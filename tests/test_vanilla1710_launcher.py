@@ -29,10 +29,12 @@ class Vanilla1710LauncherTests(unittest.TestCase):
             )
 
     def test_prepare_is_idempotent_and_secure(self):
-        with mock.patch.object(target, "download_server") as download:
+        with mock.patch.object(target, "download_server") as download, \
+             mock.patch.object(target, "download_log4j") as download_xml:
             target.prepare(self.root, "127.0.0.1", 25565, 8)
             target.prepare(self.root, "0.0.0.0", 25566, 20)
         self.assertEqual(download.call_count, 2)
+        self.assertEqual(download_xml.call_count, 2)
         props = target.parse_properties(self.root / "server.properties")
         self.assertEqual(props["online-mode"], "true")
         self.assertEqual(props["white-list"], "true")
@@ -48,7 +50,7 @@ class Vanilla1710LauncherTests(unittest.TestCase):
             target.check_security(self.root, require_eula=True)
 
     def test_invalid_configuration_is_fail_closed(self):
-        with mock.patch.object(target, "download_server"):
+        with mock.patch.object(target, "download_server"), mock.patch.object(target, "download_log4j"):
             target.prepare(self.root, "127.0.0.1", 25565, 8)
         original = (self.root / "server.properties").read_text()
         for changed in (
@@ -67,7 +69,7 @@ class Vanilla1710LauncherTests(unittest.TestCase):
             target.check_security(self.root, require_eula=False)
 
     def test_requires_explicit_eula_consent(self):
-        with mock.patch.object(target, "download_server"):
+        with mock.patch.object(target, "download_server"), mock.patch.object(target, "download_log4j"):
             target.prepare(self.root, "127.0.0.1", 25565, 8)
         eula = self.root / "eula.txt"
         eula.write_text("eula=false\n")
@@ -110,6 +112,38 @@ class Vanilla1710LauncherTests(unittest.TestCase):
         self.assertFalse(jar.exists())
         self.assertEqual(list(self.root.glob(".minecraft-1710-*.jar")), [])
 
+    def test_required_log4j_patch_cannot_be_missing_or_tampered(self):
+        self.root.mkdir()
+        xml = self.root / target.LOG4J_NAME
+        self.assertEqual(target.LOG4J_SHA1, "dd2b723346a8dcd48e7f4d245f6bf09e98db9696")
+        with self.assertRaises(target.SetupError):
+            target.verify_log4j(xml)
+        content = b"<Configuration/>"
+        with mock.patch.object(target, "LOG4J_SHA1", hashlib.sha1(content).hexdigest()), \
+             mock.patch.object(target, "LOG4J_URLS", ("https://launcher.mojang.com/test",)), \
+             mock.patch.object(target, "urlopen", return_value=io.BytesIO(content)):
+            target.download_log4j(xml)
+        self.assertEqual(xml.read_bytes(), content)
+        xml.write_text("corrupted XML")
+        with self.assertRaises(target.SetupError):
+            target.verify_log4j(xml)
+
+    def test_startup_includes_mojang_recommended_log4j_config(self):
+        with mock.patch.object(target, "download_server"), mock.patch.object(target, "download_log4j"):
+            target.prepare(self.root, "127.0.0.1", 25565, 8)
+        (self.root / "eula.txt").write_text("eula=true\n")
+        process = mock.Mock(returncode=0)
+        with mock.patch.object(target, "verify_jar"), \
+             mock.patch.object(target, "verify_log4j"), \
+             mock.patch.object(target, "find_java", return_value="java"), \
+             mock.patch.object(target, "check_java"), \
+             mock.patch.object(target.subprocess, "run", return_value=process) as runner:
+            self.assertEqual(target.run_server(self.root, None, "2G"), 0)
+        args=runner.call_args.args[0]
+        self.assertIn("-Dlog4j.configurationFile=log4j2_17-111.xml", args)
+        self.assertIn("-Xmx2G", args)
+        self.assertIn(target.JAR_NAME, args)
+
     def test_java8_check_rejects_modern_jvm(self):
         java8 = mock.Mock(returncode=0, stdout="", stderr='openjdk version "1.8.0_472"\n')
         java17 = mock.Mock(returncode=0, stdout="", stderr='openjdk version "17.0.15"\n')
@@ -120,7 +154,7 @@ class Vanilla1710LauncherTests(unittest.TestCase):
                 target.check_java("java")
 
     def test_run_never_starts_java_without_eula(self):
-        with mock.patch.object(target, "download_server"):
+        with mock.patch.object(target, "download_server"), mock.patch.object(target, "download_log4j"):
             target.prepare(self.root, "127.0.0.1", 25565, 8)
         with mock.patch.object(target.subprocess, "run") as process:
             with self.assertRaises(target.SetupError):
