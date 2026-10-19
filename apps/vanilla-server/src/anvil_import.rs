@@ -280,7 +280,7 @@ mod tests {
         let snap = root.join("snapshot");
         assert_eq!(export(&world, &snap).unwrap(), 27);
         let target = root.join("recovered.irw");
-        assert_eq!(import(&snap, &target).unwrap(), (27, 2));
+        assert_eq!(import(&snap, &target).unwrap(), (27, 3));
         assert_eq!(fs::read(&target).unwrap(), source_bytes);
         assert_eq!(fs::read(&src).unwrap(), source_bytes);
         assert!(import(&snap, &target).is_err());
