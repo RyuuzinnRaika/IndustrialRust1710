@@ -760,7 +760,14 @@ struct ServerContext {
 }
 fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     let ServerContext {
-        hub, world, path, whitelist_path, clock, ground_items, ground_path, survival,
+        hub,
+        world,
+        path,
+        whitelist_path,
+        clock,
+        ground_items,
+        ground_path,
+        survival,
     } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -1049,10 +1056,19 @@ fn main() -> io::Result<()> {
         let drops_path = Arc::clone(&ground_path);
         thread::spawn(move || {
             let _connection = admission;
-            if let Err(e) = handle(stream, ServerContext {
-                hub:clients, world:w, path:p, whitelist_path:wl,
-                clock:game_clock, ground_items:drops, ground_path:drops_path, survival,
-            }) {
+            if let Err(e) = handle(
+                stream,
+                ServerContext {
+                    hub: clients,
+                    world: w,
+                    path: p,
+                    whitelist_path: wl,
+                    clock: game_clock,
+                    ground_items: drops,
+                    ground_path: drops_path,
+                    survival,
+                },
+            ) {
                 if e.kind() != ErrorKind::UnexpectedEof {
                     eprintln!("client disconnected: {e}");
                 }
