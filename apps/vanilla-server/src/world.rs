@@ -128,7 +128,7 @@ impl World {
             return Err(invalid("world file length/count mismatch"));
         }
         let mut world = Self::new();
-        for entry in bytes[8..].chunks_exact(11) {
+        for entry in bytes[8..].as_chunks::<11>().0 {
             let x = i32::from_be_bytes(entry[0..4].try_into().unwrap());
             let y = entry[4];
             let z = i32::from_be_bytes(entry[5..9].try_into().unwrap());
