@@ -1,6 +1,6 @@
 //! Bounded, sparse, deterministic flat world streamed by chunk.
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
@@ -61,6 +61,13 @@ pub fn is_placeable(block_id: u16) -> bool {
     )
 }
 impl World {
+    /// Tracks which chunk columns contain changes, without allocating a full world.
+    pub fn edited_chunks(&self) -> BTreeSet<(i32, i32)> {
+        self.edits
+            .keys()
+            .map(|&(x, _, z)| (x.div_euclid(16), z.div_euclid(16)))
+            .collect()
+    }
     pub fn new() -> Self {
         Self::default()
     }

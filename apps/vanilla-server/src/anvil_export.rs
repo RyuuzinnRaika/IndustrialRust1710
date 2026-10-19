@@ -1,0 +1,299 @@
+//! Export a snapshot of IRW1 sparse flat-world blocks to Minecraft 1.7.10
+//! Anvil .mca regions. This never modifies or overwrites the IRW1 source.
+//! Uses independently licensed MIT / Apache-2.0 fastnbt and MIT fastanvil.
+use crate::world::{World, VIEW_DISTANCE};
+use fastanvil::Region;
+use fastnbt::{ByteArray, IntArray};
+use flate2::{write::GzEncoder, Compression};
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File};
+use std::io::{self, Seek, Write};
+use std::path::Path;
+
+const MAX_EXPORT_CHUNKS: usize = 256;
+
+fn invalid(reason: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, reason)
+}
+fn wrap(error: impl std::fmt::Display) -> io::Error {
+    io::Error::other(error.to_string())
+}
+fn signed_bytes(bytes: Vec<u8>) -> ByteArray {
+    ByteArray::new(bytes.into_iter().map(|byte| byte as i8).collect())
+}
+
+#[derive(Serialize)]
+struct AnvilRoot {
+    #[serde(rename = "Level")]
+    level: AnvilLevel,
+}
+#[derive(Serialize)]
+struct AnvilLevel {
+    #[serde(rename = "xPos")]
+    x: i32,
+    #[serde(rename = "zPos")]
+    z: i32,
+    #[serde(rename = "LastUpdate")]
+    last_update: i64,
+    #[serde(rename = "TerrainPopulated")]
+    terrain_populated: i8,
+    #[serde(rename = "LightPopulated")]
+    light_populated: i8,
+    #[serde(rename = "InhabitedTime")]
+    inhabited_time: i64,
+    #[serde(rename = "Biomes")]
+    biomes: ByteArray,
+    #[serde(rename = "HeightMap")]
+    height_map: IntArray,
+    #[serde(rename = "Sections")]
+    sections: Vec<AnvilSection>,
+    #[serde(rename = "Entities")]
+    entities: Vec<fastnbt::Value>,
+    #[serde(rename = "TileEntities")]
+    tile_entities: Vec<fastnbt::Value>,
+}
+#[derive(Serialize)]
+struct AnvilSection {
+    #[serde(rename = "Y")]
+    y: i8,
+    #[serde(rename = "Blocks")]
+    blocks: ByteArray,
+    #[serde(rename = "Data")]
+    metadata: ByteArray,
+    #[serde(rename = "BlockLight")]
+    block_light: ByteArray,
+    #[serde(rename = "SkyLight")]
+    sky_light: ByteArray,
+}
+#[derive(Serialize)]
+struct LevelDat {
+    #[serde(rename = "Data")]
+    data: LevelInfo,
+}
+#[derive(Serialize)]
+struct LevelInfo {
+    #[serde(rename = "LevelName")]
+    name: String,
+    #[serde(rename = "GameType")]
+    game_type: i32,
+    #[serde(rename = "version")]
+    anvil_version: i32,
+    #[serde(rename = "RandomSeed")]
+    random_seed: i64,
+    #[serde(rename = "generatorName")]
+    generator: String,
+    #[serde(rename = "generatorVersion")]
+    generator_version: i32,
+    #[serde(rename = "MapFeatures")]
+    map_features: i8,
+    #[serde(rename = "SpawnX")]
+    spawn_x: i32,
+    #[serde(rename = "SpawnY")]
+    spawn_y: i32,
+    #[serde(rename = "SpawnZ")]
+    spawn_z: i32,
+    #[serde(rename = "Time")]
+    time: i64,
+    #[serde(rename = "DayTime")]
+    day_time: i64,
+    #[serde(rename = "allowCommands")]
+    allow_commands: i8,
+    #[serde(rename = "initialized")]
+    initialized: i8,
+}
+
+fn nbt_for_chunk(world: &World, cx: i32, cz: i32) -> io::Result<Vec<u8>> {
+    let mut sections = Vec::new();
+    let base_x = cx * 16;
+    let base_z = cz * 16;
+    for section_y in 0..16i32 {
+        let mut blocks = vec![0u8; 4096];
+        let mut metadata = vec![0u8; 2048];
+        let mut any_block = false;
+        for dy in 0..16i32 {
+            for z in 0..16i32 {
+                for x in 0..16i32 {
+                    let block = world.get(base_x + x, section_y * 16 + dy, base_z + z);
+                    let idx = ((dy * 16 + z) * 16 + x) as usize;
+                    blocks[idx] = (block >> 4) as u8;
+                    metadata[idx / 2] |= ((block & 15) as u8) << ((idx % 2) * 4);
+                    any_block |= block != 0;
+                }
+            }
+        }
+        if any_block {
+            sections.push(AnvilSection {
+                y: section_y as i8,
+                blocks: signed_bytes(blocks),
+                metadata: signed_bytes(metadata),
+                block_light: signed_bytes(vec![0; 2048]),
+                sky_light: signed_bytes(vec![255; 2048]),
+            });
+        }
+    }
+    let mut heights = vec![64i32; 256];
+    for z in 0..16 {
+        for x in 0..16 {
+            let top = (0..256i32)
+                .rev()
+                .find(|&y| world.get(base_x + x, y, base_z + z) != 0)
+                .map_or(0, |y| y + 1);
+            heights[(z * 16 + x) as usize] = top;
+        }
+    }
+    let root = AnvilRoot {
+        level: AnvilLevel {
+            x: cx,
+            z: cz,
+            last_update: 0,
+            terrain_populated: 1,
+            light_populated: 1,
+            inhabited_time: 0,
+            biomes: signed_bytes(vec![1; 256]),
+            height_map: IntArray::new(heights),
+            sections,
+            entities: Vec::new(),
+            tile_entities: Vec::new(),
+        },
+    };
+    fastnbt::to_bytes(&root).map_err(wrap)
+}
+
+fn export_level_dat(directory: &Path) -> io::Result<()> {
+    let content = LevelDat {
+        data: LevelInfo {
+            name: "IndustrialRust1710 Export".to_string(),
+            game_type: 1,
+            anvil_version: 19133,
+            random_seed: 0,
+            generator: "flat".to_string(),
+            generator_version: 0,
+            map_features: 0,
+            spawn_x: 0,
+            spawn_y: 65,
+            spawn_z: 0,
+            time: 0,
+            day_time: 6000,
+            allow_commands: 1,
+            initialized: 1,
+        },
+    };
+    let bytes = fastnbt::to_bytes(&content).map_err(wrap)?;
+    let output = File::create(directory.join("level.dat"))?;
+    let mut encoder = GzEncoder::new(output, Compression::default());
+    encoder.write_all(&bytes)?;
+    let file = encoder.finish()?;
+    file.sync_all()
+}
+
+/// Exports only spawn 5x5 and changed chunk columns, never an unbounded map.
+/// Fails if the destination already exists; never overwrite a Minecraft save.
+pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
+    let mut chunks: BTreeSet<(i32, i32)> = world.edited_chunks();
+    for z in -VIEW_DISTANCE..=VIEW_DISTANCE {
+        for x in -VIEW_DISTANCE..=VIEW_DISTANCE {
+            chunks.insert((x, z));
+        }
+    }
+    if chunks.len() > MAX_EXPORT_CHUNKS {
+        return Err(invalid("Anvil snapshot exceeds 256 chunk limit"));
+    }
+    fs::create_dir(dest)?; // No replacing an existing world directory.
+    let regions_dir = dest.join("region");
+    fs::create_dir(&regions_dir)?;
+    let mut regions: BTreeMap<(i32, i32), Vec<(i32, i32)>> = BTreeMap::new();
+    for &(cx, cz) in &chunks {
+        regions
+            .entry((cx.div_euclid(32), cz.div_euclid(32)))
+            .or_default()
+            .push((cx, cz));
+    }
+    for ((rx, rz), columns) in regions {
+        let filename = regions_dir.join(format!("r.{rx}.{rz}.mca"));
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(filename)?;
+        let mut region = Region::create(file).map_err(wrap)?;
+        for (cx, cz) in columns {
+            let bytes = nbt_for_chunk(world, cx, cz)?;
+            region
+                .write_chunk(
+                    cx.rem_euclid(32) as usize,
+                    cz.rem_euclid(32) as usize,
+                    &bytes,
+                )
+                .map_err(wrap)?;
+        }
+        let mut file = region.into_inner().map_err(wrap)?;
+        let len = file.stream_position()?;
+        file.set_len(len)?;
+        file.sync_all()?;
+    }
+    export_level_dat(dest)?;
+    Ok(chunks.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct ParsedRoot {
+        #[serde(rename = "Level")]
+        level: ParsedLevel,
+    }
+    #[derive(Deserialize)]
+    struct ParsedLevel {
+        #[serde(rename = "xPos")]
+        x: i32,
+        #[serde(rename = "zPos")]
+        z: i32,
+        #[serde(rename = "Sections")]
+        sections: Vec<ParsedSection>,
+        #[serde(rename = "HeightMap")]
+        height_map: IntArray,
+    }
+    #[derive(Deserialize)]
+    struct ParsedSection {
+        #[serde(rename = "Y")]
+        y: i8,
+        #[serde(rename = "Blocks")]
+        blocks: ByteArray,
+        #[serde(rename = "Data")]
+        metadata: ByteArray,
+    }
+
+    #[test]
+    fn exports_regions_and_legacy_sections_without_touching_irw1() {
+        let base =
+            std::env::temp_dir().join(format!("industrial-anvil-export-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir(&base).unwrap();
+        let original = base.join("flat.irw");
+        let output = base.join("snapshot");
+        let mut world = World::new();
+        world
+            .update_and_save(&original, -49, 145, 19, (4 << 4) | 2)
+            .unwrap();
+        let original_contents = fs::read(&original).unwrap();
+        assert_eq!(export(&world, &output).unwrap(), 26);
+        assert_eq!(original_contents, fs::read(&original).unwrap());
+        assert!(output.join("level.dat").is_file());
+        let file = File::open(output.join("region/r.-1.0.mca")).unwrap();
+        let mut region = Region::from_stream(file).unwrap();
+        let raw = region.read_chunk(28, 1).unwrap().unwrap();
+        let parsed: ParsedRoot = fastnbt::from_bytes(&raw).unwrap();
+        assert_eq!((parsed.level.x, parsed.level.z), (-4, 1));
+        let sec = parsed.level.sections.iter().find(|s| s.y == 9).unwrap();
+        // local x 15, z 3, y 1 -> (1*256 + 3*16 + 15)=319
+        assert_eq!(sec.blocks[319], 4);
+        assert_eq!((sec.metadata[319 / 2] as u8) >> 4, 2);
+        assert_eq!(parsed.level.height_map[3 * 16 + 15], 146);
+        assert!(export(&world, &output).is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+}
