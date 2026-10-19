@@ -3,9 +3,11 @@ name = "vanilla-server"
 version = "0.1.0"
 edition = "2021"
 description = "Bounded Minecraft Java 1.7.10 vanilla-only Rust server prototype"
+license = "GPL-3.0-only"
 
 [dependencies]
 legacy-protocol = { path = "../../crates/legacy-protocol" }
+pumpkin-nbt = { path = "../../crates/pumpkin-nbt" }
 flate2 = "1"
 md5 = "0.7"
 serde_json = "1"

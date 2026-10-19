@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Persisted player position and out-of-range correction against real Protocol 5 TCP."""
-import json
+import gzip
 import socket
 import struct
 import sys
@@ -9,7 +9,7 @@ from pathlib import Path
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 25568
-SAVE = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("world/players/positioner.json")
+SAVE = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("world/players/positioner.dat")
 
 def vi(n):
     b = bytearray()
@@ -70,9 +70,12 @@ client.close()
 for _ in range(40):
     if SAVE.is_file():
         try:
-            data=json.loads(SAVE.read_text())
-            if (data["x"],data["y"],data["z"]) == (3.5,65.0,2.5):break
-        except (ValueError,KeyError):pass
+            nbt = gzip.decompress(SAVE.read_bytes())
+            marker = b"\x09\x00\x03Pos\x06\x00\x00\x00\x03"
+            i = nbt.index(marker) + len(marker)
+            if struct.unpack(">ddd", nbt[i:i+24]) == (3.5,65.0,2.5): break
+        except (EOFError, OSError, ValueError, struct.error):
+            pass
     time.sleep(0.1)
 else:
     raise AssertionError("did not persist player position")
@@ -88,4 +91,4 @@ for _ in range(10):
 else:
     raise AssertionError("out-of-world position was not corrected")
 client.close()
-print("Player save/reconnect and out-of-bounds correction smoke test passed")
+print("Pumpkin NBT player save/reconnect and boundary smoke test passed")

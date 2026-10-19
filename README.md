@@ -2,7 +2,7 @@
 
 **Minecraft Java Edition 1.7.10（Protocol 5）向けRustネイティブサーバーの研究開発プロジェクト。**
 
-> 現状は開発用PoCです。バニラ1.7.10向けLogin/Playの基礎は追加済みですが、完成したMinecraftサーバーではありません。Mod JAR実行・Java→Rust変換は今は対象外です。
+> **GPLv3 / Pumpkin由来コードを一部含む**。現状は開発用PoCです。バニラ1.7.10向けLogin/Playの基礎は追加済みですが、完成したMinecraftサーバーではありません。Mod JAR実行・Java→Rust変換は今は対象外です。
 
 ## 新規: Rustネイティブのバニラ最小サーバー
 
@@ -22,7 +22,7 @@ cargo run --release -p vanilla-server -- --bind 127.0.0.1:25565 --world ./world/
 |---|---|---|
 | `legacy-protocol` | VarInt、フレーム・文字列の境界チェック | Play/FMLは未対応 |
 | `legacy-status-server` | 1.7.10クライアントのサーバー一覧向けStatus/Ping | Loginは明示拒否 |
-| `vanilla-server` | ホワイトリスト入場判定、20Hz Tick時計、Login/Play、固定平坦ワールド、限定Creative操作、ブロック・位置保存 | 1人/ユーザー名偽装可能、既存ワールド非互換、サバイバルなし |
+| `vanilla-server` | ホワイトリスト入場判定、20Hz Tick時計、Login/Play、固定平坦ワールド、限定Creative操作、ブロック保存とgzip NBTプレイヤー位置保存 | 1人/ユーザー名偽装可能、既存ワールド非互換、サバイバルなし |
 | `industrial-core` | 決定的Tick、接続グラフキャッシュ、エネルギー配分 | Minecraftゲーム本体とは未接続 |
 | `industrial-bench` | 仮想エネルギー網の合成ベンチマーク | 実ワールドのTPSではない |
 | `mod-analyzer` | JAR・ClassFile解析、Modpack ZIP/フォルダのJSON監査 | Modの実行・変換・互換性判定ではない |
@@ -76,4 +76,8 @@ Mod互換を広く保証することはできません。CoreMod、リフレク�
 
 ## ライセンス・権利
 
-Minecraft/Forge/既存ModのJAR、アセット、著作権保護されたコードを無断で再配布しません。リポジトリの新規コードに適用するライセンスは決定前です。
+Pumpkin由来のNBT実装を取り込んだため、統合して配布する本プロジェクトは **GPL-3.0-only** に従います（[LICENSE](LICENSE)）。元のPumpkin作者・貢献者の権利は引き続き保持されます。参照・コピーしたファイルと元コミットは [UPSTREAM.md](crates/pumpkin-nbt/UPSTREAM.md) に記録しています。第三者のライセンスや著作権表示は削除しません。
+
+Minecraft/Forge/既存ModのJAR、ゲームアセットなどを無断で再配布しません。PumpkinのBedrock/ゲームアセット等は取り込んでいません。
+
+実装評価とバージョン差分は [Pumpkin採用監査](docs/15_Pumpkin導入監査.md) を参照してください。

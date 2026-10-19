@@ -80,7 +80,7 @@ with socket.create_connection((HOST, PORT), timeout=5) as sock:
     sock.settimeout(5)
     sock.sendall(handshake(2) + frame(0, string("RustTester")))
     pid, data = packet(sock)
-    assert pid == 2
+    assert pid == 2, (pid, data)
     uuid = decode_string(data)
     assert len(uuid) == 36
     name_start = len(vi(len(uuid))) + len(uuid)
