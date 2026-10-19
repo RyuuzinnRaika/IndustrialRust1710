@@ -1,7 +1,14 @@
 # IndustrialRust1710
 
-RustネイティブでMinecraft Java Edition 1.7.10（Protocol 5）のサーバーと工業化Mod互換性を研究・開発するプロジェクトです。
+Rustネイティブ Minecraft Java Edition 1.7.10 (Protocol 5) サーバー研究開発。
 
-> 開発初期段階です。既存Forge ModのJAR実行とプレイ可能なゲームサーバーはまだ完成していません。
+**未完成**：現在はStatus/Ping応答、Loginの明示拒否、独立した工業ネットワーク計算、合成ベンチマークのみ。Minecraftワールド、ログイン/Play、Forge/FMLハンドシェイク、JAR互換実行、Java→Rust変換はまだありません。
 
-実装・要件定義・テストは開発用PRで追加します。
+```bash
+cargo fmt --all -- --check
+cargo test --workspace
+cargo run -p legacy-status-server -- --bind 127.0.0.1:25565
+cargo run --release -p industrial-bench -- 10000 200
+```
+
+Forge Modをそのまま実行できると誤解しないよう、未実装機能はこの文書に記載します。ライセンスを確認せずMinecraft/Modのバイナリを配布しないでください。
