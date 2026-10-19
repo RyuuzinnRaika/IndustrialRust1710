@@ -124,7 +124,8 @@ fn metadata_values(data: &[u8], info: &mut ModFile) {
     let parsed: Value = match serde_json::from_slice(data) {
         Ok(value) => value,
         Err(e) => {
-            info.warnings.push(format!("mcmod.info is not valid JSON: {e}"));
+            info.warnings
+                .push(format!("mcmod.info is not valid JSON: {e}"));
             return;
         }
     };
@@ -141,8 +142,14 @@ fn metadata_values(data: &[u8], info: &mut ModFile) {
         return;
     };
     for value in list {
-        let Some(obj) = value.as_object() else { continue };
-        if let Some(id) = obj.get("modid").or_else(|| obj.get("modId")).and_then(Value::as_str) {
+        let Some(obj) = value.as_object() else {
+            continue;
+        };
+        if let Some(id) = obj
+            .get("modid")
+            .or_else(|| obj.get("modId"))
+            .and_then(Value::as_str)
+        {
             if !id.trim().is_empty() && !info.mod_ids.iter().any(|item| item == id) {
                 info.mod_ids.push(id.to_string());
             }
@@ -193,7 +200,8 @@ fn inspect_mod_bytes(path: String, bytes: &[u8]) -> ModFile {
     };
     for i in 0..archive.len() {
         let Ok(mut entry) = archive.by_index(i) else {
-            info.warnings.push(format!("unreadable JAR entry at index {i}"));
+            info.warnings
+                .push(format!("unreadable JAR entry at index {i}"));
             continue;
         };
         let name = entry.name().to_ascii_lowercase();
@@ -201,14 +209,19 @@ fn inspect_mod_bytes(path: String, bytes: &[u8]) -> ModFile {
             continue;
         }
         if entry.size() > MAX_METADATA_BYTES {
-            info.warnings.push(format!("{name}: metadata exceeds limit"));
+            info.warnings
+                .push(format!("{name}: metadata exceeds limit"));
             continue;
         }
         let mut data = Vec::new();
-        if entry.take(MAX_METADATA_BYTES + 1).read_to_end(&mut data).is_err()
+        if entry
+            .take(MAX_METADATA_BYTES + 1)
+            .read_to_end(&mut data)
+            .is_err()
             || data.len() as u64 > MAX_METADATA_BYTES
         {
-            info.warnings.push(format!("{name}: cannot read metadata safely"));
+            info.warnings
+                .push(format!("{name}: cannot read metadata safely"));
             continue;
         }
         if name == "mcmod.info" {
@@ -220,7 +233,8 @@ fn inspect_mod_bytes(path: String, bytes: &[u8]) -> ModFile {
         }
     }
     if info.mod_ids.is_empty() {
-        info.warnings.push("Mod IDs not found in mcmod.info; @Mod and injected mods not resolved".into());
+        info.warnings
+            .push("Mod IDs not found in mcmod.info; @Mod and injected mods not resolved".into());
     }
     info
 }
@@ -233,7 +247,9 @@ pub fn inspect_pack_reader<R: Read + Seek>(reader: R, source: &Path) -> io::Resu
     let mut report = ModpackReport::new(source);
     let mut total = 0u64;
     for i in 0..pack.len() {
-        let mut entry = pack.by_index(i).map_err(|_| invalid("unreadable pack entry"))?;
+        let mut entry = pack
+            .by_index(i)
+            .map_err(|_| invalid("unreadable pack entry"))?;
         let path = entry.name().to_string();
         if entry.is_dir() || !is_mod_file(&path) {
             continue;
@@ -244,7 +260,9 @@ pub fn inspect_pack_reader<R: Read + Seek>(reader: R, source: &Path) -> io::Resu
             report.append(info)?;
             continue;
         }
-        total = total.checked_add(entry.size()).ok_or_else(|| invalid("size overflow"))?;
+        total = total
+            .checked_add(entry.size())
+            .ok_or_else(|| invalid("size overflow"))?;
         if total > MAX_TOTAL_JAR_BYTES {
             return Err(invalid("total mod bytes exceed 256 MiB limit"));
         }
@@ -268,7 +286,9 @@ pub fn inspect_pack_reader<R: Read + Seek>(reader: R, source: &Path) -> io::Resu
     }
     report.mods.sort_by(|a, b| a.path.cmp(&b.path));
     if report.mods.is_empty() {
-        report.warnings.push("No mods/*.jar or mods/*.zip files found".into());
+        report
+            .warnings
+            .push("No mods/*.jar or mods/*.zip files found".into());
     }
     Ok(report)
 }
@@ -277,7 +297,12 @@ pub fn inspect_pack_zip(path: &Path) -> io::Result<ModpackReport> {
     inspect_pack_reader(File::open(path)?, path)
 }
 
-fn scan_directory(dir: &Path, depth: usize, report: &mut ModpackReport, total: &mut u64) -> io::Result<()> {
+fn scan_directory(
+    dir: &Path,
+    depth: usize,
+    report: &mut ModpackReport,
+    total: &mut u64,
+) -> io::Result<()> {
     if depth > 2 {
         return Ok(());
     }
@@ -309,7 +334,9 @@ fn scan_directory(dir: &Path, depth: usize, report: &mut ModpackReport, total: &
             report.append(info)?;
             continue;
         }
-        *total = total.checked_add(size).ok_or_else(|| invalid("size overflow"))?;
+        *total = total
+            .checked_add(size)
+            .ok_or_else(|| invalid("size overflow"))?;
         if *total > MAX_TOTAL_JAR_BYTES {
             return Err(invalid("total mod bytes exceed 256 MiB limit"));
         }
@@ -326,13 +353,19 @@ pub fn inspect_modpack(path: &Path) -> io::Result<ModpackReport> {
     if !path.is_dir() {
         return Err(io::Error::new(io::ErrorKind::NotFound, "modpack not found"));
     }
-    let dir = if path.join("mods").is_dir() { path.join("mods") } else { path.to_path_buf() };
+    let dir = if path.join("mods").is_dir() {
+        path.join("mods")
+    } else {
+        path.to_path_buf()
+    };
     let mut report = ModpackReport::new(path);
     let mut total = 0;
     scan_directory(&dir, 0, &mut report, &mut total)?;
     report.mods.sort_by(|a, b| a.path.cmp(&b.path));
     if report.mods.is_empty() {
-        report.warnings.push("No mod archives found under directory".into());
+        report
+            .warnings
+            .push("No mod archives found under directory".into());
     }
     Ok(report)
 }
@@ -346,7 +379,9 @@ mod tests {
     fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for &(name, bytes) in entries {
-            writer.start_file(name, SimpleFileOptions::default()).unwrap();
+            writer
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
             writer.write_all(bytes).unwrap();
         }
         writer.finish().unwrap().into_inner()
@@ -355,15 +390,30 @@ mod tests {
     #[test]
     fn reads_nested_modpack_without_extraction() {
         let jar = archive(&[
-            ("mcmod.info", br#"[{"modid":"BuildCraft|Core","dependencies":["required-after:Forge"]}]"#),
-            ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\nFMLCorePlugin: example.Plugin\r\n"),
+            (
+                "mcmod.info",
+                br#"[{"modid":"BuildCraft|Core","dependencies":["required-after:Forge"]}]"#,
+            ),
+            (
+                "META-INF/MANIFEST.MF",
+                b"Manifest-Version: 1.0\r\nFMLCorePlugin: example.Plugin\r\n",
+            ),
         ]);
-        let pack = archive(&[("pack/mods/buildcraft.jar", &jar), ("pack/world/level.dat", b"private")]);
+        let pack = archive(&[
+            ("pack/mods/buildcraft.jar", &jar),
+            ("pack/world/level.dat", b"private"),
+        ]);
         let report = inspect_pack_reader(Cursor::new(pack), Path::new("test.zip")).unwrap();
         assert_eq!(report.scanned_files, 1);
         assert_eq!(report.mods[0].mod_ids, ["BuildCraft|Core"]);
-        assert_eq!(report.mods[0].metadata_dependencies, ["required-after:Forge"]);
-        assert_eq!(report.mods[0].core_plugin.as_deref(), Some("example.Plugin"));
+        assert_eq!(
+            report.mods[0].metadata_dependencies,
+            ["required-after:Forge"]
+        );
+        assert_eq!(
+            report.mods[0].core_plugin.as_deref(),
+            Some("example.Plugin")
+        );
         assert!(!report.compatibility_verified);
     }
 
@@ -377,6 +427,9 @@ mod tests {
 
     #[test]
     fn parses_manifest_continuation_lines() {
-        assert_eq!(manifest_value("FMLCorePlugin: hello.\n World\n", "fmlcoreplugin").as_deref(), Some("hello.World"));
+        assert_eq!(
+            manifest_value("FMLCorePlugin: hello.\n World\n", "fmlcoreplugin").as_deref(),
+            Some("hello.World")
+        );
     }
 }
