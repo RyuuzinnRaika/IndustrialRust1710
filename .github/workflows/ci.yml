@@ -16,6 +16,31 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Official 1.7.10 vanilla launcher tests (no game download)
+        run: python3 -m unittest discover -s tests -p 'test_vanilla1710_launcher.py' -v
+      - name: Official Mojang 1.7.10 server artifact and secure setup
+        shell: bash
+        run: |
+          python3 tools/vanilla1710.py prepare --dir "$RUNNER_TEMP/official-vanilla-1710"
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'official-vanilla-1710'
+          jar=root/'minecraft_server.1.7.10.jar'
+          assert jar.stat().st_size==9605030
+          assert hashlib.sha1(jar.read_bytes()).hexdigest()=='952438ac4e01b4d115c5fc38f891710c4941df29'
+          prop=(root/'server.properties').read_text()
+          assert 'online-mode=true' in prop and 'white-list=true' in prop
+          assert 'server-ip=127.0.0.1' in prop
+          assert (root/'whitelist.json').read_text().strip()=='[]'
+          assert 'eula=false' in (root/'eula.txt').read_text()
+          print('Official Mojang vanilla 1.7.10 server verified; EULA intentionally not accepted.')
+          PY
+          if python3 tools/vanilla1710.py check --dir "$RUNNER_TEMP/official-vanilla-1710"; then
+            echo "ERROR: did not refuse startup without EULA consent"
+            exit 1
+          fi
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Unit tests
