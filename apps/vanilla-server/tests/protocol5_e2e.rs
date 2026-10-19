@@ -137,8 +137,16 @@ impl NativeServer {
                 assert_eq!(decoded.len(), sections.count_ones() as usize * 10240 + 256);
                 chunks += 1;
             } else if pid == 0x30 {
-                assert_eq!(payload.len(), 93);
                 assert_eq!(&payload[..3], &[0, 0, 45]);
+                // Empty stacks take 2 bytes; populated stacks take 7 bytes.
+                // After reconnect the saved Creative hotbar must be restored.
+                let mut offset = 3usize;
+                for _ in 0..45 {
+                    assert!(offset + 2 <= payload.len());
+                    let item = i16::from_be_bytes(payload[offset..offset + 2].try_into().unwrap());
+                    offset += if item == -1 { 2 } else { 7 };
+                }
+                assert_eq!(offset, payload.len());
                 inventory_seen = true;
             } else if pid == 0x09 {
                 assert_eq!(payload, [0]);
