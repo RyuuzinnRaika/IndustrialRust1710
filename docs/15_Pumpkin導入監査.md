@@ -1,37 +1,29 @@
-# Pumpkin → IndustrialRust1710 移植監査（2026-10-19）
+# Pumpkin参照とライセンス移行監査（2026-10-19）
 
-## upstream
+## 現行ソースの状態
 
-- リポジトリ: https://github.com/pumpkin-mc/pumpkin
-- 参照SHA: `c7a234ab8a3b3296d68a5f40411995920e11528a`（2026-10-18 23:04:39 UTC）
-- upstreamのCargo workspace: **Rust 2024 / MSRV 1.96 / GPL-3.0**、複数のクレートとWASM/Bedrock依存。
-- 現行Pumpkinは **最新Java/Bedrock版中心**。IndustrialRust1710の **Minecraft Java 1.7.10 / Protocol 5** とワイヤ形式・ブロックID・保存形式が一致しない。
+- IndustrialRust1710はRustでMinecraft Java Edition 1.7.10（Protocol 5）のサーバーを独立実装するプロジェクトです。
+- Pumpkin（https://github.com/pumpkin-mc/pumpkin）は実装調査に使った参考リポジトリです。Pumpkin本体はGPLv3で、最新Minecraft向けの機能が多いため、通信・ワールドロジックのソースを1.7.10に直接コピーしません。
+- **現行ブランチの`crates/pumpkin-nbt`のコピーは削除**し、NBT入出力は[fastnbt](https://github.com/owengage/fastnbt) v2.6.3（MIT OR Apache-2.0）に置き換えています。
+- gzip圧縮、プレイヤーの`Pos`、移動境界検査、旧JSON形式の読み込みはプロジェクト側で構成しています。Minecraft 1.7.10の完全な`player.dat`、Anvil、サバイバル機能を保証するものではありません。
+- 現行オリジナルコードのライセンスは未確定。第三者ライブラリの利用条件は別途順守します。
 
-## 詳細レビュー・採用判定
+## 残る履歴の扱い（重要）
 
-| 要素 | upstreamの位置 | 1.7.10への評価 | このPRでの対応 |
-|---|---|---|---|
-| Named Binary Tag (NBT) | `crates/pumpkin-nbt` | Java NBTの基本タグは世代共通。NBT本体は移植可能 | **実コードコピー、Cargo独立化、プレイヤー保存に接続** |
-| Anvil region | `crates/pumpkin-world/src/chunk/format/anvil.rs` | 4KiB sector等のコンテナは参考になるが、現行chunk NBTと1.7.10のSections/Blocks/Data/Add形式は違う | **未コピー**。1.7.10向け独立変換が必要 |
-| Protocol | `crates/pumpkin-protocol` | 最新版のログイン・チャンク・PlayパケットはProtocol 5と互換ではない | **未コピー**。IndustrialRust1710の`legacy-protocol`を維持 |
-| Player & Inventory | `crates/pumpkin`, `crates/pumpkin-inventory` | 最新版のスロット/オフハンド/データコンポーネント等は1.7.10にはない | **未コピー**。段階移植対象 |
-| Scheduler | `crates/pumpkin-scheduler` | 参考可能だが非同期実行モデルと現行20Hz時計が異なる | **未コピー**。ゲーム更新Tick整備後に再評価 |
-| Authentication | `crates/pumpkin-auth` | 現代のMicrosoft/Mojang認証と1.7.10の歴史的プロトコルに差 | **未コピー**。既存の名前ホワイトリストは引き続き**本人確認ではない** |
-| Bedrock, data/assets, WASM plugin | その他 | Mod/Forge保留かつ法的/実装上の依存関係が大きい | **未コピー** |
+- **PR #6**（https://github.com/RyuuzinnRaika/IndustrialRust1710/pull/6）でPumpkin由来のNBTソースがGPLv3で取り込まれ、**PR #7**で通信テストの競合が修正されました。
+- そのGitコミットおよび公開済みPRには、現行ツリーから削除したGPLv3のコードが**履歴として引き続き残ります**。
+- 現行ツリーから削除しただけで、過去の配布に適用されるGPLv3の義務が消えたり、公開履歴が消去されるわけではありません。過去の公開コードについては当時のライセンスと著作権表示を尊重してください。
+- 履歴の完全な再作成や強制pushは、既存のクローン/参照/PRに重大な影響があるため、**今回実行していません**。履歴の取り扱いは別途確認と明示的な判断が必要です。
 
-## GPL-3.0 とソースの扱い
+## 将来の移植ルール
 
-Pumpkin本体のソースはGPL-3.0。今回利用したGPL由来コードと統合した実行プログラムの配布には、GPLv3のソース提供・ライセンス通知などが必要。リポジトリの `LICENSE` はPumpkinと同じGNU GPLv3本文。コピー元、元SHA、改変事項は `crates/pumpkin-nbt/UPSTREAM.md` に記録。
+1. 仕様・振る舞いを公開プロトコル資料や独立資料で把握し、元コードを逐語/構造ごとに移植しない。
+2. 第三者ライブラリ採用前にSPDX識別子、著作者表示、配布時の義務、間接依存を確認する。
+3. 元がGPLv3なら、そのコードの直接コピーや派生実装を採用しない。利用する場合はGPL互換での配布条件を別途整理する。
+4. 最新版とProtocol 5の差分をユニット・通信・ワールド互換性テストで検証する。
+5. Minecraft/Forge/Modの再配布や実装互換性の保証を混同しない。
 
-第三者のゲーム本体/アセットやModのJAR等はコピーしていない。PumpkinのプラグインAPIの二重ライセンスは、今回選択したNBT crateには適用されない。
+## 参照元
 
-## 保存の互換性と移行
-
-- 新しいプレイヤー保存先: `world/players/<name>.dat`。形式は**gzip圧縮Java NBT**。`Pos`, `Motion`, `Rotation`等の基本タグを出力。
-- 旧形式: `world/players/<name>.json`。新NBTファイルがない時のみ読み込み、保存時に`.dat`を作る。元JSONは破壊しない。
-- NBTというコンテナ形式の採用は、**Vanilla 1.7.10の`player.dat`との完全互換、Anvilとの互換やサバイバル完成を保証しない**。
-- 自動テストは、gzip NBTの読み戻し、旧JSON移行、ワールド境界検査、実TCPの接続/再接続を含む。
-
-## 今後のマージ方針
-
-移植元の行数を増やすこと自体は完成指標にしない。Protocol 5へ書き換えた機能単位でビルド、単体、パケット、ワールド破損耐性、実機1.7.10を確認して段階マージする。未確認コードの一括上書きは禁止。
+- Pumpkin調査時のupstream SHA：`c7a234ab8a3b3296d68a5f40411995920e11528a` （2026-10-18）
+- fastnbt： https://github.com/owengage/fastnbt

@@ -2,7 +2,7 @@
 
 **Minecraft Java Edition 1.7.10（Protocol 5）向けRustネイティブサーバーの研究開発プロジェクト。**
 
-> **GPLv3 / Pumpkin由来コードを一部含む**。現状は開発用PoCです。バニラ1.7.10向けLogin/Playの基礎は追加済みですが、完成したMinecraftサーバーではありません。Mod JAR実行・Java→Rust変換は今は対象外です。
+> 現行のソースツリーにはPumpkin由来のGPLv3実装を含みません。現状は開発用PoCです。バニラ1.7.10向けLogin/Playの基礎は追加済みですが、完成したMinecraftサーバーではありません。Mod JAR実行・Java→Rust変換は今は対象外です。
 
 ## 新規: Rustネイティブのバニラ最小サーバー
 
@@ -74,10 +74,12 @@ Mod互換を広く保証することはできません。CoreMod、リフレク�
 - [Mod静的解析PoC](docs/12_Mod静的解析PoC.md)
 - [提供Modpack初期監査](docs/13_提供Modpack初期監査.md)
 
-## ライセンス・権利
+## ライセンスと著作権
 
-Pumpkin由来のNBT実装を取り込んだため、統合して配布する本プロジェクトは **GPL-3.0-only** に従います（[LICENSE](LICENSE)）。元のPumpkin作者・貢献者の権利は引き続き保持されます。参照・コピーしたファイルと元コミットは [UPSTREAM.md](crates/pumpkin-nbt/UPSTREAM.md) に記録しています。第三者のライセンスや著作権表示は削除しません。
+**現行のソースツリーでは、PumpkinからコピーしたGPLv3コードを除去済みです。**
+NBTの入出力は [fastnbt](https://github.com/owengage/fastnbt)（**MIT OR Apache-2.0**、Cargoで取得する外部依存）と、プロジェクト固有の連携処理を利用します。
+利用している第三者ライブラリのライセンスは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) に記録します。リポジトリの新規オリジナルコード全体のライセンスはまだ確定していません。
 
-Minecraft/Forge/既存ModのJAR、ゲームアセットなどを無断で再配布しません。PumpkinのBedrock/ゲームアセット等は取り込んでいません。
+重要: **過去のGitコミット/PRにはPumpkin由来GPLv3コードが残っています。** 今回の通常の削除コミットで過去の配布履歴やライセンス義務まで消えたわけではありません。現在のソースとGit履歴を混同しないこと。状況は [ライセンス・移行監査](docs/15_Pumpkin導入監査.md) を参照してください。
 
-実装評価とバージョン差分は [Pumpkin採用監査](docs/15_Pumpkin導入監査.md) を参照してください。
+Minecraft/Forge/既存ModのJARおよびゲームアセットはコピーしません。

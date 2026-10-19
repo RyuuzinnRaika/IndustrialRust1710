@@ -1,3 +1,10 @@
+## 2026-10-19 — GPLv3コードの現行ツリーからの除去
+
+- Pumpkinからコピーした`crates/pumpkin-nbt`と、コピーしたGPLv3のトップレベル`LICENSE`を現行ツリーから削除。
+- NBT入出力をMIT OR Apache-2.0のfastnbtへ置き換え、プレイヤー保存・移行の互換動作を維持。
+- 全体のソースコードライセンスは未確定。元のGPLv3コミット/PRはGit履歴に残るため、履歴まで削除したとの主張はしない。
+- `docs/15_Pumpkin導入監査.md`と`THIRD_PARTY_NOTICES.md`に、過去の取込みと現行コードの区別を記録。
+
 ## 2026-10-19 — Pumpkin由来NBTの段階導入（PR作業中）
 
 - Pumpkin upstream c7a234ab8a3b3296d68a5f40411995920e11528a のNBTモジュールをGPLv3の表示と共にコピー（依存codec部分は省略）。
