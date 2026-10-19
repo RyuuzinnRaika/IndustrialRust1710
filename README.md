@@ -12,7 +12,7 @@
 | `legacy-status-server` | 1.7.10クライアントのサーバー一覧向けStatus/Ping | Loginは明示拒否 |
 | `industrial-core` | 決定的Tick、接続グラフキャッシュ、エネルギー配分 | Minecraftゲーム本体とは未接続 |
 | `industrial-bench` | 仮想エネルギー網の合成ベンチマーク | 実ワールドのTPSではない |
-| `mod-analyzer` | JAR・Java ClassFileの読み取り専用静的解析 | 実行・変換・安全性判定ではない |
+| `mod-analyzer` | JAR・ClassFile解析、Modpack ZIP/フォルダのJSON監査 | Modの実行・変換・互換性判定ではない |
 
 ## 準備と検証
 
@@ -33,9 +33,17 @@ cargo run --release -p industrial-bench -- 10000 200
 
 # Modを実行せずにJAR内部を読み取る
 cargo run -p mod-analyzer -- /path/to/mod.jar
+
+# 1.7.10サーバーのZIPを展開せずに読み取り専用監査
+cargo run -p mod-analyzer -- --modpack /path/to/1.7.10modServerSkyBlock.zip --json modpack-report.json
+
+# 展開済みのサーバーディレクトリ (mods/ と mods/1.7.10/ を探す)
+cargo run -p mod-analyzer -- --modpack /path/to/server --json modpack-report.json
 ```
 
 GitHub Actionsではコンパイル・単体テスト・Clippy・実TCPのStatus/Ping/Login拒否テストを実行します。旧Forge 1.7.10の実機クライアントによる接続テストは未実施です。
+
+解析レポートにはMod ID（mcmod.info記載分）、CoreModのmanifest設定、参考となるクラス数、Forge/FML参照と読み取りエラーを保存します。**@ModアノテーションからのID・依存解決、Mod実行、JavaクラスのRust変換、Forge接続の実動作は未対応**です。ユーザー所有のMod/ワールドのJAR等をGitに追加しないでください。
 
 ## 実装ロードマップ
 
@@ -51,6 +59,7 @@ Mod互換を広く保証することはできません。CoreMod、リフレク�
 
 - [要件定義](docs/01_要件定義.md)
 - [Mod静的解析PoC](docs/12_Mod静的解析PoC.md)
+- [提供Modpack初期監査](docs/13_提供Modpack初期監査.md)
 
 ## ライセンス・権利
 
