@@ -1,5 +1,5 @@
-pub mod modpack;
 //! Read-only Java ClassFile / Forge JAR static scanner; does not execute Mod code.
+pub mod modpack;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read};
