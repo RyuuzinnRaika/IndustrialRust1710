@@ -16,3 +16,10 @@
 # Official vanilla server backups may contain private world and player data.
 /backups/
 /vanilla-1710-backup*.zip
+
+# Rust integration-test build artifacts and locally generated worlds
+/target/
+/world/
+/whitelist.json
+/*.irw
+/*.mca

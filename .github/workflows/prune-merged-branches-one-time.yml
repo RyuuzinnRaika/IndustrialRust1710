@@ -1,0 +1,73 @@
+name: Prune merged IndustrialRust1710 branches (one-time)
+on:
+  workflow_run:
+    workflows: ["Rust-only Minecraft 1.7.10 CI"]
+    types: [completed]
+permissions:
+  contents: write
+jobs:
+  prune:
+    if: ${{ github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Remove verified merged branch refs; archive divergent histories as tags
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          entries=(
+            '1 feat/bootstrap-native-protocol-mod-analysis'
+            '2 feat/modpack-1710-audit'
+            '3 feat/vanilla-protocol5-foundation'
+            '4 feat/whitelist-and-vanilla-tick-foundation'
+            '5 feat/vanilla-player-persistence'
+            '6 feat/pumpkin-nbt-gpl3-integration'
+            '7 fix/pumpkin-ci-session-reconnect'
+            '8 fix/remove-pumpkin-gpl-source'
+            '9 feat/vanilla17-multiplayer-synchronization'
+            '10 feat/vanilla17-dynamic-chunk-streaming'
+            '11 feat/vanilla17-anvil-export'
+            '12 feat/vanilla17-safe-anvil-roundtrip'
+            '13 feat/official-vanilla-1710-playable-server'
+            '14 fix/vanilla1710-fragmented-tcp-and-backup'
+            '15 refactor/rust-only-1710'
+          )
+          for entry in "${entries[@]}"; do
+            read -r pr branch <<< "$entry"
+            if [[ "$branch" == "main" ]]; then
+              echo "Refusing to delete a protected development ref: $branch"
+              exit 1
+            fi
+            state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '.merged')
+            pr_head=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '.head.ref')
+            if [[ "$state" != "true" || "$pr_head" != "$branch" ]]; then
+              echo "PR #$pr not verified merged from $branch; preserving the branch"
+              continue
+            fi
+            metadata=$(gh api "repos/$GITHUB_REPOSITORY/branches/$branch" 2>/dev/null) || {
+              echo "$branch already removed"
+              continue
+            }
+            protected=$(jq -r '.protected' <<< "$metadata")
+            sha=$(jq -r '.commit.sha' <<< "$metadata")
+            if [[ "$protected" != "false" || ! "$sha" =~ ^[[:xdigit:]]{40}$ ]]; then
+              echo "Not a deletable branch $branch; keeping it"
+              continue
+            fi
+            ahead=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$branch" --jq '.ahead_by')
+            if (( ahead > 0 )); then
+              tag="refs/tags/archive/merged-pr$pr-original-head"
+              echo "Archiving divergent $branch ($ahead commits) as $tag"
+              if ! gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=$tag" -f "sha=$sha"; then
+                existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/$tag" --jq '.object.sha' 2>/dev/null || true)
+                if [[ "$existing" != "$sha" ]]; then
+                  echo "Could not safely archive $branch; leaving branch untouched"
+                  continue
+                fi
+              fi
+            fi
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch"
+            echo "Pruned verified merged branch: $branch"
+          done
