@@ -199,7 +199,7 @@ fn inspect_mod_bytes(path: String, bytes: &[u8]) -> ModFile {
         }
     };
     for i in 0..archive.len() {
-        let Ok(mut entry) = archive.by_index(i) else {
+        let Ok(entry) = archive.by_index(i) else {
             info.warnings
                 .push(format!("unreadable JAR entry at index {i}"));
             continue;
@@ -247,7 +247,7 @@ pub fn inspect_pack_reader<R: Read + Seek>(reader: R, source: &Path) -> io::Resu
     let mut report = ModpackReport::new(source);
     let mut total = 0u64;
     for i in 0..pack.len() {
-        let mut entry = pack
+        let entry = pack
             .by_index(i)
             .map_err(|_| invalid("unreadable pack entry"))?;
         let path = entry.name().to_string();
