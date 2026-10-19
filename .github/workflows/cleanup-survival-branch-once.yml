@@ -1,0 +1,39 @@
+name: Cleanup merged Survival branch (one-time)
+on:
+  workflow_run:
+    workflows: ["Rust-only Minecraft 1.7.10 CI"]
+    types: [completed]
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    if: ${{ github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check merged PR 17 and safely delete branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          branch="feat/survival-foundation-1710"
+          merged=$(gh api "repos/$repo/pulls/17" --jq '.merged')
+          pr_head=$(gh api "repos/$repo/pulls/17" --jq '.head.sha')
+          if [[ "$merged" != "true" ]]; then
+            echo "PR #17 not merged; preserving branch"
+            exit 0
+          fi
+          sha=$(gh api "repos/$repo/branches/$branch" --jq '.commit.sha' 2>/dev/null || true)
+          if [[ -z "$sha" ]]; then
+            echo "Branch already absent"
+            exit 0
+          fi
+          ahead=$(gh api "repos/$repo/compare/main...$branch" --jq '.ahead_by')
+          if [[ "$sha" != "$pr_head" || "$ahead" != "0" ]]; then
+            echo "Branch changed or includes unmatched commits; retaining"
+            exit 0
+          fi
+          gh api -X DELETE "repos/$repo/git/refs/heads/$branch"
+          echo "Removed verified merged branch"
