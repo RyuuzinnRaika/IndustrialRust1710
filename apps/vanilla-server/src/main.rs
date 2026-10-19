@@ -4,6 +4,7 @@
 mod anvil_export;
 mod anvil_import;
 mod clock;
+mod inventory;
 mod multiplayer;
 mod player;
 mod whitelist;
@@ -12,6 +13,7 @@ mod world;
 use clock::Clock;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use inventory::{Inventory, Stack};
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
     PROTOCOL_VERSION,
@@ -79,24 +81,22 @@ impl<'a> Input<'a> {
         }
         Ok(s.to_owned())
     }
-    fn slot(&mut self) -> io::Result<Option<(u16, u8)>> {
-        let block = self.i16()?;
-        if block == -1 {
+    fn slot(&mut self) -> io::Result<Option<Stack>> {
+        let id = self.i16()?;
+        if id == -1 {
             return Ok(None);
         }
-        if block < 0 {
-            return Err(bad("invalid item ID"));
-        }
-        let _count = self.u8()?;
-        let meta = self.i16()?;
+        let count = self.u8()?;
+        let damage = self.i16()?;
         let nbt_length = self.i16()?;
-        if nbt_length < -1 {
-            return Err(bad("invalid NBT length"));
+        if nbt_length != -1 {
+            return Err(bad("NBT item stacks are not supported yet"));
         }
-        if nbt_length > 0 {
-            self.take(nbt_length as usize)?;
+        let stack = Stack { id, count, damage };
+        if !stack.is_valid() {
+            return Err(bad("invalid item ID, count or damage"));
         }
-        Ok(Some((block as u16, (meta as u16 & 15) as u8)))
+        Ok(Some(stack))
     }
     fn finish(&self) -> io::Result<()> {
         if self.0.is_empty() {
@@ -174,6 +174,7 @@ fn join(
     clock: &Clock,
     position: &PlayerPosition,
     entity_id: i32,
+    inventory: &Inventory,
 ) -> io::Result<()> {
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
     // difficulty u8, maxPlayers u8, levelType string.
@@ -207,6 +208,9 @@ fn join(
         send_chunk(s, world, cx, cz)?;
     }
 
+    // Clientbound 0x30 / 0x09: authoritative Creative inventory and hotbar.
+    send(s, 0x30, &inventory.window_items())?;
+    send(s, 0x09, &[inventory.selected()])?;
     // Player starts at their last safely persisted position.
     send_player_position(s, position)?;
     as_chat(
@@ -312,6 +316,8 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
 struct PlayerSession<'a> {
     position: &'a mut PlayerPosition,
     save_path: &'a Path,
+    inventory: &'a mut Inventory,
+    inventory_path: &'a Path,
     hub: &'a Hub,
     entity_id: i32,
     events: &'a Receiver<Event>,
@@ -328,6 +334,8 @@ fn play(
     let PlayerSession {
         position: player,
         save_path: player_path,
+        inventory,
+        inventory_path,
         hub,
         entity_id,
         events,
@@ -353,6 +361,7 @@ fn play(
         }
         if saved_at.elapsed() >= Duration::from_secs(5) {
             player.save(player_path)?;
+            inventory.save(inventory_path)?;
             saved_at = Instant::now();
         }
         if admission_check.elapsed() >= Duration::from_secs(2) {
@@ -521,20 +530,31 @@ fn play(
                     };
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let mut changed = false;
-                    if let Some((block_id, meta)) = held {
-                        if world::is_placeable(block_id)
-                            && w.get(x, y, z) != 0
-                            && w.get(nx, ny, nz) == 0
-                            && near(location, nx, ny, nz)
-                        {
-                            changed = w.update_and_save(
-                                world_path,
-                                nx,
-                                ny,
-                                nz,
-                                (block_id << 4) | meta as u16,
-                            )?;
+                    // Only the server-owned selected hotbar stack grants placement.
+                    if inventory.can_place(held) {
+                        if let Some(stack) = inventory.held() {
+                            let block_id = stack.id as u16;
+                            if world::is_placeable(block_id)
+                                && w.get(x, y, z) != 0
+                                && w.get(nx, ny, nz) == 0
+                                && near(location, nx, ny, nz)
+                            {
+                                changed = w.update_and_save(
+                                    world_path,
+                                    nx,
+                                    ny,
+                                    nz,
+                                    (block_id << 4) | (stack.damage as u16 & 15),
+                                )?;
+                            }
                         }
+                    } else {
+                        // Correct a forged/stale held-stack claim without granting blocks.
+                        send(
+                            s,
+                            0x2f,
+                            &inventory.set_slot(36 + inventory.selected() as i16)?,
+                        )?;
                     }
                     if world::in_bounds(nx, ny, nz) {
                         let event = block_change_event(&w, nx, ny, nz);
@@ -546,8 +566,46 @@ fn play(
                     }
                 }
             }
-            // These packets are explicitly not interpreted as trusted mutations.
-            2 | 9..=23 => {}
+            9 => {
+                let selected = input.i16()?;
+                input.finish()?;
+                inventory.select(selected)?;
+                inventory.save(inventory_path)?;
+            }
+            16 => {
+                let slot = input.i16()?;
+                let stack = input.slot()?;
+                input.finish()?;
+                if inventory.creative_set(slot, stack)? {
+                    // Explicit, bounded creative inventory actions only.
+                    inventory.save(inventory_path)?;
+                    send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                } else {
+                    send(s, 0x30, &inventory.window_items())?;
+                }
+            }
+            14 => {
+                // Legacy Click Window transaction semantics are not implemented
+                // yet. Reject rather than trust the claimed client inventory.
+                let window = input.i8()?;
+                input.i16()?; // clicked slot
+                input.i8()?; // button
+                let action = input.i16()?;
+                input.i8()?; // mode
+                input.slot()?;
+                input.finish()?;
+                let mut reply = vec![window as u8];
+                reply.extend_from_slice(&action.to_be_bytes());
+                reply.push(0); // accepted=false
+                send(s, 0x32, &reply)?;
+                send(s, 0x30, &inventory.window_items())?;
+            }
+            13 => {
+                input.u8()?; // close player window
+                input.finish()?;
+            }
+            // Other packets are not trusted inventory or world mutations.
+            2 | 10..=12 | 15 | 17..=23 => {}
             _ => return Err(bad("invalid play packet ID")),
         }
     }
@@ -635,6 +693,18 @@ fn handle(
             return Ok(());
         }
     };
+    let inventory_file = Inventory::location(&player_file);
+    let mut inventory_state = match Inventory::load(&inventory_file) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("inventory unavailable for {name}: {err}");
+            login_disconnect(
+                &mut s,
+                "Inventory save is unreadable. Administrator must repair it.",
+            )?;
+            return Ok(());
+        }
+    };
     let uuid = offline_uuid(&name);
     let (entity_id, events, previous) = match hub.add(name.clone(), uuid.clone(), player_state) {
         Ok(result) => result,
@@ -656,7 +726,14 @@ fn handle(
     write_string(&name, &mut success)?;
     send(&mut s, 0x02, &success)?;
     println!("joined: {name} (UNAUTHENTICATED OFFLINE MODE)");
-    join(&mut s, &world, &clock, &player_state, entity_id)?;
+    join(
+        &mut s,
+        &world,
+        &clock,
+        &player_state,
+        entity_id,
+        &inventory_state,
+    )?;
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
     send(&mut s, self_list.id, &self_list.body)?;
@@ -676,15 +753,19 @@ fn handle(
         PlayerSession {
             position: &mut player_state,
             save_path: &player_file,
+            inventory: &mut inventory_state,
+            inventory_path: &inventory_file,
             hub: &hub,
             entity_id,
             events: &events,
         },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
-    let saved = player_state.save(&player_file);
+    let player_saved = player_state.save(&player_file);
+    let inventory_saved = inventory_state.save(&inventory_file);
     println!("left: {name}");
-    saved?;
+    player_saved?;
+    inventory_saved?;
     result
 }
 fn main() -> io::Result<()> {

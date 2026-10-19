@@ -1,0 +1,39 @@
+name: Cleanup merged Creative inventory branch (one-time)
+on:
+  workflow_run:
+    workflows: ["Rust-only Minecraft 1.7.10 CI"]
+    types: [completed]
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    if: ${{ github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Confirm PR 16 is merged and branch has no unmatched commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          branch="feat/vanilla17-creative-inventory"
+          merged=$(gh api "repos/$repo/pulls/16" --jq '.merged')
+          head=$(gh api "repos/$repo/pulls/16" --jq '.head.sha')
+          if [[ "$merged" != "true" ]]; then
+            echo "PR #16 is not merged; preserving branch"
+            exit 0
+          fi
+          sha=$(gh api "repos/$repo/branches/$branch" --jq '.commit.sha' 2>/dev/null || true)
+          if [[ -z "$sha" ]]; then
+            echo "Feature branch already absent"
+            exit 0
+          fi
+          ahead=$(gh api "repos/$repo/compare/main...$branch" --jq '.ahead_by')
+          if [[ "$sha" != "$head" || "$ahead" != "0" ]]; then
+            echo "Feature branch moved or has unmatched commits; leaving it unchanged"
+            exit 0
+          fi
+          gh api -X DELETE "repos/$repo/git/refs/heads/$branch"
+          echo "Cleaned up merged feature branch: $branch"

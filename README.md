@@ -14,7 +14,7 @@ cargo run --release -p vanilla-server -- --whitelist whitelist.json
 
 現在はlocalhost (`127.0.0.1:25565`) のみで待ち受けます。接続には **Minecraft Java Edition 1.7.10のModなしクライアント**を使用します。ユーザー名ホワイトリストに登録した名前で接続してください。ホワイトリストは名前照合のみで、**Mojang/Microsoftアカウントの本人認証ではありません**。公開インターネットへの接続を許可しないでください。
 
-**完成状況を誤認しないでください。** Rust版は最大8人・フラットワールドのCreative操作・チャンク配信・チャット・座標保存・限定Anvilエクスポート/インポートまでを自動検証しています。**サバイバル、インベントリ、クラフト、Mob、AI、物理、レッドストーン、完全なAnvil常時保存は未実装**であり、現時点では通常のバニラMinecraftを完全に遊べません。実際の1.7.10クライアントによる総合操作検証も未実施です。
+**完成状況を誤認しないでください。** Rust版は最大8人・フラットワールドのCreative操作・45スロットのサーバー管理インベントリとホットバー選択/保存・チャンク配信・チャット・座標保存・限定Anvilエクスポート/インポートまでを自動検証しています。**サバイバル、フルインベントリ機能（防具/チェスト/カーソル操作/エンチャントNBT）、クラフト、Mob、AI、物理、レッドストーン、完全なAnvil常時保存は未実装**であり、現時点では通常のバニラMinecraftを完全に遊べません。実際の1.7.10クライアントによる総合操作検証も未実施です。
 
 ### Rustのみのビルド・通信テスト
 
@@ -69,7 +69,7 @@ cargo run --release -p vanilla-server -- --import-anvil ./exported-vanilla-world
 |---|---|---|
 | `legacy-protocol` | VarInt、フレーム・文字列の境界チェック | Play/FMLは未対応 |
 | `legacy-status-server` | 1.7.10クライアントのサーバー一覧向けStatus/Ping | Loginは明示拒否 |
-| `vanilla-server` | ホワイトリスト入場判定、20Hz Tick時計、Login/Play、平坦ワールドの動的チャンク配信、限定Creative操作、ブロック保存とgzip NBTプレイヤー位置保存、独立Anvil書き出し/限定読み戻し、8人までの同期・共有チャット | 本人確認なし、既存ワールド非互換、サバイバルなし |
+| `vanilla-server` | ホワイトリスト入場判定、20Hz Tick時計、Login/Play、平坦ワールドの動的チャンク配信、限定Creative操作、45スロットのCreativeインベントリ/選択ホットバー・独立保存、ブロック保存とgzip NBTプレイヤー位置保存、独立Anvil書き出し/限定読み戻し、8人までの同期・共有チャット | 本人確認なし、既存ワールド非互換、サバイバルなし |
 | `industrial-core` | 決定的Tick、接続グラフキャッシュ、エネルギー配分 | Minecraftゲーム本体とは未接続 |
 | `industrial-bench` | 仮想エネルギー網の合成ベンチマーク | 実ワールドのTPSではない |
 | `mod-analyzer` | JAR・ClassFile解析、Modpack ZIP/フォルダのJSON監査 | Modの実行・変換・互換性判定ではない |

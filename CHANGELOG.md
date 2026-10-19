@@ -1,3 +1,11 @@
+## 2026-10-19 — Rust Creativeインベントリ・ホットバーの実装
+
+- 45スロットのCreative Window Items (`0x30`)、Set Slot (`0x2f`)、Hotbar Change (`0x09`) と Creative Inventory Action (`0x10`) に対応。
+- プレイヤーの選択スロットに存在しないアイテムをBlock Placement (`0x08`) で偽装しても、ブロック設置を許可せずクライアントを再同期。
+- プレイヤーごとの小さなJSONインベントリを上限・形式検証付きで独立保存し、ログイン復元。
+- 未実装のWindow Clickは確定せず、拒否トランザクションとインベントリ再同期を実施。Survival/Crafting/Chest/Item NBTは未実装。
+- RustユニットテストとRust製TCPエンドツーエンドで、Creative C10→Block Placement、偽装拒否、保存復元を確認。
+
 ## 2026-10-19 — Rustネイティブ専用へ一本化
 
 - 全14件の既存PRがmainにマージ済みでオープンPRは0件であることを確認し、旧作業ブランチの整理を開始。
