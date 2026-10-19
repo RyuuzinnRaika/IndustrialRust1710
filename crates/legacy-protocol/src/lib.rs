@@ -94,10 +94,16 @@ impl BufferedFrameReader {
         let count = match reader.read(&mut buf) {
             Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
             Ok(count) => count,
-            Err(error) if matches!(
-                error.kind(),
-                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ) => return Ok(None),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                return Ok(None)
+            }
             Err(error) => return Err(error),
         };
         self.received.extend_from_slice(&buf[..count]);
@@ -222,9 +228,12 @@ mod tests {
         let timeout = || Err(io::Error::from(io::ErrorKind::TimedOut));
         let mut src = Fragments {
             pieces: std::collections::VecDeque::from([
-                Ok(vec![0x83]), timeout(),
-                Ok(vec![0x01, 0x01]), timeout(),
-                Ok(vec![7; 130]), timeout(),
+                Ok(vec![0x83]),
+                timeout(),
+                Ok(vec![0x01, 0x01]),
+                timeout(),
+                Ok(vec![7; 130]),
+                timeout(),
                 Ok(vec![5, 42, 43, 44, 45, 46]),
             ]),
         };
@@ -249,7 +258,9 @@ mod tests {
         assert!(reader.poll(&mut &[0x80u8][..]).unwrap().is_none());
         assert!(reader.poll(&mut &[][..]).is_err());
         let mut reader = BufferedFrameReader::new();
-        assert!(reader.poll(&mut &[0xff, 0xff, 0xff, 0xff, 0x7f][..]).is_err());
+        assert!(reader
+            .poll(&mut &[0xff, 0xff, 0xff, 0xff, 0x7f][..])
+            .is_err());
     }
     #[test]
     fn cursor_fields() {
