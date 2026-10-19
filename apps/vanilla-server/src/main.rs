@@ -251,6 +251,10 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
     let dz = player.2 - (z as f64 + 0.5);
     dx * dx + dy * dy + dz * dz <= 64.0
 }
+struct PlayerSession<'a> {
+    position: &'a mut PlayerPosition,
+    save_path: &'a Path,
+}
 fn play(
     s: &mut TcpStream,
     world: &Mutex<World>,
@@ -258,9 +262,9 @@ fn play(
     name: &str,
     whitelist_path: &Path,
     clock: &Clock,
-    player: &mut PlayerPosition,
-    player_path: &Path,
+    session: PlayerSession<'_>,
 ) -> io::Result<()> {
+    let PlayerSession { position: player, save_path: player_path } = session;
     s.set_read_timeout(Some(Duration::from_secs(1)))?;
     let mut location = (player.x, player.y, player.z);
     let started = Instant::now();
@@ -543,8 +547,7 @@ fn handle(
         &name,
         &whitelist_path,
         &clock,
-        &mut player_state,
-        &player_file,
+        PlayerSession { position: &mut player_state, save_path: &player_file },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
     let saved = player_state.save(&player_file);
