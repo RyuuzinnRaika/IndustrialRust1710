@@ -214,15 +214,16 @@ fn join(
 }
 
 fn chunk_center(player: &PlayerPosition) -> (i32, i32) {
-    ((player.x.floor() as i32).div_euclid(16), (player.z.floor() as i32).div_euclid(16))
+    (
+        (player.x.floor() as i32).div_euclid(16),
+        (player.z.floor() as i32).div_euclid(16),
+    )
 }
 fn view_chunks(center: (i32, i32)) -> BTreeSet<(i32, i32)> {
     let mut chunks = BTreeSet::new();
     for cz in center.1 - VIEW_DISTANCE..=center.1 + VIEW_DISTANCE {
         for cx in center.0 - VIEW_DISTANCE..=center.0 + VIEW_DISTANCE {
-            if (MIN_CHUNK..=MAX_CHUNK).contains(&cx)
-                && (MIN_CHUNK..=MAX_CHUNK).contains(&cz)
-            {
+            if (MIN_CHUNK..=MAX_CHUNK).contains(&cx) && (MIN_CHUNK..=MAX_CHUNK).contains(&cz) {
                 chunks.insert((cx, cz));
             }
         }
@@ -230,7 +231,10 @@ fn view_chunks(center: (i32, i32)) -> BTreeSet<(i32, i32)> {
     chunks
 }
 fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
-    let (mask, data) = world.lock().map_err(|_| bad("world mutex poisoned"))?.chunk_data(cx, cz);
+    let (mask, data) = world
+        .lock()
+        .map_err(|_| bad("world mutex poisoned"))?
+        .chunk_data(cx, cz);
     let mut compressor = ZlibEncoder::new(Vec::new(), Compression::fast());
     compressor.write_all(&data)?;
     let compressed = compressor.finish()?;
@@ -448,10 +452,7 @@ fn play(
                 }
                 input.u8()?;
                 input.finish()?;
-                if !x.is_finite()
-                    || !y.is_finite()
-                    || !z.is_finite()
-                    || !(0.0..256.0).contains(&y)
+                if !x.is_finite() || !y.is_finite() || !z.is_finite() || !(0.0..256.0).contains(&y)
                 {
                     return Err(bad("invalid player coordinates"));
                 }
@@ -786,7 +787,11 @@ mod tests {
         assert_eq!(shifted.len(), 25);
         assert_eq!(zero.difference(&shifted).count(), 15);
         assert_eq!(shifted.difference(&zero).count(), 15);
-        let player = PlayerPosition { x: -0.5, y: 65.0, z: -16.1 };
+        let player = PlayerPosition {
+            x: -0.5,
+            y: 65.0,
+            z: -16.1,
+        };
         assert_eq!(chunk_center(&player), (-1, -2));
         assert_eq!(view_chunks((MIN_CHUNK, MIN_CHUNK)).len(), 9);
     }

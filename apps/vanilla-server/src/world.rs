@@ -201,9 +201,11 @@ impl World {
                 for z in 0..16 {
                     for x in (0..16).step_by(2) {
                         let a = self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z)
-                            as u8 & 15;
+                            as u8
+                            & 15;
                         let b = self.get(chunk_x * 16 + x + 1, section * 16 + y, chunk_z * 16 + z)
-                            as u8 & 15;
+                            as u8
+                            & 15;
                         bytes.push(a | (b << 4));
                     }
                 }
@@ -244,7 +246,9 @@ mod tests {
         assert_eq!(loaded.get(-1, 65, 2), 4 << 4);
         assert_eq!(loaded.get(-1, 63, 2), 2 << 4);
         fs::remove_file(&path).unwrap();
-        assert!(!w.update_and_save(&path, WORLD_LIMIT, 65, 2, 4 << 4).unwrap());
+        assert!(!w
+            .update_and_save(&path, WORLD_LIMIT, 65, 2, 4 << 4)
+            .unwrap());
     }
     #[test]
     fn corrupt_save_rejected() {
@@ -258,23 +262,27 @@ mod tests {
     }
     #[test]
     fn sparse_edits_survive_cross_chunk_and_section_boundaries() {
-        let path = std::env::temp_dir().join(format!("industrial-chunks-{}.irw", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("industrial-chunks-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
-        for (x,y,z,block) in [(-49,2,19,4<<4), (56,145,-33,5<<4), (63,64,0,1<<4)] {
-            assert!(world.update_and_save(&path,x,y,z,block).unwrap());
+        for (x, y, z, block) in [
+            (-49, 2, 19, 4 << 4),
+            (56, 145, -33, 5 << 4),
+            (63, 64, 0, 1 << 4),
+        ] {
+            assert!(world.update_and_save(&path, x, y, z, block).unwrap());
         }
         let loaded = World::load(&path).unwrap();
-        assert_eq!(loaded.get(56,145,-33), 5<<4);
-        assert_eq!(loaded.get(-49,2,19), 4<<4);
-        let (mask, binary) = loaded.chunk_data(3,-3);
+        assert_eq!(loaded.get(56, 145, -33), 5 << 4);
+        assert_eq!(loaded.get(-49, 2, 19), 4 << 4);
+        let (mask, binary) = loaded.chunk_data(3, -3);
         assert_eq!(mask, 0x18 | (1 << 9));
         assert_eq!(binary.len(), 3 * 10240 + 256);
         // Section 9 (y=144..159) follows section 3 and 4 in ascending Y order.
-        let index_in_section = (145%16)*256 + ((-33i32).rem_euclid(16))*16 + 56%16;
-        assert_eq!(binary[2*4096 + index_in_section as usize],5);
-        assert_eq!(loaded.chunk_data(-4,1).0, 0x19);
+        let index_in_section = (145 % 16) * 256 + ((-33i32).rem_euclid(16)) * 16 + 56 % 16;
+        assert_eq!(binary[2 * 4096 + index_in_section as usize], 5);
+        assert_eq!(loaded.chunk_data(-4, 1).0, 0x19);
         fs::remove_file(path).unwrap();
     }
-
 }
