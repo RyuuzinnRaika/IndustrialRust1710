@@ -65,3 +65,10 @@ jobs:
           wait "$pid" 2>/dev/null || true
           ./target/debug/vanilla-server --world "$RUNNER_TEMP/industrial-smoke.irw" --export-anvil "$RUNNER_TEMP/industrial-anvil-snapshot"
           python3 tests/anvil_export_smoke.py "$RUNNER_TEMP/industrial-anvil-snapshot"
+          ./target/debug/vanilla-server --import-anvil "$RUNNER_TEMP/industrial-anvil-snapshot" --world "$RUNNER_TEMP/roundtrip.irw"
+          cmp "$RUNNER_TEMP/industrial-smoke.irw" "$RUNNER_TEMP/roundtrip.irw"
+          if ./target/debug/vanilla-server --import-anvil "$RUNNER_TEMP/industrial-anvil-snapshot" --world "$RUNNER_TEMP/roundtrip.irw"; then
+            echo 'ERROR: importer overwrote an existing IRW1 world'
+            exit 1
+          fi
+          cmp "$RUNNER_TEMP/industrial-smoke.irw" "$RUNNER_TEMP/roundtrip.irw"
