@@ -1,3 +1,9 @@
+## 2026-10-19 — 公式Minecraft 1.7.10のLog4j安全起動
+
+- Mojang公式セキュリティ告知に従い、`log4j2_17-111.xml`を公式ホストから取得、SHA-1を照合。
+- Java 8起動時に`-Dlog4j.configurationFile=log4j2_17-111.xml`を常時指定。対策XML欠落や改変時は起動拒否。
+- CIに実ネットワークによる公式対策ファイル取得、モックによる不正ファイル拒否/VM引数チェックを追加。
+
 ## 2026-10-19 — 普通に遊べる公式Minecraft 1.7.10 Vanillaサーバーを別経路で提供
 
 - Rust製PoCは未完成のままとし、Mojang公式のVanilla 1.7.10サーバーJARを合法的にユーザー環境へ直接取得する `tools/vanilla1710.py` を追加。
