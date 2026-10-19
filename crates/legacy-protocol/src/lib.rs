@@ -224,7 +224,7 @@ mod tests {
             pieces: std::collections::VecDeque::from([
                 Ok(vec![0x83]), timeout(),
                 Ok(vec![0x01, 0x01]), timeout(),
-                Ok(vec![7; 129]), timeout(),
+                Ok(vec![7; 130]), timeout(),
                 Ok(vec![5, 42, 43, 44, 45, 46]),
             ]),
         };
