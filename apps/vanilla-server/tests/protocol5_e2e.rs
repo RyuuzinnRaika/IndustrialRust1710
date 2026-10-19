@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -200,7 +200,7 @@ fn until_packet(socket: &mut TcpStream, id: u32, matches: impl Fn(&[u8]) -> bool
     }
     panic!("expected packet {id:#x} not received");
 }
-fn await_file(path: &PathBuf) {
+fn await_file(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(6);
     while !path.is_file() {
         assert!(
