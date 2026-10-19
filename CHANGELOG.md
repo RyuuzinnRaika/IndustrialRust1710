@@ -1,3 +1,10 @@
+## 2026-10-19 — Rustネイティブ専用へ一本化
+
+- 全14件の既存PRがmainにマージ済みでオープンPRは0件であることを確認し、旧作業ブランチの整理を開始。
+- Rustの実TCP統合テストを追加し、ログイン/ホワイトリスト/チャンク/マルチプレイヤー/分割パケット/保存/Anvilを検証。
+- Pythonスモークテスト/公式Javaサーバー起動Pythonツールを現行の開発・CIから撤去。Rustのcargo test/Clippy/release buildで検証。
+- RustネイティブバニラのSurvival等はまだ未実装。Rust化とMinecraft互換・処理性能を混同しない。
+
 ## 2026-10-19 — 1.7.10サーバー通信・運用の追加修正
 
 - Rust版Protocol 5 Play受信を有界`BufferedFrameReader`へ変更。50ms timeout中に受信途中のVarInt/パケットを失わないよう修正。
