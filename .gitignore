@@ -3,3 +3,7 @@
 .DS_Store
 .idea/
 .vscode/
+
+# Never commit private server access lists or worlds.
+/whitelist.json
+/world/
