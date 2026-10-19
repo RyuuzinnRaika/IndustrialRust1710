@@ -22,7 +22,7 @@ cargo run --release -p vanilla-server -- --bind 127.0.0.1:25565 --world ./world/
 |---|---|---|
 | `legacy-protocol` | VarInt、フレーム・文字列の境界チェック | Play/FMLは未対応 |
 | `legacy-status-server` | 1.7.10クライアントのサーバー一覧向けStatus/Ping | Loginは明示拒否 |
-| `vanilla-server` | ホワイトリスト入場判定、20Hz Tick時計、Login/Play、固定平坦ワールド、限定Creative操作、独自保存 | 1人/ユーザー名偽装可能、既存ワールド非互換、サバイバルなし |
+| `vanilla-server` | ホワイトリスト入場判定、20Hz Tick時計、Login/Play、固定平坦ワールド、限定Creative操作、ブロック・位置保存 | 1人/ユーザー名偽装可能、既存ワールド非互換、サバイバルなし |
 | `industrial-core` | 決定的Tick、接続グラフキャッシュ、エネルギー配分 | Minecraftゲーム本体とは未接続 |
 | `industrial-bench` | 仮想エネルギー網の合成ベンチマーク | 実ワールドのTPSではない |
 | `mod-analyzer` | JAR・ClassFile解析、Modpack ZIP/フォルダのJSON監査 | Modの実行・変換・互換性判定ではない |
