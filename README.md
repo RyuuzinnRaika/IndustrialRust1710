@@ -1,5 +1,25 @@
 # IndustrialRust1710
 
+## 今すぐMinecraft 1.7.10をModなしで普通に遊ぶ
+
+**Rust製サーバーが完成するまでの実用経路として、Mojang公式1.7.10バニラサーバーを起動できます。** サバイバル、Mob、クラフト、インベントリ、レッドストーンなどは公式Javaサーバーが担当します。**Rust実装がこれらに対応したという意味ではありません。**
+
+Windows 11のPowerShellでリポジトリのルートから:
+
+```powershell
+py -3 tools/vanilla1710.py prepare
+notepad runtime/vanilla-1.7.10/eula.txt
+# Minecraft EULAに同意する場合のみ、eula=false を eula=true に変更
+py -3 tools/vanilla1710.py run --memory 2G
+```
+
+**Java 8が必要**です。PATH上のJavaが17以降なら `--java "C:\Path\To\Java8\bin\java.exe"` を付けて起動します。サーバーコンソールで `whitelist add プレイヤー名` を実行し、Minecraft Java **1.7.10（Forgeなし）**から `127.0.0.1:25565` へ接続してください。終了は `stop`。
+
+サーバーJARは公式MojangからダウンロードしてSHA-1を検証します。JARはGitに格納せず、公式EULAへの同意も自動化しません。初期設定はホワイトリスト有効・`online-mode=true`・localhost限定です。
+
+**LAN接続・Linux・Java 8の指定・管理方法・バックアップ**は [公式1.7.10サーバー起動ガイド](docs/16_公式バニラ1710サーバー起動.md) を参照してください。
+
+
 **Minecraft Java Edition 1.7.10（Protocol 5）向けRustネイティブサーバーの研究開発プロジェクト。**
 
 > 現行のソースツリーにはPumpkin由来のGPLv3実装を含みません。現状は開発用PoCです。バニラ1.7.10向けLogin/Playの基礎は追加済みですが、完成したMinecraftサーバーではありません。Mod JAR実行・Java→Rust変換は今は対象外です。
