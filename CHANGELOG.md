@@ -1,3 +1,10 @@
+## 2026-10-19 — Protocol 5の独立マルチプレイヤー実装
+
+- Pumpkin非依存のRust独自実装で複数プレイヤー（最大8人）を登録・退出管理。
+- 1.7.10独自のPlayer Info/Spawn Player/Entity Teleport/Destroyを実装。
+- 接続中の他プレイヤーへ移動、ブロックの変更、チャットを配信。タブ一覧と/ list対応。
+- 実TCPの2人同時ログイン、重複名拒否、移動、編集、退出テストをCIに追加。
+
 ## 2026-10-19 — GPLv3コードの現行ツリーからの除去
 
 - Pumpkinからコピーした`crates/pumpkin-nbt`と、コピーしたGPLv3のトップレベル`LICENSE`を現行ツリーから削除。
