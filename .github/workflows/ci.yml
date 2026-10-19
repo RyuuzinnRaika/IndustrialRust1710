@@ -1,0 +1,39 @@
+name: Rust CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit tests
+        run: cargo test --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Status/Ping integration smoke test
+        shell: bash
+        run: |
+          cargo build -p legacy-status-server
+          ./target/debug/legacy-status-server --bind 127.0.0.1:25567 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import socket,time
+          for _ in range(40):
+              try:
+                  socket.create_connection(('127.0.0.1', 25567), timeout=0.2).close()
+                  break
+              except OSError:time.sleep(0.1)
+          else:raise SystemExit('no listening socket')
+          PY
+          python3 tests/protocol5_smoke.py 127.0.0.1 25567
