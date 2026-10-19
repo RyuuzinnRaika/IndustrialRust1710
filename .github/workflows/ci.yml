@@ -16,18 +16,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Format source capture (temporary)
-        shell: bash
-        run: |
-          cargo fmt --all
-          python3 - <<'PY'
-          import base64,pathlib
-          for d in ['crates','apps']:
-              for p in pathlib.Path(d).rglob('*.rs'):
-                  print('RUSTFMT_BEGIN:' + str(p))
-                  print(base64.b64encode(p.read_bytes()).decode('ascii'))
-                  print('RUSTFMT_END')
-          PY
+      - name: Format check
+        run: cargo fmt --all -- --check
       - name: Unit tests
         run: cargo test --workspace
       - name: Clippy
