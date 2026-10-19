@@ -382,7 +382,7 @@ mod tests {
     }
     #[test]
     fn parses_bounds_and_slot() {
-        assert!(Input(&[0, 2, 1]).string(1).is_err());
+        assert!(Input(&[2, b'a', b'b']).string(1).is_err());
         let mut input = Input(&[0xff, 0xff]);
         assert!(input.slot().unwrap().is_none());
         input.finish().unwrap();
