@@ -1,11 +1,16 @@
-//! Small, bounded, deterministic flat world. This is NOT Anvil/NBT or Forge storage.
+//! Bounded, sparse, deterministic flat world streamed by chunk.
+//! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 
-pub const MIN_CHUNK: i32 = -2;
-pub const MAX_CHUNK: i32 = 2;
+/// Temporary world edge (blocks). Prevents unbounded player edits or packet positions.
+/// Coordinates x/z must be in [-WORLD_LIMIT, WORLD_LIMIT).
+pub const WORLD_LIMIT: i32 = 16_384;
+pub const VIEW_DISTANCE: i32 = 2; // Send a 5x5 chunk window per connected player.
+pub const MIN_CHUNK: i32 = -WORLD_LIMIT / 16;
+pub const MAX_CHUNK: i32 = WORLD_LIMIT / 16 - 1;
 const MAX_EDITS: usize = 65_536;
 const MAGIC: &[u8; 4] = b"IRW1";
 type Position = (i32, u8, i32);
@@ -17,9 +22,9 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 pub fn in_bounds(x: i32, y: i32, z: i32) -> bool {
-    (MIN_CHUNK * 16..(MAX_CHUNK + 1) * 16).contains(&x)
+    (-WORLD_LIMIT..WORLD_LIMIT).contains(&x)
         && (0..=255).contains(&y)
-        && (MIN_CHUNK * 16..(MAX_CHUNK + 1) * 16).contains(&z)
+        && (-WORLD_LIMIT..WORLD_LIMIT).contains(&z)
 }
 pub fn is_placeable(block_id: u16) -> bool {
     // Ordinary renderable 1.7.10 blocks only; no tile entities, gravity or multi-block logic.
@@ -162,11 +167,23 @@ impl World {
         // keeping the original untouched rather than deleting it.
         fs::rename(temp, path)
     }
-    pub fn chunk_data(&self, chunk_x: i32, chunk_z: i32) -> Vec<u8> {
-        // 1.7.10: two 16x16x16 sections (y=48..79), ordered block IDs, metadata,
-        // block light, sky light, then 256 biome bytes. No "add" arrays.
-        let mut bytes = Vec::with_capacity(2 * 10240 + 256);
-        for section in [3i32, 4] {
+    /// Serializes the pre-1.8 Section ID/metadata/light arrays in Y-major order.
+    /// The first two sections are always present for the flat base ground; other
+    /// sections are transmitted when edited. This avoids dropping high-altitude
+    /// or underground edits on re-login or crossing a chunk boundary.
+    pub fn chunk_data(&self, chunk_x: i32, chunk_z: i32) -> (u16, Vec<u8>) {
+        let mut mask: u16 = (1 << 3) | (1 << 4);
+        let min_x = chunk_x * 16;
+        let min_z = chunk_z * 16;
+        for (&(x, y, z), _) in &self.edits {
+            if (min_x..min_x + 16).contains(&x) && (min_z..min_z + 16).contains(&z) {
+                mask |= 1u16 << (y / 16);
+            }
+        }
+        let sections: Vec<i32> = (0..16).filter(|y| (mask & (1 << y)) != 0).collect();
+        let mut bytes = Vec::with_capacity(sections.len() * 10240 + 256);
+        // Section-major IDs across every selected section.
+        for &section in &sections {
             for y in 0..16 {
                 for z in 0..16 {
                     for x in 0..16 {
@@ -178,25 +195,24 @@ impl World {
                 }
             }
         }
-        for section in [3i32, 4] {
+        // Metadata is a nibble array, two X-adjacent blocks per byte.
+        for &section in &sections {
             for y in 0..16 {
                 for z in 0..16 {
                     for x in (0..16).step_by(2) {
                         let a = self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z)
-                            as u8
-                            & 15;
+                            as u8 & 15;
                         let b = self.get(chunk_x * 16 + x + 1, section * 16 + y, chunk_z * 16 + z)
-                            as u8
-                            & 15;
-                        bytes.push(a | b << 4);
+                            as u8 & 15;
+                        bytes.push(a | (b << 4));
                     }
                 }
             }
         }
-        bytes.extend(std::iter::repeat_n(0u8, 2 * 2048)); // block light
-        bytes.extend(std::iter::repeat_n(0xffu8, 2 * 2048)); // sky light
+        bytes.extend(std::iter::repeat_n(0u8, sections.len() * 2048)); // block light
+        bytes.extend(std::iter::repeat_n(0xffu8, sections.len() * 2048)); // sky light
         bytes.extend(std::iter::repeat_n(1u8, 256)); // plains biome
-        bytes
+        (mask, bytes)
     }
 }
 #[cfg(test)]
@@ -207,9 +223,12 @@ mod tests {
         let w = World::new();
         assert_eq!(w.get(0, 63, 0), 2 << 4);
         assert_eq!(w.get(-32, 60, -32), 7 << 4);
-        assert_eq!(w.get(-33, 63, 0), 0);
-        assert_eq!(w.chunk_data(-1, 0).len(), 20736);
-        assert_eq!(w.chunk_data(0, 0)[15 * 256], 2);
+        assert_eq!(w.get(-33, 63, 0), 2 << 4);
+        assert_eq!(w.get(WORLD_LIMIT, 63, 0), 0);
+        assert_eq!(w.get(-WORLD_LIMIT - 1, 63, 0), 0);
+        assert_eq!(w.chunk_data(-1, 0).0, 0x18);
+        assert_eq!(w.chunk_data(-1, 0).1.len(), 20736);
+        assert_eq!(w.chunk_data(0, 0).1[15 * 256], 2);
     }
     #[test]
     fn persist_and_rollback() {
@@ -225,7 +244,7 @@ mod tests {
         assert_eq!(loaded.get(-1, 65, 2), 4 << 4);
         assert_eq!(loaded.get(-1, 63, 2), 2 << 4);
         fs::remove_file(&path).unwrap();
-        assert!(!w.update_and_save(&path, 1000, 65, 2, 4 << 4).unwrap());
+        assert!(!w.update_and_save(&path, WORLD_LIMIT, 65, 2, 4 << 4).unwrap());
     }
     #[test]
     fn corrupt_save_rejected() {
@@ -237,4 +256,25 @@ mod tests {
         assert!(World::load(&path).is_err());
         fs::remove_file(&path).unwrap();
     }
+    #[test]
+    fn sparse_edits_survive_cross_chunk_and_section_boundaries() {
+        let path = std::env::temp_dir().join(format!("industrial-chunks-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        for (x,y,z,block) in [(-49,2,19,4<<4), (56,145,-33,5<<4), (63,64,0,1<<4)] {
+            assert!(world.update_and_save(&path,x,y,z,block).unwrap());
+        }
+        let loaded = World::load(&path).unwrap();
+        assert_eq!(loaded.get(56,145,-33), 5<<4);
+        assert_eq!(loaded.get(-49,2,19), 4<<4);
+        let (mask, binary) = loaded.chunk_data(3,-3);
+        assert_eq!(mask, 0x18 | (1 << 9));
+        assert_eq!(binary.len(), 3 * 10240 + 256);
+        // Section 9 (y=144..159) follows section 3 and 4 in ascending Y order.
+        let index_in_section = (145%16)*256 + ((-33i32).rem_euclid(16))*16 + 56%16;
+        assert_eq!(binary[2*4096 + index_in_section as usize],5);
+        assert_eq!(loaded.chunk_data(-4,1).0, 0x19);
+        fs::remove_file(path).unwrap();
+    }
+
 }
