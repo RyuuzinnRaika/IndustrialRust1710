@@ -13,7 +13,8 @@ use clock::Clock;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use legacy_protocol::{
-    read_frame, read_varint, write_frame, write_string, write_varint, PROTOCOL_VERSION,
+    read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
+    PROTOCOL_VERSION,
 };
 use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
 use player::PlayerPosition;
@@ -344,6 +345,8 @@ fn play(
     let mut last_time_tick: u64 = clock.ticks();
     let mut admission_check = started;
     let mut saved_at = started;
+    // Keep fragmented TCP frames across short receive timeouts.
+    let mut packet_reader = BufferedFrameReader::new();
     loop {
         while let Ok(event) = events.try_recv() {
             send(s, event.id, &event.body)?;
@@ -383,20 +386,14 @@ fn play(
         if pong_time.elapsed() > Duration::from_secs(40) {
             return Err(bad("keepalive timeout"));
         }
-        let (id, data) = match receive(s) {
-            Ok(packet) => packet,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
-                ) =>
-            {
-                continue
-            }
+        let data = match packet_reader.poll(s) {
+            Ok(Some(packet)) => packet,
+            Ok(None) => continue,
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(e),
         };
         let mut input = Input(&data);
+        let id = input.varint()?;
         match id {
             0 => {
                 let reply = input.i32()?;
