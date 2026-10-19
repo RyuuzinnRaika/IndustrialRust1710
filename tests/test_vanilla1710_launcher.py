@@ -212,7 +212,7 @@ class Vanilla1710LauncherTests(unittest.TestCase):
         (self.root / "usercache.json").write_text("[]")
         output = self.root.parent / "backup.zip"
         with mock.patch.object(target, "is_port_listening", return_value=False):
-            self.assertEqual(target.backup_server(self.root, output), 5)
+            self.assertEqual(target.backup_server(self.root, output), 6)
             self.assertFalse((self.root / ".server-operation.lock").exists())
             with self.assertRaises(target.SetupError):
                 target.backup_server(self.root, output)
