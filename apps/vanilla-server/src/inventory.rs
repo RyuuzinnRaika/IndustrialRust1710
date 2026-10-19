@@ -36,7 +36,11 @@ pub struct Inventory {
 }
 impl Default for Inventory {
     fn default() -> Self {
-        Self { version: VERSION, selected: 0, slots: vec![None; SLOT_COUNT] }
+        Self {
+            version: VERSION,
+            selected: 0,
+            slots: vec![None; SLOT_COUNT],
+        }
     }
 }
 impl Inventory {
@@ -44,7 +48,9 @@ impl Inventory {
         player_path.with_extension("inventory.json")
     }
     fn validate(&self) -> io::Result<()> {
-        if self.version != VERSION || self.selected > 8 || self.slots.len() != SLOT_COUNT
+        if self.version != VERSION
+            || self.selected > 8
+            || self.slots.len() != SLOT_COUNT
             || self.slots[..9].iter().any(Option::is_some)
             || self.slots.iter().flatten().any(|stack| !stack.is_valid())
         {
@@ -65,15 +71,14 @@ impl Inventory {
         if bytes.len() as u64 > MAX_SAVE_BYTES {
             return Err(invalid("inventory save grew beyond size cap"));
         }
-        let value: Self = serde_json::from_slice(&bytes)
-            .map_err(|_| invalid("inventory save is malformed"))?;
+        let value: Self =
+            serde_json::from_slice(&bytes).map_err(|_| invalid("inventory save is malformed"))?;
         value.validate()?;
         Ok(value)
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
         self.validate()?;
-        let bytes = serde_json::to_vec(self)
-            .map_err(|_| invalid("could not encode inventory"))?;
+        let bytes = serde_json::to_vec(self).map_err(|_| invalid("could not encode inventory"))?;
         if bytes.len() as u64 > MAX_SAVE_BYTES {
             return Err(invalid("inventory save exceeds limit"));
         }
@@ -166,30 +171,75 @@ mod tests {
         assert!(!inv.creative_set(45, None).unwrap());
         assert!(!inv.creative_set(5, None).unwrap());
         assert!(inv.select(9).is_err());
-        assert!(inv.creative_set(36, Some(Stack{id:4,count:64,damage:0})).unwrap());
-        assert!(inv.can_place(Some(Stack{id:4,count:1,damage:0})));
-        assert!(!inv.can_place(Some(Stack{id:5,count:64,damage:0})));
-        assert_eq!(inv.set_slot(36).unwrap(), vec![0,0,36,0,4,64,0,0,255,255]);
+        assert!(inv
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 4,
+                    count: 64,
+                    damage: 0
+                })
+            )
+            .unwrap());
+        assert!(inv.can_place(Some(Stack {
+            id: 4,
+            count: 1,
+            damage: 0
+        })));
+        assert!(!inv.can_place(Some(Stack {
+            id: 5,
+            count: 64,
+            damage: 0
+        })));
+        assert_eq!(
+            inv.set_slot(36).unwrap(),
+            vec![0, 0, 36, 0, 4, 64, 0, 0, 255, 255]
+        );
         inv.select(1).unwrap();
         assert!(inv.held().is_none());
-        assert!(!inv.can_place(Some(Stack{id:4,count:64,damage:0})));
-        assert!(inv.creative_set(37, Some(Stack{id:5,count:1,damage:2})).unwrap());
-        assert!(inv.can_place(Some(Stack{id:5,count:1,damage:2})));
+        assert!(!inv.can_place(Some(Stack {
+            id: 4,
+            count: 64,
+            damage: 0
+        })));
+        assert!(inv
+            .creative_set(
+                37,
+                Some(Stack {
+                    id: 5,
+                    count: 1,
+                    damage: 2
+                })
+            )
+            .unwrap());
+        assert!(inv.can_place(Some(Stack {
+            id: 5,
+            count: 1,
+            damage: 2
+        })));
     }
     #[test]
     fn saves_and_fails_closed_on_corruption() {
-        let dir=std::env::temp_dir().join(format!("ir1710-inventory-{}",std::process::id()));
-        let _=fs::remove_dir_all(&dir);
+        let dir = std::env::temp_dir().join(format!("ir1710-inventory-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let path=dir.join("positioner.inventory.json");
-        let mut inv=Inventory::default();
-        inv.creative_set(36, Some(Stack{id:4,count:64,damage:0})).unwrap();
+        let path = dir.join("positioner.inventory.json");
+        let mut inv = Inventory::default();
+        inv.creative_set(
+            36,
+            Some(Stack {
+                id: 4,
+                count: 64,
+                damage: 0,
+            }),
+        )
+        .unwrap();
         inv.select(0).unwrap();
         inv.save(&path).unwrap();
-        assert_eq!(Inventory::load(&path).unwrap(),inv);
-        fs::write(&path,b"{broken").unwrap();
+        assert_eq!(Inventory::load(&path).unwrap(), inv);
+        fs::write(&path, b"{broken").unwrap();
         assert!(Inventory::load(&path).is_err());
-        fs::write(&path,b"[]").unwrap();
+        fs::write(&path, b"[]").unwrap();
         assert!(Inventory::load(&path).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }

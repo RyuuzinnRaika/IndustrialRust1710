@@ -11,9 +11,9 @@ mod whitelist;
 mod world;
 
 use clock::Clock;
-use inventory::{Inventory, Stack};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use inventory::{Inventory, Stack};
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
     PROTOCOL_VERSION,
@@ -541,14 +541,20 @@ fn play(
                             {
                                 changed = w.update_and_save(
                                     world_path,
-                                    nx, ny, nz,
+                                    nx,
+                                    ny,
+                                    nz,
                                     (block_id << 4) | (stack.damage as u16 & 15),
                                 )?;
                             }
                         }
                     } else {
                         // Correct a forged/stale held-stack claim without granting blocks.
-                        send(s, 0x2f, &inventory.set_slot(36 + inventory.selected() as i16)?)?;
+                        send(
+                            s,
+                            0x2f,
+                            &inventory.set_slot(36 + inventory.selected() as i16)?,
+                        )?;
                     }
                     if world::in_bounds(nx, ny, nz) {
                         let event = block_change_event(&w, nx, ny, nz);
@@ -692,7 +698,10 @@ fn handle(
         Ok(value) => value,
         Err(err) => {
             eprintln!("inventory unavailable for {name}: {err}");
-            login_disconnect(&mut s, "Inventory save is unreadable. Administrator must repair it.")?;
+            login_disconnect(
+                &mut s,
+                "Inventory save is unreadable. Administrator must repair it.",
+            )?;
             return Ok(());
         }
     };
@@ -717,7 +726,14 @@ fn handle(
     write_string(&name, &mut success)?;
     send(&mut s, 0x02, &success)?;
     println!("joined: {name} (UNAUTHENTICATED OFFLINE MODE)");
-    join(&mut s, &world, &clock, &player_state, entity_id, &inventory_state)?;
+    join(
+        &mut s,
+        &world,
+        &clock,
+        &player_state,
+        entity_id,
+        &inventory_state,
+    )?;
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
     send(&mut s, self_list.id, &self_list.body)?;
