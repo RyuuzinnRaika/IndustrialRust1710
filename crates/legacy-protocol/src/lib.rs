@@ -39,6 +39,81 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
     r.read_exact(&mut b)?;
     Ok(b)
 }
+
+/// Resumable Minecraft VarInt frame reader for socket connections with
+/// short timeouts. Unlike read_exact, timed-out *partial* reads retain bytes
+/// for the next poll rather than silently discarding the packet prefix.
+///
+/// This is appropriate for the Play state, where outbound events must be
+/// serviced even when no incoming packet arrives.
+#[derive(Default, Debug)]
+pub struct BufferedFrameReader {
+    received: Vec<u8>,
+}
+impl BufferedFrameReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    fn take_complete(&mut self) -> io::Result<Option<Vec<u8>>> {
+        let mut length = 0u32;
+        let mut prefix = None;
+        for (i, &byte) in self.received.iter().take(5).enumerate() {
+            if i == 4 && byte > 15 {
+                return Err(invalid("invalid fifth VarInt byte"));
+            }
+            length |= ((byte & 127) as u32) << (7 * i);
+            if byte & 128 == 0 {
+                prefix = Some(i + 1);
+                break;
+            }
+        }
+        let Some(header) = prefix else {
+            if self.received.len() >= 5 {
+                return Err(invalid("VarInt too long"));
+            }
+            return Ok(None);
+        };
+        let count = length as usize;
+        if count == 0 || count > MAX_FRAME_BYTES {
+            return Err(invalid("invalid frame size"));
+        }
+        if self.received.len() < header + count {
+            return Ok(None);
+        }
+        let body = self.received[header..header + count].to_vec();
+        self.received.drain(..header + count);
+        Ok(Some(body))
+    }
+    /// Returns None only when the stream timed out or would block, preserving
+    /// all bytes already received. EOF is an error, including a partial frame.
+    pub fn poll<R: Read>(&mut self, reader: &mut R) -> io::Result<Option<Vec<u8>>> {
+        if let Some(frame) = self.take_complete()? {
+            return Ok(Some(frame));
+        }
+        let mut buf = [0u8; 8192];
+        let count = match reader.read(&mut buf) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(count) => count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        self.received.extend_from_slice(&buf[..count]);
+        if self.received.len() > MAX_FRAME_BYTES + 5 {
+            return Err(invalid("receive buffer exceeds frame cap"));
+        }
+        self.take_complete()
+    }
+}
+
 pub fn write_frame<W: Write>(w: &mut W, p: &[u8]) -> io::Result<()> {
     if p.is_empty() || p.len() > MAX_FRAME_BYTES {
         return Err(invalid("invalid outgoing frame"));
@@ -136,6 +211,56 @@ mod tests {
         let mut b = Vec::new();
         write_frame(&mut b, &[1, 2, 3]).unwrap();
         assert_eq!(read_frame(&mut b.as_slice()).unwrap(), [1, 2, 3]);
+    }
+    #[test]
+    fn partial_frames_across_timeouts_are_lossless() {
+        struct Fragments {
+            pieces: std::collections::VecDeque<io::Result<Vec<u8>>>,
+        }
+        impl Read for Fragments {
+            fn read(&mut self, data: &mut [u8]) -> io::Result<usize> {
+                let part = self.pieces.pop_front().expect("unexpected read");
+                let buf = part?;
+                data[..buf.len()].copy_from_slice(&buf);
+                Ok(buf.len())
+            }
+        }
+        let timeout = || Err(io::Error::from(io::ErrorKind::TimedOut));
+        let mut src = Fragments {
+            pieces: std::collections::VecDeque::from([
+                Ok(vec![0x83]),
+                timeout(),
+                Ok(vec![0x01, 0x01]),
+                timeout(),
+                Ok(vec![7; 130]),
+                timeout(),
+                Ok(vec![5, 42, 43, 44, 45, 46]),
+            ]),
+        };
+        let mut reader = BufferedFrameReader::new();
+        assert!(reader.poll(&mut src).unwrap().is_none());
+        assert!(reader.poll(&mut src).unwrap().is_none());
+        assert!(reader.poll(&mut src).unwrap().is_none());
+        assert!(reader.poll(&mut src).unwrap().is_none());
+        let first = reader.poll(&mut src).unwrap().unwrap();
+        assert_eq!(first.len(), 131);
+        assert_eq!(first[0], 1);
+        assert_eq!(first[1..], [7; 130]);
+        assert!(reader.poll(&mut src).unwrap().is_none());
+        let second = reader.poll(&mut src).unwrap().unwrap();
+        assert_eq!(second, vec![42, 43, 44, 45, 46]);
+    }
+    #[test]
+    fn buffered_reader_rejects_bad_lengths_and_incomplete_eof() {
+        let mut reader = BufferedFrameReader::new();
+        assert!(reader.poll(&mut &[0u8][..]).is_err());
+        let mut reader = BufferedFrameReader::new();
+        assert!(reader.poll(&mut &[0x80u8][..]).unwrap().is_none());
+        assert!(reader.poll(&mut &[][..]).is_err());
+        let mut reader = BufferedFrameReader::new();
+        assert!(reader
+            .poll(&mut &[0xff, 0xff, 0xff, 0xff, 0x7f][..])
+            .is_err());
     }
     #[test]
     fn cursor_fields() {

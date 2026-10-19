@@ -1,6 +1,8 @@
 """Unit tests for Mojang vanilla 1.7.10 bootstrap; never download game files."""
 import hashlib
 import io
+import json
+import zipfile
 from pathlib import Path
 import sys
 import tempfile
@@ -160,6 +162,100 @@ class Vanilla1710LauncherTests(unittest.TestCase):
             with self.assertRaises(target.SetupError):
                 target.run_server(self.root, "java", "2G")
             process.assert_not_called()
+
+    def test_status_detects_protocol5_and_rejects_wrong_version(self):
+        class MockSocket:
+            def __init__(self, payload):
+                self.buffer = bytearray(payload)
+                self.sent = b""
+            def __enter__(self):
+                return self
+            def __exit__(self, *unused):
+                return False
+            def settimeout(self, unused):
+                pass
+            def sendall(self, data):
+                self.sent += data
+            def recv(self, length):
+                if not self.buffer:
+                    return b""
+                size = min(3, length, len(self.buffer))
+                chunk = bytes(self.buffer[:size])
+                del self.buffer[:size]
+                return chunk
+
+        def mock_status(protocol):
+            status = json.dumps({
+                "version": {"name": "1.7.10", "protocol": protocol},
+                "players": {"max": 8, "online": 2},
+            }).encode("utf-8")
+            body = b"\x00" + target.encode_varint(len(status)) + status
+            return MockSocket(target.encode_varint(len(body)) + body)
+        good = mock_status(5)
+        with mock.patch.object(target.socket, "create_connection", return_value=good):
+            result = target.query_status("127.0.0.1", 25565)
+        self.assertEqual(result["players"]["online"], 2)
+        self.assertIn(b"\x00\x05", good.sent)
+        wrong = mock_status(47)
+        with mock.patch.object(target.socket, "create_connection", return_value=wrong):
+            with self.assertRaises(target.SetupError):
+                target.query_status("127.0.0.1", 25565)
+
+    def test_backup_works_offline_and_never_overwrites(self):
+        with mock.patch.object(target, "download_server"), \
+             mock.patch.object(target, "download_log4j"):
+            target.prepare(self.root, "127.0.0.1", 25565, 8)
+        world = self.root / "world"
+        (world / "region").mkdir(parents=True)
+        (world / "level.dat").write_bytes(b"test-level-file")
+        (world / "region" / "r.0.0.mca").write_bytes(b"test-region-file")
+        (self.root / "usercache.json").write_text("[]")
+        output = self.root.parent / "backup.zip"
+        with mock.patch.object(target, "is_port_listening", return_value=False):
+            self.assertEqual(target.backup_server(self.root, output), 6)
+            self.assertFalse((self.root / ".server-operation.lock").exists())
+            with self.assertRaises(target.SetupError):
+                target.backup_server(self.root, output)
+        with zipfile.ZipFile(output, "r") as archive:
+            self.assertIn("world/level.dat", archive.namelist())
+            self.assertIn("world/region/r.0.0.mca", archive.namelist())
+            self.assertIn("server.properties", archive.namelist())
+            self.assertIn("whitelist.json", archive.namelist())
+            self.assertIn("usercache.json", archive.namelist())
+            self.assertNotIn(target.JAR_NAME, archive.namelist())
+            self.assertNotIn(target.LOG4J_NAME, archive.namelist())
+            self.assertEqual(archive.read("world/level.dat"), b"test-level-file")
+
+    def test_backup_refuses_running_or_concurrent_server(self):
+        with mock.patch.object(target, "download_server"), \
+             mock.patch.object(target, "download_log4j"):
+            target.prepare(self.root, "127.0.0.1", 25565, 8)
+        world = self.root / "world"
+        world.mkdir()
+        (world / "level.dat").write_bytes(b"known data")
+        output = self.root.parent / "backup.zip"
+        with mock.patch.object(target, "is_port_listening", return_value=True):
+            with self.assertRaises(target.SetupError):
+                target.backup_server(self.root, output)
+        self.assertFalse(output.exists())
+        (self.root / ".server-operation.lock").write_text("another owner")
+        with mock.patch.object(target, "is_port_listening", return_value=False):
+            with self.assertRaises(target.SetupError):
+                target.backup_server(self.root, output)
+        self.assertFalse(output.exists())
+
+    def test_backup_rejects_symlinks(self):
+        with mock.patch.object(target, "download_server"), \
+             mock.patch.object(target, "download_log4j"):
+            target.prepare(self.root, "127.0.0.1", 25565, 8)
+        world = self.root / "world"
+        world.mkdir()
+        (world / "level.dat").write_bytes(b"data")
+        (world / "private.link").symlink_to(self.root / "server.properties")
+        with mock.patch.object(target, "is_port_listening", return_value=False):
+            with self.assertRaises(target.SetupError):
+                target.backup_server(self.root, self.root.parent / "backup.zip")
+        self.assertFalse((self.root.parent / "backup.zip").exists())
 
     def test_invalid_prepare_options(self):
         with self.assertRaises(target.SetupError):
