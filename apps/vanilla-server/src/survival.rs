@@ -31,7 +31,11 @@ pub struct MiningProgress {
 impl MiningProgress {
     pub fn start(target: (i32, i32, i32), block: u16) -> Option<Self> {
         hand_mine(block)?;
-        Some(Self { target, started: Instant::now(), block })
+        Some(Self {
+            target,
+            started: Instant::now(),
+            block,
+        })
     }
     /// Consume the attempt exactly once before checking its validity.
     pub fn finish(self, target: (i32, i32, i32), current: u16) -> Option<BlockDrop> {

@@ -141,7 +141,9 @@ impl Inventory {
     /// Commit one server-owned held item consumption (Survival only).
     pub fn consume_held(&mut self) -> bool {
         let slot = &mut self.slots[36 + self.selected as usize];
-        let Some(stack) = slot.as_mut() else { return false; };
+        let Some(stack) = slot.as_mut() else {
+            return false;
+        };
         if stack.count > 1 {
             stack.count -= 1;
         } else {
@@ -258,7 +260,11 @@ mod tests {
     #[test]
     fn survival_items_stack_then_consume_without_duplication() {
         let mut inv = Inventory::default();
-        let item = Stack { id: 3, count: 1, damage: 0 };
+        let item = Stack {
+            id: 3,
+            count: 1,
+            damage: 0,
+        };
         assert_eq!(inv.receive_one(item), Some(36));
         assert_eq!(inv.receive_one(item), Some(36));
         assert_eq!(inv.held().unwrap().count, 2);
@@ -267,7 +273,13 @@ mod tests {
         assert!(inv.consume_held());
         assert!(inv.held().is_none());
         assert!(!inv.consume_held());
-        assert!(inv.receive_one(Stack{id:7,count:65,damage:0}).is_none());
+        assert!(inv
+            .receive_one(Stack {
+                id: 7,
+                count: 65,
+                damage: 0
+            })
+            .is_none());
     }
     #[test]
     fn saves_and_fails_closed_on_corruption() {

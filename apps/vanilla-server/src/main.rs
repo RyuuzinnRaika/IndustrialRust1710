@@ -21,7 +21,6 @@ use legacy_protocol::{
 };
 use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
 use player::PlayerPosition;
-use survival::MiningProgress;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::io::{self, ErrorKind, Write};
@@ -32,6 +31,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use survival::MiningProgress;
 use whitelist::Whitelist;
 use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
 
@@ -509,28 +509,34 @@ fn play(
                 input.i8()?; // face
                 input.finish()?;
                 if survival {
-                    let target = (x,y,z);
+                    let target = (x, y, z);
                     match action {
                         0 => {
-                            let w=world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                            mining = if world::in_bounds(x,y,z) && near(location,x,y,z) {
-                                MiningProgress::start(target,w.get(x,y,z))
-                            } else { None };
+                            let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                            mining = if world::in_bounds(x, y, z) && near(location, x, y, z) {
+                                MiningProgress::start(target, w.get(x, y, z))
+                            } else {
+                                None
+                            };
                         }
                         1 => mining = None,
                         2 => {
                             let attempt = mining.take();
                             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                            let mined = attempt.and_then(|m| m.finish(target,w.get(x,y,z)));
+                            let mined = attempt.and_then(|m| m.finish(target, w.get(x, y, z)));
                             let mut changed = false;
-                            if world::in_bounds(x,y,z) && near(location,x,y,z) {
+                            if world::in_bounds(x, y, z) && near(location, x, y, z) {
                                 if let Some(item) = mined {
                                     let mut candidate = inventory.clone();
-                                    let stack = Stack { id: item.id, count:1, damage:item.damage };
+                                    let stack = Stack {
+                                        id: item.id,
+                                        count: 1,
+                                        damage: item.damage,
+                                    };
                                     if let Some(slot) = candidate.receive_one(stack) {
                                         // World durability first. If disk persistence fails,
                                         // do not credit the item, preventing inventory duplication.
-                                        if w.update_and_save(world_path,x,y,z,0)? {
+                                        if w.update_and_save(world_path, x, y, z, 0)? {
                                             candidate.save(inventory_path)?;
                                             *inventory = candidate;
                                             send(s, 0x2f, &inventory.set_slot(slot)?)?;
@@ -539,18 +545,29 @@ fn play(
                                     }
                                 }
                             }
-                            let event=block_change_event(&w,x,y,z);
-                            if changed { hub.broadcast(event); } else { send(s,event.id,&event.body)?; }
+                            let event = block_change_event(&w, x, y, z);
+                            if changed {
+                                hub.broadcast(event);
+                            } else {
+                                send(s, event.id, &event.body)?;
+                            }
                         }
-                        _ => mining=None,
+                        _ => mining = None,
                     }
                 } else {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                    let changed = if (action == 0 || action == 2) && y > 60 && near(location,x,y,z) {
-                        w.update_and_save(world_path,x,y,z,0)?
-                    } else { false };
-                    let event=block_change_event(&w,x,y,z);
-                    if changed { hub.broadcast(event); } else { send(s,event.id,&event.body)?; }
+                    let changed =
+                        if (action == 0 || action == 2) && y > 60 && near(location, x, y, z) {
+                            w.update_and_save(world_path, x, y, z, 0)?
+                        } else {
+                            false
+                        };
+                    let event = block_change_event(&w, x, y, z);
+                    if changed {
+                        hub.broadcast(event);
+                    } else {
+                        send(s, event.id, &event.body)?;
+                    }
                 }
             }
             8 => {
@@ -578,9 +595,9 @@ fn play(
                             let block_id = stack.id as u16;
                             if world::is_placeable(block_id)
                                 && block_id != 7
-                                && w.get(x,y,z) != 0
-                                && w.get(nx,ny,nz) == 0
-                                && near(location,nx,ny,nz)
+                                && w.get(x, y, z) != 0
+                                && w.get(nx, ny, nz) == 0
+                                && near(location, nx, ny, nz)
                             {
                                 if survival {
                                     let mut remaining = inventory.clone();
@@ -589,15 +606,24 @@ fn play(
                                         // crash cannot grant a free block on restart.
                                         remaining.save(inventory_path)?;
                                         match w.update_and_save(
-                                            world_path,nx,ny,nz,
-                                            (block_id << 4) | (stack.damage as u16 & 15)
+                                            world_path,
+                                            nx,
+                                            ny,
+                                            nz,
+                                            (block_id << 4) | (stack.damage as u16 & 15),
                                         ) {
                                             Ok(true) => {
-                                                *inventory=remaining;
-                                                changed=true;
-                                                send(s,0x2f,&inventory.set_slot(inventory.held_slot())?)?;
+                                                *inventory = remaining;
+                                                changed = true;
+                                                send(
+                                                    s,
+                                                    0x2f,
+                                                    &inventory.set_slot(inventory.held_slot())?,
+                                                )?;
                                             }
-                                            Ok(false) => { inventory.save(inventory_path)?; }
+                                            Ok(false) => {
+                                                inventory.save(inventory_path)?;
+                                            }
                                             Err(error) => {
                                                 inventory.save(inventory_path)?;
                                                 return Err(error);
@@ -606,14 +632,17 @@ fn play(
                                     }
                                 } else {
                                     changed = w.update_and_save(
-                                        world_path,nx,ny,nz,
-                                        (block_id << 4) | (stack.damage as u16 & 15)
+                                        world_path,
+                                        nx,
+                                        ny,
+                                        nz,
+                                        (block_id << 4) | (stack.damage as u16 & 15),
                                     )?;
                                 }
                             }
                         }
                     } else {
-                        send(s,0x2f,&inventory.set_slot(inventory.held_slot())?)?;
+                        send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
                     }
                     if world::in_bounds(nx, ny, nz) {
                         let event = block_change_event(&w, nx, ny, nz);

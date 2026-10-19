@@ -44,14 +44,18 @@ impl NativeServer {
         let reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
-        let mut command=Command::new(env!("CARGO_BIN_EXE_vanilla-server"));
-        command.args(["--bind", &format!("127.0.0.1:{port}")])
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vanilla-server"));
+        command
+            .args(["--bind", &format!("127.0.0.1:{port}")])
             .arg("--whitelist")
             .arg(directory.join("whitelist.json"))
             .arg("--world")
             .arg(directory.join("flat.irw"));
-        if survival { command.arg("--survival"); }
-        let process=command.stdout(Stdio::null())
+        if survival {
+            command.arg("--survival");
+        }
+        let process = command
+            .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
@@ -469,18 +473,26 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     finish[0] = 2;
     // A forged immediate completion without starting must be rejected.
     client.write_all(&frame(7, &finish)).unwrap();
-    until_packet(&mut client, 0x23, |b| b.len() >= 11 && b[4] == 63 && b[9] == 2);
+    until_packet(&mut client, 0x23, |b| {
+        b.len() >= 11 && b[4] == 63 && b[9] == 2
+    });
     client.write_all(&frame(7, &dig)).unwrap();
     client.write_all(&frame(7, &finish)).unwrap();
-    until_packet(&mut client, 0x23, |b| b.len() >= 11 && b[4] == 63 && b[9] == 2);
+    until_packet(&mut client, 0x23, |b| {
+        b.len() >= 11 && b[4] == 63 && b[9] == 2
+    });
 
     // Valid start followed by sufficient hand-mining time yields one dirt
     // directly in the selected player inventory (entities not implemented).
     client.write_all(&frame(7, &dig)).unwrap();
     thread::sleep(Duration::from_millis(900));
     client.write_all(&frame(7, &finish)).unwrap();
-    until_packet(&mut client, 0x2f, |b| b == [0,0,36,0,3,1,0,0,255,255]);
-    until_packet(&mut client, 0x23, |b| b.len() >= 11 && b[4] == 63 && b[9] == 0);
+    until_packet(&mut client, 0x2f, |b| {
+        b == [0, 0, 36, 0, 3, 1, 0, 0, 255, 255]
+    });
+    until_packet(&mut client, 0x23, |b| {
+        b.len() >= 11 && b[4] == 63 && b[9] == 0
+    });
 
     // Client claims more than it owns; the server permits one placed dirt but
     // consumes its own authoritative inventory count.
@@ -493,24 +505,33 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     placed.push(64);
     placed.extend_from_slice(&0i16.to_be_bytes());
     placed.extend_from_slice(&(-1i16).to_be_bytes());
-    placed.extend_from_slice(&[8,8,8]);
+    placed.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &placed)).unwrap();
-    until_packet(&mut client, 0x2f, |b| b == [0,0,36,255,255]);
-    until_packet(&mut client, 0x23, |b| b.len() >= 11 && b[4] == 64 && b[9] == 3);
+    until_packet(&mut client, 0x2f, |b| b == [0, 0, 36, 255, 255]);
+    until_packet(&mut client, 0x23, |b| {
+        b.len() >= 11 && b[4] == 64 && b[9] == 3
+    });
     // Repeating the placement with an empty hotbar must be refused.
     placed[3] = 2; // still a valid, unedited target x=2
     client.write_all(&frame(8, &placed)).unwrap();
-    until_packet(&mut client, 0x2f, |b| b == [0,0,36,255,255]);
-    until_packet(&mut client, 0x23, |b| b.len() >= 11 && b[4] == 64 && b[9] == 0);
+    until_packet(&mut client, 0x2f, |b| b == [0, 0, 36, 255, 255]);
+    until_packet(&mut client, 0x23, |b| {
+        b.len() >= 11 && b[4] == 64 && b[9] == 0
+    });
 
     drop(client);
     server.wait_idle();
-    let path = server.directory.join("players/rusttester.survival.inventory.json");
+    let path = server
+        .directory
+        .join("players/rusttester.survival.inventory.json");
     await_file(&path);
     let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     assert!(value["slots"][36].is_null());
     // Old Creative inventory never becomes Survival inventory.
-    assert!(!server.directory.join("players/rusttester.inventory.json").exists());
+    assert!(!server
+        .directory
+        .join("players/rusttester.inventory.json")
+        .exists());
     let (rejoined, _, _) = server.join("RustTester");
     drop(rejoined);
     server.wait_idle();
