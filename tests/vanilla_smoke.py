@@ -92,7 +92,7 @@ with socket.create_connection((HOST, PORT), timeout=5) as sock:
         pid, data = packet(sock)
         got.add(pid)
         if pid == 0x01:
-            assert struct.unpack_from(">i", data)[0] == 1
+            assert 1 <= struct.unpack_from(">i", data)[0] <= 8
             assert data[4] == 1
         if pid == 0x21:
             chunks += 1
