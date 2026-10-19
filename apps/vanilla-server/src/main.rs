@@ -7,6 +7,7 @@ mod clock;
 mod inventory;
 mod multiplayer;
 mod player;
+mod survival;
 mod whitelist;
 mod world;
 
@@ -20,6 +21,7 @@ use legacy_protocol::{
 };
 use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
 use player::PlayerPosition;
+use survival::MiningProgress;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::io::{self, ErrorKind, Write};
@@ -175,16 +177,17 @@ fn join(
     position: &PlayerPosition,
     entity_id: i32,
     inventory: &Inventory,
+    survival: bool,
 ) -> io::Result<()> {
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
     // difficulty u8, maxPlayers u8, levelType string.
     let mut join = Vec::new();
     join.extend_from_slice(&entity_id.to_be_bytes());
-    join.extend_from_slice(&[1, 0, 1, MAX_PLAYERS as u8]);
+    join.extend_from_slice(&[u8::from(!survival), 0, 1, MAX_PLAYERS as u8]);
     write_string("default", &mut join)?;
     send(s, 0x01, &join)?;
 
-    let mut abilities = vec![0x0d]; // invulnerable, may fly, creative
+    let mut abilities = vec![if survival { 0 } else { 0x0d }]; // Survival has no fly
     abilities.extend_from_slice(&0.05f32.to_be_bytes());
     abilities.extend_from_slice(&0.1f32.to_be_bytes());
     send(s, 0x39, &abilities)?;
@@ -215,7 +218,11 @@ fn join(
     send_player_position(s, position)?;
     as_chat(
         s,
-        "Rust vanilla prototype: creative flat world. /help for commands.",
+        if survival {
+            "Rust survival prototype: basic hand mining and block inventory; no mobs/crafting/physics."
+        } else {
+            "Rust vanilla prototype: creative flat world. /help for commands."
+        },
     )?;
     Ok(())
 }
@@ -318,6 +325,7 @@ struct PlayerSession<'a> {
     save_path: &'a Path,
     inventory: &'a mut Inventory,
     inventory_path: &'a Path,
+    survival: bool,
     hub: &'a Hub,
     entity_id: i32,
     events: &'a Receiver<Event>,
@@ -336,6 +344,7 @@ fn play(
         save_path: player_path,
         inventory,
         inventory_path,
+        survival,
         hub,
         entity_id,
         events,
@@ -355,6 +364,7 @@ fn play(
     let mut saved_at = started;
     // Keep fragmented TCP frames across short receive timeouts.
     let mut packet_reader = BufferedFrameReader::new();
+    let mut mining: Option<MiningProgress> = None;
     loop {
         while let Ok(event) = events.try_recv() {
             send(s, event.id, &event.body)?;
@@ -416,7 +426,7 @@ fn play(
                 let message = input.string(100)?;
                 input.finish()?;
                 if message == "/help" {
-                    as_chat(s, "Commands: /help, /save, /list. Creative blocks only; mobs and Forge are unsupported.")?;
+                    as_chat(s, "Commands: /help, /save, /list. Survival prototype supports only simple hand mining; crafting and mobs are unsupported.")?;
                 } else if message == "/list" {
                     as_chat(
                         s,
@@ -498,17 +508,49 @@ fn play(
                 let z = input.i32()?;
                 input.i8()?; // face
                 input.finish()?;
-                let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                let changed = if (action == 0 || action == 2) && y > 60 && near(location, x, y, z) {
-                    w.update_and_save(world_path, x, y, z, 0)?
+                if survival {
+                    let target = (x,y,z);
+                    match action {
+                        0 => {
+                            let w=world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                            mining = if world::in_bounds(x,y,z) && near(location,x,y,z) {
+                                MiningProgress::start(target,w.get(x,y,z))
+                            } else { None };
+                        }
+                        1 => mining = None,
+                        2 => {
+                            let attempt = mining.take();
+                            let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                            let mined = attempt.and_then(|m| m.finish(target,w.get(x,y,z)));
+                            let mut changed = false;
+                            if world::in_bounds(x,y,z) && near(location,x,y,z) {
+                                if let Some(item) = mined {
+                                    let mut candidate = inventory.clone();
+                                    let stack = Stack { id: item.id, count:1, damage:item.damage };
+                                    if let Some(slot) = candidate.receive_one(stack) {
+                                        // World durability first. If disk persistence fails,
+                                        // do not credit the item, preventing inventory duplication.
+                                        if w.update_and_save(world_path,x,y,z,0)? {
+                                            candidate.save(inventory_path)?;
+                                            *inventory = candidate;
+                                            send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                            let event=block_change_event(&w,x,y,z);
+                            if changed { hub.broadcast(event); } else { send(s,event.id,&event.body)?; }
+                        }
+                        _ => mining=None,
+                    }
                 } else {
-                    false
-                };
-                let event = block_change_event(&w, x, y, z);
-                if changed {
-                    hub.broadcast(event);
-                } else {
-                    send(s, event.id, &event.body)?;
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let changed = if (action == 0 || action == 2) && y > 60 && near(location,x,y,z) {
+                        w.update_and_save(world_path,x,y,z,0)?
+                    } else { false };
+                    let event=block_change_event(&w,x,y,z);
+                    if changed { hub.broadcast(event); } else { send(s,event.id,&event.body)?; }
                 }
             }
             8 => {
@@ -530,31 +572,48 @@ fn play(
                     };
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let mut changed = false;
-                    // Only the server-owned selected hotbar stack grants placement.
+                    // Only the selected server-held stack may place blocks.
                     if inventory.can_place(held) {
                         if let Some(stack) = inventory.held() {
                             let block_id = stack.id as u16;
                             if world::is_placeable(block_id)
-                                && w.get(x, y, z) != 0
-                                && w.get(nx, ny, nz) == 0
-                                && near(location, nx, ny, nz)
+                                && block_id != 7
+                                && w.get(x,y,z) != 0
+                                && w.get(nx,ny,nz) == 0
+                                && near(location,nx,ny,nz)
                             {
-                                changed = w.update_and_save(
-                                    world_path,
-                                    nx,
-                                    ny,
-                                    nz,
-                                    (block_id << 4) | (stack.damage as u16 & 15),
-                                )?;
+                                if survival {
+                                    let mut remaining = inventory.clone();
+                                    if remaining.consume_held() {
+                                        // Persist item consumption before the world edit so a
+                                        // crash cannot grant a free block on restart.
+                                        remaining.save(inventory_path)?;
+                                        match w.update_and_save(
+                                            world_path,nx,ny,nz,
+                                            (block_id << 4) | (stack.damage as u16 & 15)
+                                        ) {
+                                            Ok(true) => {
+                                                *inventory=remaining;
+                                                changed=true;
+                                                send(s,0x2f,&inventory.set_slot(inventory.held_slot())?)?;
+                                            }
+                                            Ok(false) => { inventory.save(inventory_path)?; }
+                                            Err(error) => {
+                                                inventory.save(inventory_path)?;
+                                                return Err(error);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    changed = w.update_and_save(
+                                        world_path,nx,ny,nz,
+                                        (block_id << 4) | (stack.damage as u16 & 15)
+                                    )?;
+                                }
                             }
                         }
                     } else {
-                        // Correct a forged/stale held-stack claim without granting blocks.
-                        send(
-                            s,
-                            0x2f,
-                            &inventory.set_slot(36 + inventory.selected() as i16)?,
-                        )?;
+                        send(s,0x2f,&inventory.set_slot(inventory.held_slot())?)?;
                     }
                     if world::in_bounds(nx, ny, nz) {
                         let event = block_change_event(&w, nx, ny, nz);
@@ -576,7 +635,10 @@ fn play(
                 let slot = input.i16()?;
                 let stack = input.slot()?;
                 input.finish()?;
-                if inventory.creative_set(slot, stack)? {
+                if survival {
+                    // C10 is Creative-only; never mint items in Survival.
+                    send(s, 0x30, &inventory.window_items())?;
+                } else if inventory.creative_set(slot, stack)? {
                     // Explicit, bounded creative inventory actions only.
                     inventory.save(inventory_path)?;
                     send(s, 0x2f, &inventory.set_slot(slot)?)?;
@@ -632,6 +694,7 @@ fn handle(
     path: Arc<PathBuf>,
     whitelist_path: Arc<PathBuf>,
     clock: Arc<Clock>,
+    survival: bool,
 ) -> io::Result<()> {
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -693,7 +756,13 @@ fn handle(
             return Ok(());
         }
     };
-    let inventory_file = Inventory::location(&player_file);
+    // Separate survival resources from old Creative inventories to prevent
+    // player-selected Creative stacks becoming free Survival items.
+    let inventory_file = if survival {
+        player_file.with_extension("survival.inventory.json")
+    } else {
+        Inventory::location(&player_file)
+    };
     let mut inventory_state = match Inventory::load(&inventory_file) {
         Ok(value) => value,
         Err(err) => {
@@ -733,6 +802,7 @@ fn handle(
         &player_state,
         entity_id,
         &inventory_state,
+        survival,
     )?;
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
@@ -755,6 +825,7 @@ fn handle(
             save_path: &player_file,
             inventory: &mut inventory_state,
             inventory_path: &inventory_file,
+            survival,
             hub: &hub,
             entity_id,
             events: &events,
@@ -775,11 +846,12 @@ fn main() -> io::Result<()> {
     let mut anvil_import_path: Option<PathBuf> = None;
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
+    let mut survival = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -805,6 +877,7 @@ fn main() -> io::Result<()> {
                     .into()
             }
             "--insecure-offline-lan" => insecure_offline_lan = true,
+            "--survival" => survival = true,
             "--export-anvil" => {
                 anvil_export_path = Some(PathBuf::from(
                     args.next()
@@ -888,7 +961,7 @@ fn main() -> io::Result<()> {
         let game_clock = Arc::clone(&clock);
         thread::spawn(move || {
             let _connection = admission;
-            if let Err(e) = handle(stream, clients, w, p, wl, game_clock) {
+            if let Err(e) = handle(stream, clients, w, p, wl, game_clock, survival) {
                 if e.kind() != ErrorKind::UnexpectedEof {
                     eprintln!("client disconnected: {e}");
                 }
