@@ -16,13 +16,23 @@ cargo run --release -p vanilla-server -- --bind 127.0.0.1:25565 --world ./world/
 
 ユーザー名ホワイトリスト方式・最大8人・既存ワールド非互換の**試作**です（本人確認なし）。詳細と未実装範囲: [バニラ最小サーバー](docs/14_バニラ最小サーバー.md)。
 
+## Anvil形式への安全な書き出し（試験版）
+
+ゲーム本体の保存形式は引き続き独自`IRW1`です。Anvil出力は**既存ワールドを上書きしない別のスナップショット**です。
+
+```bash
+cargo run --release -p vanilla-server -- --world ./world/flat.irw --export-anvil ./exported-vanilla-world
+```
+
+出力先のフォルダーがすでに存在する場合は安全のため失敗します。生成範囲は初期5×5列＋変更のあるチャンク列（上限256）です。これだけでバニラ1.7.10の完全なワールド互換やサバイバル動作が保証されるわけではありません。
+
 ## 現時点で動作する機能
 
 | コンポーネント | 機能 | 限界 |
 |---|---|---|
 | `legacy-protocol` | VarInt、フレーム・文字列の境界チェック | Play/FMLは未対応 |
 | `legacy-status-server` | 1.7.10クライアントのサーバー一覧向けStatus/Ping | Loginは明示拒否 |
-| `vanilla-server` | ホワイトリスト入場判定、20Hz Tick時計、Login/Play、平坦ワールドの動的チャンク配信、限定Creative操作、ブロック保存とgzip NBTプレイヤー位置保存、8人までの同期・共有チャット | 本人確認なし、既存ワールド非互換、サバイバルなし |
+| `vanilla-server` | ホワイトリスト入場判定、20Hz Tick時計、Login/Play、平坦ワールドの動的チャンク配信、限定Creative操作、ブロック保存とgzip NBTプレイヤー位置保存、独立Anvil書き出し、8人までの同期・共有チャット | 本人確認なし、既存ワールド非互換、サバイバルなし |
 | `industrial-core` | 決定的Tick、接続グラフキャッシュ、エネルギー配分 | Minecraftゲーム本体とは未接続 |
 | `industrial-bench` | 仮想エネルギー網の合成ベンチマーク | 実ワールドのTPSではない |
 | `mod-analyzer` | JAR・ClassFile解析、Modpack ZIP/フォルダのJSON監査 | Modの実行・変換・互換性判定ではない |
