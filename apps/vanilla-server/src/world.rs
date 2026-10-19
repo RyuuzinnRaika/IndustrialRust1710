@@ -175,7 +175,7 @@ impl World {
         let mut mask: u16 = (1 << 3) | (1 << 4);
         let min_x = chunk_x * 16;
         let min_z = chunk_z * 16;
-        for (&(x, y, z), _) in &self.edits {
+        for &(x, y, z) in self.edits.keys() {
             if (min_x..min_x + 16).contains(&x) && (min_z..min_z + 16).contains(&z) {
                 mask |= 1u16 << (y / 16);
             }
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(mask, 0x18 | (1 << 9));
         assert_eq!(binary.len(), 3 * 10240 + 256);
         // Section 9 (y=144..159) follows section 3 and 4 in ascending Y order.
-        let index_in_section = (145 % 16) * 256 + ((-33i32).rem_euclid(16)) * 16 + 56 % 16;
+        let index_in_section = 256 + 15 * 16 + 8;
         assert_eq!(binary[2 * 4096 + index_in_section as usize], 5);
         assert_eq!(loaded.chunk_data(-4, 1).0, 0x19);
         fs::remove_file(path).unwrap();
