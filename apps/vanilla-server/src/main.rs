@@ -5,7 +5,9 @@ mod world;
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use legacy_protocol::{read_frame, read_varint, write_frame, write_string, write_varint, PROTOCOL_VERSION};
+use legacy_protocol::{
+    read_frame, read_varint, write_frame, write_string, write_varint, PROTOCOL_VERSION,
+};
 use serde_json::json;
 use std::io::{self, ErrorKind, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -18,7 +20,9 @@ use world::{World, MAX_CHUNK, MIN_CHUNK};
 
 const MAX_CONNECTIONS: usize = 32;
 const SPAWN_Y: f64 = 65.0;
-fn bad(reason: &'static str) -> io::Error { io::Error::new(ErrorKind::InvalidData, reason) }
+fn bad(reason: &'static str) -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, reason)
+}
 struct Input<'a>(&'a [u8]);
 impl<'a> Input<'a> {
     fn take(&mut self, n: usize) -> io::Result<&'a [u8]> {
@@ -26,34 +30,68 @@ impl<'a> Input<'a> {
         self.0 = &self.0[n..];
         Ok(bytes)
     }
-    fn u8(&mut self) -> io::Result<u8> { Ok(self.take(1)?[0]) }
-    fn i8(&mut self) -> io::Result<i8> { Ok(self.u8()? as i8) }
-    fn u16(&mut self) -> io::Result<u16> { Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap())) }
-    fn i16(&mut self) -> io::Result<i16> { Ok(self.u16()? as i16) }
-    fn i32(&mut self) -> io::Result<i32> { Ok(i32::from_be_bytes(self.take(4)?.try_into().unwrap())) }
-    fn f32(&mut self) -> io::Result<f32> { Ok(f32::from_bits(self.i32()? as u32)) }
-    fn f64(&mut self) -> io::Result<f64> { Ok(f64::from_bits(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))) }
-    fn varint(&mut self) -> io::Result<i32> { Ok(read_varint(&mut self.0)? as i32) }
+    fn u8(&mut self) -> io::Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+    fn i8(&mut self) -> io::Result<i8> {
+        Ok(self.u8()? as i8)
+    }
+    fn u16(&mut self) -> io::Result<u16> {
+        Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap()))
+    }
+    fn i16(&mut self) -> io::Result<i16> {
+        Ok(self.u16()? as i16)
+    }
+    fn i32(&mut self) -> io::Result<i32> {
+        Ok(i32::from_be_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn f32(&mut self) -> io::Result<f32> {
+        Ok(f32::from_bits(self.i32()? as u32))
+    }
+    fn f64(&mut self) -> io::Result<f64> {
+        Ok(f64::from_bits(u64::from_be_bytes(
+            self.take(8)?.try_into().unwrap(),
+        )))
+    }
+    fn varint(&mut self) -> io::Result<i32> {
+        Ok(read_varint(&mut self.0)? as i32)
+    }
     fn string(&mut self, limit: usize) -> io::Result<String> {
         let size = self.varint()?;
-        if size < 0 || size as usize > limit.saturating_mul(4) { return Err(bad("invalid string size")); }
+        if size < 0 || size as usize > limit.saturating_mul(4) {
+            return Err(bad("invalid string size"));
+        }
         let s = std::str::from_utf8(self.take(size as usize)?).map_err(|_| bad("invalid utf8"))?;
-        if s.chars().count() > limit { return Err(bad("too many characters")); }
+        if s.chars().count() > limit {
+            return Err(bad("too many characters"));
+        }
         Ok(s.to_owned())
     }
     fn slot(&mut self) -> io::Result<Option<(u16, u8)>> {
         let block = self.i16()?;
-        if block == -1 { return Ok(None); }
-        if block < 0 { return Err(bad("invalid item ID")); }
+        if block == -1 {
+            return Ok(None);
+        }
+        if block < 0 {
+            return Err(bad("invalid item ID"));
+        }
         let _count = self.u8()?;
         let meta = self.i16()?;
         let nbt_length = self.i16()?;
-        if nbt_length < -1 { return Err(bad("invalid NBT length")); }
-        if nbt_length > 0 { self.take(nbt_length as usize)?; }
+        if nbt_length < -1 {
+            return Err(bad("invalid NBT length"));
+        }
+        if nbt_length > 0 {
+            self.take(nbt_length as usize)?;
+        }
         Ok(Some((block as u16, (meta as u16 & 15) as u8)))
     }
     fn finish(&self) -> io::Result<()> {
-        if self.0.is_empty() { Ok(()) } else { Err(bad("unexpected packet bytes")) }
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            Err(bad("unexpected packet bytes"))
+        }
     }
 }
 fn receive(s: &mut TcpStream) -> io::Result<(i32, Vec<u8>)> {
@@ -83,11 +121,20 @@ fn offline_uuid(name: &str) -> String {
     digest[6] = digest[6] & 0x0f | 0x30;
     digest[8] = digest[8] & 0x3f | 0x80;
     let hex: String = digest.iter().map(|v| format!("{v:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 fn status(s: &mut TcpStream, occupied: &AtomicBool) -> io::Result<()> {
     let (id, body) = receive(s)?;
-    if id != 0 || !body.is_empty() { return Err(bad("invalid status request")); }
+    if id != 0 || !body.is_empty() {
+        return Err(bad("invalid status request"));
+    }
     let status = json!({
         "version":{"name":"1.7.10","protocol":PROTOCOL_VERSION},
         "players":{"max":1,"online":usize::from(occupied.load(Ordering::Acquire)),"sample":[]},
@@ -98,7 +145,14 @@ fn status(s: &mut TcpStream, occupied: &AtomicBool) -> io::Result<()> {
     send(s, 0, &bytes)?;
     match receive(s) {
         Ok((1, data)) if data.len() == 8 => send(s, 1, &data),
-        Err(e) if matches!(e.kind(), ErrorKind::UnexpectedEof | ErrorKind::WouldBlock | ErrorKind::TimedOut) => Ok(()),
+        Err(e)
+            if matches!(
+                e.kind(),
+                ErrorKind::UnexpectedEof | ErrorKind::WouldBlock | ErrorKind::TimedOut
+            ) =>
+        {
+            Ok(())
+        }
         _ => Err(bad("bad status ping")),
     }
 }
@@ -117,7 +171,9 @@ fn join(s: &mut TcpStream, world: &Mutex<World>) -> io::Result<()> {
     send(s, 0x39, &abilities)?;
 
     let mut spawn = Vec::new();
-    for coordinate in [0i32, 64, 0] { spawn.extend_from_slice(&coordinate.to_be_bytes()); }
+    for coordinate in [0i32, 64, 0] {
+        spawn.extend_from_slice(&coordinate.to_be_bytes());
+    }
     send(s, 0x05, &spawn)?;
     let mut health = Vec::new();
     health.extend_from_slice(&20.0f32.to_be_bytes());
@@ -131,7 +187,10 @@ fn join(s: &mut TcpStream, world: &Mutex<World>) -> io::Result<()> {
 
     for cz in MIN_CHUNK..=MAX_CHUNK {
         for cx in MIN_CHUNK..=MAX_CHUNK {
-            let uncompressed = world.lock().map_err(|_| bad("world mutex poisoned"))?.chunk_data(cx, cz);
+            let uncompressed = world
+                .lock()
+                .map_err(|_| bad("world mutex poisoned"))?
+                .chunk_data(cx, cz);
             let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
             encoder.write_all(&uncompressed)?;
             let compressed = encoder.finish()?;
@@ -156,7 +215,10 @@ fn join(s: &mut TcpStream, world: &Mutex<World>) -> io::Result<()> {
     position.extend_from_slice(&0f32.to_be_bytes()); // pitch
     position.push(0); // onGround
     send(s, 0x08, &position)?;
-    as_chat(s, "Rust vanilla prototype: creative flat world. /help for commands.")?;
+    as_chat(
+        s,
+        "Rust vanilla prototype: creative flat world. /help for commands.",
+    )?;
     Ok(())
 }
 fn block_change(s: &mut TcpStream, world: &World, x: i32, y: i32, z: i32) -> io::Result<()> {
@@ -169,7 +231,7 @@ fn block_change(s: &mut TcpStream, world: &World, x: i32, y: i32, z: i32) -> io:
     data.push((block & 15) as u8);
     send(s, 0x23, &data)
 }
-fn near(player: (f64,f64,f64), x: i32, y: i32, z: i32) -> bool {
+fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
     let dx = player.0 - (x as f64 + 0.5);
     let dy = player.1 - (y as f64 + 0.5);
     let dz = player.2 - (z as f64 + 0.5);
@@ -188,10 +250,19 @@ fn play(s: &mut TcpStream, world: &Mutex<World>, world_path: &Path, name: &str) 
             send(s, 0, &ping_id.to_be_bytes())?;
             ping_time = Instant::now();
         }
-        if pong_time.elapsed() > Duration::from_secs(40) { return Err(bad("keepalive timeout")); }
+        if pong_time.elapsed() > Duration::from_secs(40) {
+            return Err(bad("keepalive timeout"));
+        }
         let (id, data) = match receive(s) {
             Ok(packet) => packet,
-            Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted) => continue,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
+                ) =>
+            {
+                continue
+            }
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(e),
         };
@@ -200,7 +271,9 @@ fn play(s: &mut TcpStream, world: &Mutex<World>, world_path: &Path, name: &str) 
             0 => {
                 let reply = input.i32()?;
                 input.finish()?;
-                if reply != ping_id { return Err(bad("unexpected keepalive ID")); }
+                if reply != ping_id {
+                    return Err(bad("unexpected keepalive ID"));
+                }
                 pong_time = Instant::now();
             }
             1 => {
@@ -209,7 +282,10 @@ fn play(s: &mut TcpStream, world: &Mutex<World>, world_path: &Path, name: &str) 
                 if message == "/help" {
                     as_chat(s, "Commands: /help, /save. Creative blocks only; mobs and Forge are unsupported.")?;
                 } else if message == "/save" {
-                    world.lock().map_err(|_| bad("world mutex poisoned"))?.save(world_path)?;
+                    world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .save(world_path)?;
                     as_chat(s, "World saved.")?;
                 } else if !message.starts_with('/') {
                     as_chat(s, &format!("<{name}> {message}"))?;
@@ -217,22 +293,38 @@ fn play(s: &mut TcpStream, world: &Mutex<World>, world_path: &Path, name: &str) 
                     as_chat(s, "Unknown command; try /help")?;
                 }
             }
-            3 => { input.u8()?; input.finish()?; } // flying/onGround
+            3 => {
+                input.u8()?;
+                input.finish()?;
+            } // flying/onGround
             4 | 6 => {
                 let x = input.f64()?;
                 let _stance = input.f64()?;
                 let y = input.f64()?;
                 let z = input.f64()?;
-                if id == 6 { input.f32()?; input.f32()?; }
+                if id == 6 {
+                    input.f32()?;
+                    input.f32()?;
+                }
                 input.u8()?;
                 input.finish()?;
-                if !x.is_finite() || !y.is_finite() || !z.is_finite()
-                    || x.abs() > 128.0 || z.abs() > 128.0 || !(0.0..=255.0).contains(&y) {
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || !z.is_finite()
+                    || x.abs() > 128.0
+                    || z.abs() > 128.0
+                    || !(0.0..=255.0).contains(&y)
+                {
                     return Err(bad("invalid player coordinates"));
                 }
                 location = (x, y, z);
             }
-            5 => { input.f32()?; input.f32()?; input.u8()?; input.finish()?; }
+            5 => {
+                input.f32()?;
+                input.f32()?;
+                input.u8()?;
+                input.finish()?;
+            }
             7 => {
                 let action = input.i8()?;
                 let x = input.i32()?;
@@ -241,10 +333,10 @@ fn play(s: &mut TcpStream, world: &Mutex<World>, world_path: &Path, name: &str) 
                 input.i8()?; // face
                 input.finish()?;
                 let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                if (action == 0 || action == 2) && y > 60 && near(location, x,y,z) {
-                    w.update_and_save(world_path, x,y,z, 0)?;
+                if (action == 0 || action == 2) && y > 60 && near(location, x, y, z) {
+                    w.update_and_save(world_path, x, y, z, 0)?;
                 }
-                block_change(s, &w, x,y,z)?; // authoritative rollback
+                block_change(s, &w, x, y, z)?; // authoritative rollback
             }
             8 => {
                 let x = input.i32()?;
@@ -254,19 +346,34 @@ fn play(s: &mut TcpStream, world: &Mutex<World>, world_path: &Path, name: &str) 
                 let held = input.slot()?;
                 input.take(3)?; // cursor x/y/z
                 input.finish()?;
-                if (0..=5).contains(&face) && world::in_bounds(x,y,z) && near(location, x,y,z) {
+                if (0..=5).contains(&face) && world::in_bounds(x, y, z) && near(location, x, y, z) {
                     let (nx, ny, nz) = match face {
-                        0 => (x,y-1,z), 1 => (x,y+1,z), 2 => (x,y,z-1),
-                        3 => (x,y,z+1), 4 => (x-1,y,z), _ => (x+1,y,z),
+                        0 => (x, y - 1, z),
+                        1 => (x, y + 1, z),
+                        2 => (x, y, z - 1),
+                        3 => (x, y, z + 1),
+                        4 => (x - 1, y, z),
+                        _ => (x + 1, y, z),
                     };
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     if let Some((block_id, meta)) = held {
-                        if world::is_placeable(block_id) && w.get(x,y,z) != 0
-                            && w.get(nx,ny,nz) == 0 && near(location,nx,ny,nz) {
-                            w.update_and_save(world_path, nx,ny,nz, (block_id << 4) | meta as u16)?;
+                        if world::is_placeable(block_id)
+                            && w.get(x, y, z) != 0
+                            && w.get(nx, ny, nz) == 0
+                            && near(location, nx, ny, nz)
+                        {
+                            w.update_and_save(
+                                world_path,
+                                nx,
+                                ny,
+                                nz,
+                                (block_id << 4) | meta as u16,
+                            )?;
                         }
                     }
-                    if world::in_bounds(nx,ny,nz) { block_change(s, &w, nx,ny,nz)?; }
+                    if world::in_bounds(nx, ny, nz) {
+                        block_change(s, &w, nx, ny, nz)?;
+                    }
                 }
             }
             // These packets are explicitly not interpreted as trusted mutations.
@@ -277,39 +384,64 @@ fn play(s: &mut TcpStream, world: &Mutex<World>, world_path: &Path, name: &str) 
 }
 struct Admission(Arc<AtomicBool>);
 impl Drop for Admission {
-    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 struct ConnectionGuard(Arc<AtomicUsize>);
 impl Drop for ConnectionGuard {
-    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); }
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
-fn handle(mut s: TcpStream, occupied: Arc<AtomicBool>, world: Arc<Mutex<World>>, path: Arc<PathBuf>) -> io::Result<()> {
+fn handle(
+    mut s: TcpStream,
+    occupied: Arc<AtomicBool>,
+    world: Arc<Mutex<World>>,
+    path: Arc<PathBuf>,
+) -> io::Result<()> {
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
     let (id, data) = receive(&mut s)?;
-    if id != 0 { return Err(bad("expected handshake")); }
+    if id != 0 {
+        return Err(bad("expected handshake"));
+    }
     let mut handshake = Input(&data);
     let version = handshake.varint()?;
     let _hostname = handshake.string(255)?;
     handshake.u16()?;
     let next = handshake.varint()?;
     handshake.finish()?;
-    if next == 1 { return status(&mut s, &occupied); }
-    if next != 2 { return Err(bad("unsupported handshake state")); }
+    if next == 1 {
+        return status(&mut s, &occupied);
+    }
+    if next != 2 {
+        return Err(bad("unsupported handshake state"));
+    }
     if version != PROTOCOL_VERSION {
-        login_disconnect(&mut s, "Use an unmodified Minecraft Java 1.7.10 (protocol 5) client.")?;
+        login_disconnect(
+            &mut s,
+            "Use an unmodified Minecraft Java 1.7.10 (protocol 5) client.",
+        )?;
         return Ok(());
     }
     let (id, data) = receive(&mut s)?;
-    if id != 0 { return Err(bad("expected login start")); }
+    if id != 0 {
+        return Err(bad("expected login start"));
+    }
     let mut login = Input(&data);
     let name = login.string(16)?;
     login.finish()?;
-    if !(3..=16).contains(&name.len()) || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+    if !(3..=16).contains(&name.len())
+        || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    {
         login_disconnect(&mut s, "Invalid player name.")?;
         return Ok(());
     }
-    if occupied.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+    if occupied
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         login_disconnect(&mut s, "Prototype accepts one player at a time.")?;
         return Ok(());
     }
@@ -332,20 +464,33 @@ fn main() -> io::Result<()> {
         match arg.as_str() {
             "--help" => {
                 println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH]");
-                println!("Offline-mode single-player creative prototype. Default bind is loopback.");
+                println!(
+                    "Offline-mode single-player creative prototype. Default bind is loopback."
+                );
                 return Ok(());
             }
             "--bind" => {
-                bind = args.next().ok_or_else(|| bad("missing --bind value"))?
-                    .parse().map_err(|_| bad("invalid listen address"))?;
+                bind = args
+                    .next()
+                    .ok_or_else(|| bad("missing --bind value"))?
+                    .parse()
+                    .map_err(|_| bad("invalid listen address"))?;
             }
-            "--world" => world_path = args.next().ok_or_else(|| bad("missing --world value"))?.into(),
+            "--world" => {
+                world_path = args
+                    .next()
+                    .ok_or_else(|| bad("missing --world value"))?
+                    .into()
+            }
             _ => return Err(bad("unknown command-line argument")),
         }
     }
     let world = Arc::new(Mutex::new(World::load(&world_path)?));
     let listener = TcpListener::bind(bind)?;
-    println!("IndustrialRust1710: listening on {} (1.7.10 vanilla, 1 player)", listener.local_addr()?);
+    println!(
+        "IndustrialRust1710: listening on {} (1.7.10 vanilla, 1 player)",
+        listener.local_addr()?
+    );
     println!("WARNING: offline-mode has no account authentication. Do not expose to the internet.");
     let occupied = Arc::new(AtomicBool::new(false));
     let connections = Arc::new(AtomicUsize::new(0));

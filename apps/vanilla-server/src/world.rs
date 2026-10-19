@@ -23,24 +23,74 @@ pub fn in_bounds(x: i32, y: i32, z: i32) -> bool {
 }
 pub fn is_placeable(block_id: u16) -> bool {
     // Ordinary renderable 1.7.10 blocks only; no tile entities, gravity or multi-block logic.
-    matches!(block_id, 1 | 2 | 3 | 4 | 5 | 7 | 12 | 13 | 17 | 20 | 24 | 35
-        | 41 | 42 | 45 | 49 | 57 | 80 | 82 | 87 | 89 | 98 | 155 | 159 | 168
-        | 169 | 170 | 172 | 173)
+    matches!(
+        block_id,
+        1 | 2
+            | 3
+            | 4
+            | 5
+            | 7
+            | 12
+            | 13
+            | 17
+            | 20
+            | 24
+            | 35
+            | 41
+            | 42
+            | 45
+            | 49
+            | 57
+            | 80
+            | 82
+            | 87
+            | 89
+            | 98
+            | 155
+            | 159
+            | 168
+            | 169
+            | 170
+            | 172
+            | 173
+    )
 }
 impl World {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
     pub fn default_block(y: u8) -> u16 {
-        match y { 60 => 7 << 4, 61 | 62 => 3 << 4, 63 => 2 << 4, _ => 0 }
+        match y {
+            60 => 7 << 4,
+            61 | 62 => 3 << 4,
+            63 => 2 << 4,
+            _ => 0,
+        }
     }
     pub fn get(&self, x: i32, y: i32, z: i32) -> u16 {
-        if !in_bounds(x, y, z) { return 0; }
-        self.edits.get(&(x, y as u8, z)).copied()
+        if !in_bounds(x, y, z) {
+            return 0;
+        }
+        self.edits
+            .get(&(x, y as u8, z))
+            .copied()
             .unwrap_or_else(|| Self::default_block(y as u8))
     }
-    pub fn update_and_save(&mut self, path: &Path, x: i32, y: i32, z: i32, block: u16) -> io::Result<bool> {
-        if !in_bounds(x, y, z) || block >> 4 > 255 { return Ok(false); }
+    pub fn update_and_save(
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u16,
+    ) -> io::Result<bool> {
+        if !in_bounds(x, y, z) || block >> 4 > 255 {
+            return Ok(false);
+        }
         let previous = self.get(x, y, z);
-        if previous == block { return Ok(false); }
+        if previous == block {
+            return Ok(false);
+        }
         let key = (x, y as u8, z);
         let old = self.edits.get(&key).copied();
         if block == Self::default_block(y as u8) {
@@ -53,8 +103,12 @@ impl World {
         }
         if let Err(e) = self.save(path) {
             match old {
-                Some(value) => { self.edits.insert(key, value); }
-                None => { self.edits.remove(&key); }
+                Some(value) => {
+                    self.edits.insert(key, value);
+                }
+                None => {
+                    self.edits.remove(&key);
+                }
             }
             return Err(e);
         }
@@ -66,7 +120,9 @@ impl World {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::new()),
             Err(e) => return Err(e),
         };
-        if bytes.len() < 8 || &bytes[..4] != MAGIC { return Err(invalid("bad world header")); }
+        if bytes.len() < 8 || &bytes[..4] != MAGIC {
+            return Err(invalid("bad world header"));
+        }
         let count = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
         if count > MAX_EDITS || bytes.len() != 8 + count * 11 {
             return Err(invalid("world file length/count mismatch"));
@@ -87,12 +143,14 @@ impl World {
         Ok(world)
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let temp = path.with_extension("tmp");
         let mut f = File::create(&temp)?;
         f.write_all(MAGIC)?;
         f.write_all(&(self.edits.len() as u32).to_be_bytes())?;
-        for (&(x,y,z), &block) in &self.edits {
+        for (&(x, y, z), &block) in &self.edits {
             f.write_all(&x.to_be_bytes())?;
             f.write_all(&[y])?;
             f.write_all(&z.to_be_bytes())?;
@@ -112,7 +170,10 @@ impl World {
             for y in 0..16 {
                 for z in 0..16 {
                     for x in 0..16 {
-                        bytes.push((self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z) >> 4) as u8);
+                        bytes.push(
+                            (self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z) >> 4)
+                                as u8,
+                        );
                     }
                 }
             }
@@ -121,8 +182,12 @@ impl World {
             for y in 0..16 {
                 for z in 0..16 {
                     for x in (0..16).step_by(2) {
-                        let a = self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z) as u8 & 15;
-                        let b = self.get(chunk_x * 16 + x + 1, section * 16 + y, chunk_z * 16 + z) as u8 & 15;
+                        let a = self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z)
+                            as u8
+                            & 15;
+                        let b = self.get(chunk_x * 16 + x + 1, section * 16 + y, chunk_z * 16 + z)
+                            as u8
+                            & 15;
                         bytes.push(a | b << 4);
                     }
                 }
@@ -148,7 +213,11 @@ mod tests {
     }
     #[test]
     fn persist_and_rollback() {
-        let path = std::env::temp_dir().join(format!("industrial-world-test-{}-{}.bin", std::process::id(), 196710u32));
+        let path = std::env::temp_dir().join(format!(
+            "industrial-world-test-{}-{}.bin",
+            std::process::id(),
+            196710u32
+        ));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
         assert!(w.update_and_save(&path, -1, 65, 2, 4 << 4).unwrap());
@@ -160,7 +229,10 @@ mod tests {
     }
     #[test]
     fn corrupt_save_rejected() {
-        let path = std::env::temp_dir().join(format!("industrial-corrupt-test-{}.bin", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "industrial-corrupt-test-{}.bin",
+            std::process::id()
+        ));
         fs::write(&path, b"IRW1\x00\x00\x00\x01").unwrap();
         assert!(World::load(&path).is_err());
         fs::remove_file(&path).unwrap();
