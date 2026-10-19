@@ -43,7 +43,7 @@ jobs:
         shell: bash
         run: |
           cargo build -p vanilla-server
-          printf '[{"name":"RustTester"},{"name":"Positioner"},{"name":"TwinAlpha"},{"name":"TwinBeta"}]\n' > "$RUNNER_TEMP/whitelist.json"
+          printf '[{"name":"RustTester"},{"name":"Positioner"},{"name":"TwinAlpha"},{"name":"TwinBeta"},{"name":"ChunkScout"}]\n' > "$RUNNER_TEMP/whitelist.json"
           ./target/debug/vanilla-server --bind 127.0.0.1:25568 --world "$RUNNER_TEMP/industrial-smoke.irw" --whitelist "$RUNNER_TEMP/whitelist.json" &
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true' EXIT
@@ -60,3 +60,4 @@ jobs:
           python3 tests/vanilla_smoke.py 127.0.0.1 25568 "$RUNNER_TEMP/industrial-smoke.irw"
           python3 tests/player_position_smoke.py 127.0.0.1 25568 "$RUNNER_TEMP/players/positioner.dat"
           python3 tests/multiplayer_smoke.py 127.0.0.1 25568
+          python3 tests/chunk_streaming_smoke.py 127.0.0.1 25568

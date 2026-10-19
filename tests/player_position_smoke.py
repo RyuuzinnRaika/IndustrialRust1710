@@ -83,8 +83,8 @@ else:
     raise AssertionError("did not persist player position")
 client,pos=connect()
 assert pos == (3.5,65.0,2.5), pos
-# Movement beyond loaded chunk range must be corrected to authoritative position.
-client.sendall(frame(0x04,struct.pack(">ddddB",55.5,66.62,65.0,2.5,1)))
+# Movement beyond bounded 32k square must be corrected to authoritative position.
+client.sendall(frame(0x04,struct.pack(">ddddB",16384.5,66.62,65.0,2.5,1)))
 for _ in range(10):
     pid,content=packet(client)
     if pid==0x08:
