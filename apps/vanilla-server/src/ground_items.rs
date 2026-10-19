@@ -25,9 +25,6 @@ const VERSION: u8 = 1;
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
 }
-fn poisoned() -> io::Error {
-    io::Error::other("ground item state mutex poisoned")
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -242,6 +239,5 @@ mod tests {
         assert!(state.nearby_ready((0.5,64.0,0.5)).is_none());
         let item = GroundItem{id:1000000001,position:[i32::MAX,64*32,16],stack:Stack{id:3,count:1,damage:0}};
         assert!(!item.valid());
-        assert_eq!(poisoned().kind(), ErrorKind::Other);
     }
 }
