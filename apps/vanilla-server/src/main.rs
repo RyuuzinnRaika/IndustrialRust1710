@@ -1,6 +1,7 @@
 //! Vanilla-only Minecraft 1.7.10 / Protocol 5 server proof of concept.
 //! Offline-mode by design: bind to loopback unless you trust every client on your LAN.
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
+mod anvil_export;
 mod clock;
 mod multiplayer;
 mod player;
@@ -691,13 +692,14 @@ fn handle(
 fn main() -> io::Result<()> {
     let mut bind = "127.0.0.1:25565".parse::<SocketAddr>().unwrap();
     let mut world_path = PathBuf::from("world/flat.irw");
+    let mut anvil_export_path: Option<PathBuf> = None;
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--export-anvil NEW_DIR]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -723,8 +725,24 @@ fn main() -> io::Result<()> {
                     .into()
             }
             "--insecure-offline-lan" => insecure_offline_lan = true,
+            "--export-anvil" => {
+                anvil_export_path = Some(PathBuf::from(
+                    args.next().ok_or_else(|| bad("missing --export-anvil directory"))?
+                ));
+            },
             _ => return Err(bad("unknown command-line argument")),
         }
+    }
+    if let Some(destination) = anvil_export_path {
+        // Export mode never binds a TCP socket and never modifies the IRW1 source.
+        if !world_path.is_file() {
+            return Err(io::Error::new(ErrorKind::NotFound, "source IRW1 world does not exist"));
+        }
+        let world = World::load(&world_path)?;
+        let count = anvil_export::export(&world, &destination)?;
+        println!("Anvil 1.7.10 snapshot exported: {count} chunks to {}", destination.display());
+        println!("This is a partial flat-world snapshot, not a completed survival world.");
+        return Ok(());
     }
     if !bind.ip().is_loopback() && !insecure_offline_lan {
         return Err(io::Error::new(ErrorKind::PermissionDenied,
