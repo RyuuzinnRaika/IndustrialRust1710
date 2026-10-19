@@ -727,20 +727,27 @@ fn main() -> io::Result<()> {
             "--insecure-offline-lan" => insecure_offline_lan = true,
             "--export-anvil" => {
                 anvil_export_path = Some(PathBuf::from(
-                    args.next().ok_or_else(|| bad("missing --export-anvil directory"))?
+                    args.next()
+                        .ok_or_else(|| bad("missing --export-anvil directory"))?,
                 ));
-            },
+            }
             _ => return Err(bad("unknown command-line argument")),
         }
     }
     if let Some(destination) = anvil_export_path {
         // Export mode never binds a TCP socket and never modifies the IRW1 source.
         if !world_path.is_file() {
-            return Err(io::Error::new(ErrorKind::NotFound, "source IRW1 world does not exist"));
+            return Err(io::Error::new(
+                ErrorKind::NotFound,
+                "source IRW1 world does not exist",
+            ));
         }
         let world = World::load(&world_path)?;
         let count = anvil_export::export(&world, &destination)?;
-        println!("Anvil 1.7.10 snapshot exported: {count} chunks to {}", destination.display());
+        println!(
+            "Anvil 1.7.10 snapshot exported: {count} chunks to {}",
+            destination.display()
+        );
         println!("This is a partial flat-world snapshot, not a completed survival world.");
         return Ok(());
     }

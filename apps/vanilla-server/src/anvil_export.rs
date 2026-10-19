@@ -144,12 +144,13 @@ fn nbt_for_chunk(world: &World, cx: i32, cz: i32) -> io::Result<Vec<u8>> {
     }
     let root = AnvilRoot {
         level: AnvilLevel {
-            x: cx, z: cz,
+            x: cx,
+            z: cz,
             last_update: 0,
             terrain_populated: 1,
             light_populated: 1,
             inhabited_time: 0,
-            biomes: signed_bytes(vec![1;256]),
+            biomes: signed_bytes(vec![1; 256]),
             height_map: IntArray::new(heights),
             sections,
             entities: Vec::new(),
@@ -203,16 +204,23 @@ pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
     fs::create_dir(&regions_dir)?;
     let mut regions: BTreeMap<(i32, i32), Vec<(i32, i32)>> = BTreeMap::new();
     for &(cx, cz) in &chunks {
-        regions.entry((cx.div_euclid(32), cz.div_euclid(32)))
-            .or_default().push((cx, cz));
+        regions
+            .entry((cx.div_euclid(32), cz.div_euclid(32)))
+            .or_default()
+            .push((cx, cz));
     }
     for ((rx, rz), columns) in regions {
         let filename = regions_dir.join(format!("r.{rx}.{rz}.mca"));
         let file = File::create(filename)?;
         let mut region = Region::create(file).map_err(wrap)?;
-        for (cx,cz) in columns {
+        for (cx, cz) in columns {
             let bytes = nbt_for_chunk(world, cx, cz)?;
-            region.write_chunk(cx.rem_euclid(32) as usize, cz.rem_euclid(32) as usize, &bytes)
+            region
+                .write_chunk(
+                    cx.rem_euclid(32) as usize,
+                    cz.rem_euclid(32) as usize,
+                    &bytes,
+                )
                 .map_err(wrap)?;
         }
         let mut file = region.into_inner().map_err(wrap)?;
@@ -257,27 +265,30 @@ mod tests {
 
     #[test]
     fn exports_regions_and_legacy_sections_without_touching_irw1() {
-        let base = std::env::temp_dir().join(format!("industrial-anvil-export-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("industrial-anvil-export-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir(&base).unwrap();
         let original = base.join("flat.irw");
         let output = base.join("snapshot");
         let mut world = World::new();
-        world.update_and_save(&original, -49, 145, 19, (4<<4)|2).unwrap();
+        world
+            .update_and_save(&original, -49, 145, 19, (4 << 4) | 2)
+            .unwrap();
         let original_contents = fs::read(&original).unwrap();
         assert_eq!(export(&world, &output).unwrap(), 26);
         assert_eq!(original_contents, fs::read(&original).unwrap());
         assert!(output.join("level.dat").is_file());
         let file = File::open(output.join("region/r.-1.0.mca")).unwrap();
         let mut region = Region::from_stream(file).unwrap();
-        let raw = region.read_chunk(28,1).unwrap().unwrap();
+        let raw = region.read_chunk(28, 1).unwrap().unwrap();
         let parsed: ParsedRoot = fastnbt::from_bytes(&raw).unwrap();
-        assert_eq!((parsed.level.x,parsed.level.z),(-4,1));
-        let sec = parsed.level.sections.iter().find(|s|s.y==9).unwrap();
+        assert_eq!((parsed.level.x, parsed.level.z), (-4, 1));
+        let sec = parsed.level.sections.iter().find(|s| s.y == 9).unwrap();
         // local x 15, z 3, y 1 -> (1*256 + 3*16 + 15)=319
-        assert_eq!(sec.blocks[319],4);
-        assert_eq!((sec.metadata[319/2] as u8)>>4,2);
-        assert_eq!(parsed.level.height_map[3*16+15],146);
+        assert_eq!(sec.blocks[319], 4);
+        assert_eq!((sec.metadata[319 / 2] as u8) >> 4, 2);
+        assert_eq!(parsed.level.height_map[3 * 16 + 15], 146);
         assert!(export(&world, &output).is_err());
         fs::remove_dir_all(base).unwrap();
     }
