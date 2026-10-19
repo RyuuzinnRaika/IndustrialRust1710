@@ -1,3 +1,11 @@
+## 2026-10-19 — Rust Survivalの採掘・アイテム所持と消費（実験版）
+
+- `--survival`でゲームモード0を通知し、簡易採掘の開始/中断/終了を時間・対象ブロック単位で検証。ベッドロックの採掘は拒否。
+- 対応ブロックを採掘したアイテムを上限付きのサーバー所有Inventoryへ直接反映し、再接続で復元。
+- Survivalブロック設置ではサーバー側の持ち物から1個消費し、偽装Creative Actionで増やせない。
+- Creative/Survivalの在庫保存ファイルを分離。Python/JVMの追加はなく、Rustで実装・TCP回帰テスト。
+- アイテムEntity、実際のクラフト、Mob、物理、通常の難易度とハードネスは引き続き未実装。
+
 ## 2026-10-19 — Rust Creativeインベントリ・ホットバーの実装
 
 - 45スロットのCreative Window Items (`0x30`)、Set Slot (`0x2f`)、Hotbar Change (`0x09`) と Creative Inventory Action (`0x10`) に対応。
