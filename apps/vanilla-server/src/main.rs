@@ -16,6 +16,7 @@ use legacy_protocol::{
 use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
 use player::PlayerPosition;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::io::{self, ErrorKind, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -25,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use whitelist::Whitelist;
-use world::{World, MAX_CHUNK, MIN_CHUNK};
+use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
 
 const MAX_CONNECTIONS: usize = 32;
 fn bad(reason: &'static str) -> io::Error {
@@ -199,25 +200,8 @@ fn join(
     time.extend_from_slice(&clock.day_time().to_be_bytes());
     send(s, 0x03, &time)?;
 
-    for cz in MIN_CHUNK..=MAX_CHUNK {
-        for cx in MIN_CHUNK..=MAX_CHUNK {
-            let uncompressed = world
-                .lock()
-                .map_err(|_| bad("world mutex poisoned"))?
-                .chunk_data(cx, cz);
-            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
-            encoder.write_all(&uncompressed)?;
-            let compressed = encoder.finish()?;
-            let mut body = Vec::with_capacity(compressed.len() + 20);
-            body.extend_from_slice(&cx.to_be_bytes());
-            body.extend_from_slice(&cz.to_be_bytes());
-            body.push(1); // ground-up
-            body.extend_from_slice(&0x0018u16.to_be_bytes()); // y=48..79
-            body.extend_from_slice(&0u16.to_be_bytes()); // no Add arrays
-            body.extend_from_slice(&(compressed.len() as i32).to_be_bytes());
-            body.extend_from_slice(&compressed);
-            send(s, 0x21, &body)?;
-        }
+    for (cx, cz) in view_chunks(chunk_center(position)) {
+        send_chunk(s, world, cx, cz)?;
     }
 
     // Player starts at their last safely persisted position.
@@ -228,6 +212,66 @@ fn join(
     )?;
     Ok(())
 }
+
+fn chunk_center(player: &PlayerPosition) -> (i32, i32) {
+    ((player.x.floor() as i32).div_euclid(16), (player.z.floor() as i32).div_euclid(16))
+}
+fn view_chunks(center: (i32, i32)) -> BTreeSet<(i32, i32)> {
+    let mut chunks = BTreeSet::new();
+    for cz in center.1 - VIEW_DISTANCE..=center.1 + VIEW_DISTANCE {
+        for cx in center.0 - VIEW_DISTANCE..=center.0 + VIEW_DISTANCE {
+            if (MIN_CHUNK..=MAX_CHUNK).contains(&cx)
+                && (MIN_CHUNK..=MAX_CHUNK).contains(&cz)
+            {
+                chunks.insert((cx, cz));
+            }
+        }
+    }
+    chunks
+}
+fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
+    let (mask, data) = world.lock().map_err(|_| bad("world mutex poisoned"))?.chunk_data(cx, cz);
+    let mut compressor = ZlibEncoder::new(Vec::new(), Compression::fast());
+    compressor.write_all(&data)?;
+    let compressed = compressor.finish()?;
+    let mut packet = Vec::with_capacity(17 + compressed.len());
+    packet.extend_from_slice(&cx.to_be_bytes());
+    packet.extend_from_slice(&cz.to_be_bytes());
+    packet.push(1);
+    packet.extend_from_slice(&mask.to_be_bytes());
+    packet.extend_from_slice(&0u16.to_be_bytes());
+    packet.extend_from_slice(&(compressed.len() as i32).to_be_bytes());
+    packet.extend_from_slice(&compressed);
+    send(s, 0x21, &packet)
+}
+fn unload_chunk(s: &mut TcpStream, cx: i32, cz: i32) -> io::Result<()> {
+    // Protocol 5: full column with zero section bitmap and no data.
+    let mut packet = Vec::with_capacity(17);
+    packet.extend_from_slice(&cx.to_be_bytes());
+    packet.extend_from_slice(&cz.to_be_bytes());
+    packet.push(1);
+    packet.extend_from_slice(&0u16.to_be_bytes());
+    packet.extend_from_slice(&0u16.to_be_bytes());
+    packet.extend_from_slice(&0i32.to_be_bytes());
+    send(s, 0x21, &packet)
+}
+fn sync_chunks(
+    s: &mut TcpStream,
+    world: &Mutex<World>,
+    loaded: &mut BTreeSet<(i32, i32)>,
+    center: (i32, i32),
+) -> io::Result<()> {
+    let desired = view_chunks(center);
+    for &(cx, cz) in loaded.difference(&desired) {
+        unload_chunk(s, cx, cz)?;
+    }
+    for &(cx, cz) in desired.difference(loaded) {
+        send_chunk(s, world, cx, cz)?;
+    }
+    *loaded = desired;
+    Ok(())
+}
+
 fn send_player_position(s: &mut TcpStream, location: &PlayerPosition) -> io::Result<()> {
     // Protocol 5 clientbound position/look: x, feet y, z, yaw, pitch, on_ground.
     let mut bytes = Vec::with_capacity(33);
