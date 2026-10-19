@@ -1,3 +1,4 @@
+pub mod modpack;
 //! Read-only Java ClassFile / Forge JAR static scanner; does not execute Mod code.
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -133,8 +134,13 @@ pub struct JarReport {
     pub errors: Vec<String>,
 }
 pub fn inspect_jar(path: &Path) -> io::Result<JarReport> {
-    let f = File::open(path)?;
-    let mut archive = ZipArchive::new(f).map_err(|_| bad("invalid JAR"))?;
+    inspect_jar_reader(File::open(path)?)
+}
+pub fn inspect_jar_bytes(bytes: &[u8]) -> io::Result<JarReport> {
+    inspect_jar_reader(io::Cursor::new(bytes))
+}
+pub fn inspect_jar_reader<R: Read + io::Seek>(reader: R) -> io::Result<JarReport> {
+    let mut archive = ZipArchive::new(reader).map_err(|_| bad("invalid JAR"))?;
     if archive.len() > MAX_ENTRIES {
         return Err(bad("too many JAR entries"));
     }
