@@ -93,6 +93,7 @@ pub fn destroy(id: i32) -> Event {
     Event { id: 0x13, body }
 }
 
+#[derive(Debug)]
 pub enum JoinError { Full, Duplicate }
 impl Hub {
     pub fn count(&self) -> io::Result<usize> {
