@@ -7,12 +7,12 @@ mod whitelist;
 mod world;
 
 use clock::Clock;
-use player::PlayerPosition;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, PROTOCOL_VERSION,
 };
+use player::PlayerPosition;
 use serde_json::json;
 use std::io::{self, ErrorKind, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -161,7 +161,12 @@ fn status(s: &mut TcpStream, occupied: &AtomicBool) -> io::Result<()> {
         _ => Err(bad("bad status ping")),
     }
 }
-fn join(s: &mut TcpStream, world: &Mutex<World>, clock: &Clock, position: &PlayerPosition) -> io::Result<()> {
+fn join(
+    s: &mut TcpStream,
+    world: &Mutex<World>,
+    clock: &Clock,
+    position: &PlayerPosition,
+) -> io::Result<()> {
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
     // difficulty u8, maxPlayers u8, levelType string.
     let mut join = Vec::new();
@@ -518,7 +523,10 @@ fn handle(
         Ok(state) => state,
         Err(err) => {
             eprintln!("player state unavailable for {name}: {err}");
-            login_disconnect(&mut s, "Player save is unreadable. Administrator must repair it.")?;
+            login_disconnect(
+                &mut s,
+                "Player save is unreadable. Administrator must repair it.",
+            )?;
             return Ok(());
         }
     };
@@ -528,7 +536,16 @@ fn handle(
     send(&mut s, 0x02, &success)?;
     println!("joined: {name} (UNAUTHENTICATED OFFLINE MODE)");
     join(&mut s, &world, &clock, &player_state)?;
-    let result = play(&mut s, &world, &path, &name, &whitelist_path, &clock, &mut player_state, &player_file);
+    let result = play(
+        &mut s,
+        &world,
+        &path,
+        &name,
+        &whitelist_path,
+        &clock,
+        &mut player_state,
+        &player_file,
+    );
     // Save even on a clean disconnect, timeout, or access revocation.
     let saved = player_state.save(&player_file);
     println!("left: {name}");
