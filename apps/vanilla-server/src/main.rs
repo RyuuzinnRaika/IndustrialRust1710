@@ -743,7 +743,9 @@ fn main() -> io::Result<()> {
         }
     }
     if anvil_export_path.is_some() && anvil_import_path.is_some() {
-        return Err(bad("--export-anvil and --import-anvil are mutually exclusive"));
+        return Err(bad(
+            "--export-anvil and --import-anvil are mutually exclusive",
+        ));
     }
     if let Some(source) = anvil_import_path {
         // Only import our own exported flat-world snapshots; never overwrite

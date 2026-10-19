@@ -149,13 +149,19 @@ impl World {
     /// replaces a source world or an existing target.
     pub fn save_new(&self, path: &Path) -> io::Result<()> {
         if path.exists() {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "IRW1 target exists"));
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "IRW1 target exists",
+            ));
         }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
         let staging = path.with_extension("importing");
-        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&staging)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
         let written = self.write_to(&mut file).and_then(|_| file.sync_all());
         drop(file);
         if let Err(err) = written {
@@ -312,7 +318,10 @@ mod tests {
         world.import_block(1, 63, 1, 0).unwrap();
         world.save_new(&target).unwrap();
         let first = fs::read(&target).unwrap();
-        assert_eq!(World::load(&target).unwrap().get(-49, 145, 19), (4 << 4) | 2);
+        assert_eq!(
+            World::load(&target).unwrap().get(-49, 145, 19),
+            (4 << 4) | 2
+        );
         assert_eq!(World::load(&target).unwrap().get(1, 63, 1), 0);
         assert!(world.save_new(&target).is_err());
         assert_eq!(fs::read(&target).unwrap(), first);
