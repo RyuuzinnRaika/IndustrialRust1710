@@ -7,6 +7,7 @@ import sys
 import time
 import zlib
 from pathlib import Path
+from protocol5_test_utils import wait_for_idle
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 25568
@@ -137,4 +138,5 @@ if SAVE:
     save = SAVE.read_bytes()
     assert save[:4] == b"IRW1"
     assert struct.unpack(">I", save[4:8])[0] == 2
+wait_for_idle(HOST, PORT)
 print("Vanilla Protocol 5 Login/Play/chunks/edit/persistence smoke test passed")
