@@ -32,10 +32,11 @@ jobs:
             '12 feat/vanilla17-safe-anvil-roundtrip'
             '13 feat/official-vanilla-1710-playable-server'
             '14 fix/vanilla1710-fragmented-tcp-and-backup'
+            '15 refactor/rust-only-1710'
           )
           for entry in "${entries[@]}"; do
             read -r pr branch <<< "$entry"
-            if [[ "$branch" == "main" || "$branch" == "refactor/rust-only-1710" ]]; then
+            if [[ "$branch" == "main" ]]; then
               echo "Refusing to delete a protected development ref: $branch"
               exit 1
             fi
