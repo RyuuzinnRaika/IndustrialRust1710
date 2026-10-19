@@ -13,9 +13,9 @@ mod whitelist;
 mod world;
 
 use clock::Clock;
-use ground_items::GroundItems;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use ground_items::GroundItems;
 use inventory::{Inventory, Stack};
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
@@ -556,14 +556,23 @@ fn play(
                             let mut changed = false;
                             if world::in_bounds(x, y, z) && near(location, x, y, z) {
                                 if let Some(item) = mined {
-                                    let mut ground = ground_items.lock()
-                                        .map_err(|_| io::Error::other("ground items lock poisoned"))?;
-                                    if !ground.is_full() && w.update_and_save(world_path,x,y,z,0)? {
-                                        let stack = Stack { id:item.id,count:1,damage:item.damage };
+                                    let mut ground = ground_items.lock().map_err(|_| {
+                                        io::Error::other("ground items lock poisoned")
+                                    })?;
+                                    if !ground.is_full()
+                                        && w.update_and_save(world_path, x, y, z, 0)?
+                                    {
+                                        let stack = Stack {
+                                            id: item.id,
+                                            count: 1,
+                                            damage: item.damage,
+                                        };
                                         // World saved first; an interrupted insertion can lose
                                         // the item, never multiply it.
-                                        let dropped = ground.put(ground_path,stack,(x,y,z))?;
-                                        for packet in dropped.spawn() { hub.broadcast(packet); }
+                                        let dropped = ground.put(ground_path, stack, (x, y, z))?;
+                                        for packet in dropped.spawn() {
+                                            hub.broadcast(packet);
+                                        }
                                         changed = true;
                                     }
                                 }
@@ -870,7 +879,8 @@ fn handle(
     // Send existing persisted items to newly joining clients. They are
     // independent of the player's chunk updates in this bounded prototype.
     if survival {
-        let ground = ground_items.lock()
+        let ground = ground_items
+            .lock()
             .map_err(|_| io::Error::other("ground items lock poisoned"))?;
         for item in ground.items() {
             for packet in item.spawn() {
@@ -1036,7 +1046,9 @@ fn main() -> io::Result<()> {
         let drops_path = Arc::clone(&ground_path);
         thread::spawn(move || {
             let _connection = admission;
-            if let Err(e) = handle(stream, clients, w, p, wl, game_clock, drops, drops_path, survival) {
+            if let Err(e) = handle(
+                stream, clients, w, p, wl, game_clock, drops, drops_path, survival,
+            ) {
                 if e.kind() != ErrorKind::UnexpectedEof {
                     eprintln!("client disconnected: {e}");
                 }

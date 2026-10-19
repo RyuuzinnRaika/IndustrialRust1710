@@ -495,7 +495,7 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     let metadata = until_packet(&mut client, 0x1c, |b| {
         b.len() >= 13 && b[..4] == drop_id.to_be_bytes()
     });
-    assert_eq!(&metadata[4..], &[0xaa,0,3,1,0,0,255,255,127]);
+    assert_eq!(&metadata[4..], &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
     until_packet(&mut client, 0x23, |b| {
         b.len() >= 11 && b[4] == 63 && b[9] == 0
     });
@@ -510,14 +510,16 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
 
     thread::sleep(Duration::from_millis(900));
     send_position(&mut client, 0.5, 65.0, 0.5);
-    until_packet(&mut client, 0x2f, |b| b == [0,0,36,0,3,1,0,0,255,255]);
+    until_packet(&mut client, 0x2f, |b| {
+        b == [0, 0, 36, 0, 3, 1, 0, 0, 255, 255]
+    });
     until_packet(&mut client, 0x0d, |b| {
         b.len() == 8 && b[..4] == drop_id.to_be_bytes()
     });
     until_packet(&mut client, 0x13, |b| {
         b.len() == 5 && b[0] == 1 && b[1..] == drop_id.to_be_bytes()
     });
-    let pickup_file: Value=serde_json::from_slice(&fs::read(&drop_path).unwrap()).unwrap();
+    let pickup_file: Value = serde_json::from_slice(&fs::read(&drop_path).unwrap()).unwrap();
     assert!(pickup_file["entries"].as_object().unwrap().is_empty());
 
     // Client claims more than it owns; the server permits one placed dirt but

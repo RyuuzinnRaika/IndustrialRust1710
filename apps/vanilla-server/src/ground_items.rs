@@ -61,20 +61,26 @@ impl GroundItem {
         metadata.push(0x7f); // end of metadata
         [
             Event { id: 0x0e, body },
-            Event { id: 0x1c, body: metadata },
+            Event {
+                id: 0x1c,
+                body: metadata,
+            },
         ]
     }
     pub fn in_pickup_range(&self, feet: (f64, f64, f64)) -> bool {
         let x = f64::from(self.position[0]) / 32.0 - feet.0;
         let y = f64::from(self.position[1]) / 32.0 - feet.1;
         let z = f64::from(self.position[2]) / 32.0 - feet.2;
-        x*x + y*y + z*z <= 4.0
+        x * x + y * y + z * z <= 4.0
     }
     pub fn collected(&self, player: i32) -> [Event; 2] {
         let mut collect = self.id.to_be_bytes().to_vec();
         collect.extend_from_slice(&player.to_be_bytes());
         [
-            Event { id: 0x0d, body: collect },
+            Event {
+                id: 0x0d,
+                body: collect,
+            },
             multiplayer::destroy(self.id),
         ]
     }
@@ -106,7 +112,10 @@ impl GroundItems {
         if self.version != VERSION
             || self.next_id < 1_000_000_000
             || self.entries.len() > MAX_DROPS
-            || self.entries.iter().any(|(id,item)| *id != item.id || !item.valid() || item.id > self.next_id)
+            || self
+                .entries
+                .iter()
+                .any(|(id, item)| *id != item.id || !item.valid() || item.id > self.next_id)
         {
             return Err(invalid("invalid persisted ground items"));
         }
@@ -125,8 +134,8 @@ impl GroundItems {
         if data.len() as u64 > MAX_BYTES {
             return Err(invalid("ground-item save file grew beyond size cap"));
         }
-        let mut state: Self = serde_json::from_slice(&data)
-            .map_err(|_| invalid("invalid ground-item JSON"))?;
+        let mut state: Self =
+            serde_json::from_slice(&data).map_err(|_| invalid("invalid ground-item JSON"))?;
         state.validate()?;
         let ready = Instant::now() + PICKUP_DELAY;
         for id in state.entries.keys() {
@@ -157,37 +166,54 @@ impl GroundItems {
         self.entries.values()
     }
     /// Add the drop after an IRW1 edit succeeds. Persist before announcing.
-    pub fn put(&mut self, path: &Path, stack: Stack, block: (i32,i32,i32)) -> io::Result<GroundItem> {
+    pub fn put(
+        &mut self,
+        path: &Path,
+        stack: Stack,
+        block: (i32, i32, i32),
+    ) -> io::Result<GroundItem> {
         if self.is_full() || !stack.is_valid() || stack.count != 1 {
             return Err(invalid("ground-item capacity or stack invalid"));
         }
         let id = self.next_id + 1;
         let position = [block.0 * 32 + 16, block.1 * 32 + 16, block.2 * 32 + 16];
-        let item = GroundItem { id, position, stack };
+        let item = GroundItem {
+            id,
+            position,
+            stack,
+        };
         if !item.valid() {
             return Err(invalid("invalid drop position"));
         }
         self.next_id = id;
-        self.entries.insert(id,item.clone());
+        self.entries.insert(id, item.clone());
         if let Err(err) = self.save(path) {
             self.entries.remove(&id);
             self.next_id -= 1;
             return Err(err);
         }
-        self.eligible_after.insert(id, Instant::now() + PICKUP_DELAY);
+        self.eligible_after
+            .insert(id, Instant::now() + PICKUP_DELAY);
         Ok(item)
     }
-    pub fn nearby_ready(&self, feet: (f64,f64,f64)) -> Option<GroundItem> {
-        self.entries.values().find(|item| {
-            self.eligible_after.get(&item.id).is_some_and(|time| Instant::now() >= *time)
-                && item.in_pickup_range(feet)
-        }).cloned()
+    pub fn nearby_ready(&self, feet: (f64, f64, f64)) -> Option<GroundItem> {
+        self.entries
+            .values()
+            .find(|item| {
+                self.eligible_after
+                    .get(&item.id)
+                    .is_some_and(|time| Instant::now() >= *time)
+                    && item.in_pickup_range(feet)
+            })
+            .cloned()
     }
     /// Mutate the ground-file first: an interrupted pickup cannot clone items.
     pub fn take(&mut self, path: &Path, id: i32) -> io::Result<Option<GroundItem>> {
-        let Some(item) = self.entries.remove(&id) else { return Ok(None); };
+        let Some(item) = self.entries.remove(&id) else {
+            return Ok(None);
+        };
         if let Err(err) = self.save(path) {
-            self.entries.insert(id,item);
+            self.entries.insert(id, item);
             return Err(err);
         }
         self.eligible_after.remove(&id);
@@ -202,42 +228,64 @@ mod tests {
         let item = GroundItem {
             id: 1_000_000_001,
             position: [16, 2032, 16],
-            stack: Stack { id: 3,count:1,damage:0 },
+            stack: Stack {
+                id: 3,
+                count: 1,
+                damage: 0,
+            },
         };
         let [object, metadata] = item.spawn();
         assert_eq!(object.id, 0x0e);
         assert_eq!(object.body[5], 2);
         assert_eq!(object.body.len(), 24);
         assert_eq!(metadata.id, 0x1c);
-        assert_eq!(&metadata.body[4..], &[0xaa,0,3,1,0,0,255,255,127]);
+        assert_eq!(&metadata.body[4..], &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
         let [collect, destroy] = item.collected(42);
-        assert_eq!(collect.id,0x0d);
-        assert_eq!(&collect.body[4..],&42i32.to_be_bytes());
-        assert_eq!(destroy.id,0x13);
-        assert!(item.in_pickup_range((0.5,65.0,0.5)));
-        assert!(!item.in_pickup_range((4.5,65.0,0.5)));
+        assert_eq!(collect.id, 0x0d);
+        assert_eq!(&collect.body[4..], &42i32.to_be_bytes());
+        assert_eq!(destroy.id, 0x13);
+        assert!(item.in_pickup_range((0.5, 65.0, 0.5)));
+        assert!(!item.in_pickup_range((4.5, 65.0, 0.5)));
     }
     #[test]
     fn persists_and_refuses_duplicate_pickup() {
-        let root = std::env::temp_dir().join(format!("ir1710-ground-items-{}",std::process::id()));
+        let root = std::env::temp_dir().join(format!("ir1710-ground-items-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        let path=root.join("drops.json");
-        let mut state=GroundItems::default();
-        let item=state.put(&path, Stack {id:3,count:1,damage:0},(0,63,0)).unwrap();
-        assert_eq!(GroundItems::load(&path).unwrap().items().count(),1);
-        assert_eq!(state.take(&path,item.id).unwrap(),Some(item.clone()));
-        assert_eq!(state.take(&path,item.id).unwrap(),None);
-        assert_eq!(GroundItems::load(&path).unwrap().items().count(),0);
-        fs::write(&path,b"{corrupt").unwrap();
+        let path = root.join("drops.json");
+        let mut state = GroundItems::default();
+        let item = state
+            .put(
+                &path,
+                Stack {
+                    id: 3,
+                    count: 1,
+                    damage: 0,
+                },
+                (0, 63, 0),
+            )
+            .unwrap();
+        assert_eq!(GroundItems::load(&path).unwrap().items().count(), 1);
+        assert_eq!(state.take(&path, item.id).unwrap(), Some(item.clone()));
+        assert_eq!(state.take(&path, item.id).unwrap(), None);
+        assert_eq!(GroundItems::load(&path).unwrap().items().count(), 0);
+        fs::write(&path, b"{corrupt").unwrap();
         assert!(GroundItems::load(&path).is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn refuses_invalid_items_and_corrupt_metadata() {
         let state = GroundItems::default();
-        assert!(state.nearby_ready((0.5,64.0,0.5)).is_none());
-        let item = GroundItem{id:1000000001,position:[i32::MAX,64*32,16],stack:Stack{id:3,count:1,damage:0}};
+        assert!(state.nearby_ready((0.5, 64.0, 0.5)).is_none());
+        let item = GroundItem {
+            id: 1000000001,
+            position: [i32::MAX, 64 * 32, 16],
+            stack: Stack {
+                id: 3,
+                count: 1,
+                damage: 0,
+            },
+        };
         assert!(!item.valid());
     }
 }
