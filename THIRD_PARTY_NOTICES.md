@@ -11,6 +11,14 @@ This project does not vendor Pumpkin's GPLv3 NBT source in the current source tr
 - Original code remains copyrighted by its authors. No fastnbt source files are copied into this repository; Cargo resolves the external package.
 - Redistributors must preserve applicable copyright/license notices and check the resolved dependency tree for additional notice obligations.
 
+## fastanvil
+
+- Project: https://github.com/owengage/fastnbt
+- Dependency: `fastanvil = "=0.32.0"` (default-features disabled)
+- License: **MIT**
+- Purpose: read and write Java Anvil region container format; source is not copied into this repository.
+- Redistribution requires preserving applicable MIT copyright/license notices and reviewing transitive dependencies.
+
 ## Other dependencies
 
 Rust/Cargo transitive and direct dependencies (including serde, flate2 and md5) retain their own licenses. Before distribution, generate a locked dependency audit (`cargo metadata --format-version 1` or `cargo license`) and review all entries.
