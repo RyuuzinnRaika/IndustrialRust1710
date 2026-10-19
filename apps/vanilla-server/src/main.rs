@@ -8,12 +8,12 @@ mod whitelist;
 mod world;
 
 use clock::Clock;
-use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, PROTOCOL_VERSION,
 };
+use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
 use player::PlayerPosition;
 use serde_json::json;
 use std::io::{self, ErrorKind, Write};
@@ -247,7 +247,10 @@ fn block_change_event(world: &World, x: i32, y: i32, z: i32) -> Event {
     data.extend_from_slice(&z.to_be_bytes());
     write_varint((block >> 4) as u32, &mut data);
     data.push((block & 15) as u8);
-    Event { id: 0x23, body: data }
+    Event {
+        id: 0x23,
+        body: data,
+    }
 }
 fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
     let dx = player.0 - (x as f64 + 0.5);
@@ -358,7 +361,10 @@ fn play(
                 if message == "/help" {
                     as_chat(s, "Commands: /help, /save, /list. Creative blocks only; mobs and Forge are unsupported.")?;
                 } else if message == "/list" {
-                    as_chat(s, &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")))?;
+                    as_chat(
+                        s,
+                        &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")),
+                    )?;
                 } else if message == "/save" {
                     world
                         .lock()
@@ -367,8 +373,14 @@ fn play(
                     as_chat(s, "World saved.")?;
                 } else if !message.starts_with('/') {
                     let mut bytes = Vec::new();
-                    write_string(&json!({"text":format!("<{name}> {message}")}).to_string(), &mut bytes)?;
-                    hub.broadcast(Event { id: 0x02, body: bytes });
+                    write_string(
+                        &json!({"text":format!("<{name}> {message}")}).to_string(),
+                        &mut bytes,
+                    )?;
+                    hub.broadcast(Event {
+                        id: 0x02,
+                        body: bytes,
+                    });
                 } else {
                     as_chat(s, "Unknown command; try /help")?;
                 }
@@ -436,7 +448,9 @@ fn play(
                 let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                 let changed = if (action == 0 || action == 2) && y > 60 && near(location, x, y, z) {
                     w.update_and_save(world_path, x, y, z, 0)?
-                } else { false };
+                } else {
+                    false
+                };
                 let event = block_change_event(&w, x, y, z);
                 if changed {
                     hub.broadcast(event);
@@ -480,8 +494,11 @@ fn play(
                     }
                     if world::in_bounds(nx, ny, nz) {
                         let event = block_change_event(&w, nx, ny, nz);
-                        if changed { hub.broadcast(event); }
-                        else { send(s, event.id, &event.body)?; }
+                        if changed {
+                            hub.broadcast(event);
+                        } else {
+                            send(s, event.id, &event.body)?;
+                        }
                     }
                 }
             }
@@ -586,7 +603,10 @@ fn handle(
             return Ok(());
         }
     };
-    let _admission = PlayerAdmission { hub: Arc::clone(&hub), entity_id };
+    let _admission = PlayerAdmission {
+        hub: Arc::clone(&hub),
+        entity_id,
+    };
     let mut success = Vec::new();
     write_string(&uuid, &mut success)?;
     write_string(&name, &mut success)?;
