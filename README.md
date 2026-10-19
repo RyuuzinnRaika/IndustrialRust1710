@@ -15,6 +15,18 @@ py -3 tools/vanilla1710.py run --memory 2G
 
 **Java 8が必要**です。PATH上のJavaが17以降なら `--java "C:\Path\To\Java8\bin\java.exe"` を付けて起動します。サーバーコンソールで `whitelist add プレイヤー名` を実行し、Minecraft Java **1.7.10（Forgeなし）**から `127.0.0.1:25565` へ接続してください。終了は `stop`。
 
+起動後の通信確認:
+
+```powershell
+py -3 tools/vanilla1710.py status
+```
+
+バックアップはサーバーコンソールで `stop` してから実行します（**稼働中は作成拒否**、既存ZIP上書き不可）:
+
+```powershell
+py -3 tools/vanilla1710.py backup --output ./vanilla-1710-backup.zip
+```
+
 サーバーJARは公式MojangからダウンロードしてSHA-1を検証します。JARはGitに格納せず、公式EULAへの同意も自動化しません。**Minecraft公式推奨の古いLog4j脆弱性対策XMLも取得・SHA-1検証し、起動時に必ず適用します。**初期設定はホワイトリスト有効・`online-mode=true`・localhost限定です。
 
 **LAN接続・Linux・Java 8の指定・管理方法・バックアップ**は [公式1.7.10サーバー起動ガイド](docs/16_公式バニラ1710サーバー起動.md) を参照してください。
