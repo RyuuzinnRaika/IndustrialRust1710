@@ -1,3 +1,11 @@
+## 2026-10-19 — 自前Anvilエクスポートの非破壊ラウンドトリップ
+
+- `--import-anvil EXPORTED_DIR --world NEW.irw` を追加し、IndustrialRust1710自身が作成したフラットスナップショットを安全に読み戻す。
+- Region table/圧縮NBTの有界解析、破損や未知のエンティティ情報へのfail-closed対応、変換先の上書き拒否を追加。
+- `World::import_block`と`save_new`により、すべての内容を検査した後で新規IRW1を公開する。
+- CIでexport→import後のIRW1バイト一致と再実行時の上書き防止を確認する。
+- 一般のMinecraft/ForgeワールドのインポートとAnvilをゲームの保存先として使用する処理は未実装。
+
 ## 2026-10-19 — Anvilスナップショットの非破壊書き出し
 
 - `--export-anvil NEW_DIR`でIRW1変更済みチャンクとスポーン周辺を1.7.10 Anvil地域ファイルに出力する。
