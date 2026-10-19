@@ -115,6 +115,45 @@ impl Inventory {
         self.slots[slot as usize] = stack;
         Ok(true)
     }
+    /// Add one mined item directly to inventory (temporary until entity pickup
+    /// is implemented). Prefer the hotbar, then main inventory; never overflow.
+    pub fn receive_one(&mut self, item: Stack) -> Option<i16> {
+        if !item.is_valid() || item.count != 1 {
+            return None;
+        }
+        let slots = (36..45).chain(9..36);
+        for slot in slots.clone() {
+            if let Some(stack) = self.slots[slot].as_mut() {
+                if stack.id == item.id && stack.damage == item.damage && stack.count < 64 {
+                    stack.count += 1;
+                    return Some(slot as i16);
+                }
+            }
+        }
+        for slot in slots {
+            if self.slots[slot].is_none() {
+                self.slots[slot] = Some(item);
+                return Some(slot as i16);
+            }
+        }
+        None
+    }
+    /// Commit one server-owned held item consumption (Survival only).
+    pub fn consume_held(&mut self) -> bool {
+        let slot = &mut self.slots[36 + self.selected as usize];
+        let Some(stack) = slot.as_mut() else {
+            return false;
+        };
+        if stack.count > 1 {
+            stack.count -= 1;
+        } else {
+            *slot = None;
+        }
+        true
+    }
+    pub fn held_slot(&self) -> i16 {
+        36 + i16::from(self.selected)
+    }
     pub fn held(&self) -> Option<Stack> {
         self.slots[36 + self.selected as usize]
     }
@@ -217,6 +256,30 @@ mod tests {
             count: 1,
             damage: 2
         })));
+    }
+    #[test]
+    fn survival_items_stack_then_consume_without_duplication() {
+        let mut inv = Inventory::default();
+        let item = Stack {
+            id: 3,
+            count: 1,
+            damage: 0,
+        };
+        assert_eq!(inv.receive_one(item), Some(36));
+        assert_eq!(inv.receive_one(item), Some(36));
+        assert_eq!(inv.held().unwrap().count, 2);
+        assert!(inv.consume_held());
+        assert_eq!(inv.held().unwrap().count, 1);
+        assert!(inv.consume_held());
+        assert!(inv.held().is_none());
+        assert!(!inv.consume_held());
+        assert!(inv
+            .receive_one(Stack {
+                id: 7,
+                count: 65,
+                damage: 0
+            })
+            .is_none());
     }
     #[test]
     fn saves_and_fails_closed_on_corruption() {
