@@ -1,36 +1,31 @@
-# IndustrialRust1710
+# IndustrialRust1710 — Rustのみで実装するMinecraft Java 1.7.10サーバー
 
-## 今すぐMinecraft 1.7.10をModなしで普通に遊ぶ
+このプロジェクトは **RustネイティブのMinecraft Java Edition 1.7.10 / Protocol 5サーバー**を開発します。**公式Javaサーバーを起動するラッパーやPython製の運用・テストプログラムは、現行ソースから廃止しました。** ゲーム本体と自動通信テストはRustです。Mod/Forge互換機能は後回しにしています。
 
-**Rust製サーバーが完成するまでの実用経路として、Mojang公式1.7.10バニラサーバーを起動できます。** サバイバル、Mob、クラフト、インベントリ、レッドストーンなどは公式Javaサーバーが担当します。**Rust実装がこれらに対応したという意味ではありません。**
-
-Windows 11のPowerShellでリポジトリのルートから:
+### 現時点で動くRustバイナリ
 
 ```powershell
-py -3 tools/vanilla1710.py prepare
-notepad runtime/vanilla-1.7.10/eula.txt
-# Minecraft EULAに同意する場合のみ、eula=false を eula=true に変更
-py -3 tools/vanilla1710.py run --memory 2G
+git clone https://github.com/RyuuzinnRaika/IndustrialRust1710.git
+cd IndustrialRust1710
+Copy-Item config/whitelist.example.json whitelist.json
+notepad whitelist.json
+cargo run --release -p vanilla-server -- --whitelist whitelist.json
 ```
 
-**Java 8が必要**です。PATH上のJavaが17以降なら `--java "C:\Path\To\Java8\bin\java.exe"` を付けて起動します。サーバーコンソールで `whitelist add プレイヤー名` を実行し、Minecraft Java **1.7.10（Forgeなし）**から `127.0.0.1:25565` へ接続してください。終了は `stop`。
+現在はlocalhost (`127.0.0.1:25565`) のみで待ち受けます。接続には **Minecraft Java Edition 1.7.10のModなしクライアント**を使用します。ユーザー名ホワイトリストに登録した名前で接続してください。ホワイトリストは名前照合のみで、**Mojang/Microsoftアカウントの本人認証ではありません**。公開インターネットへの接続を許可しないでください。
 
-起動後の通信確認:
+**完成状況を誤認しないでください。** Rust版は最大8人・フラットワールドのCreative操作・チャンク配信・チャット・座標保存・限定Anvilエクスポート/インポートまでを自動検証しています。**サバイバル、インベントリ、クラフト、Mob、AI、物理、レッドストーン、完全なAnvil常時保存は未実装**であり、現時点では通常のバニラMinecraftを完全に遊べません。実際の1.7.10クライアントによる総合操作検証も未実施です。
 
-```powershell
-py -3 tools/vanilla1710.py status
+### Rustのみのビルド・通信テスト
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --release -p vanilla-server
 ```
 
-バックアップはサーバーコンソールで `stop` してから実行します（**稼働中は作成拒否**、既存ZIP上書き不可）:
-
-```powershell
-py -3 tools/vanilla1710.py backup --output ./vanilla-1710-backup.zip
-```
-
-サーバーJARは公式MojangからダウンロードしてSHA-1を検証します。JARはGitに格納せず、公式EULAへの同意も自動化しません。**Minecraft公式推奨の古いLog4j脆弱性対策XMLも取得・SHA-1検証し、起動時に必ず適用します。**初期設定はホワイトリスト有効・`online-mode=true`・localhost限定です。
-
-**LAN接続・Linux・Java 8の指定・管理方法・バックアップ**は [公式1.7.10サーバー起動ガイド](docs/16_公式バニラ1710サーバー起動.md) を参照してください。
-
+`apps/vanilla-server/tests/protocol5_e2e.rs` と `apps/legacy-status-server/tests/protocol5.rs` は、**Rustで実際のローカルTCP接続・二人同時ログイン・パケット分割・ワールド保存・Anvil往復変換**を検証します。Java・Pythonのランタイム、MinecraftサーバーJAR、EULAの自動同意は不要です。
 
 **Minecraft Java Edition 1.7.10（Protocol 5）向けRustネイティブサーバーの研究開発プロジェクト。**
 
@@ -91,7 +86,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p legacy-status-server -- --bind 127.0.0.1:25565
 
 # 別のターミナルから実行
-python3 tests/protocol5_smoke.py 127.0.0.1 25565
+cargo test --workspace --all-targets
 
 # 仮想工場ネットワークの合成ベンチマーク
 cargo run --release -p industrial-bench -- 10000 200
@@ -106,7 +101,7 @@ cargo run -p mod-analyzer -- --modpack /path/to/1.7.10modServerSkyBlock.zip --js
 cargo run -p mod-analyzer -- --modpack /path/to/server --json modpack-report.json
 ```
 
-GitHub Actionsではコンパイル・単体テスト・Clippy・実TCPのStatus/Ping/Login拒否テストを実行します。旧Forge 1.7.10の実機クライアントによる接続テストは未実施です。
+GitHub ActionsではRustフォーマット・全単体/統合テスト・Clippy・releaseビルドを実行し、Rust製の実TCPクライアントでStatus/Login/Playを検証します。旧Forge 1.7.10の実機クライアントによる接続テストは未実施です。
 
 解析レポートにはMod ID（mcmod.info記載分）、CoreModのmanifest設定、参考となるクラス数、Forge/FML参照と読み取りエラーを保存します。**@ModアノテーションからのID・依存解決、Mod実行、JavaクラスのRust変換、Forge接続の実動作は未対応**です。ユーザー所有のMod/ワールドのJAR等をGitに追加しないでください。
 
