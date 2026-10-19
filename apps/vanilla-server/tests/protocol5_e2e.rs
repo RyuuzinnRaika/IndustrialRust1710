@@ -482,17 +482,43 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
         b.len() >= 11 && b[4] == 63 && b[9] == 2
     });
 
-    // Valid start followed by sufficient hand-mining time yields one dirt
-    // directly in the selected player inventory (entities not implemented).
+    // Mine from within reach but outside the pickup radius. The drop must
+    // exist on the ground before a player actually moves within pickup range.
+    send_position(&mut client, 4.5, 65.0, 0.5);
     client.write_all(&frame(7, &dig)).unwrap();
     thread::sleep(Duration::from_millis(900));
     client.write_all(&frame(7, &finish)).unwrap();
-    until_packet(&mut client, 0x2f, |b| {
-        b == [0, 0, 36, 0, 3, 1, 0, 0, 255, 255]
+    let spawn = until_packet(&mut client, 0x0e, |b| b.len() == 24 && b[5] == 2);
+    let mut entity_bytes = spawn.as_slice();
+    let drop_id = read_varint(&mut entity_bytes).unwrap() as i32;
+    assert!(drop_id > 1_000_000_000);
+    let metadata = until_packet(&mut client, 0x1c, |b| {
+        b.len() >= 13 && b[..4] == drop_id.to_be_bytes()
     });
+    assert_eq!(&metadata[4..], &[0xaa,0,3,1,0,0,255,255,127]);
     until_packet(&mut client, 0x23, |b| {
         b.len() >= 11 && b[4] == 63 && b[9] == 0
     });
+    let drop_path = server.directory.join("flat.drops.json");
+    await_file(&drop_path);
+    let drop_file: Value = serde_json::from_slice(&fs::read(&drop_path).unwrap()).unwrap();
+    assert_eq!(drop_file["entries"].as_object().unwrap().len(), 1);
+
+    // A late-joining player must also see this persistent item in the world.
+    let (late, _, _) = server.join("TwinAlpha");
+    drop(late);
+
+    thread::sleep(Duration::from_millis(900));
+    send_position(&mut client, 0.5, 65.0, 0.5);
+    until_packet(&mut client, 0x2f, |b| b == [0,0,36,0,3,1,0,0,255,255]);
+    until_packet(&mut client, 0x0d, |b| {
+        b.len() == 8 && b[..4] == drop_id.to_be_bytes()
+    });
+    until_packet(&mut client, 0x13, |b| {
+        b.len() == 5 && b[0] == 1 && b[1..] == drop_id.to_be_bytes()
+    });
+    let pickup_file: Value=serde_json::from_slice(&fs::read(&drop_path).unwrap()).unwrap();
+    assert!(pickup_file["entries"].as_object().unwrap().is_empty());
 
     // Client claims more than it owns; the server permits one placed dirt but
     // consumes its own authoritative inventory count.
