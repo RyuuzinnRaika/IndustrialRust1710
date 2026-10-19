@@ -9,10 +9,12 @@
 ModとConfig処理は後回しにし、Java Edition 1.7.10 **バニラクライアント専用**でLogin/Play・小規模平坦チャンク・Creative設置/破壊・専用形式への保存を実装中です。`vanilla-server` はStatus専用の `legacy-status-server` とは別バイナリです。
 
 ~~~bash
-cargo run --release -p vanilla-server -- --bind 127.0.0.1:25565 --world ./world/flat.irw
+cp config/whitelist.example.json whitelist.json
+# whitelist.json の name を参加するプレイヤー名に変更
+cargo run --release -p vanilla-server -- --bind 127.0.0.1:25565 --world ./world/flat.irw --whitelist ./whitelist.json
 ~~~
 
-認証なし・1人のみ・既存ワールド非互換の**試作**です。詳細と未実装範囲: [バニラ最小サーバー](docs/14_バニラ最小サーバー.md)。
+ユーザー名ホワイトリスト方式・1人のみ・既存ワールド非互換の**試作**です（本人確認なし）。詳細と未実装範囲: [バニラ最小サーバー](docs/14_バニラ最小サーバー.md)。
 
 ## 現時点で動作する機能
 
@@ -20,7 +22,7 @@ cargo run --release -p vanilla-server -- --bind 127.0.0.1:25565 --world ./world/
 |---|---|---|
 | `legacy-protocol` | VarInt、フレーム・文字列の境界チェック | Play/FMLは未対応 |
 | `legacy-status-server` | 1.7.10クライアントのサーバー一覧向けStatus/Ping | Loginは明示拒否 |
-| `vanilla-server` | Login/Play、固定平坦ワールド、限定Creative操作、独自保存 | 1人/認証なし、既存ワールド非互換、サバイバルなし |
+| `vanilla-server` | ホワイトリスト入場判定、20Hz Tick時計、Login/Play、固定平坦ワールド、限定Creative操作、独自保存 | 1人/ユーザー名偽装可能、既存ワールド非互換、サバイバルなし |
 | `industrial-core` | 決定的Tick、接続グラフキャッシュ、エネルギー配分 | Minecraftゲーム本体とは未接続 |
 | `industrial-bench` | 仮想エネルギー網の合成ベンチマーク | 実ワールドのTPSではない |
 | `mod-analyzer` | JAR・ClassFile解析、Modpack ZIP/フォルダのJSON監査 | Modの実行・変換・互換性判定ではない |
@@ -58,11 +60,11 @@ GitHub Actionsではコンパイル・単体テスト・Clippy・実TCPのStatus
 
 ## 実装ロードマップ
 
-1. Rustでログイン・Play・最小の平坦ワールド表示
-2. チャンク・NBT・Anvil保存・ブロック変更と再起動
-3. Forge 1.7.10のFMLハンドシェイクとMod IDマッピング
-4. Java ClassFile中間表現・限定的なRustへの部分コンパイル
-5. 工業化Modを個別に対象選定し、機械・電力・配管の互換実装と実ワールド負荷比較
+1. 1.7.10 Vanillaのログイン・ホワイトリスト・Play通信を安定化（進行中）
+2. 20TPSワールドロジック、チャンク生成・保存、NBT/Anvilを実装
+3. 複数プレイヤー・インベントリ・クラフト・サバイバル・Mob・物理・レッドストーンを順次実装
+4. 1.7.10バニラクライアントの実機総合テストと耐久テスト
+5. **Mod/Forge/Config、Java→Rustの変換はユーザー指定により保留**
 
 Mod互換を広く保証することはできません。CoreMod、リフレクション、Javaクラス変換、Forgeライフサイクル等の互換性は検証と実装が必要です。
 

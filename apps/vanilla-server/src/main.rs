@@ -1,8 +1,11 @@
 //! Vanilla-only Minecraft 1.7.10 / Protocol 5 server proof of concept.
 //! Offline-mode by design: bind to loopback unless you trust every client on your LAN.
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
+mod clock;
+mod whitelist;
 mod world;
 
+use clock::Clock;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use legacy_protocol::{
@@ -16,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use whitelist::Whitelist;
 use world::{World, MAX_CHUNK, MIN_CHUNK};
 
 const MAX_CONNECTIONS: usize = 32;
@@ -156,7 +160,7 @@ fn status(s: &mut TcpStream, occupied: &AtomicBool) -> io::Result<()> {
         _ => Err(bad("bad status ping")),
     }
 }
-fn join(s: &mut TcpStream, world: &Mutex<World>) -> io::Result<()> {
+fn join(s: &mut TcpStream, world: &Mutex<World>, clock: &Clock) -> io::Result<()> {
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
     // difficulty u8, maxPlayers u8, levelType string.
     let mut join = Vec::new();
@@ -181,8 +185,8 @@ fn join(s: &mut TcpStream, world: &Mutex<World>) -> io::Result<()> {
     health.extend_from_slice(&5.0f32.to_be_bytes());
     send(s, 0x06, &health)?;
     let mut time = Vec::new();
-    time.extend_from_slice(&0i64.to_be_bytes());
-    time.extend_from_slice(&6000i64.to_be_bytes());
+    time.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
+    time.extend_from_slice(&clock.day_time().to_be_bytes());
     send(s, 0x03, &time)?;
 
     for cz in MIN_CHUNK..=MAX_CHUNK {
@@ -237,14 +241,46 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
     let dz = player.2 - (z as f64 + 0.5);
     dx * dx + dy * dy + dz * dz <= 64.0
 }
-fn play(s: &mut TcpStream, world: &Mutex<World>, world_path: &Path, name: &str) -> io::Result<()> {
+fn play(
+    s: &mut TcpStream,
+    world: &Mutex<World>,
+    world_path: &Path,
+    name: &str,
+    whitelist_path: &Path,
+    clock: &Clock,
+) -> io::Result<()> {
     s.set_read_timeout(Some(Duration::from_secs(1)))?;
     let mut location = (0.5, SPAWN_Y, 0.5);
     let started = Instant::now();
     let mut ping_time = started;
     let mut pong_time = started;
     let mut ping_id: i32 = 0;
+    let mut last_time_tick: u64 = clock.ticks();
+    let mut admission_check = started;
     loop {
+        if admission_check.elapsed() >= Duration::from_secs(2) {
+            // Reload on a bounded interval: file removal, corruption or revocation
+            // causes active sessions to be disconnected (fail closed).
+            let allowed = Whitelist::load(whitelist_path).is_ok_and(|list| list.allows(name));
+            if !allowed {
+                let mut reason = Vec::new();
+                write_string(
+                    &json!({"text":"Whitelist access revoked or unavailable"}).to_string(),
+                    &mut reason,
+                )?;
+                send(s, 0x40, &reason)?;
+                return Ok(());
+            }
+            admission_check = Instant::now();
+        }
+        let now_tick = clock.ticks();
+        if now_tick.saturating_sub(last_time_tick) >= 20 {
+            let mut time = Vec::with_capacity(16);
+            time.extend_from_slice(&(now_tick as i64).to_be_bytes());
+            time.extend_from_slice(&clock.day_time().to_be_bytes());
+            send(s, 0x03, &time)?;
+            last_time_tick = now_tick;
+        }
         if ping_time.elapsed() >= Duration::from_secs(10) {
             ping_id = ping_id.wrapping_add(1);
             send(s, 0, &ping_id.to_be_bytes())?;
@@ -399,6 +435,8 @@ fn handle(
     occupied: Arc<AtomicBool>,
     world: Arc<Mutex<World>>,
     path: Arc<PathBuf>,
+    whitelist_path: Arc<PathBuf>,
+    clock: Arc<Clock>,
 ) -> io::Result<()> {
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -432,10 +470,20 @@ fn handle(
     let mut login = Input(&data);
     let name = login.string(16)?;
     login.finish()?;
-    if !(3..=16).contains(&name.len())
-        || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
-    {
+    if !whitelist::valid_name(&name) {
         login_disconnect(&mut s, "Invalid player name.")?;
+        return Ok(());
+    }
+    // Every new login reads the whitelist from disk: no implicit public access.
+    let allowed = match Whitelist::load(&whitelist_path) {
+        Ok(list) => list.allows(&name),
+        Err(error) => {
+            eprintln!("whitelist access denied due to read/parse error: {error}");
+            false
+        }
+    };
+    if !allowed {
+        login_disconnect(&mut s, "You are not on the server whitelist.")?;
         return Ok(());
     }
     if occupied
@@ -451,21 +499,23 @@ fn handle(
     write_string(&name, &mut success)?;
     send(&mut s, 0x02, &success)?;
     println!("joined: {name} (UNAUTHENTICATED OFFLINE MODE)");
-    join(&mut s, &world)?;
-    let result = play(&mut s, &world, &path, &name);
+    join(&mut s, &world, &clock)?;
+    let result = play(&mut s, &world, &path, &name, &whitelist_path, &clock);
     println!("left: {name}");
     result
 }
 fn main() -> io::Result<()> {
     let mut bind = "127.0.0.1:25565".parse::<SocketAddr>().unwrap();
     let mut world_path = PathBuf::from("world/flat.irw");
+    let mut whitelist_path = PathBuf::from("whitelist.json");
+    let mut insecure_offline_lan = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan]");
                 println!(
-                    "Offline-mode single-player creative prototype. Default bind is loopback."
+                    "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
                 return Ok(());
             }
@@ -482,9 +532,26 @@ fn main() -> io::Result<()> {
                     .ok_or_else(|| bad("missing --world value"))?
                     .into()
             }
+            "--whitelist" => {
+                whitelist_path = args
+                    .next()
+                    .ok_or_else(|| bad("missing --whitelist value"))?
+                    .into()
+            }
+            "--insecure-offline-lan" => insecure_offline_lan = true,
             _ => return Err(bad("unknown command-line argument")),
         }
     }
+    if !bind.ip().is_loopback() && !insecure_offline_lan {
+        return Err(io::Error::new(ErrorKind::PermissionDenied,
+            "offline-mode whitelist cannot authenticate usernames: non-loopback bind requires explicit --insecure-offline-lan"));
+    }
+    let list = Whitelist::load(&whitelist_path)?;
+    println!(
+        "Whitelist: {} permitted name(s) (NOT cryptographic identity authentication)",
+        list.len()
+    );
+    let (clock, _clock_thread) = Clock::start();
     let world = Arc::new(Mutex::new(World::load(&world_path)?));
     let listener = TcpListener::bind(bind)?;
     println!(
@@ -495,6 +562,7 @@ fn main() -> io::Result<()> {
     let occupied = Arc::new(AtomicBool::new(false));
     let connections = Arc::new(AtomicUsize::new(0));
     let path = Arc::new(world_path);
+    let allow_path = Arc::new(whitelist_path);
     for accepted in listener.incoming() {
         let stream = accepted?;
         if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
@@ -505,9 +573,11 @@ fn main() -> io::Result<()> {
         let clients = Arc::clone(&occupied);
         let w = Arc::clone(&world);
         let p = Arc::clone(&path);
+        let wl = Arc::clone(&allow_path);
+        let game_clock = Arc::clone(&clock);
         thread::spawn(move || {
             let _connection = admission;
-            if let Err(e) = handle(stream, clients, w, p) {
+            if let Err(e) = handle(stream, clients, w, p, wl, game_clock) {
                 if e.kind() != ErrorKind::UnexpectedEof {
                     eprintln!("client disconnected: {e}");
                 }
