@@ -28,7 +28,13 @@ def packet(c):
   if not ch&128:return ch,b[i+1:]
  raise ValueError()
 def string(b):
- n=b[0];assert n==len(b)-1;return b[1:].decode()
+ n=0
+ for i,byte in enumerate(b[:5]):
+  n|=(byte&127)<<(7*i)
+  if not byte&128:
+   assert n==len(b)-i-1
+   return b[i+1:].decode()
+ raise ValueError('bad string length')
 host=sys.argv[1] if len(sys.argv)>1 else "127.0.0.1"
 port=int(sys.argv[2]) if len(sys.argv)>2 else 25565
 def handshake(state):return frame(vi(0)+vi(5)+st("localhost")+port.to_bytes(2,"big")+vi(state))
