@@ -1,3 +1,15 @@
+## Rust Survival試験モード（限定）
+
+通常のCreative PoCを残しつつ、**`--survival`を明示したときだけ**生存モード（Protocol 5 gamemode 0）でログインします。
+
+```bash
+cargo run --release -p vanilla-server -- --survival --whitelist whitelist.json --world ./world/flat.irw
+```
+
+草・土・砂・砂利・石・丸石・木材の一部だけについて、手で掘る開始/終了時間の検査と簡易採掘物の直接インベントリ加算を行います。ブロック設置では選択中のアイテムを必ず消費します。Creativeで取得したアイテムとSurvival取得アイテムは**別の保存ファイル**に分離し、クリエイティブ用パケットをSurvival中に送ってもアイテムは作られません。
+
+**限定実装**：採掘速度は未完成の暫定値、アイテムはドロップEntityとして出現せず直接インベントリへ加算。クラフトGUI・アイテムクリック/移動・道具耐久・空腹・Mob・重力/ダメージ・ワールド生成は未実装です。「普通のSurvivalが完成した」という意味ではありません。
+
 # IndustrialRust1710 — Rustのみで実装するMinecraft Java 1.7.10サーバー
 
 このプロジェクトは **RustネイティブのMinecraft Java Edition 1.7.10 / Protocol 5サーバー**を開発します。**公式Javaサーバーを起動するラッパーやPython製の運用・テストプログラムは、現行ソースから廃止しました。** ゲーム本体と自動通信テストはRustです。Mod/Forge互換機能は後回しにしています。
