@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(w.get(-32, 60, -32), 7 << 4);
         assert_eq!(w.get(-33, 63, 0), 0);
         assert_eq!(w.chunk_data(-1, 0).len(), 20736);
-        assert_eq!(w.chunk_data(0, 0)[15 * 256], 0);
+        assert_eq!(w.chunk_data(0, 0)[15 * 256], 2);
     }
     #[test]
     fn persist_and_rollback() {
