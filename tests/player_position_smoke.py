@@ -6,6 +6,7 @@ import struct
 import sys
 import time
 from pathlib import Path
+from protocol5_test_utils import wait_for_idle
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 25568
@@ -53,7 +54,7 @@ def connect():
     s.settimeout(5)
     s.sendall(frame(0,vi(5)+string("localhost")+struct.pack(">H",PORT)+vi(2))+frame(0,string("Positioner")))
     pid,_=packet(s)
-    assert pid==2, pid
+    assert pid==2, (pid, _)
     for _ in range(40):
         pid,content=packet(s)
         if pid==0x08:
@@ -67,6 +68,7 @@ assert pos == (0.5,65.0,0.5), pos
 # 1.7.10 position: x, stance, feet y, z, onGround
 client.sendall(frame(0x04,struct.pack(">ddddB",3.5,66.62,65.0,2.5,1)))
 client.close()
+wait_for_idle(HOST, PORT)
 for _ in range(40):
     if SAVE.is_file():
         try:
@@ -91,4 +93,5 @@ for _ in range(10):
 else:
     raise AssertionError("out-of-world position was not corrected")
 client.close()
+wait_for_idle(HOST, PORT)
 print("Pumpkin NBT player save/reconnect and boundary smoke test passed")
