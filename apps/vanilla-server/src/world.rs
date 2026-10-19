@@ -143,7 +143,7 @@ impl World {
         Ok(world)
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
         let temp = path.with_extension("tmp");
