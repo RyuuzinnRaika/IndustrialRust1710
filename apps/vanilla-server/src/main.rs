@@ -264,7 +264,10 @@ fn play(
     clock: &Clock,
     session: PlayerSession<'_>,
 ) -> io::Result<()> {
-    let PlayerSession { position: player, save_path: player_path } = session;
+    let PlayerSession {
+        position: player,
+        save_path: player_path,
+    } = session;
     s.set_read_timeout(Some(Duration::from_secs(1)))?;
     let mut location = (player.x, player.y, player.z);
     let started = Instant::now();
@@ -547,7 +550,10 @@ fn handle(
         &name,
         &whitelist_path,
         &clock,
-        PlayerSession { position: &mut player_state, save_path: &player_file },
+        PlayerSession {
+            position: &mut player_state,
+            save_path: &player_file,
+        },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
     let saved = player_state.save(&player_file);
