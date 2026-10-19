@@ -4,6 +4,16 @@
 
 > 現状は開発用PoCです。Minecraft内でプレイできるサーバー、Forge 1.7.10のMod JAR実行、Java→Rust変換は未実装です。Status/Pingへの応答は可能です。
 
+## 新規: Rustネイティブのバニラ最小サーバー
+
+ModとConfig処理は後回しにし、Java Edition 1.7.10 **バニラクライアント専用**でLogin/Play・小規模平坦チャンク・Creative設置/破壊・専用形式への保存を実装中です。`vanilla-server` はStatus専用の `legacy-status-server` とは別バイナリです。
+
+~~~bash
+cargo run --release -p vanilla-server -- --bind 127.0.0.1:25565 --world ./world/flat.irw
+~~~
+
+認証なし・1人のみ・既存ワールド非互換の**試作**です。詳細と未実装範囲: [バニラ最小サーバー](docs/14_バニラ最小サーバー.md)。
+
 ## 現時点で動作する機能
 
 | コンポーネント | 機能 | 限界 |
