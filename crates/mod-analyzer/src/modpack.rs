@@ -248,6 +248,7 @@ pub fn inspect_pack_reader<R: Read + Seek>(reader: R, source: &Path) -> io::Resu
         if total > MAX_TOTAL_JAR_BYTES {
             return Err(invalid("total mod bytes exceed 256 MiB limit"));
         }
+        let entry_size = entry.size();
         let mut bytes = Vec::new();
         match entry.take(MAX_JAR_BYTES + 1).read_to_end(&mut bytes) {
             Ok(n) if n as u64 <= MAX_JAR_BYTES => {
@@ -259,7 +260,7 @@ pub fn inspect_pack_reader<R: Read + Seek>(reader: R, source: &Path) -> io::Resu
                 report.append(info)?;
             }
             Err(e) => {
-                let mut info = ModFile::new(path, entry.size());
+                let mut info = ModFile::new(path, entry_size);
                 info.error = Some(format!("decompression failed: {e}"));
                 report.append(info)?;
             }
@@ -327,7 +328,8 @@ pub fn inspect_modpack(path: &Path) -> io::Result<ModpackReport> {
     }
     let dir = if path.join("mods").is_dir() { path.join("mods") } else { path.to_path_buf() };
     let mut report = ModpackReport::new(path);
-    scan_directory(&dir, 0, &mut report, &mut 0)?;
+    let mut total = 0;
+    scan_directory(&dir, 0, &mut report, &mut total)?;
     report.mods.sort_by(|a, b| a.path.cmp(&b.path));
     if report.mods.is_empty() {
         report.warnings.push("No mod archives found under directory".into());
