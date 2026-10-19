@@ -4,6 +4,7 @@
 mod anvil_export;
 mod anvil_import;
 mod clock;
+mod ground_items;
 mod inventory;
 mod multiplayer;
 mod player;
@@ -12,6 +13,7 @@ mod whitelist;
 mod world;
 
 use clock::Clock;
+use ground_items::GroundItems;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use inventory::{Inventory, Stack};
@@ -325,6 +327,8 @@ struct PlayerSession<'a> {
     save_path: &'a Path,
     inventory: &'a mut Inventory,
     inventory_path: &'a Path,
+    ground_items: &'a Mutex<GroundItems>,
+    ground_path: &'a Path,
     survival: bool,
     hub: &'a Hub,
     entity_id: i32,
@@ -344,6 +348,8 @@ fn play(
         save_path: player_path,
         inventory,
         inventory_path,
+        ground_items,
+        ground_path,
         survival,
         hub,
         entity_id,
@@ -365,6 +371,7 @@ fn play(
     // Keep fragmented TCP frames across short receive timeouts.
     let mut packet_reader = BufferedFrameReader::new();
     let mut mining: Option<MiningProgress> = None;
+    let mut last_pickup = Instant::now();
     loop {
         while let Ok(event) = events.try_recv() {
             send(s, event.id, &event.body)?;
@@ -373,6 +380,28 @@ fn play(
             player.save(player_path)?;
             inventory.save(inventory_path)?;
             saved_at = Instant::now();
+        }
+        if survival && last_pickup.elapsed() >= Duration::from_millis(200) {
+            let mut ground = ground_items
+                .lock()
+                .map_err(|_| io::Error::other("ground items lock poisoned"))?;
+            if let Some(item) = ground.nearby_ready(location) {
+                let mut candidate = inventory.clone();
+                if let Some(slot) = candidate.receive_one(item.stack) {
+                    // Commit removal to disk before inventory credit to avoid
+                    // duplicate pickup after process interruption. This is not
+                    // yet a cross-file atomic transaction and can lose items.
+                    if let Some(collected) = ground.take(ground_path, item.id)? {
+                        candidate.save(inventory_path)?;
+                        *inventory = candidate;
+                        for packet in collected.collected(entity_id) {
+                            hub.broadcast(packet);
+                        }
+                        send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                    }
+                }
+            }
+            last_pickup = Instant::now();
         }
         if admission_check.elapsed() >= Duration::from_secs(2) {
             // Reload on a bounded interval: file removal, corruption or revocation
@@ -527,21 +556,15 @@ fn play(
                             let mut changed = false;
                             if world::in_bounds(x, y, z) && near(location, x, y, z) {
                                 if let Some(item) = mined {
-                                    let mut candidate = inventory.clone();
-                                    let stack = Stack {
-                                        id: item.id,
-                                        count: 1,
-                                        damage: item.damage,
-                                    };
-                                    if let Some(slot) = candidate.receive_one(stack) {
-                                        // World durability first. If disk persistence fails,
-                                        // do not credit the item, preventing inventory duplication.
-                                        if w.update_and_save(world_path, x, y, z, 0)? {
-                                            candidate.save(inventory_path)?;
-                                            *inventory = candidate;
-                                            send(s, 0x2f, &inventory.set_slot(slot)?)?;
-                                            changed = true;
-                                        }
+                                    let mut ground = ground_items.lock()
+                                        .map_err(|_| io::Error::other("ground items lock poisoned"))?;
+                                    if !ground.is_full() && w.update_and_save(world_path,x,y,z,0)? {
+                                        let stack = Stack { id:item.id,count:1,damage:item.damage };
+                                        // World saved first; an interrupted insertion can lose
+                                        // the item, never multiply it.
+                                        let dropped = ground.put(ground_path,stack,(x,y,z))?;
+                                        for packet in dropped.spawn() { hub.broadcast(packet); }
+                                        changed = true;
                                     }
                                 }
                             }
@@ -723,6 +746,8 @@ fn handle(
     path: Arc<PathBuf>,
     whitelist_path: Arc<PathBuf>,
     clock: Arc<Clock>,
+    ground_items: Arc<Mutex<GroundItems>>,
+    ground_path: Arc<PathBuf>,
     survival: bool,
 ) -> io::Result<()> {
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -842,6 +867,17 @@ fn handle(
         let spawn = multiplayer::spawn(other)?;
         send(&mut s, spawn.id, &spawn.body)?;
     }
+    // Send existing persisted items to newly joining clients. They are
+    // independent of the player's chunk updates in this bounded prototype.
+    if survival {
+        let ground = ground_items.lock()
+            .map_err(|_| io::Error::other("ground items lock poisoned"))?;
+        for item in ground.items() {
+            for packet in item.spawn() {
+                send(&mut s, packet.id, &packet.body)?;
+            }
+        }
+    }
     let result = play(
         &mut s,
         &world,
@@ -854,6 +890,8 @@ fn handle(
             save_path: &player_file,
             inventory: &mut inventory_state,
             inventory_path: &inventory_file,
+            ground_items: &ground_items,
+            ground_path: &ground_path,
             survival,
             hub: &hub,
             entity_id,
@@ -966,6 +1004,12 @@ fn main() -> io::Result<()> {
     );
     let (clock, _clock_thread) = Clock::start();
     let world = Arc::new(Mutex::new(World::load(&world_path)?));
+    let ground_path = Arc::new(GroundItems::location(&world_path));
+    let ground_items = Arc::new(Mutex::new(if survival {
+        GroundItems::load(&ground_path)?
+    } else {
+        GroundItems::default()
+    }));
     let listener = TcpListener::bind(bind)?;
     println!(
         "IndustrialRust1710: listening on {} (1.7.10 vanilla, up to 8 players)",
@@ -988,9 +1032,11 @@ fn main() -> io::Result<()> {
         let p = Arc::clone(&path);
         let wl = Arc::clone(&allow_path);
         let game_clock = Arc::clone(&clock);
+        let drops = Arc::clone(&ground_items);
+        let drops_path = Arc::clone(&ground_path);
         thread::spawn(move || {
             let _connection = admission;
-            if let Err(e) = handle(stream, clients, w, p, wl, game_clock, survival) {
+            if let Err(e) = handle(stream, clients, w, p, wl, game_clock, drops, drops_path, survival) {
                 if e.kind() != ErrorKind::UnexpectedEof {
                     eprintln!("client disconnected: {e}");
                 }
