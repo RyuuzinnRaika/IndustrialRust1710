@@ -211,7 +211,11 @@ pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
     }
     for ((rx, rz), columns) in regions {
         let filename = regions_dir.join(format!("r.{rx}.{rz}.mca"));
-        let file = File::create(filename)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(filename)?;
         let mut region = Region::create(file).map_err(wrap)?;
         for (cx, cz) in columns {
             let bytes = nbt_for_chunk(world, cx, cz)?;
