@@ -2,6 +2,7 @@
 //! Offline-mode by design: bind to loopback unless you trust every client on your LAN.
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
 mod clock;
+mod multiplayer;
 mod player;
 mod whitelist;
 mod world;
@@ -12,12 +13,14 @@ use flate2::Compression;
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, PROTOCOL_VERSION,
 };
+use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
 use player::PlayerPosition;
 use serde_json::json;
 use std::io::{self, ErrorKind, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -135,14 +138,14 @@ fn offline_uuid(name: &str) -> String {
         &hex[20..32]
     )
 }
-fn status(s: &mut TcpStream, occupied: &AtomicBool) -> io::Result<()> {
+fn status(s: &mut TcpStream, hub: &Hub) -> io::Result<()> {
     let (id, body) = receive(s)?;
     if id != 0 || !body.is_empty() {
         return Err(bad("invalid status request"));
     }
     let status = json!({
         "version":{"name":"1.7.10","protocol":PROTOCOL_VERSION},
-        "players":{"max":1,"online":usize::from(occupied.load(Ordering::Acquire)),"sample":[]},
+        "players":{"max":MAX_PLAYERS,"online":hub.count()?,"sample":[]},
         "description":{"text":"IndustrialRust1710 vanilla-only prototype"}
     });
     let mut bytes = Vec::new();
@@ -166,12 +169,13 @@ fn join(
     world: &Mutex<World>,
     clock: &Clock,
     position: &PlayerPosition,
+    entity_id: i32,
 ) -> io::Result<()> {
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
     // difficulty u8, maxPlayers u8, levelType string.
     let mut join = Vec::new();
-    join.extend_from_slice(&1i32.to_be_bytes());
-    join.extend_from_slice(&[1, 0, 1, 1]);
+    join.extend_from_slice(&entity_id.to_be_bytes());
+    join.extend_from_slice(&[1, 0, 1, MAX_PLAYERS as u8]);
     write_string("default", &mut join)?;
     send(s, 0x01, &join)?;
 
@@ -235,7 +239,7 @@ fn send_player_position(s: &mut TcpStream, location: &PlayerPosition) -> io::Res
     bytes.push(0);
     send(s, 0x08, &bytes)
 }
-fn block_change(s: &mut TcpStream, world: &World, x: i32, y: i32, z: i32) -> io::Result<()> {
+fn block_change_event(world: &World, x: i32, y: i32, z: i32) -> Event {
     let block = world.get(x, y, z);
     let mut data = Vec::new();
     data.extend_from_slice(&x.to_be_bytes());
@@ -243,7 +247,10 @@ fn block_change(s: &mut TcpStream, world: &World, x: i32, y: i32, z: i32) -> io:
     data.extend_from_slice(&z.to_be_bytes());
     write_varint((block >> 4) as u32, &mut data);
     data.push((block & 15) as u8);
-    send(s, 0x23, &data)
+    Event {
+        id: 0x23,
+        body: data,
+    }
 }
 fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
     let dx = player.0 - (x as f64 + 0.5);
@@ -254,6 +261,9 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
 struct PlayerSession<'a> {
     position: &'a mut PlayerPosition,
     save_path: &'a Path,
+    hub: &'a Hub,
+    entity_id: i32,
+    events: &'a Receiver<Event>,
 }
 fn play(
     s: &mut TcpStream,
@@ -267,9 +277,15 @@ fn play(
     let PlayerSession {
         position: player,
         save_path: player_path,
+        hub,
+        entity_id,
+        events,
     } = session;
-    s.set_read_timeout(Some(Duration::from_secs(1)))?;
+    s.set_read_timeout(Some(Duration::from_millis(50)))?;
     let mut location = (player.x, player.y, player.z);
+    let mut yaw: f32 = 0.0;
+    let mut pitch: f32 = 0.0;
+    let mut last_movement_broadcast = Instant::now() - Duration::from_millis(50);
     let started = Instant::now();
     let mut ping_time = started;
     let mut pong_time = started;
@@ -278,6 +294,9 @@ fn play(
     let mut admission_check = started;
     let mut saved_at = started;
     loop {
+        while let Ok(event) = events.try_recv() {
+            send(s, event.id, &event.body)?;
+        }
         if saved_at.elapsed() >= Duration::from_secs(5) {
             player.save(player_path)?;
             saved_at = Instant::now();
@@ -340,7 +359,12 @@ fn play(
                 let message = input.string(100)?;
                 input.finish()?;
                 if message == "/help" {
-                    as_chat(s, "Commands: /help, /save. Creative blocks only; mobs and Forge are unsupported.")?;
+                    as_chat(s, "Commands: /help, /save, /list. Creative blocks only; mobs and Forge are unsupported.")?;
+                } else if message == "/list" {
+                    as_chat(
+                        s,
+                        &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")),
+                    )?;
                 } else if message == "/save" {
                     world
                         .lock()
@@ -348,7 +372,15 @@ fn play(
                         .save(world_path)?;
                     as_chat(s, "World saved.")?;
                 } else if !message.starts_with('/') {
-                    as_chat(s, &format!("<{name}> {message}"))?;
+                    let mut bytes = Vec::new();
+                    write_string(
+                        &json!({"text":format!("<{name}> {message}")}).to_string(),
+                        &mut bytes,
+                    )?;
+                    hub.broadcast(Event {
+                        id: 0x02,
+                        body: bytes,
+                    });
                 } else {
                     as_chat(s, "Unknown command; try /help")?;
                 }
@@ -363,8 +395,11 @@ fn play(
                 let y = input.f64()?;
                 let z = input.f64()?;
                 if id == 6 {
-                    input.f32()?;
-                    input.f32()?;
+                    yaw = input.f32()?;
+                    pitch = input.f32()?;
+                    if !yaw.is_finite() || !pitch.is_finite() {
+                        return Err(bad("invalid player look angles"));
+                    }
                 }
                 input.u8()?;
                 input.finish()?;
@@ -385,12 +420,23 @@ fn play(
                 }
                 location = (x, y, z);
                 *player = candidate;
+                if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
+                    hub.move_player(entity_id, candidate, yaw, pitch);
+                    last_movement_broadcast = Instant::now();
+                }
             }
             5 => {
-                input.f32()?;
-                input.f32()?;
+                yaw = input.f32()?;
+                pitch = input.f32()?;
                 input.u8()?;
                 input.finish()?;
+                if !yaw.is_finite() || !pitch.is_finite() {
+                    return Err(bad("invalid player look angles"));
+                }
+                if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
+                    hub.move_player(entity_id, *player, yaw, pitch);
+                    last_movement_broadcast = Instant::now();
+                }
             }
             7 => {
                 let action = input.i8()?;
@@ -400,10 +446,17 @@ fn play(
                 input.i8()?; // face
                 input.finish()?;
                 let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                if (action == 0 || action == 2) && y > 60 && near(location, x, y, z) {
-                    w.update_and_save(world_path, x, y, z, 0)?;
+                let changed = if (action == 0 || action == 2) && y > 60 && near(location, x, y, z) {
+                    w.update_and_save(world_path, x, y, z, 0)?
+                } else {
+                    false
+                };
+                let event = block_change_event(&w, x, y, z);
+                if changed {
+                    hub.broadcast(event);
+                } else {
+                    send(s, event.id, &event.body)?;
                 }
-                block_change(s, &w, x, y, z)?; // authoritative rollback
             }
             8 => {
                 let x = input.i32()?;
@@ -423,13 +476,14 @@ fn play(
                         _ => (x + 1, y, z),
                     };
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let mut changed = false;
                     if let Some((block_id, meta)) = held {
                         if world::is_placeable(block_id)
                             && w.get(x, y, z) != 0
                             && w.get(nx, ny, nz) == 0
                             && near(location, nx, ny, nz)
                         {
-                            w.update_and_save(
+                            changed = w.update_and_save(
                                 world_path,
                                 nx,
                                 ny,
@@ -439,7 +493,12 @@ fn play(
                         }
                     }
                     if world::in_bounds(nx, ny, nz) {
-                        block_change(s, &w, nx, ny, nz)?;
+                        let event = block_change_event(&w, nx, ny, nz);
+                        if changed {
+                            hub.broadcast(event);
+                        } else {
+                            send(s, event.id, &event.body)?;
+                        }
                     }
                 }
             }
@@ -449,10 +508,13 @@ fn play(
         }
     }
 }
-struct Admission(Arc<AtomicBool>);
-impl Drop for Admission {
+struct PlayerAdmission {
+    hub: Arc<Hub>,
+    entity_id: i32,
+}
+impl Drop for PlayerAdmission {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.hub.remove(self.entity_id);
     }
 }
 struct ConnectionGuard(Arc<AtomicUsize>);
@@ -463,7 +525,7 @@ impl Drop for ConnectionGuard {
 }
 fn handle(
     mut s: TcpStream,
-    occupied: Arc<AtomicBool>,
+    hub: Arc<Hub>,
     world: Arc<Mutex<World>>,
     path: Arc<PathBuf>,
     whitelist_path: Arc<PathBuf>,
@@ -482,7 +544,7 @@ fn handle(
     let next = handshake.varint()?;
     handshake.finish()?;
     if next == 1 {
-        return status(&mut s, &occupied);
+        return status(&mut s, &hub);
     }
     if next != 2 {
         return Err(bad("unsupported handshake state"));
@@ -517,14 +579,6 @@ fn handle(
         login_disconnect(&mut s, "You are not on the server whitelist.")?;
         return Ok(());
     }
-    if occupied
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        login_disconnect(&mut s, "Prototype accepts one player at a time.")?;
-        return Ok(());
-    }
-    let _admission = Admission(occupied);
     let player_file = PlayerPosition::location(&path, &name);
     let mut player_state = match PlayerPosition::load(&player_file) {
         Ok(state) => state,
@@ -537,12 +591,37 @@ fn handle(
             return Ok(());
         }
     };
+    let uuid = offline_uuid(&name);
+    let (entity_id, events, previous) = match hub.add(name.clone(), uuid.clone(), player_state) {
+        Ok(result) => result,
+        Err(JoinError::Full) => {
+            login_disconnect(&mut s, "Server is full.")?;
+            return Ok(());
+        }
+        Err(JoinError::Duplicate) => {
+            login_disconnect(&mut s, "That username is already connected.")?;
+            return Ok(());
+        }
+    };
+    let _admission = PlayerAdmission {
+        hub: Arc::clone(&hub),
+        entity_id,
+    };
     let mut success = Vec::new();
-    write_string(&offline_uuid(&name), &mut success)?;
+    write_string(&uuid, &mut success)?;
     write_string(&name, &mut success)?;
     send(&mut s, 0x02, &success)?;
     println!("joined: {name} (UNAUTHENTICATED OFFLINE MODE)");
-    join(&mut s, &world, &clock, &player_state)?;
+    join(&mut s, &world, &clock, &player_state, entity_id)?;
+    // 1.7.10 tab list entries precede other player entity spawns.
+    let self_list = multiplayer::list_entry(&name, true)?;
+    send(&mut s, self_list.id, &self_list.body)?;
+    for other in &previous {
+        let list = multiplayer::list_entry(&other.name, true)?;
+        send(&mut s, list.id, &list.body)?;
+        let spawn = multiplayer::spawn(other)?;
+        send(&mut s, spawn.id, &spawn.body)?;
+    }
     let result = play(
         &mut s,
         &world,
@@ -553,6 +632,9 @@ fn handle(
         PlayerSession {
             position: &mut player_state,
             save_path: &player_file,
+            hub: &hub,
+            entity_id,
+            events: &events,
         },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
@@ -612,11 +694,11 @@ fn main() -> io::Result<()> {
     let world = Arc::new(Mutex::new(World::load(&world_path)?));
     let listener = TcpListener::bind(bind)?;
     println!(
-        "IndustrialRust1710: listening on {} (1.7.10 vanilla, 1 player)",
+        "IndustrialRust1710: listening on {} (1.7.10 vanilla, up to 8 players)",
         listener.local_addr()?
     );
     println!("WARNING: offline-mode has no account authentication. Do not expose to the internet.");
-    let occupied = Arc::new(AtomicBool::new(false));
+    let hub = Arc::new(Hub::default());
     let connections = Arc::new(AtomicUsize::new(0));
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
@@ -627,7 +709,7 @@ fn main() -> io::Result<()> {
             continue;
         }
         let admission = ConnectionGuard(Arc::clone(&connections));
-        let clients = Arc::clone(&occupied);
+        let clients = Arc::clone(&hub);
         let w = Arc::clone(&world);
         let p = Arc::clone(&path);
         let wl = Arc::clone(&allow_path);
