@@ -45,7 +45,11 @@ struct PlayerNbt {
 
 impl Default for PlayerPosition {
     fn default() -> Self {
-        Self { x: 0.5, y: SPAWN_Y, z: 0.5 }
+        Self {
+            x: 0.5,
+            y: SPAWN_Y,
+            z: 0.5,
+        }
     }
 }
 
@@ -55,7 +59,9 @@ fn invalid(message: &'static str) -> io::Error {
 
 impl PlayerPosition {
     pub fn is_valid(&self) -> bool {
-        self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.z.is_finite()
             && (0.0..256.0).contains(&self.y)
             && (-32.0..48.0).contains(&self.x)
             && (-32.0..48.0).contains(&self.z)
@@ -63,10 +69,13 @@ impl PlayerPosition {
 
     pub fn location(world_file: &Path, username: &str) -> PathBuf {
         // The caller validated this name with whitelist::valid_name.
-        let parent = world_file.parent()
+        let parent = world_file
+            .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        parent.join("players").join(format!("{}.dat", username.to_ascii_lowercase()))
+        parent
+            .join("players")
+            .join(format!("{}.dat", username.to_ascii_lowercase()))
     }
 
     fn load_legacy_json(path: &Path) -> io::Result<Self> {
@@ -78,17 +87,23 @@ impl PlayerPosition {
         if raw.len() as u64 > MAX_LEGACY_BYTES {
             return Err(invalid("legacy player file is too large"));
         }
-        let value: serde_json::Value = serde_json::from_slice(&raw)
-            .map_err(|_| invalid("invalid legacy player JSON"))?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&raw).map_err(|_| invalid("invalid legacy player JSON"))?;
         if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
             return Err(invalid("unsupported legacy player version"));
         }
         let pos = Self {
-            x: value.get("x").and_then(serde_json::Value::as_f64)
+            x: value
+                .get("x")
+                .and_then(serde_json::Value::as_f64)
                 .ok_or_else(|| invalid("missing x"))?,
-            y: value.get("y").and_then(serde_json::Value::as_f64)
+            y: value
+                .get("y")
+                .and_then(serde_json::Value::as_f64)
                 .ok_or_else(|| invalid("missing y"))?,
-            z: value.get("z").and_then(serde_json::Value::as_f64)
+            z: value
+                .get("z")
+                .and_then(serde_json::Value::as_f64)
                 .ok_or_else(|| invalid("missing z"))?,
         };
         if !pos.is_valid() {
@@ -116,7 +131,9 @@ impl PlayerPosition {
         let mut decompressed = Vec::new();
         let file = File::open(path)?;
         let decoder = GzDecoder::new(file);
-        decoder.take(MAX_DECOMPRESSED_BYTES + 1).read_to_end(&mut decompressed)?;
+        decoder
+            .take(MAX_DECOMPRESSED_BYTES + 1)
+            .read_to_end(&mut decompressed)?;
         if decompressed.len() as u64 > MAX_DECOMPRESSED_BYTES {
             return Err(invalid("NBT decompression limit exceeded"));
         }
@@ -125,7 +142,11 @@ impl PlayerPosition {
         if nbt.pos.len() != 3 {
             return Err(invalid("player Pos must contain three coordinates"));
         }
-        let pos = Self { x: nbt.pos[0], y: nbt.pos[1], z: nbt.pos[2] };
+        let pos = Self {
+            x: nbt.pos[0],
+            y: nbt.pos[1],
+            z: nbt.pos[2],
+        };
         if !pos.is_valid() {
             return Err(invalid("player location outside loaded world"));
         }
@@ -145,8 +166,8 @@ impl PlayerPosition {
             health: 20.0,
             save_version: 1,
         };
-        let binary = fastnbt::to_bytes(&record)
-            .map_err(|_| invalid("could not serialize player NBT"))?;
+        let binary =
+            fastnbt::to_bytes(&record).map_err(|_| invalid("could not serialize player NBT"))?;
         if binary.len() as u64 > MAX_DECOMPRESSED_BYTES {
             return Err(invalid("encoded player NBT too large"));
         }
@@ -174,9 +195,24 @@ mod tests {
     #[test]
     fn rejects_invalid_locations() {
         assert!(PlayerPosition::default().is_valid());
-        assert!(!(PlayerPosition { x: f64::NAN, y: 65.0, z: 0.5 }).is_valid());
-        assert!(!(PlayerPosition { x: 48.0, y: 65.0, z: 0.5 }).is_valid());
-        assert!(!(PlayerPosition { x: 0.5, y: -1.0, z: 0.5 }).is_valid());
+        assert!(!(PlayerPosition {
+            x: f64::NAN,
+            y: 65.0,
+            z: 0.5
+        })
+        .is_valid());
+        assert!(!(PlayerPosition {
+            x: 48.0,
+            y: 65.0,
+            z: 0.5
+        })
+        .is_valid());
+        assert!(!(PlayerPosition {
+            x: 0.5,
+            y: -1.0,
+            z: 0.5
+        })
+        .is_valid());
     }
 
     #[test]
@@ -184,7 +220,11 @@ mod tests {
         let parent = std::env::temp_dir().join(format!("ir1710-permissive-{}", std::process::id()));
         let file = PlayerPosition::location(&parent.join("flat.irw"), "Test_Player");
         let _ = fs::remove_dir_all(&parent);
-        let pos = PlayerPosition { x: 4.5, y: 65.0, z: 2.5 };
+        let pos = PlayerPosition {
+            x: 4.5,
+            y: 65.0,
+            z: 2.5,
+        };
         pos.save(&file).unwrap();
         assert!(fs::read(&file).unwrap().starts_with(&[0x1f, 0x8b]));
         assert_eq!(PlayerPosition::load(&file).unwrap(), pos);
@@ -195,7 +235,8 @@ mod tests {
 
     #[test]
     fn migrates_legacy_json_without_removing_source() {
-        let parent = std::env::temp_dir().join(format!("ir1710-permissive-migrate-{}", std::process::id()));
+        let parent =
+            std::env::temp_dir().join(format!("ir1710-permissive-migrate-{}", std::process::id()));
         let _ = fs::remove_dir_all(&parent);
         let file = PlayerPosition::location(&parent.join("flat.irw"), "Test_Player");
         let legacy = file.with_extension("json");
@@ -211,7 +252,8 @@ mod tests {
 
     #[test]
     fn rejects_oversized_gzip_output() {
-        let parent = std::env::temp_dir().join(format!("ir1710-permissive-size-{}", std::process::id()));
+        let parent =
+            std::env::temp_dir().join(format!("ir1710-permissive-size-{}", std::process::id()));
         fs::create_dir_all(&parent).unwrap();
         let file = parent.join("oversized.dat");
         let out = File::create(&file).unwrap();
