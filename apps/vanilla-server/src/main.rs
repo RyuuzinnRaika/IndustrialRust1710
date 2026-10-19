@@ -748,8 +748,7 @@ impl Drop for ConnectionGuard {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
-fn handle(
-    mut s: TcpStream,
+struct ServerContext {
     hub: Arc<Hub>,
     world: Arc<Mutex<World>>,
     path: Arc<PathBuf>,
@@ -758,7 +757,11 @@ fn handle(
     ground_items: Arc<Mutex<GroundItems>>,
     ground_path: Arc<PathBuf>,
     survival: bool,
-) -> io::Result<()> {
+}
+fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
+    let ServerContext {
+        hub, world, path, whitelist_path, clock, ground_items, ground_path, survival,
+    } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
     let (id, data) = receive(&mut s)?;
@@ -1046,9 +1049,10 @@ fn main() -> io::Result<()> {
         let drops_path = Arc::clone(&ground_path);
         thread::spawn(move || {
             let _connection = admission;
-            if let Err(e) = handle(
-                stream, clients, w, p, wl, game_clock, drops, drops_path, survival,
-            ) {
+            if let Err(e) = handle(stream, ServerContext {
+                hub:clients, world:w, path:p, whitelist_path:wl,
+                clock:game_clock, ground_items:drops, ground_path:drops_path, survival,
+            }) {
                 if e.kind() != ErrorKind::UnexpectedEof {
                     eprintln!("client disconnected: {e}");
                 }
