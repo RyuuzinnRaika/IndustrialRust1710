@@ -116,6 +116,8 @@ impl NativeServer {
         let mut entity_id = None;
         let mut position = None;
         let mut chunks = 0;
+        let mut inventory_seen = false;
+        let mut hotbar_seen = false;
         for _ in 0..MAX_PACKETS {
             let (pid, payload) = receive(&mut socket);
             if pid == 1 {
@@ -134,12 +136,21 @@ impl NativeServer {
                     .unwrap();
                 assert_eq!(decoded.len(), sections.count_ones() as usize * 10240 + 256);
                 chunks += 1;
+            } else if pid == 0x30 {
+                assert_eq!(payload.len(), 93);
+                assert_eq!(&payload[..3], &[0, 0, 45]);
+                inventory_seen = true;
+            } else if pid == 0x09 {
+                assert_eq!(payload, [0]);
+                hotbar_seen = true;
             } else if pid == 8 {
                 position = Some(read_position(&payload));
                 break;
             }
         }
         assert_eq!(chunks, 25, "initial viewport should contain 25 chunks");
+        assert!(inventory_seen, "missing 1.7.10 Window Items");
+        assert!(hotbar_seen, "missing selected hotbar packet");
         (
             socket,
             entity_id.expect("missing Join Game"),
@@ -258,6 +269,8 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
         body.windows(9).any(|w| w == b"Commands:")
     });
 
+    // Dig a grass block. Placement is denied until the Creative action has
+    // populated a server-owned hotbar slot.
     // Dig a grass block and place a cobblestone block through Protocol 5.
     let mut dig = vec![0u8];
     dig.extend_from_slice(&0i32.to_be_bytes());
@@ -282,13 +295,44 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     place.extend_from_slice(&(-1i16).to_be_bytes());
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x2f, |b| b == [0, 0, 36, 255, 255]);
+    until_packet(&mut client, 0x23, |b| {
+        b.len() >= 11
+            && i32::from_be_bytes(b[..4].try_into().unwrap()) == 1
+            && b[4] == 64
+            && b[9] == 0
+    });
+    // Protocol5 C10 Creative Inventory Action: window 0, slot 36, item 4 x64.
+    let mut creative = 36i16.to_be_bytes().to_vec();
+    creative.extend_from_slice(&[0, 4, 64, 0, 0, 255, 255]);
+    client.write_all(&frame(0x10, &creative)).unwrap();
+    until_packet(&mut client, 0x2f, |b| {
+        b == [0, 0, 36, 0, 4, 64, 0, 0, 255, 255]
+    });
+    // Now the same client-held value is backed by the server's selected slot.
+    client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x23, |b| {
         b.len() >= 11
             && i32::from_be_bytes(b[..4].try_into().unwrap()) == 1
             && b[4] == 64
             && b[9] == 4
     });
+    // Invalid hotbar indexes are not accepted. Valid selection of an empty
+    // slot must not allow forged placement from the previous item.
+    client.write_all(&frame(9, &1i16.to_be_bytes())).unwrap();
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x2f, |b| b == [0, 0, 37, 255, 255]);
     drop(client);
+    server.wait_idle();
+    let persisted_inv = server.directory.join("players/rusttester.inventory.json");
+    await_file(&persisted_inv);
+    let saved_inv: Value = serde_json::from_slice(&fs::read(&persisted_inv).unwrap()).unwrap();
+    assert_eq!(saved_inv["selected"], 1);
+    assert_eq!(saved_inv["slots"][36]["id"], 4);
+    // Rejoin: selected hotbar must remain unchanged.
+    let (mut rejoined, _, _) = server.join("RustTester");
+    rejoined.write_all(&frame(9, &0i16.to_be_bytes())).unwrap();
+    drop(rejoined);
     server.wait_idle();
     let original_path = server.directory.join("flat.irw");
     await_file(&original_path);
