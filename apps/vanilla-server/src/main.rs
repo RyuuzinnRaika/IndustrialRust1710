@@ -327,6 +327,7 @@ fn play(
     } = session;
     s.set_read_timeout(Some(Duration::from_millis(50)))?;
     let mut location = (player.x, player.y, player.z);
+    let mut loaded_chunks = view_chunks(chunk_center(player));
     let mut yaw: f32 = 0.0;
     let mut pitch: f32 = 0.0;
     let mut last_movement_broadcast = Instant::now() - Duration::from_millis(50);
@@ -450,20 +451,19 @@ fn play(
                 if !x.is_finite()
                     || !y.is_finite()
                     || !z.is_finite()
-                    || x.abs() > 128.0
-                    || z.abs() > 128.0
-                    || !(0.0..=255.0).contains(&y)
+                    || !(0.0..256.0).contains(&y)
                 {
                     return Err(bad("invalid player coordinates"));
                 }
                 let candidate = PlayerPosition { x, y, z };
                 if !candidate.is_valid() {
-                    // A client cannot move beyond the server's loaded chunk range.
+                    // Sparse world positions are validated against the global world limit.
                     send_player_position(s, player)?;
                     continue;
                 }
                 location = (x, y, z);
                 *player = candidate;
+                sync_chunks(s, world, &mut loaded_chunks, chunk_center(&candidate))?;
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, candidate, yaw, pitch);
                     last_movement_broadcast = Instant::now();
@@ -777,6 +777,18 @@ mod tests {
         assert_eq!(offline_uuid("Notch"), offline_uuid("Notch"));
         assert_ne!(offline_uuid("Notch"), offline_uuid("Herobrine"));
         assert_eq!(&offline_uuid("Notch")[14..15], "3");
+    }
+    #[test]
+    fn negative_coordinate_and_view_window() {
+        let zero = view_chunks((0, 0));
+        let shifted = view_chunks((3, 0));
+        assert_eq!(zero.len(), 25);
+        assert_eq!(shifted.len(), 25);
+        assert_eq!(zero.difference(&shifted).count(), 15);
+        assert_eq!(shifted.difference(&zero).count(), 15);
+        let player = PlayerPosition { x: -0.5, y: 65.0, z: -16.1 };
+        assert_eq!(chunk_center(&player), (-1, -2));
+        assert_eq!(view_chunks((MIN_CHUNK, MIN_CHUNK)).len(), 9);
     }
     #[test]
     fn parses_bounds_and_slot() {
