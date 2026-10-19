@@ -101,4 +101,29 @@ try:
 finally:
     FILE.write_bytes(ORIGINAL)
 
+# The server may still be saving a kicked player's NBT data when its
+# disconnect packet is received. Gate subsequent integration tests on
+# actual session release instead of relying on a timing sleep.
+def online_players():
+    with socket.create_connection((HOST,PORT),timeout=3) as conn:
+        conn.settimeout(3)
+        packet_handshake=frame(0,varint(5)+text("localhost")+PORT.to_bytes(2,"big")+varint(1))
+        conn.sendall(packet_handshake+frame(0))
+        pid,payload=receive(conn)
+        assert pid==0
+        size=0
+        index=0
+        for shift in range(0,35,7):
+            byte=payload[index]
+            index+=1
+            size |= (byte & 127) << shift
+            if not byte & 128: break
+        return json.loads(payload[index:index+size])["players"]["online"]
+
+deadline=time.monotonic()+6
+while online_players() != 0:
+    if time.monotonic() > deadline:
+        raise AssertionError("revoked player session was not released")
+    time.sleep(0.05)
+
 print("Whitelist admission/invalid JSON/live revocation smoke test passed")
