@@ -58,4 +58,4 @@ jobs:
           PY
           python3 tests/whitelist_smoke.py 127.0.0.1 25568 "$RUNNER_TEMP/whitelist.json"
           python3 tests/vanilla_smoke.py 127.0.0.1 25568 "$RUNNER_TEMP/industrial-smoke.irw"
-          python3 tests/player_position_smoke.py 127.0.0.1 25568 "$RUNNER_TEMP/players/positioner.json"
+          python3 tests/player_position_smoke.py 127.0.0.1 25568 "$RUNNER_TEMP/players/positioner.dat"
