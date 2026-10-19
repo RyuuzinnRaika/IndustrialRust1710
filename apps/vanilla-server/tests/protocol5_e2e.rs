@@ -16,9 +16,13 @@ struct NativeServer {
     process: Child,
     directory: PathBuf,
     port: u16,
+    survival: bool,
 }
 impl NativeServer {
     fn start() -> Self {
+        Self::start_with_mode(false)
+    }
+    fn start_with_mode(survival: bool) -> Self {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -40,13 +44,14 @@ impl NativeServer {
         let reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
-        let process = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
-            .args(["--bind", &format!("127.0.0.1:{port}")])
+        let mut command=Command::new(env!("CARGO_BIN_EXE_vanilla-server"));
+        command.args(["--bind", &format!("127.0.0.1:{port}")])
             .arg("--whitelist")
             .arg(directory.join("whitelist.json"))
             .arg("--world")
-            .arg(directory.join("flat.irw"))
-            .stdout(Stdio::null())
+            .arg(directory.join("flat.irw"));
+        if survival { command.arg("--survival"); }
+        let process=command.stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
@@ -54,6 +59,7 @@ impl NativeServer {
             process,
             directory,
             port,
+            survival,
         };
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -122,7 +128,7 @@ impl NativeServer {
             let (pid, payload) = receive(&mut socket);
             if pid == 1 {
                 entity_id = Some(i32::from_be_bytes(payload[..4].try_into().unwrap()));
-                assert_eq!(payload[4], 1); // Creative mode, still a PoC.
+                assert_eq!(payload[4], u8::from(!self.survival));
             } else if pid == 0x21 {
                 let sections = u16::from_be_bytes(payload[9..11].try_into().unwrap());
                 assert_eq!(sections & 0x18, 0x18);
@@ -441,4 +447,71 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
         .status()
         .unwrap();
     assert!(!retry.success(), "import overwrote an existing world");
+}
+
+#[test]
+fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
+    let server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+
+    // No prior inventory and empty hotbar: Creative action must not mint items.
+    let mut creative = 36i16.to_be_bytes().to_vec();
+    creative.extend_from_slice(&[0, 4, 64, 0, 0, 255, 255]);
+    client.write_all(&frame(0x10, &creative)).unwrap();
+    until_packet(&mut client, 0x30, |data| data.len() == 93);
+
+    let mut dig = vec![0];
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(63);
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(1);
+    let mut finish = dig.clone();
+    finish[0] = 2;
+    // A forged immediate completion without starting must be rejected.
+    client.write_all(&frame(7, &finish)).unwrap();
+    until_packet(&mut client, 0x23, |b| b.len() >= 11 && b[4] == 63 && b[9] == 2);
+    client.write_all(&frame(7, &dig)).unwrap();
+    client.write_all(&frame(7, &finish)).unwrap();
+    until_packet(&mut client, 0x23, |b| b.len() >= 11 && b[4] == 63 && b[9] == 2);
+
+    // Valid start followed by sufficient hand-mining time yields one dirt
+    // directly in the selected player inventory (entities not implemented).
+    client.write_all(&frame(7, &dig)).unwrap();
+    thread::sleep(Duration::from_millis(900));
+    client.write_all(&frame(7, &finish)).unwrap();
+    until_packet(&mut client, 0x2f, |b| b == [0,0,36,0,3,1,0,0,255,255]);
+    until_packet(&mut client, 0x23, |b| b.len() >= 11 && b[4] == 63 && b[9] == 0);
+
+    // Client claims more than it owns; the server permits one placed dirt but
+    // consumes its own authoritative inventory count.
+    let mut placed = vec![];
+    placed.extend_from_slice(&1i32.to_be_bytes());
+    placed.push(63);
+    placed.extend_from_slice(&0i32.to_be_bytes());
+    placed.push(1);
+    placed.extend_from_slice(&3i16.to_be_bytes());
+    placed.push(64);
+    placed.extend_from_slice(&0i16.to_be_bytes());
+    placed.extend_from_slice(&(-1i16).to_be_bytes());
+    placed.extend_from_slice(&[8,8,8]);
+    client.write_all(&frame(8, &placed)).unwrap();
+    until_packet(&mut client, 0x2f, |b| b == [0,0,36,255,255]);
+    until_packet(&mut client, 0x23, |b| b.len() >= 11 && b[4] == 64 && b[9] == 3);
+    // Repeating the placement with an empty hotbar must be refused.
+    placed[3] = 2; // still a valid, unedited target x=2
+    client.write_all(&frame(8, &placed)).unwrap();
+    until_packet(&mut client, 0x2f, |b| b == [0,0,36,255,255]);
+    until_packet(&mut client, 0x23, |b| b.len() >= 11 && b[4] == 64 && b[9] == 0);
+
+    drop(client);
+    server.wait_idle();
+    let path = server.directory.join("players/rusttester.survival.inventory.json");
+    await_file(&path);
+    let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert!(value["slots"][36].is_null());
+    // Old Creative inventory never becomes Survival inventory.
+    assert!(!server.directory.join("players/rusttester.inventory.json").exists());
+    let (rejoined, _, _) = server.join("RustTester");
+    drop(rejoined);
+    server.wait_idle();
 }
