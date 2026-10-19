@@ -2,6 +2,7 @@
 //! Offline-mode by design: bind to loopback unless you trust every client on your LAN.
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
 mod anvil_export;
+mod anvil_import;
 mod clock;
 mod multiplayer;
 mod player;
@@ -693,13 +694,14 @@ fn main() -> io::Result<()> {
     let mut bind = "127.0.0.1:25565".parse::<SocketAddr>().unwrap();
     let mut world_path = PathBuf::from("world/flat.irw");
     let mut anvil_export_path: Option<PathBuf> = None;
+    let mut anvil_import_path: Option<PathBuf> = None;
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--export-anvil NEW_DIR]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -731,8 +733,30 @@ fn main() -> io::Result<()> {
                         .ok_or_else(|| bad("missing --export-anvil directory"))?,
                 ));
             }
+            "--import-anvil" => {
+                anvil_import_path = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| bad("missing --import-anvil directory"))?,
+                ));
+            }
             _ => return Err(bad("unknown command-line argument")),
         }
+    }
+    if anvil_export_path.is_some() && anvil_import_path.is_some() {
+        return Err(bad(
+            "--export-anvil and --import-anvil are mutually exclusive",
+        ));
+    }
+    if let Some(source) = anvil_import_path {
+        // Only import our own exported flat-world snapshots; never overwrite
+        // an existing IRW1 world. This mode does not open a listening socket.
+        let (columns, changed_columns) = anvil_import::import(&source, &world_path)?;
+        println!(
+            "Imported {columns} Anvil columns ({changed_columns} edited columns) into {}",
+            world_path.display()
+        );
+        println!("This is a strict IRW1 conversion, not arbitrary Minecraft world compatibility.");
+        return Ok(());
     }
     if let Some(destination) = anvil_export_path {
         // Export mode never binds a TCP socket and never modifies the IRW1 source.

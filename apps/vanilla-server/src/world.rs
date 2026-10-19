@@ -126,6 +126,53 @@ impl World {
         }
         Ok(true)
     }
+    /// Apply one parsed block to a *detached* import world. Call save_new only
+    /// after every Anvil chunk has been validated; never persist partial imports.
+    pub fn import_block(&mut self, x: i32, y: i32, z: i32, block: u16) -> io::Result<()> {
+        if !in_bounds(x, y, z) || block >> 4 > 255 {
+            return Err(invalid("imported block outside 1.7.10 world limits"));
+        }
+        let key = (x, y as u8, z);
+        if block == Self::default_block(y as u8) {
+            return Ok(());
+        }
+        if !self.edits.contains_key(&key) && self.edits.len() >= MAX_EDITS {
+            return Err(invalid("Anvil import exceeds IRW1 edit limit"));
+        }
+        self.edits.insert(key, block);
+        Ok(())
+    }
+
+    /// Publish a new IRW1 file only after all bytes are durable.
+    /// hard_link is atomic and fails if the destination already exists.
+    /// An interrupted import may leave the .importing staging file, but never
+    /// replaces a source world or an existing target.
+    pub fn save_new(&self, path: &Path) -> io::Result<()> {
+        if path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "IRW1 target exists",
+            ));
+        }
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        let staging = path.with_extension("importing");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
+        let written = self.write_to(&mut file).and_then(|_| file.sync_all());
+        drop(file);
+        if let Err(err) = written {
+            let _ = fs::remove_file(&staging);
+            return Err(err);
+        }
+        let published = fs::hard_link(&staging, path);
+        let _ = fs::remove_file(staging);
+        published
+    }
+
     pub fn load(path: &Path) -> io::Result<Self> {
         let bytes = match fs::read(path) {
             Ok(v) => v,
@@ -154,12 +201,7 @@ impl World {
         }
         Ok(world)
     }
-    pub fn save(&self, path: &Path) -> io::Result<()> {
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent)?;
-        }
-        let temp = path.with_extension("tmp");
-        let mut f = File::create(&temp)?;
+    fn write_to(&self, f: &mut File) -> io::Result<()> {
         f.write_all(MAGIC)?;
         f.write_all(&(self.edits.len() as u32).to_be_bytes())?;
         for (&(x, y, z), &block) in &self.edits {
@@ -168,10 +210,18 @@ impl World {
             f.write_all(&z.to_be_bytes())?;
             f.write_all(&block.to_be_bytes())?;
         }
+        Ok(())
+    }
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        let temp = path.with_extension("tmp");
+        let mut f = File::create(&temp)?;
+        self.write_to(&mut f)?;
         f.sync_all()?;
         drop(f);
-        // On OSes that cannot atomically replace a destination file, fail safely,
-        // keeping the original untouched rather than deleting it.
+        // Keep the original on filesystems that disallow atomic replacement.
         fs::rename(temp, path)
     }
     /// Serializes the pre-1.8 Section ID/metadata/light arrays in Y-major order.
@@ -256,6 +306,26 @@ mod tests {
         assert!(!w
             .update_and_save(&path, WORLD_LIMIT, 65, 2, 4 << 4)
             .unwrap());
+    }
+    #[test]
+    fn never_replaces_an_existing_import_target() {
+        let base = std::env::temp_dir().join(format!("ir1710-world-import-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let target = base.join("imported.irw");
+        let mut world = World::new();
+        world.import_block(-49, 145, 19, (4 << 4) | 2).unwrap();
+        world.import_block(1, 63, 1, 0).unwrap();
+        world.save_new(&target).unwrap();
+        let first = fs::read(&target).unwrap();
+        assert_eq!(
+            World::load(&target).unwrap().get(-49, 145, 19),
+            (4 << 4) | 2
+        );
+        assert_eq!(World::load(&target).unwrap().get(1, 63, 1), 0);
+        assert!(world.save_new(&target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), first);
+        fs::remove_dir_all(base).unwrap();
     }
     #[test]
     fn corrupt_save_rejected() {
