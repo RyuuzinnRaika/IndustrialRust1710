@@ -1,5 +1,12 @@
 # 変更履歴
 
+## 2026-10-19 — 1.7.10 Vanilla Rustサーバー基礎（PR #3）
+
+- Mod/Forge/Config機能は当面保留。バニラ基本機能を先に実装する方針へ変更。
+- 独立した vanilla-server：Protocol 5 Login/Play、固定平坦チャンク、Creativeブロック更新、独自IRW1保存を追加。
+- 認証なし・1人のみ・既存世界と非互換という制限を明記。
+- 単体テストと実TCPソケットのgoldenスモークテストをCIへ追加。
+
 ## 2026-10-19 — v0.3 Rustネイティブ優先に変更
 
 - メインラインをForge/JVMオフロードから、Rust製Minecraft 1.7.10サーバーの新規実装へ変更。
