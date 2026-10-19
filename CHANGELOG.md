@@ -1,3 +1,17 @@
+## 2026-10-19 — 公式Minecraft 1.7.10のLog4j安全起動
+
+- Mojang公式セキュリティ告知に従い、`log4j2_17-111.xml`を公式ホストから取得、SHA-1を照合。
+- Java 8起動時に`-Dlog4j.configurationFile=log4j2_17-111.xml`を常時指定。対策XML欠落や改変時は起動拒否。
+- CIに実ネットワークによる公式対策ファイル取得、モックによる不正ファイル拒否/VM引数チェックを追加。
+
+## 2026-10-19 — 普通に遊べる公式Minecraft 1.7.10 Vanillaサーバーを別経路で提供
+
+- Rust製PoCは未完成のままとし、Mojang公式のVanilla 1.7.10サーバーJARを合法的にユーザー環境へ直接取得する `tools/vanilla1710.py` を追加。
+- 固定SHA-1/サイズ検証、Java 8検査、`online-mode=true`、`white-list=true`、localhost初期待受、RCON無効、EULAの明示同意を必須とする。
+- Windows/Linux導入手順・ホワイトリスト操作・バックアップ・LANのファイアウォール注意点を追加。`runtime/`と公式ゲームJARをGit管理外へ。
+- PythonユニットテストおよびCIの公式JAR取得・ハッシュ検証・設定テストを追加。
+- 「Modなしで普通に遊べる」経路は**公式Javaサーバーによるもの**。RustネイティブのVanillaサバイバル/インベントリ/Mob等の未実装は変わらない。
+
 ## 2026-10-19 — 自前Anvilエクスポートの非破壊ラウンドトリップ
 
 - `--import-anvil EXPORTED_DIR --world NEW.irw` を追加し、IndustrialRust1710自身が作成したフラットスナップショットを安全に読み戻す。
