@@ -44,6 +44,7 @@ impl Clock {
     pub fn day_time(&self) -> i64 {
         ((6000 + self.ticks() % 24000) % 24000) as i64
     }
+    #[cfg(test)]
     pub fn stop(&self) {
         self.running.store(false, Ordering::Release);
     }
