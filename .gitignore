@@ -7,3 +7,8 @@
 # Never commit private server access lists or worlds.
 /whitelist.json
 /world/
+
+# Mojang game files / generated worlds / server identities; never redistribute.
+/runtime/
+**/__pycache__/
+*.pyc
