@@ -2,10 +2,12 @@
 //! Offline-mode by design: bind to loopback unless you trust every client on your LAN.
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
 mod clock;
+mod player;
 mod whitelist;
 mod world;
 
 use clock::Clock;
+use player::PlayerPosition;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use legacy_protocol::{
@@ -23,7 +25,6 @@ use whitelist::Whitelist;
 use world::{World, MAX_CHUNK, MIN_CHUNK};
 
 const MAX_CONNECTIONS: usize = 32;
-const SPAWN_Y: f64 = 65.0;
 fn bad(reason: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, reason)
 }
@@ -160,7 +161,7 @@ fn status(s: &mut TcpStream, occupied: &AtomicBool) -> io::Result<()> {
         _ => Err(bad("bad status ping")),
     }
 }
-fn join(s: &mut TcpStream, world: &Mutex<World>, clock: &Clock) -> io::Result<()> {
+fn join(s: &mut TcpStream, world: &Mutex<World>, clock: &Clock, position: &PlayerPosition) -> io::Result<()> {
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
     // difficulty u8, maxPlayers u8, levelType string.
     let mut join = Vec::new();
@@ -210,20 +211,24 @@ fn join(s: &mut TcpStream, world: &Mutex<World>, clock: &Clock) -> io::Result<()
         }
     }
 
-    // 1.7.x server->client position packet has x/y/z (not stance).
-    let mut position = Vec::new();
-    position.extend_from_slice(&0.5f64.to_be_bytes());
-    position.extend_from_slice(&SPAWN_Y.to_be_bytes());
-    position.extend_from_slice(&0.5f64.to_be_bytes());
-    position.extend_from_slice(&0f32.to_be_bytes()); // yaw
-    position.extend_from_slice(&0f32.to_be_bytes()); // pitch
-    position.push(0); // onGround
-    send(s, 0x08, &position)?;
+    // Player starts at their last safely persisted position.
+    send_player_position(s, position)?;
     as_chat(
         s,
         "Rust vanilla prototype: creative flat world. /help for commands.",
     )?;
     Ok(())
+}
+fn send_player_position(s: &mut TcpStream, location: &PlayerPosition) -> io::Result<()> {
+    // Protocol 5 clientbound position/look: x, feet y, z, yaw, pitch, on_ground.
+    let mut bytes = Vec::with_capacity(33);
+    bytes.extend_from_slice(&location.x.to_be_bytes());
+    bytes.extend_from_slice(&location.y.to_be_bytes());
+    bytes.extend_from_slice(&location.z.to_be_bytes());
+    bytes.extend_from_slice(&0f32.to_be_bytes());
+    bytes.extend_from_slice(&0f32.to_be_bytes());
+    bytes.push(0);
+    send(s, 0x08, &bytes)
 }
 fn block_change(s: &mut TcpStream, world: &World, x: i32, y: i32, z: i32) -> io::Result<()> {
     let block = world.get(x, y, z);
@@ -248,16 +253,23 @@ fn play(
     name: &str,
     whitelist_path: &Path,
     clock: &Clock,
+    player: &mut PlayerPosition,
+    player_path: &Path,
 ) -> io::Result<()> {
     s.set_read_timeout(Some(Duration::from_secs(1)))?;
-    let mut location = (0.5, SPAWN_Y, 0.5);
+    let mut location = (player.x, player.y, player.z);
     let started = Instant::now();
     let mut ping_time = started;
     let mut pong_time = started;
     let mut ping_id: i32 = 0;
     let mut last_time_tick: u64 = clock.ticks();
     let mut admission_check = started;
+    let mut saved_at = started;
     loop {
+        if saved_at.elapsed() >= Duration::from_secs(5) {
+            player.save(player_path)?;
+            saved_at = Instant::now();
+        }
         if admission_check.elapsed() >= Duration::from_secs(2) {
             // Reload on a bounded interval: file removal, corruption or revocation
             // causes active sessions to be disconnected (fail closed).
@@ -353,7 +365,14 @@ fn play(
                 {
                     return Err(bad("invalid player coordinates"));
                 }
+                let candidate = PlayerPosition { x, y, z };
+                if !candidate.is_valid() {
+                    // A client cannot move beyond the server's loaded chunk range.
+                    send_player_position(s, player)?;
+                    continue;
+                }
                 location = (x, y, z);
+                *player = candidate;
             }
             5 => {
                 input.f32()?;
@@ -494,14 +513,26 @@ fn handle(
         return Ok(());
     }
     let _admission = Admission(occupied);
+    let player_file = PlayerPosition::location(&path, &name);
+    let mut player_state = match PlayerPosition::load(&player_file) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("player state unavailable for {name}: {err}");
+            login_disconnect(&mut s, "Player save is unreadable. Administrator must repair it.")?;
+            return Ok(());
+        }
+    };
     let mut success = Vec::new();
     write_string(&offline_uuid(&name), &mut success)?;
     write_string(&name, &mut success)?;
     send(&mut s, 0x02, &success)?;
     println!("joined: {name} (UNAUTHENTICATED OFFLINE MODE)");
-    join(&mut s, &world, &clock)?;
-    let result = play(&mut s, &world, &path, &name, &whitelist_path, &clock);
+    join(&mut s, &world, &clock, &player_state)?;
+    let result = play(&mut s, &world, &path, &name, &whitelist_path, &clock, &mut player_state, &player_file);
+    // Save even on a clean disconnect, timeout, or access revocation.
+    let saved = player_state.save(&player_file);
     println!("left: {name}");
+    saved?;
     result
 }
 fn main() -> io::Result<()> {
