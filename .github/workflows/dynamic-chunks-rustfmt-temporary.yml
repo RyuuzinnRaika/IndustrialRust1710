@@ -1,0 +1,30 @@
+name: Dynamic chunks rustfmt (temporary)
+on:
+  push:
+    branches: [feat/vanilla17-dynamic-chunk-streaming]
+permissions:
+  contents: write
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/vanilla17-dynamic-chunk-streaming
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format and commit
+        shell: bash
+        run: |
+          cargo fmt --all
+          if ! git diff --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add apps/vanilla-server
+            git commit -m 'style(vanilla): format rolling chunk implementation'
+            git push origin HEAD:feat/vanilla17-dynamic-chunk-streaming
+          fi
