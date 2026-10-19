@@ -28,14 +28,16 @@ jobs:
           from pathlib import Path
           root=Path(os.environ['RUNNER_TEMP'])/'official-vanilla-1710'
           jar=root/'minecraft_server.1.7.10.jar'
+          xml=root/'log4j2_17-111.xml'
           assert jar.stat().st_size==9605030
           assert hashlib.sha1(jar.read_bytes()).hexdigest()=='952438ac4e01b4d115c5fc38f891710c4941df29'
+          assert hashlib.sha1(xml.read_bytes()).hexdigest()=='dd2b723346a8dcd48e7f4d245f6bf09e98db9696'
           prop=(root/'server.properties').read_text()
           assert 'online-mode=true' in prop and 'white-list=true' in prop
           assert 'server-ip=127.0.0.1' in prop
           assert (root/'whitelist.json').read_text().strip()=='[]'
           assert 'eula=false' in (root/'eula.txt').read_text()
-          print('Official Mojang vanilla 1.7.10 server verified; EULA intentionally not accepted.')
+          print('Official Mojang vanilla 1.7.10 jar and Log4j mitigation verified; EULA intentionally not accepted.')
           PY
           if python3 tools/vanilla1710.py check --dir "$RUNNER_TEMP/official-vanilla-1710"; then
             echo "ERROR: did not refuse startup without EULA consent"
