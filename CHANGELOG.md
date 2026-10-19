@@ -1,3 +1,10 @@
+## 2026-10-19 — Rust Survivalの地面ドロップ・拾得基盤
+
+- 採掘物の直接インベントリ加算を廃止。Minecraft 1.7.10のSpawn Object / Entity Metadataで地面にアイテムEntityを表示する基礎を追加。
+- 近接拾得をServerで判定し、Collect Item / Destroy Entities / Set Slotを配信。最大512 Entity、JSON永続化・再起動読み戻し。
+- Rust実TCPで採掘→Spawn/Metadata→距離移動→拾得→Destroy、保存ファイルを検証。旧Creativeの動作は維持。
+- 複数の永続ファイルを跨ぐクラッシュ一貫性、全アイテム物理・クラフト等は未完成。
+
 ## 2026-10-19 — Rust Survivalの採掘・アイテム所持と消費（実験版）
 
 - `--survival`でゲームモード0を通知し、簡易採掘の開始/中断/終了を時間・対象ブロック単位で検証。ベッドロックの採掘は拒否。
