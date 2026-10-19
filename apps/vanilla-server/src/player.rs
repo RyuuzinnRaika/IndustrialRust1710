@@ -59,12 +59,13 @@ fn invalid(message: &'static str) -> io::Error {
 
 impl PlayerPosition {
     pub fn is_valid(&self) -> bool {
+        let limit = f64::from(crate::world::WORLD_LIMIT);
         self.x.is_finite()
             && self.y.is_finite()
             && self.z.is_finite()
             && (0.0..256.0).contains(&self.y)
-            && (-32.0..48.0).contains(&self.x)
-            && (-32.0..48.0).contains(&self.z)
+            && (-limit..limit).contains(&self.x)
+            && (-limit..limit).contains(&self.z)
     }
 
     pub fn location(world_file: &Path, username: &str) -> PathBuf {
@@ -202,7 +203,7 @@ mod tests {
         })
         .is_valid());
         assert!(!(PlayerPosition {
-            x: 48.0,
+            x: f64::from(crate::world::WORLD_LIMIT),
             y: 65.0,
             z: 0.5
         })
