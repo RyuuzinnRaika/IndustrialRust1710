@@ -140,7 +140,7 @@ def verify_jar(path: Path, *, sha1: str = SERVER_SHA1, size: int = SERVER_SIZE) 
 
 def download_server(path: Path) -> None:
     if path.exists() or path.is_symlink():
-        verify_jar(path)
+        verify_jar(path, sha1=SERVER_SHA1, size=SERVER_SIZE)
         print(f"検証済み公式1.7.10 JARを再利用: {path}")
         return
     error = None
@@ -169,11 +169,11 @@ def download_server(path: Path) -> None:
                 raise SetupError("Mojang公式JARの長さまたはSHA-1が一致しません。")
             # Refuse to overwrite another process's or user's existing binary.
             if path.exists():
-                verify_jar(path)
+                verify_jar(path, sha1=SERVER_SHA1, size=SERVER_SIZE)
                 return
             # Atomic hard link creation refuses an existing destination.
             os.link(temp_path, path)
-            verify_jar(path)
+            verify_jar(path, sha1=SERVER_SHA1, size=SERVER_SIZE)
             print(f"Mojang公式サーバーJARを取得・SHA-1検証しました: {path}")
             return
         except (OSError, SetupError) as exc:
