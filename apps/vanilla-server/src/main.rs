@@ -6,7 +6,6 @@ mod whitelist;
 mod world;
 
 use clock::Clock;
-use whitelist::Whitelist;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use legacy_protocol::{
@@ -20,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use whitelist::Whitelist;
 use world::{World, MAX_CHUNK, MIN_CHUNK};
 
 const MAX_CONNECTIONS: usize = 32;
@@ -241,7 +241,14 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
     let dz = player.2 - (z as f64 + 0.5);
     dx * dx + dy * dy + dz * dz <= 64.0
 }
-fn play(s: &mut TcpStream, world: &Mutex<World>, world_path: &Path, name: &str, whitelist_path: &Path, clock: &Clock) -> io::Result<()> {
+fn play(
+    s: &mut TcpStream,
+    world: &Mutex<World>,
+    world_path: &Path,
+    name: &str,
+    whitelist_path: &Path,
+    clock: &Clock,
+) -> io::Result<()> {
     s.set_read_timeout(Some(Duration::from_secs(1)))?;
     let mut location = (0.5, SPAWN_Y, 0.5);
     let started = Instant::now();
@@ -257,7 +264,10 @@ fn play(s: &mut TcpStream, world: &Mutex<World>, world_path: &Path, name: &str, 
             let allowed = Whitelist::load(whitelist_path).is_ok_and(|list| list.allows(name));
             if !allowed {
                 let mut reason = Vec::new();
-                write_string(&json!({"text":"Whitelist access revoked or unavailable"}).to_string(), &mut reason)?;
+                write_string(
+                    &json!({"text":"Whitelist access revoked or unavailable"}).to_string(),
+                    &mut reason,
+                )?;
                 send(s, 0x40, &reason)?;
                 return Ok(());
             }
@@ -537,7 +547,10 @@ fn main() -> io::Result<()> {
             "offline-mode whitelist cannot authenticate usernames: non-loopback bind requires explicit --insecure-offline-lan"));
     }
     let list = Whitelist::load(&whitelist_path)?;
-    println!("Whitelist: {} permitted name(s) (NOT cryptographic identity authentication)", list.len());
+    println!(
+        "Whitelist: {} permitted name(s) (NOT cryptographic identity authentication)",
+        list.len()
+    );
     let (clock, _clock_thread) = Clock::start();
     let world = Arc::new(Mutex::new(World::load(&world_path)?));
     let listener = TcpListener::bind(bind)?;

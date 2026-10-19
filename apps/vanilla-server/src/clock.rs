@@ -29,16 +29,24 @@ impl Clock {
                     // Avoid unbounded "catch-up" work after a stall.
                     next = now;
                 }
-                if !worker.running.load(Ordering::Acquire) { break; }
+                if !worker.running.load(Ordering::Acquire) {
+                    break;
+                }
                 worker.ticks.fetch_add(1, Ordering::AcqRel);
                 next += TICK;
             }
         });
         (clock, handle)
     }
-    pub fn ticks(&self) -> u64 { self.ticks.load(Ordering::Acquire) }
-    pub fn day_time(&self) -> i64 { ((6000 + self.ticks() % 24000) % 24000) as i64 }
-    pub fn stop(&self) { self.running.store(false, Ordering::Release); }
+    pub fn ticks(&self) -> u64 {
+        self.ticks.load(Ordering::Acquire)
+    }
+    pub fn day_time(&self) -> i64 {
+        ((6000 + self.ticks() % 24000) % 24000) as i64
+    }
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::Release);
+    }
 }
 #[cfg(test)]
 mod tests {
