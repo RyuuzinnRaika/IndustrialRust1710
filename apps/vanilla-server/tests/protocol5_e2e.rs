@@ -122,14 +122,6 @@ impl NativeServer {
         assert_eq!(chunks, 25, "initial viewport should contain 25 chunks");
         (socket, entity_id.expect("missing Join Game"), position.expect("missing position"))
     }
-    fn run_cli(&self, extra: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
-            .arg("--world")
-            .arg(self.directory.join("flat.irw"))
-            .args(extra)
-            .output()
-            .unwrap()
-    }
 }
 impl Drop for NativeServer {
     fn drop(&mut self) {
