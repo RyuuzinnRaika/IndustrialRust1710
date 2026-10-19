@@ -149,7 +149,8 @@ impl NativeServer {
                 assert_eq!(offset, payload.len());
                 inventory_seen = true;
             } else if pid == 0x09 {
-                assert_eq!(payload, [0]);
+                assert_eq!(payload.len(), 1);
+                assert!(payload[0] <= 8, "invalid selected hotbar index");
                 hotbar_seen = true;
             } else if pid == 8 {
                 position = Some(read_position(&payload));
