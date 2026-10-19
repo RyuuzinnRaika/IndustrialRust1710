@@ -27,6 +27,15 @@ VERSION = "1.7.10"
 SERVER_SHA1 = "952438ac4e01b4d115c5fc38f891710c4941df29"
 SERVER_SIZE = 9_605_030
 JAR_NAME = "minecraft_server.1.7.10.jar"
+# Mojang's official Log4j mitigation for Minecraft 1.7 through 1.11.2.
+# See https://www.minecraft.net/en-us/article/important-message--security-vulnerability-java-edition
+LOG4J_NAME = "log4j2_17-111.xml"
+LOG4J_SHA1 = "dd2b723346a8dcd48e7f4d245f6bf09e98db9696"
+LOG4J_MAX_SIZE = 64 * 1024
+LOG4J_URLS = (
+    f"https://launcher.mojang.com/v1/objects/{LOG4J_SHA1}/{LOG4J_NAME}",
+    f"https://piston-data.mojang.com/v1/objects/{LOG4J_SHA1}/{LOG4J_NAME}",
+)
 DEFAULT_DIR = Path("runtime/vanilla-1.7.10")
 EULA_URL = "https://www.minecraft.net/en-us/eula"
 # Both URLs are Mojang-operated CDN frontends for the same official object.
@@ -184,6 +193,61 @@ def download_server(path: Path) -> None:
     raise SetupError(f"Mojang公式JARを取得できませんでした: {error}")
 
 
+
+def verify_log4j(path: Path, *, sha1: str = LOG4J_SHA1) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise SetupError("Mojang公式Log4j対策XMLが存在しません。")
+    if not 0 < path.stat().st_size <= LOG4J_MAX_SIZE:
+        raise SetupError("Log4j対策XMLのサイズが不正です。")
+    digest = hashlib.sha1(path.read_bytes()).hexdigest()
+    if digest != sha1:
+        raise SetupError("Mojang公式Log4j対策XMLのSHA-1が一致しません。")
+
+
+def download_log4j(path: Path) -> None:
+    """Fetch Mojang's patched logging config; never start a vulnerable 1.7.10 server."""
+    if path.exists() or path.is_symlink():
+        verify_log4j(path, sha1=LOG4J_SHA1)
+        return
+    last_error = None
+    for url in LOG4J_URLS:
+        temporary = None
+        try:
+            fd, name = tempfile.mkstemp(prefix=".log4j-safe-", suffix=".xml", dir=path.parent)
+            temporary = Path(name)
+            total = 0
+            digest = hashlib.sha1()
+            with os.fdopen(fd, "wb") as output:
+                request = Request(url, headers={"User-Agent": "IndustrialRust1710-Vanilla-Setup/1.0"})
+                with urlopen(request, timeout=30) as response:
+                    while True:
+                        block = response.read(8192)
+                        if not block:
+                            break
+                        total += len(block)
+                        if total > LOG4J_MAX_SIZE:
+                            raise SetupError("Mojang Log4j XMLが許容サイズを超えました。")
+                        digest.update(block)
+                        output.write(block)
+                output.flush()
+                os.fsync(output.fileno())
+            if total == 0 or digest.hexdigest() != LOG4J_SHA1:
+                raise SetupError("MojangのLog4j XMLハッシュが期待値と一致しません。")
+            if path.exists():
+                verify_log4j(path, sha1=LOG4J_SHA1)
+                return
+            os.link(temporary, path)
+            verify_log4j(path, sha1=LOG4J_SHA1)
+            print(f"Mojang公式Log4j脆弱性対策を導入: {path}")
+            return
+        except (OSError, SetupError) as exc:
+            last_error = exc
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    raise SetupError(f"重要: Log4j対策XMLを取得できません。脆弱なサーバーは起動しません: {last_error}")
+
+
 def prepare(directory: Path, bind: str, port: int, players: int) -> None:
     ipaddress.IPv4Address(bind)
     if not 1 <= port <= 65535:
@@ -202,6 +266,7 @@ def prepare(directory: Path, bind: str, port: int, players: int) -> None:
         whitelist.write_text("[]\n", encoding="utf-8")
     check_security(directory, require_eula=False)
     download_server(directory / JAR_NAME)
+    download_log4j(directory / LOG4J_NAME)
     print("設定済み: online-mode=true, white-list=true, survival, Java Edition 1.7.10")
     if bind != "127.0.0.1":
         print("注意: ループバック外で待受。OSファイアウォール等で許可端末だけに接続を制限してください。")
@@ -240,6 +305,7 @@ def check_java(binary: str) -> None:
 def run_server(directory: Path, java: str | None, heap: str) -> int:
     check_security(directory, require_eula=True)
     verify_jar(directory / JAR_NAME)
+    verify_log4j(directory / LOG4J_NAME)
     if not re.fullmatch(r"[1-9][0-9]*[MG]", heap):
         raise SetupError("--memory は 2G や 1024M の形式で指定してください。")
     binary = find_java(java)
@@ -248,7 +314,9 @@ def run_server(directory: Path, java: str | None, heap: str) -> int:
     print("コンソールで whitelist add <プレイヤー名> を実行して参加者を許可してください。")
     print("終了時は stop を入力してください。Ctrl+Cでの強制終了は避けてください。", flush=True)
     result = subprocess.run(
-        [binary, "-Xms512M", "-Xmx" + heap, "-jar", JAR_NAME, "nogui"],
+        [binary, "-Xms512M", "-Xmx" + heap,
+         "-Dlog4j.configurationFile=" + LOG4J_NAME,
+         "-jar", JAR_NAME, "nogui"],
         cwd=directory, check=False
     )
     return result.returncode
@@ -279,7 +347,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check":
             check_security(directory, require_eula=True)
             verify_jar(directory / JAR_NAME)
-            print("正常: Mojang公式JAR、online-mode、ホワイトリスト、EULA設定")
+            verify_log4j(directory / LOG4J_NAME)
+            print("正常: Mojang公式JAR・Log4j対策・online-mode・ホワイトリスト・EULA設定")
             return 0
         return run_server(directory, args.java, args.memory)
     except (SetupError, ValueError) as exc:
