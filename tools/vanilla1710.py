@@ -11,6 +11,7 @@ and accept it by editing eula.txt. Online authentication + whitelist stay on.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import ipaddress
 import json
@@ -18,9 +19,13 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
+import time
+import zipfile
 from urllib.request import Request, urlopen
 
 VERSION = "1.7.10"
@@ -313,13 +318,189 @@ def run_server(directory: Path, java: str | None, heap: str) -> int:
     print("Minecraft 1.7.10公式バニラサーバーを起動します。")
     print("コンソールで whitelist add <プレイヤー名> を実行して参加者を許可してください。")
     print("終了時は stop を入力してください。Ctrl+Cでの強制終了は避けてください。", flush=True)
-    result = subprocess.run(
-        [binary, "-Xms512M", "-Xmx" + heap,
-         "-Dlog4j.configurationFile=" + LOG4J_NAME,
-         "-jar", JAR_NAME, "nogui"],
-        cwd=directory, check=False
-    )
-    return result.returncode
+    props = parse_properties(directory / "server.properties")
+    with operation_lock(directory, "run"):
+        if is_port_listening(props["server-ip"], int(props["server-port"])):
+            raise SetupError("指定ポートは使用中です。二重起動はできません。")
+        result = subprocess.run(
+            [binary, "-Xms512M", "-Xmx" + heap,
+             "-Dlog4j.configurationFile=" + LOG4J_NAME,
+             "-jar", JAR_NAME, "nogui"],
+            cwd=directory, check=False
+        )
+        return result.returncode
+
+
+
+def encode_varint(value: int) -> bytes:
+    result = bytearray()
+    while True:
+        byte = value & 127
+        value >>= 7
+        result.append(byte | (128 if value else 0))
+        if not value:
+            return bytes(result)
+
+
+def read_exact(connection: socket.socket, size: int) -> bytes:
+    result = bytearray()
+    while len(result) < size:
+        block = connection.recv(size - len(result))
+        if not block:
+            raise SetupError("サーバーからのステータス応答が途中で切断されました。")
+        result.extend(block)
+    return bytes(result)
+
+
+def read_varint_socket(connection: socket.socket) -> int:
+    value = 0
+    for i in range(5):
+        byte = read_exact(connection, 1)[0]
+        if i == 4 and byte > 15:
+            raise SetupError("無効なMinecraftステータスVarIntです。")
+        value |= (byte & 127) << (7 * i)
+        if byte & 128 == 0:
+            return value
+    raise SetupError("MinecraftステータスVarIntが長すぎます。")
+
+
+def query_status(host: str, port: int, timeout: float = 3.0) -> dict:
+    """Verify that a running server speaks Minecraft Java 1.7.10 Protocol 5."""
+    if not 1 <= port <= 65535 or not 0 < timeout <= 30:
+        raise SetupError("statusのポートまたはタイムアウトが不正です。")
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as conn:
+            conn.settimeout(timeout)
+            address = host.encode("utf-8")
+            if len(address) > 255:
+                raise SetupError("サーバー名が長すぎます。")
+            handshake = (
+                b"\x00" + encode_varint(5) + encode_varint(len(address))
+                + address + struct.pack(">H", port) + b"\x01"
+            )
+            conn.sendall(encode_varint(len(handshake)) + handshake + b"\x01\x00")
+            size = read_varint_socket(conn)
+            if not 2 <= size <= 65536:
+                raise SetupError("Minecraftステータス応答の長さが不正です。")
+            first = read_exact(conn, size)
+            if first[0] != 0:
+                raise SetupError("Minecraft Status Responseではないパケットを受信しました。")
+            offset = 1
+            length = 0
+            for i in range(5):
+                if offset >= len(first):
+                    raise SetupError("Status JSON長が不足しています。")
+                byte = first[offset]
+                offset += 1
+                length |= (byte & 127) << (7 * i)
+                if byte & 128 == 0:
+                    break
+            if length != len(first) - offset or length > 65536:
+                raise SetupError("Status JSON長が一致しません。")
+            status = json.loads(first[offset:].decode("utf-8"))
+            if not isinstance(status, dict) or status.get("version", {}).get("protocol") != 5:
+                raise SetupError("Minecraft Java 1.7.10 (Protocol 5) のサーバーではありません。")
+            return status
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SetupError(f"サーバー接続・ステータス確認に失敗しました: {exc}") from exc
+
+
+@contextmanager
+def operation_lock(directory: Path, purpose: str):
+    """Stop simultaneous launcher-run/backup. A stale lock requires manual review."""
+    lock = directory / ".server-operation.lock"
+    try:
+        handle = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise SetupError(
+            f"{lock} が存在します。サーバー起動中か別の操作中です。"
+            "クラッシュ後の場合はプロセスが停止したと確認してからロックを処理してください。"
+        ) from exc
+    try:
+        with os.fdopen(handle, "w", encoding="ascii") as output:
+            output.write(f"pid={os.getpid()} purpose={purpose} at={int(time.time())}\n")
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def is_port_listening(bind: str, port: int) -> bool:
+    host = "127.0.0.1" if bind == "0.0.0.0" else bind
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except (OSError, TimeoutError):
+        return False
+
+
+def backup_server(directory: Path, output: Path) -> int:
+    """Create-only ZIP after checking the server is offline.
+
+    Backups include world and essential user configuration but never copyrighted
+    Mojang server JARs, private XML mitigation or other generated binaries.
+    """
+    directory = directory.resolve()
+    output = output.resolve()
+    if output == directory or directory in output.parents:
+        raise SetupError("バックアップをサーバーディレクトリー内に保存できません。")
+    if output.exists() or output.is_symlink():
+        raise SetupError("バックアップ先は存在しない新規ZIPファイルを指定してください。")
+    if not output.parent.is_dir():
+        raise SetupError("バックアップ保存先の親ディレクトリーがありません。")
+    props = parse_properties(directory / "server.properties")
+    check_security(directory, require_eula=False)
+    bind = props["server-ip"]
+    port = int(props["server-port"])
+    world_name = props.get("level-name", "world")
+    if (
+        not world_name or world_name in (".", "..")
+        or Path(world_name).name != world_name or "\\" in world_name
+    ):
+        raise SetupError("バックアップ対象のlevel-nameが不正です。")
+    world = directory / world_name
+    if world.is_symlink() or not world.is_dir():
+        raise SetupError(f"ワールドが見つかりません: {world}")
+    with operation_lock(directory, "backup"):
+        if is_port_listening(bind, port):
+            raise SetupError("サーバーがTCPポートで稼働中です。コンソールで stop を実行してください。")
+        files = []
+        for path in world.rglob("*"):
+            if path.is_symlink():
+                raise SetupError(f"ワールドにシンボリックリンクがあります: {path}")
+            if path.is_file():
+                files.append(path)
+        if not files:
+            raise SetupError("ワールドファイルがありません。初回起動・プレイ後にバックアップしてください。")
+        for name in ("server.properties", "whitelist.json", "ops.json", "banned-players.json",
+                     "banned-ips.json", "usercache.json", "eula.txt"):
+            path = directory / name
+            if path.is_symlink():
+                raise SetupError(f"設定にシンボリックリンクがあります: {path}")
+            if path.is_file():
+                files.append(path)
+        staged = None
+        try:
+            fd, temp_name = tempfile.mkstemp(
+                prefix=".vanilla-backup-", suffix=".zip", dir=output.parent
+            )
+            staged = Path(temp_name)
+            with os.fdopen(fd, "wb") as stream:
+                with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+                    for path in sorted(files):
+                        archive.write(path, path.relative_to(directory).as_posix())
+                stream.flush()
+                os.fsync(stream.fileno())
+            # If the server came online mid-copy, refuse to publish a possibly
+            # inconsistent backup. The operation lock blocks our launcher.
+            if is_port_listening(bind, port):
+                raise SetupError("バックアップ中にサーバーが起動しました。保存を中止します。")
+            os.link(staged, output)
+        finally:
+            if staged is not None:
+                staged.unlink(missing_ok=True)
+    print(f"バックアップ作成完了: {output} ({len(files)} ファイル)")
+    print("Minecraft JAR/Log4j XMLは含まれません。必要ならprepareで公式配布元から再取得してください。")
+    return len(files)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -327,10 +508,16 @@ def main(argv: list[str] | None = None) -> int:
         description="Mojang公式Minecraft Java 1.7.10（Modなし）の安全な導入・起動"
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    for command in ("prepare", "check", "run"):
+    for command in ("prepare", "check", "run", "status", "backup"):
         p = sub.add_parser(command)
         p.add_argument("--dir", type=Path, default=DEFAULT_DIR,
                        help="公式サーバー専用の作業ディレクトリー")
+        if command == "status":
+            p.add_argument("--host", default="127.0.0.1")
+            p.add_argument("--port", type=int, default=25565)
+        if command == "backup":
+            p.add_argument("--output", type=Path, required=True,
+                           help="既存ファイルを上書きしないZIPバックアップの保存先")
         if command == "prepare":
             p.add_argument("--bind", default="127.0.0.1", help="初期値は自分のPCからのみ")
             p.add_argument("--port", type=int, default=25565)
@@ -349,6 +536,14 @@ def main(argv: list[str] | None = None) -> int:
             verify_jar(directory / JAR_NAME)
             verify_log4j(directory / LOG4J_NAME)
             print("正常: Mojang公式JAR・Log4j対策・online-mode・ホワイトリスト・EULA設定")
+            return 0
+        if args.command == "status":
+            result = query_status(args.host, args.port)
+            print("正常: Minecraft Java 1.7.10 (Protocol 5) 応答を確認")
+            print(f"接続者: {result.get('players', {}).get('online', '?')}/{result.get('players', {}).get('max', '?')}")
+            return 0
+        if args.command == "backup":
+            backup_server(directory, args.output)
             return 0
         return run_server(directory, args.java, args.memory)
     except (SetupError, ValueError) as exc:
