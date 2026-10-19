@@ -39,3 +39,20 @@ jobs:
           else:raise SystemExit('no listening socket')
           PY
           python3 tests/protocol5_smoke.py 127.0.0.1 25567
+      - name: Vanilla 1.7.10 Login/Play/chunk/edit smoke test
+        shell: bash
+        run: |
+          cargo build -p vanilla-server
+          ./target/debug/vanilla-server --bind 127.0.0.1:25568 --world "$RUNNER_TEMP/industrial-smoke.irw" &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import socket,time
+          for _ in range(40):
+              try:
+                  socket.create_connection(('127.0.0.1', 25568), timeout=0.2).close()
+                  break
+              except OSError: time.sleep(0.1)
+          else: raise SystemExit('vanilla server not listening')
+          PY
+          python3 tests/vanilla_smoke.py 127.0.0.1 25568 "$RUNNER_TEMP/industrial-smoke.irw"

@@ -2,7 +2,17 @@
 
 **Minecraft Java Edition 1.7.10（Protocol 5）向けRustネイティブサーバーの研究開発プロジェクト。**
 
-> 現状は開発用PoCです。Minecraft内でプレイできるサーバー、Forge 1.7.10のMod JAR実行、Java→Rust変換は未実装です。Status/Pingへの応答は可能です。
+> 現状は開発用PoCです。バニラ1.7.10向けLogin/Playの基礎は追加済みですが、完成したMinecraftサーバーではありません。Mod JAR実行・Java→Rust変換は今は対象外です。
+
+## 新規: Rustネイティブのバニラ最小サーバー
+
+ModとConfig処理は後回しにし、Java Edition 1.7.10 **バニラクライアント専用**でLogin/Play・小規模平坦チャンク・Creative設置/破壊・専用形式への保存を実装中です。`vanilla-server` はStatus専用の `legacy-status-server` とは別バイナリです。
+
+~~~bash
+cargo run --release -p vanilla-server -- --bind 127.0.0.1:25565 --world ./world/flat.irw
+~~~
+
+認証なし・1人のみ・既存ワールド非互換の**試作**です。詳細と未実装範囲: [バニラ最小サーバー](docs/14_バニラ最小サーバー.md)。
 
 ## 現時点で動作する機能
 
@@ -10,6 +20,7 @@
 |---|---|---|
 | `legacy-protocol` | VarInt、フレーム・文字列の境界チェック | Play/FMLは未対応 |
 | `legacy-status-server` | 1.7.10クライアントのサーバー一覧向けStatus/Ping | Loginは明示拒否 |
+| `vanilla-server` | Login/Play、固定平坦ワールド、限定Creative操作、独自保存 | 1人/認証なし、既存ワールド非互換、サバイバルなし |
 | `industrial-core` | 決定的Tick、接続グラフキャッシュ、エネルギー配分 | Minecraftゲーム本体とは未接続 |
 | `industrial-bench` | 仮想エネルギー網の合成ベンチマーク | 実ワールドのTPSではない |
 | `mod-analyzer` | JAR・ClassFile解析、Modpack ZIP/フォルダのJSON監査 | Modの実行・変換・互換性判定ではない |
