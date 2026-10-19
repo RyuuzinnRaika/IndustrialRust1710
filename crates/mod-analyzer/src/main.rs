@@ -1,0 +1,36 @@
+use mod_analyzer::inspect_jar;
+use std::path::Path;
+fn main() {
+    let files: Vec<_> = std::env::args().skip(1).collect();
+    if files.is_empty() || files.iter().any(|s| s == "--help") {
+        println!("Usage: mod-analyzer <mod.jar> [mod2.jar ...]");
+        if files.is_empty() {
+            std::process::exit(2);
+        }
+        return;
+    }
+    let mut fail = false;
+    for file in files {
+        match inspect_jar(Path::new(&file)) {
+            Ok(r) => {
+                println!("{file}: entries={} classes={} invalid={} java9plus={} mcmod.info={} coremod={} FML={} Forge={}",r.entries,r.classes,r.invalid_classes,r.post_java8_classes,r.has_mcmod_info,r.has_coremod_manifest,r.references_fml,r.references_forge);
+                for p in r.referenced_packages {
+                    println!("  API {p}");
+                }
+                for e in r.errors {
+                    eprintln!("  WARN {e}");
+                }
+                if r.invalid_classes > 0 {
+                    fail = true;
+                }
+            }
+            Err(e) => {
+                eprintln!("{file}: {e}");
+                fail = true;
+            }
+        }
+    }
+    if fail {
+        std::process::exit(1);
+    }
+}
