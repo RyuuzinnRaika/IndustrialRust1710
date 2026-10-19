@@ -19,9 +19,13 @@ struct NativeServer {
 }
 impl NativeServer {
     fn start() -> Self {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let directory = std::env::temp_dir().join(format!(
-            "ir1710-rust-protocol5-{}-{nanos}", std::process::id()
+            "ir1710-rust-protocol5-{}-{nanos}",
+            std::process::id()
         ));
         fs::create_dir_all(&directory).unwrap();
         let whitelist = json!([
@@ -31,7 +35,8 @@ impl NativeServer {
         fs::write(
             directory.join("whitelist.json"),
             serde_json::to_vec(&whitelist).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         let reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
@@ -45,12 +50,21 @@ impl NativeServer {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let mut server = Self {process, directory, port};
+        let mut server = Self {
+            process,
+            directory,
+            port,
+        };
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() { break; }
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
             assert!(Instant::now() < deadline, "native server did not start");
-            assert!(server.process.try_wait().unwrap().is_none(), "native server exited");
+            assert!(
+                server.process.try_wait().unwrap().is_none(),
+                "native server exited"
+            );
             thread::sleep(Duration::from_millis(50));
         }
         server
@@ -58,8 +72,12 @@ impl NativeServer {
     fn client(&self) -> TcpStream {
         let addr = SocketAddr::from(([127, 0, 0, 1], self.port));
         let socket = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
-        socket.set_write_timeout(Some(Duration::from_secs(8))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
         socket.set_nodelay(true).unwrap();
         socket
     }
@@ -111,7 +129,9 @@ impl NativeServer {
                 let end = 17 + compressed as usize;
                 assert_eq!(end, payload.len());
                 let mut decoded = Vec::new();
-                ZlibDecoder::new(&payload[17..end]).read_to_end(&mut decoded).unwrap();
+                ZlibDecoder::new(&payload[17..end])
+                    .read_to_end(&mut decoded)
+                    .unwrap();
                 assert_eq!(decoded.len(), sections.count_ones() as usize * 10240 + 256);
                 chunks += 1;
             } else if pid == 8 {
@@ -120,7 +140,11 @@ impl NativeServer {
             }
         }
         assert_eq!(chunks, 25, "initial viewport should contain 25 chunks");
-        (socket, entity_id.expect("missing Join Game"), position.expect("missing position"))
+        (
+            socket,
+            entity_id.expect("missing Join Game"),
+            position.expect("missing position"),
+        )
     }
 }
 impl Drop for NativeServer {
@@ -167,27 +191,31 @@ fn read_position(packet: &[u8]) -> [f64; 3] {
         f64::from_be_bytes(packet[16..24].try_into().unwrap()),
     ]
 }
-fn until_packet(
-    socket: &mut TcpStream,
-    id: u32,
-    matches: impl Fn(&[u8]) -> bool,
-) -> Vec<u8> {
+fn until_packet(socket: &mut TcpStream, id: u32, matches: impl Fn(&[u8]) -> bool) -> Vec<u8> {
     for _ in 0..MAX_PACKETS {
         let (packet_id, body) = receive(socket);
-        if packet_id == id && matches(&body) { return body; }
+        if packet_id == id && matches(&body) {
+            return body;
+        }
     }
     panic!("expected packet {id:#x} not received");
 }
 fn await_file(path: &PathBuf) {
     let deadline = Instant::now() + Duration::from_secs(6);
     while !path.is_file() {
-        assert!(Instant::now() < deadline, "file not saved: {}", path.display());
+        assert!(
+            Instant::now() < deadline,
+            "file not saved: {}",
+            path.display()
+        );
         thread::sleep(Duration::from_millis(40));
     }
 }
 fn send_position(s: &mut TcpStream, x: f64, y: f64, z: f64) {
     let mut data = Vec::new();
-    for v in [x, y + 1.62, y, z] { data.extend_from_slice(&v.to_be_bytes()); }
+    for v in [x, y + 1.62, y, z] {
+        data.extend_from_slice(&v.to_be_bytes());
+    }
     data.push(1);
     s.write_all(&frame(4, &data)).unwrap();
 }
@@ -226,7 +254,9 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     });
     assert!(String::from_utf8_lossy(&response).contains("RustTester"));
     send_fragments(&mut client, &frame(1, &mc_string("/help")), &[1, 2]);
-    until_packet(&mut client, 2, |body| body.windows(9).any(|w| w == b"Commands:"));
+    until_packet(&mut client, 2, |body| {
+        body.windows(9).any(|w| w == b"Commands:")
+    });
 
     // Dig a grass block and place a cobblestone block through Protocol 5.
     let mut dig = vec![0u8];
@@ -236,8 +266,10 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     dig.push(1);
     client.write_all(&frame(7, &dig)).unwrap();
     until_packet(&mut client, 0x23, |b| {
-        b.len() >= 11 && i32::from_be_bytes(b[..4].try_into().unwrap()) == 0
-            && b[4] == 63 && b[9] == 0
+        b.len() >= 11
+            && i32::from_be_bytes(b[..4].try_into().unwrap()) == 0
+            && b[4] == 63
+            && b[9] == 0
     });
     let mut place = Vec::new();
     place.extend_from_slice(&1i32.to_be_bytes());
@@ -251,8 +283,10 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
     until_packet(&mut client, 0x23, |b| {
-        b.len() >= 11 && i32::from_be_bytes(b[..4].try_into().unwrap()) == 1
-            && b[4] == 64 && b[9] == 4
+        b.len() >= 11
+            && i32::from_be_bytes(b[..4].try_into().unwrap()) == 1
+            && b[4] == 64
+            && b[9] == 4
     });
     drop(client);
     server.wait_idle();
@@ -283,8 +317,12 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     until_packet(&mut alice, 0x18, |b| {
         b.len() > 4 && i32::from_be_bytes(b[..4].try_into().unwrap()) == bob_id
     });
-    alice.write_all(&frame(1, &mc_string("hello from Rust"))).unwrap();
-    until_packet(&mut bob, 2, |b| b.windows(15).any(|w| w == b"hello from Rust"));
+    alice
+        .write_all(&frame(1, &mc_string("hello from Rust")))
+        .unwrap();
+    until_packet(&mut bob, 2, |b| {
+        b.windows(15).any(|w| w == b"hello from Rust")
+    });
     drop(alice);
     until_packet(&mut bob, 0x13, |b| {
         b.len() >= 5 && i32::from_be_bytes(b[1..5].try_into().unwrap()) == alice_id
@@ -299,9 +337,15 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
         let (id, data) = receive(&mut scout);
         if id == 0x21 {
             let mask = u16::from_be_bytes(data[9..11].try_into().unwrap());
-            if mask == 0 { unloaded += 1; } else { loaded += 1; }
+            if mask == 0 {
+                unloaded += 1;
+            } else {
+                loaded += 1;
+            }
         }
-        if loaded == 15 && unloaded == 15 { break; }
+        if loaded == 15 && unloaded == 15 {
+            break;
+        }
     }
     assert_eq!((loaded, unloaded), (15, 15));
     drop(scout);
@@ -312,16 +356,36 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     let source_dir = server.directory.join("snapshot");
     let restored = server.directory.join("restored.irw");
     let export = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
-        .arg("--world").arg(&original_path)
-        .arg("--export-anvil").arg(&source_dir).output().unwrap();
-    assert!(export.status.success(), "Anvil export: {}", String::from_utf8_lossy(&export.stderr));
+        .arg("--world")
+        .arg(&original_path)
+        .arg("--export-anvil")
+        .arg(&source_dir)
+        .output()
+        .unwrap();
+    assert!(
+        export.status.success(),
+        "Anvil export: {}",
+        String::from_utf8_lossy(&export.stderr)
+    );
     let import = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
-        .arg("--world").arg(&restored)
-        .arg("--import-anvil").arg(&source_dir).output().unwrap();
-    assert!(import.status.success(), "Anvil import: {}", String::from_utf8_lossy(&import.stderr));
+        .arg("--world")
+        .arg(&restored)
+        .arg("--import-anvil")
+        .arg(&source_dir)
+        .output()
+        .unwrap();
+    assert!(
+        import.status.success(),
+        "Anvil import: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
     assert_eq!(fs::read(&restored).unwrap(), before);
     let retry = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
-        .arg("--world").arg(&restored)
-        .arg("--import-anvil").arg(&source_dir).status().unwrap();
+        .arg("--world")
+        .arg(&restored)
+        .arg("--import-anvil")
+        .arg(&source_dir)
+        .status()
+        .unwrap();
     assert!(!retry.success(), "import overwrote an existing world");
 }

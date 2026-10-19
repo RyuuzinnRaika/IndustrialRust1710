@@ -37,10 +37,15 @@ fn status_ping_and_honest_login_denial() {
     drop(reservation);
     let mut child = Command::new(env!("CARGO_BIN_EXE_legacy-status-server"))
         .args(["--bind", &format!("127.0.0.1:{port}")])
-        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() { break; }
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(40));
     }
@@ -71,5 +76,7 @@ fn status_ping_and_honest_login_denial() {
     let result = std::panic::catch_unwind(run);
     let _ = child.kill();
     let _ = child.wait();
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
