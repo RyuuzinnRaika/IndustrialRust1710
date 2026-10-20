@@ -509,6 +509,24 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
+        // The first active session advances the shared mob simulation.
+        if survival && vitals.health > 0.0 {
+            let players = hub.positions()?;
+            let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+            let updates = creatures.tick(now_tick, &w, &players);
+            let hurt = creatures.hurt_player(*player, now_tick);
+            drop(creatures);
+            drop(w);
+            for update in updates {
+                hub.broadcast(update);
+            }
+            if hurt {
+                vitals.health = (vitals.health - 2.0).max(0.0);
+                player.save_state(player_path, *vitals)?;
+                send(s, 0x06, &health_packet(*vitals))?;
+            }
+        }
         // A real 1.7.10 client predicts gravity while sending movement.
         // After six silent server ticks we integrate vertical gravity here.
         if survival && vitals.health > 0.0 {
@@ -613,6 +631,41 @@ fn play(
             continue;
         }
         match id {
+            2 => {
+                // Protocol 5 C02 Use Entity: target VarInt and action VarInt.
+                let target_id = input.varint()?;
+                let action = input.varint()?;
+                input.finish()?;
+                if survival && vitals.health > 0.0 && action == 1 {
+                    let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    let result = creatures.player_attack(
+                        target_id, *player, inventory.held(), now_tick,
+                    );
+                    drop(creatures);
+                    if let Some(hit) = result {
+                        let mut next_inventory = inventory.clone();
+                        if next_inventory.wear_held_tool() {
+                            next_inventory.save(inventory_path)?;
+                            *inventory = next_inventory;
+                            send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                        }
+                        if let Some((stack, at)) = hit.drop {
+                            let mut ground = ground_items
+                                .lock()
+                                .map_err(|_| bad("ground items mutex poisoned"))?;
+                            if !ground.is_full() {
+                                let dropped = ground.put(ground_path, stack, at)?;
+                                for packet in dropped.spawn() {
+                                    hub.broadcast(packet);
+                                }
+                            }
+                        }
+                        for event in hit.events {
+                            hub.broadcast(event);
+                        }
+                    }
+                }
+            }
             0 => {
                 let reply = input.i32()?;
                 input.finish()?;
@@ -1300,6 +1353,9 @@ fn play(
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks on respawn
                     sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                    for mob in mobs.lock().map_err(|_| bad("mob mutex poisoned"))?.spawn_events() {
+                        send(s, mob.id, &mob.body)?;
+                    }
                     send(s, 0x06, &health_packet(*vitals))?;
                     send(s, 0x30, &inventory.window_items())?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
@@ -1308,7 +1364,7 @@ fn play(
                 }
             }
             // Other packets are not trusted inventory or world mutations.
-            2 | 10..=12 | 17..=21 | 23 => {}
+            10..=12 | 17..=21 | 23 => {}
             _ => return Err(bad("invalid play packet ID")),
         }
     }
@@ -1530,6 +1586,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             for packet in item.spawn() {
                 send(&mut s, packet.id, &packet.body)?;
             }
+        }
+        drop(ground);
+        for mob in mobs.lock().map_err(|_| bad("mob mutex poisoned"))?.spawn_events() {
+            send(&mut s, mob.id, &mob.body)?;
         }
     }
     let result = play(
