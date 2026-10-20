@@ -135,9 +135,7 @@ fn resolve_descent(world: &World, position: &PlayerPosition, wanted_y: f64) -> f
         if surface < wanted_y - EPS || surface > position.y + EPS {
             continue;
         }
-        if (min_x..=max_x).any(|x| {
-            (min_z..=max_z).any(|z| solid(world.get(x, y, z) >> 4))
-        }) {
+        if (min_x..=max_x).any(|x| (min_z..=max_z).any(|z| solid(world.get(x, y, z) >> 4))) {
             return surface;
         }
     }
@@ -179,7 +177,9 @@ impl IdleGravity {
             self.last_step_tick = tick;
             return None;
         }
-        let steps = tick.saturating_sub(self.last_step_tick).min(MAX_CATCH_UP_STEPS);
+        let steps = tick
+            .saturating_sub(self.last_step_tick)
+            .min(MAX_CATCH_UP_STEPS);
         self.last_step_tick = tick;
         let mut next = *current;
         for _ in 0..steps {
@@ -188,8 +188,7 @@ impl IdleGravity {
                 break;
             }
             self.vertical_velocity =
-                ((self.vertical_velocity - GRAVITY_ACCELERATION) * AIR_DRAG)
-                    .max(TERMINAL_VELOCITY);
+                ((self.vertical_velocity - GRAVITY_ACCELERATION) * AIR_DRAG).max(TERMINAL_VELOCITY);
             let y = resolve_descent(world, &next, next.y + self.vertical_velocity);
             if (next.y - y).abs() < EPS {
                 self.vertical_velocity = 0.0;
