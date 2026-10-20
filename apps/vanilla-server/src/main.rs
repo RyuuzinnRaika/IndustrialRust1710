@@ -1274,6 +1274,8 @@ fn play(
                     loaded_chunks.clear(); // the client forgets chunks on respawn
                     sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
                     send(s, 0x06, &health_packet(*vitals))?;
+                    send(s, 0x30, &inventory.window_items())?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
                     send_player_position(s, player)?;
                     hub.move_player(entity_id, *player, yaw, pitch);
                 }
