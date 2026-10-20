@@ -179,16 +179,25 @@ fn status(s: &mut TcpStream, hub: &Hub) -> io::Result<()> {
         _ => Err(bad("bad status ping")),
     }
 }
+struct InitialPlayer<'a> {
+    position: &'a PlayerPosition,
+    inventory: &'a Inventory,
+    health: f32,
+    survival: bool,
+}
 fn join(
     s: &mut TcpStream,
     world: &Mutex<World>,
     clock: &Clock,
-    position: &PlayerPosition,
     entity_id: i32,
-    inventory: &Inventory,
-    health: f32,
-    survival: bool,
+    initial: InitialPlayer<'_>,
 ) -> io::Result<()> {
+    let InitialPlayer {
+        position,
+        inventory,
+        health,
+        survival,
+    } = initial;
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
     // difficulty u8, maxPlayers u8, levelType string.
     let mut join = Vec::new();
@@ -1316,11 +1325,13 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         &mut s,
         &world,
         &clock,
-        &player_state,
         entity_id,
-        &inventory_state,
-        player_health,
-        survival,
+        InitialPlayer {
+            position: &player_state,
+            inventory: &inventory_state,
+            health: player_health,
+            survival,
+        },
     )?;
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;

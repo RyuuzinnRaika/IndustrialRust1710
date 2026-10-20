@@ -163,13 +163,6 @@ impl PlayerPosition {
         Ok((pos, nbt.health))
     }
 
-    pub fn load(path: &Path) -> io::Result<Self> {
-        Self::load_state(path).map(|(position, _)| position)
-    }
-    pub fn save(&self, path: &Path) -> io::Result<()> {
-        self.save_with_health(path, 20.0)
-    }
-
     pub fn save_with_health(&self, path: &Path, health: f32) -> io::Result<()> {
         if !health.is_finite() || !(0.0..=20.0).contains(&health) {
             return Err(invalid("invalid player health"));
@@ -245,11 +238,11 @@ mod tests {
             y: 65.0,
             z: 2.5,
         };
-        pos.save(&file).unwrap();
+        pos.save_with_health(&file, 20.0).unwrap();
         assert!(fs::read(&file).unwrap().starts_with(&[0x1f, 0x8b]));
-        assert_eq!(PlayerPosition::load(&file).unwrap(), pos);
+        assert_eq!(PlayerPosition::load_state(&file).unwrap().0, pos);
         fs::write(&file, b"broken").unwrap();
-        assert!(PlayerPosition::load(&file).is_err());
+        assert!(PlayerPosition::load_state(&file).is_err());
         fs::remove_dir_all(parent).unwrap();
     }
 
@@ -278,11 +271,11 @@ mod tests {
         let legacy = file.with_extension("json");
         fs::create_dir_all(legacy.parent().unwrap()).unwrap();
         fs::write(&legacy, r#"{"version":1,"x":7.5,"y":66.0,"z":1.5}"#).unwrap();
-        let pos = PlayerPosition::load(&file).unwrap();
+        let pos = PlayerPosition::load_state(&file).unwrap().0;
         assert_eq!(pos.x, 7.5);
-        pos.save(&file).unwrap();
+        pos.save_with_health(&file, 20.0).unwrap();
         assert!(legacy.exists());
-        assert_eq!(PlayerPosition::load(&file).unwrap(), pos);
+        assert_eq!(PlayerPosition::load_state(&file).unwrap().0, pos);
         fs::remove_dir_all(parent).unwrap();
     }
 
@@ -296,7 +289,7 @@ mod tests {
         let mut zipped = GzEncoder::new(out, Compression::default());
         zipped.write_all(&vec![0u8; 32769]).unwrap();
         zipped.finish().unwrap();
-        assert!(PlayerPosition::load(&file).is_err());
+        assert!(PlayerPosition::load_state(&file).is_err());
         fs::remove_dir_all(parent).unwrap();
     }
 }
