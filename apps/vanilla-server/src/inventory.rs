@@ -203,7 +203,7 @@ impl Inventory {
                     (target, hand, 0) => (hand, target),
                     // Right click takes the upper half, rounded up.
                     (Some(mut target), None, 1) => {
-                        let n = (target.count + 1) / 2;
+                        let n = target.count.div_ceil(2);
                         target.count -= n;
                         let hand = Stack { count: n, ..target };
                         ((target.count != 0).then_some(target), Some(hand))
