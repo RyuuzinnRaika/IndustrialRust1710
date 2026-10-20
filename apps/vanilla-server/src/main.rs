@@ -435,7 +435,7 @@ fn play(
                 .map_err(|_| io::Error::other("ground items lock poisoned"))?;
             if let Some(item) = ground.nearby_ready(location) {
                 let mut candidate = inventory.clone();
-                if let Some(slot) = candidate.receive_one(item.stack) {
+                if let Some(slots) = candidate.receive_stack(item.stack) {
                     // Commit removal to disk before inventory credit to avoid
                     // duplicate pickup after process interruption. This is not
                     // yet a cross-file atomic transaction and can lose items.
@@ -445,7 +445,9 @@ fn play(
                         for packet in collected.collected(entity_id) {
                             hub.broadcast(packet);
                         }
-                        send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                        for slot in slots {
+                            send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                        }
                     }
                 }
             }
@@ -588,6 +590,34 @@ fn play(
                 if survival {
                     let target = (x, y, z);
                     match action {
+                        3 | 4 => {
+                            // Protocol 5: 3 = full-stack drop; 4 = one item.
+                            // These packets do not contain a real mining target.
+                            let mut candidate = inventory.clone();
+                            if let Some(stack) = candidate.drop_held(action == 3) {
+                                let mut ground = ground_items
+                                    .lock()
+                                    .map_err(|_| io::Error::other("ground items lock poisoned"))?;
+                                if !ground.is_full() {
+                                    let target = (
+                                        location.0.floor() as i32,
+                                        (location.1.floor() as i32).clamp(0, 254),
+                                        location.2.floor() as i32,
+                                    );
+                                    // Inventory debit before entity persistence prevents
+                                    // duplication; failure between saves may lose items.
+                                    candidate.save(inventory_path)?;
+                                    *inventory = candidate;
+                                    let item = ground.put(ground_path, stack, target)?;
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                    for packet in item.spawn() {
+                                        hub.broadcast(packet);
+                                    }
+                                } else {
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                }
+                            }
+                        }
                         0 => {
                             let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                             mining = if world::in_bounds(x, y, z) && near(location, x, y, z) {

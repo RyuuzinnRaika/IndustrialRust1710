@@ -1023,3 +1023,49 @@ fn survival_shovel_mining_wears_out_last_use_and_persists_dirt_drop() {
             .unwrap();
     assert_eq!(drops["entries"].as_object().unwrap().len(), 1);
 }
+
+#[test]
+fn native_protocol5_survival_q_and_ctrl_q_drop_authoritative_stacks() {
+    let server = NativeServer::start_with_mode(true);
+    let path = server
+        .directory
+        .join("players/rusttester.survival.inventory.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut slots = vec![Value::Null; 45];
+    slots[36] = json!({"id":3,"count":12,"damage":0});
+    fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "version": 1, "selected": 0, "slots": slots,
+            "cursor": null, "workbench": vec![Value::Null; 9]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (mut client, _, _) = server.join("RustTester");
+    let mut packet = vec![4u8]; // Q: drop one
+    packet.extend_from_slice(&0i32.to_be_bytes());
+    packet.push(0);
+    packet.extend_from_slice(&0i32.to_be_bytes());
+    packet.push(255);
+    client.write_all(&frame(7, &packet)).unwrap();
+    until_packet(&mut client, 0x2f, |p| {
+        p.len() == 10 && p[0..3] == [0, 0, 36] && p[5] == 11
+    });
+    packet[0] = 3; // Ctrl+Q: drop remaining stack
+    client.write_all(&frame(7, &packet)).unwrap();
+    until_packet(&mut client, 0x2f, |p| p == [0, 0, 36, 255, 255]);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved["slots"][36].is_null());
+    let drops: Value =
+        serde_json::from_slice(&fs::read(server.directory.join("flat.drops.json")).unwrap())
+            .unwrap();
+    let mut counts: Vec<u64> = drops["entries"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|value| value["stack"]["count"].as_u64().unwrap())
+        .collect();
+    counts.sort_unstable();
+    assert_eq!(counts, [1, 11]);
+}
