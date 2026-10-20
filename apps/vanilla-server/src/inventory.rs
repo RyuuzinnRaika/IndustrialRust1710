@@ -137,28 +137,58 @@ impl Inventory {
         self.slots[slot as usize] = stack;
         Ok(true)
     }
-    /// Add one mined item directly to inventory (temporary until entity pickup
-    /// is implemented). Prefer the hotbar, then main inventory; never overflow.
-    pub fn receive_one(&mut self, item: Stack) -> Option<i16> {
-        if !item.is_valid() || item.count != 1 {
+    /// Accept an entire ground-item stack atomically. Return all modified
+    /// window-zero slots; if none fit, leave the inventory untouched.
+    pub fn receive_stack(&mut self, item: Stack) -> Option<Vec<i16>> {
+        if !item.is_valid() {
             return None;
         }
-        let slots = (36..45).chain(9..36);
-        for slot in slots.clone() {
-            if let Some(stack) = self.slots[slot].as_mut() {
-                if stack.id == item.id && stack.damage == item.damage && stack.count < 64 {
-                    stack.count += 1;
-                    return Some(slot as i16);
+        let mut next = self.clone();
+        let mut remaining = item.count;
+        let mut changed = Vec::new();
+        for slot in (36..45).chain(9..36) {
+            if let Some(current) = next.slots[slot].as_mut() {
+                if current.id == item.id && current.damage == item.damage && current.count < 64 {
+                    let add = (64 - current.count).min(remaining);
+                    current.count += add;
+                    remaining -= add;
+                    changed.push(slot as i16);
+                    if remaining == 0 {
+                        *self = next;
+                        return Some(changed);
+                    }
                 }
             }
         }
-        for slot in slots {
-            if self.slots[slot].is_none() {
-                self.slots[slot] = Some(item);
-                return Some(slot as i16);
+        for slot in (36..45).chain(9..36) {
+            if next.slots[slot].is_none() {
+                next.slots[slot] = Some(Stack {
+                    count: remaining,
+                    ..item
+                });
+                changed.push(slot as i16);
+                *self = next;
+                return Some(changed);
             }
         }
         None
+    }
+    pub fn receive_one(&mut self, item: Stack) -> Option<i16> {
+        (item.count == 1).then_some(())?;
+        self.receive_stack(item)?.first().copied()
+    }
+    /// Q removes one held item; Ctrl+Q removes the entire held stack.
+    pub fn drop_held(&mut self, whole_stack: bool) -> Option<Stack> {
+        let slot = &mut self.slots[36 + self.selected as usize];
+        let held = slot.take()?;
+        if !whole_stack && held.count > 1 {
+            *slot = Some(Stack {
+                count: held.count - 1,
+                ..held
+            });
+            return Some(Stack { count: 1, ..held });
+        }
+        Some(held)
     }
     /// Commit one server-owned held item consumption (Survival only).
     pub fn consume_held(&mut self) -> bool {
@@ -821,6 +851,28 @@ impl Inventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_and_receiving_stacks_preserves_counts_and_rejects_partial_pickup() {
+        let mut inv = Inventory::default();
+        let stack = Stack { id: 3, count: 12, damage: 0 };
+        inv.creative_set(36, Some(stack)).unwrap();
+        assert_eq!(inv.drop_held(false), Some(Stack { count: 1, ..stack }));
+        assert_eq!(inv.held().unwrap().count, 11);
+        assert_eq!(inv.drop_held(true), Some(Stack { count: 11, ..stack }));
+        assert_eq!(inv.held(), None);
+        assert_eq!(inv.drop_held(false), None);
+        inv.creative_set(36, Some(Stack { count: 60, ..stack })).unwrap();
+        assert_eq!(inv.receive_stack(stack), Some(vec![36, 37]));
+        assert_eq!(inv.held().unwrap().count, 64);
+        assert_eq!(inv.slots[37].unwrap().count, 8);
+        for slot in 9..45 {
+            inv.slots[slot] = Some(Stack { id: 1, count: 64, damage: 0 });
+        }
+        let before = inv.clone();
+        assert_eq!(inv.receive_stack(stack), None);
+        assert_eq!(inv, before);
+    }
 
     #[test]
     fn furnace_inventory_moves_and_output_are_server_owned() {

@@ -242,8 +242,12 @@ impl World {
         let mut mask: u16 = (1 << 3) | (1 << 4);
         let min_x = chunk_x * 16;
         let min_z = chunk_z * 16;
-        for &(x, y, z) in self.edits.keys() {
-            if (min_x..min_x + 16).contains(&x) && (min_z..min_z + 16).contains(&z) {
+        // An x-range BTreeMap scan avoids walking every edit for every chunk.
+        for (&(_, y, z), _) in self
+            .edits
+            .range((min_x, 0, i32::MIN)..(min_x + 16, 0, i32::MIN))
+        {
+            if (min_z..min_z + 16).contains(&z) {
                 mask |= 1u16 << (y / 16);
             }
         }
@@ -299,6 +303,19 @@ mod tests {
         assert_eq!(w.chunk_data(-1, 0).1.len(), 20736);
         assert_eq!(w.chunk_data(0, 0).1[15 * 256], 2);
     }
+    #[test]
+    fn indexed_chunk_sections_respect_both_negative_and_positive_boundaries() {
+        let mut world = World::new();
+        world.import_block(-1, 145, -1, 4 << 4).unwrap();
+        world.import_block(0, 210, -1, 4 << 4).unwrap();
+        world.import_block(-1, 226, 0, 4 << 4).unwrap();
+        world.import_block(15, 241, 15, 4 << 4).unwrap();
+        assert_eq!(world.chunk_data(-1, -1).0, 0x18 | (1 << 9));
+        assert_eq!(world.chunk_data(0, -1).0, 0x18 | (1 << 13));
+        assert_eq!(world.chunk_data(-1, 0).0, 0x18 | (1 << 14));
+        assert_eq!(world.chunk_data(0, 0).0, 0x18 | (1 << 15));
+    }
+
     #[test]
     fn persist_and_rollback() {
         let path = std::env::temp_dir().join(format!(

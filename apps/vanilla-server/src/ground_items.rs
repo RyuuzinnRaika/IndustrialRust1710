@@ -172,7 +172,7 @@ impl GroundItems {
         stack: Stack,
         block: (i32, i32, i32),
     ) -> io::Result<GroundItem> {
-        if self.is_full() || !stack.is_valid() || stack.count != 1 {
+        if self.is_full() || !stack.is_valid() {
             return Err(invalid("ground-item capacity or stack invalid"));
         }
         let id = self.next_id + 1;
@@ -273,6 +273,21 @@ mod tests {
         assert!(GroundItems::load(&path).is_err());
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn full_stack_drop_roundtrips_and_uses_protocol5_count() {
+        let root = std::env::temp_dir().join(format!("ir1710-ground-stack-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("drops.json");
+        let mut drops = GroundItems::default();
+        let item = drops.put(&file, Stack { id: 3, count: 32, damage: 0 }, (1, 65, -1)).unwrap();
+        assert_eq!(GroundItems::load(&file).unwrap().items().next().unwrap().stack.count, 32);
+        let [_, metadata] = item.spawn();
+        assert_eq!(metadata.body[7], 32);
+        assert_eq!(drops.take(&file, item.id).unwrap(), Some(item));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn refuses_invalid_items_and_corrupt_metadata() {
         let state = GroundItems::default();
