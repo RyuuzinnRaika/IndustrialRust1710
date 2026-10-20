@@ -33,6 +33,10 @@ pub struct Inventory {
     version: u8,
     selected: u8,
     slots: Vec<Option<Stack>>,
+    // Carried items must survive disconnects: otherwise a click could erase them.
+    // serde(default) also loads older version-1 saves without the new field.
+    #[serde(default)]
+    cursor: Option<Stack>,
 }
 impl Default for Inventory {
     fn default() -> Self {
@@ -40,6 +44,7 @@ impl Default for Inventory {
             version: VERSION,
             selected: 0,
             slots: vec![None; SLOT_COUNT],
+            cursor: None,
         }
     }
 }
@@ -53,6 +58,7 @@ impl Inventory {
             || self.slots.len() != SLOT_COUNT
             || self.slots[..9].iter().any(Option::is_some)
             || self.slots.iter().flatten().any(|stack| !stack.is_valid())
+            || self.cursor.is_some_and(|stack| !stack.is_valid())
         {
             return Err(invalid("invalid Creative inventory save"));
         }
@@ -167,6 +173,115 @@ impl Inventory {
             _ => false,
         }
     }
+
+    /// Protocol 5 window 0: normal clicks, shift transfers, and number keys.
+    ///
+    /// The client-supplied clicked stack is NEVER used to mutate authoritative
+    /// items. Unsupported actions return false so the caller can reject them
+    /// with Confirm Transaction and resynchronize the window.
+    pub fn click(&mut self, slot: i16, button: i8, mode: i8) -> bool {
+        if !(9..SLOT_COUNT as i16).contains(&slot) {
+            return false; // Crafting, armor, and outside-drop are not implemented.
+        }
+        let index = slot as usize;
+        match mode {
+            0 if button == 0 || button == 1 => {
+                let current = self.slots[index];
+                let carried = self.cursor;
+                let (new_slot, new_cursor) = match (current, carried, button) {
+                    // Left click takes the whole stack, deposits it or swaps.
+                    (item, None, 0) => (None, item),
+                    (None, item, 0) => (item, None),
+                    (Some(mut target), Some(mut hand), 0)
+                        if target.id == hand.id && target.damage == hand.damage =>
+                    {
+                        let n = (64 - target.count).min(hand.count);
+                        target.count += n;
+                        hand.count -= n;
+                        (Some(target), (hand.count != 0).then_some(hand))
+                    }
+                    (target, hand, 0) => (hand, target),
+                    // Right click takes the upper half, rounded up.
+                    (Some(mut target), None, 1) => {
+                        let n = target.count.div_ceil(2);
+                        target.count -= n;
+                        let hand = Stack { count: n, ..target };
+                        ((target.count != 0).then_some(target), Some(hand))
+                    }
+                    (None, None, 1) => (None, None),
+                    // Right click places a single item into an empty slot.
+                    (None, Some(mut hand), 1) => {
+                        hand.count -= 1;
+                        (
+                            Some(Stack { count: 1, ..hand }),
+                            (hand.count != 0).then_some(hand),
+                        )
+                    }
+                    (Some(mut target), Some(mut hand), 1)
+                        if target.id == hand.id
+                            && target.damage == hand.damage
+                            && target.count < 64 =>
+                    {
+                        target.count += 1;
+                        hand.count -= 1;
+                        (Some(target), (hand.count != 0).then_some(hand))
+                    }
+                    // An incompatible stack swaps, including on right click.
+                    (target, hand, 1) => (hand, target),
+                    _ => unreachable!("button was validated"),
+                };
+                self.slots[index] = new_slot;
+                self.cursor = new_cursor;
+                true
+            }
+            1 if button == 0 || button == 1 => {
+                // Shift click transfers hotbar <-> main inventory, merging
+                // stacks first. No cursor changes and no item duplication.
+                let Some(mut moving) = self.slots[index].take() else {
+                    return true;
+                };
+                let destination = if index >= 36 { 9..36 } else { 36..45 };
+                for target in destination.clone() {
+                    if let Some(stack) = self.slots[target].as_mut() {
+                        if stack.id == moving.id
+                            && stack.damage == moving.damage
+                            && stack.count < 64
+                        {
+                            let count = (64 - stack.count).min(moving.count);
+                            stack.count += count;
+                            moving.count -= count;
+                            if moving.count == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if moving.count > 0 {
+                    for target in destination {
+                        if self.slots[target].is_none() {
+                            self.slots[target] = Some(moving);
+                            moving.count = 0;
+                            break;
+                        }
+                    }
+                }
+                self.slots[index] = (moving.count > 0).then_some(moving);
+                true
+            }
+            2 if (0..=8).contains(&button) => {
+                // Hotbar number-key swap, restricted to real inventory slots.
+                self.slots.swap(index, 36 + button as usize);
+                true
+            }
+            _ => false,
+        }
+    }
+    /// Clientbound Set Slot (0x2F): window -1, slot -1 represents the cursor.
+    pub fn cursor_packet(&self) -> Vec<u8> {
+        let mut out = vec![255, 255, 255];
+        Self::encode_slot(&mut out, self.cursor);
+        out
+    }
     fn encode_slot(out: &mut Vec<u8>, slot: Option<Stack>) {
         match slot {
             None => out.extend_from_slice(&(-1i16).to_be_bytes()),
@@ -201,6 +316,88 @@ impl Inventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_zero_moves_stacks_without_creating_or_losing_items() {
+        let mut inventory = Inventory::default();
+        let a = Stack {
+            id: 3,
+            count: 17,
+            damage: 0,
+        };
+        let b = Stack {
+            id: 3,
+            count: 60,
+            damage: 0,
+        };
+        inventory.creative_set(36, Some(a)).unwrap();
+        inventory.creative_set(10, Some(b)).unwrap();
+        let total = |state: &Inventory| -> u32 {
+            state
+                .slots
+                .iter()
+                .flatten()
+                .map(|item| u32::from(item.count))
+                .sum::<u32>()
+                + state.cursor.map_or(0, |item| u32::from(item.count))
+        };
+        assert_eq!(total(&inventory), 77);
+        assert!(inventory.click(36, 0, 0)); // take all 17
+        assert_eq!(inventory.cursor.unwrap().count, 17);
+        assert!(inventory.click(10, 0, 0)); // merge 4 into the 60 stack
+        assert_eq!(inventory.slots[10].unwrap().count, 64);
+        assert_eq!(inventory.cursor.unwrap().count, 13);
+        assert!(inventory.click(11, 1, 0)); // place one by right click
+        assert_eq!(inventory.slots[11].unwrap().count, 1);
+        assert_eq!(inventory.cursor.unwrap().count, 12);
+        assert!(inventory.click(12, 0, 0)); // place the rest
+        assert_eq!(inventory.cursor, None);
+        assert_eq!(total(&inventory), 77);
+        assert!(inventory.click(12, 0, 1)); // shift back to hotbar
+        assert!(inventory.click(11, 2, 2)); // hotbar key 3 swap
+        assert_eq!(total(&inventory), 77);
+        let old = inventory.clone();
+        assert!(!inventory.click(1, 0, 0)); // crafting grid unsupported
+        assert!(!inventory.click(-999, 0, 0)); // outside item drops unsupported
+        assert!(!inventory.click(10, 0, 5)); // drag painting unsupported
+        assert_eq!(inventory, old);
+        assert_eq!(&inventory.cursor_packet()[..3], &[255, 255, 255]);
+    }
+
+    #[test]
+    fn cursor_roundtrip_and_legacy_save_are_safe() {
+        let mut inventory = Inventory::default();
+        inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 4,
+                    count: 3,
+                    damage: 0,
+                }),
+            )
+            .unwrap();
+        inventory.click(36, 1, 0);
+        assert_eq!(inventory.cursor.unwrap().count, 2);
+        let save = std::env::temp_dir().join(format!(
+            "ir1710-cursor-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        inventory.save(&save).unwrap();
+        assert_eq!(Inventory::load(&save).unwrap(), inventory);
+        let raw = std::fs::read_to_string(&save).unwrap();
+        let legacy = raw.replace(",\"cursor\":{\"id\":4,\"count\":2,\"damage\":0}", "");
+        std::fs::write(&save, legacy).unwrap();
+        assert!(
+            Inventory::load(&save).is_ok(),
+            "older inventory save remains readable"
+        );
+        let _ = std::fs::remove_file(save);
+    }
     #[test]
     fn creative_hotbar_boundaries() {
         let mut inv = Inventory::default();

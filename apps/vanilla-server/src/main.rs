@@ -215,6 +215,7 @@ fn join(
 
     // Clientbound 0x30 / 0x09: authoritative Creative inventory and hotbar.
     send(s, 0x30, &inventory.window_items())?;
+    send(s, 0x2f, &inventory.cursor_packet())?;
     send(s, 0x09, &[inventory.selected()])?;
     // Player starts at their last safely persisted position.
     send_player_position(s, position)?;
@@ -708,27 +709,45 @@ fn play(
                 }
             }
             14 => {
-                // Legacy Click Window transaction semantics are not implemented
-                // yet. Reject rather than trust the claimed client inventory.
                 let window = input.i8()?;
-                input.i16()?; // clicked slot
-                input.i8()?; // button
+                let slot = input.i16()?;
+                let button = input.i8()?;
                 let action = input.i16()?;
-                input.i8()?; // mode
-                input.slot()?;
+                let mode = input.i8()?;
+                // Client-provided clicked-item snapshots must never authorize
+                // an inventory change: all modifications are server-owned.
+                let _claimed = input.slot()?;
                 input.finish()?;
+                let mut candidate = inventory.clone();
+                let accepted = window == 0 && candidate.click(slot, button, mode);
+                if accepted && candidate != *inventory {
+                    // Write before acknowledgement. A crash after commit never
+                    // produces items that existed only in volatile memory.
+                    candidate.save(inventory_path)?;
+                    *inventory = candidate;
+                }
                 let mut reply = vec![window as u8];
                 reply.extend_from_slice(&action.to_be_bytes());
-                reply.push(0); // accepted=false
+                reply.push(u8::from(accepted));
                 send(s, 0x32, &reply)?;
+                // Bounded full-window reconciliation also corrects forged
+                // client slot snapshots on accepted transactions.
                 send(s, 0x30, &inventory.window_items())?;
+                send(s, 0x2f, &inventory.cursor_packet())?;
+            }
+            15 => {
+                // Acknowledgement for rejected Click Window transactions.
+                input.i8()?; // window
+                input.i16()?; // action
+                input.u8()?; // accepted
+                input.finish()?;
             }
             13 => {
                 input.u8()?; // close player window
                 input.finish()?;
             }
             // Other packets are not trusted inventory or world mutations.
-            2 | 10..=12 | 15 | 17..=23 => {}
+            2 | 10..=12 | 17..=23 => {}
             _ => return Err(bad("invalid play packet ID")),
         }
     }

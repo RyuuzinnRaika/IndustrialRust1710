@@ -564,3 +564,71 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     drop(rejoined);
     server.wait_idle();
 }
+
+#[test]
+fn native_click_window_is_authoritative_and_persists_carried_stack() {
+    let server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+
+    // Create one Creative stack through the existing authoritative action.
+    let mut creative = 36i16.to_be_bytes().to_vec();
+    creative.extend_from_slice(&[0, 3, 5, 0, 0, 255, 255]);
+    client.write_all(&frame(0x10, &creative)).unwrap();
+    until_packet(&mut client, 0x2f, |p| {
+        p == [0, 0, 36, 0, 3, 5, 0, 0, 255, 255]
+    });
+
+    let click = |slot: i16, action: i16, button: i8, mode: i8, claimed: &[u8]| {
+        let mut body = vec![0]; // window 0
+        body.extend_from_slice(&slot.to_be_bytes());
+        body.push(button as u8);
+        body.extend_from_slice(&action.to_be_bytes());
+        body.push(mode as u8);
+        body.extend_from_slice(claimed);
+        frame(0x0e, &body)
+    };
+
+    // Left click takes all five items; the clicked-item claim is ignored.
+    client
+        .write_all(&click(36, 7, 0, 0, &(-1i16).to_be_bytes()))
+        .unwrap();
+    until_packet(&mut client, 0x32, |p| p == [0, 0, 7, 1]);
+    let items = until_packet(&mut client, 0x30, |_| true);
+    assert_eq!(&items[3 + 36 * 2..3 + 36 * 2 + 2], &(-1i16).to_be_bytes());
+    until_packet(&mut client, 0x2f, |p| {
+        p == [255, 255, 255, 0, 3, 5, 0, 0, 255, 255]
+    });
+
+    // Unsupported drag must fail even when the client claims a valuable item.
+    let forged = [0, 57, 64, 0, 0, 255, 255];
+    client.write_all(&click(10, 8, 0, 5, &forged)).unwrap();
+    until_packet(&mut client, 0x32, |p| p == [0, 0, 8, 0]);
+    until_packet(&mut client, 0x30, |_| true);
+    until_packet(&mut client, 0x2f, |p| {
+        p == [255, 255, 255, 0, 3, 5, 0, 0, 255, 255]
+    });
+    // Clientbound rejection acknowledgement (serverbound 0x0F).
+    client.write_all(&frame(0x0f, &[0, 0, 8, 0])).unwrap();
+
+    // Right click places exactly one item, preserving four in the cursor.
+    client
+        .write_all(&click(10, 9, 1, 0, &(-1i16).to_be_bytes()))
+        .unwrap();
+    until_packet(&mut client, 0x32, |p| p == [0, 0, 9, 1]);
+    let items = until_packet(&mut client, 0x30, |_| true);
+    assert_eq!(
+        &items[3 + 10 * 2..3 + 10 * 2 + 7],
+        &[0, 3, 1, 0, 0, 255, 255]
+    );
+    until_packet(&mut client, 0x2f, |p| {
+        p == [255, 255, 255, 0, 3, 4, 0, 0, 255, 255]
+    });
+    drop(client);
+    server.wait_idle();
+
+    let saved = server.directory.join("players/rusttester.inventory.json");
+    await_file(&saved);
+    let value: Value = serde_json::from_slice(&fs::read(saved).unwrap()).unwrap();
+    assert_eq!(value["slots"][10]["count"], 1);
+    assert_eq!(value["cursor"]["count"], 4);
+}
