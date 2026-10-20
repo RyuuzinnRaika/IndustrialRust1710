@@ -186,6 +186,30 @@ impl Inventory {
         }
         Some(held)
     }
+    /// Snapshot all droppable player possessions before clearing them.
+    /// Does not include the virtual crafting result or empty armor slots.
+    pub fn possessions(&self) -> Vec<Stack> {
+        self.slots[1..5]
+            .iter()
+            .chain(self.slots[9..45].iter())
+            .chain(self.workbench.iter())
+            .chain(std::slice::from_ref(&self.cursor))
+            .flatten()
+            .copied()
+            .collect()
+    }
+    /// Clear only possessions; used after ground-drop capacity is checked.
+    pub fn clear_possessions(&mut self) {
+        for slot in &mut self.slots[1..5] {
+            *slot = None;
+        }
+        for slot in &mut self.slots[9..45] {
+            *slot = None;
+        }
+        self.workbench.fill(None);
+        self.cursor = None;
+    }
+
     /// Commit one server-owned held item consumption (Survival only).
     pub fn consume_held(&mut self) -> bool {
         let slot = &mut self.slots[36 + self.selected as usize];
@@ -846,6 +870,23 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn death_collects_hotbar_backpack_cursor_and_crafting_without_duplicate() {
+        let mut inventory = super::Inventory::default();
+        let stone = super::Stack { id: 1, count: 9, damage: 0 };
+        let apple = super::Stack { id: 260, count: 2, damage: 0 };
+        inventory.creative_set(36, Some(stone)).unwrap();
+        inventory.creative_set(9, Some(apple)).unwrap();
+        inventory.cursor = Some(apple);
+        inventory.workbench[0] = Some(stone);
+        let possessions = inventory.possessions();
+        assert_eq!(possessions.len(), 4);
+        inventory.clear_possessions();
+        assert!(inventory.possessions().is_empty());
+        assert!(inventory.held().is_none());
+        assert_eq!(inventory.selected(), 0);
+    }
+
     use super::*;
 
     #[test]
