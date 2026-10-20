@@ -855,19 +855,28 @@ mod tests {
     #[test]
     fn dropping_and_receiving_stacks_preserves_counts_and_rejects_partial_pickup() {
         let mut inv = Inventory::default();
-        let stack = Stack { id: 3, count: 12, damage: 0 };
+        let stack = Stack {
+            id: 3,
+            count: 12,
+            damage: 0,
+        };
         inv.creative_set(36, Some(stack)).unwrap();
         assert_eq!(inv.drop_held(false), Some(Stack { count: 1, ..stack }));
         assert_eq!(inv.held().unwrap().count, 11);
         assert_eq!(inv.drop_held(true), Some(Stack { count: 11, ..stack }));
         assert_eq!(inv.held(), None);
         assert_eq!(inv.drop_held(false), None);
-        inv.creative_set(36, Some(Stack { count: 60, ..stack })).unwrap();
+        inv.creative_set(36, Some(Stack { count: 60, ..stack }))
+            .unwrap();
         assert_eq!(inv.receive_stack(stack), Some(vec![36, 37]));
         assert_eq!(inv.held().unwrap().count, 64);
         assert_eq!(inv.slots[37].unwrap().count, 8);
         for slot in 9..45 {
-            inv.slots[slot] = Some(Stack { id: 1, count: 64, damage: 0 });
+            inv.slots[slot] = Some(Stack {
+                id: 1,
+                count: 64,
+                damage: 0,
+            });
         }
         let before = inv.clone();
         assert_eq!(inv.receive_stack(stack), None);

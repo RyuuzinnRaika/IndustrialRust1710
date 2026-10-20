@@ -595,9 +595,9 @@ fn play(
                             // These packets do not contain a real mining target.
                             let mut candidate = inventory.clone();
                             if let Some(stack) = candidate.drop_held(action == 3) {
-                                let mut ground = ground_items.lock().map_err(|_| {
-                                    io::Error::other("ground items lock poisoned")
-                                })?;
+                                let mut ground = ground_items
+                                    .lock()
+                                    .map_err(|_| io::Error::other("ground items lock poisoned"))?;
                                 if !ground.is_full() {
                                     let target = (
                                         location.0.floor() as i32,

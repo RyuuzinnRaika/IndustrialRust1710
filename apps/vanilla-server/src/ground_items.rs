@@ -280,8 +280,27 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let file = root.join("drops.json");
         let mut drops = GroundItems::default();
-        let item = drops.put(&file, Stack { id: 3, count: 32, damage: 0 }, (1, 65, -1)).unwrap();
-        assert_eq!(GroundItems::load(&file).unwrap().items().next().unwrap().stack.count, 32);
+        let item = drops
+            .put(
+                &file,
+                Stack {
+                    id: 3,
+                    count: 32,
+                    damage: 0,
+                },
+                (1, 65, -1),
+            )
+            .unwrap();
+        assert_eq!(
+            GroundItems::load(&file)
+                .unwrap()
+                .items()
+                .next()
+                .unwrap()
+                .stack
+                .count,
+            32
+        );
         let [_, metadata] = item.spawn();
         assert_eq!(metadata.body[7], 32);
         assert_eq!(drops.take(&file, item.id).unwrap(), Some(item));
