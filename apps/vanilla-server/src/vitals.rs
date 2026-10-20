@@ -168,7 +168,7 @@ mod tests {
             health: 15.0,
             ..Vitals::default()
         };
-        assert!(!healthy.tick(79.min(20)));
+        assert!(!healthy.tick(20));
         for _ in 0..3 {
             healthy.tick(20);
         }
