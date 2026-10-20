@@ -835,7 +835,6 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
     assert!(empty["entries"].as_object().unwrap().is_empty());
 }
 
-
 #[test]
 fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     let server = NativeServer::start();
@@ -861,7 +860,9 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     place.extend_from_slice(&(-1i16).to_be_bytes());
     place.extend_from_slice(&[8, 8, 8]);
     alice.write_all(&frame(8, &place)).unwrap();
-    until_packet(&mut alice, 0x23, |p| p.len() >= 11 && p[4] == 64 && p[9] == 61);
+    until_packet(&mut alice, 0x23, |p| {
+        p.len() >= 11 && p[4] == 64 && p[9] == 61
+    });
     let mut open = 0i32.to_be_bytes().to_vec();
     open.push(64);
     open.extend_from_slice(&0i32.to_be_bytes());
@@ -871,10 +872,14 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     alice.write_all(&frame(8, &open)).unwrap();
     let opened = until_packet(&mut alice, 0x2d, |p| p.first() == Some(&1));
     assert_eq!(opened.last(), Some(&3));
-    assert!(opened.windows(b"minecraft:furnace".len()).any(|s| s == b"minecraft:furnace"));
+    assert!(opened
+        .windows(b"minecraft:furnace".len())
+        .any(|s| s == b"minecraft:furnace"));
     until_packet(&mut alice, 0x30, |p| p.starts_with(&[1, 0, 39]));
     for property in 0..3u8 {
-        until_packet(&mut alice, 0x31, |p| p.len() == 5 && p[0] == 1 && p[2] == property);
+        until_packet(&mut alice, 0x31, |p| {
+            p.len() == 5 && p[0] == 1 && p[2] == property
+        });
     }
     until_packet(&mut alice, 0x2f, |p| p.starts_with(&[255, 255, 255]));
     alice.write_all(&creative(37, 15, 1)).unwrap();
@@ -911,11 +916,20 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
         if furnace["slots"][2]["id"] == 265 {
             break furnace.clone();
         }
-        assert!(Instant::now() < deadline, "200-tick iron smelting did not finish");
+        assert!(
+            Instant::now() < deadline,
+            "200-tick iron smelting did not finish"
+        );
         thread::sleep(Duration::from_millis(70));
     };
-    assert!(completed["slots"][0].is_null(), "one ore should be consumed");
-    assert!(completed["slots"][1].is_null(), "one coal should be consumed");
+    assert!(
+        completed["slots"][0].is_null(),
+        "one ore should be consumed"
+    );
+    assert!(
+        completed["slots"][1].is_null(),
+        "one coal should be consumed"
+    );
     assert_eq!(completed["slots"][2]["count"], 1);
     assert_eq!(completed["burn_total"], 1600);
     assert!(completed["burn_left"].as_u64().unwrap() > 0);
@@ -926,7 +940,9 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     let items = until_packet(&mut bob, 0x30, |p| p.starts_with(&[1, 0, 39]));
     assert!(items.windows(7).any(|s| s == [1, 9, 1, 0, 0, 255, 255]));
     for property in 0..3u8 {
-        until_packet(&mut bob, 0x31, |p| p.len() == 5 && p[0] == 1 && p[2] == property);
+        until_packet(&mut bob, 0x31, |p| {
+            p.len() == 5 && p[0] == 1 && p[2] == property
+        });
     }
     until_packet(&mut bob, 0x2f, |p| p.starts_with(&[255, 255, 255]));
     shift(&mut bob, 2, 3); // extract output through authoritative transaction
@@ -940,5 +956,9 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     let inv = server.directory.join("players/twinalpha.inventory.json");
     await_file(&inv);
     let value: Value = serde_json::from_slice(&fs::read(inv).unwrap()).unwrap();
-    assert!(value["slots"].as_array().unwrap().iter().any(|entry| entry["id"] == 265));
+    assert!(value["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["id"] == 265));
 }
