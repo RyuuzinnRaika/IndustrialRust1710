@@ -1561,6 +1561,33 @@ fn main() -> io::Result<()> {
                         }
                     }
                 }
+                // Gravity uses the same monotonic 20Hz tick clock.
+                // Advance at most 20 accumulated ticks after a stalled worker,
+                // avoiding unbounded catch-up or a world-wide block scan.
+                let mut gravity_world = match furnace_world.lock() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                for _ in 0..steps {
+                    match gravity_world.gravity_tick(&furnace_world_path, 64) {
+                        Ok(changes) => {
+                            for movement in changes {
+                                for (x, y, z) in [movement.from, movement.to] {
+                                    furnace_hub.broadcast(block_change_event(
+                                        &gravity_world,
+                                        x,
+                                        y,
+                                        z,
+                                    ));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("GRAVITY TICK STORAGE ERROR: {error}");
+                            return;
+                        }
+                    }
+                }
             }
             thread::sleep(Duration::from_millis(10));
         }

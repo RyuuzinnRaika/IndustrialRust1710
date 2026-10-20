@@ -17,7 +17,17 @@ type Position = (i32, u8, i32);
 #[derive(Default, Clone, Debug)]
 pub struct World {
     edits: BTreeMap<Position, u16>,
+    // In-memory wake-up queue only. Reconstructed from placed blocks on load.
+    pending_gravity: BTreeSet<Position>,
 }
+
+/// A gravity block moved exactly one vertical cell during one 20Hz world tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GravityMove {
+    pub from: (i32, i32, i32),
+    pub to: (i32, i32, i32),
+}
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -27,7 +37,7 @@ pub fn in_bounds(x: i32, y: i32, z: i32) -> bool {
         && (-WORLD_LIMIT..WORLD_LIMIT).contains(&z)
 }
 pub fn is_placeable(block_id: u16) -> bool {
-    // Ordinary renderable 1.7.10 blocks only; no tile entities, gravity or multi-block logic.
+    // Ordinary renderable 1.7.10 blocks only; limited sand/gravel gravity.
     matches!(
         block_id,
         1 | 2
@@ -98,6 +108,90 @@ impl World {
             .copied()
             .unwrap_or_else(|| Self::default_block(y as u8))
     }
+    /// A changed cell may be a new gravity block or the support of one above it.
+    /// Only queue known falling blocks; never scan the whole flat world per tick.
+    fn wake_gravity(&mut self, x: i32, y: i32, z: i32) {
+        for candidate_y in [y, y + 1] {
+            if !in_bounds(x, candidate_y, z) {
+                continue;
+            }
+            if matches!(self.get(x, candidate_y, z) >> 4, 12 | 13) {
+                self.pending_gravity.insert((x, candidate_y as u8, z));
+            }
+        }
+    }
+
+    /// Advance bounded falling sand/gravel exactly one vertical block per tick.
+    /// All changes in one tick are saved together; disk failure restores the
+    /// previous sparse world and keeps the queue intact for a safe retry.
+    pub fn gravity_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<GravityMove>> {
+        let scheduled: Vec<Position> = self.pending_gravity.iter().take(budget).copied().collect();
+        let mut undo: BTreeMap<Position, Option<u16>> = BTreeMap::new();
+        let mut moved = Vec::new();
+        for &(x, y, z) in &scheduled {
+            let height = i32::from(y);
+            let block = self.get(x, height, z);
+            if height == 0 || !matches!(block >> 4, 12 | 13) {
+                continue;
+            }
+            if self.get(x, height - 1, z) != 0 {
+                continue;
+            }
+            let upper = (x, y, z);
+            let lower = (x, y - 1, z);
+            for cell in [upper, lower] {
+                undo.entry(cell)
+                    .or_insert_with(|| self.edits.get(&cell).copied());
+            }
+            self.set_gravity_cell(upper, 0);
+            self.set_gravity_cell(lower, block);
+            moved.push(GravityMove {
+                from: (x, height, z),
+                to: (x, height - 1, z),
+            });
+        }
+        if !moved.is_empty() {
+            let written = if self.edits.len() > MAX_EDITS {
+                Err(invalid("gravity tick would exceed IRW1 edit capacity"))
+            } else {
+                self.save(path)
+            };
+            if let Err(error) = written {
+                for (cell, old) in undo {
+                    match old {
+                        Some(value) => {
+                            self.edits.insert(cell, value);
+                        }
+                        None => {
+                            self.edits.remove(&cell);
+                        }
+                    }
+                }
+                return Err(error);
+            }
+        }
+        for position in scheduled {
+            self.pending_gravity.remove(&position);
+        }
+        // Wake moving blocks for the next tick, and the block above their
+        // former location, which may now have become unsupported.
+        for movement in &moved {
+            self.wake_gravity(movement.to.0, movement.to.1, movement.to.2);
+            self.wake_gravity(movement.from.0, movement.from.1, movement.from.2);
+        }
+        Ok(moved)
+    }
+
+    /// Mutate the sparse representation without writing a partial tick.
+    fn set_gravity_cell(&mut self, (x, y, z): Position, block: u16) {
+        let key = (x, y, z);
+        if block == Self::default_block(y) {
+            self.edits.remove(&key);
+        } else {
+            self.edits.insert(key, block);
+        }
+    }
+
     pub fn update_and_save(
         &mut self,
         path: &Path,
@@ -134,6 +228,7 @@ impl World {
             }
             return Err(e);
         }
+        self.wake_gravity(x, y, z);
         Ok(true)
     }
     /// Apply one parsed block to a *detached* import world. Call save_new only
@@ -150,6 +245,7 @@ impl World {
             return Err(invalid("Anvil import exceeds IRW1 edit limit"));
         }
         self.edits.insert(key, block);
+        self.wake_gravity(x, y, z);
         Ok(())
     }
 
@@ -207,6 +303,9 @@ impl World {
             }
             if world.edits.insert((x, y, z), block).is_some() {
                 return Err(invalid("duplicate world block"));
+            }
+            if matches!(block >> 4, 12 | 13) {
+                world.pending_gravity.insert((x, y, z));
             }
         }
         Ok(world)
@@ -291,6 +390,57 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sand_gravel_fall_one_cell_per_tick_and_restore_after_reload() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-gravity-{}-{}.irw",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("world")
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world
+            .update_and_save(&path, 2, 67, -2, (12 << 4) | 1)
+            .unwrap();
+        world.update_and_save(&path, 3, 66, -2, 13 << 4).unwrap();
+        let first = world.gravity_tick(&path, 64).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(world.get(2, 66, -2), (12 << 4) | 1);
+        assert_eq!(world.get(3, 65, -2), 13 << 4);
+        // In-flight queue state is reconstructed from durable sparse edits.
+        let mut restored = World::load(&path).unwrap();
+        assert_eq!(restored.gravity_tick(&path, 64).unwrap().len(), 2);
+        for _ in 0..8 {
+            restored.gravity_tick(&path, 64).unwrap();
+        }
+        assert_eq!(restored.get(2, 64, -2), (12 << 4) | 1);
+        assert_eq!(restored.get(3, 64, -2), 13 << 4);
+        assert!(restored.gravity_tick(&path, 64).unwrap().is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn breaking_support_wakes_gravity_and_saves_undo_on_failure() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-gravity-support-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 64, 0, 12 << 4).unwrap();
+        assert!(world.gravity_tick(&path, 64).unwrap().is_empty());
+        world.update_and_save(&path, 0, 63, 0, 0).unwrap();
+        // A regular file cannot be used as the parent directory of a save.
+        let blocked = path.join("world.irw");
+        let err = world.gravity_tick(&blocked, 64);
+        assert!(err.is_err());
+        assert_eq!(world.get(0, 64, 0), 12 << 4);
+        assert_eq!(world.get(0, 63, 0), 0);
+        assert_eq!(world.gravity_tick(&path, 64).unwrap().len(), 1);
+        assert_eq!(world.get(0, 63, 0), 12 << 4);
+        assert_eq!(world.get(0, 64, 0), 0);
+        assert!(world.gravity_tick(&path, 64).unwrap().is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn flat_and_bounds() {
         let w = World::new();

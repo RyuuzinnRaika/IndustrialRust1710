@@ -1119,3 +1119,52 @@ fn native_survival_collision_damage_death_respawn_and_health_persistence() {
     assert_eq!(position, [0.5, 65.0, 0.5]);
     drop(final_session);
 }
+
+#[test]
+fn native_protocol5_gravity_sand_falls_after_support_is_mined() {
+    let server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+    // Creative C10 grants one sand stack to selected hotbar slot 36.
+    let mut creative = 36i16.to_be_bytes().to_vec();
+    creative.extend_from_slice(&[0, 12, 64, 0, 0, 255, 255]);
+    client.write_all(&frame(0x10, &creative)).unwrap();
+    until_packet(&mut client, 0x2f, |b| {
+        b == [0, 0, 36, 0, 12, 64, 0, 0, 255, 255]
+    });
+
+    // Place sand above grass (y64). Supported sand should remain stationary.
+    let mut place = Vec::new();
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&12i16.to_be_bytes());
+    place.push(64);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |b| {
+        b.len() == 11 && b[4] == 64 && b[9] == 12
+    });
+
+    // Removing the grass wakes sand one block above it. The world tick,
+    // not the client, moves it downward and sends both block updates.
+    let mut dig = vec![0u8];
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(63);
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(1);
+    client.write_all(&frame(7, &dig)).unwrap();
+    until_packet(&mut client, 0x23, |b| {
+        b.len() == 11 && b[4] == 64 && b[9] == 0
+    });
+    until_packet(&mut client, 0x23, |b| {
+        b.len() == 11 && b[4] == 63 && b[9] == 12
+    });
+    let snapshot = fs::read(server.directory.join("flat.irw")).unwrap();
+    assert_eq!(&snapshot[..4], b"IRW1");
+    assert_eq!(snapshot.len() - 8, 11); // the fallen sand replaces the dug grass
+    drop(client);
+    server.wait_idle();
+}
