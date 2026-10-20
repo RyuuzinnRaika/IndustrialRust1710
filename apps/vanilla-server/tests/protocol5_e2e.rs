@@ -632,3 +632,106 @@ fn native_click_window_is_authoritative_and_persists_carried_stack() {
     assert_eq!(value["slots"][10]["count"], 1);
     assert_eq!(value["cursor"]["count"], 4);
 }
+
+#[test]
+fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
+    let server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+    let creative = |slot: i16, id: i16, amount: u8| {
+        let mut payload = slot.to_be_bytes().to_vec();
+        payload.extend_from_slice(&id.to_be_bytes());
+        payload.push(amount);
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        frame(0x10, &payload)
+    };
+    let click = |client: &mut TcpStream, window: u8, slot: i16, action: i16, button: i8| {
+        let mut payload = vec![window];
+        payload.extend_from_slice(&slot.to_be_bytes());
+        payload.push(button as u8);
+        payload.extend_from_slice(&action.to_be_bytes());
+        payload.push(0); // normal click
+        payload.extend_from_slice(&(-1i16).to_be_bytes()); // empty client claim
+        client.write_all(&frame(0x0e, &payload)).unwrap();
+        until_packet(client, 0x32, |p| {
+            p == [window, action.to_be_bytes()[0], action.to_be_bytes()[1], 1]
+        });
+        let items = until_packet(client, 0x30, |p| p[0] == window);
+        until_packet(client, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+        items
+    };
+    client.write_all(&creative(36, 17, 1)).unwrap();
+    until_packet(&mut client, 0x2f, |p| p.starts_with(&[0, 0, 36]));
+    click(&mut client, 0, 36, 1, 0);
+    let grid = click(&mut client, 0, 1, 2, 0);
+    assert_eq!(&grid[3..10], &[0, 5, 4, 0, 0, 255, 255]); // four planks
+    click(&mut client, 0, 0, 3, 0); // consume the log
+    for (slot, action) in (1..=4).zip(4..=7) {
+        click(&mut client, 0, slot, action, 1);
+    }
+    let table = click(&mut client, 0, 0, 8, 0);
+    assert_eq!(&table[3..5], &(-1i16).to_be_bytes()); // ingredients spent
+    click(&mut client, 0, 36, 9, 0); // hold crafted table in hotbar
+
+    // Place the crafting table atop the default grass and open its 3x3 GUI.
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1); // top face
+    place.extend_from_slice(&58i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() >= 11 && p[4] == 64 && p[9] == 58
+    });
+    let mut use_table = 0i32.to_be_bytes().to_vec();
+    use_table.push(64);
+    use_table.extend_from_slice(&0i32.to_be_bytes());
+    use_table.push(1);
+    use_table.extend_from_slice(&(-1i16).to_be_bytes());
+    use_table.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &use_table)).unwrap();
+    let opened = until_packet(&mut client, 0x2d, |p| p.first() == Some(&1));
+    assert!(opened
+        .windows("minecraft:crafting_table".len())
+        .any(|w| w == b"minecraft:crafting_table"));
+    until_packet(&mut client, 0x30, |p| p.starts_with(&[1, 0, 46]));
+    until_packet(&mut client, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+
+    // Server-owned 3x3 recipe for a wooden pickaxe: three planks and two sticks.
+    client.write_all(&creative(36, 5, 3)).unwrap();
+    until_packet(&mut client, 0x2f, |p| p.starts_with(&[0, 0, 36]));
+    client.write_all(&creative(37, 280, 2)).unwrap();
+    until_packet(&mut client, 0x2f, |p| p.starts_with(&[0, 0, 37]));
+    let mut action = 10i16;
+    let mut do_click = |slot: i16, button: i8| {
+        let result = click(&mut client, 1, slot, action, button);
+        action += 1;
+        result
+    };
+    do_click(37, 0); // planks: 3
+    do_click(1, 1);
+    do_click(2, 1);
+    do_click(3, 1);
+    do_click(38, 0); // sticks: 2
+    do_click(5, 1);
+    let items = do_click(8, 1);
+    assert_eq!(&items[3..10], &[1, 14, 1, 0, 0, 255, 255]); // wooden pickaxe ID 270
+    let crafted = do_click(0, 0);
+    assert_eq!(&crafted[3..5], &(-1i16).to_be_bytes()); // recipe consumed
+    client.write_all(&frame(13, &[1])).unwrap();
+    drop(client);
+    server.wait_idle();
+    let save = server.directory.join("players/rusttester.inventory.json");
+    await_file(&save);
+    let saved: Value = serde_json::from_slice(&fs::read(save).unwrap()).unwrap();
+    assert_eq!(saved["cursor"]["id"], 270);
+    assert!(saved["workbench"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(Value::is_null));
+}

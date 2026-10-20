@@ -37,6 +37,8 @@ pub struct Inventory {
     // serde(default) also loads older version-1 saves without the new field.
     #[serde(default)]
     cursor: Option<Stack>,
+    #[serde(default)]
+    workbench: [Option<Stack>; 9],
 }
 impl Default for Inventory {
     fn default() -> Self {
@@ -45,6 +47,7 @@ impl Default for Inventory {
             selected: 0,
             slots: vec![None; SLOT_COUNT],
             cursor: None,
+            workbench: [None; 9],
         }
     }
 }
@@ -56,7 +59,13 @@ impl Inventory {
         if self.version != VERSION
             || self.selected > 8
             || self.slots.len() != SLOT_COUNT
-            || self.slots[..9].iter().any(Option::is_some)
+            || self.slots[0].is_some()
+            || self.slots[5..9].iter().any(Option::is_some)
+            || self
+                .workbench
+                .iter()
+                .flatten()
+                .any(|stack| !stack.is_valid())
             || self.slots.iter().flatten().any(|stack| !stack.is_valid())
             || self.cursor.is_some_and(|stack| !stack.is_valid())
         {
@@ -174,22 +183,127 @@ impl Inventory {
         }
     }
 
-    /// Protocol 5 window 0: normal clicks, shift transfers, and number keys.
-    ///
-    /// The client-supplied clicked stack is NEVER used to mutate authoritative
-    /// items. Unsupported actions return false so the caller can reject them
-    /// with Confirm Transaction and resynchronize the window.
-    pub fn click(&mut self, slot: i16, button: i8, mode: i8) -> bool {
-        if !(9..SLOT_COUNT as i16).contains(&slot) {
-            return false; // Crafting, armor, and outside-drop are not implemented.
+    /// Map a Protocol 5 window slot to a server-owned inventory array.
+    /// Slot zero is *virtual* (the derived crafting output) and cannot be set.
+    fn slot_index(window: u8, slot: i16) -> Option<(bool, usize)> {
+        match (window, slot) {
+            (0, 1..=4) => Some((false, slot as usize)),
+            (0, 9..=44) => Some((false, slot as usize)),
+            (1..=u8::MAX, 1..=9) => Some((true, (slot - 1) as usize)),
+            (1..=u8::MAX, 10..=45) => Some((false, (slot - 1) as usize)),
+            _ => None,
         }
-        let index = slot as usize;
+    }
+    fn lookup(&self, window: u8, slot: i16) -> Option<Stack> {
+        let (workbench, index) = Self::slot_index(window, slot)?;
+        if workbench {
+            self.workbench[index]
+        } else {
+            self.slots[index]
+        }
+    }
+    fn assign(&mut self, window: u8, slot: i16, stack: Option<Stack>) {
+        if let Some((workbench, index)) = Self::slot_index(window, slot) {
+            if workbench {
+                self.workbench[index] = stack;
+            } else {
+                self.slots[index] = stack;
+            }
+        }
+    }
+    pub fn crafting_result(&self, window: u8) -> Option<Stack> {
+        match window {
+            0 => crate::crafting::result(&self.slots[1..5], 2),
+            _ => crate::crafting::result(&self.workbench, 3),
+        }
+    }
+    fn spend_ingredients(&mut self, window: u8) {
+        // Called only after verifying a recipe and a destination with capacity.
+        let size = if window == 0 { 4 } else { 9 };
+        for index in 0..size {
+            let slot = index + 1;
+            if let Some(mut stack) = self.lookup(window, slot as i16) {
+                stack.count -= 1;
+                self.assign(window, slot as i16, (stack.count != 0).then_some(stack));
+            }
+        }
+    }
+    fn move_to_player(&mut self, window: u8, mut moving: Stack) -> Option<Stack> {
+        // Used by Shift-clicking recipe output and ingredient slots.
+        let begin = if window == 0 { 9 } else { 10 };
+        let end = if window == 0 { 45 } else { 46 };
+        for slot in begin..end {
+            if let Some(mut stack) = self.lookup(window, slot) {
+                if stack.id == moving.id && stack.damage == moving.damage && stack.count < 64 {
+                    let count = (64 - stack.count).min(moving.count);
+                    stack.count += count;
+                    moving.count -= count;
+                    self.assign(window, slot, Some(stack));
+                    if moving.count == 0 {
+                        return None;
+                    }
+                }
+            }
+        }
+        for slot in begin..end {
+            if self.lookup(window, slot).is_none() {
+                self.assign(window, slot, Some(moving));
+                return None;
+            }
+        }
+        Some(moving)
+    }
+    fn take_recipe(&mut self, window: u8, shift: bool) -> bool {
+        let Some(output) = self.crafting_result(window) else {
+            return true;
+        };
+        if shift {
+            // This state is cloned by the session before persistence. Requiring
+            // full capacity prevents losing ingredients when output cannot fit.
+            let mut candidate = self.clone();
+            if candidate.move_to_player(window, output).is_some() {
+                return true;
+            }
+            candidate.spend_ingredients(window);
+            *self = candidate;
+            return true;
+        }
+        let carried = match self.cursor {
+            None => Some(output),
+            Some(mut old)
+                if old.id == output.id
+                    && old.damage == output.damage
+                    && u16::from(old.count) + u16::from(output.count) <= 64 =>
+            {
+                old.count += output.count;
+                Some(old)
+            }
+            _ => return true,
+        };
+        self.spend_ingredients(window);
+        self.cursor = carried;
+        true
+    }
+    /// Execute only bounded, server-owned window transactions.
+    ///
+    /// Client-provided snapshots are never trusted; unsupported modes,
+    /// unsupported armor slots and outside-drop return false.
+    pub fn click_window(&mut self, window: u8, slot: i16, button: i8, mode: i8) -> bool {
+        if slot == 0 {
+            return match (mode, button) {
+                (0, 0 | 1) => self.take_recipe(window, false),
+                (1, 0 | 1) => self.take_recipe(window, true),
+                _ => false,
+            };
+        }
+        if Self::slot_index(window, slot).is_none() {
+            return false;
+        }
         match mode {
             0 if button == 0 || button == 1 => {
-                let current = self.slots[index];
+                let current = self.lookup(window, slot);
                 let carried = self.cursor;
                 let (new_slot, new_cursor) = match (current, carried, button) {
-                    // Left click takes the whole stack, deposits it or swaps.
                     (item, None, 0) => (None, item),
                     (None, item, 0) => (item, None),
                     (Some(mut target), Some(mut hand), 0)
@@ -201,7 +315,6 @@ impl Inventory {
                         (Some(target), (hand.count != 0).then_some(hand))
                     }
                     (target, hand, 0) => (hand, target),
-                    // Right click takes the upper half, rounded up.
                     (Some(mut target), None, 1) => {
                         let n = target.count.div_ceil(2);
                         target.count -= n;
@@ -209,7 +322,6 @@ impl Inventory {
                         ((target.count != 0).then_some(target), Some(hand))
                     }
                     (None, None, 1) => (None, None),
-                    // Right click places a single item into an empty slot.
                     (None, Some(mut hand), 1) => {
                         hand.count -= 1;
                         (
@@ -226,30 +338,37 @@ impl Inventory {
                         hand.count -= 1;
                         (Some(target), (hand.count != 0).then_some(hand))
                     }
-                    // An incompatible stack swaps, including on right click.
                     (target, hand, 1) => (hand, target),
-                    _ => unreachable!("button was validated"),
+                    _ => unreachable!("validated button"),
                 };
-                self.slots[index] = new_slot;
+                self.assign(window, slot, new_slot);
                 self.cursor = new_cursor;
                 true
             }
             1 if button == 0 || button == 1 => {
-                // Shift click transfers hotbar <-> main inventory, merging
-                // stacks first. No cursor changes and no item duplication.
-                let Some(mut moving) = self.slots[index].take() else {
+                // Shift ingredient slots to player; main <-> hotbar otherwise.
+                let Some(mut moving) = self.lookup(window, slot) else {
                     return true;
                 };
-                let destination = if index >= 36 { 9..36 } else { 36..45 };
+                let main_start = if window == 0 { 9 } else { 10 };
+                let hotbar_start = if window == 0 { 36 } else { 37 };
+                let destination = if slot < main_start {
+                    main_start..hotbar_start + 9
+                } else if slot >= hotbar_start {
+                    main_start..hotbar_start
+                } else {
+                    hotbar_start..hotbar_start + 9
+                };
                 for target in destination.clone() {
-                    if let Some(stack) = self.slots[target].as_mut() {
-                        if stack.id == moving.id
-                            && stack.damage == moving.damage
-                            && stack.count < 64
+                    if let Some(mut existing) = self.lookup(window, target) {
+                        if existing.id == moving.id
+                            && existing.damage == moving.damage
+                            && existing.count < 64
                         {
-                            let count = (64 - stack.count).min(moving.count);
-                            stack.count += count;
-                            moving.count -= count;
+                            let amount = (64 - existing.count).min(moving.count);
+                            existing.count += amount;
+                            moving.count -= amount;
+                            self.assign(window, target, Some(existing));
                             if moving.count == 0 {
                                 break;
                             }
@@ -258,23 +377,31 @@ impl Inventory {
                 }
                 if moving.count > 0 {
                     for target in destination {
-                        if self.slots[target].is_none() {
-                            self.slots[target] = Some(moving);
+                        if self.lookup(window, target).is_none() {
+                            self.assign(window, target, Some(moving));
                             moving.count = 0;
                             break;
                         }
                     }
                 }
-                self.slots[index] = (moving.count > 0).then_some(moving);
+                self.assign(window, slot, (moving.count > 0).then_some(moving));
                 true
             }
             2 if (0..=8).contains(&button) => {
-                // Hotbar number-key swap, restricted to real inventory slots.
-                self.slots.swap(index, 36 + button as usize);
+                let other = if window == 0 { 36 } else { 37 } + i16::from(button);
+                let old = self.lookup(window, slot);
+                let held = self.lookup(window, other);
+                self.assign(window, slot, held);
+                self.assign(window, other, old);
                 true
             }
             _ => false,
         }
+    }
+    /// Compatibility wrapper for unit tests targeting the player inventory.
+    #[cfg(test)]
+    pub fn click(&mut self, slot: i16, button: i8, mode: i8) -> bool {
+        self.click_window(0, slot, button, mode)
     }
     /// Clientbound Set Slot (0x2F): window -1, slot -1 represents the cursor.
     pub fn cursor_packet(&self) -> Vec<u8> {
@@ -293,22 +420,38 @@ impl Inventory {
             }
         }
     }
-    pub fn window_items(&self) -> Vec<u8> {
-        let mut data = Vec::with_capacity(4 + self.slots.len() * 7);
-        data.push(0); // player inventory window
-        data.extend_from_slice(&(SLOT_COUNT as i16).to_be_bytes());
-        for &slot in &self.slots {
-            Self::encode_slot(&mut data, slot);
+    pub fn window_items_for(&self, window: u8) -> Vec<u8> {
+        let count: i16 = if window == 0 { 45 } else { 46 };
+        let mut data = Vec::with_capacity(4 + count as usize * 7);
+        data.push(window);
+        data.extend_from_slice(&count.to_be_bytes());
+        for slot in 0..count {
+            let stack = if slot == 0 {
+                self.crafting_result(window)
+            } else {
+                self.lookup(window, slot)
+            };
+            Self::encode_slot(&mut data, stack);
         }
         data
+    }
+    pub fn window_items(&self) -> Vec<u8> {
+        self.window_items_for(0)
     }
     pub fn set_slot(&self, slot: i16) -> io::Result<Vec<u8>> {
         if !(0..SLOT_COUNT as i16).contains(&slot) {
             return Err(invalid("slot outside player window"));
         }
-        let mut data = vec![0]; // window 0
+        let mut data = vec![0];
         data.extend_from_slice(&slot.to_be_bytes());
-        Self::encode_slot(&mut data, self.slots[slot as usize]);
+        Self::encode_slot(
+            &mut data,
+            if slot == 0 {
+                self.crafting_result(0)
+            } else {
+                self.lookup(0, slot)
+            },
+        );
         Ok(data)
     }
 }
@@ -357,11 +500,78 @@ mod tests {
         assert!(inventory.click(11, 2, 2)); // hotbar key 3 swap
         assert_eq!(total(&inventory), 77);
         let old = inventory.clone();
-        assert!(!inventory.click(1, 0, 0)); // crafting grid unsupported
+        assert!(inventory.click(1, 0, 0)); // empty crafting grid click is a no-op
         assert!(!inventory.click(-999, 0, 0)); // outside item drops unsupported
         assert!(!inventory.click(10, 0, 5)); // drag painting unsupported
         assert_eq!(inventory, old);
         assert_eq!(&inventory.cursor_packet()[..3], &[255, 255, 255]);
+    }
+
+    #[test]
+    fn player_grid_crafts_planks_and_table_without_minting_items() {
+        let mut inv = Inventory::default();
+        inv.creative_set(
+            36,
+            Some(Stack {
+                id: 17,
+                count: 1,
+                damage: 0,
+            }),
+        )
+        .unwrap();
+        assert!(inv.click(36, 0, 0));
+        assert!(inv.click(1, 0, 0)); // log into 2x2
+        assert_eq!(
+            inv.crafting_result(0),
+            Some(Stack {
+                id: 5,
+                count: 4,
+                damage: 0
+            })
+        );
+        assert!(inv.click(0, 0, 0)); // obtain four planks
+        assert_eq!(inv.slots[1], None);
+        assert_eq!(inv.cursor.unwrap().count, 4);
+        for slot in 1..=4 {
+            assert!(inv.click(slot, 1, 0)); // put one plank in each crafting input
+        }
+        assert_eq!(
+            inv.crafting_result(0),
+            Some(Stack {
+                id: 58,
+                count: 1,
+                damage: 0
+            })
+        );
+        assert!(inv.click(0, 0, 0)); // take one crafting table
+        assert_eq!(inv.cursor.unwrap().id, 58);
+        assert_eq!(inv.slots[1..5], [None; 4]);
+        assert_eq!(inv.crafting_result(0), None);
+        assert!(inv.click(0, 0, 0)); // no recipe, cannot create another table
+        assert_eq!(inv.cursor.unwrap().count, 1);
+    }
+    #[test]
+    fn workbench_crafts_pickaxe_and_rejects_wrong_window() {
+        let mut inv = Inventory::default();
+        for slot in [1, 2, 3] {
+            inv.workbench[slot - 1] = Some(Stack {
+                id: 5,
+                count: 1,
+                damage: 0,
+            });
+        }
+        for slot in [5, 8] {
+            inv.workbench[slot - 1] = Some(Stack {
+                id: 280,
+                count: 1,
+                damage: 0,
+            });
+        }
+        assert_eq!(inv.crafting_result(1).unwrap().id, 270);
+        assert!(inv.click_window(1, 0, 0, 0));
+        assert_eq!(inv.cursor.unwrap().id, 270);
+        assert!(inv.workbench.iter().all(Option::is_none));
+        assert!(!inv.click_window(1, 46, 0, 0));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 mod anvil_export;
 mod anvil_import;
 mod clock;
+mod crafting;
 mod ground_items;
 mod inventory;
 mod multiplayer;
@@ -372,6 +373,8 @@ fn play(
     // Keep fragmented TCP frames across short receive timeouts.
     let mut packet_reader = BufferedFrameReader::new();
     let mut mining: Option<MiningProgress> = None;
+    let mut active_window: u8 = 0;
+    let mut next_window: u8 = 1;
     let mut last_pickup = Instant::now();
     loop {
         while let Ok(event) = events.try_recv() {
@@ -611,6 +614,33 @@ fn play(
                 let held = input.slot()?;
                 input.take(3)?; // cursor x/y/z
                 input.finish()?;
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 58
+                {
+                    // The 1.7.10 crafting table is a non-storage window.
+                    // Window 0 is always the player's personal 2x2 grid.
+                    active_window = next_window;
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
+                    let mut opened = vec![active_window];
+                    write_string("minecraft:crafting_table", &mut opened)?;
+                    write_string(&json!({"text":"Crafting"}).to_string(), &mut opened)?;
+                    opened.push(0); // non-storage window: slot count comes from type
+                    send(s, 0x2d, &opened)?;
+                    send(s, 0x30, &inventory.window_items_for(active_window))?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
                 if (0..=5).contains(&face) && world::in_bounds(x, y, z) && near(location, x, y, z) {
                     let (nx, ny, nz) = match face {
                         0 => (x, y - 1, z),
@@ -719,7 +749,9 @@ fn play(
                 let _claimed = input.slot()?;
                 input.finish()?;
                 let mut candidate = inventory.clone();
-                let accepted = window == 0 && candidate.click(slot, button, mode);
+                let accepted = window >= 0
+                    && window as u8 == active_window
+                    && candidate.click_window(active_window, slot, button, mode);
                 if accepted && candidate != *inventory {
                     // Write before acknowledgement. A crash after commit never
                     // produces items that existed only in volatile memory.
@@ -732,7 +764,7 @@ fn play(
                 send(s, 0x32, &reply)?;
                 // Bounded full-window reconciliation also corrects forged
                 // client slot snapshots on accepted transactions.
-                send(s, 0x30, &inventory.window_items())?;
+                send(s, 0x30, &inventory.window_items_for(active_window))?;
                 send(s, 0x2f, &inventory.cursor_packet())?;
             }
             15 => {
@@ -743,8 +775,14 @@ fn play(
                 input.finish()?;
             }
             13 => {
-                input.u8()?; // close player window
+                let closed = input.u8()?;
                 input.finish()?;
+                if active_window == closed {
+                    // Keep unused ingredients saved rather than silently
+                    // deleting them if a player closes the crafting window.
+                    active_window = 0;
+                    send(s, 0x30, &inventory.window_items())?;
+                }
             }
             // Other packets are not trusted inventory or world mutations.
             2 | 10..=12 | 17..=23 => {}
