@@ -1,6 +1,7 @@
 //! Standalone 1.7.10 player position persistence using the independently licensed
 //! fastnbt crate (MIT OR Apache-2.0), not Pumpkin source code.
 //! This remains a prototype and is not a full vanilla player.dat implementation.
+use crate::vitals::Vitals;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -25,10 +26,24 @@ struct PositionNbt {
     pos: Vec<f64>,
     #[serde(rename = "Health", default = "full_health")]
     health: f32,
+    #[serde(rename = "foodLevel", default = "full_food")]
+    food: i32,
+    #[serde(rename = "foodSaturationLevel", default = "default_saturation")]
+    saturation: f32,
+    #[serde(rename = "foodExhaustionLevel", default)]
+    exhaustion: f32,
+    #[serde(rename = "foodTickTimer", default)]
+    food_timer: i32,
 }
 
 fn full_health() -> f32 {
     20.0
+}
+fn full_food() -> i32 {
+    20
+}
+fn default_saturation() -> f32 {
+    5.0
 }
 
 #[derive(Serialize)]
@@ -45,6 +60,14 @@ struct PlayerNbt {
     game_mode: i32,
     #[serde(rename = "Health")]
     health: f32,
+    #[serde(rename = "foodLevel")]
+    food: i32,
+    #[serde(rename = "foodSaturationLevel")]
+    saturation: f32,
+    #[serde(rename = "foodExhaustionLevel")]
+    exhaustion: f32,
+    #[serde(rename = "foodTickTimer")]
+    food_timer: i32,
     #[serde(rename = "IndustrialRustSaveVersion")]
     save_version: i32,
 }
@@ -119,14 +142,14 @@ impl PlayerPosition {
         Ok(pos)
     }
 
-    pub fn load_state(path: &Path) -> io::Result<(Self, f32)> {
+    pub fn load_state(path: &Path) -> io::Result<(Self, Vitals)> {
         let meta = match fs::metadata(path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 let legacy = path.with_extension("json");
                 return match fs::metadata(&legacy) {
-                    Ok(_) => Self::load_legacy_json(&legacy).map(|position| (position, 20.0)),
-                    Err(e) if e.kind() == ErrorKind::NotFound => Ok((Self::default(), 20.0)),
+                    Ok(_) => Self::load_legacy_json(&legacy).map(|position| (position, Vitals::default())),
+                    Err(e) if e.kind() == ErrorKind::NotFound => Ok((Self::default(), Vitals::default())),
                     Err(e) => Err(e),
                 };
             }
@@ -157,15 +180,23 @@ impl PlayerPosition {
         if !pos.is_valid() {
             return Err(invalid("player location outside loaded world"));
         }
-        if !nbt.health.is_finite() || !(0.0..=20.0).contains(&nbt.health) {
-            return Err(invalid("invalid player health"));
+        let vitals = Vitals {
+            health: nbt.health,
+            food: nbt.food,
+            saturation: nbt.saturation,
+            exhaustion: nbt.exhaustion,
+            food_timer: u32::try_from(nbt.food_timer)
+                .map_err(|_| invalid("invalid food tick timer"))?,
+        };
+        if !vitals.valid() {
+            return Err(invalid("invalid player health or food values"));
         }
-        Ok((pos, nbt.health))
+        Ok((pos, vitals))
     }
 
-    pub fn save_with_health(&self, path: &Path, health: f32) -> io::Result<()> {
-        if !health.is_finite() || !(0.0..=20.0).contains(&health) {
-            return Err(invalid("invalid player health"));
+    pub fn save_state(&self, path: &Path, vitals: Vitals) -> io::Result<()> {
+        if !vitals.valid() {
+            return Err(invalid("invalid player health or food values"));
         }
         if !self.is_valid() {
             return Err(invalid("invalid player position"));
@@ -176,8 +207,12 @@ impl PlayerPosition {
             rotation: vec![0.0, 0.0],
             dimension: 0,
             game_mode: 1,
-            health,
-            save_version: 1,
+            health: vitals.health,
+            food: vitals.food,
+            saturation: vitals.saturation,
+            exhaustion: vitals.exhaustion,
+            food_timer: vitals.food_timer as i32,
+            save_version: 2,
         };
         let binary =
             fastnbt::to_bytes(&record).map_err(|_| invalid("could not serialize player NBT"))?;
@@ -238,7 +273,7 @@ mod tests {
             y: 65.0,
             z: 2.5,
         };
-        pos.save_with_health(&file, 20.0).unwrap();
+        pos.save_state(&file, Vitals::default()).unwrap();
         assert!(fs::read(&file).unwrap().starts_with(&[0x1f, 0x8b]));
         assert_eq!(PlayerPosition::load_state(&file).unwrap().0, pos);
         fs::write(&file, b"broken").unwrap();
@@ -253,12 +288,12 @@ mod tests {
         fs::create_dir_all(&parent).unwrap();
         let file = parent.join("player.dat");
         let position = PlayerPosition::default();
-        position.save_with_health(&file, 7.0).unwrap();
-        assert_eq!(PlayerPosition::load_state(&file).unwrap(), (position, 7.0));
-        position.save_with_health(&file, 0.0).unwrap();
-        assert_eq!(PlayerPosition::load_state(&file).unwrap().1, 0.0);
-        assert!(position.save_with_health(&file, f32::NAN).is_err());
-        assert!(position.save_with_health(&file, 21.0).is_err());
+        position.save_state(&file, Vitals { health: 7.0, food: 8, saturation: 2.0, ..Vitals::default() }).unwrap();
+        assert_eq!(PlayerPosition::load_state(&file).unwrap(), (position, Vitals { health: 7.0, food: 8, saturation: 2.0, ..Vitals::default() }));
+        position.save_state(&file, Vitals { health: 0.0, ..Vitals::default() }).unwrap();
+        assert_eq!(PlayerPosition::load_state(&file).unwrap().1.health, 0.0);
+        assert!(position.save_state(&file, Vitals { health: f32::NAN, ..Vitals::default() }).is_err());
+        assert!(position.save_state(&file, Vitals { health: 21.0, ..Vitals::default() }).is_err());
         fs::remove_dir_all(parent).unwrap();
     }
 
@@ -273,7 +308,7 @@ mod tests {
         fs::write(&legacy, r#"{"version":1,"x":7.5,"y":66.0,"z":1.5}"#).unwrap();
         let pos = PlayerPosition::load_state(&file).unwrap().0;
         assert_eq!(pos.x, 7.5);
-        pos.save_with_health(&file, 20.0).unwrap();
+        pos.save_state(&file, Vitals::default()).unwrap();
         assert!(legacy.exists());
         assert_eq!(PlayerPosition::load_state(&file).unwrap().0, pos);
         fs::remove_dir_all(parent).unwrap();
