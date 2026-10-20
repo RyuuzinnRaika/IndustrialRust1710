@@ -178,7 +178,9 @@ impl Inventory {
     /// and ordinary blocks/items do not acquire arbitrary damage metadata.
     pub fn wear_held_tool(&mut self) -> bool {
         let slot = &mut self.slots[36 + self.selected as usize];
-        let Some(mut value) = *slot else { return false; };
+        let Some(mut value) = *slot else {
+            return false;
+        };
         let Some(max_uses) = crate::survival::tool_max_uses(value) else {
             return false;
         };
@@ -883,16 +885,40 @@ mod tests {
     #[test]
     fn tool_wear_increases_damage_and_breaks_at_material_limit() {
         let mut inv = Inventory::default();
-        inv.creative_set(36, Some(Stack { id: 270, count: 1, damage: 57 })).unwrap();
+        inv.creative_set(
+            36,
+            Some(Stack {
+                id: 270,
+                count: 1,
+                damage: 57,
+            }),
+        )
+        .unwrap();
         assert!(inv.wear_held_tool());
         assert_eq!(inv.held().unwrap().damage, 58);
         assert!(inv.wear_held_tool());
         assert_eq!(inv.held(), None);
         assert!(!inv.wear_held_tool());
-        inv.creative_set(36, Some(Stack { id: 4, count: 12, damage: 0 })).unwrap();
+        inv.creative_set(
+            36,
+            Some(Stack {
+                id: 4,
+                count: 12,
+                damage: 0,
+            }),
+        )
+        .unwrap();
         assert!(!inv.wear_held_tool());
         assert_eq!(inv.held().unwrap().count, 12);
-        inv.creative_set(36, Some(Stack { id: 274, count: 1, damage: 130 })).unwrap();
+        inv.creative_set(
+            36,
+            Some(Stack {
+                id: 274,
+                count: 1,
+                damage: 130,
+            }),
+        )
+        .unwrap();
         assert!(inv.wear_held_tool());
         assert_eq!(inv.held(), None);
     }
