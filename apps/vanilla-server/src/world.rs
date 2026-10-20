@@ -666,9 +666,10 @@ mod tests {
         assert!(first.contains(&(5, 65, 5)));
         assert_eq!(w.get(5, 65, 5), (8 << 4) | 1);
         assert_eq!(w.get(6, 65, 5), 0);
-        // The flowing block is supported by grass and spreads horizontally.
-        assert!(w.block_tick(&path, 64).unwrap().contains(&(6, 65, 5)));
-        assert_eq!(w.get(6, 65, 5), (8 << 4) | 2);
+        // Water flows down y=64 before spreading over the grass at y=63.
+        assert!(w.block_tick(&path, 64).unwrap().contains(&(5, 64, 5)));
+        assert!(w.block_tick(&path, 64).unwrap().contains(&(6, 64, 5)));
+        assert_eq!(w.get(6, 64, 5), (8 << 4) | 3);
         // Lever -> one wire -> adjacent wire, with 15 and then 14.
         w.update_and_save(&path, 0, 64, 0, (69 << 4) | 8).unwrap();
         w.update_and_save(&path, 1, 64, 0, 55 << 4).unwrap();
