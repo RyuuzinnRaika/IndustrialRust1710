@@ -1271,8 +1271,8 @@ mod tests {
             count: 1,
             damage: 0,
         };
-        assert_eq!(inv.receive_one(item), Some(36));
-        assert_eq!(inv.receive_one(item), Some(36));
+        assert_eq!(inv.receive_stack(item), Some(vec![36]));
+        assert_eq!(inv.receive_stack(item), Some(vec![36]));
         assert_eq!(inv.held().unwrap().count, 2);
         assert!(inv.consume_held());
         assert_eq!(inv.held().unwrap().count, 1);
@@ -1280,7 +1280,7 @@ mod tests {
         assert!(inv.held().is_none());
         assert!(!inv.consume_held());
         assert!(inv
-            .receive_one(Stack {
+            .receive_stack(Stack {
                 id: 7,
                 count: 65,
                 damage: 0
