@@ -401,6 +401,7 @@ fn play(
     let mut pong_time = started;
     let mut ping_id: i32 = 0;
     let mut last_time_tick: u64 = clock.ticks();
+    let mut last_vitals_tick = clock.ticks();
     let mut admission_check = started;
     let mut saved_at = started;
     // Keep fragmented TCP frames across short receive timeouts.
@@ -413,6 +414,7 @@ fn play(
     let mut observed_chest_revision: u64 = 0;
     let mut next_window: u8 = 1;
     let mut last_pickup = Instant::now();
+    let mut eating: Option<(u64, Stack)> = None;
     loop {
         while let Ok(event) = events.try_recv() {
             send(s, event.id, &event.body)?;
@@ -450,7 +452,7 @@ fn play(
             inventory.save(inventory_path)?;
             saved_at = Instant::now();
         }
-        if survival && last_pickup.elapsed() >= Duration::from_millis(200) {
+        if survival && vitals.health > 0.0 && last_pickup.elapsed() >= Duration::from_millis(200) {
             let mut ground = ground_items
                 .lock()
                 .map_err(|_| io::Error::other("ground items lock poisoned"))?;
@@ -517,6 +519,48 @@ fn play(
                     last_movement_broadcast = Instant::now();
                 }
             }
+        }
+        if survival && now_tick > last_vitals_tick {
+            let steps = (now_tick - last_vitals_tick).min(20);
+            last_vitals_tick = now_tick;
+            let mut next = *vitals;
+            if next.tick(steps) {
+                player.save_state(player_path, next)?;
+                *vitals = next;
+                send(s, 0x06, &health_packet(*vitals))?;
+            } else {
+                *vitals = next;
+            }
+        }
+        // A food right-click starts a 32 tick use animation. The server owns
+        // completion, selection, consumption, and the resulting food values.
+        if survival && vitals.health > 0.0 {
+            if let Some((began, stack)) = eating {
+                if now_tick.saturating_sub(began) >= 32 {
+                    eating = None;
+                    if inventory.held() == Some(stack) && vitals.can_eat(stack) {
+                        let mut remaining = inventory.clone();
+                        if remaining.consume_held() {
+                            let mut after = *vitals;
+                            if after.eat(stack) {
+                                // Debit inventory before player-NBT food credit.
+                                remaining.save(inventory_path)?;
+                                player.save_state(player_path, after)?;
+                                *inventory = remaining;
+                                *vitals = after;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                send(s, 0x06, &health_packet(*vitals))?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if survival && vitals.health <= 0.0 {
+            eating = None;
+            commit_death_drops(
+                inventory, inventory_path, ground_items, ground_path, hub, location,
+            )?;
         }
         if now_tick.saturating_sub(last_time_tick) >= 20 {
             let mut time = Vec::with_capacity(16);
@@ -629,6 +673,15 @@ fn play(
                         send(s, 0x06, &health_packet(*vitals))?;
                     }
                 }
+                if survival {
+                    let old_food = vitals.food;
+                    let old_saturation = vitals.saturation;
+                    vitals.travel((x - player.x).hypot(z - player.z));
+                    if vitals.food != old_food || vitals.saturation != old_saturation {
+                        player.save_state(player_path, *vitals)?;
+                        send(s, 0x06, &health_packet(*vitals))?;
+                    }
+                }
                 idle_gravity.observe_client(now_tick);
                 location = (x, y, z);
                 *player = candidate;
@@ -660,6 +713,9 @@ fn play(
                 input.i8()?; // face
                 input.finish()?;
                 if survival {
+                    if action == 5 {
+                        eating = None; // Release Use Item.
+                    }
                     let target = (x, y, z);
                     match action {
                         3 | 4 => {
@@ -835,6 +891,16 @@ fn play(
                 input.take(3)?; // cursor x/y/z
                 input.finish()?;
 
+                // Protocol 5 Use Item: air target is (-1,255,-1), face -1.
+                // Only an authenticated, selected inventory stack can be used.
+                if survival && x == -1 && y == 255 && z == -1 && face == -1 {
+                    if let Some(stack) = inventory.held() {
+                        if inventory.can_place(held) && vitals.can_eat(stack) {
+                            eating = Some((now_tick, stack));
+                        }
+                    }
+                    continue;
+                }
                 if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
@@ -1189,6 +1255,9 @@ fn play(
                 let action = input.i8()?;
                 input.finish()?;
                 if survival && action == 0 && vitals.health <= 0.0 {
+                    commit_death_drops(
+                        inventory, inventory_path, ground_items, ground_path, hub, location,
+                    )?;
                     let origin = PlayerPosition::default();
                     let fresh_vitals = Vitals::default();
                     origin.save_state(player_path, fresh_vitals)?;
@@ -1196,6 +1265,7 @@ fn play(
                     *player = origin;
                     fall = FallTracker::new(origin.y);
                     idle_gravity = IdleGravity::new(now_tick);
+                    eating = None;
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = 0i32.to_be_bytes().to_vec();
                     respawn.extend_from_slice(&[1, 0]); // normal difficulty, survival
@@ -1214,6 +1284,44 @@ fn play(
         }
     }
 }
+/// Debit all player possessions before publishing death drops. A cross-file
+/// transaction journal is not yet implemented: a storage fault can lose items,
+/// but cannot re-credit the source inventory and duplicate them.
+fn commit_death_drops(
+    inventory: &mut Inventory,
+    inventory_path: &Path,
+    ground_items: &Mutex<GroundItems>,
+    ground_path: &Path,
+    hub: &Hub,
+    location: (f64, f64, f64),
+) -> io::Result<()> {
+    let possessions = inventory.possessions();
+    if possessions.is_empty() {
+        return Ok(());
+    }
+    let mut ground = ground_items
+        .lock()
+        .map_err(|_| io::Error::other("ground items lock poisoned"))?;
+    if !ground.has_capacity_for(possessions.len()) {
+        return Err(bad("death-drop capacity exhausted"));
+    }
+    let mut empty = inventory.clone();
+    empty.clear_possessions();
+    empty.save(inventory_path)?;
+    *inventory = empty;
+    let block = (
+        (location.0.floor() as i32).clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
+        (location.1.floor() as i32).clamp(0, 254),
+        (location.2.floor() as i32).clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
+    );
+    for item in ground.put_many(ground_path, &possessions, block)? {
+        for packet in item.spawn() {
+            hub.broadcast(packet);
+        }
+    }
+    Ok(())
+}
+
 struct PlayerAdmission {
     hub: Arc<Hub>,
     entity_id: i32,
