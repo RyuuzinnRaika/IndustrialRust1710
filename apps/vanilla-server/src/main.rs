@@ -13,6 +13,7 @@ mod multiplayer;
 mod physics;
 mod player;
 mod survival;
+mod vitals;
 mod whitelist;
 mod world;
 
@@ -41,6 +42,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use survival::MiningProgress;
+use vitals::Vitals;
 use whitelist::Whitelist;
 use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
 
@@ -182,7 +184,7 @@ fn status(s: &mut TcpStream, hub: &Hub) -> io::Result<()> {
 struct InitialPlayer<'a> {
     position: &'a PlayerPosition,
     inventory: &'a Inventory,
-    health: f32,
+    vitals: Vitals,
     survival: bool,
 }
 fn join(
@@ -195,7 +197,7 @@ fn join(
     let InitialPlayer {
         position,
         inventory,
-        health,
+        vitals,
         survival,
     } = initial;
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
@@ -216,7 +218,7 @@ fn join(
         spawn.extend_from_slice(&coordinate.to_be_bytes());
     }
     send(s, 0x05, &spawn)?;
-    send(s, 0x06, &health_packet(health))?;
+    send(s, 0x06, &health_packet(vitals))?;
     let mut time = Vec::new();
     time.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
     time.extend_from_slice(&clock.day_time().to_be_bytes());
@@ -306,11 +308,11 @@ fn sync_chunks(
     Ok(())
 }
 
-fn health_packet(health: f32) -> Vec<u8> {
+fn health_packet(vitals: Vitals) -> Vec<u8> {
     let mut packet = Vec::with_capacity(10);
-    packet.extend_from_slice(&health.to_be_bytes());
-    packet.extend_from_slice(&20i16.to_be_bytes()); // hunger system not yet modeled
-    packet.extend_from_slice(&5.0f32.to_be_bytes());
+    packet.extend_from_slice(&vitals.health.to_be_bytes());
+    packet.extend_from_slice(&(vitals.food as i16).to_be_bytes());
+    packet.extend_from_slice(&vitals.saturation.to_be_bytes());
     packet
 }
 fn send_player_position(s: &mut TcpStream, location: &PlayerPosition) -> io::Result<()> {
@@ -345,7 +347,7 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
 }
 struct PlayerSession<'a> {
     position: &'a mut PlayerPosition,
-    health: &'a mut f32,
+    vitals: &'a mut Vitals,
     save_path: &'a Path,
     inventory: &'a mut Inventory,
     inventory_path: &'a Path,
@@ -371,7 +373,7 @@ fn play(
 ) -> io::Result<()> {
     let PlayerSession {
         position: player,
-        health,
+        vitals,
         save_path: player_path,
         inventory,
         inventory_path,
@@ -444,7 +446,7 @@ fn play(
             }
         }
         if saved_at.elapsed() >= Duration::from_secs(5) {
-            player.save_with_health(player_path, *health)?;
+            player.save_state(player_path, *vitals)?;
             inventory.save(inventory_path)?;
             saved_at = Instant::now();
         }
@@ -490,7 +492,7 @@ fn play(
         let now_tick = clock.ticks();
         // A real 1.7.10 client predicts gravity while sending movement.
         // After six silent server ticks we integrate vertical gravity here.
-        if survival && *health > 0.0 {
+        if survival && vitals.health > 0.0 {
             let gravity_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let simulated = idle_gravity.advance(&gravity_world, player, now_tick);
             let grounded = simulated
@@ -499,16 +501,16 @@ fn play(
             drop(gravity_world);
             if let Some(candidate) = simulated {
                 let damage = fall.update(candidate.y, grounded);
-                let next_health = (*health - f32::from(damage)).max(0.0);
-                // Commit the authoritative position and HP to disk before
-                // notifying clients. A failed save must not update RAM.
-                candidate.save_with_health(player_path, next_health)?;
+                let mut next_vitals = *vitals;
+                next_vitals.health = (next_vitals.health - f32::from(damage)).max(0.0);
+                // Save accepted position and HP before sending an update.
+                candidate.save_state(player_path, next_vitals)?;
                 *player = candidate;
-                *health = next_health;
+                *vitals = next_vitals;
                 location = (candidate.x, candidate.y, candidate.z);
                 send_player_position(s, player)?;
                 if damage != 0 {
-                    send(s, 0x06, &health_packet(*health))?;
+                    send(s, 0x06, &health_packet(*vitals))?;
                 }
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, *player, yaw, pitch);
@@ -541,7 +543,7 @@ fn play(
         let id = input.varint()?;
         // Dead players cannot interact with or move through the world until
         // their Protocol 5 Client Status respawn request is accepted.
-        if survival && *health <= 0.0 && matches!(id, 4 | 6 | 7 | 8) {
+        if survival && vitals.health <= 0.0 && matches!(id, 4 | 6 | 7 | 8) {
             continue;
         }
         match id {
@@ -622,9 +624,9 @@ fn play(
                     drop(collision_world);
                     let damage = fall.update(y, landed);
                     if damage != 0 {
-                        *health = (*health - f32::from(damage)).max(0.0);
-                        player.save_with_health(player_path, *health)?;
-                        send(s, 0x06, &health_packet(*health))?;
+                        vitals.health = (vitals.health - f32::from(damage)).max(0.0);
+                        player.save_state(player_path, *vitals)?;
+                        send(s, 0x06, &health_packet(*vitals))?;
                     }
                 }
                 idle_gravity.observe_client(now_tick);
@@ -1186,21 +1188,22 @@ fn play(
                 // Protocol 5 C16 Client Status: 0 = Perform Respawn.
                 let action = input.i8()?;
                 input.finish()?;
-                if survival && action == 0 && *health <= 0.0 {
+                if survival && action == 0 && vitals.health <= 0.0 {
                     let origin = PlayerPosition::default();
-                    *health = 20.0;
+                    let fresh_vitals = Vitals::default();
+                    origin.save_state(player_path, fresh_vitals)?;
+                    *vitals = fresh_vitals;
                     *player = origin;
                     fall = FallTracker::new(origin.y);
                     idle_gravity = IdleGravity::new(now_tick);
                     location = (origin.x, origin.y, origin.z);
-                    player.save_with_health(player_path, *health)?;
                     let mut respawn = 0i32.to_be_bytes().to_vec();
                     respawn.extend_from_slice(&[1, 0]); // normal difficulty, survival
                     write_string("default", &mut respawn)?;
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks on respawn
                     sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
-                    send(s, 0x06, &health_packet(*health))?;
+                    send(s, 0x06, &health_packet(*vitals))?;
                     send_player_position(s, player)?;
                     hub.move_player(entity_id, *player, yaw, pitch);
                 }
@@ -1304,7 +1307,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         return Ok(());
     }
     let player_file = PlayerPosition::location(&path, &name);
-    let (mut player_state, mut player_health) = match PlayerPosition::load_state(&player_file) {
+    let (mut player_state, mut player_vitals) = match PlayerPosition::load_state(&player_file) {
         Ok(state) => state,
         Err(err) => {
             eprintln!("player state unavailable for {name}: {err}");
@@ -1362,7 +1365,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         InitialPlayer {
             position: &player_state,
             inventory: &inventory_state,
-            health: player_health,
+            vitals: player_vitals,
             survival,
         },
     )?;
@@ -1396,7 +1399,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         &clock,
         PlayerSession {
             position: &mut player_state,
-            health: &mut player_health,
+            vitals: &mut player_vitals,
             save_path: &player_file,
             inventory: &mut inventory_state,
             inventory_path: &inventory_file,
@@ -1413,7 +1416,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
-    let player_saved = player_state.save_with_health(&player_file, player_health);
+    let player_saved = player_state.save_state(&player_file, player_vitals);
     let inventory_saved = inventory_state.save(&inventory_file);
     println!("left: {name}");
     player_saved?;
