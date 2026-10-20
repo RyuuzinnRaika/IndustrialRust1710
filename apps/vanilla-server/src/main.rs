@@ -591,7 +591,7 @@ fn play(
                         0 => {
                             let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                             mining = if world::in_bounds(x, y, z) && near(location, x, y, z) {
-                                MiningProgress::start(target, w.get(x, y, z))
+                                MiningProgress::start(target, w.get(x, y, z), inventory.held())
                             } else {
                                 None
                             };
@@ -600,28 +600,84 @@ fn play(
                         2 => {
                             let attempt = mining.take();
                             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                            let mined = attempt.and_then(|m| m.finish(target, w.get(x, y, z)));
+                            let result = attempt
+                                .and_then(|m| m.finish(target, w.get(x, y, z), inventory.held()));
                             let mut changed = false;
                             if world::in_bounds(x, y, z) && near(location, x, y, z) {
-                                if let Some(item) = mined {
-                                    let mut ground = ground_items.lock().map_err(|_| {
-                                        io::Error::other("ground items lock poisoned")
-                                    })?;
-                                    if !ground.is_full()
-                                        && w.update_and_save(world_path, x, y, z, 0)?
-                                    {
-                                        let stack = Stack {
-                                            id: item.id,
-                                            count: 1,
-                                            damage: item.damage,
-                                        };
-                                        // World saved first; an interrupted insertion can lose
-                                        // the item, never multiply it.
-                                        let dropped = ground.put(ground_path, stack, (x, y, z))?;
-                                        for packet in dropped.spawn() {
-                                            hub.broadcast(packet);
+                                if let Some(result) = result {
+                                    let block = w.get(x, y, z) >> 4;
+                                    // Safely refuse tile-entity mining until
+                                    // their contents can become proper drops.
+                                    let occupied = (block == 54
+                                        && chests
+                                            .lock()
+                                            .map_err(|_| bad("chest lock poisoned"))?
+                                            .is_nonempty(target))
+                                        || ((block == 61 || block == 62)
+                                            && furnaces
+                                                .lock()
+                                                .map_err(|_| bad("furnace lock poisoned"))?
+                                                .get(target)
+                                                .occupied());
+                                    if !occupied {
+                                        let mut ground = ground_items.lock().map_err(|_| {
+                                            io::Error::other("ground items lock poisoned")
+                                        })?;
+                                        // A filled entity pool must not destroy a
+                                        // block that should have created an item.
+                                        if result.drop.is_none() || !ground.is_full() {
+                                            let mut candidate = inventory.clone();
+                                            let wore =
+                                                result.wear_tool && candidate.wear_held_tool();
+                                            // Commit durability consumption before
+                                            // changing the world, not vice-versa.
+                                            if wore {
+                                                candidate.save(inventory_path)?;
+                                            }
+                                            match w.update_and_save(world_path, x, y, z, 0) {
+                                                Ok(true) => {
+                                                    if wore {
+                                                        *inventory = candidate;
+                                                        send(
+                                                            s,
+                                                            0x2f,
+                                                            &inventory
+                                                                .set_slot(inventory.held_slot())?,
+                                                        )?;
+                                                    }
+                                                    if let Some(drop) = result.drop {
+                                                        let stack = Stack {
+                                                            id: drop.id,
+                                                            count: 1,
+                                                            damage: drop.damage,
+                                                        };
+                                                        // A crash after world save and
+                                                        // before entity persistence can
+                                                        // lose an item, never clone it.
+                                                        let item = ground.put(
+                                                            ground_path,
+                                                            stack,
+                                                            target,
+                                                        )?;
+                                                        for packet in item.spawn() {
+                                                            hub.broadcast(packet);
+                                                        }
+                                                    }
+                                                    changed = true;
+                                                }
+                                                Ok(false) => {
+                                                    if wore {
+                                                        inventory.save(inventory_path)?;
+                                                    }
+                                                }
+                                                Err(error) => {
+                                                    if wore {
+                                                        inventory.save(inventory_path)?;
+                                                    }
+                                                    return Err(error);
+                                                }
+                                            }
                                         }
-                                        changed = true;
                                     }
                                 }
                             }
