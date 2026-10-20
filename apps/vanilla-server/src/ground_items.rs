@@ -85,7 +85,7 @@ impl GroundItem {
         ]
     }
 }
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroundItems {
     version: u8,
@@ -196,6 +196,47 @@ impl GroundItems {
             .insert(id, Instant::now() + PICKUP_DELAY);
         Ok(item)
     }
+    /// Reserve capacity before clearing an inventory. The entire death-drop
+    /// batch is committed by one file replace, never by per-stack IO.
+    pub fn has_capacity_for(&self, count: usize) -> bool {
+        count <= MAX_DROPS.saturating_sub(self.entries.len())
+            && i64::from(self.next_id) + count as i64 <= i64::from(i32::MAX)
+    }
+
+    pub fn put_many(
+        &mut self,
+        path: &Path,
+        stacks: &[Stack],
+        block: (i32, i32, i32),
+    ) -> io::Result<Vec<GroundItem>> {
+        if !self.has_capacity_for(stacks.len()) || stacks.iter().any(|stack| !stack.is_valid()) {
+            return Err(invalid("death-drop capacity or stack invalid"));
+        }
+        if stacks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut candidate = self.clone();
+        let mut inserted = Vec::with_capacity(stacks.len());
+        let when_ready = Instant::now() + PICKUP_DELAY;
+        for &stack in stacks {
+            candidate.next_id += 1;
+            let item = GroundItem {
+                id: candidate.next_id,
+                position: [block.0 * 32 + 16, block.1 * 32 + 16, block.2 * 32 + 16],
+                stack,
+            };
+            if !item.valid() {
+                return Err(invalid("invalid death-drop location"));
+            }
+            candidate.entries.insert(item.id, item.clone());
+            candidate.eligible_after.insert(item.id, when_ready);
+            inserted.push(item);
+        }
+        candidate.save(path)?;
+        *self = candidate;
+        Ok(inserted)
+    }
+
     pub fn nearby_ready(&self, feet: (f64, f64, f64)) -> Option<GroundItem> {
         self.entries
             .values()
@@ -223,6 +264,39 @@ impl GroundItems {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn batch_death_drop_is_atomic_and_preserves_stacks() {
+        let dir = std::env::temp_dir().join(format!("ir1710-drops-batch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("drops.json");
+        let mut drops = GroundItems::default();
+        let stacks = [
+            Stack {
+                id: 260,
+                count: 5,
+                damage: 0,
+            },
+            Stack {
+                id: 1,
+                count: 32,
+                damage: 0,
+            },
+        ];
+        assert!(drops.has_capacity_for(2));
+        let items = drops.put_many(&file, &stacks, (0, 65, 0)).unwrap();
+        assert_eq!(items.len(), 2);
+        let restored = GroundItems::load(&file).unwrap();
+        let values: Vec<_> = restored.items().map(|item| item.stack).collect();
+        assert_eq!(values, stacks);
+        let missing_parent = file.join("world.json");
+        assert!(drops
+            .put_many(&missing_parent, &stacks, (0, 65, 0))
+            .is_err());
+        assert_eq!(drops.items().count(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn protocol5_item_packets_and_range() {
         let item = GroundItem {

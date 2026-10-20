@@ -1194,3 +1194,124 @@ fn native_protocol5_airborne_player_gets_20tps_gravity_after_client_silence() {
     drop(rejoined);
     server.wait_idle();
 }
+
+#[test]
+fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
+    let server = NativeServer::start_with_mode(true);
+    // Seed a native 1.7.10-compatible NBT player with partial hunger.
+    // The server must load these values without trusting client-held food.
+    #[derive(serde::Serialize)]
+    struct SeedPlayer {
+        #[serde(rename = "Pos")]
+        pos: Vec<f64>,
+        #[serde(rename = "Health")]
+        health: f32,
+        #[serde(rename = "foodLevel")]
+        food: i32,
+        #[serde(rename = "foodSaturationLevel")]
+        saturation: f32,
+    }
+    let player_file = server.directory.join("players/rusttester.dat");
+    fs::create_dir_all(player_file.parent().unwrap()).unwrap();
+    let encoded = fastnbt::to_bytes(&SeedPlayer {
+        pos: vec![0.5, 64.0, 0.5],
+        health: 10.0,
+        food: 10,
+        saturation: 0.0,
+    })
+    .unwrap();
+    let mut compressed = flate2::write::GzEncoder::new(
+        fs::File::create(&player_file).unwrap(),
+        flate2::Compression::default(),
+    );
+    compressed.write_all(&encoded).unwrap();
+    compressed.finish().unwrap();
+
+    let inventory_file = server
+        .directory
+        .join("players/rusttester.survival.inventory.json");
+    let mut slots = vec![Value::Null; 45];
+    slots[36] = json!({"id":260,"count":2,"damage":0});
+    slots[37] = json!({"id":1,"count":9,"damage":0});
+    fs::write(
+        &inventory_file,
+        serde_json::to_vec(&json!({
+            "version":1, "selected":0, "slots":slots, "cursor":null,
+            "workbench":vec![Value::Null;9]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (mut client, _, start) = server.join("RustTester");
+    assert_eq!(start, [0.5, 64.0, 0.5]);
+    // Invalid forged item use is ignored without any inventory credit.
+    let mut use_item = (-1i32).to_be_bytes().to_vec();
+    use_item.push(255);
+    use_item.extend_from_slice(&(-1i32).to_be_bytes());
+    use_item.push(255);
+    use_item.extend_from_slice(&1i16.to_be_bytes());
+    use_item.push(2);
+    use_item.extend_from_slice(&0i16.to_be_bytes());
+    use_item.extend_from_slice(&(-1i16).to_be_bytes());
+    use_item.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &use_item)).unwrap();
+
+    // Authentic apple (260) with 2 items starts 32 tick food use.
+    use_item[10] = 1; // first byte of 260i16 = 1, second is 4
+    use_item[11] = 4;
+    client.write_all(&frame(8, &use_item)).unwrap();
+    until_packet(&mut client, 0x2f, |packet| {
+        packet.len() == 10
+            && packet[..3] == [0, 0, 36]
+            && packet[3..5] == 260i16.to_be_bytes()
+            && packet[5] == 1
+    });
+    until_packet(&mut client, 0x06, |packet| {
+        packet.len() == 10
+            && packet[..4] == 10f32.to_be_bytes()
+            && packet[4..6] == 14i16.to_be_bytes()
+    });
+
+    // Death must drop the remaining apple and stone and clear source inventory.
+    send_position(&mut client, 0.5, 90.0, 0.5);
+    send_position(&mut client, 0.5, 64.0, 0.5);
+    until_packet(&mut client, 0x06, |packet| {
+        packet.len() == 10 && packet[..4] == 0f32.to_be_bytes()
+    });
+    let drops_file = server.directory.join("flat.drops.json");
+    await_file(&drops_file);
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let value: Value = serde_json::from_slice(&fs::read(&drops_file).unwrap()).unwrap();
+        if value["entries"].as_object().unwrap().len() == 2 {
+            let counts: Vec<u64> = value["entries"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|v| v["stack"]["count"].as_u64().unwrap())
+                .collect();
+            assert!(counts.contains(&1));
+            assert!(counts.contains(&9));
+            break;
+        }
+        assert!(Instant::now() < deadline, "death drops never persisted");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let inv: Value = serde_json::from_slice(&fs::read(&inventory_file).unwrap()).unwrap();
+    assert!(inv["slots"][36].is_null());
+    assert!(inv["slots"][37].is_null());
+
+    client.write_all(&frame(22, &[0])).unwrap();
+    until_packet(&mut client, 0x07, |_| true);
+    until_packet(&mut client, 0x06, |packet| {
+        packet.len() == 10
+            && packet[..4] == 20f32.to_be_bytes()
+            && packet[4..6] == 20i16.to_be_bytes()
+    });
+    drop(client);
+    server.wait_idle();
+    let (rejoined, _, _) = server.join("RustTester");
+    drop(rejoined);
+    server.wait_idle();
+}
