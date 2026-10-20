@@ -108,6 +108,10 @@ impl Hub {
         let inner = self.0.lock().map_err(|_| poisoned())?;
         Ok(inner.players.values().map(|p| p.name.clone()).collect())
     }
+    pub fn positions(&self) -> io::Result<Vec<PlayerPosition>> {
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        Ok(inner.players.values().map(|peer| peer.position).collect())
+    }
     pub fn add(
         &self,
         name: String,
