@@ -504,7 +504,9 @@ mod tests {
         assert!(generated.spawn_y() > 50.0);
         let surface = crate::terrain::surface(42, -17, 16);
         assert_eq!(generated.get(-17, surface, 16), 2 << 4);
-        generated.update_and_save(&path, -17, surface, 16, 0).unwrap();
+        generated
+            .update_and_save(&path, -17, surface, 16, 0)
+            .unwrap();
         assert_eq!(&fs::read(&path).unwrap()[..4], b"IRW2");
         let again = World::load(&path).unwrap();
         assert_eq!(again.natural_seed(), Some(42));

@@ -218,7 +218,8 @@ fn join(
     let surface = world
         .lock()
         .map_err(|_| bad("world mutex poisoned"))?
-        .spawn_y() as i32 - 1;
+        .spawn_y() as i32
+        - 1;
     for coordinate in [0i32, surface, 0] {
         spawn.extend_from_slice(&coordinate.to_be_bytes());
     }
@@ -1605,7 +1606,7 @@ fn main() -> io::Result<()> {
                         .parse()
                         .map_err(|_| bad("invalid terrain seed (expected unsigned integer)"))?,
                 );
-            },
+            }
             "--export-anvil" => {
                 anvil_export_path = Some(PathBuf::from(
                     args.next()
@@ -1621,8 +1622,12 @@ fn main() -> io::Result<()> {
             _ => return Err(bad("unknown command-line argument")),
         }
     }
-    if requested_seed.is_some() && (!survival || anvil_export_path.is_some() || anvil_import_path.is_some()) {
-        return Err(bad("--terrain-seed requires --survival and cannot be used with import/export"));
+    if requested_seed.is_some()
+        && (!survival || anvil_export_path.is_some() || anvil_import_path.is_some())
+    {
+        return Err(bad(
+            "--terrain-seed requires --survival and cannot be used with import/export",
+        ));
     }
     if anvil_export_path.is_some() && anvil_import_path.is_some() {
         return Err(bad(
@@ -1671,7 +1676,9 @@ fn main() -> io::Result<()> {
         let existing = World::load(&world_path)?;
         if let Some(seed) = requested_seed {
             if existing.natural_seed() != Some(seed) {
-                return Err(bad("existing world has a different generation type or seed"));
+                return Err(bad(
+                    "existing world has a different generation type or seed",
+                ));
             }
         }
         existing

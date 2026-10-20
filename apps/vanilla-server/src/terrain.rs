@@ -61,23 +61,29 @@ fn noise3(seed: u64, x: i32, y: i32, z: i32, span: i32) -> f64 {
 pub fn surface(seed: u64, x: i32, z: i32) -> i32 {
     let coarse = noise2(seed ^ 0x241d, x, z, 64);
     let detail = noise2(seed ^ 0x5ed3, x, z, 20);
-    (70.0 + coarse * 12.0 + detail * 5.0).round().clamp(52.0, 90.0) as i32
+    (70.0 + coarse * 12.0 + detail * 5.0)
+        .round()
+        .clamp(52.0, 90.0) as i32
 }
 fn tree(seed: u64, x: i32, z: i32) -> bool {
     // Reserve a safe player spawn radius; always cross-check the same world seed.
-    (x.abs() > 12 || z.abs() > 12)
-        && hash(seed ^ 0x6ac2d, x, 0, z) % 73 == 0
+    (x.abs() > 12 || z.abs() > 12) && hash(seed ^ 0x6ac2d, x, 0, z) % 73 == 0
 }
 fn ore(seed: u64, x: i32, y: i32, z: i32) -> u16 {
-    let pick = hash(seed ^ 0xa037, x.div_euclid(3), y.div_euclid(3), z.div_euclid(3)) % 1000;
+    let pick = hash(
+        seed ^ 0xa037,
+        x.div_euclid(3),
+        y.div_euclid(3),
+        z.div_euclid(3),
+    ) % 1000;
     let id = match (y, pick) {
-        (0..=15, 0..=7) => 56, // diamond
-        (0..=20, 8..=23) => 73, // redstone
-        (0..=31, 24..=39) => 14, // gold
-        (0..=47, 40..=58) => 21, // lapis
+        (0..=15, 0..=7) => 56,    // diamond
+        (0..=20, 8..=23) => 73,   // redstone
+        (0..=31, 24..=39) => 14,  // gold
+        (0..=47, 40..=58) => 21,  // lapis
         (0..=63, 59..=104) => 15, // iron
-        (_, 105..=185) => 16, // coal
-        _ => 1, // stone
+        (_, 105..=185) => 16,     // coal
+        _ => 1,                   // stone
     };
     id << 4
 }
@@ -92,7 +98,8 @@ pub fn block(seed: u64, x: i32, y: i32, z: i32) -> u16 {
     }
     let top = surface(seed, x, z);
     if y <= top {
-        if y < top - 4 && y > 6
+        if y < top - 4
+            && y > 6
             && noise3(seed ^ 0xcafe, x, y, z, 13) > 0.46
             && noise3(seed ^ 0x1337, x, y, z, 29) > -0.2
         {
@@ -126,15 +133,16 @@ pub fn block(seed: u64, x: i32, y: i32, z: i32) -> u16 {
             }
             let dy = y - (root + 4);
             let radius = if dy == 2 { 1 } else { 2 };
-            if (-1..=2).contains(&dy)
-                && (tx - x).abs() <= radius
-                && (tz - z).abs() <= radius
-            {
+            if (-1..=2).contains(&dy) && (tx - x).abs() <= radius && (tz - z).abs() <= radius {
                 leaf = true;
             }
         }
     }
-    if leaf { LEAVES } else { 0 }
+    if leaf {
+        LEAVES
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -161,13 +169,21 @@ mod tests {
         for x in -40..40 {
             for z in -40..40 {
                 let y = surface(42, x, z);
-                if block(42, x, y + 1, z) == LOG { logs += 1; }
-                if block(42, x, y + 4, z) == LEAVES { leaves += 1; }
+                if block(42, x, y + 1, z) == LOG {
+                    logs += 1;
+                }
+                if block(42, x, y + 4, z) == LEAVES {
+                    leaves += 1;
+                }
                 if x % 7 == 0 && z % 7 == 0 {
                     for deep in 7..48 {
                         let id = block(42, x, deep, z) >> 4;
-                        if matches!(id, 14 | 15 | 16 | 21 | 56 | 73) { ores += 1; }
-                        if id == 0 { caves += 1; }
+                        if matches!(id, 14 | 15 | 16 | 21 | 56 | 73) {
+                            ores += 1;
+                        }
+                        if id == 0 {
+                            caves += 1;
+                        }
                     }
                 }
             }
