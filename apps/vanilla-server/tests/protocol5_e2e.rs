@@ -1316,7 +1316,6 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     server.wait_idle();
 }
 
-
 #[test]
 fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
     let server = NativeServer::start();
@@ -1342,8 +1341,10 @@ fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
         packet.extend_from_slice(&[8, 8, 8]);
         client.write_all(&frame(8, &packet)).unwrap();
         until_packet(&mut client, 0x23, |body| {
-            body.len() == 11 && body[0..4] == x.to_be_bytes()
-                && body[4] == 64 && body[9] == if id == 331 { 55 } else { id as u8 }
+            body.len() == 11
+                && body[0..4] == x.to_be_bytes()
+                && body[4] == 64
+                && body[9] == if id == 331 { 55 } else { id as u8 }
         });
     };
     place(69, -4); // lever
@@ -1351,8 +1352,11 @@ fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
     place(8, 5); // source water supported by grass
     drop(place); // release closure's mutable TcpStream borrow
     until_packet(&mut client, 0x23, |body| {
-        body.len() == 11 && body[0..4] == 6i32.to_be_bytes()
-            && body[4] == 64 && body[9] == 8 && body[10] >= 1
+        body.len() == 11
+            && body[0..4] == 6i32.to_be_bytes()
+            && body[4] == 64
+            && body[9] == 8
+            && body[10] >= 1
     });
     // Right click the lever to turn on the 15-strength redstone source.
     let mut click = (-4i32).to_be_bytes().to_vec();
@@ -1363,12 +1367,18 @@ fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
     click.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &click)).unwrap();
     until_packet(&mut client, 0x23, |body| {
-        body.len() == 11 && body[0..4] == (-4i32).to_be_bytes()
-            && body[4] == 64 && body[9] == 69 && body[10] & 8 != 0
+        body.len() == 11
+            && body[0..4] == (-4i32).to_be_bytes()
+            && body[4] == 64
+            && body[9] == 69
+            && body[10] & 8 != 0
     });
     until_packet(&mut client, 0x23, |body| {
-        body.len() == 11 && body[0..4] == (-3i32).to_be_bytes()
-            && body[4] == 64 && body[9] == 55 && body[10] == 15
+        body.len() == 11
+            && body[0..4] == (-3i32).to_be_bytes()
+            && body[4] == 64
+            && body[9] == 55
+            && body[10] == 15
     });
     drop(client);
     server.wait_idle();

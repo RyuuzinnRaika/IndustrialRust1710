@@ -278,16 +278,16 @@ impl World {
             }
             let down = (x, y - 1, z);
             let targets: Vec<(i32, i32, i32)> =
-                if in_bounds(down.0, down.1, down.2)
-                    && self.get(down.0, down.1, down.2) == 0
-                {
+                if in_bounds(down.0, down.1, down.2) && self.get(down.0, down.1, down.2) == 0 {
                     vec![down]
                 } else {
                     vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
                 };
             for (nx, ny, nz) in targets {
                 if in_bounds(nx, ny, nz) && self.get(nx, ny, nz) == 0 {
-                    changes.entry((nx, ny as u8, nz)).or_insert((id << 4) | level + 1);
+                    changes
+                        .entry((nx, ny as u8, nz))
+                        .or_insert((id << 4) | level + 1);
                 }
             }
         }
@@ -303,7 +303,7 @@ impl World {
                 let block = self.get(nx, y, nz);
                 let source = match block >> 4 {
                     69 if block & 8 != 0 => 15, // active lever
-                    76 => 15, // redstone torch
+                    76 => 15,                   // redstone torch
                     55 => (block & 15).saturating_sub(1),
                     _ => 0,
                 };
@@ -330,8 +330,12 @@ impl World {
             if let Err(error) = saved {
                 for (pos, original) in undo {
                     match original {
-                        Some(block) => { self.edits.insert(pos, block); }
-                        None => { self.edits.remove(&pos); }
+                        Some(block) => {
+                            self.edits.insert(pos, block);
+                        }
+                        None => {
+                            self.edits.remove(&pos);
+                        }
                     }
                 }
                 return Err(error);
@@ -652,7 +656,8 @@ mod tests {
     }
     #[test]
     fn water_flow_and_circuit_propagation_are_bounded_and_persistent() {
-        let path = std::env::temp_dir().join(format!("ir1710-fluid-circuit-{}.irw", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-fluid-circuit-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
         // Water above the grass: first tick flows down only.
@@ -674,7 +679,9 @@ mod tests {
         assert_eq!(w.get(2, 64, 0), (55 << 4) | 14);
         // Turning off the lever decays a wire chain to zero.
         w.update_and_save(&path, 0, 64, 0, 69 << 4).unwrap();
-        for _ in 0..35 { w.block_tick(&path, 64).unwrap(); }
+        for _ in 0..35 {
+            w.block_tick(&path, 64).unwrap();
+        }
         assert_eq!(w.get(1, 64, 0), 55 << 4);
         assert_eq!(w.get(2, 64, 0), 55 << 4);
         let saved = World::load(&path).unwrap();
@@ -685,7 +692,10 @@ mod tests {
     #[test]
     fn source_flow_respects_edit_budget_and_legacy_flat() {
         let mut w = World::new();
-        assert!(w.block_tick(Path::new("/no-write-when-empty"), 64).unwrap().is_empty());
+        assert!(w
+            .block_tick(Path::new("/no-write-when-empty"), 64)
+            .unwrap()
+            .is_empty());
         assert!(is_placeable(55) && is_placeable(69) && is_placeable(76));
         assert!(is_placeable(8) && is_placeable(10));
         w.import_block(0, 67, 0, 10 << 4).unwrap();

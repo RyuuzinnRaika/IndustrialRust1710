@@ -977,10 +977,7 @@ fn play(
                 }
                 // Server-authoritative lever use: toggle powered flag,
                 // then let queued redstone-wire updates propagate per tick.
-                if (0..=5).contains(&face)
-                    && world::in_bounds(x, y, z)
-                    && near(location, x, y, z)
-                {
+                if (0..=5).contains(&face) && world::in_bounds(x, y, z) && near(location, x, y, z) {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let old = w.get(x, y, z);
                     if old >> 4 == 69 {
@@ -1128,7 +1125,13 @@ fn play(
                                     let mut remaining = inventory.clone();
                                     let removed = remaining.consume_held();
                                     let bucket_ok = if matches!(stack.id, 326 | 327) {
-                                        remaining.receive_stack(Stack { id: 325, count: 1, damage: 0 }).is_some()
+                                        remaining
+                                            .receive_stack(Stack {
+                                                id: 325,
+                                                count: 1,
+                                                damage: 0,
+                                            })
+                                            .is_some()
                                     } else {
                                         true
                                     };
