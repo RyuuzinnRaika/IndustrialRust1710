@@ -320,12 +320,25 @@ mod tests {
     #[test]
     fn window_zero_moves_stacks_without_creating_or_losing_items() {
         let mut inventory = Inventory::default();
-        let a = Stack { id: 3, count: 17, damage: 0 };
-        let b = Stack { id: 3, count: 60, damage: 0 };
+        let a = Stack {
+            id: 3,
+            count: 17,
+            damage: 0,
+        };
+        let b = Stack {
+            id: 3,
+            count: 60,
+            damage: 0,
+        };
         inventory.creative_set(36, Some(a)).unwrap();
         inventory.creative_set(10, Some(b)).unwrap();
         let total = |state: &Inventory| -> u32 {
-            state.slots.iter().flatten().map(|item| u32::from(item.count)).sum::<u32>()
+            state
+                .slots
+                .iter()
+                .flatten()
+                .map(|item| u32::from(item.count))
+                .sum::<u32>()
                 + state.cursor.map_or(0, |item| u32::from(item.count))
         };
         assert_eq!(total(&inventory), 77);
@@ -354,20 +367,35 @@ mod tests {
     #[test]
     fn cursor_roundtrip_and_legacy_save_are_safe() {
         let mut inventory = Inventory::default();
-        inventory.creative_set(36, Some(Stack { id: 4, count: 3, damage: 0 })).unwrap();
+        inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 4,
+                    count: 3,
+                    damage: 0,
+                }),
+            )
+            .unwrap();
         inventory.click(36, 1, 0);
         assert_eq!(inventory.cursor.unwrap().count, 2);
         let save = std::env::temp_dir().join(format!(
             "ir1710-cursor-{}-{}.json",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         inventory.save(&save).unwrap();
         assert_eq!(Inventory::load(&save).unwrap(), inventory);
         let raw = std::fs::read_to_string(&save).unwrap();
         let legacy = raw.replace(",\"cursor\":{\"id\":4,\"count\":2,\"damage\":0}", "");
         std::fs::write(&save, legacy).unwrap();
-        assert!(Inventory::load(&save).is_ok(), "older inventory save remains readable");
+        assert!(
+            Inventory::load(&save).is_ok(),
+            "older inventory save remains readable"
+        );
         let _ = std::fs::remove_file(save);
     }
     #[test]
