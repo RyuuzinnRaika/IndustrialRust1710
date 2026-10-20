@@ -50,6 +50,7 @@ pub fn is_placeable(block_id: u16) -> bool {
         block_id,
         1 | 2
             | 3
+            | 50 // wall/ground torch: simplified attachment
             | 4
             | 5
             | 7
