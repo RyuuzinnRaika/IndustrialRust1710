@@ -633,7 +633,6 @@ fn native_click_window_is_authoritative_and_persists_carried_stack() {
     assert_eq!(value["cursor"]["count"], 4);
 }
 
-
 #[test]
 fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
     let server = NativeServer::start();
@@ -654,7 +653,9 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
         payload.push(0); // normal click
         payload.extend_from_slice(&(-1i16).to_be_bytes()); // empty client claim
         client.write_all(&frame(0x0e, &payload)).unwrap();
-        until_packet(client, 0x32, |p| p == [window, action.to_be_bytes()[0], action.to_be_bytes()[1], 1]);
+        until_packet(client, 0x32, |p| {
+            p == [window, action.to_be_bytes()[0], action.to_be_bytes()[1], 1]
+        });
         let items = until_packet(client, 0x30, |p| p[0] == window);
         until_packet(client, 0x2f, |p| p.starts_with(&[255, 255, 255]));
         items
@@ -683,7 +684,9 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
     place.extend_from_slice(&(-1i16).to_be_bytes());
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
-    until_packet(&mut client, 0x23, |p| p.len() >= 11 && p[4] == 64 && p[9] == 58);
+    until_packet(&mut client, 0x23, |p| {
+        p.len() >= 11 && p[4] == 64 && p[9] == 58
+    });
     let mut use_table = 0i32.to_be_bytes().to_vec();
     use_table.push(64);
     use_table.extend_from_slice(&0i32.to_be_bytes());
@@ -692,7 +695,9 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
     use_table.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &use_table)).unwrap();
     let opened = until_packet(&mut client, 0x2d, |p| p.first() == Some(&1));
-    assert!(opened.windows("minecraft:crafting_table".len()).any(|w| w == b"minecraft:crafting_table"));
+    assert!(opened
+        .windows("minecraft:crafting_table".len())
+        .any(|w| w == b"minecraft:crafting_table"));
     until_packet(&mut client, 0x30, |p| p.starts_with(&[1, 0, 46]));
     until_packet(&mut client, 0x2f, |p| p.starts_with(&[255, 255, 255]));
 
@@ -724,5 +729,9 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
     await_file(&save);
     let saved: Value = serde_json::from_slice(&fs::read(save).unwrap()).unwrap();
     assert_eq!(saved["cursor"]["id"], 270);
-    assert!(saved["workbench"].as_array().unwrap().iter().all(Value::is_null));
+    assert!(saved["workbench"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(Value::is_null));
 }
