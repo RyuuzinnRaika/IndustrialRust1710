@@ -37,8 +37,12 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 7
             | 12
             | 13
+            | 14 // gold ore
+            | 15 // iron ore
+            | 16 // coal ore
             | 17
             | 20
+            | 21 // lapis ore
             | 24
             | 35
             | 41
@@ -46,15 +50,19 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 45
             | 49
             | 54 // chest (single only)
+            | 56 // diamond ore
             | 57
             | 58 // crafting table: opens workbench window when used
+            | 73 // redstone ore
             | 80
             | 82
             | 87
             | 89
             | 98
+            | 129 // emerald ore
             | 155
             | 159
+            | 162 // acacia / dark oak logs
             | 168
             | 169
             | 170
