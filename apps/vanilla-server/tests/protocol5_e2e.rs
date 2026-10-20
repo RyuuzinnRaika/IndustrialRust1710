@@ -834,3 +834,111 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
     let empty: Value = serde_json::from_slice(&fs::read(stored).unwrap()).unwrap();
     assert!(empty["entries"].as_object().unwrap().is_empty());
 }
+
+
+#[test]
+fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
+    let server = NativeServer::start();
+    let (mut alice, _, _) = server.join("RustTester");
+    let creative = |slot: i16, id: i16, count: u8| {
+        let mut bytes = slot.to_be_bytes().to_vec();
+        bytes.extend_from_slice(&id.to_be_bytes());
+        bytes.push(count);
+        bytes.extend_from_slice(&0i16.to_be_bytes());
+        bytes.extend_from_slice(&(-1i16).to_be_bytes());
+        frame(0x10, &bytes)
+    };
+    // Place an unlit furnace above the grass at the origin.
+    alice.write_all(&creative(36, 61, 1)).unwrap();
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[0, 0, 36]));
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&61i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    alice.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut alice, 0x23, |p| p.len() >= 11 && p[4] == 64 && p[9] == 61);
+    let mut open = 0i32.to_be_bytes().to_vec();
+    open.push(64);
+    open.extend_from_slice(&0i32.to_be_bytes());
+    open.push(1);
+    open.extend_from_slice(&(-1i16).to_be_bytes());
+    open.extend_from_slice(&[8, 8, 8]);
+    alice.write_all(&frame(8, &open)).unwrap();
+    let opened = until_packet(&mut alice, 0x2d, |p| p.first() == Some(&1));
+    assert_eq!(opened.last(), Some(&3));
+    assert!(opened.windows(b"minecraft:furnace".len()).any(|s| s == b"minecraft:furnace"));
+    until_packet(&mut alice, 0x30, |p| p.starts_with(&[1, 0, 39]));
+    for property in 0..3u8 {
+        until_packet(&mut alice, 0x31, |p| p.len() == 5 && p[0] == 1 && p[2] == property);
+    }
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+    alice.write_all(&creative(37, 15, 1)).unwrap();
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[0, 0, 37]));
+    alice.write_all(&creative(38, 263, 1)).unwrap();
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[0, 0, 38]));
+
+    let shift = |client: &mut TcpStream, slot: i16, action: i16| {
+        let mut data = vec![1];
+        data.extend_from_slice(&slot.to_be_bytes());
+        data.push(0);
+        data.extend_from_slice(&action.to_be_bytes());
+        data.push(1); // shift-click
+        data.extend_from_slice(&(-1i16).to_be_bytes());
+        client.write_all(&frame(0x0e, &data)).unwrap();
+        until_packet(client, 0x32, |p| {
+            p == [1, action.to_be_bytes()[0], action.to_be_bytes()[1], 1]
+        });
+    };
+    shift(&mut alice, 31, 1); // input from hotbar 37
+    until_packet(&mut alice, 0x30, |p| p.starts_with(&[1, 0, 39]));
+    // Some properties may be queued before the cursor Set Slot packet.
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+    shift(&mut alice, 32, 2); // coal from hotbar 38
+    until_packet(&mut alice, 0x30, |p| p.starts_with(&[1, 0, 39]));
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+
+    let saved_path = server.directory.join("flat.furnaces.json");
+    await_file(&saved_path);
+    let deadline = Instant::now() + Duration::from_secs(16);
+    let completed = loop {
+        let document: Value = serde_json::from_slice(&fs::read(&saved_path).unwrap()).unwrap();
+        let furnace = &document["entries"]["0,64,0"];
+        if furnace["slots"][2]["id"] == 265 {
+            break furnace.clone();
+        }
+        assert!(Instant::now() < deadline, "200-tick iron smelting did not finish");
+        thread::sleep(Duration::from_millis(70));
+    };
+    assert!(completed["slots"][0].is_null(), "one ore should be consumed");
+    assert!(completed["slots"][1].is_null(), "one coal should be consumed");
+    assert_eq!(completed["slots"][2]["count"], 1);
+    assert_eq!(completed["burn_total"], 1600);
+    assert!(completed["burn_left"].as_u64().unwrap() > 0);
+    // A second viewer gets the existing result and current progress properties.
+    let (mut bob, _, _) = server.join("TwinAlpha");
+    bob.write_all(&frame(8, &open)).unwrap();
+    until_packet(&mut bob, 0x2d, |p| p.first() == Some(&1));
+    let items = until_packet(&mut bob, 0x30, |p| p.starts_with(&[1, 0, 39]));
+    assert!(items.windows(7).any(|s| s == [1, 9, 1, 0, 0, 255, 255]));
+    for property in 0..3u8 {
+        until_packet(&mut bob, 0x31, |p| p.len() == 5 && p[0] == 1 && p[2] == property);
+    }
+    until_packet(&mut bob, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+    shift(&mut bob, 2, 3); // extract output through authoritative transaction
+    until_packet(&mut bob, 0x30, |p| p.starts_with(&[1, 0, 39]));
+    until_packet(&mut bob, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+    drop(bob);
+    drop(alice);
+    server.wait_idle();
+    let updated: Value = serde_json::from_slice(&fs::read(saved_path).unwrap()).unwrap();
+    assert!(updated["entries"]["0,64,0"]["slots"][2].is_null());
+    let inv = server.directory.join("players/twinalpha.inventory.json");
+    await_file(&inv);
+    let value: Value = serde_json::from_slice(&fs::read(inv).unwrap()).unwrap();
+    assert!(value["slots"].as_array().unwrap().iter().any(|entry| entry["id"] == 265));
+}
