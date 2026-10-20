@@ -736,7 +736,6 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
         .all(Value::is_null));
 }
 
-
 #[test]
 fn native_single_chest_shared_storage_and_protocol5_gui() {
     let server = NativeServer::start();
@@ -763,7 +762,9 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
     place.extend_from_slice(&(-1i16).to_be_bytes());
     place.extend_from_slice(&[8, 8, 8]);
     alice.write_all(&frame(8, &place)).unwrap();
-    until_packet(&mut alice, 0x23, |p| p.len() >= 11 && p[4] == 64 && p[9] == 54);
+    until_packet(&mut alice, 0x23, |p| {
+        p.len() >= 11 && p[4] == 64 && p[9] == 54
+    });
 
     let mut open = 0i32.to_be_bytes().to_vec();
     open.push(64);
