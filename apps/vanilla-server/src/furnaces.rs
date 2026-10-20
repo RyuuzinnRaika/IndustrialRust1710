@@ -375,9 +375,10 @@ mod tests {
         assert_eq!(f.slots[0], None);
         assert_eq!(f.slots[1], None);
         assert_eq!(f.slots[2], stack(265, 8));
-        assert_eq!(f.burn_left, 0);
+        assert_eq!(f.burn_left, 1);
         assert_eq!(f.cook, 0);
         assert!(!f.tick_once());
+        assert_eq!(f.burn_left, 0);
         assert_eq!(f.slots[2], stack(265, 8));
     }
     #[test]
