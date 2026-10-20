@@ -427,7 +427,8 @@ mod tests {
         world.update_and_save(&path, 0, 64, 0, 12 << 4).unwrap();
         assert!(world.gravity_tick(&path, 64).unwrap().is_empty());
         world.update_and_save(&path, 0, 63, 0, 0).unwrap();
-        let blocked = path.with_file_name("nonexistent-gravity-dir").join("world.irw");
+        // A regular file cannot be used as the parent directory of a save.
+        let blocked = path.join("world.irw");
         let err = world.gravity_tick(&blocked, 64);
         assert!(err.is_err());
         assert_eq!(world.get(0, 64, 0), 12 << 4);

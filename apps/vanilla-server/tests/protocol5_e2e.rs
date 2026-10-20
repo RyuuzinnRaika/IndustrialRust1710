@@ -1164,7 +1164,7 @@ fn native_protocol5_gravity_sand_falls_after_support_is_mined() {
     });
     let snapshot = fs::read(server.directory.join("flat.irw")).unwrap();
     assert_eq!(&snapshot[..4], b"IRW1");
-    assert_eq!(snapshot.len() - 8, 11 * 2); // grass deletion + fallen sand
+    assert_eq!(snapshot.len() - 8, 11); // the fallen sand replaces the dug grass
     drop(client);
     server.wait_idle();
 }
