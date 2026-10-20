@@ -12,7 +12,11 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_PACKETS: usize = 160;
+// These end-to-end tests reserve ephemeral ports before spawning binaries.
+// Serialize reservations and process lifetime to prevent cross-test port races.
+static SERVER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 struct NativeServer {
+    _exclusive_test_run: std::sync::MutexGuard<'static, ()>,
     process: Child,
     directory: PathBuf,
     port: u16,
@@ -23,6 +27,7 @@ impl NativeServer {
         Self::start_with_mode(false)
     }
     fn start_with_mode(survival: bool) -> Self {
+        let exclusive = SERVER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -60,6 +65,7 @@ impl NativeServer {
             .spawn()
             .unwrap();
         let mut server = Self {
+            _exclusive_test_run: exclusive,
             process,
             directory,
             port,
@@ -734,4 +740,97 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
         .unwrap()
         .iter()
         .all(Value::is_null));
+}
+
+#[test]
+fn native_single_chest_shared_storage_and_protocol5_gui() {
+    let server = NativeServer::start();
+    let (mut alice, _, _) = server.join("RustTester");
+
+    // Authoritative Creative chest placement on the default flat grass.
+    let creative = |slot: i16, id: i16, count: u8| {
+        let mut p = slot.to_be_bytes().to_vec();
+        p.extend_from_slice(&id.to_be_bytes());
+        p.push(count);
+        p.extend_from_slice(&0i16.to_be_bytes());
+        p.extend_from_slice(&(-1i16).to_be_bytes());
+        frame(0x10, &p)
+    };
+    alice.write_all(&creative(36, 54, 1)).unwrap();
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[0, 0, 36]));
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&54i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    alice.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut alice, 0x23, |p| {
+        p.len() >= 11 && p[4] == 64 && p[9] == 54
+    });
+
+    let mut open = 0i32.to_be_bytes().to_vec();
+    open.push(64);
+    open.extend_from_slice(&0i32.to_be_bytes());
+    open.push(1);
+    open.extend_from_slice(&(-1i16).to_be_bytes());
+    open.extend_from_slice(&[8, 8, 8]);
+    alice.write_all(&frame(8, &open)).unwrap();
+    let opened = until_packet(&mut alice, 0x2d, |p| p.first() == Some(&1));
+    assert_eq!(*opened.last().unwrap(), 27);
+    assert!(opened.windows(15).any(|part| part == b"minecraft:chest"));
+    until_packet(&mut alice, 0x30, |p| p.starts_with(&[1, 0, 63]));
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+
+    let click = |client: &mut TcpStream, window: u8, slot: i16, action: i16, mode: i8| {
+        let mut p = vec![window];
+        p.extend_from_slice(&slot.to_be_bytes());
+        p.push(0); // left click
+        p.extend_from_slice(&action.to_be_bytes());
+        p.push(mode as u8);
+        p.extend_from_slice(&(-1i16).to_be_bytes()); // untrusted claim
+        client.write_all(&frame(0x0e, &p)).unwrap();
+        until_packet(client, 0x32, |b| {
+            b == [window, action.to_be_bytes()[0], action.to_be_bytes()[1], 1]
+        });
+        let items = until_packet(client, 0x30, |b| b.first() == Some(&window));
+        until_packet(client, 0x2f, |b| b.starts_with(&[255, 255, 255]));
+        items
+    };
+    // Player hotbar slot 37 maps to chest window slot 55.
+    alice.write_all(&creative(37, 4, 5)).unwrap();
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[0, 0, 37]));
+    click(&mut alice, 1, 55, 1, 0);
+    let contents = click(&mut alice, 1, 0, 2, 0);
+    assert_eq!(&contents[3..10], &[0, 4, 5, 0, 0, 255, 255]);
+
+    let stored = server.directory.join("flat.chests.json");
+    await_file(&stored);
+    let snapshot: Value = serde_json::from_slice(&fs::read(&stored).unwrap()).unwrap();
+    assert_eq!(snapshot["entries"]["0,64,0"][0]["count"], 5);
+
+    let (mut bob, _, _) = server.join("TwinAlpha");
+    bob.write_all(&frame(8, &open)).unwrap();
+    let second = until_packet(&mut bob, 0x2d, |p| p.first() == Some(&1));
+    assert_eq!(*second.last().unwrap(), 27);
+    let second_items = until_packet(&mut bob, 0x30, |p| p.starts_with(&[1, 0, 63]));
+    assert_eq!(&second_items[3..10], &[0, 4, 5, 0, 0, 255, 255]);
+    until_packet(&mut bob, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+
+    // A shift click transfers one stack, no duplication.
+    let moved = click(&mut bob, 1, 0, 1, 1);
+    assert_eq!(&moved[3..5], &(-1i16).to_be_bytes());
+    let alice_updated = until_packet(&mut alice, 0x30, |p| p.starts_with(&[1, 0, 63]));
+    assert_eq!(&alice_updated[3..5], &(-1i16).to_be_bytes());
+
+    bob.write_all(&frame(13, &[1])).unwrap();
+    alice.write_all(&frame(13, &[1])).unwrap();
+    drop(bob);
+    drop(alice);
+    server.wait_idle();
+    let empty: Value = serde_json::from_slice(&fs::read(stored).unwrap()).unwrap();
+    assert!(empty["entries"].as_object().unwrap().is_empty());
 }

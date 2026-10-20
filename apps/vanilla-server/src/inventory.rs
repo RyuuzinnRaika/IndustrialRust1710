@@ -8,6 +8,13 @@ use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 pub const SLOT_COUNT: usize = 45;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChestDirection {
+    InventoryOnly,
+    IntoChest,
+    OutOfChest,
+}
+
 const MAX_SAVE_BYTES: u64 = 16 * 1024;
 const VERSION: u8 = 1;
 
@@ -403,6 +410,164 @@ impl Inventory {
     pub fn click(&mut self, slot: i16, button: i8, mode: i8) -> bool {
         self.click_window(0, slot, button, mode)
     }
+
+    fn chest_stack(&self, chest: &[Option<Stack>; 27], slot: i16) -> Option<Stack> {
+        if slot < 27 {
+            chest[slot as usize]
+        } else {
+            self.slots[(slot - 18) as usize]
+        }
+    }
+    fn set_chest_stack(
+        &mut self,
+        chest: &mut [Option<Stack>; 27],
+        slot: i16,
+        stack: Option<Stack>,
+    ) {
+        if slot < 27 {
+            chest[slot as usize] = stack;
+        } else {
+            self.slots[(slot - 18) as usize] = stack;
+        }
+    }
+    /// Single-chest 0..26 and player inventory 27..62.
+    /// Rejection is None; directional writes must commit the *source* first
+    /// to avoid item duplication across the non-atomic inventory/chest files.
+    pub fn chest_click(
+        &mut self,
+        chest: &mut [Option<Stack>; 27],
+        slot: i16,
+        button: i8,
+        mode: i8,
+    ) -> Option<ChestDirection> {
+        if !(0..63).contains(&slot) {
+            return None;
+        }
+        let storage = slot < 27;
+        let direction = if storage {
+            if self.cursor.is_some() {
+                ChestDirection::IntoChest
+            } else {
+                ChestDirection::OutOfChest
+            }
+        } else {
+            ChestDirection::InventoryOnly
+        };
+        match mode {
+            0 if button == 0 || button == 1 => {
+                let existing = self.chest_stack(chest, slot);
+                let carried = self.cursor;
+                // Two unlike stacks must never be swapped across storage and
+                // player files without a durable multi-file transaction.
+                if storage
+                    && existing.is_some()
+                    && carried.is_some()
+                    && (existing.unwrap().id != carried.unwrap().id
+                        || existing.unwrap().damage != carried.unwrap().damage)
+                {
+                    return None;
+                }
+                let (new_slot, new_cursor) = match (existing, carried, button) {
+                    (item, None, 0) => (None, item),
+                    (None, item, 0) => (item, None),
+                    (Some(mut target), Some(mut hand), 0)
+                        if target.id == hand.id && target.damage == hand.damage =>
+                    {
+                        let count = (64 - target.count).min(hand.count);
+                        target.count += count;
+                        hand.count -= count;
+                        (Some(target), (hand.count != 0).then_some(hand))
+                    }
+                    (target, hand, 0) => (hand, target),
+                    (Some(mut target), None, 1) => {
+                        let count = target.count.div_ceil(2);
+                        target.count -= count;
+                        (
+                            (target.count != 0).then_some(target),
+                            Some(Stack { count, ..target }),
+                        )
+                    }
+                    (None, None, 1) => (None, None),
+                    (None, Some(mut hand), 1) => {
+                        hand.count -= 1;
+                        (
+                            Some(Stack { count: 1, ..hand }),
+                            (hand.count != 0).then_some(hand),
+                        )
+                    }
+                    (Some(mut target), Some(mut hand), 1)
+                        if target.id == hand.id
+                            && target.damage == hand.damage
+                            && target.count < 64 =>
+                    {
+                        target.count += 1;
+                        hand.count -= 1;
+                        (Some(target), (hand.count != 0).then_some(hand))
+                    }
+                    (target, hand, 1) => (hand, target),
+                    _ => unreachable!("button validated"),
+                };
+                self.set_chest_stack(chest, slot, new_slot);
+                self.cursor = new_cursor;
+                Some(direction)
+            }
+            1 if button == 0 || button == 1 => {
+                let Some(mut moving) = self.chest_stack(chest, slot) else {
+                    return Some(direction);
+                };
+                let targets = if storage { 27..63 } else { 0..27 };
+                for target in targets.clone() {
+                    if let Some(mut existing) = self.chest_stack(chest, target) {
+                        if existing.id == moving.id
+                            && existing.damage == moving.damage
+                            && existing.count < 64
+                        {
+                            let count = (64 - existing.count).min(moving.count);
+                            existing.count += count;
+                            moving.count -= count;
+                            self.set_chest_stack(chest, target, Some(existing));
+                            if moving.count == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if moving.count > 0 {
+                    for target in targets {
+                        if self.chest_stack(chest, target).is_none() {
+                            self.set_chest_stack(chest, target, Some(moving));
+                            moving.count = 0;
+                            break;
+                        }
+                    }
+                }
+                self.set_chest_stack(chest, slot, (moving.count != 0).then_some(moving));
+                Some(if storage {
+                    ChestDirection::OutOfChest
+                } else {
+                    ChestDirection::IntoChest
+                })
+            }
+            2 if !storage && (0..=8).contains(&button) => {
+                let target = 54 + i16::from(button);
+                let a = self.chest_stack(chest, slot);
+                let b = self.chest_stack(chest, target);
+                self.set_chest_stack(chest, slot, b);
+                self.set_chest_stack(chest, target, a);
+                Some(ChestDirection::InventoryOnly)
+            }
+            _ => None,
+        }
+    }
+    pub fn chest_window_items(&self, window: u8, chest: &[Option<Stack>; 27]) -> Vec<u8> {
+        let mut out = vec![window];
+        out.extend_from_slice(&63i16.to_be_bytes());
+        for slot in 0..63 {
+            Self::encode_slot(&mut out, self.chest_stack(chest, slot));
+        }
+        out
+    }
+
     /// Clientbound Set Slot (0x2F): window -1, slot -1 represents the cursor.
     pub fn cursor_packet(&self) -> Vec<u8> {
         let mut out = vec![255, 255, 255];
@@ -460,6 +625,86 @@ impl Inventory {
 mod tests {
     use super::*;
 
+    #[test]
+    fn chest_moves_are_bounded_and_conserve_items() {
+        let mut inv = Inventory::default();
+        let mut chest = [None; 27];
+        inv.creative_set(
+            36,
+            Some(Stack {
+                id: 5,
+                count: 12,
+                damage: 1,
+            }),
+        )
+        .unwrap();
+        let sum = |inv: &Inventory, chest: &[Option<Stack>; 27]| -> u32 {
+            inv.slots
+                .iter()
+                .chain(chest.iter())
+                .flatten()
+                .map(|v| u32::from(v.count))
+                .sum::<u32>()
+                + inv.cursor.map_or(0, |v| u32::from(v.count))
+        };
+        assert_eq!(sum(&inv, &chest), 12);
+        assert_eq!(
+            inv.chest_click(&mut chest, 54, 0, 0),
+            Some(ChestDirection::InventoryOnly)
+        );
+        assert_eq!(
+            inv.chest_click(&mut chest, 0, 0, 0),
+            Some(ChestDirection::IntoChest)
+        );
+        assert_eq!(chest[0].unwrap().count, 12);
+        assert_eq!(sum(&inv, &chest), 12);
+        assert_eq!(
+            inv.chest_click(&mut chest, 0, 1, 0),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(chest[0].unwrap().count, 6);
+        assert_eq!(inv.cursor.unwrap().count, 6);
+        assert_eq!(sum(&inv, &chest), 12);
+        assert_eq!(
+            inv.chest_click(&mut chest, 0, 0, 0),
+            Some(ChestDirection::IntoChest)
+        );
+        assert_eq!(chest[0].unwrap().count, 12);
+        assert_eq!(
+            inv.chest_click(&mut chest, 0, 0, 1),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(chest[0], None);
+        assert_eq!(sum(&inv, &chest), 12);
+        assert_eq!(inv.chest_click(&mut chest, 0, 1, 2), None); // cannot number swap chest
+        assert_eq!(inv.chest_click(&mut chest, -999, 0, 0), None); // no outside drop
+        assert_eq!(inv.chest_click(&mut chest, 63, 0, 0), None);
+        assert_eq!(inv.chest_window_items(2, &chest)[..3], [2, 0, 63]);
+        assert_eq!(sum(&inv, &chest), 12);
+    }
+    #[test]
+    fn chest_rejects_cross_storage_swaps_with_unlike_items() {
+        let mut inv = Inventory::default();
+        let mut chest = [None; 27];
+        chest[0] = Some(Stack {
+            id: 1,
+            count: 2,
+            damage: 0,
+        });
+        inv.creative_set(
+            36,
+            Some(Stack {
+                id: 3,
+                count: 2,
+                damage: 0,
+            }),
+        )
+        .unwrap();
+        assert!(inv.chest_click(&mut chest, 54, 0, 0).is_some());
+        let before = (inv.clone(), chest);
+        assert_eq!(inv.chest_click(&mut chest, 0, 0, 0), None);
+        assert_eq!((inv, chest), before);
+    }
     #[test]
     fn window_zero_moves_stacks_without_creating_or_losing_items() {
         let mut inventory = Inventory::default();
