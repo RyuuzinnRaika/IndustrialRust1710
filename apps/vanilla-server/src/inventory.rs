@@ -221,7 +221,7 @@ impl Inventory {
         // Called only after verifying a recipe and a destination with capacity.
         let size = if window == 0 { 4 } else { 9 };
         for index in 0..size {
-            let slot = if window == 0 { index + 1 } else { index + 1 };
+            let slot = index + 1;
             if let Some(mut stack) = self.lookup(window, slot as i16) {
                 stack.count -= 1;
                 self.assign(window, slot as i16, (stack.count != 0).then_some(stack));
@@ -398,7 +398,8 @@ impl Inventory {
             _ => false,
         }
     }
-    /// Compatibility with callers and tests that target the player inventory.
+    /// Compatibility wrapper for unit tests targeting the player inventory.
+    #[cfg(test)]
     pub fn click(&mut self, slot: i16, button: i8, mode: i8) -> bool {
         self.click_window(0, slot, button, mode)
     }
