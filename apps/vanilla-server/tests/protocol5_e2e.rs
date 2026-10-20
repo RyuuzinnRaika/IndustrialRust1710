@@ -1169,7 +1169,6 @@ fn native_protocol5_gravity_sand_falls_after_support_is_mined() {
     server.wait_idle();
 }
 
-
 #[test]
 fn native_protocol5_airborne_player_gets_20tps_gravity_after_client_silence() {
     let server = NativeServer::start_with_mode(true);
