@@ -27,36 +27,59 @@ fn key((x, y, z): Position) -> String {
 /// Legacy 1.7.10 subset. All outputs are a single item and have no NBT.
 pub fn recipe(input: Stack) -> Option<Stack> {
     let (id, damage) = match (input.id, input.damage) {
-        (15, _) => (265, 0),  // iron ore -> iron ingot
-        (14, _) => (266, 0),  // gold ore -> gold ingot
-        (12, _) => (20, 0),   // sand -> glass
-        (4, _) => (1, 0),     // cobblestone -> stone
-        (319, _) => (320, 0), // raw pork
-        (363, _) => (364, 0), // raw beef
-        (365, _) => (366, 0), // raw chicken
-        (392, _) => (393, 0), // potato
-        (337, _) => (336, 0), // clay ball -> brick
-        (82, _) => (172, 0),  // clay block -> hardened clay
-        (17 | 162, _) => (263, 1), // logs -> charcoal
-        (87, _) => (405, 0),  // netherrack -> nether brick
-        (81, _) => (351, 2),  // cactus -> cactus green
+        (15, _) => (265, 0),                 // iron ore -> iron ingot
+        (14, _) => (266, 0),                 // gold ore -> gold ingot
+        (12, _) => (20, 0),                  // sand -> glass
+        (4, _) => (1, 0),                    // cobblestone -> stone
+        (319, _) => (320, 0),                // raw pork
+        (363, _) => (364, 0),                // raw beef
+        (365, _) => (366, 0),                // raw chicken
+        (392, _) => (393, 0),                // potato
+        (337, _) => (336, 0),                // clay ball -> brick
+        (82, _) => (172, 0),                 // clay block -> hardened clay
+        (17 | 162, _) => (263, 1),           // logs -> charcoal
+        (87, _) => (405, 0),                 // netherrack -> nether brick
+        (81, _) => (351, 2),                 // cactus -> cactus green
         (349, 0 | 1) => (350, input.damage), // raw fish/salmon
         _ => return None,
     };
-    Some(Stack { id, count: 1, damage })
+    Some(Stack {
+        id,
+        count: 1,
+        damage,
+    })
 }
 /// Return fuel burn duration in 20Hz ticks. Reject metadata variants that
 /// are not fuel, and do not treat modern post-1.7.10 items as valid fuel.
 pub fn burn_duration(item: Stack) -> Option<u16> {
     let ticks = match item.id {
         263 if item.damage == 0 || item.damage == 1 => 1600,
-        173 => 16000, // coal block
+        173 => 16000,                    // coal block
         327 if item.count == 1 => 20000, // lava bucket (leaves empty bucket)
-        369 => 2400, // blaze rod
-        280 => 100, // stick
-        6 => 100, // sapling
-        5 | 17 | 162 | 54 | 58 | 53 | 85 | 107 | 134 | 135 | 136
-        | 125 | 126 | 143 | 158 | 47 | 84 | 96 | 64 | 71 | 193..=197 => 300,
+        369 => 2400,                     // blaze rod
+        280 => 100,                      // stick
+        6 => 100,                        // sapling
+        5
+        | 17
+        | 162
+        | 54
+        | 58
+        | 53
+        | 85
+        | 107
+        | 134
+        | 135
+        | 136
+        | 125
+        | 126
+        | 143
+        | 158
+        | 47
+        | 84
+        | 96
+        | 64
+        | 71
+        | 193..=197 => 300,
         268..=271 | 290 => 200, // wooden tools
         _ => return None,
     };
@@ -79,7 +102,9 @@ impl Furnace {
             && self.burn_left <= self.burn_total
             && self.cook < COOK_TICKS
     }
-    pub fn is_burning(&self) -> bool { self.burn_left > 0 }
+    pub fn is_burning(&self) -> bool {
+        self.burn_left > 0
+    }
     pub fn occupied(&self) -> bool {
         self.slots.iter().any(Option::is_some) || self.burn_left > 0 || self.cook > 0
     }
@@ -87,8 +112,13 @@ impl Furnace {
         let result = recipe(self.slots[0]?)?;
         match self.slots[2] {
             None => Some(result),
-            Some(existing) if existing.id == result.id && existing.damage == result.damage
-                && existing.count <= 63 => Some(result),
+            Some(existing)
+                if existing.id == result.id
+                    && existing.damage == result.damage
+                    && existing.count <= 63 =>
+            {
+                Some(result)
+            }
             _ => None,
         }
     }
@@ -106,9 +136,16 @@ impl Furnace {
                     self.burn_total = duration;
                     self.burn_left = duration;
                     self.slots[1] = if fuel.id == 327 {
-                        Some(Stack { id: 325, count: 1, damage: 0 })
+                        Some(Stack {
+                            id: 325,
+                            count: 1,
+                            damage: 0,
+                        })
                     } else if fuel.count > 1 {
-                        Some(Stack { count: fuel.count - 1, ..fuel })
+                        Some(Stack {
+                            count: fuel.count - 1,
+                            ..fuel
+                        })
                     } else {
                         None
                     };
@@ -126,7 +163,10 @@ impl Furnace {
                     self.slots[0] = (input.count > 0).then_some(input);
                 }
                 self.slots[2] = Some(match self.slots[2] {
-                    Some(mut current) => { current.count += 1; current }
+                    Some(mut current) => {
+                        current.count += 1;
+                        current
+                    }
                     None => result,
                 });
                 items_changed = true;
@@ -139,16 +179,23 @@ impl Furnace {
     /// Protocol 5 Window Property packet 0x31: window, property short, value short.
     /// Legacy properties 0 cook, 1 burn remaining, 2 original fuel duration.
     pub fn properties(&self, window: u8) -> [Vec<u8>; 3] {
-        [self.cook, self.burn_left, self.burn_total].map(|value| {
-            let mut packet = vec![window];
-            // Replaced by index in the loop below.
-            packet.extend_from_slice(&0i16.to_be_bytes());
-            packet.extend_from_slice(&(value as i16).to_be_bytes());
-            packet
-        }).into_iter().enumerate().map(|(id, mut value)| {
-            value[1..3].copy_from_slice(&(id as i16).to_be_bytes());
-            value
-        }).collect::<Vec<_>>().try_into().expect("three furnace properties")
+        [self.cook, self.burn_left, self.burn_total]
+            .map(|value| {
+                let mut packet = vec![window];
+                // Replaced by index in the loop below.
+                packet.extend_from_slice(&0i16.to_be_bytes());
+                packet.extend_from_slice(&(value as i16).to_be_bytes());
+                packet
+            })
+            .into_iter()
+            .enumerate()
+            .map(|(id, mut value)| {
+                value[1..3].copy_from_slice(&(id as i16).to_be_bytes());
+                value
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("three furnace properties")
     }
 }
 
@@ -162,11 +209,17 @@ pub struct Furnaces {
 }
 impl Default for Furnaces {
     fn default() -> Self {
-        Self { version: VERSION, entries: BTreeMap::new(), revision: 0 }
+        Self {
+            version: VERSION,
+            entries: BTreeMap::new(),
+            revision: 0,
+        }
     }
 }
 impl Furnaces {
-    pub fn location(world: &Path) -> PathBuf { world.with_extension("furnaces.json") }
+    pub fn location(world: &Path) -> PathBuf {
+        world.with_extension("furnaces.json")
+    }
     fn validate(&self) -> io::Result<()> {
         if self.version != VERSION || self.entries.len() > MAX_FURNACES {
             return Err(invalid("invalid furnace version or count"));
@@ -176,8 +229,11 @@ impl Furnaces {
             if coords.len() != 3 || coords.iter().any(Result::is_err) || !state.valid() {
                 return Err(invalid("invalid furnace coordinate or state"));
             }
-            let pos = (coords[0].as_ref().copied().unwrap(),
-                coords[1].as_ref().copied().unwrap(), coords[2].as_ref().copied().unwrap());
+            let pos = (
+                coords[0].as_ref().copied().unwrap(),
+                coords[1].as_ref().copied().unwrap(),
+                coords[2].as_ref().copied().unwrap(),
+            );
             if !world::in_bounds(pos.0, pos.1, pos.2) || key(pos) != *name {
                 return Err(invalid("invalid furnace position"));
             }
@@ -194,16 +250,20 @@ impl Furnaces {
             return Err(invalid("invalid furnace save metadata"));
         }
         let bytes = fs::read(path)?;
-        if bytes.len() as u64 > MAX_BYTES { return Err(invalid("oversized furnace save")); }
-        let state: Self = serde_json::from_slice(&bytes)
-            .map_err(|_| invalid("furnace JSON malformed"))?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(invalid("oversized furnace save"));
+        }
+        let state: Self =
+            serde_json::from_slice(&bytes).map_err(|_| invalid("furnace JSON malformed"))?;
         state.validate()?;
         Ok(state)
     }
     fn save(&self, path: &Path) -> io::Result<()> {
         self.validate()?;
         let bytes = serde_json::to_vec(self).map_err(|_| invalid("encode furnace data"))?;
-        if bytes.len() as u64 > MAX_BYTES { return Err(invalid("furnace save exceeds cap")); }
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(invalid("furnace save exceeds cap"));
+        }
         if let Some(parent) = path.parent().filter(|v| !v.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
@@ -217,14 +277,18 @@ impl Furnaces {
     pub fn get(&self, pos: Position) -> Furnace {
         self.entries.get(&key(pos)).copied().unwrap_or_default()
     }
-    pub fn revision(&self) -> u64 { self.revision }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
     pub fn update(&mut self, path: &Path, pos: Position, next: Furnace) -> io::Result<()> {
         if !world::in_bounds(pos.0, pos.1, pos.2) || !next.valid() {
             return Err(invalid("invalid furnace update"));
         }
         let k = key(pos);
         let old = self.entries.get(&k).copied();
-        if old.unwrap_or_default() == next { return Ok(()); }
+        if old.unwrap_or_default() == next {
+            return Ok(());
+        }
         if next == Furnace::default() {
             self.entries.remove(&k);
         } else {
@@ -232,8 +296,12 @@ impl Furnaces {
         }
         if let Err(error) = self.save(path) {
             match old {
-                Some(old) => { self.entries.insert(k, old); }
-                None => { self.entries.remove(&k); }
+                Some(old) => {
+                    self.entries.insert(k, old);
+                }
+                None => {
+                    self.entries.remove(&k);
+                }
             }
             return Err(error);
         }
@@ -244,7 +312,9 @@ impl Furnaces {
         // No real-time catch-up while the server is stopped.
         // Bounded catch-up preserves stability after a stalled host tick.
         let steps = elapsed_ticks.min(20);
-        if steps == 0 || self.entries.is_empty() { return Ok(()); }
+        if steps == 0 || self.entries.is_empty() {
+            return Ok(());
+        }
         let snapshot = self.entries.clone();
         let mut different = false;
         let mut durable = false;
@@ -255,7 +325,9 @@ impl Furnaces {
             }
             different |= before != *furnace;
         }
-        if !different { return Ok(()); }
+        if !different {
+            return Ok(());
+        }
         // Burn is written every second; input/fuel/output commits immediately.
         if durable || now_tick % 20 < u64::from(steps) {
             if let Err(error) = self.save(path) {
@@ -267,18 +339,34 @@ impl Furnaces {
         Ok(())
     }
     pub fn lighting(&self) -> Vec<(Position, bool)> {
-        self.entries.iter().filter_map(|(name, state)| {
-            let coords = name.split(',').map(|v| v.parse::<i32>().ok()).collect::<Vec<_>>();
-            Some(((coords.first()?.as_ref().copied()?, coords.get(1)?.as_ref().copied()?,
-                coords.get(2)?.as_ref().copied()?), state.is_burning()))
-        }).collect()
+        self.entries
+            .iter()
+            .filter_map(|(name, state)| {
+                let coords = name
+                    .split(',')
+                    .map(|v| v.parse::<i32>().ok())
+                    .collect::<Vec<_>>();
+                Some((
+                    (
+                        coords.first()?.as_ref().copied()?,
+                        coords.get(1)?.as_ref().copied()?,
+                        coords.get(2)?.as_ref().copied()?,
+                    ),
+                    state.is_burning(),
+                ))
+            })
+            .collect()
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     fn stack(id: i16, count: u8) -> Option<Stack> {
-        Some(Stack { id, count, damage: 0 })
+        Some(Stack {
+            id,
+            count,
+            damage: 0,
+        })
     }
     #[test]
     fn recipes_and_fuels_are_legacy_bounded() {
@@ -294,11 +382,16 @@ mod tests {
     }
     #[test]
     fn consumes_one_coal_and_smelts_eight_ores_in_200_tick_steps() {
-        let mut f = Furnace { slots: [stack(15, 8), stack(263, 1), None], ..Furnace::default() };
+        let mut f = Furnace {
+            slots: [stack(15, 8), stack(263, 1), None],
+            ..Furnace::default()
+        };
         let mut products = 0;
         for _ in 0..1600 {
             f.tick_once();
-            if let Some(v) = f.slots[2] { products = v.count; }
+            if let Some(v) = f.slots[2] {
+                products = v.count;
+            }
         }
         assert_eq!(products, 8);
         assert_eq!(f.slots[0], None);
@@ -315,7 +408,9 @@ mod tests {
             slots: [stack(15, 1), stack(263, 1), stack(266, 3)],
             ..Furnace::default()
         };
-        for _ in 0..201 { f.tick_once(); }
+        for _ in 0..201 {
+            f.tick_once();
+        }
         assert_eq!(f.slots[1], stack(263, 1));
         assert_eq!(f.slots[0], stack(15, 1));
         f.slots[2] = stack(265, 64);
@@ -324,12 +419,16 @@ mod tests {
     }
     #[test]
     fn lava_bucket_leaves_empty_bucket_and_state_persists() {
-        let f = Furnace { slots: [stack(12, 1), stack(327, 1), None], ..Furnace::default() };
+        let f = Furnace {
+            slots: [stack(12, 1), stack(327, 1), None],
+            ..Furnace::default()
+        };
         let mut f = f;
         assert!(f.tick_once());
         assert_eq!(f.slots[1], stack(325, 1));
         assert_eq!(f.burn_total, 20000);
-        let path = std::env::temp_dir().join(format!("ir1710-{}-furnaces.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-{}-furnaces.json", std::process::id()));
         let _ = fs::remove_file(&path);
         let pos = (0, 64, 0);
         let mut all = Furnaces::default();
