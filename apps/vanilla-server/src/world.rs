@@ -13,10 +13,18 @@ pub const MIN_CHUNK: i32 = -WORLD_LIMIT / 16;
 pub const MAX_CHUNK: i32 = WORLD_LIMIT / 16 - 1;
 const MAX_EDITS: usize = 65_536;
 const MAGIC: &[u8; 4] = b"IRW1";
+const NATURAL_MAGIC: &[u8; 4] = b"IRW2";
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Generation {
+    #[default]
+    Flat,
+    Natural(u64),
+}
 type Position = (i32, u8, i32);
 #[derive(Default, Clone, Debug)]
 pub struct World {
     edits: BTreeMap<Position, u16>,
+    generation: Generation,
     // In-memory wake-up queue only. Reconstructed from placed blocks on load.
     pending_gravity: BTreeSet<Position>,
 }
@@ -91,6 +99,33 @@ impl World {
     pub fn new() -> Self {
         Self::default()
     }
+    pub fn natural(seed: u64) -> Self {
+        Self {
+            generation: Generation::Natural(seed),
+            ..Self::default()
+        }
+    }
+    pub fn is_natural(&self) -> bool {
+        matches!(self.generation, Generation::Natural(_))
+    }
+    pub fn natural_seed(&self) -> Option<u64> {
+        match self.generation {
+            Generation::Natural(seed) => Some(seed),
+            Generation::Flat => None,
+        }
+    }
+    pub fn spawn_y(&self) -> f64 {
+        match self.generation {
+            Generation::Natural(seed) => f64::from(crate::terrain::surface(seed, 0, 0) + 1),
+            Generation::Flat => 65.0,
+        }
+    }
+    fn base_block(&self, x: i32, y: u8, z: i32) -> u16 {
+        match self.generation {
+            Generation::Flat => Self::default_block(y),
+            Generation::Natural(seed) => crate::terrain::block(seed, x, i32::from(y), z),
+        }
+    }
     pub fn default_block(y: u8) -> u16 {
         match y {
             60 => 7 << 4,
@@ -106,7 +141,7 @@ impl World {
         self.edits
             .get(&(x, y as u8, z))
             .copied()
-            .unwrap_or_else(|| Self::default_block(y as u8))
+            .unwrap_or_else(|| self.base_block(x, y as u8, z))
     }
     /// A changed cell may be a new gravity block or the support of one above it.
     /// Only queue known falling blocks; never scan the whole flat world per tick.
@@ -185,7 +220,7 @@ impl World {
     /// Mutate the sparse representation without writing a partial tick.
     fn set_gravity_cell(&mut self, (x, y, z): Position, block: u16) {
         let key = (x, y, z);
-        if block == Self::default_block(y) {
+        if block == self.base_block(x, y, z) {
             self.edits.remove(&key);
         } else {
             self.edits.insert(key, block);
@@ -209,7 +244,7 @@ impl World {
         }
         let key = (x, y as u8, z);
         let old = self.edits.get(&key).copied();
-        if block == Self::default_block(y as u8) {
+        if block == self.base_block(x, y as u8, z) {
             self.edits.remove(&key);
         } else {
             if old.is_none() && self.edits.len() >= MAX_EDITS {
@@ -238,7 +273,7 @@ impl World {
             return Err(invalid("imported block outside 1.7.10 world limits"));
         }
         let key = (x, y as u8, z);
-        if block == Self::default_block(y as u8) {
+        if block == self.base_block(x, y as u8, z) {
             return Ok(());
         }
         if !self.edits.contains_key(&key) && self.edits.len() >= MAX_EDITS {
@@ -285,15 +320,22 @@ impl World {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::new()),
             Err(e) => return Err(e),
         };
-        if bytes.len() < 8 || &bytes[..4] != MAGIC {
+        if bytes.len() < 8 {
             return Err(invalid("bad world header"));
         }
-        let count = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
-        if count > MAX_EDITS || bytes.len() != 8 + count * 11 {
+        let (mut world, offset) = match &bytes[..4] {
+            value if value == MAGIC => (Self::new(), 8),
+            value if value == NATURAL_MAGIC && bytes.len() >= 16 => {
+                let seed = u64::from_be_bytes(bytes[4..12].try_into().unwrap());
+                (Self::natural(seed), 16)
+            }
+            _ => return Err(invalid("unknown IRW world format")),
+        };
+        let count = u32::from_be_bytes(bytes[offset - 4..offset].try_into().unwrap()) as usize;
+        if count > MAX_EDITS || bytes.len() != offset + count * 11 {
             return Err(invalid("world file length/count mismatch"));
         }
-        let mut world = Self::new();
-        for entry in bytes[8..].as_chunks::<11>().0 {
+        for entry in bytes[offset..].as_chunks::<11>().0 {
             let x = i32::from_be_bytes(entry[0..4].try_into().unwrap());
             let y = entry[4];
             let z = i32::from_be_bytes(entry[5..9].try_into().unwrap());
@@ -311,7 +353,13 @@ impl World {
         Ok(world)
     }
     fn write_to(&self, f: &mut File) -> io::Result<()> {
-        f.write_all(MAGIC)?;
+        match self.generation {
+            Generation::Flat => f.write_all(MAGIC)?,
+            Generation::Natural(seed) => {
+                f.write_all(NATURAL_MAGIC)?;
+                f.write_all(&seed.to_be_bytes())?;
+            }
+        }
         f.write_all(&(self.edits.len() as u32).to_be_bytes())?;
         for (&(x, y, z), &block) in &self.edits {
             f.write_all(&x.to_be_bytes())?;
@@ -338,7 +386,11 @@ impl World {
     /// sections are transmitted when edited. This avoids dropping high-altitude
     /// or underground edits on re-login or crossing a chunk boundary.
     pub fn chunk_data(&self, chunk_x: i32, chunk_z: i32) -> (u16, Vec<u8>) {
-        let mut mask: u16 = (1 << 3) | (1 << 4);
+        let mut mask: u16 = if self.is_natural() {
+            0x00ff
+        } else {
+            (1 << 3) | (1 << 4)
+        };
         let min_x = chunk_x * 16;
         let min_z = chunk_z * 16;
         // An x-range BTreeMap scan avoids walking every edit for every chunk.
@@ -441,6 +493,28 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    #[test]
+    fn seeded_natural_world_roundtrip_isolated_from_irw1() {
+        let path = std::env::temp_dir().join(format!("ir1710-natural-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut generated = World::natural(42);
+        assert!(generated.is_natural());
+        assert_eq!(generated.natural_seed(), Some(42));
+        assert!(generated.spawn_y() > 50.0);
+        let surface = crate::terrain::surface(42, -17, 16);
+        assert_eq!(generated.get(-17, surface, 16), 2 << 4);
+        generated.update_and_save(&path, -17, surface, 16, 0).unwrap();
+        assert_eq!(&fs::read(&path).unwrap()[..4], b"IRW2");
+        let again = World::load(&path).unwrap();
+        assert_eq!(again.natural_seed(), Some(42));
+        assert_eq!(again.get(-17, surface, 16), 0);
+        assert_eq!(again.get(-17, surface - 1, 16), 3 << 4);
+        let (mask, packet) = again.chunk_data(-2, 1);
+        assert_eq!(mask, 0xff);
+        assert_eq!(packet.len(), 8 * 10240 + 256);
+        fs::remove_file(path).unwrap();
+        assert_eq!(World::new().chunk_data(0, 0).0, 0x18);
+    }
     #[test]
     fn flat_and_bounds() {
         let w = World::new();
