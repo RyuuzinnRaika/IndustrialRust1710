@@ -1315,3 +1315,60 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     drop(rejoined);
     server.wait_idle();
 }
+
+
+#[test]
+fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
+    let server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+    let mut place = |id: i16, x: i32| {
+        let mut creative = 36i16.to_be_bytes().to_vec();
+        creative.extend_from_slice(&id.to_be_bytes());
+        creative.push(1);
+        creative.extend_from_slice(&0i16.to_be_bytes());
+        creative.extend_from_slice(&(-1i16).to_be_bytes());
+        client.write_all(&frame(0x10, &creative)).unwrap();
+        until_packet(&mut client, 0x2f, |body| {
+            body.len() == 10 && body[3..5] == id.to_be_bytes()
+        });
+        let mut packet = x.to_be_bytes().to_vec();
+        packet.push(63);
+        packet.extend_from_slice(&0i32.to_be_bytes());
+        packet.push(1);
+        packet.extend_from_slice(&id.to_be_bytes());
+        packet.push(1);
+        packet.extend_from_slice(&0i16.to_be_bytes());
+        packet.extend_from_slice(&(-1i16).to_be_bytes());
+        packet.extend_from_slice(&[8, 8, 8]);
+        client.write_all(&frame(8, &packet)).unwrap();
+        until_packet(&mut client, 0x23, |body| {
+            body.len() == 11 && body[0..4] == x.to_be_bytes()
+                && body[4] == 64 && body[9] == id as u8
+        });
+    };
+    place(69, -4); // lever
+    place(331, -3); // redstone dust item -> wire block55
+    place(8, 5); // source water supported by grass
+    until_packet(&mut client, 0x23, |body| {
+        body.len() == 11 && body[0..4] == 6i32.to_be_bytes()
+            && body[4] == 64 && body[9] == 8 && body[10] >= 1
+    });
+    // Right click the lever to turn on the 15-strength redstone source.
+    let mut click = (-4i32).to_be_bytes().to_vec();
+    click.push(64);
+    click.extend_from_slice(&0i32.to_be_bytes());
+    click.push(1);
+    click.extend_from_slice(&(-1i16).to_be_bytes()); // empty held snapshot
+    click.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &click)).unwrap();
+    until_packet(&mut client, 0x23, |body| {
+        body.len() == 11 && body[0..4] == (-4i32).to_be_bytes()
+            && body[4] == 64 && body[9] == 69 && body[10] & 8 != 0
+    });
+    until_packet(&mut client, 0x23, |body| {
+        body.len() == 11 && body[0..4] == (-3i32).to_be_bytes()
+            && body[4] == 64 && body[9] == 55 && body[10] == 15
+    });
+    drop(client);
+    server.wait_idle();
+}
