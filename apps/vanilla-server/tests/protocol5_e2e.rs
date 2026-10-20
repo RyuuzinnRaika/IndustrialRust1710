@@ -565,7 +565,6 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     server.wait_idle();
 }
 
-
 #[test]
 fn native_click_window_is_authoritative_and_persists_carried_stack() {
     let server = NativeServer::start();
@@ -590,7 +589,9 @@ fn native_click_window_is_authoritative_and_persists_carried_stack() {
     };
 
     // Left click takes all five items; the clicked-item claim is ignored.
-    client.write_all(&click(36, 7, 0, 0, &(-1i16).to_be_bytes())).unwrap();
+    client
+        .write_all(&click(36, 7, 0, 0, &(-1i16).to_be_bytes()))
+        .unwrap();
     until_packet(&mut client, 0x32, |p| p == [0, 0, 7, 1]);
     let items = until_packet(&mut client, 0x30, |_| true);
     assert_eq!(&items[3 + 36 * 2..3 + 36 * 2 + 2], &(-1i16).to_be_bytes());
@@ -610,10 +611,15 @@ fn native_click_window_is_authoritative_and_persists_carried_stack() {
     client.write_all(&frame(0x0f, &[0, 0, 8, 0])).unwrap();
 
     // Right click places exactly one item, preserving four in the cursor.
-    client.write_all(&click(10, 9, 1, 0, &(-1i16).to_be_bytes())).unwrap();
+    client
+        .write_all(&click(10, 9, 1, 0, &(-1i16).to_be_bytes()))
+        .unwrap();
     until_packet(&mut client, 0x32, |p| p == [0, 0, 9, 1]);
     let items = until_packet(&mut client, 0x30, |_| true);
-    assert_eq!(&items[3 + 10 * 2..3 + 10 * 2 + 7], &[0, 3, 1, 0, 0, 255, 255]);
+    assert_eq!(
+        &items[3 + 10 * 2..3 + 10 * 2 + 7],
+        &[0, 3, 1, 0, 0, 255, 255]
+    );
     until_packet(&mut client, 0x2f, |p| {
         p == [255, 255, 255, 0, 3, 4, 0, 0, 255, 255]
     });
