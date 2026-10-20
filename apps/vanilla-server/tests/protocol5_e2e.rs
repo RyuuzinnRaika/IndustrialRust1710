@@ -962,3 +962,54 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
         .iter()
         .any(|entry| entry["id"] == 265));
 }
+
+
+#[test]
+fn survival_shovel_mining_wears_out_last_use_and_persists_dirt_drop() {
+    let server = NativeServer::start_with_mode(true);
+    let player_inventory = server.directory.join("players/rusttester.survival.inventory.json");
+    fs::create_dir_all(player_inventory.parent().unwrap()).unwrap();
+    let mut slots = vec![Value::Null; 45];
+    slots[36] = json!({"id":273,"count":1,"damage":130}); // stone shovel, last use
+    fs::write(
+        &player_inventory,
+        serde_json::to_vec(&json!({
+            "version":1,
+            "selected":0,
+            "slots":slots,
+            "cursor":null,
+            "workbench":vec![Value::Null;9]
+        })).unwrap(),
+    ).unwrap();
+    let (mut client, _, _) = server.join("RustTester");
+    send_position(&mut client, 4.5, 65.0, 0.5);
+    let mut start = vec![0]; // begin digging
+    start.extend_from_slice(&0i32.to_be_bytes());
+    start.push(63);
+    start.extend_from_slice(&0i32.to_be_bytes());
+    start.push(1);
+    let mut finish = start.clone();
+    finish[0] = 2;
+    // Abnormally fast client must not mine even with a tool.
+    client.write_all(&frame(7, &start)).unwrap();
+    client.write_all(&frame(7, &finish)).unwrap();
+    until_packet(&mut client, 0x23, |p| p.len() >= 11 && p[4] == 63 && p[9] == 2);
+    // The stone shovel saves time vs bare-hand 750ms, and breaks on its last use.
+    client.write_all(&frame(7, &start)).unwrap();
+    thread::sleep(Duration::from_millis(350));
+    client.write_all(&frame(7, &finish)).unwrap();
+    until_packet(&mut client, 0x2f, |p| p == [0, 0, 36, 255, 255]);
+    let metadata = until_packet(&mut client, 0x1c, |p| {
+        p.len() >= 13 && p[4] == 0xaa && p[5..7] == [0, 3]
+    });
+    assert_eq!(&metadata[4..], &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
+    until_packet(&mut client, 0x23, |p| p.len() >= 11 && p[4] == 63 && p[9] == 0);
+    drop(client);
+    server.wait_idle();
+    let data: Value = serde_json::from_slice(&fs::read(player_inventory).unwrap()).unwrap();
+    assert!(data["slots"][36].is_null(), "the shovel must break at durability 131");
+    let drops: Value = serde_json::from_slice(
+        &fs::read(server.directory.join("flat.drops.json")).unwrap()
+    ).unwrap();
+    assert_eq!(drops["entries"].as_object().unwrap().len(), 1);
+}
