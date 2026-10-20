@@ -148,8 +148,11 @@ impl PlayerPosition {
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 let legacy = path.with_extension("json");
                 return match fs::metadata(&legacy) {
-                    Ok(_) => Self::load_legacy_json(&legacy).map(|position| (position, Vitals::default())),
-                    Err(e) if e.kind() == ErrorKind::NotFound => Ok((Self::default(), Vitals::default())),
+                    Ok(_) => Self::load_legacy_json(&legacy)
+                        .map(|position| (position, Vitals::default())),
+                    Err(e) if e.kind() == ErrorKind::NotFound => {
+                        Ok((Self::default(), Vitals::default()))
+                    }
                     Err(e) => Err(e),
                 };
             }
@@ -288,12 +291,57 @@ mod tests {
         fs::create_dir_all(&parent).unwrap();
         let file = parent.join("player.dat");
         let position = PlayerPosition::default();
-        position.save_state(&file, Vitals { health: 7.0, food: 8, saturation: 2.0, ..Vitals::default() }).unwrap();
-        assert_eq!(PlayerPosition::load_state(&file).unwrap(), (position, Vitals { health: 7.0, food: 8, saturation: 2.0, ..Vitals::default() }));
-        position.save_state(&file, Vitals { health: 0.0, ..Vitals::default() }).unwrap();
+        position
+            .save_state(
+                &file,
+                Vitals {
+                    health: 7.0,
+                    food: 8,
+                    saturation: 2.0,
+                    ..Vitals::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            PlayerPosition::load_state(&file).unwrap(),
+            (
+                position,
+                Vitals {
+                    health: 7.0,
+                    food: 8,
+                    saturation: 2.0,
+                    ..Vitals::default()
+                }
+            )
+        );
+        position
+            .save_state(
+                &file,
+                Vitals {
+                    health: 0.0,
+                    ..Vitals::default()
+                },
+            )
+            .unwrap();
         assert_eq!(PlayerPosition::load_state(&file).unwrap().1.health, 0.0);
-        assert!(position.save_state(&file, Vitals { health: f32::NAN, ..Vitals::default() }).is_err());
-        assert!(position.save_state(&file, Vitals { health: 21.0, ..Vitals::default() }).is_err());
+        assert!(position
+            .save_state(
+                &file,
+                Vitals {
+                    health: f32::NAN,
+                    ..Vitals::default()
+                }
+            )
+            .is_err());
+        assert!(position
+            .save_state(
+                &file,
+                Vitals {
+                    health: 21.0,
+                    ..Vitals::default()
+                }
+            )
+            .is_err());
         fs::remove_dir_all(parent).unwrap();
     }
 

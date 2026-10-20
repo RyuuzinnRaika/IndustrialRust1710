@@ -1195,7 +1195,6 @@ fn native_protocol5_airborne_player_gets_20tps_gravity_after_client_silence() {
     server.wait_idle();
 }
 
-
 #[test]
 fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     let server = NativeServer::start_with_mode(true);
@@ -1219,7 +1218,8 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
         health: 10.0,
         food: 10,
         saturation: 0.0,
-    }).unwrap();
+    })
+    .unwrap();
     let mut compressed = flate2::write::GzEncoder::new(
         fs::File::create(&player_file).unwrap(),
         flate2::Compression::default(),
@@ -1227,14 +1227,21 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     compressed.write_all(&encoded).unwrap();
     compressed.finish().unwrap();
 
-    let inventory_file = server.directory.join("players/rusttester.survival.inventory.json");
+    let inventory_file = server
+        .directory
+        .join("players/rusttester.survival.inventory.json");
     let mut slots = vec![Value::Null; 45];
     slots[36] = json!({"id":260,"count":2,"damage":0});
     slots[37] = json!({"id":1,"count":9,"damage":0});
-    fs::write(&inventory_file, serde_json::to_vec(&json!({
-        "version":1, "selected":0, "slots":slots, "cursor":null,
-        "workbench":vec![Value::Null;9]
-    })).unwrap()).unwrap();
+    fs::write(
+        &inventory_file,
+        serde_json::to_vec(&json!({
+            "version":1, "selected":0, "slots":slots, "cursor":null,
+            "workbench":vec![Value::Null;9]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
     let (mut client, _, start) = server.join("RustTester");
     assert_eq!(start, [0.5, 64.0, 0.5]);
@@ -1247,7 +1254,7 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     use_item.push(2);
     use_item.extend_from_slice(&0i16.to_be_bytes());
     use_item.extend_from_slice(&(-1i16).to_be_bytes());
-    use_item.extend_from_slice(&[8,8,8]);
+    use_item.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &use_item)).unwrap();
 
     // Authentic apple (260) with 2 items starts 32 tick food use.
@@ -1255,8 +1262,10 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     use_item[11] = 4;
     client.write_all(&frame(8, &use_item)).unwrap();
     until_packet(&mut client, 0x2f, |packet| {
-        packet.len() == 10 && packet[..3] == [0,0,36]
-            && packet[3..5] == 260i16.to_be_bytes() && packet[5] == 1
+        packet.len() == 10
+            && packet[..3] == [0, 0, 36]
+            && packet[3..5] == 260i16.to_be_bytes()
+            && packet[5] == 1
     });
     until_packet(&mut client, 0x06, |packet| {
         packet.len() == 10
@@ -1276,8 +1285,12 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     loop {
         let value: Value = serde_json::from_slice(&fs::read(&drops_file).unwrap()).unwrap();
         if value["entries"].as_object().unwrap().len() == 2 {
-            let counts: Vec<u64> = value["entries"].as_object().unwrap()
-                .values().map(|v| v["stack"]["count"].as_u64().unwrap()).collect();
+            let counts: Vec<u64> = value["entries"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|v| v["stack"]["count"].as_u64().unwrap())
+                .collect();
             assert!(counts.contains(&1));
             assert!(counts.contains(&9));
             break;
@@ -1292,7 +1305,8 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     client.write_all(&frame(22, &[0])).unwrap();
     until_packet(&mut client, 0x07, |_| true);
     until_packet(&mut client, 0x06, |packet| {
-        packet.len() == 10 && packet[..4] == 20f32.to_be_bytes()
+        packet.len() == 10
+            && packet[..4] == 20f32.to_be_bytes()
             && packet[4..6] == 20i16.to_be_bytes()
     });
     drop(client);

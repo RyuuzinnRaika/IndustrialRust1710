@@ -272,8 +272,16 @@ mod tests {
         let file = dir.join("drops.json");
         let mut drops = GroundItems::default();
         let stacks = [
-            Stack { id: 260, count: 5, damage: 0 },
-            Stack { id: 1, count: 32, damage: 0 },
+            Stack {
+                id: 260,
+                count: 5,
+                damage: 0,
+            },
+            Stack {
+                id: 1,
+                count: 32,
+                damage: 0,
+            },
         ];
         assert!(drops.has_capacity_for(2));
         let items = drops.put_many(&file, &stacks, (0, 65, 0)).unwrap();
@@ -282,7 +290,9 @@ mod tests {
         let values: Vec<_> = restored.items().map(|item| item.stack).collect();
         assert_eq!(values, stacks);
         let missing_parent = file.join("world.json");
-        assert!(drops.put_many(&missing_parent, &stacks, (0, 65, 0)).is_err());
+        assert!(drops
+            .put_many(&missing_parent, &stacks, (0, 65, 0))
+            .is_err());
         assert_eq!(drops.items().count(), 2);
         fs::remove_dir_all(dir).unwrap();
     }

@@ -559,7 +559,12 @@ fn play(
         if survival && vitals.health <= 0.0 {
             eating = None;
             commit_death_drops(
-                inventory, inventory_path, ground_items, ground_path, hub, location,
+                inventory,
+                inventory_path,
+                ground_items,
+                ground_path,
+                hub,
+                location,
             )?;
         }
         if now_tick.saturating_sub(last_time_tick) >= 20 {
@@ -1256,7 +1261,12 @@ fn play(
                 input.finish()?;
                 if survival && action == 0 && vitals.health <= 0.0 {
                     commit_death_drops(
-                        inventory, inventory_path, ground_items, ground_path, hub, location,
+                        inventory,
+                        inventory_path,
+                        ground_items,
+                        ground_path,
+                        hub,
+                        location,
                     )?;
                     let origin = PlayerPosition::default();
                     let fresh_vitals = Vitals::default();

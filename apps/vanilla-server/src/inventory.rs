@@ -873,8 +873,16 @@ mod tests {
     #[test]
     fn death_collects_hotbar_backpack_cursor_and_crafting_without_duplicate() {
         let mut inventory = super::Inventory::default();
-        let stone = super::Stack { id: 1, count: 9, damage: 0 };
-        let apple = super::Stack { id: 260, count: 2, damage: 0 };
+        let stone = super::Stack {
+            id: 1,
+            count: 9,
+            damage: 0,
+        };
+        let apple = super::Stack {
+            id: 260,
+            count: 2,
+            damage: 0,
+        };
         inventory.creative_set(36, Some(stone)).unwrap();
         inventory.creative_set(9, Some(apple)).unwrap();
         inventory.cursor = Some(apple);

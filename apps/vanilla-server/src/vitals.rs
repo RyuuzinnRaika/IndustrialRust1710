@@ -39,22 +39,22 @@ impl Vitals {
     /// Limited 1.7.10 food set. Saturation modifier is the vanilla-like multiplier.
     fn nutrition(id: i16) -> Option<(i32, f32)> {
         match id {
-            260 => Some((4, 0.3)),  // apple
-            297 => Some((5, 0.6)),  // bread
-            319 => Some((3, 0.3)),  // raw pork
-            320 => Some((8, 0.8)),  // cooked pork
-            349 => Some((2, 0.1)),  // raw fish
-            350 => Some((5, 0.6)),  // cooked fish
-            357 => Some((2, 0.1)),  // cookie
-            360 => Some((2, 0.3)),  // melon
-            363 => Some((3, 0.3)),  // raw beef
-            364 => Some((8, 0.8)),  // steak
-            365 => Some((2, 0.3)),  // raw chicken
-            366 => Some((6, 0.6)),  // cooked chicken
-            391 => Some((3, 0.6)),  // carrot
-            392 => Some((1, 0.3)),  // potato
-            393 => Some((5, 0.6)),  // baked potato
-            400 => Some((8, 0.3)),  // pumpkin pie
+            260 => Some((4, 0.3)), // apple
+            297 => Some((5, 0.6)), // bread
+            319 => Some((3, 0.3)), // raw pork
+            320 => Some((8, 0.8)), // cooked pork
+            349 => Some((2, 0.1)), // raw fish
+            350 => Some((5, 0.6)), // cooked fish
+            357 => Some((2, 0.1)), // cookie
+            360 => Some((2, 0.3)), // melon
+            363 => Some((3, 0.3)), // raw beef
+            364 => Some((8, 0.8)), // steak
+            365 => Some((2, 0.3)), // raw chicken
+            366 => Some((6, 0.6)), // cooked chicken
+            391 => Some((3, 0.6)), // carrot
+            392 => Some((1, 0.3)), // potato
+            393 => Some((5, 0.6)), // baked potato
+            400 => Some((8, 0.3)), // pumpkin pie
             _ => None,
         }
     }
@@ -72,8 +72,7 @@ impl Vitals {
             return false;
         }
         self.food = (self.food + restore).min(20);
-        self.saturation = (self.saturation + restore as f32 * modifier * 2.0)
-            .min(self.food as f32);
+        self.saturation = (self.saturation + restore as f32 * modifier * 2.0).min(self.food as f32);
         true
     }
 
@@ -127,11 +126,19 @@ impl Vitals {
 mod tests {
     use super::*;
     fn food(id: i16) -> Stack {
-        Stack { id, count: 1, damage: 0 }
+        Stack {
+            id,
+            count: 1,
+            damage: 0,
+        }
     }
     #[test]
     fn apple_and_steak_restore_food_without_exceeding_limits() {
-        let mut v = Vitals { food: 12, saturation: 0.0, ..Vitals::default() };
+        let mut v = Vitals {
+            food: 12,
+            saturation: 0.0,
+            ..Vitals::default()
+        };
         assert!(v.eat(food(260)));
         assert_eq!(v.food, 16);
         assert!((v.saturation - 2.4).abs() < 0.001);
@@ -143,20 +150,41 @@ mod tests {
     }
     #[test]
     fn travel_drains_saturation_then_food_and_ticking_heals() {
-        let mut v = Vitals { health: 15.0, food: 20, saturation: 1.0, ..Vitals::default() };
-        for _ in 0..8 { v.travel(64.0); }
+        let mut v = Vitals {
+            health: 15.0,
+            food: 20,
+            saturation: 1.0,
+            ..Vitals::default()
+        };
+        for _ in 0..8 {
+            v.travel(64.0);
+        }
         assert_eq!(v.food, 20);
-        for _ in 0..7 { v.travel(64.0); }
+        for _ in 0..7 {
+            v.travel(64.0);
+        }
         assert!(v.food < 20);
-        let mut healthy = Vitals { health: 15.0, ..Vitals::default() };
+        let mut healthy = Vitals {
+            health: 15.0,
+            ..Vitals::default()
+        };
         assert!(!healthy.tick(79.min(20)));
-        for _ in 0..3 { healthy.tick(20); }
+        for _ in 0..3 {
+            healthy.tick(20);
+        }
         assert_eq!(healthy.health, 16.0);
     }
     #[test]
     fn normal_difficulty_starvation_stops_at_one_health() {
-        let mut v = Vitals { food: 0, saturation: 0.0, health: 3.0, ..Vitals::default() };
-        for _ in 0..20 { v.tick(20); }
+        let mut v = Vitals {
+            food: 0,
+            saturation: 0.0,
+            health: 3.0,
+            ..Vitals::default()
+        };
+        for _ in 0..20 {
+            v.tick(20);
+        }
         assert_eq!(v.health, 1.0);
         assert!(v.valid());
         v.exhaustion = f32::NAN;
