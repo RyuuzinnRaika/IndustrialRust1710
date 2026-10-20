@@ -19,8 +19,8 @@ use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use ground_items::GroundItems;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
+use ground_items::GroundItems;
 use inventory::{ChestDirection, Inventory, Stack};
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
@@ -681,14 +681,21 @@ fn play(
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
                     && matches!(
-                        world.lock().map_err(|_| bad("world mutex poisoned"))?
-                            .get(x, y, z) >> 4,
+                        world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(x, y, z)
+                            >> 4,
                         61 | 62
                     )
                 {
                     let pos = (x, y, z);
                     active_window = next_window;
-                    next_window = if next_window >= 100 { 1 } else { next_window + 1 };
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
                     active_chest = None;
                     active_furnace = Some(pos);
                     let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
@@ -699,7 +706,11 @@ fn play(
                     write_string(&json!({"text":"Furnace"}).to_string(), &mut opened)?;
                     opened.push(3);
                     send(s, 0x2d, &opened)?;
-                    send(s, 0x30, &inventory.furnace_window_items(active_window, &last_furnace_view))?;
+                    send(
+                        s,
+                        0x30,
+                        &inventory.furnace_window_items(active_window, &last_furnace_view),
+                    )?;
                     for property in last_furnace_view.properties(active_window) {
                         send(s, 0x31, &property)?;
                     }
@@ -884,8 +895,12 @@ fn play(
                 let response_items;
                 if let Some(pos) = active_furnace {
                     let still_open = matches!(
-                        world.lock().map_err(|_| bad("world mutex poisoned"))?
-                            .get(pos.0, pos.1, pos.2) >> 4, 61 | 62
+                        world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(pos.0, pos.1, pos.2)
+                            >> 4,
+                        61 | 62
                     ) && near(location, pos.0, pos.1, pos.2);
                     let mut machines = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
                     let previous = machines.get(pos);
@@ -907,9 +922,13 @@ fn play(
                                 candidate.save(inventory_path)?;
                                 *inventory = candidate;
                             }
-                            if furnace_changed { machines.update(furnace_path, pos, next)?; }
+                            if furnace_changed {
+                                machines.update(furnace_path, pos, next)?;
+                            }
                         } else {
-                            if furnace_changed { machines.update(furnace_path, pos, next)?; }
+                            if furnace_changed {
+                                machines.update(furnace_path, pos, next)?;
+                            }
                             if inv_changed {
                                 candidate.save(inventory_path)?;
                                 *inventory = candidate;
@@ -917,7 +936,8 @@ fn play(
                         }
                     }
                     last_furnace_view = machines.get(pos);
-                    response_items = inventory.furnace_window_items(active_window, &last_furnace_view);
+                    response_items =
+                        inventory.furnace_window_items(active_window, &last_furnace_view);
                     drop(machines);
                 } else if let Some(pos) = active_chest {
                     let still_open = world
@@ -1376,12 +1396,15 @@ fn main() -> io::Result<()> {
                             let target: u16 = if lit { 62 } else { 61 };
                             if actual != target {
                                 match world.update_and_save(
-                                    &furnace_world_path, pos.0, pos.1, pos.2, target << 4
+                                    &furnace_world_path,
+                                    pos.0,
+                                    pos.1,
+                                    pos.2,
+                                    target << 4,
                                 ) {
-                                    Ok(true) => furnace_hub.broadcast(block_change_event(
-                                        &world, pos.0, pos.1, pos.2
-                                    )),
-                                    Ok(false) => {},
+                                    Ok(true) => furnace_hub
+                                        .broadcast(block_change_event(&world, pos.0, pos.1, pos.2)),
+                                    Ok(false) => {}
                                     Err(error) => eprintln!("FURNACE LIGHT BLOCK ERROR: {error}"),
                                 }
                             }
