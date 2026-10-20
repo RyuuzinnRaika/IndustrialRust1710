@@ -568,6 +568,180 @@ impl Inventory {
         out
     }
 
+
+    fn furnace_stack(&self, furnace: &crate::furnaces::Furnace, slot: i16) -> Option<Stack> {
+        if slot < 3 {
+            furnace.slots[slot as usize]
+        } else {
+            self.slots[(slot + 6) as usize]
+        }
+    }
+    fn set_furnace_stack(
+        &mut self,
+        furnace: &mut crate::furnaces::Furnace,
+        slot: i16,
+        stack: Option<Stack>,
+    ) {
+        if slot < 3 {
+            furnace.slots[slot as usize] = stack;
+        } else {
+            self.slots[(slot + 6) as usize] = stack;
+        }
+    }
+    /// 1.7.10 furnace window: input 0, fuel 1, output 2,
+    /// main inventory 3..29 and hotbar 30..38.
+    ///
+    /// Returns the storage write direction for source-first persistence.
+    /// Forge/vanilla item-slot claims sent by the client are never trusted.
+    pub fn furnace_click(
+        &mut self,
+        furnace: &mut crate::furnaces::Furnace,
+        slot: i16,
+        button: i8,
+        mode: i8,
+    ) -> Option<ChestDirection> {
+        if !(0..39).contains(&slot) {
+            return None;
+        }
+        if slot >= 3 && mode == 0 {
+            return self.click_window(0, slot + 6, button, mode)
+                .then_some(ChestDirection::InventoryOnly);
+        }
+        if slot >= 3 && mode == 2 && (0..=8).contains(&button) {
+            let a = (slot + 6) as usize;
+            let b = 36 + button as usize;
+            self.slots.swap(a, b);
+            return Some(ChestDirection::InventoryOnly);
+        }
+        if slot >= 3 && mode == 1 && (button == 0 || button == 1) {
+            let idx = (slot + 6) as usize;
+            let Some(stack) = self.slots[idx] else {
+                return Some(ChestDirection::InventoryOnly);
+            };
+            let target: usize = if crate::furnaces::recipe(stack).is_some() {
+                0
+            } else if crate::furnaces::burn_duration(stack).is_some() {
+                1
+            } else {
+                return Some(ChestDirection::InventoryOnly);
+            };
+            let existing = furnace.slots[target];
+            if existing.is_some_and(|v| v.id != stack.id || v.damage != stack.damage) {
+                return Some(ChestDirection::InventoryOnly);
+            }
+            let room = 64u8 - existing.map_or(0, |v| v.count);
+            let moving = room.min(stack.count);
+            if moving == 0 { return Some(ChestDirection::InventoryOnly); }
+            furnace.slots[target] = Some(Stack {
+                count: existing.map_or(0, |v| v.count) + moving,
+                ..stack
+            });
+            let remaining = stack.count - moving;
+            self.slots[idx] = (remaining > 0).then_some(Stack { count: remaining, ..stack });
+            return Some(ChestDirection::IntoChest);
+        }
+        if slot < 3 && mode == 1 && (button == 0 || button == 1) {
+            let Some(item) = furnace.slots[slot as usize] else {
+                return Some(ChestDirection::OutOfChest);
+            };
+            let mut copy = self.clone();
+            // Only commit a whole stack. Partial transfers would otherwise
+            // need complex output-slot and item conservation semantics.
+            if copy.move_to_player(0, item).is_some() {
+                return Some(ChestDirection::OutOfChest);
+            }
+            furnace.slots[slot as usize] = None;
+            *self = copy;
+            return Some(ChestDirection::OutOfChest);
+        }
+        if slot < 3 && mode == 0 && (button == 0 || button == 1) {
+            let old = furnace.slots[slot as usize];
+            let hand = self.cursor;
+            if slot == 2 {
+                // Smelting output can ONLY be extracted, never inserted.
+                let Some(output) = old else { return Some(ChestDirection::OutOfChest); };
+                let next = match hand {
+                    None => Some(output),
+                    Some(mut current) if current.id == output.id && current.damage == output.damage
+                        && u16::from(current.count) + u16::from(output.count) <= 64 =>
+                    {
+                        current.count += output.count;
+                        Some(current)
+                    }
+                    _ => return None,
+                };
+                self.cursor = next;
+                furnace.slots[2] = None;
+                return Some(ChestDirection::OutOfChest);
+            }
+            // Allow input recipes and recognised fuel only. Withdraw existing
+            // contents freely, including the empty bucket left by lava.
+            if let Some(insert) = hand {
+                let allowed = if slot == 0 {
+                    crate::furnaces::recipe(insert).is_some()
+                } else {
+                    crate::furnaces::burn_duration(insert).is_some()
+                };
+                if !allowed { return None; }
+            }
+            if old.is_some() && hand.is_some()
+                && (old.unwrap().id != hand.unwrap().id
+                    || old.unwrap().damage != hand.unwrap().damage)
+            {
+                return None; // unsupported unlike-stack swap across two files
+            }
+            let (next_slot, next_cursor) = match (old, hand, button) {
+                (item, None, 0) => (None, item),
+                (None, item, 0) => (item, None),
+                (Some(mut item), Some(mut cursor), 0) => {
+                    let amount = (64 - item.count).min(cursor.count);
+                    item.count += amount;
+                    cursor.count -= amount;
+                    (Some(item), (cursor.count != 0).then_some(cursor))
+                }
+                (Some(mut item), None, 1) => {
+                    let amount = item.count.div_ceil(2);
+                    item.count -= amount;
+                    ((item.count != 0).then_some(item),
+                        Some(Stack { count: amount, ..item }))
+                }
+                (None, None, 1) => (None, None),
+                (None, Some(mut cursor), 1) => {
+                    cursor.count -= 1;
+                    (Some(Stack { count: 1, ..cursor }),
+                        (cursor.count != 0).then_some(cursor))
+                }
+                (Some(mut item), Some(mut cursor), 1) => {
+                    let amount = u8::from(item.count < 64);
+                    item.count += amount;
+                    cursor.count -= amount;
+                    (Some(item), (cursor.count != 0).then_some(cursor))
+                }
+                _ => unreachable!("validated furnace button"),
+            };
+            furnace.slots[slot as usize] = next_slot;
+            self.cursor = next_cursor;
+            return Some(if hand.is_some() {
+                ChestDirection::IntoChest
+            } else {
+                ChestDirection::OutOfChest
+            });
+        }
+        None
+    }
+    pub fn furnace_window_items(
+        &self,
+        window: u8,
+        furnace: &crate::furnaces::Furnace,
+    ) -> Vec<u8> {
+        let mut packet = vec![window];
+        packet.extend_from_slice(&39i16.to_be_bytes());
+        for slot in 0..39 {
+            Self::encode_slot(&mut packet, self.furnace_stack(furnace, slot));
+        }
+        packet
+    }
+
     /// Clientbound Set Slot (0x2F): window -1, slot -1 represents the cursor.
     pub fn cursor_packet(&self) -> Vec<u8> {
         let mut out = vec![255, 255, 255];
@@ -625,6 +799,35 @@ impl Inventory {
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn furnace_inventory_moves_and_output_are_server_owned() {
+        let mut inv = Inventory::default();
+        let mut furnace = crate::furnaces::Furnace::default();
+        inv.creative_set(36, Some(Stack { id: 15, count: 3, damage: 0 })).unwrap();
+        // Hotbar 36 maps to furnace window 30; Shift inserts input into slot 0.
+        assert_eq!(inv.furnace_click(&mut furnace, 30, 0, 1),
+            Some(ChestDirection::IntoChest));
+        assert_eq!(furnace.slots[0].unwrap().count, 3);
+        assert!(inv.held().is_none());
+        inv.creative_set(36, Some(Stack { id: 263, count: 2, damage: 0 })).unwrap();
+        assert!(inv.furnace_click(&mut furnace, 30, 0, 1).is_some());
+        assert_eq!(furnace.slots[1].unwrap().count, 2);
+        // Never allow the client to move an arbitrary item into output.
+        inv.creative_set(37, Some(Stack { id: 57, count: 10, damage: 0 })).unwrap();
+        inv.furnace_click(&mut furnace, 31, 0, 0);
+        let before = (inv.clone(), furnace);
+        assert_eq!(inv.furnace_click(&mut furnace, 2, 0, 0), None);
+        assert_eq!((inv, furnace), before);
+        inv.furnace_click(&mut furnace, 31, 0, 0);
+        furnace.slots[2] = Some(Stack { id: 265, count: 1, damage: 0 });
+        assert_eq!(inv.furnace_click(&mut furnace, 2, 0, 0),
+            Some(ChestDirection::OutOfChest));
+        assert_eq!(inv.cursor.unwrap().id, 265);
+        assert_eq!(furnace.slots[2], None);
+        assert!(!inv.furnace_click(&mut furnace, 39, 0, 0).is_some());
+        assert_eq!(&inv.furnace_window_items(7, &furnace)[..3], &[7, 0, 39]);
+    }
     #[test]
     fn chest_moves_are_bounded_and_conserve_items() {
         let mut inv = Inventory::default();
