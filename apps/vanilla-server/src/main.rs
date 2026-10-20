@@ -6,6 +6,7 @@ mod anvil_import;
 mod chests;
 mod clock;
 mod crafting;
+mod furnaces;
 mod ground_items;
 mod inventory;
 mod multiplayer;
@@ -18,6 +19,7 @@ use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use ground_items::GroundItems;
 use inventory::{ChestDirection, Inventory, Stack};
 use legacy_protocol::{
@@ -335,6 +337,8 @@ struct PlayerSession<'a> {
     ground_path: &'a Path,
     chests: &'a Mutex<Chests>,
     chest_path: &'a Path,
+    furnaces: &'a Mutex<Furnaces>,
+    furnace_path: &'a Path,
     survival: bool,
     hub: &'a Hub,
     entity_id: i32,
@@ -358,6 +362,8 @@ fn play(
         ground_path,
         chests,
         chest_path,
+        furnaces,
+        furnace_path,
         survival,
         hub,
         entity_id,
@@ -381,6 +387,8 @@ fn play(
     let mut mining: Option<MiningProgress> = None;
     let mut active_window: u8 = 0;
     let mut active_chest: Option<ChestPosition> = None;
+    let mut active_furnace: Option<FurnacePosition> = None;
+    let mut last_furnace_view = Furnace::default();
     let mut observed_chest_revision: u64 = 0;
     let mut next_window: u8 = 1;
     let mut last_pickup = Instant::now();
@@ -397,6 +405,23 @@ fn play(
                 observed_chest_revision = guard.revision();
                 drop(guard);
                 send(s, 0x30, &data)?;
+            }
+        }
+        if let Some(pos) = active_furnace {
+            let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
+            let current = guard.get(pos);
+            if current != last_furnace_view {
+                let contents = (current.slots != last_furnace_view.slots)
+                    .then(|| inventory.furnace_window_items(active_window, &current));
+                let properties = current.properties(active_window);
+                last_furnace_view = current;
+                drop(guard);
+                if let Some(contents) = contents {
+                    send(s, 0x30, &contents)?;
+                }
+                for property in properties {
+                    send(s, 0x31, &property)?;
+                }
             }
         }
         if saved_at.elapsed() >= Duration::from_secs(5) {
@@ -615,11 +640,18 @@ fn play(
                         if (action == 0 || action == 2) && y > 60 && near(location, x, y, z) {
                             // Refuse breaking a nonempty chest until contents
                             // can be safely dropped as item entities.
-                            let occupied = w.get(x, y, z) >> 4 == 54
+                            let block = w.get(x, y, z) >> 4;
+                            let occupied = (block == 54
                                 && chests
                                     .lock()
                                     .map_err(|_| bad("chest lock poisoned"))?
-                                    .is_nonempty((x, y, z));
+                                    .is_nonempty((x, y, z)))
+                                || ((block == 61 || block == 62)
+                                    && furnaces
+                                        .lock()
+                                        .map_err(|_| bad("furnace lock poisoned"))?
+                                        .get((x, y, z))
+                                        .occupied());
                             if occupied {
                                 false
                             } else {
@@ -648,6 +680,46 @@ fn play(
                 if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
+                    && matches!(
+                        world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(x, y, z)
+                            >> 4,
+                        61 | 62
+                    )
+                {
+                    let pos = (x, y, z);
+                    active_window = next_window;
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
+                    active_chest = None;
+                    active_furnace = Some(pos);
+                    let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
+                    last_furnace_view = guard.get(pos);
+                    drop(guard);
+                    let mut opened = vec![active_window];
+                    write_string("minecraft:furnace", &mut opened)?;
+                    write_string(&json!({"text":"Furnace"}).to_string(), &mut opened)?;
+                    opened.push(3);
+                    send(s, 0x2d, &opened)?;
+                    send(
+                        s,
+                        0x30,
+                        &inventory.furnace_window_items(active_window, &last_furnace_view),
+                    )?;
+                    for property in last_furnace_view.properties(active_window) {
+                        send(s, 0x31, &property)?;
+                    }
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
                     && world
                         .lock()
                         .map_err(|_| bad("world mutex poisoned"))?
@@ -663,6 +735,7 @@ fn play(
                     };
                     let pos = (x, y, z);
                     active_chest = Some(pos);
+                    active_furnace = None;
                     let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
                     let items = inventory.chest_window_items(active_window, &guard.slots(pos));
                     observed_chest_revision = guard.revision();
@@ -690,6 +763,7 @@ fn play(
                     // Window 0 is always the player's personal 2x2 grid.
                     active_window = next_window;
                     active_chest = None;
+                    active_furnace = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -723,7 +797,7 @@ fn play(
                                 && [(nx + 1, nz), (nx - 1, nz), (nx, nz + 1), (nx, nz - 1)]
                                     .iter()
                                     .any(|&(cx, cz)| w.get(cx, ny, cz) >> 4 == 54);
-                            if world::is_placeable(block_id)
+                            if (world::is_placeable(block_id) || block_id == 61)
                                 && block_id != 7
                                 && !adjacent_chest
                                 && w.get(x, y, z) != 0
@@ -819,7 +893,53 @@ fn play(
                 let requested_window = window >= 0 && window as u8 == active_window;
                 let mut accepted = false;
                 let response_items;
-                if let Some(pos) = active_chest {
+                if let Some(pos) = active_furnace {
+                    let still_open = matches!(
+                        world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(pos.0, pos.1, pos.2)
+                            >> 4,
+                        61 | 62
+                    ) && near(location, pos.0, pos.1, pos.2);
+                    let mut machines = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
+                    let previous = machines.get(pos);
+                    let mut next = previous;
+                    let mut candidate = inventory.clone();
+                    let direction = if still_open && requested_window {
+                        candidate.furnace_click(&mut next, slot, button, mode)
+                    } else {
+                        None
+                    };
+                    if let Some(direction) = direction {
+                        accepted = true;
+                        let inv_changed = candidate != *inventory;
+                        let furnace_changed = next != previous;
+                        // Source-first, analogous to the chest transactions:
+                        // preserves at-most-once credit during crashes.
+                        if direction == ChestDirection::IntoChest {
+                            if inv_changed {
+                                candidate.save(inventory_path)?;
+                                *inventory = candidate;
+                            }
+                            if furnace_changed {
+                                machines.update(furnace_path, pos, next)?;
+                            }
+                        } else {
+                            if furnace_changed {
+                                machines.update(furnace_path, pos, next)?;
+                            }
+                            if inv_changed {
+                                candidate.save(inventory_path)?;
+                                *inventory = candidate;
+                            }
+                        }
+                    }
+                    last_furnace_view = machines.get(pos);
+                    response_items =
+                        inventory.furnace_window_items(active_window, &last_furnace_view);
+                    drop(machines);
+                } else if let Some(pos) = active_chest {
                     let still_open = world
                         .lock()
                         .map_err(|_| bad("world mutex poisoned"))?
@@ -880,6 +1000,11 @@ fn play(
                 reply.push(u8::from(accepted));
                 send(s, 0x32, &reply)?;
                 send(s, 0x30, &response_items)?;
+                if active_furnace.is_some() {
+                    for property in last_furnace_view.properties(active_window) {
+                        send(s, 0x31, &property)?;
+                    }
+                }
                 send(s, 0x2f, &inventory.cursor_packet())?;
             }
             15 => {
@@ -897,6 +1022,7 @@ fn play(
                     // deleting them if a player closes the crafting window.
                     active_window = 0;
                     active_chest = None;
+                    active_furnace = None;
                     send(s, 0x30, &inventory.window_items())?;
                 }
             }
@@ -931,6 +1057,8 @@ struct ServerContext {
     ground_path: Arc<PathBuf>,
     chests: Arc<Mutex<Chests>>,
     chest_path: Arc<PathBuf>,
+    furnaces: Arc<Mutex<Furnaces>>,
+    furnace_path: Arc<PathBuf>,
     survival: bool,
 }
 fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
@@ -944,6 +1072,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         ground_path,
         chests,
         chest_path,
+        furnaces,
+        furnace_path,
         survival,
     } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1091,6 +1221,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             ground_path: &ground_path,
             chests: &chests,
             chest_path: &chest_path,
+            furnaces: &furnaces,
+            furnace_path: &furnace_path,
             survival,
             hub: &hub,
             entity_id,
@@ -1211,6 +1343,8 @@ fn main() -> io::Result<()> {
     }));
     let chest_path = Arc::new(Chests::location(&world_path));
     let chests = Arc::new(Mutex::new(Chests::load(&chest_path)?));
+    let furnace_path = Arc::new(Furnaces::location(&world_path));
+    let furnaces = Arc::new(Mutex::new(Furnaces::load(&furnace_path)?));
     let listener = TcpListener::bind(bind)?;
     println!(
         "IndustrialRust1710: listening on {} (1.7.10 vanilla, up to 8 players)",
@@ -1221,6 +1355,66 @@ fn main() -> io::Result<()> {
     let connections = Arc::new(AtomicUsize::new(0));
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
+    // Furnace simulation is driven by the same monotonic 20Hz clock as the
+    // server world. It runs without connected players; it never replays
+    // wall-clock downtime after the process was stopped.
+    let furnace_worker = Arc::clone(&furnaces);
+    let furnace_file = Arc::clone(&furnace_path);
+    let furnace_clock = Arc::clone(&clock);
+    let furnace_world = Arc::clone(&world);
+    let furnace_world_path = Arc::clone(&path);
+    let furnace_hub = Arc::clone(&hub);
+    thread::spawn(move || {
+        let mut last = furnace_clock.ticks();
+        loop {
+            let now = furnace_clock.ticks();
+            if now > last {
+                let steps = (now - last).min(20) as u32;
+                last = now;
+                let lighting = {
+                    let mut storage = match furnace_worker.lock() {
+                        Ok(v) => v,
+                        Err(_) => break,
+                    };
+                    if let Err(error) = storage.advance(&furnace_file, steps, now) {
+                        eprintln!("FURNACE TICK STORAGE ERROR: {error}");
+                        // Do not simulate more operations without safe persistence.
+                        break;
+                    }
+                    storage.lighting()
+                };
+                // Only rewrite a block when its lit state changes. Keeping the
+                // furnace mutex released avoids a lock cycle with player actions.
+                if now % 20 < u64::from(steps) || now < 3 {
+                    let mut world = match furnace_world.lock() {
+                        Ok(v) => v,
+                        Err(_) => break,
+                    };
+                    for (pos, lit) in lighting {
+                        let actual = world.get(pos.0, pos.1, pos.2) >> 4;
+                        if actual == 61 || actual == 62 {
+                            let target: u16 = if lit { 62 } else { 61 };
+                            if actual != target {
+                                match world.update_and_save(
+                                    &furnace_world_path,
+                                    pos.0,
+                                    pos.1,
+                                    pos.2,
+                                    target << 4,
+                                ) {
+                                    Ok(true) => furnace_hub
+                                        .broadcast(block_change_event(&world, pos.0, pos.1, pos.2)),
+                                    Ok(false) => {}
+                                    Err(error) => eprintln!("FURNACE LIGHT BLOCK ERROR: {error}"),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
     for accepted in listener.incoming() {
         let stream = accepted?;
         if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
@@ -1237,6 +1431,8 @@ fn main() -> io::Result<()> {
         let drops_path = Arc::clone(&ground_path);
         let storage = Arc::clone(&chests);
         let storage_path = Arc::clone(&chest_path);
+        let machine_storage = Arc::clone(&furnaces);
+        let machine_file = Arc::clone(&furnace_path);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -1251,6 +1447,8 @@ fn main() -> io::Result<()> {
                     ground_path: drops_path,
                     chests: storage,
                     chest_path: storage_path,
+                    furnaces: machine_storage,
+                    furnace_path: machine_file,
                     survival,
                 },
             ) {
