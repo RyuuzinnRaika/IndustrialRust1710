@@ -49,6 +49,19 @@ pub fn result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if w == 1 && h == 2 && plank(at(0, 0)) && plank(at(0, 1)) {
         return product(280, 4, 0); // sticks
     }
+    if w == 1
+        && h == 2
+        && at(0, 0).is_some_and(|item| item.id == 263)
+        && stick(at(0, 1))
+    {
+        return product(50, 4, 0); // four torches from coal/charcoal and a stick
+    }
+    if w == 3
+        && h == 1
+        && (0..3).all(|x| same_material(at(x, 0), 296))
+    {
+        return product(297, 1, 0); // bread from wheat
+    }
     if w == 2 && h == 2 && (0..2).all(|y| (0..2).all(|x| plank(at(x, y)))) {
         return product(58, 1, 0); // crafting table
     }
@@ -82,7 +95,13 @@ pub fn result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     }
     if width == 3 {
         for (material, pickaxe, axe, shovel, sword, hoe) in
-            [(5, 270, 271, 269, 268, 290), (4, 274, 275, 273, 272, 291)]
+            [
+                (5, 270, 271, 269, 268, 290),
+                (4, 274, 275, 273, 272, 291),
+                (265, 257, 258, 256, 267, 292),
+                (266, 285, 286, 284, 283, 294),
+                (264, 278, 279, 277, 276, 293),
+            ]
         {
             let m = |x, y| same_material(at(x, y), material);
             let s = |x, y| stick(at(x, y));
@@ -202,5 +221,29 @@ mod tests {
             product(54, 1, 0)
         );
         assert_eq!(result(&[item(3); 9], 3), None);
+        assert_eq!(
+            result(&[item(263), None, item(280), None], 2),
+            product(50, 4, 0)
+        );
+        assert_eq!(
+            result(&[item(296), item(296), item(296), None, None, None, None, None, None], 3),
+            product(297, 1, 0)
+        );
+        assert_eq!(
+            result(&[
+                item(265), item(265), item(265),
+                None, item(280), None,
+                None, item(280), None,
+            ], 3),
+            product(257, 1, 0)
+        );
+        assert_eq!(
+            result(&[
+                item(264), item(264), item(264),
+                None, item(280), None,
+                None, item(280), None,
+            ], 3),
+            product(278, 1, 0)
+        );
     }
 }
