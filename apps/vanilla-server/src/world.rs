@@ -27,6 +27,8 @@ pub struct World {
     generation: Generation,
     // In-memory wake-up queue only. Reconstructed from placed blocks on load.
     pending_gravity: BTreeSet<Position>,
+    pending_fluid: BTreeSet<Position>,
+    pending_circuit: BTreeSet<Position>,
 }
 
 /// A gravity block moved exactly one vertical cell during one 20Hz world tick.
@@ -50,7 +52,12 @@ pub fn is_placeable(block_id: u16) -> bool {
         block_id,
         1 | 2
             | 3
+            | 8 // flowing water: simplified bounded propagation
+            | 10 // flowing lava
             | 50 // wall/ground torch: simplified attachment
+            | 55 // redstone dust (client item 331)
+            | 69 // lever
+            | 76 // powered redstone torch
             | 4
             | 5
             | 7
@@ -228,6 +235,123 @@ impl World {
         }
     }
 
+    /// Wake fluids and powered dust around an edited block, without scanning
+    /// every generated chunk. Source types are 1.7.10 8=water and 10=lava.
+    fn wake_block_updates(&mut self, x: i32, y: i32, z: i32) {
+        for (nx, ny, nz) in [
+            (x, y, z),
+            (x + 1, y, z),
+            (x - 1, y, z),
+            (x, y, z + 1),
+            (x, y, z - 1),
+            (x, y + 1, z),
+            (x, y - 1, z),
+        ] {
+            if !in_bounds(nx, ny, nz) {
+                continue;
+            }
+            let id = self.get(nx, ny, nz) >> 4;
+            let pos = (nx, ny as u8, nz);
+            if matches!(id, 8 | 10) {
+                self.pending_fluid.insert(pos);
+            }
+            if id == 55 {
+                self.pending_circuit.insert(pos);
+            }
+        }
+    }
+
+    /// Bounded 20TPS flow/conduction step. IRW save occurs once per tick.
+    /// Empty fluid destinations and wire strengths are staged before mutation.
+    pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
+        let wet: Vec<Position> = self.pending_fluid.iter().take(budget).copied().collect();
+        let wired: Vec<Position> = self.pending_circuit.iter().take(budget).copied().collect();
+        let mut changes: BTreeMap<Position, u16> = BTreeMap::new();
+
+        for &(x, y, z) in &wet {
+            let y = i32::from(y);
+            let block = self.get(x, y, z);
+            let id = block >> 4;
+            let level = block & 15;
+            if !matches!(id, 8 | 10) || level >= 7 {
+                continue;
+            }
+            let down = (x, y - 1, z);
+            let targets: Vec<(i32, i32, i32)> =
+                if in_bounds(down.0, down.1, down.2)
+                    && self.get(down.0, down.1, down.2) == 0
+                {
+                    vec![down]
+                } else {
+                    vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
+                };
+            for (nx, ny, nz) in targets {
+                if in_bounds(nx, ny, nz) && self.get(nx, ny, nz) == 0 {
+                    changes.entry((nx, ny as u8, nz)).or_insert((id << 4) | level + 1);
+                }
+            }
+        }
+
+        for &(x, y, z) in &wired {
+            let y = i32::from(y);
+            let current = self.get(x, y, z);
+            if current >> 4 != 55 {
+                continue;
+            }
+            let mut strongest = 0u16;
+            for (nx, nz) in [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)] {
+                let block = self.get(nx, y, nz);
+                let source = match block >> 4 {
+                    69 if block & 8 != 0 => 15, // active lever
+                    76 => 15, // redstone torch
+                    55 => (block & 15).saturating_sub(1),
+                    _ => 0,
+                };
+                strongest = strongest.max(source);
+            }
+            if current & 15 != strongest {
+                changes.insert((x, y as u8, z), (55 << 4) | strongest);
+            }
+        }
+
+        if !changes.is_empty() {
+            let undo: Vec<(Position, Option<u16>)> = changes
+                .keys()
+                .map(|&p| (p, self.edits.get(&p).copied()))
+                .collect();
+            for (&position, &block) in &changes {
+                self.set_gravity_cell(position, block);
+            }
+            let saved = if self.edits.len() > MAX_EDITS {
+                Err(invalid("fluid or redstone exceeds world edit budget"))
+            } else {
+                self.save(path)
+            };
+            if let Err(error) = saved {
+                for (pos, original) in undo {
+                    match original {
+                        Some(block) => { self.edits.insert(pos, block); }
+                        None => { self.edits.remove(&pos); }
+                    }
+                }
+                return Err(error);
+            }
+        }
+
+        for pos in wet {
+            self.pending_fluid.remove(&pos);
+        }
+        for pos in wired {
+            self.pending_circuit.remove(&pos);
+        }
+        let mut changed = Vec::with_capacity(changes.len());
+        for (x, y, z) in changes.keys().copied() {
+            changed.push((x, i32::from(y), z));
+            self.wake_block_updates(x, i32::from(y), z);
+        }
+        Ok(changed)
+    }
+
     pub fn update_and_save(
         &mut self,
         path: &Path,
@@ -265,6 +389,7 @@ impl World {
             return Err(e);
         }
         self.wake_gravity(x, y, z);
+        self.wake_block_updates(x, y, z);
         Ok(true)
     }
     /// Apply one parsed block to a *detached* import world. Call save_new only
@@ -282,6 +407,7 @@ impl World {
         }
         self.edits.insert(key, block);
         self.wake_gravity(x, y, z);
+        self.wake_block_updates(x, y, z);
         Ok(())
     }
 
@@ -349,6 +475,12 @@ impl World {
             }
             if matches!(block >> 4, 12 | 13) {
                 world.pending_gravity.insert((x, y, z));
+            }
+            if matches!(block >> 4, 8 | 10) {
+                world.pending_fluid.insert((x, y, z));
+            }
+            if block >> 4 == 55 {
+                world.pending_circuit.insert((x, y, z));
             }
         }
         Ok(world)
@@ -517,6 +649,47 @@ mod tests {
         assert_eq!(packet.len(), 8 * 10240 + 256);
         fs::remove_file(path).unwrap();
         assert_eq!(World::new().chunk_data(0, 0).0, 0x18);
+    }
+    #[test]
+    fn water_flow_and_circuit_propagation_are_bounded_and_persistent() {
+        let path = std::env::temp_dir().join(format!("ir1710-fluid-circuit-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        // Water above the grass: first tick flows down only.
+        w.update_and_save(&path, 5, 66, 5, 8 << 4).unwrap();
+        let first = w.block_tick(&path, 64).unwrap();
+        assert!(first.contains(&(5, 65, 5)));
+        assert_eq!(w.get(5, 65, 5), (8 << 4) | 1);
+        assert_eq!(w.get(6, 65, 5), 0);
+        // The flowing block is supported by grass and spreads horizontally.
+        assert!(w.block_tick(&path, 64).unwrap().contains(&(6, 65, 5)));
+        assert_eq!(w.get(6, 65, 5), (8 << 4) | 2);
+        // Lever -> one wire -> adjacent wire, with 15 and then 14.
+        w.update_and_save(&path, 0, 64, 0, (69 << 4) | 8).unwrap();
+        w.update_and_save(&path, 1, 64, 0, 55 << 4).unwrap();
+        w.update_and_save(&path, 2, 64, 0, 55 << 4).unwrap();
+        w.block_tick(&path, 64).unwrap();
+        assert_eq!(w.get(1, 64, 0), (55 << 4) | 15);
+        w.block_tick(&path, 64).unwrap();
+        assert_eq!(w.get(2, 64, 0), (55 << 4) | 14);
+        // Turning off the lever decays a wire chain to zero.
+        w.update_and_save(&path, 0, 64, 0, 69 << 4).unwrap();
+        for _ in 0..35 { w.block_tick(&path, 64).unwrap(); }
+        assert_eq!(w.get(1, 64, 0), 55 << 4);
+        assert_eq!(w.get(2, 64, 0), 55 << 4);
+        let saved = World::load(&path).unwrap();
+        assert_eq!(saved.get(5, 65, 5), (8 << 4) | 1);
+        assert_eq!(saved.get(1, 64, 0), 55 << 4);
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn source_flow_respects_edit_budget_and_legacy_flat() {
+        let mut w = World::new();
+        assert!(w.block_tick(Path::new("/no-write-when-empty"), 64).unwrap().is_empty());
+        assert!(is_placeable(55) && is_placeable(69) && is_placeable(76));
+        assert!(is_placeable(8) && is_placeable(10));
+        w.import_block(0, 67, 0, 10 << 4).unwrap();
+        assert_eq!(w.get(0, 67, 0) >> 4, 10);
     }
     #[test]
     fn flat_and_bounds() {
