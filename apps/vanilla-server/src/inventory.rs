@@ -575,18 +575,6 @@ impl Inventory {
             self.slots[(slot + 6) as usize]
         }
     }
-    fn set_furnace_stack(
-        &mut self,
-        furnace: &mut crate::furnaces::Furnace,
-        slot: i16,
-        stack: Option<Stack>,
-    ) {
-        if slot < 3 {
-            furnace.slots[slot as usize] = stack;
-        } else {
-            self.slots[(slot + 6) as usize] = stack;
-        }
-    }
     /// 1.7.10 furnace window: input 0, fuel 1, output 2,
     /// main inventory 3..29 and hotbar 30..38.
     ///
@@ -858,7 +846,7 @@ mod tests {
         inv.furnace_click(&mut furnace, 31, 0, 0);
         let before = (inv.clone(), furnace);
         assert_eq!(inv.furnace_click(&mut furnace, 2, 0, 0), None);
-        assert_eq!((inv, furnace), before);
+        assert_eq!((inv.clone(), furnace), before);
         inv.furnace_click(&mut furnace, 31, 0, 0);
         furnace.slots[2] = Some(Stack {
             id: 265,
