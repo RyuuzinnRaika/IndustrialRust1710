@@ -10,6 +10,7 @@ mod furnaces;
 mod ground_items;
 mod inventory;
 mod multiplayer;
+mod physics;
 mod player;
 mod survival;
 mod whitelist;
@@ -27,6 +28,7 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
+use physics::FallTracker;
 use player::PlayerPosition;
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -177,15 +179,25 @@ fn status(s: &mut TcpStream, hub: &Hub) -> io::Result<()> {
         _ => Err(bad("bad status ping")),
     }
 }
+struct InitialPlayer<'a> {
+    position: &'a PlayerPosition,
+    inventory: &'a Inventory,
+    health: f32,
+    survival: bool,
+}
 fn join(
     s: &mut TcpStream,
     world: &Mutex<World>,
     clock: &Clock,
-    position: &PlayerPosition,
     entity_id: i32,
-    inventory: &Inventory,
-    survival: bool,
+    initial: InitialPlayer<'_>,
 ) -> io::Result<()> {
+    let InitialPlayer {
+        position,
+        inventory,
+        health,
+        survival,
+    } = initial;
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
     // difficulty u8, maxPlayers u8, levelType string.
     let mut join = Vec::new();
@@ -204,11 +216,7 @@ fn join(
         spawn.extend_from_slice(&coordinate.to_be_bytes());
     }
     send(s, 0x05, &spawn)?;
-    let mut health = Vec::new();
-    health.extend_from_slice(&20.0f32.to_be_bytes());
-    health.extend_from_slice(&20i16.to_be_bytes());
-    health.extend_from_slice(&5.0f32.to_be_bytes());
-    send(s, 0x06, &health)?;
+    send(s, 0x06, &health_packet(health))?;
     let mut time = Vec::new();
     time.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
     time.extend_from_slice(&clock.day_time().to_be_bytes());
@@ -227,7 +235,7 @@ fn join(
     as_chat(
         s,
         if survival {
-            "Rust survival prototype: basic hand mining and block inventory; no mobs/crafting/physics."
+            "Rust survival: mining, crafting, basic collision, fall damage; no mobs or full physics."
         } else {
             "Rust vanilla prototype: creative flat world. /help for commands."
         },
@@ -298,6 +306,13 @@ fn sync_chunks(
     Ok(())
 }
 
+fn health_packet(health: f32) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(10);
+    packet.extend_from_slice(&health.to_be_bytes());
+    packet.extend_from_slice(&20i16.to_be_bytes()); // hunger system not yet modeled
+    packet.extend_from_slice(&5.0f32.to_be_bytes());
+    packet
+}
 fn send_player_position(s: &mut TcpStream, location: &PlayerPosition) -> io::Result<()> {
     // Protocol 5 clientbound position/look: x, feet y, z, yaw, pitch, on_ground.
     let mut bytes = Vec::with_capacity(33);
@@ -330,6 +345,7 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
 }
 struct PlayerSession<'a> {
     position: &'a mut PlayerPosition,
+    health: &'a mut f32,
     save_path: &'a Path,
     inventory: &'a mut Inventory,
     inventory_path: &'a Path,
@@ -355,6 +371,7 @@ fn play(
 ) -> io::Result<()> {
     let PlayerSession {
         position: player,
+        health,
         save_path: player_path,
         inventory,
         inventory_path,
@@ -371,6 +388,7 @@ fn play(
     } = session;
     s.set_read_timeout(Some(Duration::from_millis(50)))?;
     let mut location = (player.x, player.y, player.z);
+    let mut fall = FallTracker::new(player.y);
     let mut loaded_chunks = view_chunks(chunk_center(player));
     let mut yaw: f32 = 0.0;
     let mut pitch: f32 = 0.0;
@@ -425,7 +443,7 @@ fn play(
             }
         }
         if saved_at.elapsed() >= Duration::from_secs(5) {
-            player.save(player_path)?;
+            player.save_with_health(player_path, *health)?;
             inventory.save(inventory_path)?;
             saved_at = Instant::now();
         }
@@ -492,6 +510,11 @@ fn play(
         };
         let mut input = Input(&data);
         let id = input.varint()?;
+        // Dead players cannot interact with or move through the world until
+        // their Protocol 5 Client Status respawn request is accepted.
+        if survival && *health <= 0.0 && matches!(id, 4 | 6 | 7 | 8) {
+            continue;
+        }
         match id {
             0 => {
                 let reply = input.i32()?;
@@ -505,7 +528,7 @@ fn play(
                 let message = input.string(100)?;
                 input.finish()?;
                 if message == "/help" {
-                    as_chat(s, "Commands: /help, /save, /list. Survival prototype supports only simple hand mining; crafting and mobs are unsupported.")?;
+                    as_chat(s, "Commands: /help, /save, /list. Survival supports crafting, inventory, basic collision and fall damage; mobs remain unsupported.")?;
                 } else if message == "/list" {
                     as_chat(
                         s,
@@ -558,6 +581,21 @@ fn play(
                     // Sparse world positions are validated against the global world limit.
                     send_player_position(s, player)?;
                     continue;
+                }
+                if survival {
+                    let collision_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    if !physics::valid_movement(&collision_world, player, &candidate) {
+                        send_player_position(s, player)?;
+                        continue;
+                    }
+                    let landed = physics::supported(&collision_world, &candidate);
+                    drop(collision_world);
+                    let damage = fall.update(y, landed);
+                    if damage != 0 {
+                        *health = (*health - f32::from(damage)).max(0.0);
+                        player.save_with_health(player_path, *health)?;
+                        send(s, 0x06, &health_packet(*health))?;
+                    }
                 }
                 location = (x, y, z);
                 *player = candidate;
@@ -1112,8 +1150,30 @@ fn play(
                     send(s, 0x30, &inventory.window_items())?;
                 }
             }
+            22 => {
+                // Protocol 5 C16 Client Status: 0 = Perform Respawn.
+                let action = input.i8()?;
+                input.finish()?;
+                if survival && action == 0 && *health <= 0.0 {
+                    let origin = PlayerPosition::default();
+                    *health = 20.0;
+                    *player = origin;
+                    fall = FallTracker::new(origin.y);
+                    location = (origin.x, origin.y, origin.z);
+                    player.save_with_health(player_path, *health)?;
+                    let mut respawn = 0i32.to_be_bytes().to_vec();
+                    respawn.extend_from_slice(&[1, 0]); // normal difficulty, survival
+                    write_string("default", &mut respawn)?;
+                    send(s, 0x07, &respawn)?;
+                    loaded_chunks.clear(); // the client forgets chunks on respawn
+                    sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                    send(s, 0x06, &health_packet(*health))?;
+                    send_player_position(s, player)?;
+                    hub.move_player(entity_id, *player, yaw, pitch);
+                }
+            }
             // Other packets are not trusted inventory or world mutations.
-            2 | 10..=12 | 17..=23 => {}
+            2 | 10..=12 | 17..=21 | 23 => {}
             _ => return Err(bad("invalid play packet ID")),
         }
     }
@@ -1211,7 +1271,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         return Ok(());
     }
     let player_file = PlayerPosition::location(&path, &name);
-    let mut player_state = match PlayerPosition::load(&player_file) {
+    let (mut player_state, mut player_health) = match PlayerPosition::load_state(&player_file) {
         Ok(state) => state,
         Err(err) => {
             eprintln!("player state unavailable for {name}: {err}");
@@ -1265,10 +1325,13 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         &mut s,
         &world,
         &clock,
-        &player_state,
         entity_id,
-        &inventory_state,
-        survival,
+        InitialPlayer {
+            position: &player_state,
+            inventory: &inventory_state,
+            health: player_health,
+            survival,
+        },
     )?;
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
@@ -1300,6 +1363,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         &clock,
         PlayerSession {
             position: &mut player_state,
+            health: &mut player_health,
             save_path: &player_file,
             inventory: &mut inventory_state,
             inventory_path: &inventory_file,
@@ -1316,7 +1380,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
-    let player_saved = player_state.save(&player_file);
+    let player_saved = player_state.save_with_health(&player_file, player_health);
     let inventory_saved = inventory_state.save(&inventory_file);
     println!("left: {name}");
     player_saved?;
