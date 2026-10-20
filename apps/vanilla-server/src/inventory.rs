@@ -61,7 +61,11 @@ impl Inventory {
             || self.slots.len() != SLOT_COUNT
             || self.slots[0].is_some()
             || self.slots[5..9].iter().any(Option::is_some)
-            || self.workbench.iter().flatten().any(|stack| !stack.is_valid())
+            || self
+                .workbench
+                .iter()
+                .flatten()
+                .any(|stack| !stack.is_valid())
             || self.slots.iter().flatten().any(|stack| !stack.is_valid())
             || self.cursor.is_some_and(|stack| !stack.is_valid())
         {
@@ -179,7 +183,6 @@ impl Inventory {
         }
     }
 
-
     /// Map a Protocol 5 window slot to a server-owned inventory array.
     /// Slot zero is *virtual* (the derived crafting output) and cannot be set.
     fn slot_index(window: u8, slot: i16) -> Option<(bool, usize)> {
@@ -193,11 +196,19 @@ impl Inventory {
     }
     fn lookup(&self, window: u8, slot: i16) -> Option<Stack> {
         let (workbench, index) = Self::slot_index(window, slot)?;
-        if workbench { self.workbench[index] } else { self.slots[index] }
+        if workbench {
+            self.workbench[index]
+        } else {
+            self.slots[index]
+        }
     }
     fn assign(&mut self, window: u8, slot: i16, stack: Option<Stack>) {
         if let Some((workbench, index)) = Self::slot_index(window, slot) {
-            if workbench { self.workbench[index] = stack; } else { self.slots[index] = stack; }
+            if workbench {
+                self.workbench[index] = stack;
+            } else {
+                self.slots[index] = stack;
+            }
         }
     }
     pub fn crafting_result(&self, window: u8) -> Option<Stack> {
@@ -228,7 +239,9 @@ impl Inventory {
                     stack.count += count;
                     moving.count -= count;
                     self.assign(window, slot, Some(stack));
-                    if moving.count == 0 { return None; }
+                    if moving.count == 0 {
+                        return None;
+                    }
                 }
             }
         }
@@ -241,7 +254,9 @@ impl Inventory {
         Some(moving)
     }
     fn take_recipe(&mut self, window: u8, shift: bool) -> bool {
-        let Some(output) = self.crafting_result(window) else { return true; };
+        let Some(output) = self.crafting_result(window) else {
+            return true;
+        };
         if shift {
             // This state is cloned by the session before persistence. Requiring
             // full capacity prevents losing ingredients when output cannot fit.
@@ -255,8 +270,10 @@ impl Inventory {
         }
         let carried = match self.cursor {
             None => Some(output),
-            Some(mut old) if old.id == output.id && old.damage == output.damage
-                && u16::from(old.count) + u16::from(output.count) <= 64 =>
+            Some(mut old)
+                if old.id == output.id
+                    && old.damage == output.damage
+                    && u16::from(old.count) + u16::from(output.count) <= 64 =>
             {
                 old.count += output.count;
                 Some(old)
@@ -279,7 +296,9 @@ impl Inventory {
                 _ => false,
             };
         }
-        if Self::slot_index(window, slot).is_none() { return false; }
+        if Self::slot_index(window, slot).is_none() {
+            return false;
+        }
         match mode {
             0 if button == 0 || button == 1 => {
                 let current = self.lookup(window, slot);
@@ -311,7 +330,9 @@ impl Inventory {
                         )
                     }
                     (Some(mut target), Some(mut hand), 1)
-                        if target.id == hand.id && target.damage == hand.damage && target.count < 64 =>
+                        if target.id == hand.id
+                            && target.damage == hand.damage
+                            && target.count < 64 =>
                     {
                         target.count += 1;
                         hand.count -= 1;
@@ -326,7 +347,9 @@ impl Inventory {
             }
             1 if button == 0 || button == 1 => {
                 // Shift ingredient slots to player; main <-> hotbar otherwise.
-                let Some(mut moving) = self.lookup(window, slot) else { return true; };
+                let Some(mut moving) = self.lookup(window, slot) else {
+                    return true;
+                };
                 let main_start = if window == 0 { 9 } else { 10 };
                 let hotbar_start = if window == 0 { 36 } else { 37 };
                 let destination = if slot < main_start {
@@ -338,12 +361,17 @@ impl Inventory {
                 };
                 for target in destination.clone() {
                     if let Some(mut existing) = self.lookup(window, target) {
-                        if existing.id == moving.id && existing.damage == moving.damage && existing.count < 64 {
+                        if existing.id == moving.id
+                            && existing.damage == moving.damage
+                            && existing.count < 64
+                        {
                             let amount = (64 - existing.count).min(moving.count);
                             existing.count += amount;
                             moving.count -= amount;
                             self.assign(window, target, Some(existing));
-                            if moving.count == 0 { break; }
+                            if moving.count == 0 {
+                                break;
+                            }
                         }
                     }
                 }
@@ -397,7 +425,11 @@ impl Inventory {
         data.push(window);
         data.extend_from_slice(&count.to_be_bytes());
         for slot in 0..count {
-            let stack = if slot == 0 { self.crafting_result(window) } else { self.lookup(window, slot) };
+            let stack = if slot == 0 {
+                self.crafting_result(window)
+            } else {
+                self.lookup(window, slot)
+            };
             Self::encode_slot(&mut data, stack);
         }
         data
@@ -411,7 +443,14 @@ impl Inventory {
         }
         let mut data = vec![0];
         data.extend_from_slice(&slot.to_be_bytes());
-        Self::encode_slot(&mut data, if slot == 0 { self.crafting_result(0) } else { self.lookup(0, slot) });
+        Self::encode_slot(
+            &mut data,
+            if slot == 0 {
+                self.crafting_result(0)
+            } else {
+                self.lookup(0, slot)
+            },
+        );
         Ok(data)
     }
 }
@@ -467,21 +506,42 @@ mod tests {
         assert_eq!(&inventory.cursor_packet()[..3], &[255, 255, 255]);
     }
 
-
     #[test]
     fn player_grid_crafts_planks_and_table_without_minting_items() {
         let mut inv = Inventory::default();
-        inv.creative_set(36, Some(Stack { id: 17, count: 1, damage: 0 })).unwrap();
+        inv.creative_set(
+            36,
+            Some(Stack {
+                id: 17,
+                count: 1,
+                damage: 0,
+            }),
+        )
+        .unwrap();
         assert!(inv.click(36, 0, 0));
         assert!(inv.click(1, 0, 0)); // log into 2x2
-        assert_eq!(inv.crafting_result(0), Some(Stack { id: 5, count: 4, damage: 0 }));
+        assert_eq!(
+            inv.crafting_result(0),
+            Some(Stack {
+                id: 5,
+                count: 4,
+                damage: 0
+            })
+        );
         assert!(inv.click(0, 0, 0)); // obtain four planks
         assert_eq!(inv.slots[1], None);
         assert_eq!(inv.cursor.unwrap().count, 4);
         for slot in 1..=4 {
             assert!(inv.click(slot, 1, 0)); // put one plank in each crafting input
         }
-        assert_eq!(inv.crafting_result(0), Some(Stack { id: 58, count: 1, damage: 0 }));
+        assert_eq!(
+            inv.crafting_result(0),
+            Some(Stack {
+                id: 58,
+                count: 1,
+                damage: 0
+            })
+        );
         assert!(inv.click(0, 0, 0)); // take one crafting table
         assert_eq!(inv.cursor.unwrap().id, 58);
         assert_eq!(inv.slots[1..5], [None; 4]);
@@ -492,11 +552,19 @@ mod tests {
     #[test]
     fn workbench_crafts_pickaxe_and_rejects_wrong_window() {
         let mut inv = Inventory::default();
-        for slot in [1,2,3] {
-            inv.workbench[slot - 1] = Some(Stack { id: 5, count: 1, damage: 0 });
+        for slot in [1, 2, 3] {
+            inv.workbench[slot - 1] = Some(Stack {
+                id: 5,
+                count: 1,
+                damage: 0,
+            });
         }
-        for slot in [5,8] {
-            inv.workbench[slot - 1] = Some(Stack { id: 280, count: 1, damage: 0 });
+        for slot in [5, 8] {
+            inv.workbench[slot - 1] = Some(Stack {
+                id: 280,
+                count: 1,
+                damage: 0,
+            });
         }
         assert_eq!(inv.crafting_result(1).unwrap().id, 270);
         assert!(inv.click_window(1, 0, 0, 0));
