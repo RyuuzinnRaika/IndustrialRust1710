@@ -600,9 +600,8 @@ fn play(
                         2 => {
                             let attempt = mining.take();
                             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                            let result = attempt.and_then(|m| {
-                                m.finish(target, w.get(x, y, z), inventory.held())
-                            });
+                            let result = attempt
+                                .and_then(|m| m.finish(target, w.get(x, y, z), inventory.held()));
                             let mut changed = false;
                             if world::in_bounds(x, y, z) && near(location, x, y, z) {
                                 if let Some(result) = result {
@@ -610,11 +609,16 @@ fn play(
                                     // Safely refuse tile-entity mining until
                                     // their contents can become proper drops.
                                     let occupied = (block == 54
-                                        && chests.lock().map_err(|_| bad("chest lock poisoned"))?
+                                        && chests
+                                            .lock()
+                                            .map_err(|_| bad("chest lock poisoned"))?
                                             .is_nonempty(target))
                                         || ((block == 61 || block == 62)
-                                            && furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?
-                                                .get(target).occupied());
+                                            && furnaces
+                                                .lock()
+                                                .map_err(|_| bad("furnace lock poisoned"))?
+                                                .get(target)
+                                                .occupied());
                                     if !occupied {
                                         let mut ground = ground_items.lock().map_err(|_| {
                                             io::Error::other("ground items lock poisoned")
@@ -623,27 +627,38 @@ fn play(
                                         // block that should have created an item.
                                         if result.drop.is_none() || !ground.is_full() {
                                             let mut candidate = inventory.clone();
-                                            let wore = result.wear_tool
-                                                && candidate.wear_held_tool();
+                                            let wore =
+                                                result.wear_tool && candidate.wear_held_tool();
                                             // Commit durability consumption before
                                             // changing the world, not vice-versa.
-                                            if wore { candidate.save(inventory_path)?; }
+                                            if wore {
+                                                candidate.save(inventory_path)?;
+                                            }
                                             match w.update_and_save(world_path, x, y, z, 0) {
                                                 Ok(true) => {
                                                     if wore {
                                                         *inventory = candidate;
-                                                        send(s, 0x2f,
-                                                            &inventory.set_slot(inventory.held_slot())?)?;
+                                                        send(
+                                                            s,
+                                                            0x2f,
+                                                            &inventory
+                                                                .set_slot(inventory.held_slot())?,
+                                                        )?;
                                                     }
                                                     if let Some(drop) = result.drop {
                                                         let stack = Stack {
-                                                            id: drop.id, count: 1,
+                                                            id: drop.id,
+                                                            count: 1,
                                                             damage: drop.damage,
                                                         };
                                                         // A crash after world save and
                                                         // before entity persistence can
                                                         // lose an item, never clone it.
-                                                        let item = ground.put(ground_path, stack, target)?;
+                                                        let item = ground.put(
+                                                            ground_path,
+                                                            stack,
+                                                            target,
+                                                        )?;
                                                         for packet in item.spawn() {
                                                             hub.broadcast(packet);
                                                         }
@@ -651,10 +666,14 @@ fn play(
                                                     changed = true;
                                                 }
                                                 Ok(false) => {
-                                                    if wore { inventory.save(inventory_path)?; }
+                                                    if wore {
+                                                        inventory.save(inventory_path)?;
+                                                    }
                                                 }
                                                 Err(error) => {
-                                                    if wore { inventory.save(inventory_path)?; }
+                                                    if wore {
+                                                        inventory.save(inventory_path)?;
+                                                    }
                                                     return Err(error);
                                                 }
                                             }
