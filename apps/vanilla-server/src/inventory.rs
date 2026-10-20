@@ -653,7 +653,8 @@ impl Inventory {
             if slot == 2 {
                 // Smelting output can ONLY be extracted, never inserted.
                 let Some(output) = old else {
-                    return Some(ChestDirection::OutOfChest);
+                    // Empty output cannot accept a carried item.
+                    return if hand.is_none() { Some(ChestDirection::OutOfChest) } else { None };
                 };
                 let next = match hand {
                     None => Some(output),
