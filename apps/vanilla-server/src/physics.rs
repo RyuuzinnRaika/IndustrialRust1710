@@ -15,10 +15,47 @@ fn solid(id: u16) -> bool {
     // Chests are conservatively approximated as full cubes until proper AABBs.
     matches!(
         id,
-        1 | 2 | 3 | 4 | 5 | 7 | 12 | 13 | 14 | 15 | 16 | 17 | 20
-            | 21 | 24 | 35 | 41 | 42 | 45 | 49 | 54 | 56 | 57 | 58
-            | 61 | 62 | 73 | 74 | 80 | 82 | 87 | 89 | 98 | 129
-            | 155 | 159 | 162 | 168 | 169 | 170 | 172 | 173
+        1 | 2
+            | 3
+            | 4
+            | 5
+            | 7
+            | 12
+            | 13
+            | 14
+            | 15
+            | 16
+            | 17
+            | 20
+            | 21
+            | 24
+            | 35
+            | 41
+            | 42
+            | 45
+            | 49
+            | 54
+            | 56
+            | 57
+            | 58
+            | 61
+            | 62
+            | 73
+            | 74
+            | 80
+            | 82
+            | 87
+            | 89
+            | 98
+            | 129
+            | 155
+            | 159
+            | 162
+            | 168
+            | 169
+            | 170
+            | 172
+            | 173
     )
 }
 
@@ -36,11 +73,8 @@ pub fn collides(world: &World, position: &PlayerPosition) -> bool {
     let (min_x, max_x, min_z, max_z) = horizontal_box(position);
     let min_y = (position.y + EPS).floor() as i32;
     let max_y = (position.y + HEIGHT - EPS).floor() as i32;
-    (min_x..=max_x).any(|x| {
-        (min_z..=max_z).any(|z| {
-            (min_y..=max_y).any(|y| solid(world.get(x, y, z) >> 4))
-        })
-    })
+    (min_x..=max_x)
+        .any(|x| (min_z..=max_z).any(|z| (min_y..=max_y).any(|y| solid(world.get(x, y, z) >> 4))))
 }
 
 /// A client's onGround flag alone is not evidence of contact with a block.
@@ -50,9 +84,7 @@ pub fn supported(world: &World, position: &PlayerPosition) -> bool {
         return false;
     }
     let (min_x, max_x, min_z, max_z) = horizontal_box(position);
-    (min_x..=max_x).any(|x| {
-        (min_z..=max_z).any(|z| solid(world.get(x, foot_block, z) >> 4))
-    })
+    (min_x..=max_x).any(|x| (min_z..=max_z).any(|z| solid(world.get(x, foot_block, z) >> 4)))
 }
 
 /// Check the destination and fixed-height, long horizontal movements.

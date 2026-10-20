@@ -1077,7 +1077,9 @@ fn native_survival_collision_damage_death_respawn_and_health_persistence() {
 
     // Position inside bedrock at y=60 must be rejected by the server.
     send_position(&mut client, 0.5, 60.0, 0.5);
-    until_packet(&mut client, 0x08, |packet| read_position(packet) == [0.5, 65.0, 0.5]);
+    until_packet(&mut client, 0x08, |packet| {
+        read_position(packet) == [0.5, 65.0, 0.5]
+    });
 
     // Falling eight blocks to the y=64 grass surface costs five health.
     send_position(&mut client, 0.5, 72.0, 0.5);
