@@ -3,8 +3,8 @@
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
 mod anvil_export;
 mod anvil_import;
-mod clock;
 mod chests;
+mod clock;
 mod crafting;
 mod ground_items;
 mod inventory;
@@ -616,9 +616,13 @@ fn play(
                             // Refuse breaking a nonempty chest until contents
                             // can be safely dropped as item entities.
                             let occupied = w.get(x, y, z) >> 4 == 54
-                                && chests.lock().map_err(|_| bad("chest lock poisoned"))?
+                                && chests
+                                    .lock()
+                                    .map_err(|_| bad("chest lock poisoned"))?
                                     .is_nonempty((x, y, z));
-                            if occupied { false } else {
+                            if occupied {
+                                false
+                            } else {
                                 w.update_and_save(world_path, x, y, z, 0)?
                             }
                         } else {
@@ -644,11 +648,19 @@ fn play(
                 if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
-                    && world.lock().map_err(|_| bad("world mutex poisoned"))?
-                        .get(x, y, z) >> 4 == 54
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 54
                 {
                     active_window = next_window;
-                    next_window = if next_window >= 100 { 1 } else { next_window + 1 };
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
                     let pos = (x, y, z);
                     active_chest = Some(pos);
                     let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
@@ -709,7 +721,8 @@ fn play(
                             let block_id = stack.id as u16;
                             let adjacent_chest = block_id == 54
                                 && [(nx + 1, nz), (nx - 1, nz), (nx, nz + 1), (nx, nz - 1)]
-                                    .iter().any(|&(cx, cz)| w.get(cx, ny, cz) >> 4 == 54);
+                                    .iter()
+                                    .any(|&(cx, cz)| w.get(cx, ny, cz) >> 4 == 54);
                             if world::is_placeable(block_id)
                                 && block_id != 7
                                 && !adjacent_chest
@@ -807,8 +820,12 @@ fn play(
                 let mut accepted = false;
                 let response_items;
                 if let Some(pos) = active_chest {
-                    let still_open = world.lock().map_err(|_| bad("world mutex poisoned"))?
-                        .get(pos.0, pos.1, pos.2) >> 4 == 54
+                    let still_open = world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(pos.0, pos.1, pos.2)
+                        >> 4
+                        == 54
                         && near(location, pos.0, pos.1, pos.2);
                     let mut storage = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
                     let original = storage.slots(pos);
@@ -845,11 +862,13 @@ fn play(
                         }
                     }
                     observed_chest_revision = storage.revision();
-                    response_items = inventory.chest_window_items(active_window, &storage.slots(pos));
+                    response_items =
+                        inventory.chest_window_items(active_window, &storage.slots(pos));
                     drop(storage);
                 } else {
                     let mut candidate = inventory.clone();
-                    accepted = requested_window && candidate.click_window(active_window, slot, button, mode);
+                    accepted = requested_window
+                        && candidate.click_window(active_window, slot, button, mode);
                     if accepted && candidate != *inventory {
                         candidate.save(inventory_path)?;
                         *inventory = candidate;
