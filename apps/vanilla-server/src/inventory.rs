@@ -173,10 +173,6 @@ impl Inventory {
         }
         None
     }
-    pub fn receive_one(&mut self, item: Stack) -> Option<i16> {
-        (item.count == 1).then_some(())?;
-        self.receive_stack(item)?.first().copied()
-    }
     /// Q removes one held item; Ctrl+Q removes the entire held stack.
     pub fn drop_held(&mut self, whole_stack: bool) -> Option<Stack> {
         let slot = &mut self.slots[36 + self.selected as usize];
