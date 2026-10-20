@@ -120,6 +120,8 @@ fn rule(block: u16) -> Option<BlockRule> {
             true,
             item(id as i16, damage),
         ),
+        18 => (0.2, None, 0, false, None), // leaves: decay/sapling drops deferred
+        50 => (0.0, None, 0, false, item(50, 0)), // torch
         5 => (2.0, Some(ToolKind::Axe), 0, false, item(5, damage)),
         17 | 162 => (2.0, Some(ToolKind::Axe), 0, false, item(id as i16, damage)),
         54 => (2.5, Some(ToolKind::Axe), 0, false, item(54, 0)),

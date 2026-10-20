@@ -13,6 +13,7 @@ mod multiplayer;
 mod physics;
 mod player;
 mod survival;
+mod terrain;
 mod vitals;
 mod whitelist;
 mod world;
@@ -214,7 +215,12 @@ fn join(
     send(s, 0x39, &abilities)?;
 
     let mut spawn = Vec::new();
-    for coordinate in [0i32, 64, 0] {
+    let surface = world
+        .lock()
+        .map_err(|_| bad("world mutex poisoned"))?
+        .spawn_y() as i32
+        - 1;
+    for coordinate in [0i32, surface, 0] {
         spawn.extend_from_slice(&coordinate.to_be_bytes());
     }
     send(s, 0x05, &spawn)?;
@@ -245,6 +251,13 @@ fn join(
     Ok(())
 }
 
+fn safe_spawn(world: &Mutex<World>) -> io::Result<PlayerPosition> {
+    let y = world
+        .lock()
+        .map_err(|_| bad("world mutex poisoned"))?
+        .spawn_y();
+    Ok(PlayerPosition { x: 0.5, y, z: 0.5 })
+}
 fn chunk_center(player: &PlayerPosition) -> (i32, i32) {
     (
         (player.x.floor() as i32).div_euclid(16),
@@ -1268,7 +1281,7 @@ fn play(
                         hub,
                         location,
                     )?;
-                    let origin = PlayerPosition::default();
+                    let origin = safe_spawn(world)?;
                     let fresh_vitals = Vitals::default();
                     origin.save_state(player_path, fresh_vitals)?;
                     *vitals = fresh_vitals;
@@ -1438,6 +1451,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             return Ok(());
         }
     };
+    if !player_file.exists() && !player_file.with_extension("json").exists() {
+        player_state = safe_spawn(&world)?;
+    }
     // Separate survival resources from old Creative inventories to prevent
     // player-selected Creative stacks becoming free Survival items.
     let inventory_file = if survival {
@@ -1551,11 +1567,12 @@ fn main() -> io::Result<()> {
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
     let mut survival = false;
+    let mut requested_seed: Option<u64> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--terrain-seed U64]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -1582,6 +1599,14 @@ fn main() -> io::Result<()> {
             }
             "--insecure-offline-lan" => insecure_offline_lan = true,
             "--survival" => survival = true,
+            "--terrain-seed" => {
+                requested_seed = Some(
+                    args.next()
+                        .ok_or_else(|| bad("missing --terrain-seed value"))?
+                        .parse()
+                        .map_err(|_| bad("invalid terrain seed (expected unsigned integer)"))?,
+                );
+            }
             "--export-anvil" => {
                 anvil_export_path = Some(PathBuf::from(
                     args.next()
@@ -1596,6 +1621,13 @@ fn main() -> io::Result<()> {
             }
             _ => return Err(bad("unknown command-line argument")),
         }
+    }
+    if requested_seed.is_some()
+        && (!survival || anvil_export_path.is_some() || anvil_import_path.is_some())
+    {
+        return Err(bad(
+            "--terrain-seed requires --survival and cannot be used with import/export",
+        ));
     }
     if anvil_export_path.is_some() && anvil_import_path.is_some() {
         return Err(bad(
@@ -1640,7 +1672,25 @@ fn main() -> io::Result<()> {
         list.len()
     );
     let (clock, _clock_thread) = Clock::start();
-    let world = Arc::new(Mutex::new(World::load(&world_path)?));
+    let loaded_world = if world_path.exists() {
+        let existing = World::load(&world_path)?;
+        if let Some(seed) = requested_seed {
+            if existing.natural_seed() != Some(seed) {
+                return Err(bad(
+                    "existing world has a different generation type or seed",
+                ));
+            }
+        }
+        existing
+    } else if let Some(seed) = requested_seed {
+        let initial = World::natural(seed);
+        // Create-only: never replace an existing IRW1 world or another seed.
+        initial.save_new(&world_path)?;
+        initial
+    } else {
+        World::new()
+    };
+    let world = Arc::new(Mutex::new(loaded_world));
     let ground_path = Arc::new(GroundItems::location(&world_path));
     let ground_items = Arc::new(Mutex::new(if survival {
         GroundItems::load(&ground_path)?
