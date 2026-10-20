@@ -19,7 +19,13 @@ pub struct MineResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ToolKind { Pickaxe, Shovel, Axe, Sword, Hoe }
+enum ToolKind {
+    Pickaxe,
+    Shovel,
+    Axe,
+    Sword,
+    Hoe,
+}
 #[derive(Clone, Copy, Debug)]
 struct Tool {
     kind: ToolKind,
@@ -61,7 +67,12 @@ fn tool(stack: Option<Stack>) -> Option<Tool> {
     if held.count != 1 || held.damage >= max_uses {
         return None;
     }
-    Some(Tool { kind, tier, speed, max_uses })
+    Some(Tool {
+        kind,
+        tier,
+        speed,
+        max_uses,
+    })
 }
 /// 1.7.10-style damage count and break thresholds for basic tools.
 pub fn tool_max_uses(stack: Stack) -> Option<i16> {
@@ -95,8 +106,20 @@ fn rule(block: u16) -> Option<BlockRule> {
         56 => (3.0, Some(ToolKind::Pickaxe), 2, true, item(264, 0)),
         73 | 74 => (3.0, Some(ToolKind::Pickaxe), 2, true, item(331, 0)),
         129 => (3.0, Some(ToolKind::Pickaxe), 2, true, item(388, 0)),
-        41 | 42 | 57 | 173 => (5.0, Some(ToolKind::Pickaxe), 0, true, item(id as i16, damage)),
-        45 | 98 | 155 | 159 | 168 | 172 => (1.5, Some(ToolKind::Pickaxe), 0, true, item(id as i16, damage)),
+        41 | 42 | 57 | 173 => (
+            5.0,
+            Some(ToolKind::Pickaxe),
+            0,
+            true,
+            item(id as i16, damage),
+        ),
+        45 | 98 | 155 | 159 | 168 | 172 => (
+            1.5,
+            Some(ToolKind::Pickaxe),
+            0,
+            true,
+            item(id as i16, damage),
+        ),
         5 => (2.0, Some(ToolKind::Axe), 0, false, item(5, damage)),
         17 | 162 => (2.0, Some(ToolKind::Axe), 0, false, item(id as i16, damage)),
         54 => (2.5, Some(ToolKind::Axe), 0, false, item(54, 0)),
@@ -109,7 +132,13 @@ fn rule(block: u16) -> Option<BlockRule> {
         170 => (0.5, Some(ToolKind::Axe), 0, false, item(170, 0)),
         _ => return None,
     };
-    Some(BlockRule { hardness, kind, tier, requires_tool, drop })
+    Some(BlockRule {
+        hardness,
+        kind,
+        tier,
+        requires_tool,
+        drop,
+    })
 }
 /// Server-authoritative minimum for breaking a known block; tick quantized,
 /// 30 game ticks × hardness / speed if harvestable, otherwise 100 × hardness.
@@ -118,15 +147,23 @@ pub fn mine_rule(block: u16, held: Option<Stack>) -> Option<(Duration, MineResul
     let spec = rule(block)?;
     let equipped = tool(held);
     let effective = equipped.is_some_and(|t| spec.kind == Some(t.kind));
-    let can_harvest = !spec.requires_tool
-        || (effective && equipped.is_some_and(|t| t.tier >= spec.tier));
-    let speed = if effective { equipped.map_or(1.0, |t| t.speed) } else { 1.0 };
+    let can_harvest =
+        !spec.requires_tool || (effective && equipped.is_some_and(|t| t.tier >= spec.tier));
+    let speed = if effective {
+        equipped.map_or(1.0, |t| t.speed)
+    } else {
+        1.0
+    };
     let ticks = ((spec.hardness * if can_harvest { 30.0 } else { 100.0 }) / speed)
-        .ceil().max(1.0) as u64;
+        .ceil()
+        .max(1.0) as u64;
     let drop = if can_harvest { spec.drop } else { None };
     Some((
         Duration::from_millis(ticks.saturating_mul(50)),
-        MineResult { drop, wear_tool: equipped.is_some() },
+        MineResult {
+            drop,
+            wear_tool: equipped.is_some(),
+        },
     ))
 }
 #[derive(Clone, Copy, Debug)]
@@ -139,7 +176,12 @@ pub struct MiningProgress {
 impl MiningProgress {
     pub fn start(target: (i32, i32, i32), block: u16, held: Option<Stack>) -> Option<Self> {
         mine_rule(block, held)?;
-        Some(Self { target, started: Instant::now(), block, tool: held })
+        Some(Self {
+            target,
+            started: Instant::now(),
+            block,
+            tool: held,
+        })
     }
     /// Consume the attempt exactly once. The held tool must remain unchanged
     /// between starting and finishing a dig, preventing fast-tool switching.
@@ -160,7 +202,11 @@ impl MiningProgress {
 mod tests {
     use super::*;
     fn stack(id: i16, damage: i16) -> Option<Stack> {
-        Some(Stack { id, damage, count: 1 })
+        Some(Stack {
+            id,
+            damage,
+            count: 1,
+        })
     }
     #[test]
     fn base_rules_and_harvest_tiers_are_authoritative() {
@@ -168,14 +214,49 @@ mod tests {
         assert!(mine_rule(0, None).is_none());
         assert_eq!(mine_rule(2 << 4, None).unwrap().1.drop.unwrap().id, 3);
         assert_eq!(mine_rule(1 << 4, None).unwrap().1.drop, None);
-        assert_eq!(mine_rule(1 << 4, stack(270, 0)).unwrap().1.drop.unwrap().id, 4);
+        assert_eq!(
+            mine_rule(1 << 4, stack(270, 0)).unwrap().1.drop.unwrap().id,
+            4
+        );
         assert_eq!(mine_rule(15 << 4, stack(270, 0)).unwrap().1.drop, None);
-        assert_eq!(mine_rule(15 << 4, stack(274, 0)).unwrap().1.drop.unwrap().id, 15);
+        assert_eq!(
+            mine_rule(15 << 4, stack(274, 0))
+                .unwrap()
+                .1
+                .drop
+                .unwrap()
+                .id,
+            15
+        );
         assert_eq!(mine_rule(14 << 4, stack(274, 0)).unwrap().1.drop, None);
-        assert_eq!(mine_rule(14 << 4, stack(257, 0)).unwrap().1.drop.unwrap().id, 14);
-        assert_eq!(mine_rule(56 << 4, stack(257, 0)).unwrap().1.drop.unwrap().id, 264);
+        assert_eq!(
+            mine_rule(14 << 4, stack(257, 0))
+                .unwrap()
+                .1
+                .drop
+                .unwrap()
+                .id,
+            14
+        );
+        assert_eq!(
+            mine_rule(56 << 4, stack(257, 0))
+                .unwrap()
+                .1
+                .drop
+                .unwrap()
+                .id,
+            264
+        );
         assert_eq!(mine_rule(49 << 4, stack(257, 0)).unwrap().1.drop, None);
-        assert_eq!(mine_rule(49 << 4, stack(278, 0)).unwrap().1.drop.unwrap().id, 49);
+        assert_eq!(
+            mine_rule(49 << 4, stack(278, 0))
+                .unwrap()
+                .1
+                .drop
+                .unwrap()
+                .id,
+            49
+        );
         assert_eq!(mine_rule(20 << 4, None).unwrap().1.drop, None);
         assert!(MiningProgress::start((0, 60, 0), 7 << 4, None).is_none());
     }
