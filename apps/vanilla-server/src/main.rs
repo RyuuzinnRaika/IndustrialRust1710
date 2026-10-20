@@ -4,6 +4,7 @@
 mod anvil_export;
 mod anvil_import;
 mod clock;
+mod chests;
 mod crafting;
 mod ground_items;
 mod inventory;
@@ -13,11 +14,12 @@ mod survival;
 mod whitelist;
 mod world;
 
+use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use ground_items::GroundItems;
-use inventory::{Inventory, Stack};
+use inventory::{ChestDirection, Inventory, Stack};
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
     PROTOCOL_VERSION,
@@ -331,6 +333,8 @@ struct PlayerSession<'a> {
     inventory_path: &'a Path,
     ground_items: &'a Mutex<GroundItems>,
     ground_path: &'a Path,
+    chests: &'a Mutex<Chests>,
+    chest_path: &'a Path,
     survival: bool,
     hub: &'a Hub,
     entity_id: i32,
@@ -352,6 +356,8 @@ fn play(
         inventory_path,
         ground_items,
         ground_path,
+        chests,
+        chest_path,
         survival,
         hub,
         entity_id,
@@ -374,11 +380,24 @@ fn play(
     let mut packet_reader = BufferedFrameReader::new();
     let mut mining: Option<MiningProgress> = None;
     let mut active_window: u8 = 0;
+    let mut active_chest: Option<ChestPosition> = None;
+    let mut observed_chest_revision: u64 = 0;
     let mut next_window: u8 = 1;
     let mut last_pickup = Instant::now();
     loop {
         while let Ok(event) = events.try_recv() {
             send(s, event.id, &event.body)?;
+        }
+        // Poll the single shared chest revision to synchronize viewers.
+        // Do not send a chest's window-id to unrelated players.
+        if let Some(pos) = active_chest {
+            let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
+            if guard.revision() != observed_chest_revision {
+                let data = inventory.chest_window_items(active_window, &guard.slots(pos));
+                observed_chest_revision = guard.revision();
+                drop(guard);
+                send(s, 0x30, &data)?;
+            }
         }
         if saved_at.elapsed() >= Duration::from_secs(5) {
             player.save(player_path)?;
@@ -594,7 +613,14 @@ fn play(
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let changed =
                         if (action == 0 || action == 2) && y > 60 && near(location, x, y, z) {
-                            w.update_and_save(world_path, x, y, z, 0)?
+                            // Refuse breaking a nonempty chest until contents
+                            // can be safely dropped as item entities.
+                            let occupied = w.get(x, y, z) >> 4 == 54
+                                && chests.lock().map_err(|_| bad("chest lock poisoned"))?
+                                    .is_nonempty((x, y, z));
+                            if occupied { false } else {
+                                w.update_and_save(world_path, x, y, z, 0)?
+                            }
                         } else {
                             false
                         };
@@ -614,6 +640,30 @@ fn play(
                 let held = input.slot()?;
                 input.take(3)?; // cursor x/y/z
                 input.finish()?;
+
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world.lock().map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z) >> 4 == 54
+                {
+                    active_window = next_window;
+                    next_window = if next_window >= 100 { 1 } else { next_window + 1 };
+                    let pos = (x, y, z);
+                    active_chest = Some(pos);
+                    let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
+                    let items = inventory.chest_window_items(active_window, &guard.slots(pos));
+                    observed_chest_revision = guard.revision();
+                    drop(guard);
+                    let mut opened = vec![active_window];
+                    write_string("minecraft:chest", &mut opened)?;
+                    write_string(&json!({"text":"Chest"}).to_string(), &mut opened)?;
+                    opened.push(27); // 3 rows of nine, excluding player inventory
+                    send(s, 0x2d, &opened)?;
+                    send(s, 0x30, &items)?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
                 if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
@@ -627,6 +677,7 @@ fn play(
                     // The 1.7.10 crafting table is a non-storage window.
                     // Window 0 is always the player's personal 2x2 grid.
                     active_window = next_window;
+                    active_chest = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -656,8 +707,12 @@ fn play(
                     if inventory.can_place(held) {
                         if let Some(stack) = inventory.held() {
                             let block_id = stack.id as u16;
+                            let adjacent_chest = block_id == 54
+                                && [(nx + 1, nz), (nx - 1, nz), (nx, nz + 1), (nx, nz - 1)]
+                                    .iter().any(|&(cx, cz)| w.get(cx, ny, cz) >> 4 == 54);
                             if world::is_placeable(block_id)
                                 && block_id != 7
+                                && !adjacent_chest
                                 && w.get(x, y, z) != 0
                                 && w.get(nx, ny, nz) == 0
                                 && near(location, nx, ny, nz)
@@ -748,23 +803,64 @@ fn play(
                 // an inventory change: all modifications are server-owned.
                 let _claimed = input.slot()?;
                 input.finish()?;
-                let mut candidate = inventory.clone();
-                let accepted = window >= 0
-                    && window as u8 == active_window
-                    && candidate.click_window(active_window, slot, button, mode);
-                if accepted && candidate != *inventory {
-                    // Write before acknowledgement. A crash after commit never
-                    // produces items that existed only in volatile memory.
-                    candidate.save(inventory_path)?;
-                    *inventory = candidate;
+                let requested_window = window >= 0 && window as u8 == active_window;
+                let mut accepted = false;
+                let response_items;
+                if let Some(pos) = active_chest {
+                    let still_open = world.lock().map_err(|_| bad("world mutex poisoned"))?
+                        .get(pos.0, pos.1, pos.2) >> 4 == 54
+                        && near(location, pos.0, pos.1, pos.2);
+                    let mut storage = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
+                    let original = storage.slots(pos);
+                    let mut changed_slots = original;
+                    let mut candidate = inventory.clone();
+                    let change = if still_open && requested_window {
+                        candidate.chest_click(&mut changed_slots, slot, button, mode)
+                    } else {
+                        None
+                    };
+                    if let Some(direction) = change {
+                        accepted = true;
+                        let inventory_changed = candidate != *inventory;
+                        let storage_changed = original != changed_slots;
+                        // The transfer source is persisted first, to avoid
+                        // item duplication at a crash boundary. Two files
+                        // are still not an atomic transaction: loss is possible.
+                        if direction == ChestDirection::IntoChest {
+                            if inventory_changed {
+                                candidate.save(inventory_path)?;
+                                *inventory = candidate;
+                            }
+                            if storage_changed {
+                                storage.update(chest_path, pos, changed_slots)?;
+                            }
+                        } else {
+                            if storage_changed {
+                                storage.update(chest_path, pos, changed_slots)?;
+                            }
+                            if inventory_changed {
+                                candidate.save(inventory_path)?;
+                                *inventory = candidate;
+                            }
+                        }
+                    }
+                    observed_chest_revision = storage.revision();
+                    response_items = inventory.chest_window_items(active_window, &storage.slots(pos));
+                    drop(storage);
+                } else {
+                    let mut candidate = inventory.clone();
+                    accepted = requested_window && candidate.click_window(active_window, slot, button, mode);
+                    if accepted && candidate != *inventory {
+                        candidate.save(inventory_path)?;
+                        *inventory = candidate;
+                    }
+                    response_items = inventory.window_items_for(active_window);
                 }
                 let mut reply = vec![window as u8];
                 reply.extend_from_slice(&action.to_be_bytes());
                 reply.push(u8::from(accepted));
                 send(s, 0x32, &reply)?;
-                // Bounded full-window reconciliation also corrects forged
-                // client slot snapshots on accepted transactions.
-                send(s, 0x30, &inventory.window_items_for(active_window))?;
+                send(s, 0x30, &response_items)?;
                 send(s, 0x2f, &inventory.cursor_packet())?;
             }
             15 => {
@@ -781,6 +877,7 @@ fn play(
                     // Keep unused ingredients saved rather than silently
                     // deleting them if a player closes the crafting window.
                     active_window = 0;
+                    active_chest = None;
                     send(s, 0x30, &inventory.window_items())?;
                 }
             }
@@ -813,6 +910,8 @@ struct ServerContext {
     clock: Arc<Clock>,
     ground_items: Arc<Mutex<GroundItems>>,
     ground_path: Arc<PathBuf>,
+    chests: Arc<Mutex<Chests>>,
+    chest_path: Arc<PathBuf>,
     survival: bool,
 }
 fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
@@ -824,6 +923,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         clock,
         ground_items,
         ground_path,
+        chests,
+        chest_path,
         survival,
     } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -969,6 +1070,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             inventory_path: &inventory_file,
             ground_items: &ground_items,
             ground_path: &ground_path,
+            chests: &chests,
+            chest_path: &chest_path,
             survival,
             hub: &hub,
             entity_id,
@@ -1087,6 +1190,8 @@ fn main() -> io::Result<()> {
     } else {
         GroundItems::default()
     }));
+    let chest_path = Arc::new(Chests::location(&world_path));
+    let chests = Arc::new(Mutex::new(Chests::load(&chest_path)?));
     let listener = TcpListener::bind(bind)?;
     println!(
         "IndustrialRust1710: listening on {} (1.7.10 vanilla, up to 8 players)",
@@ -1111,6 +1216,8 @@ fn main() -> io::Result<()> {
         let game_clock = Arc::clone(&clock);
         let drops = Arc::clone(&ground_items);
         let drops_path = Arc::clone(&ground_path);
+        let storage = Arc::clone(&chests);
+        let storage_path = Arc::clone(&chest_path);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -1123,6 +1230,8 @@ fn main() -> io::Result<()> {
                     clock: game_clock,
                     ground_items: drops,
                     ground_path: drops_path,
+                    chests: storage,
+                    chest_path: storage_path,
                     survival,
                 },
             ) {
