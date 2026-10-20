@@ -12,7 +12,11 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_PACKETS: usize = 160;
+// These end-to-end tests reserve ephemeral ports before spawning binaries.
+// Serialize reservations and process lifetime to prevent cross-test port races.
+static SERVER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 struct NativeServer {
+    _exclusive_test_run: std::sync::MutexGuard<'static, ()>,
     process: Child,
     directory: PathBuf,
     port: u16,
@@ -23,6 +27,7 @@ impl NativeServer {
         Self::start_with_mode(false)
     }
     fn start_with_mode(survival: bool) -> Self {
+        let exclusive = SERVER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -60,6 +65,7 @@ impl NativeServer {
             .spawn()
             .unwrap();
         let mut server = Self {
+            _exclusive_test_run: exclusive,
             process,
             directory,
             port,
