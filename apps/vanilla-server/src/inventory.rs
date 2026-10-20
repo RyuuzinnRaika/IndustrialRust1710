@@ -173,6 +173,19 @@ impl Inventory {
         }
         true
     }
+    /// Damage one server-held, unenchanted tool on a committed block break.
+    /// Returns true only if a real tool was damaged or broke. Hand mining
+    /// and ordinary blocks/items do not acquire arbitrary damage metadata.
+    pub fn wear_held_tool(&mut self) -> bool {
+        let slot = &mut self.slots[36 + self.selected as usize];
+        let Some(mut value) = *slot else { return false; };
+        let Some(max_uses) = crate::survival::tool_max_uses(value) else {
+            return false;
+        };
+        value.damage += 1;
+        *slot = (value.damage < max_uses).then_some(value);
+        true
+    }
     pub fn held_slot(&self) -> i16 {
         36 + i16::from(self.selected)
     }
@@ -866,6 +879,22 @@ mod tests {
         assert_eq!(furnace.slots[2], None);
         assert!(!inv.furnace_click(&mut furnace, 39, 0, 0).is_some());
         assert_eq!(&inv.furnace_window_items(7, &furnace)[..3], &[7, 0, 39]);
+    }
+    #[test]
+    fn tool_wear_increases_damage_and_breaks_at_material_limit() {
+        let mut inv = Inventory::default();
+        inv.creative_set(36, Some(Stack { id: 270, count: 1, damage: 57 })).unwrap();
+        assert!(inv.wear_held_tool());
+        assert_eq!(inv.held().unwrap().damage, 58);
+        assert!(inv.wear_held_tool());
+        assert_eq!(inv.held(), None);
+        assert!(!inv.wear_held_tool());
+        inv.creative_set(36, Some(Stack { id: 4, count: 12, damage: 0 })).unwrap();
+        assert!(!inv.wear_held_tool());
+        assert_eq!(inv.held().unwrap().count, 12);
+        inv.creative_set(36, Some(Stack { id: 274, count: 1, damage: 130 })).unwrap();
+        assert!(inv.wear_held_tool());
+        assert_eq!(inv.held(), None);
     }
     #[test]
     fn chest_moves_are_bounded_and_conserve_items() {
