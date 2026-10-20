@@ -45,6 +45,7 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 42
             | 45
             | 49
+            | 54 // chest (single only)
             | 57
             | 58 // crafting table: opens workbench window when used
             | 80
