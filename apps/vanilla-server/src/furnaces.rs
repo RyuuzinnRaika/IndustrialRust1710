@@ -77,9 +77,7 @@ pub fn burn_duration(item: Stack) -> Option<u16> {
         | 47
         | 84
         | 96
-        | 64
-        | 71
-        | 193..=197 => 300,
+        | 64 => 300,
         268..=271 | 290 => 200, // wooden tools
         _ => return None,
     };
