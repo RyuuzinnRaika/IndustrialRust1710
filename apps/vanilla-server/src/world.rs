@@ -140,7 +140,8 @@ impl World {
             let upper = (x, y, z);
             let lower = (x, y - 1, z);
             for cell in [upper, lower] {
-                undo.entry(cell).or_insert_with(|| self.edits.get(&cell).copied());
+                undo.entry(cell)
+                    .or_insert_with(|| self.edits.get(&cell).copied());
             }
             self.set_gravity_cell(upper, 0);
             self.set_gravity_cell(lower, block);
@@ -398,7 +399,9 @@ mod tests {
         ));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
-        world.update_and_save(&path, 2, 67, -2, (12 << 4) | 1).unwrap();
+        world
+            .update_and_save(&path, 2, 67, -2, (12 << 4) | 1)
+            .unwrap();
         world.update_and_save(&path, 3, 66, -2, 13 << 4).unwrap();
         let first = world.gravity_tick(&path, 64).unwrap();
         assert_eq!(first.len(), 2);
@@ -418,10 +421,8 @@ mod tests {
 
     #[test]
     fn breaking_support_wakes_gravity_and_saves_undo_on_failure() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-gravity-support-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-gravity-support-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
         world.update_and_save(&path, 0, 64, 0, 12 << 4).unwrap();

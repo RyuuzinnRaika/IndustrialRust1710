@@ -1573,7 +1573,12 @@ fn main() -> io::Result<()> {
                         Ok(changes) => {
                             for movement in changes {
                                 for (x, y, z) in [movement.from, movement.to] {
-                                    furnace_hub.broadcast(block_change_event(&gravity_world, x, y, z));
+                                    furnace_hub.broadcast(block_change_event(
+                                        &gravity_world,
+                                        x,
+                                        y,
+                                        z,
+                                    ));
                                 }
                             }
                         }
