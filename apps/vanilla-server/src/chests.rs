@@ -53,9 +53,11 @@ impl Chests {
             if coords.len() != 3 || coords.iter().any(Result::is_err) {
                 return Err(invalid("invalid chest coordinate key"));
             }
-            let pos = (coords[0].as_ref().copied().unwrap(),
+            let pos = (
+                coords[0].as_ref().copied().unwrap(),
                 coords[1].as_ref().copied().unwrap(),
-                coords[2].as_ref().copied().unwrap());
+                coords[2].as_ref().copied().unwrap(),
+            );
             if !world::in_bounds(pos.0, pos.1, pos.2)
                 || key(pos) != *name
                 || slots.iter().flatten().any(|stack| !stack.is_valid())
@@ -78,8 +80,8 @@ impl Chests {
         if bytes.len() as u64 > MAX_BYTES {
             return Err(invalid("chest file exceeds limit"));
         }
-        let value: Self = serde_json::from_slice(&bytes)
-            .map_err(|_| invalid("invalid chest data"))?;
+        let value: Self =
+            serde_json::from_slice(&bytes).map_err(|_| invalid("invalid chest data"))?;
         value.validate()?;
         Ok(value)
     }
@@ -87,7 +89,10 @@ impl Chests {
         self.revision
     }
     pub fn slots(&self, pos: Position) -> [Option<Stack>; CHEST_SLOTS] {
-        self.entries.get(&key(pos)).copied().unwrap_or([None; CHEST_SLOTS])
+        self.entries
+            .get(&key(pos))
+            .copied()
+            .unwrap_or([None; CHEST_SLOTS])
     }
     pub fn is_nonempty(&self, pos: Position) -> bool {
         self.slots(pos).iter().any(Option::is_some)
@@ -134,8 +139,12 @@ impl Chests {
         }
         if let Err(error) = self.save(path) {
             match previous {
-                Some(existing) => { self.entries.insert(name, existing); }
-                None => { self.entries.remove(&name); }
+                Some(existing) => {
+                    self.entries.insert(name, existing);
+                }
+                None => {
+                    self.entries.remove(&name);
+                }
             }
             return Err(error);
         }
@@ -148,12 +157,15 @@ mod tests {
     use super::*;
     #[test]
     fn shared_chest_persists_and_invalid_entries_fail_closed() {
-        let file = std::env::temp_dir().join(format!(
-            "ir1710-{}-chests.json", std::process::id()));
+        let file = std::env::temp_dir().join(format!("ir1710-{}-chests.json", std::process::id()));
         let _ = fs::remove_file(&file);
         let mut chests = Chests::load(&file).unwrap();
         let mut slots = [None; CHEST_SLOTS];
-        slots[0] = Some(Stack { id: 3, count: 7, damage: 0 });
+        slots[0] = Some(Stack {
+            id: 3,
+            count: 7,
+            damage: 0,
+        });
         let pos = (2, 64, -1);
         chests.update(&file, pos, slots).unwrap();
         assert_eq!(chests.revision(), 1);
