@@ -23,6 +23,12 @@ pub struct PlayerPosition {
 struct PositionNbt {
     #[serde(rename = "Pos")]
     pos: Vec<f64>,
+    #[serde(rename = "Health", default = "full_health")]
+    health: f32,
+}
+
+fn full_health() -> f32 {
+    20.0
 }
 
 #[derive(Serialize)]
@@ -113,14 +119,14 @@ impl PlayerPosition {
         Ok(pos)
     }
 
-    pub fn load(path: &Path) -> io::Result<Self> {
+    pub fn load_state(path: &Path) -> io::Result<(Self, f32)> {
         let meta = match fs::metadata(path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 let legacy = path.with_extension("json");
                 return match fs::metadata(&legacy) {
-                    Ok(_) => Self::load_legacy_json(&legacy),
-                    Err(e) if e.kind() == ErrorKind::NotFound => Ok(Self::default()),
+                    Ok(_) => Self::load_legacy_json(&legacy).map(|position| (position, 20.0)),
+                    Err(e) if e.kind() == ErrorKind::NotFound => Ok((Self::default(), 20.0)),
                     Err(e) => Err(e),
                 };
             }
@@ -151,10 +157,23 @@ impl PlayerPosition {
         if !pos.is_valid() {
             return Err(invalid("player location outside loaded world"));
         }
-        Ok(pos)
+        if !nbt.health.is_finite() || !(0.0..=20.0).contains(&nbt.health) {
+            return Err(invalid("invalid player health"));
+        }
+        Ok((pos, nbt.health))
     }
 
+    pub fn load(path: &Path) -> io::Result<Self> {
+        Self::load_state(path).map(|(position, _)| position)
+    }
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        self.save_with_health(path, 20.0)
+    }
+
+    pub fn save_with_health(&self, path: &Path, health: f32) -> io::Result<()> {
+        if !health.is_finite() || !(0.0..=20.0).contains(&health) {
+            return Err(invalid("invalid player health"));
+        }
         if !self.is_valid() {
             return Err(invalid("invalid player position"));
         }
@@ -164,7 +183,7 @@ impl PlayerPosition {
             rotation: vec![0.0, 0.0],
             dimension: 0,
             game_mode: 1,
-            health: 20.0,
+            health,
             save_version: 1,
         };
         let binary =
@@ -231,6 +250,22 @@ mod tests {
         assert_eq!(PlayerPosition::load(&file).unwrap(), pos);
         fs::write(&file, b"broken").unwrap();
         assert!(PlayerPosition::load(&file).is_err());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn persisted_health_is_preserved_and_invalid_values_are_rejected() {
+        let parent = std::env::temp_dir().join(format!("ir1710-health-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&parent).unwrap();
+        let file = parent.join("player.dat");
+        let position = PlayerPosition::default();
+        position.save_with_health(&file, 7.0).unwrap();
+        assert_eq!(PlayerPosition::load_state(&file).unwrap(), (position, 7.0));
+        position.save_with_health(&file, 0.0).unwrap();
+        assert_eq!(PlayerPosition::load_state(&file).unwrap().1, 0.0);
+        assert!(position.save_with_health(&file, f32::NAN).is_err());
+        assert!(position.save_with_health(&file, 21.0).is_err());
         fs::remove_dir_all(parent).unwrap();
     }
 

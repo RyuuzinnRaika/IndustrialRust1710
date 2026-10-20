@@ -1069,3 +1069,51 @@ fn native_protocol5_survival_q_and_ctrl_q_drop_authoritative_stacks() {
     counts.sort_unstable();
     assert_eq!(counts, [1, 11]);
 }
+
+#[test]
+fn native_survival_collision_damage_death_respawn_and_health_persistence() {
+    let server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+
+    // Position inside bedrock at y=60 must be rejected by the server.
+    send_position(&mut client, 0.5, 60.0, 0.5);
+    until_packet(&mut client, 0x08, |packet| read_position(packet) == [0.5, 65.0, 0.5]);
+
+    // Falling eight blocks to the y=64 grass surface costs five health.
+    send_position(&mut client, 0.5, 72.0, 0.5);
+    send_position(&mut client, 0.5, 64.0, 0.5);
+    let damage = until_packet(&mut client, 0x06, |packet| {
+        packet.len() == 10 && f32::from_be_bytes(packet[0..4].try_into().unwrap()) == 15.0
+    });
+    assert_eq!(&damage[4..6], &20i16.to_be_bytes());
+
+    // The same surface is still supported; repeated packets cannot damage twice.
+    send_position(&mut client, 0.5, 64.0, 0.5);
+    drop(client);
+    server.wait_idle();
+    let (mut rejoined, _, position) = server.join("RustTester");
+    assert_eq!(position, [0.5, 64.0, 0.5]);
+
+    // Further fall damage is lethal and causes a 0-health update.
+    send_position(&mut rejoined, 0.5, 90.0, 0.5);
+    send_position(&mut rejoined, 0.5, 64.0, 0.5);
+    until_packet(&mut rejoined, 0x06, |packet| {
+        packet.len() == 10 && packet[0..4] == 0f32.to_be_bytes()
+    });
+    // Protocol 5 C16: Perform Respawn, one-byte command.
+    rejoined.write_all(&frame(22, &[0])).unwrap();
+    until_packet(&mut rejoined, 0x07, |packet| {
+        packet.len() >= 6 && packet[0..4] == 0i32.to_be_bytes()
+    });
+    until_packet(&mut rejoined, 0x06, |packet| {
+        packet.len() == 10 && packet[0..4] == 20f32.to_be_bytes()
+    });
+    until_packet(&mut rejoined, 0x08, |packet| {
+        read_position(packet) == [0.5, 65.0, 0.5]
+    });
+    drop(rejoined);
+    server.wait_idle();
+    let (final_session, _, position) = server.join("RustTester");
+    assert_eq!(position, [0.5, 65.0, 0.5]);
+    drop(final_session);
+}
