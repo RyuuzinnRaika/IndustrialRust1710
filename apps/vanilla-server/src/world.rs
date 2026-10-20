@@ -46,6 +46,7 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 45
             | 49
             | 57
+            | 58 // crafting table: opens workbench window when used
             | 80
             | 82
             | 87
