@@ -617,12 +617,21 @@ fn play(
                 if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
-                    && world.lock().map_err(|_| bad("world mutex poisoned"))?.get(x, y, z) >> 4 == 58
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 58
                 {
                     // The 1.7.10 crafting table is a non-storage window.
                     // Window 0 is always the player's personal 2x2 grid.
                     active_window = next_window;
-                    next_window = if next_window >= 100 { 1 } else { next_window + 1 };
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
                     let mut opened = vec![active_window];
                     write_string("minecraft:crafting_table", &mut opened)?;
                     write_string(&json!({"text":"Crafting"}).to_string(), &mut opened)?;
