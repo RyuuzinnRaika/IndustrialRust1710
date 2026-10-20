@@ -277,9 +277,6 @@ impl Furnaces {
     pub fn get(&self, pos: Position) -> Furnace {
         self.entries.get(&key(pos)).copied().unwrap_or_default()
     }
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
     pub fn update(&mut self, path: &Path, pos: Position, next: Furnace) -> io::Result<()> {
         if !world::in_bounds(pos.0, pos.1, pos.2) || !next.valid() {
             return Err(invalid("invalid furnace update"));
