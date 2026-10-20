@@ -1168,3 +1168,30 @@ fn native_protocol5_gravity_sand_falls_after_support_is_mined() {
     drop(client);
     server.wait_idle();
 }
+
+
+#[test]
+fn native_protocol5_airborne_player_gets_20tps_gravity_after_client_silence() {
+    let server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+
+    // Report a valid airborne position then stop transmitting movement.
+    // Server owns the fall from the sixth silent tick onwards.
+    send_position(&mut client, 0.5, 70.0, 0.5);
+    let dropped = until_packet(&mut client, 0x08, |packet| {
+        let position = read_position(packet);
+        position[0] == 0.5 && position[1] < 70.0 && position[1] >= 64.0
+    });
+    assert!(read_position(&dropped)[1] < 70.0);
+    let hurt = until_packet(&mut client, 0x06, |packet| {
+        packet.len() == 10 && packet[0..4] == 17f32.to_be_bytes()
+    });
+    assert_eq!(hurt.len(), 10);
+    drop(client);
+    server.wait_idle();
+
+    let (rejoined, _, position) = server.join("RustTester");
+    assert_eq!(position, [0.5, 64.0, 0.5]);
+    drop(rejoined);
+    server.wait_idle();
+}
