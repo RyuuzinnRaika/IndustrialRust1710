@@ -9,6 +9,7 @@ mod crafting;
 mod furnaces;
 mod ground_items;
 mod inventory;
+mod mobs;
 mod multiplayer;
 mod physics;
 mod player;
@@ -29,6 +30,7 @@ use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
     PROTOCOL_VERSION,
 };
+use mobs::Mobs;
 use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
@@ -366,6 +368,7 @@ struct PlayerSession<'a> {
     inventory_path: &'a Path,
     ground_items: &'a Mutex<GroundItems>,
     ground_path: &'a Path,
+    mobs: &'a Mutex<Mobs>,
     chests: &'a Mutex<Chests>,
     chest_path: &'a Path,
     furnaces: &'a Mutex<Furnaces>,
@@ -392,6 +395,7 @@ fn play(
         inventory_path,
         ground_items,
         ground_path,
+        mobs,
         chests,
         chest_path,
         furnaces,
@@ -505,6 +509,24 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
+        // The first active session advances the shared mob simulation.
+        if survival && vitals.health > 0.0 {
+            let players = hub.positions()?;
+            let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+            let updates = creatures.tick(now_tick, &w, &players);
+            let hurt = creatures.hurt_player(*player, now_tick);
+            drop(creatures);
+            drop(w);
+            for update in updates {
+                hub.broadcast(update);
+            }
+            if hurt {
+                vitals.health = (vitals.health - 2.0).max(0.0);
+                player.save_state(player_path, *vitals)?;
+                send(s, 0x06, &health_packet(*vitals))?;
+            }
+        }
         // A real 1.7.10 client predicts gravity while sending movement.
         // After six silent server ticks we integrate vertical gravity here.
         if survival && vitals.health > 0.0 {
@@ -609,6 +631,40 @@ fn play(
             continue;
         }
         match id {
+            2 => {
+                // Protocol 5 C02 Use Entity: target VarInt and action VarInt.
+                let target_id = input.varint()?;
+                let action = input.varint()?;
+                input.finish()?;
+                if survival && vitals.health > 0.0 && action == 1 {
+                    let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    let result =
+                        creatures.player_attack(target_id, *player, inventory.held(), now_tick);
+                    drop(creatures);
+                    if let Some(hit) = result {
+                        let mut next_inventory = inventory.clone();
+                        if next_inventory.wear_held_tool() {
+                            next_inventory.save(inventory_path)?;
+                            *inventory = next_inventory;
+                            send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                        }
+                        if let Some((stack, at)) = hit.drop {
+                            let mut ground = ground_items
+                                .lock()
+                                .map_err(|_| bad("ground items mutex poisoned"))?;
+                            if !ground.is_full() {
+                                let dropped = ground.put(ground_path, stack, at)?;
+                                for packet in dropped.spawn() {
+                                    hub.broadcast(packet);
+                                }
+                            }
+                        }
+                        for event in hit.events {
+                            hub.broadcast(event);
+                        }
+                    }
+                }
+            }
             0 => {
                 let reply = input.i32()?;
                 input.finish()?;
@@ -1296,6 +1352,13 @@ fn play(
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks on respawn
                     sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                    for mob in mobs
+                        .lock()
+                        .map_err(|_| bad("mob mutex poisoned"))?
+                        .spawn_events()
+                    {
+                        send(s, mob.id, &mob.body)?;
+                    }
                     send(s, 0x06, &health_packet(*vitals))?;
                     send(s, 0x30, &inventory.window_items())?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
@@ -1304,7 +1367,7 @@ fn play(
                 }
             }
             // Other packets are not trusted inventory or world mutations.
-            2 | 10..=12 | 17..=21 | 23 => {}
+            10..=12 | 17..=21 | 23 => {}
             _ => return Err(bad("invalid play packet ID")),
         }
     }
@@ -1370,6 +1433,7 @@ struct ServerContext {
     clock: Arc<Clock>,
     ground_items: Arc<Mutex<GroundItems>>,
     ground_path: Arc<PathBuf>,
+    mobs: Arc<Mutex<Mobs>>,
     chests: Arc<Mutex<Chests>>,
     chest_path: Arc<PathBuf>,
     furnaces: Arc<Mutex<Furnaces>>,
@@ -1385,6 +1449,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         clock,
         ground_items,
         ground_path,
+        mobs,
         chests,
         chest_path,
         furnaces,
@@ -1525,6 +1590,14 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
                 send(&mut s, packet.id, &packet.body)?;
             }
         }
+        drop(ground);
+        for mob in mobs
+            .lock()
+            .map_err(|_| bad("mob mutex poisoned"))?
+            .spawn_events()
+        {
+            send(&mut s, mob.id, &mob.body)?;
+        }
     }
     let result = play(
         &mut s,
@@ -1541,6 +1614,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             inventory_path: &inventory_file,
             ground_items: &ground_items,
             ground_path: &ground_path,
+            mobs: &mobs,
             chests: &chests,
             chest_path: &chest_path,
             furnaces: &furnaces,
@@ -1691,6 +1765,10 @@ fn main() -> io::Result<()> {
         World::new()
     };
     let world = Arc::new(Mutex::new(loaded_world));
+    let mobs = Arc::new(Mutex::new({
+        let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        Mobs::new(&guard, survival)
+    }));
     let ground_path = Arc::new(GroundItems::location(&world_path));
     let ground_items = Arc::new(Mutex::new(if survival {
         GroundItems::load(&ground_path)?
@@ -1812,6 +1890,7 @@ fn main() -> io::Result<()> {
         let game_clock = Arc::clone(&clock);
         let drops = Arc::clone(&ground_items);
         let drops_path = Arc::clone(&ground_path);
+        let mob_state = Arc::clone(&mobs);
         let storage = Arc::clone(&chests);
         let storage_path = Arc::clone(&chest_path);
         let machine_storage = Arc::clone(&furnaces);
@@ -1828,6 +1907,7 @@ fn main() -> io::Result<()> {
                     clock: game_clock,
                     ground_items: drops,
                     ground_path: drops_path,
+                    mobs: mob_state,
                     chests: storage,
                     chest_path: storage_path,
                     furnaces: machine_storage,
