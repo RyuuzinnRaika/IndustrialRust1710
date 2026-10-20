@@ -30,8 +30,8 @@ use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
     PROTOCOL_VERSION,
 };
-use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
 use mobs::Mobs;
+use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use serde_json::json;
@@ -638,9 +638,8 @@ fn play(
                 input.finish()?;
                 if survival && vitals.health > 0.0 && action == 1 {
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
-                    let result = creatures.player_attack(
-                        target_id, *player, inventory.held(), now_tick,
-                    );
+                    let result =
+                        creatures.player_attack(target_id, *player, inventory.held(), now_tick);
                     drop(creatures);
                     if let Some(hit) = result {
                         let mut next_inventory = inventory.clone();
@@ -1353,7 +1352,11 @@ fn play(
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks on respawn
                     sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
-                    for mob in mobs.lock().map_err(|_| bad("mob mutex poisoned"))?.spawn_events() {
+                    for mob in mobs
+                        .lock()
+                        .map_err(|_| bad("mob mutex poisoned"))?
+                        .spawn_events()
+                    {
                         send(s, mob.id, &mob.body)?;
                     }
                     send(s, 0x06, &health_packet(*vitals))?;
@@ -1588,7 +1591,11 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             }
         }
         drop(ground);
-        for mob in mobs.lock().map_err(|_| bad("mob mutex poisoned"))?.spawn_events() {
+        for mob in mobs
+            .lock()
+            .map_err(|_| bad("mob mutex poisoned"))?
+            .spawn_events()
+        {
             send(&mut s, mob.id, &mob.body)?;
         }
     }

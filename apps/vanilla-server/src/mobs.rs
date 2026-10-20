@@ -89,26 +89,25 @@ impl Mobs {
         self.entities.values().copied().map(Mob::spawn)
     }
     /// A bounded 20TPS movement step pursuing the closest nearby player.
-    pub fn tick(
-        &mut self,
-        now: u64,
-        world: &World,
-        players: &[PlayerPosition],
-    ) -> Vec<Event> {
+    pub fn tick(&mut self, now: u64, world: &World, players: &[PlayerPosition]) -> Vec<Event> {
         let steps = now.saturating_sub(self.last_tick).min(MAX_STEPS);
         self.last_tick = now;
         let mut events = Vec::new();
         for _ in 0..steps {
             for mob in self.entities.values_mut() {
-                let nearest = players.iter().copied().filter(|position| {
-                    mob.nearby(*position, 16.0)
-                }).min_by(|left, right| {
-                    let distance = |p: PlayerPosition| {
-                        (p.x - mob.position.x).powi(2) + (p.z - mob.position.z).powi(2)
-                    };
-                    distance(*left).total_cmp(&distance(*right))
-                });
-                let Some(target) = nearest else { continue; };
+                let nearest = players
+                    .iter()
+                    .copied()
+                    .filter(|position| mob.nearby(*position, 16.0))
+                    .min_by(|left, right| {
+                        let distance = |p: PlayerPosition| {
+                            (p.x - mob.position.x).powi(2) + (p.z - mob.position.z).powi(2)
+                        };
+                        distance(*left).total_cmp(&distance(*right))
+                    });
+                let Some(target) = nearest else {
+                    continue;
+                };
                 let dx = target.x - mob.position.x;
                 let dz = target.z - mob.position.z;
                 let length = dx.hypot(dz);
@@ -159,7 +158,11 @@ impl Mobs {
                 vec![mob.status(2)]
             },
             drop: killed.then_some((
-                Stack { id: 367, count: 1, damage: 0 }, // rotten flesh
+                Stack {
+                    id: 367,
+                    count: 1,
+                    damage: 0,
+                }, // rotten flesh
                 (
                     mob.position.x.floor() as i32,
                     mob.position.y.floor() as i32,
@@ -199,19 +202,41 @@ mod tests {
         assert_eq!(packet.id, 0x0f);
         assert_eq!(packet.body[3], 54);
         assert!(packet.body.ends_with(&[0, 0, 0x7f]));
-        assert!(zombies.player_attack(mob.id, PlayerPosition::default(), None, 100).is_none());
+        assert!(zombies
+            .player_attack(mob.id, PlayerPosition::default(), None, 100)
+            .is_none());
         for tick in [100, 111] {
-            let outcome = zombies.player_attack(mob.id, mob.position, Some(Stack {
-                id: 276, count: 1, damage: 0
-            }), tick).unwrap();
+            let outcome = zombies
+                .player_attack(
+                    mob.id,
+                    mob.position,
+                    Some(Stack {
+                        id: 276,
+                        count: 1,
+                        damage: 0,
+                    }),
+                    tick,
+                )
+                .unwrap();
             assert!(outcome.drop.is_none());
         }
-        let result = zombies.player_attack(mob.id, mob.position, Some(Stack {
-            id: 276, count: 1, damage: 0
-        }), 122).unwrap();
+        let result = zombies
+            .player_attack(
+                mob.id,
+                mob.position,
+                Some(Stack {
+                    id: 276,
+                    count: 1,
+                    damage: 0,
+                }),
+                122,
+            )
+            .unwrap();
         assert_eq!(result.drop.unwrap().0.id, 367);
         assert!(result.events.iter().any(|packet| packet.id == 0x13));
-        assert!(zombies.player_attack(mob.id, mob.position, None, 150).is_none());
+        assert!(zombies
+            .player_attack(mob.id, mob.position, None, 150)
+            .is_none());
     }
     #[test]
     fn zombie_avoids_invalid_attacks_and_flat_worlds() {
