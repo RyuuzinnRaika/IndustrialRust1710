@@ -9,6 +9,7 @@ mod crafting;
 mod furnaces;
 mod ground_items;
 mod inventory;
+mod mobs;
 mod multiplayer;
 mod physics;
 mod player;
@@ -30,6 +31,7 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
+use mobs::Mobs;
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use serde_json::json;
@@ -366,6 +368,7 @@ struct PlayerSession<'a> {
     inventory_path: &'a Path,
     ground_items: &'a Mutex<GroundItems>,
     ground_path: &'a Path,
+    mobs: &'a Mutex<Mobs>,
     chests: &'a Mutex<Chests>,
     chest_path: &'a Path,
     furnaces: &'a Mutex<Furnaces>,
@@ -392,6 +395,7 @@ fn play(
         inventory_path,
         ground_items,
         ground_path,
+        mobs,
         chests,
         chest_path,
         furnaces,
@@ -1370,6 +1374,7 @@ struct ServerContext {
     clock: Arc<Clock>,
     ground_items: Arc<Mutex<GroundItems>>,
     ground_path: Arc<PathBuf>,
+    mobs: Arc<Mutex<Mobs>>,
     chests: Arc<Mutex<Chests>>,
     chest_path: Arc<PathBuf>,
     furnaces: Arc<Mutex<Furnaces>>,
@@ -1385,6 +1390,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         clock,
         ground_items,
         ground_path,
+        mobs,
         chests,
         chest_path,
         furnaces,
@@ -1541,6 +1547,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             inventory_path: &inventory_file,
             ground_items: &ground_items,
             ground_path: &ground_path,
+            mobs: &mobs,
             chests: &chests,
             chest_path: &chest_path,
             furnaces: &furnaces,
@@ -1691,6 +1698,10 @@ fn main() -> io::Result<()> {
         World::new()
     };
     let world = Arc::new(Mutex::new(loaded_world));
+    let mobs = Arc::new(Mutex::new({
+        let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        Mobs::new(&guard, survival)
+    }));
     let ground_path = Arc::new(GroundItems::location(&world_path));
     let ground_items = Arc::new(Mutex::new(if survival {
         GroundItems::load(&ground_path)?
@@ -1812,6 +1823,7 @@ fn main() -> io::Result<()> {
         let game_clock = Arc::clone(&clock);
         let drops = Arc::clone(&ground_items);
         let drops_path = Arc::clone(&ground_path);
+        let mob_state = Arc::clone(&mobs);
         let storage = Arc::clone(&chests);
         let storage_path = Arc::clone(&chest_path);
         let machine_storage = Arc::clone(&furnaces);
@@ -1828,6 +1840,7 @@ fn main() -> io::Result<()> {
                     clock: game_clock,
                     ground_items: drops,
                     ground_path: drops_path,
+                    mobs: mob_state,
                     chests: storage,
                     chest_path: storage_path,
                     furnaces: machine_storage,
