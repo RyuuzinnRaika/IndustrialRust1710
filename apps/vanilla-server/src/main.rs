@@ -28,7 +28,7 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
-use physics::FallTracker;
+use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -389,6 +389,7 @@ fn play(
     s.set_read_timeout(Some(Duration::from_millis(50)))?;
     let mut location = (player.x, player.y, player.z);
     let mut fall = FallTracker::new(player.y);
+    let mut idle_gravity = IdleGravity::new(clock.ticks());
     let mut loaded_chunks = view_chunks(chunk_center(player));
     let mut yaw: f32 = 0.0;
     let mut pitch: f32 = 0.0;
@@ -487,6 +488,34 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
+        // A real 1.7.10 client predicts gravity while sending movement.
+        // After six silent server ticks we integrate vertical gravity here.
+        if survival && *health > 0.0 {
+            let gravity_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            let simulated = idle_gravity.advance(&gravity_world, player, now_tick);
+            let grounded = simulated
+                .as_ref()
+                .is_some_and(|candidate| physics::supported(&gravity_world, candidate));
+            drop(gravity_world);
+            if let Some(candidate) = simulated {
+                let damage = fall.update(candidate.y, grounded);
+                let next_health = (*health - f32::from(damage)).max(0.0);
+                // Commit the authoritative position and HP to disk before
+                // notifying clients. A failed save must not update RAM.
+                candidate.save_with_health(player_path, next_health)?;
+                *player = candidate;
+                *health = next_health;
+                location = (candidate.x, candidate.y, candidate.z);
+                send_player_position(s, player)?;
+                if damage != 0 {
+                    send(s, 0x06, &health_packet(*health))?;
+                }
+                if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
+                    hub.move_player(entity_id, *player, yaw, pitch);
+                    last_movement_broadcast = Instant::now();
+                }
+            }
+        }
         if now_tick.saturating_sub(last_time_tick) >= 20 {
             let mut time = Vec::with_capacity(16);
             time.extend_from_slice(&(now_tick as i64).to_be_bytes());
@@ -557,6 +586,7 @@ fn play(
             3 => {
                 input.u8()?;
                 input.finish()?;
+                idle_gravity.observe_client(now_tick);
             } // flying/onGround
             4 | 6 => {
                 let x = input.f64()?;
@@ -597,6 +627,7 @@ fn play(
                         send(s, 0x06, &health_packet(*health))?;
                     }
                 }
+                idle_gravity.observe_client(now_tick);
                 location = (x, y, z);
                 *player = candidate;
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(&candidate))?;
@@ -613,6 +644,7 @@ fn play(
                 if !yaw.is_finite() || !pitch.is_finite() {
                     return Err(bad("invalid player look angles"));
                 }
+                idle_gravity.observe_client(now_tick);
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, *player, yaw, pitch);
                     last_movement_broadcast = Instant::now();
@@ -1159,6 +1191,7 @@ fn play(
                     *health = 20.0;
                     *player = origin;
                     fall = FallTracker::new(origin.y);
+                    idle_gravity = IdleGravity::new(now_tick);
                     location = (origin.x, origin.y, origin.z);
                     player.save_with_health(player_path, *health)?;
                     let mut respawn = 0i32.to_be_bytes().to_vec();
