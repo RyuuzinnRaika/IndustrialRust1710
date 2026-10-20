@@ -2,7 +2,6 @@
 //! This is a new generator, not the original 1.7.10 biome/noise algorithm.
 //! No allocation, RNG global state, Java dependency or cross-chunk seams.
 const BEDROCK: u16 = 7 << 4;
-const STONE: u16 = 1 << 4;
 const DIRT: u16 = 3 << 4;
 const GRASS: u16 = 2 << 4;
 const LOG: u16 = 17 << 4;
@@ -67,7 +66,7 @@ pub fn surface(seed: u64, x: i32, z: i32) -> i32 {
 }
 fn tree(seed: u64, x: i32, z: i32) -> bool {
     // Reserve a safe player spawn radius; always cross-check the same world seed.
-    (x.abs() > 12 || z.abs() > 12) && hash(seed ^ 0x6ac2d, x, 0, z) % 73 == 0
+    (x.abs() > 12 || z.abs() > 12) && hash(seed ^ 0x6ac2d, x, 0, z).is_multiple_of(73)
 }
 fn ore(seed: u64, x: i32, y: i32, z: i32) -> u16 {
     let pick = hash(
@@ -111,7 +110,7 @@ pub fn block(seed: u64, x: i32, y: i32, z: i32) -> u16 {
         if y >= top - 3 {
             return DIRT;
         }
-        if y <= 3 && hash(seed, x, y, z) % 5 == 0 {
+        if y <= 3 && hash(seed, x, y, z).is_multiple_of(5) {
             return BEDROCK;
         }
         return ore(seed, x, y, z);
