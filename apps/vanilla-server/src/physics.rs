@@ -118,6 +118,94 @@ pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPos
     true
 }
 
+const GRAVITY_ACCELERATION: f64 = 0.08;
+const AIR_DRAG: f64 = 0.98;
+const TERMINAL_VELOCITY: f64 = -3.92;
+const IDLE_GRACE_TICKS: u64 = 6;
+const MAX_CATCH_UP_STEPS: u64 = 4;
+
+/// Resolve vertical descent against solid block top faces without tunnelling.
+fn resolve_descent(world: &World, position: &PlayerPosition, wanted_y: f64) -> f64 {
+    let wanted_y = wanted_y.max(0.0);
+    let (min_x, max_x, min_z, max_z) = horizontal_box(position);
+    let bottom = ((wanted_y.floor() as i32) - 1).max(0);
+    let top = (position.y.floor() as i32).min(255);
+    for y in (bottom..=top).rev() {
+        let surface = f64::from(y + 1);
+        if surface < wanted_y - EPS || surface > position.y + EPS {
+            continue;
+        }
+        if (min_x..=max_x).any(|x| {
+            (min_z..=max_z).any(|z| solid(world.get(x, y, z) >> 4))
+        }) {
+            return surface;
+        }
+    }
+    wanted_y
+}
+
+/// A 20Hz, server-owned fallback for clients that stop sending position
+/// packets while airborne. Active 1.7.10 clients normally predict gravity.
+#[derive(Debug)]
+pub struct IdleGravity {
+    last_client_tick: u64,
+    last_step_tick: u64,
+    vertical_velocity: f64,
+}
+impl IdleGravity {
+    pub fn new(tick: u64) -> Self {
+        Self {
+            last_client_tick: tick,
+            last_step_tick: tick,
+            vertical_velocity: 0.0,
+        }
+    }
+
+    /// Reconcile with accepted client movement, not rejected coordinates.
+    pub fn observe_client(&mut self, tick: u64) {
+        self.last_client_tick = tick;
+        self.last_step_tick = tick;
+        self.vertical_velocity = 0.0;
+    }
+
+    /// Advance in elapsed server ticks, capped following event-loop stalls.
+    pub fn advance(
+        &mut self,
+        world: &World,
+        current: &PlayerPosition,
+        tick: u64,
+    ) -> Option<PlayerPosition> {
+        if tick.saturating_sub(self.last_client_tick) <= IDLE_GRACE_TICKS {
+            self.last_step_tick = tick;
+            return None;
+        }
+        let steps = tick.saturating_sub(self.last_step_tick).min(MAX_CATCH_UP_STEPS);
+        self.last_step_tick = tick;
+        let mut next = *current;
+        for _ in 0..steps {
+            if supported(world, &next) {
+                self.vertical_velocity = 0.0;
+                break;
+            }
+            self.vertical_velocity =
+                ((self.vertical_velocity - GRAVITY_ACCELERATION) * AIR_DRAG)
+                    .max(TERMINAL_VELOCITY);
+            let y = resolve_descent(world, &next, next.y + self.vertical_velocity);
+            if (next.y - y).abs() < EPS {
+                self.vertical_velocity = 0.0;
+                break;
+            }
+            let proposed = PlayerPosition { y, ..next };
+            if !proposed.is_valid() || collides(world, &proposed) {
+                self.vertical_velocity = 0.0;
+                break;
+            }
+            next = proposed;
+        }
+        (next.y < current.y - EPS).then_some(next)
+    }
+}
+
 /// Tracks actual downward displacement across accepted position packets.
 /// A spoofed client onGround bit cannot reset accumulated fall distance.
 #[derive(Debug)]
@@ -179,6 +267,40 @@ mod tests {
         assert!(!supported(&world, &at(0.5, 64.5, 0.5)));
         world.import_block(0, 63, 0, 0).unwrap();
         assert!(!supported(&world, &at(0.5, 64.0, 0.5)));
+    }
+
+    #[test]
+    fn idle_gravity_uses_server_ticks_and_sweeps_to_real_floor() {
+        let world = World::new();
+        let start = at(0.5, 70.0, 0.5);
+        let mut fall = FallTracker::new(start.y);
+        let mut gravity = IdleGravity::new(0);
+        assert_eq!(gravity.advance(&world, &start, 5), None);
+        assert_eq!(gravity.advance(&world, &start, 6), None);
+        let mut current = start;
+        let mut total_damage = 0;
+        for tick in 7..80 {
+            if let Some(next) = gravity.advance(&world, &current, tick) {
+                assert!(next.y <= current.y);
+                assert!(!collides(&world, &next));
+                total_damage += u32::from(fall.update(next.y, supported(&world, &next)));
+                current = next;
+            }
+        }
+        assert_eq!(current.y, 64.0);
+        assert_eq!(total_damage, 3);
+        assert_eq!(gravity.advance(&world, &current, 81), None);
+    }
+
+    #[test]
+    fn client_movement_reconciles_idle_gravity_without_rubberbanding() {
+        let world = World::new();
+        let start = at(0.5, 69.0, 0.5);
+        let mut gravity = IdleGravity::new(0);
+        assert!(gravity.advance(&world, &start, 7).is_some());
+        gravity.observe_client(7);
+        assert_eq!(gravity.advance(&world, &start, 12), None);
+        assert!(gravity.advance(&world, &start, 14).is_some());
     }
 
     #[test]
