@@ -424,13 +424,25 @@ impl Inventory {
         }
     }
     fn spend_ingredients(&mut self, window: u8) {
-        // Called only after verifying a recipe and a destination with capacity.
+        // Only after a recipe output has a durable destination.
+        // In 1.7.10 crafting a cake consumes milk but leaves empty buckets
+        // in the three original grid slots. No extra inventory space needed.
+        let cake = self.crafting_result(window).is_some_and(|output| output.id == 354);
         let size = if window == 0 { 4 } else { 9 };
         for index in 0..size {
             let slot = index + 1;
             if let Some(mut stack) = self.lookup(window, slot as i16) {
                 stack.count -= 1;
-                self.assign(window, slot as i16, (stack.count != 0).then_some(stack));
+                let next = if cake && stack.id == 335 {
+                    Some(Stack {
+                        id: 325,
+                        count: 1,
+                        damage: 0,
+                    })
+                } else {
+                    (stack.count != 0).then_some(stack)
+                };
+                self.assign(window, slot as i16, next);
             }
         }
     }
@@ -1415,6 +1427,31 @@ mod tests {
             damage: 0,
         });
         assert!(inventory.validate().is_ok());
+    }
+
+    #[test]
+    fn cake_consumes_ingredients_and_returns_three_buckets_to_grid() {
+        use super::{Inventory, Stack};
+        let mut inv = Inventory::default();
+        for (index, id) in [335, 335, 335, 353, 344, 353, 296, 296, 296]
+            .into_iter()
+            .enumerate()
+        {
+            inv.workbench[index] = Some(Stack {
+                id,
+                count: 1,
+                damage: 0,
+            });
+        }
+        assert_eq!(inv.crafting_result(1).unwrap().id, 354);
+        assert!(inv.click_window(1, 0, 0, 0));
+        assert_eq!(inv.cursor.unwrap().id, 354);
+        assert!(inv.workbench[..3]
+            .iter()
+            .all(|slot| slot.is_some_and(|s| s.id == 325 && s.count == 1)));
+        assert!(inv.workbench[3..].iter().all(Option::is_none));
+        assert!(inv.crafting_result(1).is_none());
+        assert!(inv.validate().is_ok());
     }
 
     #[test]
