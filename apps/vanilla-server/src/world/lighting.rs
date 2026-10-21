@@ -45,10 +45,13 @@ impl World {
         // source positions outside the chunk, BFS traverses their halo.
         let mut queue = VecDeque::<(i32, i32, i32, u8)>::new();
         let mut levels = BTreeMap::<(i32, i32, i32), u8>::new();
-        for (&(x, y, z), &value) in self.edits.range(
-            (min_x - 15, 0, i32::MIN)..(min_x + 31, 0, i32::MIN)
-        ) {
-            if z < min_z - 15 || z >= min_z + 31 { continue; }
+        for (&(x, y, z), &value) in self
+            .edits
+            .range((min_x - 15, 0, i32::MIN)..(min_x + 31, 0, i32::MIN))
+        {
+            if z < min_z - 15 || z >= min_z + 31 {
+                continue;
+            }
             let strength = emission(value >> 4);
             if strength > 0 {
                 queue.push_back((x, i32::from(y), z, strength));
@@ -56,21 +59,30 @@ impl World {
         }
         while let Some((x, y, z, level)) = queue.pop_front() {
             if level == 0
-                || x < min_x - 15 || x >= min_x + 31
-                || z < min_z - 15 || z >= min_z + 31
+                || x < min_x - 15
+                || x >= min_x + 31
+                || z < min_z - 15
+                || z >= min_z + 31
                 || !(0..256).contains(&y)
                 || levels.get(&(x, y, z)).is_some_and(|&old| old >= level)
-            { continue; }
+            {
+                continue;
+            }
             levels.insert((x, y, z), level);
-            if (min_x..min_x + 16).contains(&x)
-                && (min_z..min_z + 16).contains(&z) {
+            if (min_x..min_x + 16).contains(&x) && (min_z..min_z + 16).contains(&z) {
                 let slot = index(x, y, z, min_x, min_z);
                 block[slot] = block[slot].max(level);
             }
-            if level <= 1 { continue; }
+            if level <= 1 {
+                continue;
+            }
             for (nx, ny, nz) in [
-                (x+1,y,z), (x-1,y,z), (x,y+1,z),
-                (x,y-1,z), (x,y,z+1), (x,y,z-1)
+                (x + 1, y, z),
+                (x - 1, y, z),
+                (x, y + 1, z),
+                (x, y - 1, z),
+                (x, y, z + 1),
+                (x, y, z - 1),
             ] {
                 if (0..256).contains(&ny) && transparent(self.get(nx, ny, nz) >> 4) {
                     queue.push_back((nx, ny, nz, level - 1));

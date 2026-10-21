@@ -53,8 +53,10 @@ impl Clock {
     pub fn weather_packets(&self) -> Vec<Vec<u8>> {
         let (rain, thunder) = self.weather();
         let mut packets = vec![vec![if rain { 1 } else { 2 }, 0, 0, 0, 0]];
-        for (reason, amount) in [(7u8, if rain { 1.0f32 } else { 0.0 }),
-                                 (8u8, if thunder { 1.0f32 } else { 0.0 })] {
+        for (reason, amount) in [
+            (7u8, if rain { 1.0f32 } else { 0.0 }),
+            (8u8, if thunder { 1.0f32 } else { 0.0 }),
+        ] {
             let mut body = vec![reason];
             body.extend_from_slice(&amount.to_be_bytes());
             packets.push(body);

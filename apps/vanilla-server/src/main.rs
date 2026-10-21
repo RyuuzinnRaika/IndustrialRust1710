@@ -767,21 +767,22 @@ fn play(
                     // A fall of at least one block onto farmland tramples it.
                     if fy >= 0 && player.y - y >= 1.0 {
                         let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                        if soil.get(fx,fy,fz) >> 4 == 60
-                            && soil.update_and_save(world_path,fx,fy,fz,3 << 4)? {
-                            hub.broadcast(block_change_event(&soil,fx,fy,fz));
+                        if soil.get(fx, fy, fz) >> 4 == 60
+                            && soil.update_and_save(world_path, fx, fy, fz, 3 << 4)?
+                        {
+                            hub.broadcast(block_change_event(&soil, fx, fy, fz));
                         }
                     }
                 }
                 // A player standing on a pressure plate powers it. Releasing
                 // is managed by the bounded 20TPS device timer.
                 {
-                    let bx=x.floor() as i32;
-                    let by=y.floor() as i32 - 1;
-                    let bz=z.floor() as i32;
+                    let bx = x.floor() as i32;
+                    let by = y.floor() as i32 - 1;
+                    let bz = z.floor() as i32;
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                    if world::in_bounds(bx,by,bz) && w.press_plate(world_path,bx,by,bz)? {
-                        hub.broadcast(block_change_event(&w,bx,by,bz));
+                    if world::in_bounds(bx, by, bz) && w.press_plate(world_path, bx, by, bz)? {
+                        hub.broadcast(block_change_event(&w, bx, by, bz));
                     }
                 }
                 location = (x, y, z);
@@ -1004,35 +1005,40 @@ fn play(
                 }
                 // Hoe -> farmland. In Survival, commit tool wear first;
                 // no item is consumed for tilling soil.
-                if face == 1 && world::in_bounds(x,y,z) && near(location,x,y,z)
+                if face == 1
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
                     && inventory.can_place(held)
-                    && inventory.held().is_some_and(|stack| matches!(stack.id, 290..=294))
+                    && inventory
+                        .held()
+                        .is_some_and(|stack| matches!(stack.id, 290..=294))
                 {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                    if matches!(w.get(x,y,z) >> 4, 2 | 3) && w.get(x,y+1,z) == 0 {
+                    if matches!(w.get(x, y, z) >> 4, 2 | 3) && w.get(x, y + 1, z) == 0 {
                         let mut after = inventory.clone();
                         if !survival || after.wear_held_tool() {
-                            if survival { after.save(inventory_path)?; }
-                            if w.update_and_save(world_path,x,y,z,60 << 4)? {
+                            if survival {
+                                after.save(inventory_path)?;
+                            }
+                            if w.update_and_save(world_path, x, y, z, 60 << 4)? {
                                 if survival {
                                     *inventory = after;
-                                    send(s,0x2f,&inventory.set_slot(inventory.held_slot())?)?;
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
                                 }
-                                hub.broadcast(block_change_event(&w,x,y,z));
+                                hub.broadcast(block_change_event(&w, x, y, z));
                             }
                         }
                         continue;
                     }
                 }
                 // Server-owned switch/button/door/repeater interaction.
-                if (0..=5).contains(&face) && world::in_bounds(x,y,z)
-                    && near(location,x,y,z) {
+                if (0..=5).contains(&face) && world::in_bounds(x, y, z) && near(location, x, y, z) {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                    let id = w.get(x,y,z) >> 4;
+                    let id = w.get(x, y, z) >> 4;
                     if matches!(id, 69 | 77 | 143 | 64 | 96 | 93 | 94) {
-                        let changed = w.interact_device(world_path,x,y,z)?;
-                        for (cx,cy,cz) in changed {
-                            hub.broadcast(block_change_event(&w,cx,cy,cz));
+                        let changed = w.interact_device(world_path, x, y, z)?;
+                        for (cx, cy, cz) in changed {
+                            hub.broadcast(block_change_event(&w, cx, cy, cz));
                         }
                         continue;
                     }
@@ -1168,12 +1174,12 @@ fn play(
                                 331 => 55,
                                 326 => 8,
                                 327 => 10,
-                                295 => 59, // wheat seeds
+                                295 => 59,  // wheat seeds
                                 391 => 141, // carrot
                                 392 => 142, // potato
-                                356 => 93, // repeater
-                                324 => 64, // wooden door
-                                330 => 71, // iron door
+                                356 => 93,  // repeater
+                                324 => 64,  // wooden door
+                                330 => 71,  // iron door
                                 _ => stack.id as u16,
                             };
                             let adjacent_chest = block_id == 54
@@ -1181,11 +1187,24 @@ fn play(
                                     .iter()
                                     .any(|&(cx, cz)| w.get(cx, ny, cz) >> 4 == 54);
                             let metadata = if matches!(block_id, 50 | 77 | 143) {
-                                match face { 1 => 5, 2 => 3, 3 => 4, 4 => 1, 5 => 2, _ => 5 }
+                                match face {
+                                    1 => 5,
+                                    2 => 3,
+                                    3 => 4,
+                                    4 => 1,
+                                    5 => 2,
+                                    _ => 5,
+                                }
                             } else if matches!(block_id, 29 | 33) {
                                 face as u16
                             } else if block_id == 96 {
-                                match face { 2 => 1, 3 => 0, 4 => 3, 5 => 2, _ => 0 }
+                                match face {
+                                    2 => 1,
+                                    3 => 0,
+                                    4 => 3,
+                                    5 => 2,
+                                    _ => 0,
+                                }
                             } else if matches!(block_id, 64 | 71 | 93) {
                                 ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
                             } else if matches!(block_id, 59 | 141 | 142 | 8 | 10) {
@@ -1194,7 +1213,7 @@ fn play(
                                 stack.damage as u16 & 15
                             };
                             if (world::is_placeable(block_id) || block_id == 61)
-                                && w.can_support(nx,ny,nz,(block_id << 4) | metadata)
+                                && w.can_support(nx, ny, nz, (block_id << 4) | metadata)
                                 && block_id != 7
                                 && !adjacent_chest
                                 && w.get(x, y, z) != 0
@@ -1219,11 +1238,16 @@ fn play(
                                         // Persist item consumption before the world edit so a
                                         // crash cannot grant a free block on restart.
                                         remaining.save(inventory_path)?;
-                                        match if matches!(block_id,64 | 71) {
-                                            w.place_door(world_path,nx,ny,nz,block_id,metadata)
+                                        match if matches!(block_id, 64 | 71) {
+                                            w.place_door(world_path, nx, ny, nz, block_id, metadata)
                                         } else {
-                                            w.update_and_save(world_path,nx,ny,nz,
-                                                (block_id << 4) | metadata)
+                                            w.update_and_save(
+                                                world_path,
+                                                nx,
+                                                ny,
+                                                nz,
+                                                (block_id << 4) | metadata,
+                                            )
                                         } {
                                             Ok(true) => {
                                                 *inventory = remaining;
@@ -1240,11 +1264,16 @@ fn play(
                                         }
                                     }
                                 } else {
-                                    changed = if matches!(block_id,64 | 71) {
-                                        w.place_door(world_path,nx,ny,nz,block_id,metadata)?
+                                    changed = if matches!(block_id, 64 | 71) {
+                                        w.place_door(world_path, nx, ny, nz, block_id, metadata)?
                                     } else {
-                                        w.update_and_save(world_path,nx,ny,nz,
-                                            (block_id << 4) | metadata)?
+                                        w.update_and_save(
+                                            world_path,
+                                            nx,
+                                            ny,
+                                            nz,
+                                            (block_id << 4) | metadata,
+                                        )?
                                     };
                                 }
                             }
@@ -1256,9 +1285,10 @@ fn play(
                         let event = block_change_event(&w, nx, ny, nz);
                         if changed {
                             hub.broadcast(event);
-                            if matches!(w.get(nx,ny,nz) >> 4,64 | 71)
-                                && world::in_bounds(nx,ny+1,nz) {
-                                hub.broadcast(block_change_event(&w,nx,ny+1,nz));
+                            if matches!(w.get(nx, ny, nz) >> 4, 64 | 71)
+                                && world::in_bounds(nx, ny + 1, nz)
+                            {
+                                hub.broadcast(block_change_event(&w, nx, ny + 1, nz));
                             }
                         } else {
                             send(s, event.id, &event.body)?;
@@ -1792,9 +1822,12 @@ fn main() -> io::Result<()> {
                 );
             }
             "--biome-seed" => {
-                biome_seed = Some(args.next()
-                    .ok_or_else(|| bad("missing --biome-seed value"))?
-                    .parse().map_err(|_| bad("invalid biome seed"))?);
+                biome_seed = Some(
+                    args.next()
+                        .ok_or_else(|| bad("missing --biome-seed value"))?
+                        .parse()
+                        .map_err(|_| bad("invalid biome seed"))?,
+                );
             }
             "--export-anvil" => {
                 anvil_export_path = Some(PathBuf::from(
@@ -1812,7 +1845,9 @@ fn main() -> io::Result<()> {
         }
     }
     if (requested_seed.is_some() || biome_seed.is_some())
-        && (!survival || anvil_export_path.is_some() || anvil_import_path.is_some()
+        && (!survival
+            || anvil_export_path.is_some()
+            || anvil_import_path.is_some()
             || (requested_seed.is_some() && biome_seed.is_some()))
     {
         return Err(bad(

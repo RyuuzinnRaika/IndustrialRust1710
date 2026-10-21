@@ -122,17 +122,23 @@ fn rule(block: u16) -> Option<BlockRule> {
         ),
         6 => (0.0, None, 0, false, item(6, damage & 7)),
         18 => (0.2, None, 0, false, None), // leaf drops handled separately
-        59 => (0.0, None, 0, false, item(if damage == 7 {296} else {295}, 0)),
+        59 => (
+            0.0,
+            None,
+            0,
+            false,
+            item(if damage == 7 { 296 } else { 295 }, 0),
+        ),
         60 => (0.6, Some(ToolKind::Shovel), 0, false, item(3, 0)),
         141 => (0.0, None, 0, false, item(391, 0)),
         142 => (0.0, None, 0, false, item(392, 0)),
         66 => (0.7, Some(ToolKind::Pickaxe), 0, false, item(66, 0)),
-        70 | 72 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(id as i16,0)),
-        93 | 94 => (0.0, None, 0, false, item(356,0)),
-        50 => (0.0, None, 0, false, item(50, 0)), // torch
+        70 | 72 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(id as i16, 0)),
+        93 | 94 => (0.0, None, 0, false, item(356, 0)),
+        50 => (0.0, None, 0, false, item(50, 0)),  // torch
         55 => (0.0, None, 0, false, item(331, 0)), // redstone dust
-        69 => (0.5, None, 0, false, item(69, 0)), // lever
-        76 => (0.0, None, 0, false, item(76, 0)), // redstone torch
+        69 => (0.5, None, 0, false, item(69, 0)),  // lever
+        76 => (0.0, None, 0, false, item(76, 0)),  // redstone torch
         5 => (2.0, Some(ToolKind::Axe), 0, false, item(5, damage)),
         17 | 162 => (2.0, Some(ToolKind::Axe), 0, false, item(id as i16, damage)),
         54 => (2.5, Some(ToolKind::Axe), 0, false, item(54, 0)),

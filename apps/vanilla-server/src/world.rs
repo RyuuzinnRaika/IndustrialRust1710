@@ -1,9 +1,9 @@
 //! Bounded, sparse, deterministic flat world streamed by chunk.
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
 use std::collections::{BTreeMap, BTreeSet};
-mod lighting;
-mod ecology;
 mod devices;
+mod ecology;
+mod lighting;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
@@ -138,13 +138,19 @@ impl World {
         }
     }
     pub fn is_natural(&self) -> bool {
-        matches!(self.generation, Generation::Natural(_) | Generation::Biomes(_))
+        matches!(
+            self.generation,
+            Generation::Natural(_) | Generation::Biomes(_)
+        )
     }
     pub fn is_biome_world(&self) -> bool {
         matches!(self.generation, Generation::Biomes(_))
     }
     pub fn with_biomes(seed: u64) -> Self {
-        Self { generation: Generation::Biomes(seed), ..Self::default() }
+        Self {
+            generation: Generation::Biomes(seed),
+            ..Self::default()
+        }
     }
     pub fn natural_seed(&self) -> Option<u64> {
         match self.generation {
@@ -295,7 +301,26 @@ impl World {
             } else {
                 self.pending_ecology.remove(&pos);
             }
-            if matches!(id, 6 | 50 | 55 | 59 | 66 | 70 | 72 | 75 | 76 | 77 | 93 | 94 | 141 | 142 | 143 | 64 | 71 | 96) {
+            if matches!(
+                id,
+                6 | 50
+                    | 55
+                    | 59
+                    | 66
+                    | 70
+                    | 72
+                    | 75
+                    | 76
+                    | 77
+                    | 93
+                    | 94
+                    | 141
+                    | 142
+                    | 143
+                    | 64
+                    | 71
+                    | 96
+            ) {
                 self.pending_support.insert(pos);
             }
             if matches!(id, 29 | 33 | 93 | 94) {
@@ -310,9 +335,9 @@ impl World {
         for dx in -4..=4 {
             for dz in -4..=4 {
                 for dy in -4..=4 {
-                    let (nx, ny, nz) = (x+dx,y+dy,z+dz);
-                    if in_bounds(nx,ny,nz) && self.get(nx,ny,nz) >> 4 == 18 {
-                        self.pending_ecology.insert((nx,ny as u8,nz));
+                    let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+                    if in_bounds(nx, ny, nz) && self.get(nx, ny, nz) >> 4 == 18 {
+                        self.pending_ecology.insert((nx, ny as u8, nz));
                     }
                 }
             }
@@ -322,13 +347,18 @@ impl World {
     /// Bounded 20TPS flow/conduction step. IRW save occurs once per tick.
     /// Empty fluid destinations and wire strengths are staged before mutation.
     pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
-
         self.fluid_phase = self.fluid_phase.wrapping_add(1);
         // Lava updates every fourth server tick, water every tick. Delayed
         // lava positions remain queued rather than getting silently dropped.
-        let wet: Vec<Position> = self.pending_fluid.iter()
-            .filter(|&&(x, y, z)| self.get(x, i32::from(y), z) >> 4 != 10 || self.fluid_phase % 4 == 0)
-            .take(budget).copied().collect();
+        let wet: Vec<Position> = self
+            .pending_fluid
+            .iter()
+            .filter(|&&(x, y, z)| {
+                self.get(x, i32::from(y), z) >> 4 != 10 || self.fluid_phase % 4 == 0
+            })
+            .take(budget)
+            .copied()
+            .collect();
         let wired: Vec<Position> = self.pending_circuit.iter().take(budget).copied().collect();
         let supported: Vec<Position> = self.pending_support.iter().take(budget).copied().collect();
         let mut changes: BTreeMap<Position, u16> = self.ecology_changes(budget);
@@ -343,9 +373,12 @@ impl World {
                 continue;
             }
             let adjacent = [
-                (x - 1, y, z), (x + 1, y, z),
-                (x, y, z - 1), (x, y, z + 1),
-                (x, y - 1, z), (x, y + 1, z),
+                (x - 1, y, z),
+                (x + 1, y, z),
+                (x, y, z - 1),
+                (x, y, z + 1),
+                (x, y - 1, z),
+                (x, y + 1, z),
             ];
             // Resolve water/lava contact before flowing, preserving the
             // source-lava -> obsidian and flowing-lava -> cobblestone rules.
@@ -358,11 +391,15 @@ impl World {
                 }
             } else {
                 for &(nx, ny, nz) in &adjacent {
-                    if !in_bounds(nx, ny, nz) { continue; }
+                    if !in_bounds(nx, ny, nz) {
+                        continue;
+                    }
                     let other = self.get(nx, ny, nz);
                     if matches!(other >> 4, 10 | 11) {
-                        changes.insert((nx, ny as u8, nz),
-                            (if other & 15 == 0 { 49 } else { 4 }) << 4);
+                        changes.insert(
+                            (nx, ny as u8, nz),
+                            (if other & 15 == 0 { 49 } else { 4 }) << 4,
+                        );
                     }
                 }
             }
@@ -373,17 +410,22 @@ impl World {
                 let above = self.get(x, y + 1, z);
                 let mut next = if above >> 4 == id {
                     ((above & 15) + 1).min(7)
-                } else { 8 };
+                } else {
+                    8
+                };
                 let sides = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)];
                 let mut source_neighbors = 0;
                 for (nx, nz) in sides {
                     let other = self.get(nx, y, nz);
                     if other >> 4 == id {
-                        if other & 15 == 0 { source_neighbors += 1; }
+                        if other & 15 == 0 {
+                            source_neighbors += 1;
+                        }
                         next = next.min((other & 15) + 1);
                     }
                 }
-                let solid_below = y > 0 && !matches!(self.get(x, y - 1, z) >> 4, 0 | 8 | 9 | 10 | 11);
+                let solid_below =
+                    y > 0 && !matches!(self.get(x, y - 1, z) >> 4, 0 | 8 | 9 | 10 | 11);
                 if id == 8 && source_neighbors >= 2 && solid_below {
                     next = 0;
                 }
@@ -396,7 +438,9 @@ impl World {
                     level = next;
                 }
             }
-            if level >= 7 { continue; }
+            if level >= 7 {
+                continue;
+            }
             let down = (x, y - 1, z);
             // Flow down first. Falling lava contacting water below creates
             // stone at the destination rather than replacing the water.
@@ -407,18 +451,25 @@ impl World {
                     continue;
                 }
             }
-            let falling = in_bounds(down.0, down.1, down.2)
-                && self.get(down.0, down.1, down.2) == 0;
-            let targets: Vec<(i32, i32, i32)> = if falling { vec![down] } else {
+            let falling =
+                in_bounds(down.0, down.1, down.2) && self.get(down.0, down.1, down.2) == 0;
+            let targets: Vec<(i32, i32, i32)> = if falling {
+                vec![down]
+            } else {
                 vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
             };
             for (nx, ny, nz) in targets {
-                if !in_bounds(nx, ny, nz) { continue; }
+                if !in_bounds(nx, ny, nz) {
+                    continue;
+                }
                 let existing = self.get(nx, ny, nz);
                 let desired = (id << 4) | (level + 1);
                 if existing == 0 || (existing >> 4 == id && existing & 15 > level + 1) {
                     let target = (nx, ny as u8, nz);
-                    if changes.get(&target).is_none_or(|&v| v == 0 || (v >> 4 == id && v & 15 > level + 1)) {
+                    if changes
+                        .get(&target)
+                        .is_none_or(|&v| v == 0 || (v >> 4 == id && v & 15 > level + 1))
+                    {
                         changes.insert(target, desired);
                     }
                 }
@@ -437,12 +488,15 @@ impl World {
                 // current dust, or descends along a block edge.
                 let height = if self.get(nx, y, nz) >> 4 == 55 {
                     y
-                } else if self.get(nx, y, nz) != 0
-                    && self.get(x, y + 1, z) == 0 {
+                } else if self.get(nx, y, nz) != 0 && self.get(x, y + 1, z) == 0 {
                     y + 1
-                } else { y - 1 };
+                } else {
+                    y - 1
+                };
                 for check_y in [y, height] {
-                    if !in_bounds(nx, check_y, nz) { continue; }
+                    if !in_bounds(nx, check_y, nz) {
+                        continue;
+                    }
                     let power = self.get(nx, check_y, nz);
                     let signal = match power >> 4 {
                         69 if power & 8 != 0 => 15,
@@ -496,10 +550,15 @@ impl World {
         for pos in supported {
             self.pending_support.remove(&pos);
         }
-        let expired: Vec<_> = self.pending_buttons.iter()
-            .filter(|&(_,when)| self.fluid_phase >= *when)
-            .map(|(&pos,_)| pos).collect();
-        for pos in expired { self.pending_buttons.remove(&pos); }
+        let expired: Vec<_> = self
+            .pending_buttons
+            .iter()
+            .filter(|&(_, when)| self.fluid_phase >= *when)
+            .map(|(&pos, _)| pos)
+            .collect();
+        for pos in expired {
+            self.pending_buttons.remove(&pos);
+        }
         let mut changed = Vec::with_capacity(changes.len());
         for (x, y, z) in changes.keys().copied() {
             changed.push((x, i32::from(y), z));
@@ -646,17 +705,37 @@ impl World {
                 world.pending_circuit.insert((x, y, z));
             }
             if matches!(block >> 4, 6 | 18 | 59 | 60 | 141 | 142) {
-                world.pending_ecology.insert((x,y,z));
+                world.pending_ecology.insert((x, y, z));
             }
-            if matches!(block >> 4, 6 | 50 | 55 | 59 | 66 | 70 | 72 | 75 | 76 | 77 | 93 | 94 | 141 | 142 | 143 | 64 | 71 | 96) {
-                world.pending_support.insert((x,y,z));
+            if matches!(
+                block >> 4,
+                6 | 50
+                    | 55
+                    | 59
+                    | 66
+                    | 70
+                    | 72
+                    | 75
+                    | 76
+                    | 77
+                    | 93
+                    | 94
+                    | 141
+                    | 142
+                    | 143
+                    | 64
+                    | 71
+                    | 96
+            ) {
+                world.pending_support.insert((x, y, z));
             }
-            if matches!(block >> 4,29 | 33 | 93 | 94) {
-                world.pending_devices.insert((x,y,z));
+            if matches!(block >> 4, 29 | 33 | 93 | 94) {
+                world.pending_devices.insert((x, y, z));
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
-                || (matches!(block >> 4, 77 | 143) && block & 8 != 0) {
-                world.pending_buttons.insert((x,y,z), 20);
+                || (matches!(block >> 4, 77 | 143) && block & 8 != 0)
+            {
+                world.pending_buttons.insert((x, y, z), 20);
             }
         }
         Ok(world)
@@ -762,7 +841,9 @@ impl World {
         for z in 0..16 {
             for x in 0..16 {
                 let kind = match self.generation {
-                    Generation::Biomes(seed) => crate::terrain::biome(seed,chunk_x*16+x,chunk_z*16+z),
+                    Generation::Biomes(seed) => {
+                        crate::terrain::biome(seed, chunk_x * 16 + x, chunk_z * 16 + z)
+                    }
                     _ => 1,
                 };
                 bytes.push(kind);
@@ -1026,111 +1107,126 @@ mod tests {
 
     #[test]
     fn water_sources_regenerate_and_disconnected_flows_recede() {
-        let path = std::env::temp_dir().join(format!("ir1710-water-recede-{}.irw",std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-water-recede-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
-        w.update_and_save(&path, -1,64,0,8 << 4).unwrap();
-        w.update_and_save(&path, 1,64,0,8 << 4).unwrap();
-        w.update_and_save(&path, 0,64,0,(8 << 4)|1).unwrap();
-        w.block_tick(&path,64).unwrap();
-        assert_eq!(w.get(0,64,0),8 << 4);
-        w.update_and_save(&path,-1,64,0,0).unwrap();
-        w.update_and_save(&path,1,64,0,0).unwrap();
-        w.update_and_save(&path,0,64,0,0).unwrap();
-        for _ in 0..90 { w.block_tick(&path,64).unwrap(); }
-        assert_eq!(w.get(0,64,0),0);
-        assert_eq!(World::load(&path).unwrap().get(0,64,0),0);
+        w.update_and_save(&path, -1, 64, 0, 8 << 4).unwrap();
+        w.update_and_save(&path, 1, 64, 0, 8 << 4).unwrap();
+        w.update_and_save(&path, 0, 64, 0, (8 << 4) | 1).unwrap();
+        w.block_tick(&path, 64).unwrap();
+        assert_eq!(w.get(0, 64, 0), 8 << 4);
+        w.update_and_save(&path, -1, 64, 0, 0).unwrap();
+        w.update_and_save(&path, 1, 64, 0, 0).unwrap();
+        w.update_and_save(&path, 0, 64, 0, 0).unwrap();
+        for _ in 0..90 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(w.get(0, 64, 0), 0);
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 0);
         fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn lava_delay_and_cross_chunk_block_light() {
-        let path = std::env::temp_dir().join(format!("ir1710-lava-delay-{}.irw",std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-lava-delay-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
-        w.update_and_save(&path,0,64,0,10 << 4).unwrap();
-        for _ in 0..3 { w.block_tick(&path,64).unwrap(); }
-        assert_eq!(w.get(1,64,0),0);
-        w.block_tick(&path,64).unwrap();
-        assert_eq!(w.get(1,64,0),(10 << 4)|1);
-        w.update_and_save(&path,15,64,0,50 << 4).unwrap();
-        let (block,sky) = w.light_arrays(1,0);
+        w.update_and_save(&path, 0, 64, 0, 10 << 4).unwrap();
+        for _ in 0..3 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(w.get(1, 64, 0), 0);
+        w.block_tick(&path, 64).unwrap();
+        assert_eq!(w.get(1, 64, 0), (10 << 4) | 1);
+        w.update_and_save(&path, 15, 64, 0, 50 << 4).unwrap();
+        let (block, sky) = w.light_arrays(1, 0);
         assert!(block[(64 * 256) + 0] > 0);
-        assert_eq!(sky[(80 * 256) + 0],15);
+        assert_eq!(sky[(80 * 256) + 0], 15);
         fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn crops_hydrate_and_grow_saplings_become_trees_and_attachments_fall() {
-        let path = std::env::temp_dir().join(format!("ir1710-ecology-{}.irw",std::process::id()));
+        let path = std::env::temp_dir().join(format!("ir1710-ecology-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
-        w.update_and_save(&path,0,63,0,60 << 4).unwrap();
-        w.update_and_save(&path,2,64,0,8 << 4).unwrap();
-        w.update_and_save(&path,0,64,0,59 << 4).unwrap();
-        w.update_and_save(&path,8,64,0,6 << 4).unwrap();
-        for _ in 0..400 { w.block_tick(&path,64).unwrap(); }
-        assert_eq!(w.get(0,63,0),(60 << 4)|7);
-        assert_eq!(w.get(0,64,0),(59 << 4)|7);
-        assert_eq!(w.get(8,64,0) >> 4,17);
+        w.update_and_save(&path, 0, 63, 0, 60 << 4).unwrap();
+        w.update_and_save(&path, 2, 64, 0, 8 << 4).unwrap();
+        w.update_and_save(&path, 0, 64, 0, 59 << 4).unwrap();
+        w.update_and_save(&path, 8, 64, 0, 6 << 4).unwrap();
+        for _ in 0..400 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(w.get(0, 63, 0), (60 << 4) | 7);
+        assert_eq!(w.get(0, 64, 0), (59 << 4) | 7);
+        assert_eq!(w.get(8, 64, 0) >> 4, 17);
         // A broken support causes a torch to detach via the next tick.
-        w.update_and_save(&path,12,64,0,50 << 4).unwrap();
-        w.update_and_save(&path,12,63,0,0).unwrap();
-        w.block_tick(&path,64).unwrap();
-        assert_eq!(w.get(12,64,0),0);
-        assert_eq!(World::load(&path).unwrap().get(0,64,0),(59 << 4)|7);
+        w.update_and_save(&path, 12, 64, 0, 50 << 4).unwrap();
+        w.update_and_save(&path, 12, 63, 0, 0).unwrap();
+        w.block_tick(&path, 64).unwrap();
+        assert_eq!(w.get(12, 64, 0), 0);
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), (59 << 4) | 7);
         fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn piston_pushes_dust_powered_block_and_doors_have_both_halves() {
-        let path = std::env::temp_dir().join(format!("ir1710-device-{}.irw",std::process::id()));
+        let path = std::env::temp_dir().join(format!("ir1710-device-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
-        w.update_and_save(&path,-1,64,0,(69 << 4)|8).unwrap();
-        w.update_and_save(&path,0,64,0,55 << 4).unwrap();
-        w.update_and_save(&path,1,64,0,(33 << 4)|5).unwrap();
-        w.update_and_save(&path,2,64,0,1 << 4).unwrap();
-        for _ in 0..6 { w.block_tick(&path,64).unwrap(); }
-        assert_eq!(w.get(1,64,0),(33 << 4)|13);
-        assert_eq!(w.get(2,64,0),(34 << 4)|5);
-        assert_eq!(w.get(3,64,0),1 << 4);
-        w.update_and_save(&path,-1,64,0,69 << 4).unwrap();
-        for _ in 0..35 {w.block_tick(&path,64).unwrap();}
-        assert_eq!(w.get(1,64,0),(33 << 4)|5);
-        assert_eq!(w.get(2,64,0),0);
-        assert_eq!(w.get(3,64,0),1 << 4);
-        assert!(w.place_door(&path,5,64,0,64,2).unwrap());
-        assert_eq!(w.get(5,65,0),(64 << 4)|8);
-        assert_eq!(w.interact_device(&path,5,65,0).unwrap(),vec![(5,64,0)]);
-        assert_ne!(w.get(5,64,0) & 4,0);
-        w.update_and_save(&path,5,64,0,0).unwrap();
-        w.block_tick(&path,64).unwrap();
-        assert_eq!(w.get(5,65,0),0);
+        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
+        w.update_and_save(&path, 0, 64, 0, 55 << 4).unwrap();
+        w.update_and_save(&path, 1, 64, 0, (33 << 4) | 5).unwrap();
+        w.update_and_save(&path, 2, 64, 0, 1 << 4).unwrap();
+        for _ in 0..6 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(w.get(1, 64, 0), (33 << 4) | 13);
+        assert_eq!(w.get(2, 64, 0), (34 << 4) | 5);
+        assert_eq!(w.get(3, 64, 0), 1 << 4);
+        w.update_and_save(&path, -1, 64, 0, 69 << 4).unwrap();
+        for _ in 0..35 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(w.get(1, 64, 0), (33 << 4) | 5);
+        assert_eq!(w.get(2, 64, 0), 0);
+        assert_eq!(w.get(3, 64, 0), 1 << 4);
+        assert!(w.place_door(&path, 5, 64, 0, 64, 2).unwrap());
+        assert_eq!(w.get(5, 65, 0), (64 << 4) | 8);
+        assert_eq!(
+            w.interact_device(&path, 5, 65, 0).unwrap(),
+            vec![(5, 64, 0)]
+        );
+        assert_ne!(w.get(5, 64, 0) & 4, 0);
+        w.update_and_save(&path, 5, 64, 0, 0).unwrap();
+        w.block_tick(&path, 64).unwrap();
+        assert_eq!(w.get(5, 65, 0), 0);
         fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn irw3_biomes_are_opt_in_and_old_generation_is_unchanged() {
-        let path = std::env::temp_dir().join(format!("ir1710-biomes-{}.irw",std::process::id()));
+        let path = std::env::temp_dir().join(format!("ir1710-biomes-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let old = World::natural(42);
         let new = World::with_biomes(42);
         assert!(!old.is_biome_world() && new.is_biome_world());
-        assert_eq!(old.get(0,crate::terrain::surface(42,0,0),0),2 << 4);
+        assert_eq!(old.get(0, crate::terrain::surface(42, 0, 0), 0), 2 << 4);
         let mut seen = std::collections::BTreeSet::new();
         for x in (-1500..=1500).step_by(100) {
             for z in (-1500..=1500).step_by(100) {
-                seen.insert(crate::terrain::biome(42,x,z));
+                seen.insert(crate::terrain::biome(42, x, z));
             }
         }
-        assert_eq!(seen,[0u8,1,2,3,4].into_iter().collect());
+        assert_eq!(seen, [0u8, 1, 2, 3, 4].into_iter().collect());
         new.save_new(&path).unwrap();
-        assert_eq!(&fs::read(&path).unwrap()[..4],b"IRW3");
+        assert_eq!(&fs::read(&path).unwrap()[..4], b"IRW3");
         let reloaded = World::load(&path).unwrap();
         assert!(reloaded.is_biome_world());
-        assert_eq!(reloaded.natural_seed(),Some(42));
-        assert_eq!(old.get(20,60,20),World::natural(42).get(20,60,20));
+        assert_eq!(reloaded.natural_seed(), Some(42));
+        assert_eq!(old.get(20, 60, 20), World::natural(42).get(20, 60, 20));
         fs::remove_file(path).unwrap();
     }
 }
