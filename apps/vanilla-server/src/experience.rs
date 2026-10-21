@@ -118,6 +118,17 @@ struct Orb {
     value: u16,
     created: u64,
 }
+impl Orb {
+    fn spawn(self) -> Event {
+        let mut body = Vec::with_capacity(20);
+        write_varint(self.id as u32, &mut body);
+        for v in [self.position.x, self.position.y, self.position.z] {
+            body.extend_from_slice(&((v * 32.0).floor() as i32).to_be_bytes());
+        }
+        body.extend_from_slice(&(self.value.min(i16::MAX as u16) as i16).to_be_bytes());
+        Event { id: 0x11, body }
+    }
+}
 #[derive(Debug)]
 pub struct Orbs {
     items: BTreeMap<i32, Orb>,
@@ -145,18 +156,25 @@ impl Orbs {
             created: tick,
         };
         self.items.insert(id, orb);
-        let mut body = Vec::with_capacity(20);
-        write_varint(id as u32, &mut body);
-        for v in [position.x, position.y, position.z] {
-            body.extend_from_slice(&((v * 32.0).floor() as i32).to_be_bytes());
-        }
-        body.extend_from_slice(&(amount.min(i16::MAX as u16) as i16).to_be_bytes());
-        Some(Event { id: 0x11, body })
+        Some(orb.spawn())
+    }
+    /// Re-send existing orbs to clients joining or respawning mid-session.
+    pub fn spawn_events(&self) -> impl Iterator<Item = Event> + '_ {
+        self.items.values().copied().map(Orb::spawn)
+    }
+    /// Despawn expired orbs for every client, not only the player polling XP.
+    pub fn expire(&mut self, now: u64) -> Vec<Event> {
+        let ids: Vec<i32> = self.items.values()
+            .filter(|orb| now.saturating_sub(orb.created) >= 6000)
+            .map(|orb| orb.id).collect();
+        for id in &ids { self.items.remove(id); }
+        ids.into_iter().map(multiplayer::destroy).collect()
     }
     /// Candidate remains present until XP has been durably credited.
     pub fn nearby(&mut self, position: PlayerPosition, now: u64) -> Option<(i32, u16)> {
-        self.items
-            .retain(|_, orb| now.saturating_sub(orb.created) < 6000);
+        // Expiration is handled by expire(), which broadcasts destroy events.
+        // Do not remove silently or remote clients will retain ghost orbs.
+        let _ = now;
         self.items
             .values()
             .find(|orb| {
@@ -222,6 +240,7 @@ mod tests {
         let mut orbs = Orbs::default();
         let pos = PlayerPosition::default();
         assert_eq!(orbs.spawn(pos, 5, 0).unwrap().id, 0x11);
+        assert_eq!(orbs.spawn_events().count(), 1);
         let (id, amount) = orbs.nearby(pos, 5).unwrap();
         assert_eq!(amount, 5);
         let packets = orbs.collect(id, 10).unwrap();
@@ -232,5 +251,10 @@ mod tests {
         assert!(body.is_empty());
         assert_eq!(packets[1].id, 0x13);
         assert!(orbs.collect(id, 10).is_none());
+        assert!(orbs.spawn_events().next().is_none());
+        orbs.spawn(pos, 3, 0).unwrap();
+        assert_eq!(orbs.expire(5999).len(), 0);
+        assert_eq!(orbs.expire(6000).len(), 1);
+        assert!(orbs.spawn_events().next().is_none());
     }
 }
