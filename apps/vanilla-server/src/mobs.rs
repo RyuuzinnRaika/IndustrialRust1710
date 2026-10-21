@@ -1,6 +1,7 @@
 //! Bounded Protocol 5 natural-survival entities. No external entity registry.
 use crate::inventory::Stack;
 use crate::multiplayer::{self, Event};
+use crate::mob_rules::{self, SpawnCategory, SpawnCheck};
 use crate::navigation;
 use crate::physics;
 use crate::player::PlayerPosition;
@@ -24,6 +25,18 @@ enum Kind {
     Skeleton,
     Creeper,
     Spider,
+    CaveSpider,
+    Enderman,
+    Slime,
+    Witch,
+    Ghast,
+    Blaze,
+    ZombiePigman,
+    MagmaCube,
+    Villager,
+    IronGolem,
+    EnderDragon,
+    Wither,
 }
 impl Kind {
     fn protocol(self) -> u8 {
@@ -36,10 +49,22 @@ impl Kind {
             Self::Skeleton => 51,
             Self::Creeper => 50,
             Self::Spider => 52,
+            Self::CaveSpider => 59,
+            Self::Enderman => 58,
+            Self::Slime => 55,
+            Self::Witch => 66,
+            Self::Ghast => 56,
+            Self::Blaze => 61,
+            Self::ZombiePigman => 57,
+            Self::MagmaCube => 62,
+            Self::Villager => 120,
+            Self::IronGolem => 99,
+            Self::EnderDragon => 63,
+            Self::Wither => 64,
         }
     }
     fn passive(self) -> bool {
-        matches!(self, Self::Cow | Self::Pig | Self::Sheep | Self::Chicken)
+        matches!(self, Self::Cow | Self::Pig | Self::Sheep | Self::Chicken | Self::Villager)
     }
     fn health(self) -> i16 {
         match self {
@@ -49,7 +74,23 @@ impl Kind {
             Self::Creeper => 20,
             Self::Skeleton => 20,
             Self::Zombie => 20,
+            Self::CaveSpider => 12,
+            Self::Enderman => 40,
+            Self::Slime => 4,
+            Self::Witch => 26,
+            Self::Ghast => 10,
+            Self::Blaze | Self::ZombiePigman | Self::MagmaCube => 20,
+            Self::Villager => 20,
+            Self::IronGolem => 100,
+            Self::EnderDragon => 200,
+            Self::Wither => 300,
         }
+    }
+    fn is_boss(self) -> bool {
+        matches!(self, Self::EnderDragon | Self::Wither)
+    }
+    fn burns_in_sun(self) -> bool {
+        matches!(self, Self::Zombie | Self::Skeleton)
     }
     fn drop(self) -> Stack {
         let id = match self {
@@ -60,7 +101,17 @@ impl Kind {
             Self::Chicken => 365,
             Self::Skeleton => 352,
             Self::Creeper => 289,
-            Self::Spider => 287,
+            Self::Spider | Self::CaveSpider => 287,
+            Self::Enderman => 368,
+            Self::Slime | Self::MagmaCube => 341,
+            Self::Witch => 331,
+            Self::Ghast => 370,
+            Self::Blaze => 369,
+            Self::ZombiePigman => 371,
+            Self::Villager => 0,
+            Self::IronGolem => 265,
+            Self::EnderDragon => 122,
+            Self::Wither => 399,
         };
         Stack {
             id,
@@ -90,6 +141,12 @@ struct Mob {
     baby: bool,
     age_ticks: u32,
     waypoint: Option<PlayerPosition>,
+    burning: u16,
+    sheared: bool,
+    egg_timer: u32,
+    split_size: u8,
+    carried: Option<u16>,
+    profession: u8,
 }
 impl Mob {
     fn spawn(self) -> Event {
@@ -104,6 +161,18 @@ impl Mob {
             body.extend_from_slice(&0i16.to_be_bytes());
         }
         body.extend_from_slice(&[0, 0]); // flags byte
+        if matches!(self.kind, Kind::Slime | Kind::MagmaCube) {
+            body.push(16 << 3); // slime size metadata (byte)
+            body.push(self.split_size);
+        }
+        if self.kind == Kind::Villager {
+            body.push((16 << 3) | 2); // profession metadata (int)
+            body.extend_from_slice(&(self.profession as i32).to_be_bytes());
+        }
+        if self.kind == Kind::Sheep {
+            body.push(16 << 3);
+            body.push(if self.sheared { 16 } else { 0 });
+        }
         if self.baby {
             body.push((12 << 3) | 2); // metadata index 12, type 2 (int)
             body.extend_from_slice(&(-24000i32).to_be_bytes());
@@ -230,6 +299,12 @@ impl Mobs {
             baby,
             age_ticks: 0,
             waypoint: None,
+            burning: 0,
+            sheared: false,
+            egg_timer: 6000 + (id.unsigned_abs() % 6000),
+            split_size: if matches!(kind, Kind::Slime | Kind::MagmaCube) { 2 } else { 1 },
+            carried: None,
+            profession: (id.unsigned_abs() % 5) as u8,
         };
         let event = mob.spawn();
         self.entities.insert(id, mob);
