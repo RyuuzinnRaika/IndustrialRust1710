@@ -181,7 +181,7 @@ impl Explosion {
 pub struct Mobs {
     entities: BTreeMap<i32, Mob>,
     arrows: BTreeMap<i32, Arrow>,
-    orbs: BTreeMap<i32, (PlayerPosition, u16)>,
+    orbs: BTreeMap<i32, (PlayerPosition, u16, u64)>,
     pending_hits: Vec<(PlayerPosition, u8, u64)>,
     pending_blast_damage: BTreeMap<i32, u8>,
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
@@ -276,7 +276,7 @@ impl Mobs {
             .copied()
             .map(Mob::spawn)
             .chain(self.arrows.values().copied().map(Arrow::spawn))
-            .chain(self.orbs.iter().map(|(&id, &(at, amount))| {
+            .chain(self.orbs.iter().map(|(&id, &(at, amount, _))| {
                 let mut body = Vec::new();
                 write_varint(id as u32, &mut body);
                 for value in [at.x, at.y, at.z] {
@@ -293,7 +293,7 @@ impl Mobs {
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.orbs.insert(id, (at, amount));
+        self.orbs.insert(id, (at, amount, self.last_tick));
         let mut body = Vec::new();
         write_varint(id as u32, &mut body);
         for value in [at.x, at.y, at.z] {
@@ -307,7 +307,7 @@ impl Mobs {
         player: PlayerPosition,
         collector: i32,
     ) -> Option<(u32, Vec<Event>)> {
-        let (&id, &(_, amount)) = self.orbs.iter().find(|(_, (at, _))| {
+        let (&id, &(_, amount, _)) = self.orbs.iter().find(|(_, (at, _, _))| {
             let d =
                 (at.x - player.x).powi(2) + (at.y - player.y).powi(2) + (at.z - player.z).powi(2);
             d <= 2.25
@@ -532,6 +532,16 @@ impl Mobs {
         let steps = now.saturating_sub(self.last_tick).min(MAX_STEPS);
         self.last_tick = now;
         let mut events = Vec::new();
+        // Vanilla orbs expire after five minutes (6,000 server ticks); broadcast
+        // destruction so clients do not retain ghosts after the server frees them.
+        self.orbs.retain(|id, orb| {
+            if now.saturating_sub(orb.2) >= 6000 {
+                events.push(multiplayer::destroy(*id));
+                false
+            } else {
+                true
+            }
+        });
         self.pending_hits
             .retain(|(_, _, t)| now.saturating_sub(*t) < 30);
         self.spawn_natural(now, world, players, &mut events);
@@ -802,6 +812,21 @@ mod tests {
         assert_eq!(mobs.hurt_player(3, far, 10), 0);
     }
 
+    #[test]
+    fn xp_orbs_expire_after_five_minutes_and_notify_clients() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition::default();
+        let spawned = mobs.spawn_xp(at, 5).unwrap();
+        let id = *mobs.orbs.keys().next().unwrap();
+        assert_eq!(spawned.id, 0x11);
+        assert_eq!(mobs.tick(5999, &World::new(), &[]).len(), 0);
+        assert!(mobs.orbs.contains_key(&id));
+        let destroyed = mobs.tick(6000, &World::new(), &[]);
+        assert_eq!(destroyed.len(), 1);
+        assert_eq!(destroyed[0].id, 0x13);
+        assert!(mobs.orbs.is_empty());
+        assert_eq!(mobs.spawn_events().count(), 0);
+    }
     #[test]
     fn natural_mobs_spawn_in_protocol5() {
         let world = World::natural(42);
