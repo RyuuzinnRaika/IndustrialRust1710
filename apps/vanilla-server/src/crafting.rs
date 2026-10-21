@@ -496,11 +496,31 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
 mod tests {
     #[test]
     fn legacy_workstations_and_bucket_cake_have_bounded_recipes() {
-        let make = |ids: [i16; 9]| ids.map(|id| (id != 0).then_some(Stack { id, count: 1, damage: 0 }));
-        assert_eq!(result(&make([0, 369, 0, 4, 4, 4, 0, 0, 0]), 3), product(117, 1, 0));
-        assert_eq!(result(&make([0, 340, 0, 264, 49, 264, 49, 49, 49]), 3), product(116, 1, 0));
-        assert_eq!(result(&make([42, 42, 42, 0, 265, 0, 265, 265, 265]), 3), product(145, 1, 0));
-        assert_eq!(result(&make([335, 335, 335, 353, 344, 353, 296, 296, 296]), 3), product(354, 1, 0));
+        let make = |ids: [i16; 9]| {
+            ids.map(|id| {
+                (id != 0).then_some(Stack {
+                    id,
+                    count: 1,
+                    damage: 0,
+                })
+            })
+        };
+        assert_eq!(
+            result(&make([0, 369, 0, 4, 4, 4, 0, 0, 0]), 3),
+            product(117, 1, 0)
+        );
+        assert_eq!(
+            result(&make([0, 340, 0, 264, 49, 264, 49, 49, 49]), 3),
+            product(116, 1, 0)
+        );
+        assert_eq!(
+            result(&make([42, 42, 42, 0, 265, 0, 265, 265, 265]), 3),
+            product(145, 1, 0)
+        );
+        assert_eq!(
+            result(&make([335, 335, 335, 353, 344, 353, 296, 296, 296]), 3),
+            product(354, 1, 0)
+        );
         // The 1.8-style fence made from four planks and two sticks is not a 1.7.10 recipe.
         assert_eq!(result(&make([5, 280, 5, 5, 280, 5, 0, 0, 0]), 3), None);
     }
