@@ -1059,20 +1059,20 @@ impl Mobs {
         for (id, damage) in blasted {
             if let Some(mob) = self.entities.get_mut(&id) {
                 mob.health -= i16::from(damage);
+                let dead = *mob;
                 events.push(mob.status(if mob.health <= 0 { 3 } else { 2 }));
                 if mob.health <= 0 {
-                    if mob.kind != Kind::Villager {
+                    if dead.kind != Kind::Villager
+                        && !(matches!(dead.kind, Kind::Slime | Kind::MagmaCube) && dead.split_size > 1) {
                         self.pending_drops.push((
-                            mob.kind.drop(),
-                            (
-                                mob.position.x.floor() as i32,
-                                mob.position.y.floor() as i32,
-                                mob.position.z.floor() as i32,
-                            ),
+                            dead.kind.drop(),
+                            (dead.position.x.floor() as i32, dead.position.y.floor() as i32,
+                             dead.position.z.floor() as i32),
                         ));
                     }
                     self.entities.remove(&id);
                     events.push(multiplayer::destroy(id));
+                    events.extend(self.split_children(dead));
                 }
             }
         }
@@ -1138,18 +1138,20 @@ impl Mobs {
         for (id, damage) in arrow_hits {
             if let Some(mob) = self.entities.get_mut(&id) {
                 mob.health -= i16::from(damage);
+                let dead = *mob;
                 if mob.health <= 0 {
-                    self.pending_drops.push((
-                        mob.kind.drop(),
-                        (
-                            mob.position.x.floor() as i32,
-                            mob.position.y.floor() as i32,
-                            mob.position.z.floor() as i32,
-                        ),
-                    ));
+                    if dead.kind != Kind::Villager
+                        && !(matches!(dead.kind, Kind::Slime | Kind::MagmaCube) && dead.split_size > 1) {
+                        self.pending_drops.push((
+                            dead.kind.drop(),
+                            (dead.position.x.floor() as i32, dead.position.y.floor() as i32,
+                             dead.position.z.floor() as i32),
+                        ));
+                    }
                     events.push(mob.status(3));
                     events.push(multiplayer::destroy(id));
                     self.entities.remove(&id);
+                    events.extend(self.split_children(dead));
                 } else {
                     events.push(mob.status(2));
                 }
