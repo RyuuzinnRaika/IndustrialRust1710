@@ -778,9 +778,20 @@ mod tests {
     #[test]
     fn explosion_damages_all_nearby_players_once_even_when_overlapping() {
         let mut mobs = Mobs::default();
-        let nearby = PlayerPosition { x: 1.0, y: 65.0, z: 1.0 };
-        let far = PlayerPosition { x: 100.0, y: 65.0, z: 100.0 };
-        let explosions = [Explosion { position: nearby, radius: 3.0 }];
+        let nearby = PlayerPosition {
+            x: 1.0,
+            y: 65.0,
+            z: 1.0,
+        };
+        let far = PlayerPosition {
+            x: 100.0,
+            y: 65.0,
+            z: 100.0,
+        };
+        let explosions = [Explosion {
+            position: nearby,
+            radius: 3.0,
+        }];
         mobs.queue_explosion_hits(&explosions, &[(1, nearby), (2, nearby), (3, far)]);
         let first = mobs.hurt_player(1, nearby, 10);
         let second = mobs.hurt_player(2, nearby, 10);
