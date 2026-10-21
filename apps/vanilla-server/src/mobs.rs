@@ -751,7 +751,8 @@ impl Mobs {
             } else {
                 continue;
             };
-            events.push(self.insert(kind, p, false));
+            let baby = kind == Kind::Zombie && ((seed >> 16) % 20 == 0);
+            events.push(self.insert(kind, p, baby));
             break; // Bound network traffic to one natural spawn per cycle.
         }
     }
@@ -866,6 +867,21 @@ impl Mobs {
                     continue;
                 }
                 let d = distance(target, mob.position);
+                if mob.kind == Kind::Enderman && now.is_multiple_of(100) && d < 16.0 {
+                    // Bounded, collision-checked teleport near the target.
+                    let offset = if mob.id % 2 == 0 { 3.0 } else { -3.0 };
+                    let candidate = PlayerPosition {
+                        x: target.x + offset, y: target.y, z: target.z + offset,
+                    };
+                    if candidate.is_valid()
+                        && !physics::collides(world, &candidate)
+                        && physics::supported(world, &candidate)
+                    {
+                        mob.position = candidate;
+                        events.push(multiplayer::teleport(mob.id, &candidate, 0.0, 0.0));
+                        continue;
+                    }
+                }
                 if mob.kind == Kind::Creeper {
                     if d < 3.0 {
                         mob.fuse = mob.fuse.saturating_add(1);
