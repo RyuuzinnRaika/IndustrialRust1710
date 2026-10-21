@@ -216,7 +216,7 @@ fn consume_initial(socket: &mut TcpStream, expected_entity_id: i32) {
         match id {
             0x01 => {
                 let mut expected = expected_entity_id.to_be_bytes().to_vec();
-                expected.extend_from_slice(&[1, 0, 1, 8, 7]);
+                expected.extend_from_slice(&[1, 0, 2, 8, 7]);
                 expected.extend_from_slice(b"default");
                 assert_eq!(body, expected, "Join Game Protocol 5 golden bytes");
                 join = true;
