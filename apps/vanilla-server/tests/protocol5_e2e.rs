@@ -1478,3 +1478,41 @@ fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
     drop(client);
     server.wait_idle();
 }
+
+
+#[test]
+fn e50_four_clients_disconnect_reconnect_and_keep_consistent_status() {
+    let server = NativeServer::start();
+    let mut sessions = Vec::new();
+    for name in ["RustTester", "Positioner", "TwinAlpha", "TwinBeta"] {
+        let (socket, _entity, _position) = server.join(name);
+        sessions.push(socket);
+        assert_eq!(
+            server.status()["players"]["online"].as_u64(),
+            Some(sessions.len() as u64)
+        );
+    }
+    assert_eq!(server.status()["players"]["online"], 4);
+    drop(sessions);
+    server.wait_idle();
+    for _ in 0..3 {
+        let (socket, _entity, _position) = server.join("RustTester");
+        assert_eq!(server.status()["players"]["online"], 1);
+        drop(socket);
+        server.wait_idle();
+    }
+    assert_eq!(server.status()["players"]["online"], 0);
+}
+
+#[test]
+fn e50_invalid_play_packet_disconnects_without_poisoning_next_login() {
+    let server = NativeServer::start();
+    let (mut socket, _entity, _position) = server.join("RustTester");
+    socket.write_all(&frame(0x7f, &[])).unwrap(); // No Protocol 5 play packet has ID 127.
+    server.wait_idle();
+    drop(socket);
+    let (socket, _entity, _position) = server.join("RustTester");
+    assert_eq!(server.status()["players"]["online"], 1);
+    drop(socket);
+    server.wait_idle();
+}
