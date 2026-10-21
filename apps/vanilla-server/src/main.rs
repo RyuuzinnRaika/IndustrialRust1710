@@ -3134,6 +3134,35 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn golden_protocol5_empty_window_cursor_and_chunk_layout() {
+        // S30 Window Items: unsigned window ID, signed short slot count,
+        // followed by 45 slots with i16(-1) absent-item sentinels.
+        let inventory = Inventory::default();
+        let mut expected = vec![0, 0, 45];
+        expected.extend(std::iter::repeat_n(0xff, 90));
+        assert_eq!(inventory.window_items(), expected);
+        // S2F Set Slot for the cursor is window=-1, slot=-1, empty item.
+        assert_eq!(inventory.cursor_packet(), [0xff; 5]);
+
+        // S21 flat-world chunk: sections 3+4 with block IDs, nibble
+        // metadata, both light channels, then 256 biome bytes.
+        let (mask, payload) = World::new().chunk_data(0, 0);
+        assert_eq!(mask, 0x0018);
+        assert_eq!(payload.len(), 8192 + 4096 + 8192 + 256);
+        assert_eq!(&payload[payload.len() - 256..], &[1u8; 256]);
+    }
+    #[test]
+    fn protocol5_slot_nbt_length_is_validated() {
+        let empty = [-1i16; 1].into_iter().flat_map(i16::to_be_bytes).collect::<Vec<_>>();
+        assert!(Input(&empty).slot().unwrap().is_none());
+        // Item id=1, count=1, damage=0, NBT=-1 (no tag).
+        let mut none = Input(&[0, 1, 1, 0, 0, 255, 255]);
+        assert_eq!(none.slot().unwrap(), Some(Stack { id: 1, count: 1, damage: 0 }));
+        none.finish().unwrap();
+        // An NBT-bearing client item must not be accepted as a bare stack.
+        assert!(Input(&[0, 1, 1, 0, 0, 0, 3, 0, 0, 0]).slot().is_err());
+    }
+    #[test]
     fn offline_uuid_is_deterministic() {
         assert_eq!(offline_uuid("Notch"), offline_uuid("Notch"));
         assert_ne!(offline_uuid("Notch"), offline_uuid("Herobrine"));
