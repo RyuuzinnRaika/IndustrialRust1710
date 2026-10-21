@@ -69,9 +69,18 @@ pub(crate) struct PlayerData {
 impl PlayerData {
     fn validate(&self) -> io::Result<()> {
         if self.pos.len() != 3
-            || !self.pos.iter().all(|v| v.is_finite() && v.abs() <= 30_000_000.0)
-            || self.motion.as_ref().is_some_and(|v| v.len() != 3 || v.iter().any(|f| !f.is_finite()))
-            || self.rotation.as_ref().is_some_and(|v| v.len() != 2 || v.iter().any(|f| !f.is_finite()))
+            || !self
+                .pos
+                .iter()
+                .all(|v| v.is_finite() && v.abs() <= 30_000_000.0)
+            || self
+                .motion
+                .as_ref()
+                .is_some_and(|v| v.len() != 3 || v.iter().any(|f| !f.is_finite()))
+            || self
+                .rotation
+                .as_ref()
+                .is_some_and(|v| v.len() != 2 || v.iter().any(|f| !f.is_finite()))
             || self.health.is_some_and(|v| !v.is_finite())
             || self.inventory.len() > 128
             || self.ender_items.len() > 27
@@ -161,10 +170,10 @@ pub(crate) fn validate_tiles(tiles: &[Value]) -> io::Result<()> {
         return Err(invalid("too many tile entities in a chunk"));
     }
     for original in tiles {
-        let bytes = fastnbt::to_bytes(original)
-            .map_err(|_| invalid("non-compound tile entity NBT"))?;
-        let tile: TileEntity = fastnbt::from_bytes(&bytes)
-            .map_err(|_| invalid("invalid tile entity compound"))?;
+        let bytes =
+            fastnbt::to_bytes(original).map_err(|_| invalid("non-compound tile entity NBT"))?;
+        let tile: TileEntity =
+            fastnbt::from_bytes(&bytes).map_err(|_| invalid("invalid tile entity compound"))?;
         tile.validate()?;
     }
     Ok(())
@@ -179,13 +188,23 @@ mod tests {
     fn item(slot: i8) -> SlotItem {
         let mut extra = BTreeMap::new();
         extra.insert("UnknownItemField".into(), Value::String("kept".into()));
-        SlotItem { slot, id: 264, count: 3, damage: 0, tag: None, extra }
+        SlotItem {
+            slot,
+            id: 264,
+            count: 3,
+            damage: 0,
+            tag: None,
+            extra,
+        }
     }
 
     #[test]
     fn player_inventory_and_unknown_nbt_survive_roundtrip() {
         let mut extra = BTreeMap::new();
-        extra.insert("ModdedPlayerField".into(), Value::String("preserved".into()));
+        extra.insert(
+            "ModdedPlayerField".into(),
+            Value::String("preserved".into()),
+        );
         let original = PlayerData {
             pos: vec![0.5, 64.0, -1.5],
             motion: Some(vec![0.0, 0.0, 0.0]),
@@ -203,9 +222,17 @@ mod tests {
         let decoded: PlayerData = fastnbt::from_bytes(&encoded).unwrap();
         decoded.validate().unwrap();
         assert_eq!(decoded.inventory[0].id, 264);
-        assert!(matches!(decoded.inventory[0].extra.get("UnknownItemField"), Some(Value::String(s)) if s == "kept"));
-        assert!(matches!(decoded.extra.get("ModdedPlayerField"), Some(Value::String(s)) if s == "preserved"));
-        let root = std::env::temp_dir().join(format!("ir1710-player-read-{}-{:?}", std::process::id(), std::thread::current().id()));
+        assert!(
+            matches!(decoded.inventory[0].extra.get("UnknownItemField"), Some(Value::String(s)) if s == "kept")
+        );
+        assert!(
+            matches!(decoded.extra.get("ModdedPlayerField"), Some(Value::String(s)) if s == "preserved")
+        );
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-player-read-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let mut writer = GzEncoder::new(Vec::new(), Compression::default());
         writer.write_all(&encoded).unwrap();
         fs::write(&root, writer.finish().unwrap()).unwrap();
@@ -216,10 +243,17 @@ mod tests {
     #[test]
     fn malformed_items_and_duplicate_slots_are_rejected() {
         let mut player = PlayerData {
-            pos: vec![1.0, 64.0, 1.0], motion: None, rotation: None,
-            dimension: 0, inventory: vec![item(0), item(0)],
-            ender_items: Vec::new(), health: None, food_level: None,
-            xp_level: None, xp_total: None, extra: BTreeMap::new()
+            pos: vec![1.0, 64.0, 1.0],
+            motion: None,
+            rotation: None,
+            dimension: 0,
+            inventory: vec![item(0), item(0)],
+            ender_items: Vec::new(),
+            health: None,
+            food_level: None,
+            xp_level: None,
+            xp_total: None,
+            extra: BTreeMap::new(),
         };
         assert!(player.validate().is_err());
         player.inventory.pop();
@@ -232,8 +266,12 @@ mod tests {
         let mut extra = BTreeMap::new();
         extra.insert("CustomName".into(), Value::String("Treasure".into()));
         let tile = TileEntity {
-            id: "Chest".into(), x: 16, y: 64, z: -1,
-            items: Some(vec![item(0)]), extra
+            id: "Chest".into(),
+            x: 16,
+            y: 64,
+            z: -1,
+            items: Some(vec![item(0)]),
+            extra,
         };
         let bytes = fastnbt::to_bytes(&tile).unwrap();
         let t: TileEntity = fastnbt::from_bytes(&bytes).unwrap();

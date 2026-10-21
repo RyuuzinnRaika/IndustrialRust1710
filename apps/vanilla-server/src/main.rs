@@ -16,8 +16,8 @@ mod ground_items;
 mod hoppers;
 mod inventory;
 mod journal;
-mod legacy_nbt;
 mod legacy_inventory_nbt;
+mod legacy_nbt;
 mod mobs;
 mod multiplayer;
 mod navigation;
@@ -2684,7 +2684,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
 fn main() -> io::Result<()> {
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
-    let properties = if std::env::args().any(|arg| arg == "--help" || arg == "--backup-world" || arg == "--inspect-player-data") {
+    let properties = if std::env::args()
+        .any(|arg| arg == "--help" || arg == "--backup-world" || arg == "--inspect-player-data")
+    {
         None
     } else {
         server_config::ServerProperties::load_optional(Path::new("server.properties"))?
@@ -2836,7 +2838,9 @@ fn main() -> io::Result<()> {
             || anvil_import_path.is_some()
             || anvil_export_path.is_some()
         {
-            return Err(bad("--inspect-player-data cannot be combined with backup/import/export"));
+            return Err(bad(
+                "--inspect-player-data cannot be combined with backup/import/export",
+            ));
         }
         let (inventory, ender) = legacy_inventory_nbt::inspect_player(&path)?;
         println!("Legacy 1.7.10 playerdata verified (read-only): {inventory} inventory stacks, {ender} ender stacks");
