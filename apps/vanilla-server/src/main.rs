@@ -205,6 +205,7 @@ struct InitialPlayer<'a> {
     inventory: &'a Inventory,
     vitals: Vitals,
     survival: bool,
+    difficulty: u8,
 }
 fn join(
     s: &mut TcpStream,
@@ -218,6 +219,7 @@ fn join(
         inventory,
         vitals,
         survival,
+        difficulty,
     } = initial;
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
     // difficulty u8, maxPlayers u8, levelType string.
@@ -231,7 +233,7 @@ fn join(
     join.extend_from_slice(&[
         u8::from(!survival),
         dimension_id as u8,
-        1,
+        difficulty,
         MAX_PLAYERS as u8,
     ]);
     write_string("default", &mut join)?;
@@ -2385,7 +2387,7 @@ fn play(
                     }
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = 0i32.to_be_bytes().to_vec();
-                    respawn.extend_from_slice(&[1, 0]); // normal difficulty, survival
+                    respawn.extend_from_slice(&[difficulty, 0]); // configured difficulty, survival
                     write_string("default", &mut respawn)?;
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks on respawn
@@ -2491,6 +2493,7 @@ struct ServerContext {
     brewers: Arc<Mutex<Brewers>>,
     brewer_path: Arc<PathBuf>,
     survival: bool,
+    difficulty: u8,
 }
 fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     let ServerContext {
@@ -2511,6 +2514,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         brewers,
         brewer_path,
         survival,
+        difficulty,
     } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -2626,6 +2630,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             inventory: &inventory_state,
             vitals: player_vitals,
             survival,
+            difficulty,
         },
     )?;
     if survival {
@@ -2725,6 +2730,7 @@ fn main() -> io::Result<()> {
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
     let mut survival = properties.as_ref().is_some_and(|config| config.survival);
+    let mut difficulty = properties.as_ref().map_or(1, |config| config.difficulty);
     let mut requested_seed: Option<u64> = None;
     let mut biome_seed: Option<u64> = None;
     let mut expanded_seed: Option<u64> = None;
@@ -2761,6 +2767,11 @@ fn main() -> io::Result<()> {
             "--insecure-offline-lan" => insecure_offline_lan = true,
             "--survival" => survival = true,
             "--creative" => survival = false,
+            "--difficulty" => {
+                difficulty = args.next().ok_or_else(|| bad("missing --difficulty value"))?
+                    .parse::<u8>().map_err(|_| bad("invalid difficulty"))?;
+                if difficulty > 3 { return Err(bad("difficulty must be 0..=3")); }
+            },
             "--terrain-seed" => {
                 requested_seed = Some(
                     args.next()
@@ -2949,7 +2960,7 @@ fn main() -> io::Result<()> {
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-        Mobs::new(&guard, survival)
+        Mobs::new_with_difficulty(&guard, survival, difficulty)
     }));
     let ground_path = Arc::new(GroundItems::location(&world_path));
     let ground_items = Arc::new(Mutex::new(if survival {
@@ -3249,6 +3260,7 @@ fn main() -> io::Result<()> {
                     brewers: brewer_storage,
                     brewer_path: brewer_file,
                     survival,
+                    difficulty,
                 },
             ) {
                 if e.kind() != ErrorKind::UnexpectedEof {
