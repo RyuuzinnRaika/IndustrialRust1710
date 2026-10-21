@@ -427,7 +427,9 @@ impl Inventory {
         // Only after a recipe output has a durable destination.
         // In 1.7.10 crafting a cake consumes milk but leaves empty buckets
         // in the three original grid slots. No extra inventory space needed.
-        let cake = self.crafting_result(window).is_some_and(|output| output.id == 354);
+        let cake = self
+            .crafting_result(window)
+            .is_some_and(|output| output.id == 354);
         let size = if window == 0 { 4 } else { 9 };
         for index in 0..size {
             let slot = index + 1;
