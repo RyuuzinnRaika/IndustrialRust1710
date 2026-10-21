@@ -26,7 +26,7 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use ground_items::GroundItems;
-use inventory::{ChestDirection, Inventory, Stack};
+use inventory::{Inventory, Stack};
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
     PROTOCOL_VERSION,
