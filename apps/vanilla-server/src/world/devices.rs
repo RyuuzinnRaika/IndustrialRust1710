@@ -122,6 +122,34 @@ impl World {
         }
         false
     }
+    /// Power cannot travel infinitely across powered/activator rails.
+    /// Bound traversal to eight rail segments as in 1.7.10.
+    fn rail_powered(&self, x: i32, y: i32, z: i32, id: u16) -> bool {
+        use std::collections::{BTreeSet, VecDeque};
+        let mut seen = BTreeSet::from([(x, y, z)]);
+        let mut next = VecDeque::from([(x, y, z, 0u8)]);
+        while let Some((rx, ry, rz, distance)) = next.pop_front() {
+            if self.powered_near(rx, ry, rz) {
+                return true;
+            }
+            if distance >= 8 {
+                continue;
+            }
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                for dy in [-1, 0, 1] {
+                    let at = (rx + dx, ry + dy, rz + dz);
+                    if in_bounds(at.0, at.1, at.2)
+                        && self.get(at.0, at.1, at.2) >> 4 == id
+                        && seen.insert(at)
+                    {
+                        next.push_back((at.0, at.1, at.2, distance + 1));
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn push_piston(
         &self,
         x: i32,
@@ -285,6 +313,12 @@ impl World {
                             }
                             self.pending_comparators.remove(&pos);
                         }
+                    }
+                }
+                27 | 157 => {
+                    let powered = self.rail_powered(x, y, z, current >> 4);
+                    if powered != (current & 8 != 0) {
+                        changes.insert((x, y as u8, z), current ^ 8);
                     }
                 }
                 29 | 33 => self.push_piston(x, y, z, current, &mut changes),
