@@ -455,12 +455,12 @@ impl Mobs {
     /// Atomic replacement; the old snapshot survives failed serialization or write.
     pub fn save(&self, world: &World) -> io::Result<()> {
         let Some(path) = &self.storage else { return Ok(()); };
-        let snapshot = MobSnapshot {
-            format: 1,
-            seed: world.natural_seed(),
-            dimension: world.dimension(),
-            state: self,
-        };
+        let snapshot = serde_json::json!({
+            "format": 1,
+            "seed": world.natural_seed(),
+            "dimension": world.dimension(),
+            "state": self,
+        });
         let data = serde_json::to_vec(&snapshot)
             .map_err(|_| invalid("mob snapshot serialization failed"))?;
         if data.len() > 2 * 1024 * 1024 { return Err(invalid("mob snapshot too large")); }
