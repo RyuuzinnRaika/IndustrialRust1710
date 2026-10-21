@@ -1,7 +1,7 @@
 //! Bounded Protocol 5 natural-survival entities. No external entity registry.
 use crate::inventory::Stack;
-use crate::multiplayer::{self, Event};
 use crate::mob_rules::{self, SpawnCategory, SpawnCheck};
+use crate::multiplayer::{self, Event};
 use crate::navigation;
 use crate::physics;
 use crate::player::PlayerPosition;
@@ -64,7 +64,10 @@ impl Kind {
         }
     }
     fn passive(self) -> bool {
-        matches!(self, Self::Cow | Self::Pig | Self::Sheep | Self::Chicken | Self::Villager)
+        matches!(
+            self,
+            Self::Cow | Self::Pig | Self::Sheep | Self::Chicken | Self::Villager
+        )
     }
     fn health(self) -> i16 {
         match self {
@@ -303,10 +306,17 @@ impl Mobs {
             burning: 0,
             sheared: false,
             egg_timer: 6000 + (id.unsigned_abs() % 6000),
-            split_size: if matches!(kind, Kind::Slime | Kind::MagmaCube) { 2 } else { 1 },
+            split_size: if matches!(kind, Kind::Slime | Kind::MagmaCube) {
+                2
+            } else {
+                1
+            },
             carried: None,
             profession: (id.unsigned_abs() % 5) as u8,
-            angry: !matches!(kind, Kind::Spider | Kind::CaveSpider | Kind::ZombiePigman | Kind::IronGolem),
+            angry: !matches!(
+                kind,
+                Kind::Spider | Kind::CaveSpider | Kind::ZombiePigman | Kind::IronGolem
+            ),
         };
         let event = mob.spawn();
         self.entities.insert(id, mob);
@@ -415,8 +425,11 @@ impl Mobs {
     ) {
         for explosion in explosions {
             for &(id, player) in participants {
-                let damage = mob_rules::blast_damage(world, explosion.position, player, explosion.radius);
-                if damage == 0 { continue; }
+                let damage =
+                    mob_rules::blast_damage(world, explosion.position, player, explosion.radius);
+                if damage == 0 {
+                    continue;
+                }
                 // A queue per entity, not a spatial queue, prevents the first
                 // of several co-located players from consuming all hits.
                 let entry = self.pending_blast_damage.entry(id).or_default();
@@ -470,22 +483,40 @@ impl Mobs {
     }
     /// Animal interaction result; caller must persist its inventory changes and
     /// any ground drops before publishing the entity metadata packet.
-    pub fn animal_interact(&mut self, id: i32, at: PlayerPosition, held: Option<Stack>)
-        -> Option<(Option<Event>, Option<(Stack,(i32,i32,i32))>, bool)>
-    {
+    pub fn animal_interact(
+        &mut self,
+        id: i32,
+        at: PlayerPosition,
+        held: Option<Stack>,
+    ) -> Option<(Option<Event>, Option<(Stack, (i32, i32, i32))>, bool)> {
         let mob = self.entities.get_mut(&id)?;
-        if !mob.nearby(at,3.0) || mob.baby { return None; }
+        if !mob.nearby(at, 3.0) || mob.baby {
+            return None;
+        }
         let stack = held?;
         match (mob.kind, stack.id) {
-            (Kind::Cow, 325) if stack.count == 1 => Some((None,None,true)),
+            (Kind::Cow, 325) if stack.count == 1 => Some((None, None, true)),
             (Kind::Sheep, 359) if !mob.sheared => {
                 mob.sheared = true;
                 let mut body = mob.id.to_be_bytes().to_vec();
-                body.extend_from_slice(&[16 << 3,16,0x7f]);
-                let pos = (mob.position.x.floor() as i32,
-                    mob.position.y.floor() as i32,mob.position.z.floor() as i32);
-                Some((Some(Event{id:0x1c,body}),
-                    Some((Stack{id:35,count:1,damage:0},pos)),false))
+                body.extend_from_slice(&[16 << 3, 16, 0x7f]);
+                let pos = (
+                    mob.position.x.floor() as i32,
+                    mob.position.y.floor() as i32,
+                    mob.position.z.floor() as i32,
+                );
+                Some((
+                    Some(Event { id: 0x1c, body }),
+                    Some((
+                        Stack {
+                            id: 35,
+                            count: 1,
+                            damage: 0,
+                        },
+                        pos,
+                    )),
+                    false,
+                ))
             }
             _ => None,
         }
@@ -569,8 +600,12 @@ impl Mobs {
         players: &[PlayerPosition],
         events: &mut Vec<Event>,
     ) {
-        if !self.enabled || players.is_empty() || !now.is_multiple_of(80) { return; }
-        let Some(seed_world) = world.natural_seed() else { return; };
+        if !self.enabled || players.is_empty() || !now.is_multiple_of(80) {
+            return;
+        }
+        let Some(seed_world) = world.natural_seed() else {
+            return;
+        };
         let passive = self.entities.values().filter(|m| m.kind.passive()).count();
         let hostile = self.entities.len() - passive;
         for index in 0..4u64 {
@@ -584,38 +619,68 @@ impl Mobs {
             } else {
                 crate::terrain::surface(seed_world, x, z) + 1
             };
-            let p = PlayerPosition { x: x as f64 + 0.5, y: y as f64, z: z as f64 + 0.5 };
-            if !p.is_valid() || !physics::supported(world, &p)
-                || physics::collides(world, &p) { continue; }
+            let p = PlayerPosition {
+                x: x as f64 + 0.5,
+                y: y as f64,
+                z: z as f64 + 0.5,
+            };
+            if !p.is_valid() || !physics::supported(world, &p) || physics::collides(world, &p) {
+                continue;
+            }
             let dist = distance_to_players(p, players);
             let (sky, block) = world.light_at(x, y, z);
             let daylight = (now % 24000) < 12000 || (now % 24000) > 23500;
-            let sky = if daylight { sky } else { sky.saturating_sub(11) };
+            let sky = if daylight {
+                sky
+            } else {
+                sky.saturating_sub(11)
+            };
             let biome = if world.is_biome_world() {
                 crate::terrain::biome(seed_world, x, z)
-            } else { 1 };
+            } else {
+                1
+            };
             let common = SpawnCheck {
-                sky_light: sky, block_light: block, daytime: daylight,
-                biome, distance: dist, nearby_players: true,
-                current: passive, capacity: PASSIVE_CAP,
+                sky_light: sky,
+                block_light: block,
+                daytime: daylight,
+                biome,
+                distance: dist,
+                nearby_players: true,
+                current: passive,
+                capacity: PASSIVE_CAP,
                 difficulty: 1, // Existing Protocol 5 login advertises Normal.
-                grass_below: world.get(x,y-1,z) >> 4 == 2,
+                grass_below: world.get(x, y - 1, z) >> 4 == 2,
                 has_room: true,
             };
             let kind = if mob_rules::eligible(SpawnCategory::Passive, common) {
                 match seed % 4 {
-                    0 => Kind::Cow, 1 => Kind::Pig, 2 => Kind::Sheep, _ => Kind::Chicken,
+                    0 => Kind::Cow,
+                    1 => Kind::Pig,
+                    2 => Kind::Sheep,
+                    _ => Kind::Chicken,
                 }
-            } else if mob_rules::eligible(SpawnCategory::Hostile, SpawnCheck {
-                current: hostile, capacity: HOSTILE_CAP, ..common
-            }) {
+            } else if mob_rules::eligible(
+                SpawnCategory::Hostile,
+                SpawnCheck {
+                    current: hostile,
+                    capacity: HOSTILE_CAP,
+                    ..common
+                },
+            ) {
                 match (seed >> 4) % 7 {
-                    0 => Kind::Zombie, 1 => Kind::Skeleton, 2 => Kind::Creeper,
-                    3 => Kind::Spider, 4 => Kind::Enderman, 5 => Kind::Witch,
+                    0 => Kind::Zombie,
+                    1 => Kind::Skeleton,
+                    2 => Kind::Creeper,
+                    3 => Kind::Spider,
+                    4 => Kind::Enderman,
+                    5 => Kind::Witch,
                     _ => Kind::Slime,
                 }
-            } else { continue; };
-            events.push(self.insert(kind,p,false));
+            } else {
+                continue;
+            };
+            events.push(self.insert(kind, p, false));
             break; // Bound network traffic to one natural spawn per cycle.
         }
     }
@@ -635,17 +700,26 @@ impl Mobs {
                 if mob.kind == Kind::Sheep && mob.sheared && now.is_multiple_of(6000) {
                     mob.sheared = false;
                     let mut body = mob.id.to_be_bytes().to_vec();
-                    body.extend_from_slice(&[16 << 3,0,0x7f]);
-                    events.push(Event {id:0x1c,body});
+                    body.extend_from_slice(&[16 << 3, 0, 0x7f]);
+                    events.push(Event { id: 0x1c, body });
                 }
                 if mob.kind == Kind::Chicken && !mob.baby {
-                    if mob.egg_timer > 0 { mob.egg_timer -= 1; }
+                    if mob.egg_timer > 0 {
+                        mob.egg_timer -= 1;
+                    }
                     if mob.egg_timer == 0 {
-                        self.pending_drops.push((Stack{id:344,count:1,damage:0},(
-                            mob.position.x.floor() as i32,
-                            mob.position.y.floor() as i32,
-                            mob.position.z.floor() as i32,
-                        )));
+                        self.pending_drops.push((
+                            Stack {
+                                id: 344,
+                                count: 1,
+                                damage: 0,
+                            },
+                            (
+                                mob.position.x.floor() as i32,
+                                mob.position.y.floor() as i32,
+                                mob.position.z.floor() as i32,
+                            ),
+                        ));
                         mob.egg_timer = 6000 + (hash(now ^ mob.id as u64) % 6000) as u32;
                     }
                 }
@@ -653,14 +727,18 @@ impl Mobs {
                     mob.health = (mob.health + 1).min(mob.kind.health());
                 }
                 if now.is_multiple_of(20) {
-                    if mob.kind.burns_in_sun() && sky_exposed(world, mob.position)
-                        && now % 24000 < 12000 {
+                    if mob.kind.burns_in_sun()
+                        && sky_exposed(world, mob.position)
+                        && now % 24000 < 12000
+                    {
                         mob.burning = 160;
                     }
                     if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
-                        let (sky, block)=world.light_at(
-                            mob.position.x.floor() as i32, mob.position.y.floor() as i32,
-                            mob.position.z.floor() as i32);
+                        let (sky, block) = world.light_at(
+                            mob.position.x.floor() as i32,
+                            mob.position.y.floor() as i32,
+                            mob.position.z.floor() as i32,
+                        );
                         mob.angry = sky.max(block) <= 11;
                     }
                 }
@@ -671,11 +749,13 @@ impl Mobs {
                         if mob.health <= 0 {
                             events.push(mob.status(3));
                             self.pending_drops.push((
-                                mob.kind.drop(), (
+                                mob.kind.drop(),
+                                (
                                     mob.position.x.floor() as i32,
                                     mob.position.y.floor() as i32,
                                     mob.position.z.floor() as i32,
-                                )));
+                                ),
+                            ));
                             dead.push(mob.id);
                             continue;
                         }
@@ -693,8 +773,11 @@ impl Mobs {
                         events.push(Event { id: 0x1c, body });
                     }
                 }
-                if !players.is_empty() && !mob.kind.passive()
-                    && !mob.kind.is_boss() && distance_to_players(mob.position, players) > 128.0 {
+                if !players.is_empty()
+                    && !mob.kind.passive()
+                    && !mob.kind.is_boss()
+                    && distance_to_players(mob.position, players) > 128.0
+                {
                     dead.push(mob.id);
                     continue;
                 }
@@ -708,7 +791,9 @@ impl Mobs {
                 let Some(target) = nearest else {
                     continue;
                 };
-                if !mob.angry && !mob.kind.passive() { continue; }
+                if !mob.angry && !mob.kind.passive() {
+                    continue;
+                }
                 let d = distance(target, mob.position);
                 if mob.kind == Kind::Creeper {
                     if d < 3.0 {
@@ -725,12 +810,21 @@ impl Mobs {
                         continue;
                     }
                 }
-                if mob.kind == Kind::Skeleton && (5.0..16.0).contains(&d)
+                if mob.kind == Kind::Skeleton
+                    && (5.0..16.0).contains(&d)
                     && now.saturating_sub(mob.bite_tick) >= 40
                     && mob_rules::visible(
                         world,
-                        PlayerPosition { y: mob.position.y+1.55, ..mob.position },
-                        PlayerPosition { y: target.y+1.55, ..target }, 16.0)
+                        PlayerPosition {
+                            y: mob.position.y + 1.55,
+                            ..mob.position
+                        },
+                        PlayerPosition {
+                            y: target.y + 1.55,
+                            ..target
+                        },
+                        16.0,
+                    )
                 {
                     mob.bite_tick = now;
                     let yaw = (-(target.x - mob.position.x))
@@ -830,19 +924,31 @@ impl Mobs {
         let mut blasted = Vec::new();
         for explosion in &self.explosions {
             for (&id, mob) in &self.entities {
-                let damage = mob_rules::blast_damage(world, explosion.position, mob.position, explosion.radius);
-                if damage > 0 { blasted.push((id, damage)); }
+                let damage = mob_rules::blast_damage(
+                    world,
+                    explosion.position,
+                    mob.position,
+                    explosion.radius,
+                );
+                if damage > 0 {
+                    blasted.push((id, damage));
+                }
             }
         }
         for (id, damage) in blasted {
             if let Some(mob) = self.entities.get_mut(&id) {
                 mob.health -= i16::from(damage);
-                events.push(mob.status(if mob.health <= 0 {3} else {2}));
+                events.push(mob.status(if mob.health <= 0 { 3 } else { 2 }));
                 if mob.health <= 0 {
                     if mob.kind != Kind::Villager {
-                        self.pending_drops.push((mob.kind.drop(), (
-                            mob.position.x.floor() as i32, mob.position.y.floor() as i32,
-                            mob.position.z.floor() as i32)));
+                        self.pending_drops.push((
+                            mob.kind.drop(),
+                            (
+                                mob.position.x.floor() as i32,
+                                mob.position.y.floor() as i32,
+                                mob.position.z.floor() as i32,
+                            ),
+                        ));
                     }
                     self.entities.remove(&id);
                     events.push(multiplayer::destroy(id));
@@ -949,7 +1055,9 @@ impl Mobs {
 fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
     players
         .iter()
-        .map(|other| ((p.x-other.x).powi(2) + (p.y-other.y).powi(2) + (p.z-other.z).powi(2)).sqrt())
+        .map(|other| {
+            ((p.x - other.x).powi(2) + (p.y - other.y).powi(2) + (p.z - other.z).powi(2)).sqrt()
+        })
         .fold(f64::INFINITY, f64::min)
 }
 #[cfg(test)]
@@ -972,7 +1080,11 @@ mod tests {
             position: nearby,
             radius: 3.0,
         }];
-        mobs.queue_explosion_hits(&World::new(), &explosions, &[(1, nearby), (2, nearby), (3, far)]);
+        mobs.queue_explosion_hits(
+            &World::new(),
+            &explosions,
+            &[(1, nearby), (2, nearby), (3, far)],
+        );
         let first = mobs.hurt_player(1, nearby, 10);
         let second = mobs.hurt_player(2, nearby, 10);
         assert!(first > 0);
