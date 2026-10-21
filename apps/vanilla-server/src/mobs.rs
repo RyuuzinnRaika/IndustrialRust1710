@@ -326,9 +326,6 @@ impl Mobs {
         event
     }
     /// Natural Survival only, preserving flat E2E world behaviour.
-    pub fn new(world: &World, enabled: bool) -> Self {
-        Self::new_with_difficulty(world, enabled, 1)
-    }
     pub fn new_with_difficulty(world: &World, enabled: bool, difficulty: u8) -> Self {
         let mut state = Self {
             next_id: BASE_ID,
@@ -761,7 +758,7 @@ impl Mobs {
                 if !mob.kind.passive()
                     && nearest_distance > 32.0
                     && now.saturating_sub(mob.hit_tick) > 600
-                    && hash(now ^ mob.id as u64) % 800 == 0
+                    && hash(now ^ mob.id as u64).is_multiple_of(800)
                 {
                     dead.push(mob.id);
                     continue;
@@ -1093,7 +1090,7 @@ mod tests {
     #[test]
     fn natural_mobs_spawn_in_protocol5() {
         let world = World::natural(42);
-        let mut mobs = Mobs::new(&world, true);
+        let mut mobs = Mobs::new_with_difficulty(&world, true, 1);
         assert!(!mobs.entities.is_empty());
         let zombie = *mobs.entities.values().next().unwrap();
         assert_eq!(zombie.kind, Kind::Zombie);
@@ -1262,7 +1259,7 @@ mod tests {
     }
     #[test]
     fn flat_world_has_no_mobs_and_bow_shot_is_bounded() {
-        assert!(Mobs::new(&World::new(), true).entities.is_empty());
+        assert!(Mobs::new_with_difficulty(&World::new(), true, 1).entities.is_empty());
         let mut mobs = Mobs::default();
         assert!(mobs
             .fire_arrow(None, PlayerPosition::default(), 0.0, 0.0, 3.0, 4)
