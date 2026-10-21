@@ -608,11 +608,15 @@ fn play(
             if let Some(item) = ground.nearby_ready(location) {
                 let mut candidate = inventory.clone();
                 if let Some(slots) = candidate.receive_stack(item.stack) {
-                    // Commit removal to disk before inventory credit to avoid
-                    // duplicate pickup after process interruption. This is not
-                    // yet a cross-file atomic transaction and can lose items.
-                    if let Some(collected) = ground.take(ground_path, item.id)? {
-                        candidate.save(inventory_path)?;
+                    if let Some((staged_ground, collected)) = ground.stage_take(item.id)? {
+                        journal::commit(
+                            &world_path.with_extension("pending-txn.json"),
+                            &[
+                                (ground_path, staged_ground.encoded()?),
+                                (inventory_path, candidate.encoded()?),
+                            ],
+                        )?;
+                        *ground = staged_ground;
                         *inventory = candidate;
                         for packet in collected.collected(entity_id) {
                             hub.broadcast(packet);
@@ -797,6 +801,7 @@ fn play(
                 inventory_path,
                 ground_items,
                 ground_path,
+                world_path,
                 hub,
                 location,
             )?;
@@ -1879,6 +1884,7 @@ fn play(
                         inventory_path,
                         ground_items,
                         ground_path,
+                        world_path,
                         hub,
                         location,
                     )?;
@@ -1936,14 +1942,15 @@ fn play(
         }
     }
 }
-/// Debit all player possessions before publishing death drops. A cross-file
-/// transaction journal is not yet implemented: a storage fault can lose items,
-/// but cannot re-credit the source inventory and duplicate them.
+/// Commit both the debited inventory and all spawned death drops as one
+/// redo-journaled transaction. Until both snapshots are durable, neither
+/// state is visible to players.
 fn commit_death_drops(
     inventory: &mut Inventory,
     inventory_path: &Path,
     ground_items: &Mutex<GroundItems>,
     ground_path: &Path,
+    world_path: &Path,
     hub: &Hub,
     location: (f64, f64, f64),
 ) -> io::Result<()> {
@@ -1959,14 +1966,22 @@ fn commit_death_drops(
     }
     let mut empty = inventory.clone();
     empty.clear_possessions();
-    empty.save(inventory_path)?;
-    *inventory = empty;
     let block = (
         (location.0.floor() as i32).clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
         (location.1.floor() as i32).clamp(0, 254),
         (location.2.floor() as i32).clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
     );
-    for item in ground.put_many(ground_path, &possessions, block)? {
+    let (staged_ground, spawned) = ground.stage_put_many(&possessions, block)?;
+    journal::commit(
+        &world_path.with_extension("pending-txn.json"),
+        &[
+            (inventory_path, empty.encoded()?),
+            (ground_path, staged_ground.encoded()?),
+        ],
+    )?;
+    *inventory = empty;
+    *ground = staged_ground;
+    for item in spawned {
         for packet in item.spawn() {
             hub.broadcast(packet);
         }
