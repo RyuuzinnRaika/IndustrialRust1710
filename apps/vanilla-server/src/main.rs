@@ -1841,10 +1841,6 @@ fn play(
                             };
                             let invalid_chest_merge =
                                 block_id == 54 && !can_place_chest(&w, (nx, ny, nz));
-                            let adjacent_chest = block_id == 54
-                                && [(nx + 1, nz), (nx - 1, nz), (nx, nz + 1), (nx, nz - 1)]
-                                    .iter()
-                                    .any(|&(cx, cz)| w.get(cx, ny, cz) >> 4 == 54);
                             let metadata = if matches!(block_id, 50 | 77 | 143) {
                                 match face {
                                     1 => 5,
