@@ -111,7 +111,10 @@ impl Whitelist {
             return Err(invalid("modified whitelist exceeds 64 KiB"));
         }
         let temp = path.with_extension("admin-tmp");
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
         let result = (|| -> io::Result<()> {
             file.set_permissions(metadata.permissions())?;
             file.write_all(&bytes)?;
@@ -150,8 +153,10 @@ mod tests {
     }
     #[test]
     fn console_membership_edits_are_case_insensitive_and_preserve_metadata() {
-        let path = std::env::temp_dir()
-            .join(format!("ir1710-console-whitelist-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-console-whitelist-{}.json",
+            std::process::id()
+        ));
         let _ = fs::remove_file(&path);
         fs::write(
             &path,
