@@ -604,7 +604,10 @@ mod tests {
             assert_eq!(result(&make(inputs), 3), product(id, count, damage));
         }
         // Missing just one ingredient cannot accidentally produce a free item.
-        assert_eq!(result(&make([280, 0, 280, 280, 0, 280, 280, 0, 280]), 3), None);
+        assert_eq!(
+            result(&make([280, 0, 280, 280, 0, 280, 280, 0, 280]), 3),
+            None
+        );
         // 1.7.10 buttons require real stone, not a granite metadata variant.
         assert_eq!(result(&[product(1, 1, 1), None, None, None], 2), None);
     }
