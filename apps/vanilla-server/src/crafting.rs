@@ -286,18 +286,11 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
         return product(359, 1, 0);
     }
     // Storage blocks must debit all nine source items.
-    if matches(&[
-        &[331, 331, 331],
-        &[331, 331, 331],
-        &[331, 331, 331],
-    ]) {
+    if matches(&[&[331, 331, 331], &[331, 331, 331], &[331, 331, 331]]) {
         return product(152, 1, 0);
     }
-    if matches(&[
-        &[351, 351, 351],
-        &[351, 351, 351],
-        &[351, 351, 351],
-    ]) && grid.iter().flatten().all(|item| item.damage == 4)
+    if matches(&[&[351, 351, 351], &[351, 351, 351], &[351, 351, 351]])
+        && grid.iter().flatten().all(|item| item.damage == 4)
     {
         return product(22, 1, 0);
     }
@@ -505,15 +498,27 @@ mod tests {
     #[test]
     fn java_1710_recipes_conserve_items_and_reject_modern_patterns() {
         let iron_door = [
-            item(265), item(265), None,
-            item(265), item(265), None,
-            item(265), item(265), None,
+            item(265),
+            item(265),
+            None,
+            item(265),
+            item(265),
+            None,
+            item(265),
+            item(265),
+            None,
         ];
         assert_eq!(result(&iron_door, 3), product(330, 1, 0));
         let wood_door = [
-            item(5), item(5), None,
-            item(5), item(5), None,
-            item(5), item(5), None,
+            item(5),
+            item(5),
+            None,
+            item(5),
+            item(5),
+            None,
+            item(5),
+            item(5),
+            None,
         ];
         assert_eq!(result(&wood_door, 3), product(324, 1, 0));
         assert_eq!(result(&[item(331); 4], 2), None);
@@ -525,42 +530,76 @@ mod tests {
         assert_eq!(result(&[item(351); 9], 3), None);
 
         let old_fence = [
-            item(280), item(280), item(280),
-            item(280), item(280), item(280),
-            None, None, None,
+            item(280),
+            item(280),
+            item(280),
+            item(280),
+            item(280),
+            item(280),
+            None,
+            None,
+            None,
         ];
         assert_eq!(result(&old_fence, 3), product(85, 2, 0));
         let modern_fence = [
-            item(280), item(5), item(280),
-            item(280), item(5), item(280),
-            None, None, None,
+            item(280),
+            item(5),
+            item(280),
+            item(280),
+            item(5),
+            item(280),
+            None,
+            None,
+            None,
         ];
         assert_eq!(result(&modern_fence, 3), None);
 
         let powered_rail = [
-            item(266), None, item(266),
-            item(266), item(280), item(266),
-            item(266), item(331), item(266),
+            item(266),
+            None,
+            item(266),
+            item(266),
+            item(280),
+            item(266),
+            item(266),
+            item(331),
+            item(266),
         ];
         assert_eq!(result(&powered_rail, 3), product(27, 6, 0));
         let iron_rail = [
-            item(265), None, item(265),
-            item(265), item(280), item(265),
-            item(265), item(331), item(265),
+            item(265),
+            None,
+            item(265),
+            item(265),
+            item(280),
+            item(265),
+            item(265),
+            item(331),
+            item(265),
         ];
         assert_eq!(result(&iron_rail, 3), None);
         let birch_slabs = [
-            product(5, 1, 2), product(5, 1, 2), product(5, 1, 2),
-            None, None, None,
-            None, None, None,
+            product(5, 1, 2),
+            product(5, 1, 2),
+            product(5, 1, 2),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         ];
         assert_eq!(result(&birch_slabs, 3), product(126, 6, 2));
         let mixed_slabs = [
-            product(5, 1, 2), product(5, 1, 3), product(5, 1, 2),
-            None, None, None,
-            None, None, None,
+            product(5, 1, 2),
+            product(5, 1, 3),
+            product(5, 1, 2),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         ];
         assert_eq!(result(&mixed_slabs, 3), None);
-    }
-
-}
+   }
