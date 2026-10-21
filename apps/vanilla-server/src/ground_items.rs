@@ -7,8 +7,8 @@
 //! between these two commits can lose an item; a multi-file transaction is
 //! needed for full crash consistency.
 use crate::inventory::Stack;
-use crate::player::PlayerPosition;
 use crate::multiplayer::{self, Event};
+use crate::player::PlayerPosition;
 use crate::world::WORLD_LIMIT;
 use legacy_protocol::write_varint;
 use serde::{Deserialize, Serialize};
