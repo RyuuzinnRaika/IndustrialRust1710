@@ -525,9 +525,13 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     let drop_id = read_varint(&mut entity_bytes).unwrap() as i32;
     assert!(drop_id > 1_000_000_000);
     let metadata = until_packet(&mut client, 0x1c, |b| {
-        b.len() >= 13 && b[..4] == drop_id.to_be_bytes()
+        let mut raw = b;
+        read_varint(&mut raw).ok() == Some(drop_id as u32)
+            && raw == [0xaa, 0, 3, 1, 0, 0, 255, 255, 127]
     });
-    assert_eq!(&metadata[4..], &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
+    let mut metadata_data = metadata.as_slice();
+    assert_eq!(read_varint(&mut metadata_data).unwrap(), drop_id as u32);
+    assert_eq!(metadata_data, &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
     until_packet(&mut client, 0x23, |b| {
         b.len() >= 11 && b[4] == 63 && b[9] == 0
     });
@@ -1042,9 +1046,13 @@ fn survival_shovel_mining_wears_out_last_use_and_persists_dirt_drop() {
     client.write_all(&frame(7, &finish)).unwrap();
     until_packet(&mut client, 0x2f, |p| p == [0, 0, 36, 255, 255]);
     let metadata = until_packet(&mut client, 0x1c, |p| {
-        p.len() >= 13 && p[4] == 0xaa && p[5..7] == [0, 3]
+        let mut raw = p;
+        read_varint(&mut raw).is_ok()
+            && raw == [0xaa, 0, 3, 1, 0, 0, 255, 255, 127]
     });
-    assert_eq!(&metadata[4..], &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
+    let mut metadata_data = metadata.as_slice();
+    read_varint(&mut metadata_data).unwrap();
+    assert_eq!(metadata_data, &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
     until_packet(&mut client, 0x23, |p| {
         p.len() >= 11 && p[4] == 63 && p[9] == 0
     });
