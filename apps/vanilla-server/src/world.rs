@@ -77,6 +77,7 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 49
             | 26 // two-block bed
             | 54 // chest (single or double)
+            | 117 // brewing stand
             | 154 // hopper
             | 56 // diamond ore
             | 57
