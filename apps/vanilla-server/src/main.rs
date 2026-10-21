@@ -744,7 +744,8 @@ fn play(
             let mut updates = creatures.tick(now_tick, &w, &players);
             let explosions = creatures.take_explosions();
             updates.extend(creatures.queue_explosion_hits(&w, &explosions, &participants));
-            let hurt = creatures.hurt_player(entity_id, *player, now_tick);
+            updates.extend(creatures.take_player_effects(entity_id, *player, now_tick));
+            let hurt = creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
             let drops = creatures.take_drops();
             drop(creatures);
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
@@ -2721,10 +2722,17 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
+    // Snapshot living entities on disconnect, not only on periodic 20TPS ticks.
+    // Always lock world before mobs to match the gameplay tick lock order.
+    let mob_saved = {
+        let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        mobs.lock().map_err(|_| bad("mob mutex poisoned"))?.save(&guard)
+    };
     let player_saved = player_state.save_state(&player_file, player_vitals);
     let inventory_saved = inventory_state.save(&inventory_file);
     let experience_saved = experience_state.save(&experience_file);
     println!("left: {name}");
+    mob_saved?;
     player_saved?;
     inventory_saved?;
     experience_saved?;
