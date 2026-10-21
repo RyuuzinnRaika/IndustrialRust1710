@@ -37,7 +37,7 @@ impl World {
         let cz = z.div_euclid(16);
         let (block, sky) = self.light_arrays(cx, cz);
         let index =
-            ((y as usize * 16 + z.rem_euclid(16) as usize) * 16 + x.rem_euclid(16) as usize);
+            (y as usize * 16 + z.rem_euclid(16) as usize) * 16 + x.rem_euclid(16) as usize;
         (sky[index], block[index])
     }
     /// Returns separate 16x256x16 block-light and sky-light nibble values.
