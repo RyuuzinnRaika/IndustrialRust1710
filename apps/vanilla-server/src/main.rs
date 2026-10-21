@@ -5,6 +5,7 @@ mod anvil_export;
 mod anvil_import;
 mod brewing;
 mod chests;
+mod chunk_pipeline;
 mod clock;
 mod crafting;
 mod experience;
@@ -46,7 +47,7 @@ use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use serde_json::json;
 use std::collections::BTreeSet;
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -248,8 +249,14 @@ fn join(
         send(s, 0x2b, &weather)?;
     }
 
-    for (cx, cz) in view_chunks(chunk_center(position)) {
-        send_chunk(s, world, cx, cz)?;
+    // Prefetch all visible chunks into a fixed-size compression queue.
+    // Independent workers compress while the world mutex stays unlocked.
+    let pending: Vec<_> = view_chunks(chunk_center(position))
+        .into_iter()
+        .map(|(cx, cz)| queue_chunk(world, cx, cz))
+        .collect::<io::Result<_>>()?;
+    for chunk in pending {
+        send(s, 0x21, &chunk.finish()?)?;
     }
 
     // Clientbound 0x30 / 0x09: authoritative Creative inventory and hotbar.
@@ -293,23 +300,15 @@ fn view_chunks(center: (i32, i32)) -> BTreeSet<(i32, i32)> {
     }
     chunks
 }
-fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
+fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipeline::PendingChunk> {
     let (mask, data) = world
         .lock()
         .map_err(|_| bad("world mutex poisoned"))?
         .chunk_data(cx, cz);
-    let mut compressor = ZlibEncoder::new(Vec::new(), Compression::fast());
-    compressor.write_all(&data)?;
-    let compressed = compressor.finish()?;
-    let mut packet = Vec::with_capacity(17 + compressed.len());
-    packet.extend_from_slice(&cx.to_be_bytes());
-    packet.extend_from_slice(&cz.to_be_bytes());
-    packet.push(1);
-    packet.extend_from_slice(&mask.to_be_bytes());
-    packet.extend_from_slice(&0u16.to_be_bytes());
-    packet.extend_from_slice(&(compressed.len() as i32).to_be_bytes());
-    packet.extend_from_slice(&compressed);
-    send(s, 0x21, &packet)
+    chunk_pipeline::submit(cx, cz, mask, data)
+}
+fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
+    send(s, 0x21, &queue_chunk(world, cx, cz)?.finish()?)
 }
 fn unload_chunk(s: &mut TcpStream, cx: i32, cz: i32) -> io::Result<()> {
     // Protocol 5: full column with zero section bitmap and no data.
@@ -332,8 +331,12 @@ fn sync_chunks(
     for &(cx, cz) in loaded.difference(&desired) {
         unload_chunk(s, cx, cz)?;
     }
-    for &(cx, cz) in desired.difference(loaded) {
-        send_chunk(s, world, cx, cz)?;
+    let pending: Vec<_> = desired
+        .difference(loaded)
+        .map(|&(cx, cz)| queue_chunk(world, cx, cz))
+        .collect::<io::Result<_>>()?;
+    for chunk in pending {
+        send(s, 0x21, &chunk.finish()?)?;
     }
     *loaded = desired;
     Ok(())
