@@ -496,6 +496,10 @@ impl World {
         for pos in supported {
             self.pending_support.remove(&pos);
         }
+        let expired: Vec<_> = self.pending_buttons.iter()
+            .filter(|&(_,when)| self.fluid_phase >= *when)
+            .map(|(&pos,_)| pos).collect();
+        for pos in expired { self.pending_buttons.remove(&pos); }
         let mut changed = Vec::with_capacity(changes.len());
         for (x, y, z) in changes.keys().copied() {
             changed.push((x, i32::from(y), z));
