@@ -352,7 +352,7 @@ impl IdleGravity {
         self.last_step_tick = tick;
         let mut next = *current;
         for _ in 0..steps {
-            if supported(world, &next) {
+            if supported(world, &next) || on_ladder(world, &next) {
                 self.vertical_velocity = 0.0;
                 break;
             }
