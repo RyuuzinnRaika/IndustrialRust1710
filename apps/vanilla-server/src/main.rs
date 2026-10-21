@@ -943,13 +943,31 @@ fn play(
                         if remaining.consume_held() {
                             let mut after = *vitals;
                             if after.eat(stack) {
-                                // Debit inventory before player-NBT food credit.
-                                remaining.save(inventory_path)?;
-                                player.save_state(player_path, after)?;
-                                *inventory = remaining;
-                                *vitals = after;
-                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                                send(s, 0x06, &health_packet(*vitals))?;
+                                // Mushroom stew is a nonstackable bowl meal in
+                                // Java 1.7.10. Reserve the returned bowl in the
+                                // same staged inventory BEFORE persisting the
+                                // debit, otherwise a full bag could erase it.
+                                let container_returned = stack.id != 282
+                                    || remaining
+                                        .receive_stack(Stack {
+                                            id: 281,
+                                            count: 1,
+                                            damage: 0,
+                                        })
+                                        .is_some();
+                                if container_returned {
+                                    // Debit inventory before player-NBT food credit.
+                                    remaining.save(inventory_path)?;
+                                    player.save_state(player_path, after)?;
+                                    *inventory = remaining;
+                                    *vitals = after;
+                                    if stack.id == 282 {
+                                        send(s, 0x30, &inventory.window_items())?;
+                                    } else {
+                                        send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                    }
+                                    send(s, 0x06, &health_packet(*vitals))?;
+                                }
                             }
                         }
                     }
