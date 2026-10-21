@@ -7,11 +7,13 @@ mod chests;
 mod clock;
 mod crafting;
 mod environment;
+mod experience;
 mod furnaces;
 mod ground_items;
 mod inventory;
 mod mobs;
 mod multiplayer;
+mod navigation;
 mod physics;
 mod player;
 mod survival;
@@ -22,6 +24,7 @@ mod world;
 
 use chests::{Chests, Position as ChestPosition};
 use environment::Ambient;
+use experience::{Experience,Orbs};
 use clock::Clock;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
@@ -368,6 +371,9 @@ struct PlayerSession<'a> {
     save_path: &'a Path,
     inventory: &'a mut Inventory,
     inventory_path: &'a Path,
+    experience: &'a mut Experience,
+    xp_path: &'a Path,
+    orbs: &'a Mutex<Orbs>,
     ground_items: &'a Mutex<GroundItems>,
     ground_path: &'a Path,
     mobs: &'a Mutex<Mobs>,
@@ -395,6 +401,9 @@ fn play(
         save_path: player_path,
         inventory,
         inventory_path,
+        experience,
+        xp_path,
+        orbs,
         ground_items,
         ground_path,
         mobs,
@@ -1476,6 +1485,7 @@ struct ServerContext {
     ground_items: Arc<Mutex<GroundItems>>,
     ground_path: Arc<PathBuf>,
     mobs: Arc<Mutex<Mobs>>,
+    orbs: Arc<Mutex<Orbs>>,
     chests: Arc<Mutex<Chests>>,
     chest_path: Arc<PathBuf>,
     furnaces: Arc<Mutex<Furnaces>>,
@@ -1492,6 +1502,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         ground_items,
         ground_path,
         mobs,
+        orbs,
         chests,
         chest_path,
         furnaces,
@@ -1547,6 +1558,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         return Ok(());
     }
     let player_file = PlayerPosition::location(&path, &name);
+    let xp_file = Experience::location(&player_file);
+    let mut experience = Experience::load(&xp_file)?;
     let (mut player_state, mut player_vitals) = match PlayerPosition::load_state(&player_file) {
         Ok(state) => state,
         Err(err) => {
@@ -1641,6 +1654,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             send(&mut s, mob.id, &mob.body)?;
         }
     }
+    let packet = experience.packet();
+    send(&mut s, packet.id, &packet.body)?;
     let result = play(
         &mut s,
         &world,
@@ -1654,6 +1669,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             save_path: &player_file,
             inventory: &mut inventory_state,
             inventory_path: &inventory_file,
+            experience: &mut experience,
+            xp_path: &xp_file,
+            orbs: &orbs,
             ground_items: &ground_items,
             ground_path: &ground_path,
             mobs: &mobs,
@@ -1807,6 +1825,7 @@ fn main() -> io::Result<()> {
         World::new()
     };
     let world = Arc::new(Mutex::new(loaded_world));
+    let orbs = Arc::new(Mutex::new(Orbs::default()));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
         Mobs::new(&guard, survival)
@@ -1946,6 +1965,7 @@ fn main() -> io::Result<()> {
         let drops = Arc::clone(&ground_items);
         let drops_path = Arc::clone(&ground_path);
         let mob_state = Arc::clone(&mobs);
+        let xp_orbs = Arc::clone(&orbs);
         let storage = Arc::clone(&chests);
         let storage_path = Arc::clone(&chest_path);
         let machine_storage = Arc::clone(&furnaces);
@@ -1963,6 +1983,7 @@ fn main() -> io::Result<()> {
                     ground_items: drops,
                     ground_path: drops_path,
                     mobs: mob_state,
+                    orbs: xp_orbs,
                     chests: storage,
                     chest_path: storage_path,
                     furnaces: machine_storage,
