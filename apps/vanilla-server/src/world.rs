@@ -218,6 +218,17 @@ impl World {
             _ => None,
         }
     }
+    /// Returns deterministic starting stacks only for an untouched IRW4 dungeon chest.
+    pub fn generated_dungeon_loot(&self, x: i32, y: i32, z: i32) -> Option<[(i16, u8); 3]> {
+        match self.generation {
+            Generation::Expanded(seed, crate::dimensions::Dimension::Overworld)
+                if self.get(x, y, z) >> 4 == 54 =>
+            {
+                crate::worldgen::dungeon_loot(seed, x, y, z)
+            }
+            _ => None,
+        }
+    }
     pub fn with_biomes(seed: u64) -> Self {
         Self {
             generation: Generation::Biomes(seed),
