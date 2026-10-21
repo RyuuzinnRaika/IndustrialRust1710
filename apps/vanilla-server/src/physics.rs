@@ -388,6 +388,11 @@ impl FallTracker {
             falling: 0.0,
         }
     }
+    /// Entering water, lava or climbing cancels accumulated fall distance.
+    pub fn reset(&mut self, y: f64) {
+        self.last_y = y;
+        self.falling = 0.0;
+    }
     /// Return Minecraft-style integer health damage on an authenticated landing.
     pub fn update(&mut self, y: f64, on_solid_ground: bool) -> u8 {
         if y + EPS < self.last_y {
@@ -471,6 +476,15 @@ mod tests {
         assert!(gravity.advance(&world, &start, 14).is_some());
     }
 
+    #[test]
+    fn liquid_and_ladder_reset_accumulated_fall_distance() {
+        let mut fall = FallTracker::new(90.0);
+        assert_eq!(fall.update(70.0, false), 0);
+        fall.reset(65.0);
+        assert_eq!(fall.update(64.0, true), 0);
+        let mut untouched = FallTracker::new(90.0);
+        assert_eq!(untouched.update(64.0, true), 20);
+    }
     #[test]
     fn fall_damage_is_based_on_height_and_cannot_be_reset_in_midair() {
         let mut tracker = FallTracker::new(72.0);
