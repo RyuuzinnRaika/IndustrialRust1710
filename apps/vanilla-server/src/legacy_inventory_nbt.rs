@@ -148,6 +148,16 @@ impl TileEntity {
         {
             return Err(invalid("invalid 1.7.10 tile entity identity or position"));
         }
+        // Vanilla 1.7.10 container slots have fixed bounds. Unknown/modded
+        // tile IDs remain readable without inventing a capacity for them.
+        let known_capacity = match self.id.as_str() {
+            "Chest" => Some(27),
+            "Trap" | "Dispenser" | "Dropper" => Some(9),
+            "Furnace" => Some(3),
+            "Hopper" => Some(5),
+            "BrewingStand" => Some(4),
+            _ => None,
+        };
         if let Some(items) = &self.items {
             if items.len() > 256 {
                 return Err(invalid("tile entity contains too many inventory slots"));
@@ -155,6 +165,11 @@ impl TileEntity {
             let mut slots = std::collections::BTreeSet::new();
             for item in items {
                 item.validate()?;
+                if let Some(max) = known_capacity {
+                    if item.slot < 0 || item.slot as usize >= max {
+                        return Err(invalid("tile entity inventory slot out of range"));
+                    }
+                }
                 if !slots.insert(item.slot) {
                     return Err(invalid("duplicate tile entity inventory slot"));
                 }
@@ -164,17 +179,28 @@ impl TileEntity {
     }
 }
 
-/// Validate every tile without discarding the original Value tree.
-pub(crate) fn validate_tiles(tiles: &[Value]) -> io::Result<()> {
+/// Validate every tile without discarding the original Value tree. When the
+/// enclosing chunk is known, reject displaced or duplicate tile positions so
+/// that a later read/write migration cannot silently attach contents elsewhere.
+pub(crate) fn validate_tiles(tiles: &[Value], chunk: Option<(i32, i32)>) -> io::Result<()> {
     if tiles.len() > MAX_TILES_PER_CHUNK {
         return Err(invalid("too many tile entities in a chunk"));
     }
+    let mut positions = std::collections::BTreeSet::new();
     for original in tiles {
         let bytes =
             fastnbt::to_bytes(original).map_err(|_| invalid("non-compound tile entity NBT"))?;
         let tile: TileEntity =
             fastnbt::from_bytes(&bytes).map_err(|_| invalid("invalid tile entity compound"))?;
         tile.validate()?;
+        if !positions.insert((tile.x, tile.y, tile.z)) {
+            return Err(invalid("duplicate tile entity position"));
+        }
+        if let Some((cx, cz)) = chunk {
+            if tile.x.div_euclid(16) != cx || tile.z.div_euclid(16) != cz {
+                return Err(invalid("tile entity is outside its owning chunk"));
+            }
+        }
     }
     Ok(())
 }
@@ -279,6 +305,37 @@ mod tests {
         assert_eq!(t.items.as_ref().unwrap()[0].id, 264);
         assert!(matches!(t.extra.get("CustomName"), Some(Value::String(s)) if s == "Treasure"));
         let value: Value = fastnbt::from_bytes(&bytes).unwrap();
-        validate_tiles(&[value]).unwrap();
+        validate_tiles(&[value], None).unwrap();
+    }
+
+
+    #[test]
+    fn tile_position_and_vanilla_container_slot_bounds() {
+        fn tile(id: &str, x: i32, z: i32, slot: i8) -> Value {
+            let record = TileEntity {
+                id: id.to_string(),
+                x,
+                y: 65,
+                z,
+                items: Some(vec![item(slot)]),
+                extra: BTreeMap::new(),
+            };
+            fastnbt::from_bytes(&fastnbt::to_bytes(&record).unwrap()).unwrap()
+        }
+
+        // Negative block coordinates must use Euclidean chunk division.
+        assert!(validate_tiles(&[tile("Chest", -1, -16, 26)], Some((-1, -1))).is_ok());
+        assert!(validate_tiles(&[tile("Chest", -1, -16, 27)], Some((-1, -1))).is_err());
+        assert!(validate_tiles(&[tile("Hopper", 0, 0, 4)], Some((0, 0))).is_ok());
+        assert!(validate_tiles(&[tile("Hopper", 0, 0, 5)], Some((0, 0))).is_err());
+        assert!(validate_tiles(&[tile("Furnace", 0, 0, 3)], Some((0, 0))).is_err());
+        assert!(validate_tiles(&[tile("BrewingStand", 0, 0, -1)], Some((0, 0))).is_err());
+        assert!(validate_tiles(&[tile("Dropper", 0, 0, 8)], Some((0, 0))).is_ok());
+        // Unknown tiles are preserved, not assigned an assumed vanilla capacity.
+        assert!(validate_tiles(&[tile("ModdedContainer", 0, 0, 100)], Some((0, 0))).is_ok());
+        assert!(validate_tiles(&[tile("Chest", 16, 0, 0)], Some((0, 0))).is_err());
+        assert!(validate_tiles(&[tile("Chest", -1, -16, 0)], Some((0, 0))).is_err());
+        let duplicate = tile("Chest", 0, 0, 0);
+        assert!(validate_tiles(&[duplicate.clone(), duplicate], Some((0, 0))).is_err());
     }
 }
