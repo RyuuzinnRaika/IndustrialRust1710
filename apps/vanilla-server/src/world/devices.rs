@@ -23,6 +23,16 @@ fn facing(meta: u16) -> (i32, i32, i32) {
         _ => (1, 0, 0),
     }
 }
+/// 1.7.10 repeater metadata 0=N, 1=E, 2=S, 3=W.
+fn repeater_direction(meta: u16) -> (i32, i32) {
+    match meta & 3 {
+        0 => (0, -1),
+        1 => (1, 0),
+        2 => (0, 1),
+        _ => (-1, 0),
+    }
+}
+
 fn movable(block: u16) -> bool {
     !matches!(
         block >> 4,
@@ -50,20 +60,44 @@ fn movable(block: u16) -> bool {
     )
 }
 impl World {
-    fn power_at(&self, x: i32, y: i32, z: i32) -> bool {
-        let value = self.get(x, y, z);
-        match value >> 4 {
-            55 => value & 15 > 0,
-            69 | 77 | 143 => value & 8 != 0,
-            70 | 72 => value & 1 != 0,
-            76 | 94 | 152 => true,
+    /// Whether a source powers a specific neighboring destination.
+    /// Powered repeaters only output toward their face, never into their
+    /// own input or perpendicular dust/pistons.
+    pub(super) fn power_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> bool {
+        let (x, y, z) = from;
+        let block = self.get(x, y, z);
+        match block >> 4 {
+            55 => block & 15 > 0,
+            69 | 77 | 143 => block & 8 != 0,
+            70 | 72 => block & 1 != 0,
+            76 | 152 => true,
+            94 => {
+                let (dx, dz) = repeater_direction(block);
+                to == (x + dx, y, z + dz)
+            }
             _ => false,
         }
     }
+
     fn powered_near(&self, x: i32, y: i32, z: i32) -> bool {
         NEIGHBORS
             .iter()
-            .any(|&(dx, dy, dz)| self.power_at(x + dx, y + dy, z + dz))
+            .any(|&(dx, dy, dz)| self.power_into((x + dx, y + dy, z + dz), (x, y, z)))
+    }
+
+    /// An actively powered repeater facing perpendicular into either side
+    /// locks the target's output state until the side source turns off.
+    fn repeater_locked(&self, x: i32, y: i32, z: i32, meta: u16) -> bool {
+        let (dx, dz) = repeater_direction(meta);
+        for (sx, sz) in [(-dz, dx), (dz, -dx)] {
+            let source = (x + sx, y, z + sz);
+            if self.get(source.0, source.1, source.2) >> 4 == 94
+                && self.power_into(source, (x, y, z))
+            {
+                return true;
+            }
+        }
+        false
     }
     fn push_piston(
         &self,
@@ -89,14 +123,14 @@ impl World {
             let mut occupied = Vec::new();
             let mut target = head;
             loop {
-                if !in_bounds(target.0, target.1, target.2) || occupied.len() >= 12 {
+                if !in_bounds(target.0, target.1, target.2) {
                     return;
                 }
                 let found = self.get(target.0, target.1, target.2);
                 if found == 0 {
                     break;
                 }
-                if !movable(found) {
+                if occupied.len() >= 12 || !movable(found) {
                     return;
                 }
                 occupied.push((target, found));
@@ -159,15 +193,14 @@ impl World {
             let current = self.get(x, y, z);
             match current >> 4 {
                 93 | 94 => {
-                    let direction = match current & 3 {
-                        0 => (0, 0, -1),
-                        1 => (1, 0, 0),
-                        2 => (0, 0, 1),
-                        _ => (-1, 0, 0),
-                    };
-                    let desired = self.power_at(x - direction.0, y, z - direction.2);
-                    let active = current >> 4 == 94;
+                    let (dx, dz) = repeater_direction(current);
                     let pos = (x, y as u8, z);
+                    if self.repeater_locked(x, y, z, current) {
+                        self.pending_repeaters.remove(&pos);
+                        continue;
+                    }
+                    let desired = self.power_into((x - dx, y, z - dz), (x, y, z));
+                    let active = current >> 4 == 94;
                     if desired == active {
                         self.pending_repeaters.remove(&pos);
                     } else {
@@ -305,5 +338,84 @@ impl World {
             return Ok(false);
         }
         self.update_and_save(path, x, y, z, block | 1)
+    }
+}
+
+#[cfg(test)]
+mod redstone_regression_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn powered_repeater_only_outputs_in_its_facing_direction() {
+        let mut w = World::new();
+        w.import_block(0, 64, 0, (94 << 4) | 1).unwrap();
+        assert!(w.power_into((0, 64, 0), (1, 64, 0)));
+        for target in [(-1, 64, 0), (0, 64, -1), (0, 64, 1), (0, 65, 0)] {
+            assert!(!w.power_into((0, 64, 0), target));
+        }
+        assert!(w.powered_near(1, 64, 0));
+        assert!(!w.powered_near(-1, 64, 0));
+        assert!(!w.powered_near(0, 64, 1));
+    }
+
+    #[test]
+    fn repeater_locks_when_a_powered_side_repeater_points_into_it() {
+        let mut w = World::new();
+        w.import_block(0, 64, 0, (93 << 4) | 1).unwrap();
+        w.import_block(0, 64, 1, 94 << 4).unwrap(); // north-facing side lock
+        assert!(w.repeater_locked(0, 64, 0, 1));
+        w.import_block(0, 64, 1, 93 << 4).unwrap();
+        assert!(!w.repeater_locked(0, 64, 0, 1));
+        w.import_block(0, 64, 1, (94 << 4) | 2).unwrap();
+        assert!(!w.repeater_locked(0, 64, 0, 1));
+    }
+
+    #[test]
+    fn repeater_has_two_tick_minimum_delay_and_blocks_side_output() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-redstone-facing-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
+        w.update_and_save(&path, 0, 64, 0, (93 << 4) | 1).unwrap();
+        w.update_and_save(&path, 1, 64, 0, 55 << 4).unwrap();
+        w.update_and_save(&path, 0, 64, 1, 55 << 4).unwrap();
+        w.block_tick(&path, 64).unwrap();
+        w.block_tick(&path, 64).unwrap();
+        assert_eq!(w.get(0, 64, 0) >> 4, 93);
+        assert_eq!(w.get(1, 64, 0) & 15, 0);
+        w.block_tick(&path, 64).unwrap();
+        assert_eq!(w.get(0, 64, 0) >> 4, 94);
+        w.block_tick(&path, 64).unwrap();
+        assert_eq!(w.get(1, 64, 0) & 15, 15);
+        assert_eq!(w.get(0, 64, 1) & 15, 0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn piston_pushes_exactly_twelve_not_thirteen_solid_blocks() {
+        for number in [12, 13] {
+            let path = std::env::temp_dir().join(format!(
+                "ir1710-piston-cap-{}-{number}.irw",
+                std::process::id()
+            ));
+            let _ = fs::remove_file(&path);
+            let mut w = World::new();
+            w.update_and_save(&path, -2, 64, 0, (69 << 4) | 8).unwrap();
+            w.update_and_save(&path, -1, 64, 0, (33 << 4) | 5).unwrap();
+            for x in 0..number {
+                w.update_and_save(&path, x, 64, 0, 1 << 4).unwrap();
+            }
+            w.block_tick(&path, 64).unwrap();
+            if number == 12 {
+                assert_eq!(w.get(-1, 64, 0), (33 << 4) | 13);
+                assert_eq!(w.get(12, 64, 0), 1 << 4);
+            } else {
+                assert_eq!(w.get(-1, 64, 0), (33 << 4) | 5);
+                assert_eq!(w.get(13, 64, 0), 0);
+            }
+            fs::remove_file(path).unwrap();
+        }
     }
 }
