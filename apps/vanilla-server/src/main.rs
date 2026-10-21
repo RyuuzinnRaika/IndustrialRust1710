@@ -939,7 +939,10 @@ fn play(
                                                 .lock()
                                                 .map_err(|_| bad("furnace lock poisoned"))?
                                                 .get(target)
-                                                .occupied());
+                                                .occupied())
+                                        || (block == 154 && hoppers.lock()
+                                            .map_err(|_| bad("hopper lock poisoned"))?
+                                            .has_contents(target));
                                     if !occupied {
                                         let mut ground = ground_items.lock().map_err(|_| {
                                             io::Error::other("ground items lock poisoned")
@@ -1028,7 +1031,10 @@ fn play(
                                         .lock()
                                         .map_err(|_| bad("furnace lock poisoned"))?
                                         .get((x, y, z))
-                                        .occupied());
+                                        .occupied())
+                                || (block == 154 && hoppers.lock()
+                                    .map_err(|_| bad("hopper lock poisoned"))?
+                                    .has_contents((x,y,z)));
                             if occupied {
                                 false
                             } else {
@@ -1387,6 +1393,10 @@ fn play(
                                         nz,
                                         (block_id << 4) | (stack.damage as u16 & 15),
                                     )?;
+                                }
+                                if changed && block_id == 154 {
+                                    hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?
+                                        .register(hopper_path,(nx,ny,nz))?;
                                 }
                             }
                         }
@@ -2211,6 +2221,41 @@ fn main() -> io::Result<()> {
                             return;
                         }
                     }
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+    // Hopper movement is an independent bounded job on the same 20Hz clock.
+    // Only a single 8-tick transfer cycle is processed after any scheduler stall.
+    let hopper_worker=Arc::clone(&hoppers);
+    let hopper_file=Arc::clone(&hopper_path);
+    let hopper_clock=Arc::clone(&clock);
+    let hopper_world=Arc::clone(&world);
+    let hopper_chests=Arc::clone(&chests);
+    let hopper_chest_file=Arc::clone(&chest_path);
+    let hopper_furnaces=Arc::clone(&furnaces);
+    let hopper_furnace_file=Arc::clone(&furnace_path);
+    let hopper_world_path=Arc::clone(&path);
+    thread::spawn(move || {
+        let mut last_cycle=hopper_clock.ticks()/8;
+        loop {
+            let cycle=hopper_clock.ticks()/8;
+            if cycle>last_cycle {
+                last_cycle=cycle;
+                let tick_result=(|| -> io::Result<()> {
+                    let world=hopper_world.lock().map_err(|_| bad("world lock poisoned"))?;
+                    let mut chests=hopper_chests.lock().map_err(|_| bad("chest lock poisoned"))?;
+                    let mut furnaces=hopper_furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
+                    let mut hoppers=hopper_worker.lock().map_err(|_| bad("hopper lock poisoned"))?;
+                    hoppers.advance(&world,&mut chests,&hopper_chest_file,&mut furnaces,
+                        &hopper_furnace_file,&hopper_file,
+                        &hopper_world_path.with_extension("pending-txn.json"))?;
+                    Ok(())
+                })();
+                if let Err(error)=tick_result {
+                    eprintln!("HOPPER TRANSFER ERROR: {error}; stopping transfers");
+                    break;
                 }
             }
             thread::sleep(Duration::from_millis(10));
