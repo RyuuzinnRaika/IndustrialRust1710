@@ -59,6 +59,27 @@ impl Default for Inventory {
     }
 }
 impl Inventory {
+    /// Armor order in Protocol 5 window 0: helmet, chestplate, leggings, boots.
+    fn armor_for_slot(stack: Stack, index: usize) -> bool {
+        stack.count == 1 && match index {
+            0 => matches!(stack.id, 298 | 302 | 306 | 310 | 314),
+            1 => matches!(stack.id, 299 | 303 | 307 | 311 | 315),
+            2 => matches!(stack.id, 300 | 304 | 308 | 312 | 316),
+            3 => matches!(stack.id, 301 | 305 | 309 | 313 | 317),
+            _ => false,
+        }
+    }
+    /// Total pre-enchantment armor points, capped at 20.
+    pub fn armor_points(&self) -> u8 {
+        self.slots[5..9].iter().flatten().map(|stack| match stack.id {
+            298 => 1, 299 => 3, 300 => 2, 301 => 1,
+            302 => 2, 303 => 5, 304 => 4, 305 => 1,
+            306 => 2, 307 => 6, 308 => 5, 309 => 2,
+            310 => 3, 311 => 8, 312 => 6, 313 => 3,
+            314 => 2, 315 => 5, 316 => 3, 317 => 1,
+            _ => 0,
+        }).sum::<u8>().min(20)
+    }
     pub fn location(player_path: &Path) -> PathBuf {
         player_path.with_extension("inventory.json")
     }
@@ -67,7 +88,9 @@ impl Inventory {
             || self.selected > 8
             || self.slots.len() != SLOT_COUNT
             || self.slots[0].is_some()
-            || self.slots[5..9].iter().any(Option::is_some)
+            || self.slots[5..9].iter().enumerate().any(|(i, equipped)| {
+                equipped.is_some_and(|stack| !Self::armor_for_slot(stack, i))
+            })
             || self
                 .workbench
                 .iter()
@@ -189,9 +212,8 @@ impl Inventory {
     /// Snapshot all droppable player possessions before clearing them.
     /// Does not include the virtual crafting result or empty armor slots.
     pub fn possessions(&self) -> Vec<Stack> {
-        self.slots[1..5]
+        self.slots[1..45]
             .iter()
-            .chain(self.slots[9..45].iter())
             .chain(self.workbench.iter())
             .chain(std::slice::from_ref(&self.cursor))
             .flatten()
@@ -200,10 +222,7 @@ impl Inventory {
     }
     /// Clear only possessions; used after ground-drop capacity is checked.
     pub fn clear_possessions(&mut self) {
-        for slot in &mut self.slots[1..5] {
-            *slot = None;
-        }
-        for slot in &mut self.slots[9..45] {
+        for slot in &mut self.slots[1..45] {
             *slot = None;
         }
         self.workbench.fill(None);
@@ -259,7 +278,7 @@ impl Inventory {
     /// Slot zero is *virtual* (the derived crafting output) and cannot be set.
     fn slot_index(window: u8, slot: i16) -> Option<(bool, usize)> {
         match (window, slot) {
-            (0, 1..=4) => Some((false, slot as usize)),
+            (0, 1..=8) => Some((false, slot as usize)),
             (0, 9..=44) => Some((false, slot as usize)),
             (1..=u8::MAX, 1..=9) => Some((true, (slot - 1) as usize)),
             (1..=u8::MAX, 10..=45) => Some((false, (slot - 1) as usize)),
@@ -359,7 +378,7 @@ impl Inventory {
     /// Execute only bounded, server-owned window transactions.
     ///
     /// Client-provided snapshots are never trusted; unsupported modes,
-    /// unsupported armor slots and outside-drop return false.
+    /// outside-drop and unsupported transaction modes return false.
     pub fn click_window(&mut self, window: u8, slot: i16, button: i8, mode: i8) -> bool {
         if slot == 0 {
             return match (mode, button) {
@@ -413,6 +432,10 @@ impl Inventory {
                     (target, hand, 1) => (hand, target),
                     _ => unreachable!("validated button"),
                 };
+                if window == 0 && (5..=8).contains(&slot) &&
+                    new_slot.is_some_and(|item| !Self::armor_for_slot(item, slot as usize - 5)) {
+                    return false;
+                }
                 self.assign(window, slot, new_slot);
                 self.cursor = new_cursor;
                 true
@@ -463,6 +486,10 @@ impl Inventory {
                 let other = if window == 0 { 36 } else { 37 } + i16::from(button);
                 let old = self.lookup(window, slot);
                 let held = self.lookup(window, other);
+                if window == 0 && (5..=8).contains(&slot) &&
+                    held.is_some_and(|item| !Self::armor_for_slot(item, slot as usize - 5)) {
+                    return false;
+                }
                 self.assign(window, slot, held);
                 self.assign(window, other, old);
                 true
