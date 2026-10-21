@@ -106,6 +106,13 @@ impl Chests {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+    /// Persist a previously validated, fully staged window without exposing
+    /// half-updated storage to other players.
+    pub fn commit_staged(&mut self, path: &Path, candidate: Self) -> io::Result<()> {
+        candidate.save(path)?;
+        *self = candidate;
+        Ok(())
+    }
     pub fn slots(&self, pos: Position) -> [Option<Stack>; CHEST_SLOTS] {
         self.entries
             .get(&key(pos))
