@@ -563,7 +563,12 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     placed.extend_from_slice(&(-1i16).to_be_bytes());
     placed.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &placed)).unwrap();
-    until_packet(&mut client, 0x2f, |b| b == [0, 0, 36, 255, 255]);
+    // Successful placement sends the full server-owned inventory (S30),
+    // because consuming a bucket can also return an empty bucket elsewhere.
+    // The selected hotbar slot 36 must now be empty.
+    until_packet(&mut client, 0x30, |b| {
+        b.len() >= 77 && b[..3] == [0, 0, 45] && b[75..77] == [255, 255]
+    });
     until_packet(&mut client, 0x23, |b| {
         b.len() >= 11 && b[4] == 64 && b[9] == 3
     });
