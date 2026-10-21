@@ -331,6 +331,33 @@ fn sky_exposed(world: &World, p: PlayerPosition) -> bool {
     let z = p.z.floor() as i32;
     ((p.y as i32 + 2)..=255).all(|y| world.get(x, y, z) == 0)
 }
+/// Probe a bounded number of underground cells for a solid cave floor and
+/// two air blocks beneath an opaque ceiling. Reject open-air surface cavities.
+fn cave_spawn_y(world: &World, x: i32, z: i32, surface_y: i32, seed: u64) -> Option<i32> {
+    let highest = surface_y.saturating_sub(4).min(250);
+    if highest < 12 {
+        return None;
+    }
+    let start = 9 + (seed % (highest - 8) as u64) as i32;
+    for offset in 0..16 {
+        let y = start - offset;
+        if y < 6 {
+            break;
+        }
+        let position = PlayerPosition {
+            x: f64::from(x) + 0.5,
+            y: f64::from(y),
+            z: f64::from(z) + 0.5,
+        };
+        if physics::supported(world, &position)
+            && !physics::collides(world, &position)
+            && !sky_exposed(world, position)
+        {
+            return Some(y);
+        }
+    }
+    None
+}
 fn damage_held(held: Option<Stack>) -> i16 {
     match held.map(|s| s.id) {
         Some(268) | Some(283) => 4,
@@ -728,10 +755,21 @@ impl Mobs {
             let radial = 24 + (seed % 25) as i32;
             let x = reference.x.floor() as i32 + if seed & 1 == 0 { radial } else { -radial };
             let z = reference.z.floor() as i32 + (((seed >> 8) % 49) as i32 - 24);
-            let y = if world.is_biome_world() {
+            let surface_y = if world.is_biome_world() {
                 crate::terrain::biome_surface(seed_world, x, z) + 1
             } else {
                 crate::terrain::surface(seed_world, x, z) + 1
+            };
+            // Alternate open-surface and underground attempts. Do not let
+            // the surface scan silently replace a failed cave probe.
+            let y = if index % 2 == 0 {
+                surface_y
+            } else if let Some(y) =
+                cave_spawn_y(world, x, z, surface_y, hash(seed ^ 0x53a9c37d))
+            {
+                y
+            } else {
+                continue;
             };
             let p = PlayerPosition {
                 x: x as f64 + 0.5,
@@ -1452,6 +1490,16 @@ mod tests {
         assert_eq!(mobs.entities.len(),4);
         assert!(mobs.entities.values().all(|m|m.split_size==1));
     }
+    #[test]
+    fn cave_spawn_probe_requires_a_roof_and_valid_floor() {
+        let mut world = World::new();
+        world.import_block(4, 49, 4, 1 << 4).unwrap();
+        let y = cave_spawn_y(&world, 4, 4, 64, 45);
+        assert_eq!(y, Some(50));
+        world.import_block(4, 49, 4, 0).unwrap();
+        assert_ne!(cave_spawn_y(&world, 4, 4, 64, 45), Some(50));
+    }
+
     #[test]
     fn overlapping_players_take_independent_melee_damage_on_same_tick() {
         let mut mobs = Mobs::default();
