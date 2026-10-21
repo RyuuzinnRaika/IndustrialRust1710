@@ -707,6 +707,11 @@ impl Mobs {
                     killed.position.z.floor() as i32,
                 )));
                 events.push(killed.status(3));
+                if let Some(packet) = self.spawn_xp(
+                    killed.position, if killed.kind.passive() { 2 } else { 5 }
+                ) {
+                    events.push(packet);
+                }
             }
             self.pending_drops.extend(eggs);
             for id in dead {
@@ -724,8 +729,55 @@ impl Mobs {
         if self.explosions.len() > 32 {
             self.explosions.truncate(32);
         }
+        self.damage_mobs_from_blasts(world, &mut events);
         events
     }
+
+    /// Apply every pending blast to all surviving entities once. Destroying an
+    /// entity here also emits its death, drops and XP to the shared broadcast.
+    fn damage_mobs_from_blasts(&mut self, world: &World, events: &mut Vec<Event>) {
+        let mut killed = Vec::new();
+        for mob in self.entities.values_mut() {
+            let mut total = 0u8;
+            for explosion in &self.explosions {
+                let dx = mob.position.x - explosion.position.x;
+                let dy = mob.position.y - explosion.position.y;
+                let dz = mob.position.z - explosion.position.z;
+                let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+                if distance >= explosion.radius * 2.0 {
+                    continue;
+                }
+                let exposure = rules::blast_exposure(world, explosion.position, mob.position);
+                total = total.saturating_add(rules::blast_damage(
+                    explosion.radius, distance, exposure
+                ));
+            }
+            if total == 0 {
+                continue;
+            }
+            mob.health -= i16::from(total);
+            events.push(mob.status(2));
+            if mob.health <= 0 {
+                killed.push(*mob);
+            }
+        }
+        for mob in killed {
+            self.entities.remove(&mob.id);
+            self.pending_drops.push((mob.kind.drop(), (
+                mob.position.x.floor() as i32,
+                mob.position.y.floor() as i32,
+                mob.position.z.floor() as i32,
+            )));
+            events.push(mob.status(3));
+            events.push(multiplayer::destroy(mob.id));
+            if let Some(packet) = self.spawn_xp(
+                mob.position, if mob.kind.passive() { 2 } else { 5 }
+            ) {
+                events.push(packet);
+            }
+        }
+    }
+
     fn tick_arrows(
         &mut self,
         world: &World,
@@ -783,6 +835,7 @@ impl Mobs {
             }
             events.push(multiplayer::teleport(arrow.id, &next, 0.0, 0.0));
         }
+        let mut earned_xp = Vec::new();
         for (id, damage) in arrow_hits {
             if let Some(mob) = self.entities.get_mut(&id) {
                 mob.health -= i16::from(damage);
@@ -795,12 +848,18 @@ impl Mobs {
                             mob.position.z.floor() as i32,
                         ),
                     ));
+                    earned_xp.push((mob.position, if mob.kind.passive() { 2 } else { 5 }));
                     events.push(mob.status(3));
                     events.push(multiplayer::destroy(id));
                     self.entities.remove(&id);
                 } else {
                     events.push(mob.status(2));
                 }
+            }
+        }
+        for (position, amount) in earned_xp {
+            if let Some(packet) = self.spawn_xp(position, amount) {
+                events.push(packet);
             }
         }
         for id in removed {
