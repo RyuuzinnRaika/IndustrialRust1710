@@ -548,7 +548,7 @@ fn play(
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
             let updates = creatures.tick_with_day(now_tick, clock.day_time(), &w, &players);
-            let damage = creatures.damage_player(*player, now_tick);
+            let damage = creatures.damage_player(entity_id, *player, now_tick);
             let explosions = creatures.take_explosions();
             let kills = creatures.take_drops();
             drop(creatures);
