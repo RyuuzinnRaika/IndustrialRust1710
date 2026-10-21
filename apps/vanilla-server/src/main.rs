@@ -717,10 +717,12 @@ fn play(
             let players = hub.positions()?;
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+            creatures.set_participants(&participants);
             let updates = creatures.tick(now_tick, &w, &players);
             let explosions = creatures.take_explosions();
             creatures.queue_explosion_hits(&w, &explosions, &participants);
             let hurt = creatures.hurt_player(entity_id, *player, now_tick);
+            let poisoned = creatures.take_player_effect(entity_id);
             let mut drops = creatures.take_drops();
             drop(creatures);
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
@@ -792,6 +794,14 @@ fn play(
                 }
             }
             drop(w);
+            if let Some((kind, duration)) = poisoned {
+                active_effects.retain(|effect| effect.kind != kind);
+                active_effects.push(ActiveEffect {
+                    kind, amplifier: 0, expires_at: now_tick + u64::from(duration),
+                    next_periodic: now_tick + 25,
+                });
+                send(s, 0x1d, &potion_effect_packet(entity_id, kind, 0, duration))?;
+            }
             for update in updates {
                 hub.broadcast(update);
             }
