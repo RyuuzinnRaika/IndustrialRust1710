@@ -220,13 +220,13 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[338, 338, 338]]) {
         return product(339, 3, 0);
     } // paper
-    if matches(&[&[339, 339, 339], &[0, 297, 0], &[0, 0, 0]]) {
+    if shapeless(&[339, 339, 339, 334]) {
         return product(340, 1, 0);
     }
-    if matches(&[&[280, 318, 288]]) {
+    if matches(&[&[318], &[280], &[288]]) {
         return product(262, 4, 0);
     }
-    if matches(&[&[265, 265, 0], &[265, 265, 0]]) {
+    if matches(&[&[265, 265, 265], &[265, 265, 265]]) {
         return product(101, 16, 0);
     }
     if matches(&[&[20, 20, 20], &[20, 20, 20]]) {
@@ -250,13 +250,14 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[-1, -1, -1], &[-1, -1, -1]]) {
         return product(96, 2, 0);
     }
+    if matches(&[&[-1,-1]]) { return product(72,1,0); }
     if matches(&[&[265, 265], &[265, 265], &[265, 265]]) {
         return product(330, 3, 0);
     }
     if matches(&[&[-1, -1], &[-1, -1], &[-1, -1]]) {
         return product(324, 3, 0);
     }
-    if matches(&[&[-1, -1, -1], &[280, 280, 280], &[280, 280, 280]]) {
+    if matches(&[&[-1, -1, -1], &[-1, -1, -1], &[0, 280, 0]]) {
         return product(323, 3, 0);
     }
     if matches(&[&[280, 0, 280], &[280, 280, 280], &[280, 0, 280]]) {
@@ -271,23 +272,20 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[-2, -2, -2], &[-1, -1, -1]]) {
         return product(355, 1, 0);
     }
-    if matches(&[&[0, 265, 0], &[265, 0, 265]]) {
+    if matches(&[&[265, 0, 265], &[0, 265, 0]]) {
         return product(325, 1, 0);
     }
-    if matches(&[&[265, 0, 265], &[265, 265, 265]]) {
-        return product(328, 1, 0);
-    }
-    if matches(&[&[265, 0], &[0, 265]]) {
-        return product(359, 1, 0);
-    }
+
+    if matches(&[&[0, 265], &[265, 0]]) { return product(359, 1, 0); }
     if matches(&[&[331, 331], &[331, 331]]) {
         return product(152, 1, 0);
     }
-    if matches(&[&[263, 263], &[263, 263]]) {
-        return product(173, 1, 0);
-    }
+
     if matches(&[&[296, 296, 296], &[296, 296, 296], &[296, 296, 296]]) {
         return product(170, 1, 0);
+    }
+    if matches(&[&[263,263,263], &[263,263,263], &[263,263,263]]) {
+        return product(173,1,0);
     }
     for (item, block) in [(265, 42), (266, 41), (264, 57), (388, 133)] {
         if matches(&[
@@ -325,7 +323,7 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
             return product(boots, 1, 0);
         }
     }
-    if matches(&[&[280, 287, 0], &[280, 0, 287], &[280, 287, 0]]) {
+    if matches(&[&[0, 280, 287], &[280, 0, 287], &[0, 280, 287]]) {
         return product(261, 1, 0);
     }
     if matches(&[&[265, 331, 265], &[265, 280, 265], &[265, 331, 265]]) {
@@ -337,7 +335,7 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[76, 331, 76], &[1, 1, 1]]) {
         return product(356, 1, 0);
     }
-    if matches(&[&[4, 4], &[4, 4]]) {
+    if matches(&[&[1, 1], &[1, 1]]) {
         return product(98, 4, 0);
     }
     None
