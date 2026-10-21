@@ -504,11 +504,10 @@ impl World {
             if level != 0 {
                 let above = self.get(x, y + 1, z);
                 let above_id = above >> 4;
-                let mut next = if above_id == id || above_id == id + 1 {
-                    ((above & 15) + 1).min(7)
-                } else {
-                    8
-                };
+                let fed_from_above = above_id == id || above_id == id + 1;
+                // Falling fluids use metadata level 8, not level 1. They
+                // remain falling while fed vertically from their source.
+                let mut next = if fed_from_above { 8 } else { 9 };
                 let sides = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)];
                 let mut source_neighbors = 0;
                 for (nx, nz) in sides {
@@ -524,7 +523,7 @@ impl World {
                 if id == 8 && source_neighbors >= 2 && solid_below {
                     next = 0;
                 }
-                if next > 7 {
+                if next > 8 || (next == 8 && !fed_from_above) {
                     changes.insert((x, y as u8, z), 0);
                     continue;
                 }
@@ -533,9 +532,7 @@ impl World {
                     level = next;
                 }
             }
-            if level >= 7 {
-                continue;
-            }
+            // Level 7 cannot spread sideways, but it can still fall.
             let down = (x, y - 1, z);
             // Flow down first. Falling lava contacting water below creates
             // stone at the destination rather than replacing the water.
@@ -550,6 +547,8 @@ impl World {
                 in_bounds(down.0, down.1, down.2) && self.get(down.0, down.1, down.2) == 0;
             let targets: Vec<(i32, i32, i32)> = if falling {
                 vec![down]
+            } else if level == 7 {
+                Vec::new()
             } else {
                 vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
             };
@@ -558,12 +557,13 @@ impl World {
                     continue;
                 }
                 let existing = self.get(nx, ny, nz);
-                let desired = (id << 4) | (level + 1);
-                if existing == 0 || (existing >> 4 == id && existing & 15 > level + 1) {
+                let next_level = if falling { 8 } else { (level & 7) + 1 };
+                let desired = (id << 4) | next_level;
+                if existing == 0 || (existing >> 4 == id && existing & 15 > next_level) {
                     let target = (nx, ny as u8, nz);
                     if changes
                         .get(&target)
-                        .is_none_or(|&v| v == 0 || (v >> 4 == id && v & 15 > level + 1))
+                        .is_none_or(|&v| v == 0 || (v >> 4 == id && v & 15 > next_level))
                     {
                         changes.insert(target, desired);
                     }
