@@ -329,12 +329,18 @@ fn sync_chunks(
     for &(cx, cz) in loaded.difference(&desired) {
         unload_chunk(s, cx, cz)?;
     }
-    let pending: Vec<_> = desired
-        .difference(loaded)
-        .map(|&(cx, cz)| queue_chunk(world, cx, cz))
-        .collect::<io::Result<_>>()?;
-    for chunk in pending {
-        send(s, 0x21, &chunk.finish()?)?;
+    // Per-session in-flight snapshots stay bounded even when view changes.
+    // Queue saturation is explicit rather than blocking the packet sender.
+    const IN_FLIGHT: usize = 8;
+    let additions: Vec<_> = desired.difference(loaded).copied().collect();
+    for batch in additions.chunks(IN_FLIGHT) {
+        let pending: Vec<_> = batch
+            .iter()
+            .map(|&(cx, cz)| queue_chunk(world, cx, cz))
+            .collect::<io::Result<_>>()?;
+        for chunk in pending {
+            send(s, 0x21, &chunk.finish()?)?;
+        }
     }
     *loaded = desired;
     Ok(())
@@ -674,9 +680,7 @@ fn play(
                         )?;
                         *ground = staged_ground;
                         *inventory = candidate;
-                        for packet in collected.collected(entity_id) {
-                            hub.broadcast(packet);
-                        }
+                        hub.forget_ground_item(collected.id, Some(entity_id));
                         for slot in slots {
                             send(s, 0x2f, &inventory.set_slot(slot)?)?;
                         }
@@ -774,9 +778,7 @@ fn play(
                         break;
                     }
                     let item = ground.put(ground_path, stack, at)?;
-                    for event in item.spawn() {
-                        hub.broadcast(event);
-                    }
+                    hub.register_ground_item(&item);
                 }
             }
             if damage > 0.0 {
@@ -1037,9 +1039,7 @@ fn play(
                                 .map_err(|_| bad("ground items mutex poisoned"))?;
                             if !ground.is_full() {
                                 let dropped = ground.put(ground_path, stack, at)?;
-                                for packet in dropped.spawn() {
-                                    hub.broadcast(packet);
-                                }
+                                hub.register_ground_item(&dropped);
                             }
                         }
                         for event in hit.events {
@@ -1252,9 +1252,7 @@ fn play(
                                     *inventory = candidate;
                                     let item = ground.put(ground_path, stack, target)?;
                                     send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                                    for packet in item.spawn() {
-                                        hub.broadcast(packet);
-                                    }
+                                    hub.register_ground_item(&item);
                                 } else {
                                     send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
                                 }
@@ -1348,9 +1346,7 @@ fn play(
                                                             stack,
                                                             target,
                                                         )?;
-                                                        for packet in item.spawn() {
-                                                            hub.broadcast(packet);
-                                                        }
+                                                        hub.register_ground_item(&item);
                                                     }
                                                     if let Some(stack) = bonus {
                                                         if !ground.is_full() {
@@ -1359,9 +1355,7 @@ fn play(
                                                                 stack,
                                                                 target,
                                                             )?;
-                                                            for packet in item.spawn() {
-                                                                hub.broadcast(packet);
-                                                            }
+                                                            hub.register_ground_item(&item);
                                                         }
                                                     }
                                                     changed = true;
@@ -2406,9 +2400,7 @@ fn commit_death_drops(
     *inventory = empty;
     *ground = staged_ground;
     for item in spawned {
-        for packet in item.spawn() {
-            hub.broadcast(packet);
-        }
+        hub.register_ground_item(&item);
     }
     Ok(())
 }
@@ -2600,15 +2592,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     // Send existing persisted items to newly joining clients. They are
     // independent of the player's chunk updates in this bounded prototype.
     if survival {
-        let ground = ground_items
-            .lock()
-            .map_err(|_| io::Error::other("ground items lock poisoned"))?;
-        for item in ground.items() {
-            for packet in item.spawn() {
-                send(&mut s, packet.id, &packet.body)?;
-            }
-        }
-        drop(ground);
+        // Hub::add queued only visible persisted items for this player.
         for mob in mobs
             .lock()
             .map_err(|_| bad("mob mutex poisoned"))?
@@ -2847,6 +2831,15 @@ fn main() -> io::Result<()> {
     );
     println!("WARNING: offline-mode has no account authentication. Do not expose to the internet.");
     let hub = Arc::new(Hub::default());
+    // Reconstruct the entity interest index before admitting new players.
+    {
+        let stored = ground_items
+            .lock()
+            .map_err(|_| bad("ground items mutex poisoned"))?;
+        for item in stored.items() {
+            hub.register_ground_item(item);
+        }
+    }
     let connections = Arc::new(AtomicUsize::new(0));
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
@@ -2975,9 +2968,7 @@ fn main() -> io::Result<()> {
                                     }
                                     match ground.put(&leaf_drops_file, fallen.stack, fallen.pos) {
                                         Ok(item) => {
-                                            for packet in item.spawn() {
-                                                furnace_hub.broadcast(packet);
-                                            }
+                                            furnace_hub.register_ground_item(&item);
                                         }
                                         Err(error) => {
                                             eprintln!("LEAF DROP STORAGE ERROR: {error}");

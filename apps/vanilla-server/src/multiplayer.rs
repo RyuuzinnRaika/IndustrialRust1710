@@ -1,6 +1,7 @@
 //! Small bounded multiplayer state for Minecraft Java 1.7.10 / Protocol 5.
 //! Wire packet structure is independently encoded from the public 1.7 protocol.
 //! No Pumpkin code is copied or linked.
+use crate::ground_items::GroundItem;
 use crate::player::PlayerPosition;
 use crate::world::VIEW_DISTANCE;
 use legacy_protocol::{write_string, write_varint};
@@ -30,6 +31,7 @@ pub struct Peer {
 struct Inner {
     next_id: i32,
     players: BTreeMap<i32, Peer>,
+    ground_items: BTreeMap<i32, GroundItem>,
 }
 #[derive(Default)]
 pub struct Hub(Mutex<Inner>);
@@ -188,6 +190,15 @@ impl Hub {
                 enqueue(other, &entity);
             }
         }
+        // Queue initial dropped-item spawns after the protocol login has been
+        // admitted; only chunks visible to the joining player are included.
+        for item in inner.ground_items.values() {
+            if visible(&peer.position, &item.world_position()) {
+                for event in item.spawn() {
+                    enqueue(&peer, &event);
+                }
+            }
+        }
         inner.players.insert(id, peer);
         Ok((id, rx, existing))
     }
@@ -247,6 +258,53 @@ impl Hub {
                         _ => {}
                     }
                 }
+                // Server-owned items are spawned/destroyed on view transitions.
+                for item in inner.ground_items.values() {
+                    match (
+                        visible(&old_position, &item.world_position()),
+                        visible(&position, &item.world_position()),
+                    ) {
+                        (false, true) => {
+                            for event in item.spawn() {
+                                enqueue(&moved, &event);
+                            }
+                        }
+                        (true, false) => enqueue(&moved, &destroy(item.id)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    /// Called after a dropped item is durably stored on disk.
+    pub fn register_ground_item(&self, item: &GroundItem) {
+        if let Ok(mut inner) = self.0.lock() {
+            if inner.ground_items.contains_key(&item.id) {
+                return;
+            }
+            inner.ground_items.insert(item.id, item.clone());
+            for peer in inner.players.values() {
+                if visible(&peer.position, &item.world_position()) {
+                    for event in item.spawn() {
+                        enqueue(peer, &event);
+                    }
+                }
+            }
+        }
+    }
+    /// Remove an item only after durable pickup; never send distant clients
+    /// packets for an entity they were not supposed to have seen.
+    pub fn forget_ground_item(&self, item_id: i32, collector: Option<i32>) {
+        if let Ok(mut inner) = self.0.lock() {
+            if let Some(item) = inner.ground_items.remove(&item_id) {
+                for peer in inner.players.values() {
+                    if visible(&peer.position, &item.world_position()) {
+                        if let Some(player_id) = collector {
+                            enqueue(peer, &item.collected(player_id)[0]);
+                        }
+                        enqueue(peer, &destroy(item_id));
+                    }
+                }
             }
         }
     }
@@ -304,6 +362,46 @@ mod tests {
         assert_eq!(b_rx.try_recv().unwrap().id, 0x13);
         assert_eq!(a_rx.try_recv().unwrap().id, 0x13);
         assert!(b_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ground_items_are_sent_only_in_chunk_view_and_replayed_on_entry() {
+        use crate::inventory::Stack;
+        let hub = Hub::default();
+        let near = PlayerPosition::default();
+        let far = PlayerPosition {
+            x: 160.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let (a, a_rx, _) = hub.add("Near".into(), "near".into(), near).unwrap();
+        let (b, b_rx, _) = hub.add("Far".into(), "far".into(), far).unwrap();
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x38); // global tab-list
+        let item = GroundItem {
+            id: 1_000_000_001,
+            position: [16, 65 * 32, 16],
+            stack: Stack {
+                id: 1,
+                count: 1,
+                damage: 0,
+            },
+        };
+        hub.register_ground_item(&item);
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x0e);
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x1c);
+        assert!(b_rx.try_recv().is_err());
+        hub.move_player(b, near, 0.0, 0.0);
+        assert_eq!(b_rx.try_recv().unwrap().id, 0x0c); // sees A
+        assert_eq!(b_rx.try_recv().unwrap().id, 0x0e); // sees item
+        assert_eq!(b_rx.try_recv().unwrap().id, 0x1c);
+        hub.forget_ground_item(item.id, Some(a));
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x0c); // B appears
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x0d); // collect
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x13); // destroy
+        assert_eq!(b_rx.try_recv().unwrap().id, 0x0d);
+        assert_eq!(b_rx.try_recv().unwrap().id, 0x13);
+        let (_c, c_rx, _) = hub.add("Late".into(), "late".into(), near).unwrap();
+        assert!(c_rx.try_recv().is_err()); // picked-up item never reappears
     }
 
     #[test]

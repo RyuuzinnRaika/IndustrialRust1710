@@ -4,7 +4,7 @@
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::io::{self, Write};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
@@ -82,17 +82,24 @@ pub fn submit(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChun
         ));
     }
     let (tx, rx) = mpsc::sync_channel(1);
-    // Bounded backpressure: never allocate an unbounded work backlog.
-    sender()
-        .send(Job {
-            x,
-            z,
-            mask,
-            raw,
-            reply: tx,
-        })
-        .map_err(|_| io::Error::other("chunk compression queue closed"))?;
-    Ok(PendingChunk(rx))
+    // A full shared queue must never block a player's packet sender.
+    // Failure is explicit so callers cannot silently drop world state.
+    match sender().try_send(Job {
+        x,
+        z,
+        mask,
+        raw,
+        reply: tx,
+    }) {
+        Ok(()) => Ok(PendingChunk(rx)),
+        Err(TrySendError::Full(_)) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "chunk compression queue saturated",
+        )),
+        Err(TrySendError::Disconnected(_)) => {
+            Err(io::Error::other("chunk compression queue closed"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -115,6 +122,20 @@ mod tests {
             .read_to_end(&mut decoded)
             .unwrap();
         assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn zero_capacity_queue_rejects_without_waiting() {
+        let (tx, _rx) = mpsc::sync_channel::<Job>(0);
+        let (reply, _) = mpsc::sync_channel(1);
+        let outcome = tx.try_send(Job {
+            x: 0,
+            z: 0,
+            mask: 0,
+            raw: vec![0; 16],
+            reply,
+        });
+        assert!(matches!(outcome, Err(TrySendError::Full(_))));
     }
 
     #[test]
