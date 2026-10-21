@@ -55,7 +55,8 @@ fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
         || name.ends_with(".furnaces.json")
         || name.ends_with(".hoppers.json")
         || name.ends_with(".brewers.json")
-        || name.ends_with(".drops.json"))
+        || name.ends_with(".drops.json")
+        || name.ends_with(".irw"))
     {
         return Err(invalid("journal target type not allowed"));
     }
@@ -119,6 +120,12 @@ fn apply(journal: &Path, record: &Record) -> io::Result<()> {
             fs::remove_file(&temp)?;
         }
         atomic_write(&destination, &file.contents)?;
+        // A file rename in a nested players/ directory is only crash-durable
+        // after that directory is synced as well. Do not remove the redo
+        // journal while any target parent has an unsynced rename.
+        if let Some(parent) = destination.parent() {
+            sync_directory(parent)?;
+        }
     }
     sync_directory(base)?;
     fs::remove_file(journal)?;
@@ -305,6 +312,55 @@ mod tests {
         assert!(!journal.exists());
         fs::remove_dir_all(home).unwrap();
     }
+    #[test]
+    fn world_inventory_chest_crash_replay_and_parent_fsync() {
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-world-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("players")).unwrap();
+        let world = home.join("flat.irw");
+        let inventory = home.join("players/alex.inventory.json");
+        let chest = home.join("flat.chests.json");
+        let journal = home.join("flat.pending-txn.json");
+        for path in [&world, &inventory, &chest] {
+            fs::write(path, b"old").unwrap();
+        }
+        // Model a power loss after the commit record and first file rename.
+        // The redo log must restore all three targets before normal loading.
+        let contents = [
+            (world.as_path(), b"IRW1-new".as_slice()),
+            (inventory.as_path(), b"inventory-new".as_slice()),
+            (chest.as_path(), b"chest-new".as_slice()),
+        ];
+        let files = contents
+            .iter()
+            .map(|(path, data)| Target {
+                relative: relative(&home, path).unwrap(),
+                contents: data.to_vec(),
+                checksum: fingerprint(data),
+            })
+            .collect();
+        fs::write(
+            &journal,
+            serde_json::to_vec(&Record {
+                version: VERSION,
+                files,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(&world, contents[0].1).unwrap();
+        recover(&journal).unwrap();
+        for (path, data) in contents {
+            assert_eq!(fs::read(path).unwrap(), data);
+        }
+        recover(&journal).unwrap();
+        assert!(!journal.exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn corrupt_journal_fails_closed() {
         let home = std::env::temp_dir().join(format!("ir-journal-corrupt-{}", std::process::id()));
