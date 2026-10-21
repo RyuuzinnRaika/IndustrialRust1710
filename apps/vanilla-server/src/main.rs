@@ -6,6 +6,7 @@ mod anvil_import;
 mod chests;
 mod clock;
 mod crafting;
+mod environment;
 mod furnaces;
 mod ground_items;
 mod inventory;
@@ -20,6 +21,7 @@ mod whitelist;
 mod world;
 
 use chests::{Chests, Position as ChestPosition};
+use environment::Ambient;
 use clock::Clock;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
@@ -408,6 +410,7 @@ fn play(
     s.set_read_timeout(Some(Duration::from_millis(50)))?;
     let mut location = (player.x, player.y, player.z);
     let mut fall = FallTracker::new(player.y);
+    let mut ambient = Ambient::new(clock.ticks());
     let mut idle_gravity = IdleGravity::new(clock.ticks());
     let mut loaded_chunks = view_chunks(chunk_center(player));
     let mut yaw: f32 = 0.0;
@@ -522,7 +525,7 @@ fn play(
                 hub.broadcast(update);
             }
             if hurt {
-                vitals.health = (vitals.health - 2.0).max(0.0);
+                vitals.health = (vitals.health - vitals::armored_damage(2.0, inventory.armor_points())).max(0.0);
                 player.save_state(player_path, *vitals)?;
                 send(s, 0x06, &health_packet(*vitals))?;
             }
@@ -565,6 +568,17 @@ fn play(
                 send(s, 0x06, &health_packet(*vitals))?;
             } else {
                 *vitals = next;
+            }
+        }
+        // Environmental damage is server-owned and capped after stalled ticks.
+        if survival && vitals.health > 0.0 {
+            let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            let damage = ambient.advance(now_tick, &w, player, inventory.armor_points());
+            drop(w);
+            if damage > 0.0 {
+                vitals.health = (vitals.health - damage).max(0.0);
+                player.save_state(player_path, *vitals)?;
+                send(s, 0x06, &health_packet(*vitals))?;
             }
         }
         // A food right-click starts a 32 tick use animation. The server owns
@@ -677,7 +691,7 @@ fn play(
                 let message = input.string(100)?;
                 input.finish()?;
                 if message == "/help" {
-                    as_chat(s, "Commands: /help, /save, /list. Survival supports crafting, inventory, basic collision and fall damage; mobs remain unsupported.")?;
+                    as_chat(s, "Commands: /help, /save, /list. Survival supports inventory, mobs, armor, environmental hazards and AABB collision.")?;
                 } else if message == "/list" {
                     as_chat(
                         s,
@@ -1370,6 +1384,7 @@ fn play(
                     *vitals = fresh_vitals;
                     *player = origin;
                     fall = FallTracker::new(origin.y);
+                    ambient = Ambient::new(now_tick);
                     idle_gravity = IdleGravity::new(now_tick);
                     eating = None;
                     location = (origin.x, origin.y, origin.z);
