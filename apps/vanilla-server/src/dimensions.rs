@@ -299,7 +299,10 @@ mod tests {
         assert_eq!(end.get(x, y + 1, z), 0);
         assert!(safe_arrival(
             &flat,
-            PortalDestination { x: f64::NAN, ..anchor }
+            PortalDestination {
+                x: f64::NAN,
+                ..anchor
+            }
         )
         .is_none());
     }
