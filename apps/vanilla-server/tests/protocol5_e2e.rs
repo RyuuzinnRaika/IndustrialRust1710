@@ -248,7 +248,9 @@ fn until_packet(socket: &mut TcpStream, id: u32, matches: impl Fn(&[u8]) -> bool
         seen += 1;
         if packet_id == 0 && body.len() == 4 {
             // S00 KeepAlive: the same signed 32-bit identifier is returned in C00.
-            socket.write_all(&frame(0, &body)).expect("reply to KeepAlive");
+            socket
+                .write_all(&frame(0, &body))
+                .expect("reply to KeepAlive");
         }
         if packet_id == id && matches(&body) {
             return body;
