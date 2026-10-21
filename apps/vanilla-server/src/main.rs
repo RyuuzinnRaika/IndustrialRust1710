@@ -621,12 +621,18 @@ fn play(
             let grounded = simulated
                 .as_ref()
                 .is_some_and(|candidate| physics::supported(&gravity_world, candidate));
-            let wet = simulated.as_ref().is_some_and(|candidate|
-                physics::in_water(&gravity_world,candidate) ||
-                physics::on_ladder(&gravity_world,candidate));
+            let wet = simulated.as_ref().is_some_and(|candidate| {
+                physics::in_water(&gravity_world, candidate)
+                    || physics::on_ladder(&gravity_world, candidate)
+            });
             drop(gravity_world);
             if let Some(candidate) = simulated {
-                let damage = if wet {fall.reset(candidate.y);0} else {fall.update(candidate.y, grounded)};
+                let damage = if wet {
+                    fall.reset(candidate.y);
+                    0
+                } else {
+                    fall.update(candidate.y, grounded)
+                };
                 let mut next_vitals = *vitals;
                 next_vitals.health = (next_vitals.health - f32::from(damage)).max(0.0);
                 // Save accepted position and HP before sending an update.
@@ -742,7 +748,9 @@ fn play(
                 input.finish()?;
                 if survival && vitals.health > 0.0 && action == 0 {
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
-                    if let Some(event) = creatures.feed(target_id, *player, inventory.held(), now_tick) {
+                    if let Some(event) =
+                        creatures.feed(target_id, *player, inventory.held(), now_tick)
+                    {
                         let mut candidate = inventory.clone();
                         if candidate.consume_held() {
                             candidate.save(inventory_path)?;
@@ -872,10 +880,15 @@ fn play(
                         continue;
                     }
                     let landed = physics::supported(&collision_world, &candidate);
-                    let safe_fall=physics::in_water(&collision_world,&candidate) ||
-                        physics::on_ladder(&collision_world,&candidate);
+                    let safe_fall = physics::in_water(&collision_world, &candidate)
+                        || physics::on_ladder(&collision_world, &candidate);
                     drop(collision_world);
-                    let damage=if safe_fall {fall.reset(y);0} else {fall.update(y,landed)};
+                    let damage = if safe_fall {
+                        fall.reset(y);
+                        0
+                    } else {
+                        fall.update(y, landed)
+                    };
                     if damage != 0 {
                         vitals.health = (vitals.health - f32::from(damage)).max(0.0);
                         player.save_state(player_path, *vitals)?;
@@ -1446,20 +1459,29 @@ fn play(
                     response_items =
                         inventory.furnace_window_items(active_window, &last_furnace_view);
                     // Smelt XP is created only after an actual server-owned output withdrawal.
-                    if accepted && slot==2 && previous.slots[2].is_some() &&
-                        last_furnace_view.slots[2].is_none() {
-                        let output=previous.slots[2].unwrap();
-                        let per_item:u16=match output.id {
-                            265|266|320|364|366|393|336|172|405=>1,
-                            263 if output.damage==1=>1,
-                            _=>0
+                    if accepted
+                        && slot == 2
+                        && previous.slots[2].is_some()
+                        && last_furnace_view.slots[2].is_none()
+                    {
+                        let output = previous.slots[2].unwrap();
+                        let per_item: u16 = match output.id {
+                            265 | 266 | 320 | 364 | 366 | 393 | 336 | 172 | 405 => 1,
+                            263 if output.damage == 1 => 1,
+                            _ => 0,
                         };
-                        let earned=per_item.saturating_mul(u16::from(output.count));
-                        if earned>0 {
-                            let orb_at=PlayerPosition{x:pos.0 as f64+0.5,
-                                y:pos.1 as f64+1.0,z:pos.2 as f64+0.5};
-                            if let Some(orb)=mobs.lock().map_err(|_|bad("mob mutex poisoned"))?
-                                .spawn_xp(orb_at,earned) {
+                        let earned = per_item.saturating_mul(u16::from(output.count));
+                        if earned > 0 {
+                            let orb_at = PlayerPosition {
+                                x: pos.0 as f64 + 0.5,
+                                y: pos.1 as f64 + 1.0,
+                                z: pos.2 as f64 + 0.5,
+                            };
+                            if let Some(orb) = mobs
+                                .lock()
+                                .map_err(|_| bad("mob mutex poisoned"))?
+                                .spawn_xp(orb_at, earned)
+                            {
                                 hub.broadcast(orb);
                             }
                         }

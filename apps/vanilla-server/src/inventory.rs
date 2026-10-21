@@ -937,19 +937,27 @@ impl Inventory {
 mod tests {
     #[test]
     fn armor_equipping_reduces_damage_and_is_included_in_death_drops() {
-        let mut inv=super::Inventory::default();
-        let helm=super::Stack{id:306,count:1,damage:0};
+        let mut inv = super::Inventory::default();
+        let helm = super::Stack {
+            id: 306,
+            count: 1,
+            damage: 0,
+        };
         assert!(inv.receive_stack(helm).is_some());
-        assert!(inv.click_window(0,36,0,0));
-        assert!(inv.click_window(0,5,0,0));
-        assert_eq!(inv.armor_points(),2);
+        assert!(inv.click_window(0, 36, 0, 0));
+        assert!(inv.click_window(0, 5, 0, 0));
+        assert_eq!(inv.armor_points(), 2);
         assert!(inv.possessions().contains(&helm));
-        let stone=super::Stack{id:1,count:1,damage:0};
+        let stone = super::Stack {
+            id: 1,
+            count: 1,
+            damage: 0,
+        };
         assert!(inv.receive_stack(stone).is_some());
-        assert!(inv.click_window(0,36,0,0));
-        assert!(!inv.click_window(0,6,0,0)); // helmet cannot be an arbitrary chest piece
+        assert!(inv.click_window(0, 36, 0, 0));
+        assert!(!inv.click_window(0, 6, 0, 0)); // helmet cannot be an arbitrary chest piece
         inv.clear_possessions();
-        assert_eq!(inv.armor_points(),0);
+        assert_eq!(inv.armor_points(), 0);
         assert!(!inv.possessions().contains(&helm));
     }
 

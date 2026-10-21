@@ -145,7 +145,7 @@ impl Arrow {
         if self.shooter.is_some() {
             for speed in self.velocity {
                 body.extend_from_slice(
-                    &((speed*8000.0).clamp(-32768.0,32767.0) as i16).to_be_bytes()
+                    &((speed * 8000.0).clamp(-32768.0, 32767.0) as i16).to_be_bytes(),
                 );
             }
         }
@@ -370,12 +370,18 @@ impl Mobs {
         Some(result)
     }
     /// Animal breeding consumes feed only if a nearby same-kind partner exists.
-    pub fn feed(&mut self, id: i32, player: PlayerPosition, held: Option<Stack>, tick: u64) -> Option<Event> {
+    pub fn feed(
+        &mut self,
+        id: i32,
+        player: PlayerPosition,
+        held: Option<Stack>,
+        tick: u64,
+    ) -> Option<Event> {
         let first = *self.entities.get(&id)?;
         let food = held?.id;
-        if !first.nearby(player,3.0) ||
-            self.entities.values().filter(|m|m.kind.passive()).count()>=PASSIVE_CAP ||
-            !first.kind.passive()
+        if !first.nearby(player, 3.0)
+            || self.entities.values().filter(|m| m.kind.passive()).count() >= PASSIVE_CAP
+            || !first.kind.passive()
             || first.baby
             || !first.kind.breeding_food(food)
             || (first.breed_tick != 0 && tick.saturating_sub(first.breed_tick) < 600)
@@ -508,14 +514,14 @@ impl Mobs {
             let mut dead = Vec::new();
             for mob in self.entities.values_mut() {
                 if mob.baby {
-                    mob.age_ticks=mob.age_ticks.saturating_add(1);
-                    if mob.age_ticks>=24000 {
-                        mob.baby=false;
-                        let mut body=mob.id.to_be_bytes().to_vec();
-                        body.push((12<<3)|2);
+                    mob.age_ticks = mob.age_ticks.saturating_add(1);
+                    if mob.age_ticks >= 24000 {
+                        mob.baby = false;
+                        let mut body = mob.id.to_be_bytes().to_vec();
+                        body.push((12 << 3) | 2);
                         body.extend_from_slice(&0i32.to_be_bytes());
                         body.push(0x7f);
-                        events.push(Event{id:0x1c,body});
+                        events.push(Event { id: 0x1c, body });
                     }
                 }
                 if !players.is_empty() && distance_to_players(mob.position, players) > 128.0 {
@@ -573,12 +579,15 @@ impl Mobs {
                     continue;
                 }
                 if now.is_multiple_of(20) || mob.waypoint.is_none() {
-                    mob.waypoint=navigation::next_step(world,mob.position,destination,64);
+                    mob.waypoint = navigation::next_step(world, mob.position, destination, 64);
                 }
-                if mob.waypoint.is_some_and(|p|distance(p,mob.position)<0.25) {
-                    mob.waypoint=None;
+                if mob
+                    .waypoint
+                    .is_some_and(|p| distance(p, mob.position) < 0.25)
+                {
+                    mob.waypoint = None;
                 }
-                let waypoint=mob.waypoint.unwrap_or(destination);
+                let waypoint = mob.waypoint.unwrap_or(destination);
                 let dx = waypoint.x - mob.position.x;
                 let dz = waypoint.z - mob.position.z;
                 let len = dx.hypot(dz);
@@ -596,17 +605,26 @@ impl Mobs {
                 {
                     mob.position = candidate;
                     events.push(multiplayer::teleport(mob.id, &candidate, 0.0, 0.0));
-                } else if mob.kind==Kind::Spider {
+                } else if mob.kind == Kind::Spider {
                     // Climb alongside a wall, never through it.
-                    let front=PlayerPosition{x:mob.position.x+dx/len*0.6,
-                        z:mob.position.z+dz/len*0.6,..mob.position};
-                    let wall=world.get(front.x.floor() as i32,front.y.floor() as i32,
-                        front.z.floor() as i32)>>4;
-                    if wall!=0 && !matches!(wall,8..=11) {
-                        let climbed=PlayerPosition{y:mob.position.y+0.2,..mob.position};
-                        if climbed.is_valid() && !physics::collides(world,&climbed) {
-                            mob.position=climbed;
-                            events.push(multiplayer::teleport(mob.id,&climbed,0.0,0.0));
+                    let front = PlayerPosition {
+                        x: mob.position.x + dx / len * 0.6,
+                        z: mob.position.z + dz / len * 0.6,
+                        ..mob.position
+                    };
+                    let wall = world.get(
+                        front.x.floor() as i32,
+                        front.y.floor() as i32,
+                        front.z.floor() as i32,
+                    ) >> 4;
+                    if wall != 0 && !matches!(wall, 8..=11) {
+                        let climbed = PlayerPosition {
+                            y: mob.position.y + 0.2,
+                            ..mob.position
+                        };
+                        if climbed.is_valid() && !physics::collides(world, &climbed) {
+                            mob.position = climbed;
+                            events.push(multiplayer::teleport(mob.id, &climbed, 0.0, 0.0));
                         }
                     }
                 }
@@ -780,13 +798,42 @@ mod tests {
     }
     #[test]
     fn passive_animals_breed_once_per_cooldown() {
-        let mut mobs=Mobs::default();
-        let at=PlayerPosition::default();
-        mobs.insert(Kind::Cow,at,false);
-        mobs.insert(Kind::Cow,PlayerPosition{x:at.x+1.0,..at},false);
-        assert!(mobs.feed(0,at,Some(Stack{id:296,count:1,damage:0}),100).is_some());
-        assert!(mobs.entities.values().any(|m|m.baby));
-        assert!(mobs.feed(1,at,Some(Stack{id:296,count:1,damage:0}),101).is_none());
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition::default();
+        mobs.insert(Kind::Cow, at, false);
+        mobs.insert(
+            Kind::Cow,
+            PlayerPosition {
+                x: at.x + 1.0,
+                ..at
+            },
+            false,
+        );
+        assert!(mobs
+            .feed(
+                0,
+                at,
+                Some(Stack {
+                    id: 296,
+                    count: 1,
+                    damage: 0
+                }),
+                100
+            )
+            .is_some());
+        assert!(mobs.entities.values().any(|m| m.baby));
+        assert!(mobs
+            .feed(
+                1,
+                at,
+                Some(Stack {
+                    id: 296,
+                    count: 1,
+                    damage: 0
+                }),
+                101
+            )
+            .is_none());
     }
     #[test]
     fn flat_world_has_no_mobs_and_bow_shot_is_bounded() {

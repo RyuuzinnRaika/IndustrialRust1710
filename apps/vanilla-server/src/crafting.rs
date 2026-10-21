@@ -94,45 +94,62 @@ pub fn result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     }
     if width == 3 {
         // All equipment patterns use exact shaped layouts in the trimmed grid.
-        if w==1 && h==3 &&
-            same_material(at(0,0),318) && stick(at(0,1)) &&
-            same_material(at(0,2),288) {
-            return product(262,4,0); // flint + stick + feather = four arrows
+        if w == 1
+            && h == 3
+            && same_material(at(0, 0), 318)
+            && stick(at(0, 1))
+            && same_material(at(0, 2), 288)
+        {
+            return product(262, 4, 0); // flint + stick + feather = four arrows
         }
-        if w==3 && h==3 {
+        if w == 3 && h == 3 {
             for mirror in 0..2 {
-                let (outer,inner)=if mirror==0 {(2,1)} else {(0,1)};
-                if stick(at(inner,1)) && stick(at(outer,0)) && stick(at(outer,2)) &&
-                    (0..3).all(|y|same_material(at(if mirror==0 {0}else{2},y),287)) &&
-                    at(inner,0).is_none() && at(inner,2).is_none() {
-                    return product(261,1,0); // bow
+                let (outer, inner) = if mirror == 0 { (2, 1) } else { (0, 1) };
+                if stick(at(inner, 1))
+                    && stick(at(outer, 0))
+                    && stick(at(outer, 2))
+                    && (0..3).all(|y| same_material(at(if mirror == 0 { 0 } else { 2 }, y), 287))
+                    && at(inner, 0).is_none()
+                    && at(inner, 2).is_none()
+                {
+                    return product(261, 1, 0); // bow
                 }
             }
         }
-        for (material,helmet,chest,leggings,boots) in [
-            (334,298,299,300,301), // leather
-            (265,306,307,308,309), // iron
-            (266,314,315,316,317), // gold
-            (264,310,311,312,313), // diamond
+        for (material, helmet, chest, leggings, boots) in [
+            (334, 298, 299, 300, 301), // leather
+            (265, 306, 307, 308, 309), // iron
+            (266, 314, 315, 316, 317), // gold
+            (264, 310, 311, 312, 313), // diamond
         ] {
-            let m=|x,y|same_material(at(x,y),material);
-            let e=|x,y|at(x,y).is_none();
-            if w==3 && h==2 && (0..3).all(|x|m(x,0)) &&
-                m(0,1) && e(1,1) && m(2,1) {
-                return product(helmet,1,0);
+            let m = |x, y| same_material(at(x, y), material);
+            let e = |x, y| at(x, y).is_none();
+            if w == 3 && h == 2 && (0..3).all(|x| m(x, 0)) && m(0, 1) && e(1, 1) && m(2, 1) {
+                return product(helmet, 1, 0);
             }
-            if w==3 && h==3 && m(0,0) && e(1,0) && m(2,0) &&
-                (0..3).all(|x|m(x,1)&&m(x,2)) {
-                return product(chest,1,0);
+            if w == 3
+                && h == 3
+                && m(0, 0)
+                && e(1, 0)
+                && m(2, 0)
+                && (0..3).all(|x| m(x, 1) && m(x, 2))
+            {
+                return product(chest, 1, 0);
             }
-            if w==3 && h==3 && (0..3).all(|x|m(x,0)) &&
-                m(0,1) && e(1,1) && m(2,1) &&
-                m(0,2) && e(1,2) && m(2,2) {
-                return product(leggings,1,0);
+            if w == 3
+                && h == 3
+                && (0..3).all(|x| m(x, 0))
+                && m(0, 1)
+                && e(1, 1)
+                && m(2, 1)
+                && m(0, 2)
+                && e(1, 2)
+                && m(2, 2)
+            {
+                return product(leggings, 1, 0);
             }
-            if w==3 && h==2 && m(0,0)&&e(1,0)&&m(2,0) &&
-                m(0,1)&&e(1,1)&&m(2,1) {
-                return product(boots,1,0);
+            if w == 3 && h == 2 && m(0, 0) && e(1, 0) && m(2, 0) && m(0, 1) && e(1, 1) && m(2, 1) {
+                return product(boots, 1, 0);
             }
         }
     }
@@ -200,27 +217,81 @@ mod tests {
     }
     #[test]
     fn armor_bow_and_arrow_require_exact_legacy_patterns() {
-        assert_eq!(result(&[
-            item(265),item(265),item(265),
-            item(265),None,item(265),
-            None,None,None
-        ],3),product(306,1,0)); // iron helmet
-        assert_eq!(result(&[
-            item(334),None,item(334),
-            item(334),None,item(334),
-            None,None,None
-        ],3),product(301,1,0)); // leather boots
-        assert_eq!(result(&[
-            item(287),None,item(280),
-            item(287),item(280),None,
-            item(287),None,item(280)
-        ],3),product(261,1,0));
-        assert_eq!(result(&[
-            None,item(318),None,
-            None,item(280),None,
-            None,item(288),None
-        ],3),product(262,4,0));
-        assert_eq!(result(&[item(265),None,None,None,None,None,None,None,None],3),None);
+        assert_eq!(
+            result(
+                &[
+                    item(265),
+                    item(265),
+                    item(265),
+                    item(265),
+                    None,
+                    item(265),
+                    None,
+                    None,
+                    None
+                ],
+                3
+            ),
+            product(306, 1, 0)
+        ); // iron helmet
+        assert_eq!(
+            result(
+                &[
+                    item(334),
+                    None,
+                    item(334),
+                    item(334),
+                    None,
+                    item(334),
+                    None,
+                    None,
+                    None
+                ],
+                3
+            ),
+            product(301, 1, 0)
+        ); // leather boots
+        assert_eq!(
+            result(
+                &[
+                    item(287),
+                    None,
+                    item(280),
+                    item(287),
+                    item(280),
+                    None,
+                    item(287),
+                    None,
+                    item(280)
+                ],
+                3
+            ),
+            product(261, 1, 0)
+        );
+        assert_eq!(
+            result(
+                &[
+                    None,
+                    item(318),
+                    None,
+                    None,
+                    item(280),
+                    None,
+                    None,
+                    item(288),
+                    None
+                ],
+                3
+            ),
+            product(262, 4, 0)
+        );
+        assert_eq!(
+            result(
+                &[item(265), None, None, None, None, None, None, None, None],
+                3
+            ),
+            None
+        );
     }
     #[test]
     fn early_game_recipes_are_bounded_and_shape_checked() {
