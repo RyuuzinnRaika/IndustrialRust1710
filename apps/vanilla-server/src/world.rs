@@ -42,6 +42,7 @@ pub struct World {
     // Reconstructed by queued evaluation after loading IRW snapshots.
     comparator_outputs: BTreeMap<Position, u8>,
     pending_comparators: BTreeMap<Position, (u64, u8)>,
+    comparator_ready: BTreeMap<Position, u8>,
     pending_buttons: BTreeMap<Position, u64>,
     pending_drops: Vec<WorldDrop>,
     // Sparse pending client-facing lighting invalidations, not part of IRW files.
@@ -667,6 +668,7 @@ impl World {
                 self.save(path)
             };
             if let Err(error) = saved {
+                self.comparator_ready.clear();
                 for (pos, original) in undo {
                     match original {
                         Some(block) => {
@@ -685,6 +687,17 @@ impl World {
             }
         }
 
+        // Publish analog changes only after the block snapshot committed.
+        // Same-output-state comparator strength changes still wake nearby dust.
+        let ready = std::mem::take(&mut self.comparator_ready);
+        for (pos, strength) in ready {
+            if self.get(pos.0, i32::from(pos.1), pos.2) >> 4 == 150 && strength > 0 {
+                self.comparator_outputs.insert(pos, strength);
+            } else {
+                self.comparator_outputs.remove(&pos);
+            }
+            self.wake_block_updates(pos.0, i32::from(pos.1), pos.2);
+        }
         for pos in wet {
             self.pending_fluid.remove(&pos);
         }
