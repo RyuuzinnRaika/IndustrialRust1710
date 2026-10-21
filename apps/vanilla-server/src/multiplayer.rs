@@ -6,8 +6,8 @@ use crate::world::VIEW_DISTANCE;
 use legacy_protocol::{write_string, write_varint};
 use std::collections::BTreeMap;
 use std::io;
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
 pub const MAX_PLAYERS: usize = 8;
@@ -115,9 +115,16 @@ pub enum JoinError {
 impl Hub {
     /// Healthy sessions have not lost any authoritative outbound packets.
     pub fn is_healthy(&self, id: i32) -> bool {
-        self.0.lock().ok().and_then(|inner| {
-            inner.players.get(&id).map(|peer| !peer.overloaded.load(Ordering::Acquire))
-        }).unwrap_or(false)
+        self.0
+            .lock()
+            .ok()
+            .and_then(|inner| {
+                inner
+                    .players
+                    .get(&id)
+                    .map(|peer| !peer.overloaded.load(Ordering::Acquire))
+            })
+            .unwrap_or(false)
     }
     pub fn count(&self) -> io::Result<usize> {
         Ok(self.0.lock().map_err(|_| poisoned())?.players.len())
@@ -246,15 +253,35 @@ mod tests {
         let (a, _a_rx, _) = hub
             .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
             .unwrap();
-        let far = PlayerPosition { x: 160.5, y: 65.0, z: 0.5 };
-        let (_b, b_rx, previous) = hub
-            .add("Bob".into(), "uuid-b".into(), far)
-            .unwrap();
+        let far = PlayerPosition {
+            x: 160.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let (_b, b_rx, previous) = hub.add("Bob".into(), "uuid-b".into(), far).unwrap();
         assert_eq!(previous.len(), 1); // globally listed, not spawned
         assert!(b_rx.try_recv().is_err());
-        hub.move_player(a, PlayerPosition { x: 161.5, y: 65.0, z: 0.5 }, 0.0, 0.0);
+        hub.move_player(
+            a,
+            PlayerPosition {
+                x: 161.5,
+                y: 65.0,
+                z: 0.5,
+            },
+            0.0,
+            0.0,
+        );
         assert_eq!(b_rx.try_recv().unwrap().id, 0x0c);
-        hub.move_player(a, PlayerPosition { x: 162.5, y: 65.0, z: 0.5 }, 0.0, 0.0);
+        hub.move_player(
+            a,
+            PlayerPosition {
+                x: 162.5,
+                y: 65.0,
+                z: 0.5,
+            },
+            0.0,
+            0.0,
+        );
         assert_eq!(b_rx.try_recv().unwrap().id, 0x18);
         hub.move_player(a, PlayerPosition::default(), 0.0, 0.0);
         assert_eq!(b_rx.try_recv().unwrap().id, 0x13);
@@ -268,7 +295,10 @@ mod tests {
             .add("FullQueue".into(), "uuid".into(), PlayerPosition::default())
             .unwrap();
         for _ in 0..=QUEUE_CAPACITY {
-            hub.broadcast(Event { id: 0x03, body: vec![] });
+            hub.broadcast(Event {
+                id: 0x03,
+                body: vec![],
+            });
         }
         assert!(!hub.is_healthy(id));
     }
@@ -280,11 +310,14 @@ mod tests {
             .add("A".into(), "u".into(), PlayerPosition::default())
             .unwrap();
         let peer = hub.0.lock().unwrap().players[&id].clone();
-        assert_eq!(spawn(&peer).unwrap().body, [
-            1, 1, b'u', 1, b'A', 0, // ID, UUID, name, properties
-            0, 0, 0, 16, 0, 0, 8, 32, 0, 0, 0, 16, // fixed-point XYZ
-            0, 0, 0, 0, 0x7f, // yaw, pitch, held item, metadata terminator
-        ]);
+        assert_eq!(
+            spawn(&peer).unwrap().body,
+            [
+                1, 1, b'u', 1, b'A', 0, // ID, UUID, name, properties
+                0, 0, 0, 16, 0, 0, 8, 32, 0, 0, 0, 16, // fixed-point XYZ
+                0, 0, 0, 0, 0x7f, // yaw, pitch, held item, metadata terminator
+            ]
+        );
         assert_eq!(destroy(id).body, [1, 0, 0, 0, 1]);
         assert_eq!(list_entry("A", true).unwrap().body, [1, b'A', 1, 0, 0]);
         assert_eq!(
