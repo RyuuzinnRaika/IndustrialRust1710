@@ -39,16 +39,13 @@ fn received(socket: &mut TcpStream) -> (u32, Vec<u8>) {
 fn frozen_handshake_and_keepalive_wire_images() {
     assert_eq!(
         handshake(25565, 2),
-        [
-            0x0f, 0, 5, 9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't',
-            0x63, 0xdd, 2
-        ]
+        [0x0f, 0, 5, 9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0x63, 0xdd, 2]
     );
     assert_eq!(
         packet(1, &[1, 2, 3, 4, 5, 6, 7, 8]),
         [9, 1, 1, 2, 3, 4, 5, 6, 7, 8]
     );
-    let mut stream = packet(0x38, &[4, b'B', b'e', b't', b'a', 1, 0, 0]).as_slice().to_vec();
+    let mut stream = packet(0x38, &[4, b'B', b'e', b't', b'a', 1, 0, 0]);
     let mut src = stream.as_slice();
     let data = read_frame(&mut src).unwrap();
     assert_eq!(data, [0x38, 4, b'B', b'e', b't', b'a', 1, 0, 0]);
@@ -61,17 +58,10 @@ fn frozen_handshake_and_keepalive_wire_images() {
 // and one SlotItem compound. Unlike constructing both sides with fastnbt,
 // the expected bytes are independent of the serializer under test.
 const CHEST_NBT: &[u8] = &[
-    10, 0, 0,
-    8, 0, 2, b'i', b'd', 0, 5, b'C', b'h', b'e', b's', b't',
-    3, 0, 1, b'x', 0, 0, 0, 1,
-    3, 0, 1, b'y', 0, 0, 0, 64,
-    3, 0, 1, b'z', 0, 0, 0, 2,
-    9, 0, 5, b'I', b't', b'e', b'm', b's', 10, 0, 0, 0, 1,
-    1, 0, 4, b'S', b'l', b'o', b't', 0,
-    2, 0, 2, b'i', b'd', 0, 54,
-    1, 0, 5, b'C', b'o', b'u', b'n', b't', 1,
-    2, 0, 6, b'D', b'a', b'm', b'a', b'g', b'e', 0, 0,
-    0, 0,
+    10, 0, 0, 8, 0, 2, b'i', b'd', 0, 5, b'C', b'h', b'e', b's', b't', 3, 0, 1, b'x', 0, 0, 0, 1,
+    3, 0, 1, b'y', 0, 0, 0, 64, 3, 0, 1, b'z', 0, 0, 0, 2, 9, 0, 5, b'I', b't', b'e', b'm', b's',
+    10, 0, 0, 0, 1, 1, 0, 4, b'S', b'l', b'o', b't', 0, 2, 0, 2, b'i', b'd', 0, 54, 1, 0, 5, b'C',
+    b'o', b'u', b'n', b't', 1, 2, 0, 6, b'D', b'a', b'm', b'a', b'g', b'e', 0, 0, 0, 0,
 ];
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,7 +92,12 @@ fn frozen_chest_tileentity_nbt_roundtrip() {
     assert_eq!((chest.x, chest.y, chest.z), (1, 64, 2));
     assert_eq!(
         chest.items,
-        vec![ItemFixture { slot: 0, id: 54, count: 1, damage: 0 }]
+        vec![ItemFixture {
+            slot: 0,
+            id: 54,
+            count: 1,
+            damage: 0
+        }]
     );
     assert_eq!(fastnbt::to_bytes(&chest).unwrap(), CHEST_NBT);
 }
@@ -115,9 +110,13 @@ struct Server {
 
 impl Server {
     fn start() -> Self {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let directory = std::env::temp_dir().join(format!(
-            "industrialrust1710-e41-{}-{nonce}", std::process::id()
+            "industrialrust1710-e41-{}-{nonce}",
+            std::process::id()
         ));
         fs::create_dir_all(&directory).unwrap();
         fs::write(
@@ -138,13 +137,20 @@ impl Server {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let mut server = Self { process, directory, port };
+        let mut server = Self {
+            process,
+            directory,
+            port,
+        };
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
             if TcpStream::connect(("127.0.0.1", port)).is_ok() {
                 return server;
             }
-            assert!(server.process.try_wait().unwrap().is_none(), "server exited");
+            assert!(
+                server.process.try_wait().unwrap().is_none(),
+                "server exited"
+            );
             assert!(Instant::now() < deadline, "server startup timeout");
             thread::sleep(Duration::from_millis(40));
         }
@@ -152,8 +158,12 @@ impl Server {
 
     fn login(&self, name: &str) -> TcpStream {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-        stream.set_write_timeout(Some(Duration::from_secs(15))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
         stream.write_all(&handshake(self.port, 2)).unwrap();
         let mut user = Vec::new();
         write_string(name, &mut user).unwrap();
@@ -190,7 +200,10 @@ fn check_chunk(data: &[u8]) {
         .take(200_000)
         .read_to_end(&mut uncompressed)
         .unwrap();
-    assert_eq!(uncompressed.len(), mask.count_ones() as usize * 10_240 + 256);
+    assert_eq!(
+        uncompressed.len(),
+        mask.count_ones() as usize * 10_240 + 256
+    );
 }
 
 fn consume_initial(socket: &mut TcpStream, expected_entity_id: i32) {
@@ -229,7 +242,10 @@ fn consume_initial(socket: &mut TcpStream, expected_entity_id: i32) {
             _ => {}
         }
     }
-    assert!(join && window_items && position, "initial login packets missing");
+    assert!(
+        join && window_items && position,
+        "initial login packets missing"
+    );
     assert_eq!(chunks, 25, "initial 5x5 chunk view");
 }
 
@@ -254,10 +270,8 @@ fn live_protocol5_entity_chunk_inventory_and_window_golden() {
                 let mut expected = vec![2, 36];
                 expected.extend_from_slice(b"1110dc55-a244-318c-9843-101d405cbf34");
                 expected.extend_from_slice(&[4, b'B', b'e', b't', b'a', 0]);
-                expected.extend_from_slice(&[
-                    0, 0, 0, 16, 0, 0, 8, 32, 0, 0, 0, 16,
-                    0, 0, 0, 0, 0x7f,
-                ]);
+                expected
+                    .extend_from_slice(&[0, 0, 0, 16, 0, 0, 8, 32, 0, 0, 0, 16, 0, 0, 0, 0, 0x7f]);
                 assert_eq!(body, expected, "Spawn Player Protocol 5 golden bytes");
                 saw_entity = true;
             }
@@ -268,5 +282,8 @@ fn live_protocol5_entity_chunk_inventory_and_window_golden() {
             break;
         }
     }
-    assert!(saw_list && saw_entity, "second player not visible to first player");
+    assert!(
+        saw_list && saw_entity,
+        "second player not visible to first player"
+    );
 }
