@@ -20,6 +20,7 @@ mod multiplayer;
 mod navigation;
 mod physics;
 mod player;
+mod server_config;
 mod survival;
 mod survival_damage;
 mod telemetry;
@@ -2677,13 +2678,26 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     result
 }
 fn main() -> io::Result<()> {
-    let mut bind = "127.0.0.1:25565".parse::<SocketAddr>().unwrap();
-    let mut world_path = PathBuf::from("world/flat.irw");
+    // Reading configuration never converts, modifies, or replaces a native
+    // Minecraft world. Without server.properties old IRW CLI behavior stays.
+    let properties = if std::env::args().any(|arg| arg == "--help") {
+        None
+    } else {
+        server_config::ServerProperties::load_optional(Path::new("server.properties"))?
+    };
+    let mut bind = properties
+        .as_ref()
+        .map(|config| config.bind)
+        .unwrap_or_else(|| "127.0.0.1:25565".parse::<SocketAddr>().unwrap());
+    let mut world_path = properties
+        .as_ref()
+        .map(|config| config.world_path.clone())
+        .unwrap_or_else(|| PathBuf::from("world/flat.irw"));
     let mut anvil_export_path: Option<PathBuf> = None;
     let mut anvil_import_path: Option<PathBuf> = None;
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
-    let mut survival = false;
+    let mut survival = properties.as_ref().is_some_and(|config| config.survival);
     let mut requested_seed: Option<u64> = None;
     let mut biome_seed: Option<u64> = None;
     let mut expanded_seed: Option<u64> = None;
@@ -2692,7 +2706,7 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -2719,6 +2733,7 @@ fn main() -> io::Result<()> {
             }
             "--insecure-offline-lan" => insecure_offline_lan = true,
             "--survival" => survival = true,
+            "--creative" => survival = false,
             "--terrain-seed" => {
                 requested_seed = Some(
                     args.next()
@@ -2823,6 +2838,15 @@ fn main() -> io::Result<()> {
         );
         println!("This is a partial flat-world snapshot, not a completed survival world.");
         return Ok(());
+    }
+    if let Some(config) = properties.as_ref() {
+        if world_path == config.world_path {
+            server_config::verify_legacy_storage(&world_path)?;
+        }
+        eprintln!(
+            "server.properties: level-name={} (legacy IRW storage; Anvil is NOT enabled)",
+            config.level_name
+        );
     }
     if !bind.ip().is_loopback() && !insecure_offline_lan {
         return Err(io::Error::new(ErrorKind::PermissionDenied,
