@@ -39,6 +39,31 @@ enum Kind {
     Wither,
 }
 impl Kind {
+    fn from_name(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "zombie" => Some(Self::Zombie),
+            "cow" => Some(Self::Cow),
+            "pig" => Some(Self::Pig),
+            "sheep" => Some(Self::Sheep),
+            "chicken" => Some(Self::Chicken),
+            "skeleton" => Some(Self::Skeleton),
+            "creeper" => Some(Self::Creeper),
+            "spider" => Some(Self::Spider),
+            "cavespider" => Some(Self::CaveSpider),
+            "enderman" => Some(Self::Enderman),
+            "slime" => Some(Self::Slime),
+            "witch" => Some(Self::Witch),
+            "ghast" => Some(Self::Ghast),
+            "blaze" => Some(Self::Blaze),
+            "zombiepigman" => Some(Self::ZombiePigman),
+            "magmacube" => Some(Self::MagmaCube),
+            "villager" => Some(Self::Villager),
+            "irongolem" => Some(Self::IronGolem),
+            "enderdragon" => Some(Self::EnderDragon),
+            "wither" => Some(Self::Wither),
+            _ => None,
+        }
+    }
     fn protocol(self) -> u8 {
         match self {
             Self::Zombie => 54,
@@ -176,6 +201,12 @@ impl Mob {
         if self.kind == Kind::Sheep {
             body.push(16 << 3);
             body.push(if self.sheared { 16 } else { 0 });
+        }
+        if self.kind == Kind::Enderman {
+            if let Some(block) = self.carried {
+                body.push((16 << 3) | 1); // carried block ID (short)
+                body.extend_from_slice(&(block as i16).to_be_bytes());
+            }
         }
         if self.baby {
             body.push((12 << 3) | 2); // metadata index 12, type 2 (int)
@@ -327,6 +358,17 @@ impl Mobs {
         let event = mob.spawn();
         self.entities.insert(id, mob);
         event
+    }
+    /// Developer-only summon entry point. The caller is responsible for
+    /// allowing this only from a trusted local client.
+    pub fn summon(&mut self, kind_name: &str, world: &World, near: PlayerPosition) -> Option<Event> {
+        let kind = Kind::from_name(kind_name)?;
+        if self.entities.len() >= HOSTILE_CAP + PASSIVE_CAP + 40 { return None; }
+        let p = PlayerPosition {x:near.x+2.0,y:near.y,z:near.z+0.5};
+        if !p.is_valid() || physics::collides(world,&p) { return None; }
+        if !matches!(kind,Kind::EnderDragon|Kind::Wither|Kind::Ghast|Kind::Blaze)
+            && !physics::supported(world,&p) { return None; }
+        Some(self.insert(kind,p,false))
     }
     /// Natural Survival only, preserving flat E2E world behaviour.
     pub fn new(world: &World, enabled: bool) -> Self {
