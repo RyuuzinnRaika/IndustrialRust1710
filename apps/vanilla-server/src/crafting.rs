@@ -250,7 +250,9 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[-1, -1, -1], &[-1, -1, -1]]) {
         return product(96, 2, 0);
     }
-    if matches(&[&[-1,-1]]) { return product(72,1,0); }
+    if matches(&[&[-1, -1]]) {
+        return product(72, 1, 0);
+    }
     if matches(&[&[265, 265], &[265, 265], &[265, 265]]) {
         return product(330, 3, 0);
     }
@@ -276,7 +278,9 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
         return product(325, 1, 0);
     }
 
-    if matches(&[&[0, 265], &[265, 0]]) { return product(359, 1, 0); }
+    if matches(&[&[0, 265], &[265, 0]]) {
+        return product(359, 1, 0);
+    }
     if matches(&[&[331, 331], &[331, 331]]) {
         return product(152, 1, 0);
     }
@@ -284,8 +288,8 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[296, 296, 296], &[296, 296, 296], &[296, 296, 296]]) {
         return product(170, 1, 0);
     }
-    if matches(&[&[263,263,263], &[263,263,263], &[263,263,263]]) {
-        return product(173,1,0);
+    if matches(&[&[263, 263, 263], &[263, 263, 263], &[263, 263, 263]]) {
+        return product(173, 1, 0);
     }
     for (item, block) in [(265, 42), (266, 41), (264, 57), (388, 133)] {
         if matches(&[
