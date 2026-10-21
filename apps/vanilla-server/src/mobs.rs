@@ -195,6 +195,7 @@ pub struct Mobs {
     last_tick: u64,
     next_id: i32,
     enabled: bool,
+    difficulty: Option<u8>,
 }
 fn hash(mut x: u64) -> u64 {
     x ^= x >> 30;
@@ -303,9 +304,13 @@ impl Mobs {
     }
     /// Natural Survival only, preserving flat E2E world behaviour.
     pub fn new(world: &World, enabled: bool) -> Self {
+        Self::new_with_difficulty(world, enabled, 1)
+    }
+    pub fn new_with_difficulty(world: &World, enabled: bool, difficulty: u8) -> Self {
         let mut state = Self {
             next_id: BASE_ID,
             enabled: enabled && world.is_natural(),
+            difficulty: Some(difficulty.min(3)),
             ..Self::default()
         };
         if state.enabled {
@@ -627,7 +632,7 @@ impl Mobs {
                     _ => Kind::Chicken,
                 }
             } else {
-                if hostile >= HOSTILE_CAP { continue; }
+                if self.difficulty == Some(0) || hostile >= HOSTILE_CAP { continue; }
                 match seed % 4 {
                     0 => Kind::Zombie,
                     1 => Kind::Skeleton,
@@ -656,6 +661,14 @@ impl Mobs {
         });
         self.pending_hits
             .retain(|(_, _, t)| now.saturating_sub(*t) < 30);
+        if self.difficulty == Some(0) {
+            self.entities.retain(|id, mob| {
+                if mob.kind.passive() { true } else {
+                    events.push(multiplayer::destroy(*id));
+                    false
+                }
+            });
+        }
         self.spawn_natural(now, world, players, &mut events);
         for _ in 0..steps {
             let mut shots = Vec::new();
@@ -923,7 +936,12 @@ impl Mobs {
                 break;
             }
         }
-        amount
+        match self.difficulty.unwrap_or(1) {
+            0 => 0,
+            1 => amount.div_ceil(2),
+            3 => amount.saturating_mul(3).div_ceil(2),
+            _ => amount,
+        }
     }
 }
 fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
