@@ -6,7 +6,11 @@ use crate::physics;
 use crate::player::PlayerPosition;
 use crate::world::World;
 use legacy_protocol::write_varint;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 const BASE_ID: i32 = 500_000;
 const MAX_STEPS: u64 = 4;
@@ -14,7 +18,7 @@ const ATTACK_INTERVAL: u64 = 20;
 const HOSTILE_CAP: usize = 32;
 const PASSIVE_CAP: usize = 24;
 const ARROW_CAP: usize = 128;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 enum Kind {
     Zombie,
     Cow,
@@ -138,7 +142,7 @@ impl Kind {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct Mob {
     id: i32,
     kind: Kind,
@@ -212,7 +216,7 @@ impl Mob {
         dx * dx + dy * dy + dz * dz <= radius * radius
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct Arrow {
     id: i32,
     position: PlayerPosition,
@@ -267,19 +271,38 @@ impl Explosion {
         Event { id: 0x27, body }
     }
 }
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Deserialize, Serialize)]
 pub struct Mobs {
     entities: BTreeMap<i32, Mob>,
     arrows: BTreeMap<i32, Arrow>,
     orbs: BTreeMap<i32, (PlayerPosition, u16, u64)>,
+    #[serde(skip)]
     pending_hits: Vec<(PlayerPosition, u8, u64)>,
+    #[serde(skip)]
     pending_blast_damage: BTreeMap<i32, u8>,
+    #[serde(skip)]
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
+    #[serde(skip)]
     explosions: Vec<Explosion>,
     last_tick: u64,
     next_id: i32,
     enabled: bool,
     difficulty: Option<u8>,
+    #[serde(skip)]
+    storage: Option<PathBuf>,
+    #[serde(skip)]
+    last_saved: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MobSnapshot {
+    format: u8,
+    seed: Option<u64>,
+    dimension: crate::dimensions::Dimension,
+    state: Mobs,
+}
+fn invalid(reason: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, reason)
 }
 fn hash(mut x: u64) -> u64 {
     x ^= x >> 30;
@@ -387,6 +410,68 @@ fn damage_held(held: Option<Stack>) -> i16 {
     }
 }
 impl Mobs {
+    /// Crash-resilient, bounded entity snapshot scoped to this exact world.
+    /// An absent snapshot is a fresh world; a malformed one aborts startup.
+    pub fn load_or_new(world: &World, enabled: bool, difficulty: u8, path: &Path) -> io::Result<Self> {
+        let mut state = if path.exists() {
+            let bytes = fs::read(path)?;
+            if bytes.len() > 2 * 1024 * 1024 {
+                return Err(invalid("mob snapshot too large"));
+            }
+            let saved: MobSnapshot = serde_json::from_slice(&bytes)
+                .map_err(|_| invalid("invalid mob snapshot"))?;
+            if saved.format != 1 || saved.seed != world.natural_seed()
+                || saved.dimension != world.dimension() {
+                return Err(invalid("mob snapshot belongs to a different world"));
+            }
+            let value = saved.state;
+            let max_id = value.entities.keys().chain(value.arrows.keys())
+                .chain(value.orbs.keys()).copied().max().unwrap_or(BASE_ID - 1);
+            if value.next_id <= max_id || value.next_id < BASE_ID
+                || value.next_id >= i32::MAX - 1024
+                || value.entities.len() > 128 || value.arrows.len() > ARROW_CAP
+                || value.orbs.len() > 256
+                || value.entities.iter().any(|(&id, mob)| {
+                    id < BASE_ID || id != mob.id || !mob.position.is_valid()
+                        || mob.health <= 0 || mob.health > 300
+                        || (mob.kind.splitting() && !matches!(mob.size, 1 | 2 | 4))
+                })
+                || value.arrows.iter().any(|(&id, arrow)| {
+                    id < BASE_ID || id != arrow.id || !arrow.position.is_valid()
+                        || !arrow.velocity.iter().all(|v| v.is_finite() && v.abs() <= 8.0)
+                })
+                || value.orbs.values().any(|(pos, amount, _)| !pos.is_valid() || *amount == 0) {
+                return Err(invalid("invalid mob identity, position or bounds"));
+            }
+            value
+        } else {
+            Self::new_with_difficulty(world, enabled, difficulty)
+        };
+        state.enabled = enabled && world.is_natural();
+        state.difficulty = Some(difficulty.min(3));
+        state.storage = Some(path.to_path_buf());
+        Ok(state)
+    }
+    /// Atomic replacement; the old snapshot survives failed serialization or write.
+    pub fn save(&self, world: &World) -> io::Result<()> {
+        let Some(path) = &self.storage else { return Ok(()); };
+        let snapshot = MobSnapshot {
+            format: 1,
+            seed: world.natural_seed(),
+            dimension: world.dimension(),
+            state: self,
+        };
+        let data = serde_json::to_vec(&snapshot)
+            .map_err(|_| invalid("mob snapshot serialization failed"))?;
+        if data.len() > 2 * 1024 * 1024 { return Err(invalid("mob snapshot too large")); }
+        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        let tmp = path.with_extension("mobs.tmp");
+        let mut file = File::create(&tmp)?;
+        file.write_all(&data)?;
+        file.sync_all()?;
+        fs::rename(tmp, path)?;
+        Ok(())
+    }
     fn insert(&mut self, kind: Kind, position: PlayerPosition, baby: bool) -> Event {
         self.insert_sized(kind, position, baby, 1)
     }
@@ -1190,6 +1275,13 @@ impl Mobs {
         }
         if self.explosions.len() > 32 {
             self.explosions.truncate(32);
+        }
+        if now.saturating_sub(self.last_saved) >= 100 {
+            if let Err(error) = self.save(world) {
+                eprintln!("Mob snapshot save failed: {error}");
+            } else {
+                self.last_saved = now;
+            }
         }
         events
     }
