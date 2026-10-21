@@ -457,9 +457,11 @@ mod tests {
         assert_eq!(b_rx.try_recv().unwrap().body, [4, 5]);
         assert!(a_rx.try_recv().is_err());
         // Broadcast remains global for chat and world state.
-        hub.broadcast(Event { id: 0x02, body: vec![] });
+        hub.broadcast(Event {
+            id: 0x02,
+            body: vec![],
+        });
         assert_eq!(a_rx.try_recv().unwrap().id, 0x02);
         assert_eq!(b_rx.try_recv().unwrap().id, 0x02);
     }
-
 }
