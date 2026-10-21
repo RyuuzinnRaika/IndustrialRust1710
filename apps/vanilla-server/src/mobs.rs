@@ -211,12 +211,22 @@ fn distance_3d(a: PlayerPosition, b: PlayerPosition) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
 }
 fn can_see(world: &World, source: PlayerPosition, target: PlayerPosition) -> bool {
-    let start = PlayerPosition { y: source.y + 1.3, ..source };
-    let end = PlayerPosition { y: target.y + 1.2, ..target };
+    let start = PlayerPosition {
+        y: source.y + 1.3,
+        ..source
+    };
+    let end = PlayerPosition {
+        y: target.y + 1.2,
+        ..target
+    };
     let span = distance_3d(start, end);
     let steps = (span * 4.0).ceil() as usize;
-    if steps == 0 { return true; }
-    if steps > 128 { return false; }
+    if steps == 0 {
+        return true;
+    }
+    if steps > 128 {
+        return false;
+    }
     (1..steps).all(|step| {
         let t = step as f64 / steps as f64;
         let (x, y, z) = (
@@ -232,8 +242,11 @@ fn sunlight(now: u64) -> bool {
 }
 fn spawn_light_ok(block: u8, sky: u8, now: u64, passive: bool) -> bool {
     let effective_sky = sky.saturating_sub(if sunlight(now) { 0 } else { 11 });
-    if passive { block.max(effective_sky) >= 9 }
-    else { block < 8 && effective_sky < 8 }
+    if passive {
+        block.max(effective_sky) >= 9
+    } else {
+        block < 8 && effective_sky < 8
+    }
 }
 fn sky_exposed(world: &World, p: PlayerPosition) -> bool {
     let x = p.x.floor() as i32;
@@ -246,7 +259,11 @@ fn blast_exposure(world: &World, from: PlayerPosition, to: PlayerPosition) -> f6
     let mut clear = 0u8;
     for ox in [-0.3, 0.0, 0.3] {
         for height in [0.1, 0.9, 1.6] {
-            let target = PlayerPosition { x: to.x + ox, y: to.y + height, z: to.z };
+            let target = PlayerPosition {
+                x: to.x + ox,
+                y: to.y + height,
+                z: to.z,
+            };
             let span = distance_3d(from, target);
             let steps = (span * 3.0).ceil().max(1.0) as usize;
             let blocked = (1..steps).any(|n| {
@@ -258,17 +275,23 @@ fn blast_exposure(world: &World, from: PlayerPosition, to: PlayerPosition) -> f6
                 );
                 !matches!(world.get(x,y,z) >> 4, 0 | 6 | 8..=11 | 18 | 30 | 31 | 37..=40 | 50 | 55 | 59 | 63 | 65 | 66 | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 83 | 90 | 106 | 111)
             });
-            if !blocked { clear += 1; }
+            if !blocked {
+                clear += 1;
+            }
         }
     }
     f64::from(clear) / 9.0
 }
 fn blast_damage(world: &World, blast: &Explosion, target: PlayerPosition) -> u8 {
     let dist = distance_3d(blast.position, target);
-    if dist >= blast.radius * 2.0 { return 0; }
-    let impact = (1.0 - dist / (blast.radius * 2.0))
-        * blast_exposure(world, blast.position, target);
-    ((impact * impact + impact) * 7.0 * blast.radius + 1.0).floor().clamp(0.0, 255.0) as u8
+    if dist >= blast.radius * 2.0 {
+        return 0;
+    }
+    let impact =
+        (1.0 - dist / (blast.radius * 2.0)) * blast_exposure(world, blast.position, target);
+    ((impact * impact + impact) * 7.0 * blast.radius + 1.0)
+        .floor()
+        .clamp(0.0, 255.0) as u8
 }
 fn damage_held(held: Option<Stack>) -> i16 {
     match held.map(|s| s.id) {
@@ -409,15 +432,20 @@ impl Mobs {
         for explosion in explosions {
             for &(id, player) in participants {
                 let raw = blast_damage(world, explosion, player);
-                if raw == 0 { continue; }
+                if raw == 0 {
+                    continue;
+                }
                 let entry = self.pending_blast_damage.entry(id).or_default();
                 *entry = entry.saturating_add(raw).min(40);
             }
-            let affected: Vec<_> = self.entities.values()
+            let affected: Vec<_> = self
+                .entities
+                .values()
                 .filter_map(|mob| {
                     let raw = blast_damage(world, explosion, mob.position);
                     (raw > 0).then_some((mob.id, raw))
-                }).collect();
+                })
+                .collect();
             let mut dead = Vec::new();
             for (id, raw) in affected {
                 if let Some(mob) = self.entities.get_mut(&id) {
@@ -430,11 +458,14 @@ impl Mobs {
             }
             for id in dead {
                 if let Some(mob) = self.entities.remove(&id) {
-                    self.pending_drops.push((mob.kind.drop(), (
-                        mob.position.x.floor() as i32,
-                        mob.position.y.floor() as i32,
-                        mob.position.z.floor() as i32,
-                    )));
+                    self.pending_drops.push((
+                        mob.kind.drop(),
+                        (
+                            mob.position.x.floor() as i32,
+                            mob.position.y.floor() as i32,
+                            mob.position.z.floor() as i32,
+                        ),
+                    ));
                     events.push(multiplayer::destroy(id));
                 }
             }
@@ -486,16 +517,32 @@ impl Mobs {
         Some(result)
     }
     /// Sheep shearing is server-authoritative and changes the shared entity metadata.
-    pub fn shear(&mut self, id: i32, at: PlayerPosition, held: Option<Stack>) -> Option<(Stack, Event)> {
+    pub fn shear(
+        &mut self,
+        id: i32,
+        at: PlayerPosition,
+        held: Option<Stack>,
+    ) -> Option<(Stack, Event)> {
         let mob = self.entities.get_mut(&id)?;
-        if mob.kind != Kind::Sheep || mob.sheared || mob.baby || held?.id != 359
-            || !mob.nearby(at, 3.0) {
+        if mob.kind != Kind::Sheep
+            || mob.sheared
+            || mob.baby
+            || held?.id != 359
+            || !mob.nearby(at, 3.0)
+        {
             return None;
         }
         mob.sheared = true;
         let mut body = id.to_be_bytes().to_vec();
         body.extend_from_slice(&[16, 0x10, 0x7f]);
-        Some((Stack { id: 35, count: 2, damage: 0 }, Event { id: 0x1c, body }))
+        Some((
+            Stack {
+                id: 35,
+                count: 2,
+                damage: 0,
+            },
+            Event { id: 0x1c, body },
+        ))
     }
 
     /// Animal breeding consumes feed only if a nearby same-kind partner exists.
@@ -580,7 +627,11 @@ impl Mobs {
         if !self.enabled || players.is_empty() || !now.is_multiple_of(80) {
             return;
         }
-        let passive = self.entities.values().filter(|mob| mob.kind.passive()).count();
+        let passive = self
+            .entities
+            .values()
+            .filter(|mob| mob.kind.passive())
+            .count();
         let hostile = self.entities.len() - passive;
         for index in 0..4u64 {
             let seed = hash(
@@ -609,20 +660,29 @@ impl Mobs {
                     probe = if probe + 1 < height { probe + 1 } else { 12 };
                 }
             }
-            let position = PlayerPosition { x: x as f64 + 0.5, y: y as f64, z: z as f64 + 0.5 };
+            let position = PlayerPosition {
+                x: x as f64 + 0.5,
+                y: y as f64,
+                z: z as f64 + 0.5,
+            };
             if !position.is_valid()
                 || !(24.0..=128.0).contains(&distance_to_players(position, players))
                 || !physics::supported(world, &position)
                 || physics::collides(world, &position)
-            { continue; }
+            {
+                continue;
+            }
             let biome = world.biome_at(x, z);
             let grass = world.get(x, y - 1, z) >> 4 == 2;
             let open = sky_exposed(world, position);
             let (block_light, sky_light) = world.light_at(x, y, z);
             let is_passive = grass && open && sunlight(now) && (seed & 1 == 0);
-            if !spawn_light_ok(block_light, sky_light, now, is_passive) { continue; }
+            if !spawn_light_ok(block_light, sky_light, now, is_passive) {
+                continue;
+            }
             let kind = if is_passive {
-                if passive >= PASSIVE_CAP || matches!(biome, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24) {
+                if passive >= PASSIVE_CAP || matches!(biome, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24)
+                {
                     continue;
                 }
                 match seed % 4 {
@@ -632,7 +692,9 @@ impl Mobs {
                     _ => Kind::Chicken,
                 }
             } else {
-                if self.difficulty == Some(0) || hostile >= HOSTILE_CAP { continue; }
+                if self.difficulty == Some(0) || hostile >= HOSTILE_CAP {
+                    continue;
+                }
                 match seed % 4 {
                     0 => Kind::Zombie,
                     1 => Kind::Skeleton,
@@ -663,7 +725,9 @@ impl Mobs {
             .retain(|(_, _, t)| now.saturating_sub(*t) < 30);
         if self.difficulty == Some(0) {
             self.entities.retain(|id, mob| {
-                if mob.kind.passive() { true } else {
+                if mob.kind.passive() {
+                    true
+                } else {
                     events.push(multiplayer::destroy(*id));
                     false
                 }
@@ -690,7 +754,8 @@ impl Mobs {
                     dead.push(mob.id);
                     continue;
                 }
-                if !mob.kind.passive() && nearest_distance > 32.0
+                if !mob.kind.passive()
+                    && nearest_distance > 32.0
                     && now.saturating_sub(mob.hit_tick) > 600
                     && hash(now ^ mob.id as u64) % 800 == 0
                 {
@@ -698,12 +763,20 @@ impl Mobs {
                     continue;
                 }
                 if matches!(mob.kind, Kind::Zombie | Kind::Skeleton)
-                    && sunlight(now) && sky_exposed(world, mob.position)
+                    && sunlight(now)
+                    && sky_exposed(world, mob.position)
                     && now.is_multiple_of(20)
                 {
                     mob.health -= 1;
                     if mob.health <= 0 {
-                        self.pending_drops.push((mob.kind.drop(), (mob.position.x.floor() as i32, mob.position.y.floor() as i32, mob.position.z.floor() as i32)));
+                        self.pending_drops.push((
+                            mob.kind.drop(),
+                            (
+                                mob.position.x.floor() as i32,
+                                mob.position.y.floor() as i32,
+                                mob.position.z.floor() as i32,
+                            ),
+                        ));
                         events.push(mob.status(3));
                         dead.push(mob.id);
                         continue;
@@ -712,7 +785,18 @@ impl Mobs {
                 }
                 if mob.kind == Kind::Chicken && !mob.baby && now >= mob.next_egg_tick {
                     mob.next_egg_tick = now + 6000 + hash(now ^ mob.id as u64) % 6000;
-                    self.pending_drops.push((Stack { id: 344, count: 1, damage: 0 }, (mob.position.x.floor() as i32, mob.position.y.floor() as i32, mob.position.z.floor() as i32)));
+                    self.pending_drops.push((
+                        Stack {
+                            id: 344,
+                            count: 1,
+                            damage: 0,
+                        },
+                        (
+                            mob.position.x.floor() as i32,
+                            mob.position.y.floor() as i32,
+                            mob.position.z.floor() as i32,
+                        ),
+                    ));
                 }
                 let nearest = players
                     .iter()
@@ -724,7 +808,9 @@ impl Mobs {
                 let Some(target) = nearest else {
                     continue;
                 };
-                if mob.kind == Kind::Spider && sunlight(now) && sky_exposed(world, mob.position)
+                if mob.kind == Kind::Spider
+                    && sunlight(now)
+                    && sky_exposed(world, mob.position)
                     && distance(target, mob.position) > 3.0
                 {
                     continue; // Daylight spiders are neutral until provoked.
@@ -745,7 +831,8 @@ impl Mobs {
                         continue;
                     }
                 }
-                if mob.kind == Kind::Skeleton && d < 16.0
+                if mob.kind == Kind::Skeleton
+                    && d < 16.0
                     && can_see(world, mob.position, target)
                     && now.saturating_sub(mob.bite_tick) >= 40
                 {
@@ -970,7 +1057,11 @@ mod tests {
             position: nearby,
             radius: 3.0,
         }];
-        mobs.queue_explosion_hits(&World::new(), &explosions, &[(1, nearby), (2, nearby), (3, far)]);
+        mobs.queue_explosion_hits(
+            &World::new(),
+            &explosions,
+            &[(1, nearby), (2, nearby), (3, far)],
+        );
         let first = mobs.hurt_player(1, nearby, 10);
         let second = mobs.hurt_player(2, nearby, 10);
         assert!(first > 0);
@@ -1093,13 +1184,26 @@ mod tests {
         assert!(!spawn_light_ok(9, 0, 18000, false));
         world.import_block(x, y, z, 50 << 4).unwrap();
         assert_eq!(world.light_at(x + 1, y, z).0, 13);
-        assert!(!spawn_light_ok(world.light_at(x + 1, y, z).0, 0, 18000, false));
+        assert!(!spawn_light_ok(
+            world.light_at(x + 1, y, z).0,
+            0,
+            18000,
+            false
+        ));
     }
     #[test]
     fn skeleton_line_of_sight_is_blocked_by_a_stone_wall() {
         let mut world = World::new();
-        let a = PlayerPosition { x: 0.5, y: 66.0, z: 0.5 };
-        let b = PlayerPosition { x: 4.5, y: 66.0, z: 0.5 };
+        let a = PlayerPosition {
+            x: 0.5,
+            y: 66.0,
+            z: 0.5,
+        };
+        let b = PlayerPosition {
+            x: 4.5,
+            y: 66.0,
+            z: 0.5,
+        };
         assert!(can_see(&world, a, b));
         world.import_block(2, 67, 0, 1 << 4).unwrap();
         assert!(!can_see(&world, a, b));
@@ -1107,9 +1211,20 @@ mod tests {
     #[test]
     fn explosions_respect_block_occlusion() {
         let mut world = World::new();
-        let source = PlayerPosition { x: 0.5, y: 66.0, z: 0.5 };
-        let target = PlayerPosition { x: 4.5, y: 66.0, z: 0.5 };
-        let blast = Explosion { position: source, radius: 3.0 };
+        let source = PlayerPosition {
+            x: 0.5,
+            y: 66.0,
+            z: 0.5,
+        };
+        let target = PlayerPosition {
+            x: 4.5,
+            y: 66.0,
+            z: 0.5,
+        };
+        let blast = Explosion {
+            position: source,
+            radius: 3.0,
+        };
         let clear = blast_damage(&world, &blast, target);
         assert!(clear > 0);
         for y in 66..=68 {
@@ -1122,10 +1237,18 @@ mod tests {
     #[test]
     fn sheep_shearing_is_single_use_and_shared_with_joiners() {
         let mut mobs = Mobs::default();
-        let at = PlayerPosition { x: 0.5, y: 66.0, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 66.0,
+            z: 0.5,
+        };
         let spawn = mobs.insert(Kind::Sheep, at, false);
         assert_eq!(spawn.id, 0x0f);
-        let held = Some(Stack { id: 359, count: 1, damage: 0 });
+        let held = Some(Stack {
+            id: 359,
+            count: 1,
+            damage: 0,
+        });
         let (wool, metadata) = mobs.shear(0, at, held).unwrap();
         assert_eq!(wool.id, 35);
         assert_eq!(metadata.id, 0x1c);
