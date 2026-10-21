@@ -676,18 +676,163 @@ impl Inventory {
             self.slots[(slot - n + 9) as usize] = stack;
         }
     }
-    /// Single/double chest storage (27 or 54 slots) followed by 36 player slots.
-    /// Rejection is None; directional writes must commit the *source* first
-    /// to avoid item duplication across the non-atomic inventory/chest files.
-    pub fn chest_click(
+    /// Paint a server-owned cursor stack into a container window using the
+    /// original three-phase 1.7.10 protocol; never use client item counts.
+    fn chest_drag(
         &mut self,
+        window: u8,
+        chest: &mut [Option<Stack>],
+        slot: i16,
+        button: i8,
+    ) -> Option<ChestDirection> {
+        let size = chest.len() as i16;
+        let kind = match button {
+            0..=2 => 0,
+            4..=6 => 4,
+            _ => return None,
+        };
+        match button {
+            0 | 4 if slot == -999 => {
+                self.drag = Drag {
+                    window,
+                    button: Some(kind),
+                    slots: Vec::new(),
+                };
+                Some(ChestDirection::InventoryOnly)
+            }
+            1 | 5 if self.drag.window == window && self.drag.button == Some(kind) => {
+                if !(0..size + 36).contains(&slot) {
+                    self.drag = Drag::default();
+                    return None;
+                }
+                if !self.drag.slots.contains(&slot) {
+                    self.drag.slots.push(slot);
+                }
+                Some(ChestDirection::InventoryOnly)
+            }
+            2 | 6
+                if slot == -999 && self.drag.window == window && self.drag.button == Some(kind) =>
+            {
+                let slots = std::mem::take(&mut self.drag.slots);
+                self.drag = Drag::default();
+                let Some(mut cursor) = self.cursor else {
+                    return Some(ChestDirection::InventoryOnly);
+                };
+                if slots.is_empty() {
+                    return Some(ChestDirection::InventoryOnly);
+                }
+                let each = if kind == 0 {
+                    cursor.count / slots.len().min(64) as u8
+                } else {
+                    1
+                };
+                if each == 0 {
+                    return Some(ChestDirection::InventoryOnly);
+                }
+                let mut changed_storage = false;
+                for position in slots {
+                    let existing = self.chest_stack(chest, position);
+                    if existing
+                        .is_some_and(|other| other.id != cursor.id || other.damage != cursor.damage)
+                    {
+                        continue;
+                    }
+                    let count = existing.map_or(0, |other| other.count);
+                    let transfer = each.min(64 - count).min(cursor.count);
+                    if transfer == 0 {
+                        continue;
+                    }
+                    self.set_chest_stack(
+                        chest,
+                        position,
+                        Some(Stack {
+                            count: count + transfer,
+                            ..cursor
+                        }),
+                    );
+                    changed_storage |= position < size;
+                    cursor.count -= transfer;
+                    if cursor.count == 0 {
+                        break;
+                    }
+                }
+                self.cursor = (cursor.count != 0).then_some(cursor);
+                Some(if changed_storage {
+                    ChestDirection::IntoChest
+                } else {
+                    ChestDirection::InventoryOnly
+                })
+            }
+            _ => {
+                self.drag = Drag::default();
+                None
+            }
+        }
+    }
+
+    /// Double-click collection scans both the container and the player's
+    /// 36 slots. The same authoritative transaction commits both inventories.
+    fn chest_collect(
+        &mut self,
+        chest: &mut [Option<Stack>],
+        slot: i16,
+        button: i8,
+    ) -> Option<ChestDirection> {
+        let size = chest.len() as i16;
+        if button != 0 || !(0..size + 36).contains(&slot) {
+            return None;
+        }
+        let Some(mut carried) = self.cursor else {
+            return Some(ChestDirection::InventoryOnly);
+        };
+        let mut changed_storage = false;
+        for position in 0..size + 36 {
+            let Some(mut existing) = self.chest_stack(chest, position) else {
+                continue;
+            };
+            if existing.id != carried.id || existing.damage != carried.damage {
+                continue;
+            }
+            let amount = (64 - carried.count).min(existing.count);
+            if amount == 0 {
+                break;
+            }
+            carried.count += amount;
+            existing.count -= amount;
+            self.set_chest_stack(chest, position, (existing.count != 0).then_some(existing));
+            changed_storage |= position < size;
+        }
+        self.cursor = Some(carried);
+        Some(if changed_storage {
+            ChestDirection::OutOfChest
+        } else {
+            ChestDirection::InventoryOnly
+        })
+    }
+
+    /// Single/double chests, hopper and brewing containers with 36 player slots.
+    /// All mutations are staged by the caller and journaled together with the
+    /// player inventory if both files are changed.
+    pub fn chest_click_window(
+        &mut self,
+        window: u8,
         chest: &mut [Option<Stack>],
         slot: i16,
         button: i8,
         mode: i8,
     ) -> Option<ChestDirection> {
         let n = chest.len() as i16;
-        if !matches!(n, 4 | 5 | 27 | 54) || !(0..n + 36).contains(&slot) {
+        if !matches!(n, 4 | 5 | 27 | 54) {
+            return None;
+        }
+        if mode == 5 {
+            return self.chest_drag(window, chest, slot, button);
+        }
+        self.drag = Drag::default();
+        if mode == 6 {
+            return self.chest_collect(chest, slot, button);
+        }
+        if !(0..n + 36).contains(&slot) {
             return None;
         }
         let storage = slot < n;
@@ -806,6 +951,18 @@ impl Inventory {
             _ => None,
         }
     }
+    /// Compatibility helper for pre-existing inventory unit tests.
+    #[cfg(test)]
+    pub fn chest_click(
+        &mut self,
+        chest: &mut [Option<Stack>],
+        slot: i16,
+        button: i8,
+        mode: i8,
+    ) -> Option<ChestDirection> {
+        self.chest_click_window(1, chest, slot, button, mode)
+    }
+
     pub fn chest_window_items(&self, window: u8, chest: &[Option<Stack>]) -> Vec<u8> {
         let mut out = vec![window];
         let n = chest.len() as i16;
@@ -1211,6 +1368,57 @@ mod tests {
         assert!(inv.wear_held_tool());
         assert_eq!(inv.held(), None);
     }
+    #[test]
+    fn shared_container_drag_collect_conserves_items_and_resets_invalid_drag() {
+        let mut player = Inventory::default();
+        let mut chest = [None; 54];
+        chest[0] = Some(Stack {
+            id: 4,
+            count: 10,
+            damage: 0,
+        });
+        player.cursor = Some(Stack {
+            id: 4,
+            count: 15,
+            damage: 0,
+        });
+        assert!(player
+            .chest_click_window(3, &mut chest, -999, 0, 5)
+            .is_some());
+        assert!(player.chest_click_window(3, &mut chest, 0, 1, 5).is_some());
+        assert!(player.chest_click_window(3, &mut chest, 1, 1, 5).is_some());
+        assert_eq!(
+            player.chest_click_window(3, &mut chest, -999, 2, 5),
+            Some(ChestDirection::IntoChest)
+        );
+        assert_eq!(chest[0].unwrap().count, 17);
+        assert_eq!(chest[1].unwrap().count, 7);
+        assert_eq!(player.cursor.unwrap().count, 1);
+
+        assert_eq!(
+            player.chest_click_window(3, &mut chest, 0, 0, 6),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert!(chest[0].is_none());
+        assert!(chest[1].is_none());
+        assert_eq!(player.cursor.unwrap().count, 25);
+        assert_eq!(
+            player.chest_click_window(3, &mut chest, -999, 4, 5),
+            Some(ChestDirection::InventoryOnly)
+        );
+        // Cannot finish a drag on a different container window.
+        assert_eq!(player.chest_click_window(4, &mut chest, -999, 6, 5), None);
+        assert_eq!(player.cursor.unwrap().count, 25);
+
+        // Malformed or out-of-range dragged slots cannot create items.
+        assert!(player
+            .chest_click_window(4, &mut chest, -999, 0, 5)
+            .is_some());
+        assert_eq!(player.chest_click_window(4, &mut chest, 90, 1, 5), None);
+        assert_eq!(player.chest_click_window(4, &mut chest, -999, 2, 5), None);
+        assert_eq!(player.cursor.unwrap().count, 25);
+    }
+
     #[test]
     fn chest_moves_are_bounded_and_conserve_items() {
         let mut inv = Inventory::default();
