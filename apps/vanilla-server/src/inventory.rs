@@ -1334,11 +1334,28 @@ impl Inventory {
 mod tests {
     #[test]
     fn legacy_item_caps_apply_in_player_chest_and_hopper_windows() {
-        let potion = Stack { id: 373, count: 1, damage: 8194 };
+        let potion = Stack {
+            id: 373,
+            count: 1,
+            damage: 8194,
+        };
         assert_eq!(potion.max_count(), 1);
         assert!(!(Stack { count: 2, ..potion }).is_valid());
-        assert_eq!(Stack { id: 332, count: 16, damage: 0 }.max_count(), 16);
-        assert!(!(Stack { id: 332, count: 17, damage: 0 }).is_valid());
+        assert_eq!(
+            Stack {
+                id: 332,
+                count: 16,
+                damage: 0
+            }
+            .max_count(),
+            16
+        );
+        assert!(!(Stack {
+            id: 332,
+            count: 17,
+            damage: 0
+        })
+        .is_valid());
 
         let mut inv = Inventory::default();
         inv.creative_set(36, Some(potion)).unwrap();
