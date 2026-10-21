@@ -354,7 +354,7 @@ impl World {
             .pending_fluid
             .iter()
             .filter(|&&(x, y, z)| {
-                self.get(x, i32::from(y), z) >> 4 != 10 || self.fluid_phase % 4 == 0
+                self.get(x, i32::from(y), z) >> 4 != 10 || self.fluid_phase.is_multiple_of(4)
             })
             .take(budget)
             .copied()
@@ -1142,8 +1142,8 @@ mod tests {
         assert_eq!(w.get(1, 64, 0), (10 << 4) | 1);
         w.update_and_save(&path, 15, 64, 0, 50 << 4).unwrap();
         let (block, sky) = w.light_arrays(1, 0);
-        assert!(block[(64 * 256) + 0] > 0);
-        assert_eq!(sky[(80 * 256) + 0], 15);
+        assert!(block[64 * 256] > 0);
+        assert_eq!(sky[80 * 256], 15);
         fs::remove_file(path).unwrap();
     }
 
