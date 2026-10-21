@@ -2,6 +2,7 @@
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
 use std::collections::{BTreeMap, BTreeSet};
 mod lighting;
+mod ecology;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
@@ -30,6 +31,8 @@ pub struct World {
     pending_gravity: BTreeSet<Position>,
     pending_fluid: BTreeSet<Position>,
     pending_circuit: BTreeSet<Position>,
+    pending_support: BTreeSet<Position>,
+    pending_ecology: BTreeSet<Position>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
     fluid_phase: u64,
 }
@@ -57,6 +60,14 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 3
             | 8 // flowing water: simplified bounded propagation
             | 10 // flowing lava
+            | 6 // saplings
+            | 18 // leaves
+            | 59 // wheat
+            | 60 // farmland (via hoe)
+            | 66 // rails
+            | 70 | 72 // pressure plates
+            | 93 | 94 // repeater
+            | 141 | 142 // carrot/potato
             | 50 // wall/ground torch: simplified attachment
             | 55 // redstone dust (client item 331)
             | 69 // lever
@@ -261,6 +272,26 @@ impl World {
             if id == 55 {
                 self.pending_circuit.insert(pos);
             }
+            if matches!(id, 6 | 18 | 59 | 60 | 141 | 142) {
+                self.pending_ecology.insert(pos);
+            } else {
+                self.pending_ecology.remove(&pos);
+            }
+            if matches!(id, 6 | 50 | 55 | 59 | 66 | 70 | 72 | 75 | 76 | 93 | 94 | 141 | 142) {
+                self.pending_support.insert(pos);
+            }
+        }
+    }
+    fn wake_leaves(&mut self, x: i32, y: i32, z: i32) {
+        for dx in -4..=4 {
+            for dz in -4..=4 {
+                for dy in -4..=4 {
+                    let (nx, ny, nz) = (x+dx,y+dy,z+dz);
+                    if in_bounds(nx,ny,nz) && self.get(nx,ny,nz) >> 4 == 18 {
+                        self.pending_ecology.insert((nx,ny as u8,nz));
+                    }
+                }
+            }
         }
     }
 
@@ -275,7 +306,8 @@ impl World {
             .filter(|&&(x, y, z)| self.get(x, i32::from(y), z) >> 4 != 10 || self.fluid_phase % 4 == 0)
             .take(budget).copied().collect();
         let wired: Vec<Position> = self.pending_circuit.iter().take(budget).copied().collect();
-        let mut changes: BTreeMap<Position, u16> = BTreeMap::new();
+        let supported: Vec<Position> = self.pending_support.iter().take(budget).copied().collect();
+        let mut changes: BTreeMap<Position, u16> = self.ecology_changes(budget);
 
         for &(x, y, z) in &wet {
             let y = i32::from(y);
@@ -436,6 +468,9 @@ impl World {
         for pos in wired {
             self.pending_circuit.remove(&pos);
         }
+        for pos in supported {
+            self.pending_support.remove(&pos);
+        }
         let mut changed = Vec::with_capacity(changes.len());
         for (x, y, z) in changes.keys().copied() {
             changed.push((x, i32::from(y), z));
@@ -482,6 +517,9 @@ impl World {
         }
         self.wake_gravity(x, y, z);
         self.wake_block_updates(x, y, z);
+        if matches!(previous >> 4, 17 | 162) || matches!(block >> 4, 17 | 162) {
+            self.wake_leaves(x, y, z);
+        }
         Ok(true)
     }
     /// Apply one parsed block to a *detached* import world. Call save_new only
@@ -573,6 +611,12 @@ impl World {
             }
             if block >> 4 == 55 {
                 world.pending_circuit.insert((x, y, z));
+            }
+            if matches!(block >> 4, 6 | 18 | 59 | 60 | 141 | 142) {
+                world.pending_ecology.insert((x,y,z));
+            }
+            if matches!(block >> 4, 6 | 50 | 55 | 59 | 66 | 70 | 72 | 75 | 76 | 93 | 94 | 141 | 142) {
+                world.pending_support.insert((x,y,z));
             }
         }
         Ok(world)
