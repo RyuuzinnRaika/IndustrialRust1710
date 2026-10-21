@@ -164,10 +164,15 @@ impl Orbs {
     }
     /// Despawn expired orbs for every client, not only the player polling XP.
     pub fn expire(&mut self, now: u64) -> Vec<Event> {
-        let ids: Vec<i32> = self.items.values()
+        let ids: Vec<i32> = self
+            .items
+            .values()
             .filter(|orb| now.saturating_sub(orb.created) >= 6000)
-            .map(|orb| orb.id).collect();
-        for id in &ids { self.items.remove(id); }
+            .map(|orb| orb.id)
+            .collect();
+        for id in &ids {
+            self.items.remove(id);
+        }
         ids.into_iter().map(multiplayer::destroy).collect()
     }
     /// Candidate remains present until XP has been durably credited.
@@ -177,7 +182,9 @@ impl Orbs {
         self.items
             .values()
             .find(|orb| {
-                if now.saturating_sub(orb.created) >= 6000 { return false; }
+                if now.saturating_sub(orb.created) >= 6000 {
+                    return false;
+                }
                 let d = (position.x - orb.position.x).powi(2)
                     + (position.y - orb.position.y).powi(2)
                     + (position.z - orb.position.z).powi(2);
