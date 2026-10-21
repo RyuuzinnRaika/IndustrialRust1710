@@ -773,6 +773,17 @@ fn play(
                         }
                     }
                 }
+                // A player standing on a pressure plate powers it. Releasing
+                // is managed by the bounded 20TPS device timer.
+                {
+                    let bx=x.floor() as i32;
+                    let by=y.floor() as i32 - 1;
+                    let bz=z.floor() as i32;
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    if world::in_bounds(bx,by,bz) && w.press_plate(world_path,bx,by,bz)? {
+                        hub.broadcast(block_change_event(&w,bx,by,bz));
+                    }
+                }
                 location = (x, y, z);
                 *player = candidate;
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(&candidate))?;
@@ -1013,8 +1024,19 @@ fn play(
                         continue;
                     }
                 }
-                // Server-authoritative lever use: toggle powered flag,
-                // then let queued redstone-wire updates propagate per tick.
+                // Server-owned switch/button/door/repeater interaction.
+                if (0..=5).contains(&face) && world::in_bounds(x,y,z)
+                    && near(location,x,y,z) {
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let id = w.get(x,y,z) >> 4;
+                    if matches!(id, 69 | 77 | 143 | 64 | 96 | 93 | 94) {
+                        let changed = w.interact_device(world_path,x,y,z)?;
+                        for (cx,cy,cz) in changed {
+                            hub.broadcast(block_change_event(&w,cx,cy,cz));
+                        }
+                        continue;
+                    }
+                }
                 if (0..=5).contains(&face) && world::in_bounds(x, y, z) && near(location, x, y, z) {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let old = w.get(x, y, z);
@@ -1149,15 +1171,24 @@ fn play(
                                 295 => 59, // wheat seeds
                                 391 => 141, // carrot
                                 392 => 142, // potato
+                                356 => 93, // repeater
+                                324 => 64, // wooden door
+                                330 => 71, // iron door
                                 _ => stack.id as u16,
                             };
                             let adjacent_chest = block_id == 54
                                 && [(nx + 1, nz), (nx - 1, nz), (nx, nz + 1), (nx, nz - 1)]
                                     .iter()
                                     .any(|&(cx, cz)| w.get(cx, ny, cz) >> 4 == 54);
-                            let metadata = if block_id == 50 {
+                            let metadata = if matches!(block_id, 50 | 77 | 143) {
                                 match face { 1 => 5, 2 => 3, 3 => 4, 4 => 1, 5 => 2, _ => 5 }
-                            } else if matches!(block_id,59 | 141 | 142 | 8 | 10) {
+                            } else if matches!(block_id, 29 | 33) {
+                                face as u16
+                            } else if block_id == 96 {
+                                match face { 2 => 1, 3 => 0, 4 => 3, 5 => 2, _ => 0 }
+                            } else if matches!(block_id, 64 | 71 | 93) {
+                                ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
+                            } else if matches!(block_id, 59 | 141 | 142 | 8 | 10) {
                                 0
                             } else {
                                 stack.damage as u16 & 15
@@ -1188,13 +1219,12 @@ fn play(
                                         // Persist item consumption before the world edit so a
                                         // crash cannot grant a free block on restart.
                                         remaining.save(inventory_path)?;
-                                        match w.update_and_save(
-                                            world_path,
-                                            nx,
-                                            ny,
-                                            nz,
-                                            (block_id << 4) | metadata,
-                                        ) {
+                                        match if matches!(block_id,64 | 71) {
+                                            w.place_door(world_path,nx,ny,nz,block_id,metadata)
+                                        } else {
+                                            w.update_and_save(world_path,nx,ny,nz,
+                                                (block_id << 4) | metadata)
+                                        } {
                                             Ok(true) => {
                                                 *inventory = remaining;
                                                 changed = true;
@@ -1210,13 +1240,12 @@ fn play(
                                         }
                                     }
                                 } else {
-                                    changed = w.update_and_save(
-                                        world_path,
-                                        nx,
-                                        ny,
-                                        nz,
-                                        (block_id << 4) | metadata,
-                                    )?;
+                                    changed = if matches!(block_id,64 | 71) {
+                                        w.place_door(world_path,nx,ny,nz,block_id,metadata)?
+                                    } else {
+                                        w.update_and_save(world_path,nx,ny,nz,
+                                            (block_id << 4) | metadata)?
+                                    };
                                 }
                             }
                         }
@@ -1227,6 +1256,10 @@ fn play(
                         let event = block_change_event(&w, nx, ny, nz);
                         if changed {
                             hub.broadcast(event);
+                            if matches!(w.get(nx,ny,nz) >> 4,64 | 71)
+                                && world::in_bounds(nx,ny+1,nz) {
+                                hub.broadcast(block_change_event(&w,nx,ny+1,nz));
+                            }
                         } else {
                             send(s, event.id, &event.body)?;
                         }
