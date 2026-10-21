@@ -417,6 +417,12 @@ impl World {
                     | 77
                     | 93
                     | 94
+                    | 81
+                    | 83
+                    | 104
+                    | 105
+                    | 115
+                    | 127
                     | 141
                     | 142
                     | 143
@@ -913,7 +919,7 @@ impl World {
             if block >> 4 == 55 {
                 world.pending_circuit.insert((x, y, z));
             }
-            if matches!(block >> 4, 6 | 18 | 59 | 60 | 141 | 142) {
+            if matches!(block >> 4, 6 | 18 | 59 | 60 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142) {
                 world.pending_ecology.insert((x, y, z));
             }
             if matches!(
@@ -929,6 +935,12 @@ impl World {
                     | 77
                     | 93
                     | 94
+                    | 81
+                    | 83
+                    | 104
+                    | 105
+                    | 115
+                    | 127
                     | 141
                     | 142
                     | 143
