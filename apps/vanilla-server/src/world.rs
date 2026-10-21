@@ -139,7 +139,12 @@ impl World {
 
     /// Bounded per-worker budget; remaining light updates survive the next tick.
     pub fn drain_light_chunks(&mut self, budget: usize) -> Vec<(i32, i32)> {
-        let chunks: Vec<_> = self.pending_light_chunks.iter().take(budget).copied().collect();
+        let chunks: Vec<_> = self
+            .pending_light_chunks
+            .iter()
+            .take(budget)
+            .copied()
+            .collect();
         for chunk in &chunks {
             self.pending_light_chunks.remove(chunk);
         }
@@ -989,8 +994,8 @@ mod tests {
 
     #[test]
     fn light_refreshes_are_bounded_to_chunks_and_only_follow_committed_edits() {
-        let path = std::env::temp_dir()
-            .join(format!("ir1710-light-dirty-{}.irw", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-light-dirty-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
         w.update_and_save(&path, 15, 64, 15, 50 << 4).unwrap();
@@ -1001,8 +1006,7 @@ mod tests {
         assert!(!remaining.contains(&(2, 2)));
         assert!(w.drain_light_chunks(1).is_empty());
         // Metadata-only updates cannot change the light field.
-        w.update_and_save(&path, 15, 64, 15, (50 << 4) | 5)
-            .unwrap();
+        w.update_and_save(&path, 15, 64, 15, (50 << 4) | 5).unwrap();
         assert!(w.drain_light_chunks(32).is_empty());
         // A failed save neither mutates the block nor queues a relight.
         let failure_path = path.join("invalid.irw");
