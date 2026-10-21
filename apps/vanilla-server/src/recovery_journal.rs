@@ -61,7 +61,8 @@ pub fn recover(journal: &Path, targets: &[&Path]) -> io::Result<()> {
         for (index, target) in targets.iter().enumerate() {
             let staged = staged(journal, index);
             if staged.exists() {
-                if staged.is_symlink() || !staged.is_file()
+                if staged.is_symlink()
+                    || !staged.is_file()
                     || staged.metadata()?.len() > MAX_ENTRY_BYTES as u64
                 {
                     return Err(invalid("unsafe staged recovery entry"));
@@ -87,7 +88,10 @@ pub fn commit(journal: &Path, writes: &[(&Path, &[u8])]) -> io::Result<()> {
     let targets: Vec<&Path> = writes.iter().map(|entry| entry.0).collect();
     validate_targets(&targets)?;
     if journal.exists() {
-        return Err(io::Error::new(ErrorKind::AlreadyExists, "journal recovery required"));
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "journal recovery required",
+        ));
     }
     fs::create_dir(journal)?;
     sync_parent(journal)?;
@@ -95,12 +99,18 @@ pub fn commit(journal: &Path, writes: &[(&Path, &[u8])]) -> io::Result<()> {
         if bytes.len() > MAX_ENTRY_BYTES {
             return Err(invalid("journal entry exceeds size limit"));
         }
-        let mut f = OpenOptions::new().write(true).create_new(true).open(staged(journal, index))?;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(staged(journal, index))?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
     sync_parent(&staged(journal, 0))?;
-    let mut f = OpenOptions::new().write(true).create_new(true).open(marker(journal))?;
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker(journal))?;
     f.write_all(&(writes.len() as u64).to_le_bytes())?;
     f.sync_all()?;
     sync_parent(&marker(journal))?;
