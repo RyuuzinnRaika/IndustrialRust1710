@@ -16,12 +16,13 @@ const MAX_TOTAL: u32 = 2_000_000;
 const MAX_ORBS: usize = 256;
 pub fn to_next(level: u16) -> u32 {
     let n = u32::from(level);
-    if n < 16 {
+    // Java 1.7.10, not the post-1.8 experience curve.
+    if n < 15 {
         17
-    } else if n < 31 {
-        5 * n - 38
+    } else if n < 30 {
+        17 + (n - 15) * 3
     } else {
-        9 * n - 158
+        62 + (n - 30) * 7
     }
 }
 fn level_of(total: u32) -> (u16, u32) {
@@ -196,6 +197,19 @@ mod tests {
     fn level_boundaries_and_packet() {
         let mut state = Experience::new();
         assert_eq!(state.level(), 0);
+        assert_eq!(to_next(14), 17);
+        assert_eq!(to_next(15), 17);
+        assert_eq!(to_next(16), 20);
+        assert_eq!(to_next(29), 59);
+        assert_eq!(to_next(30), 62);
+        assert_eq!(to_next(31), 69);
+        let mut thresholds = Experience::new();
+        thresholds.add(272);
+        assert_eq!(thresholds.level(), 16);
+        thresholds.add(553);
+        assert_eq!(thresholds.level(), 30);
+        thresholds.add(62);
+        assert_eq!(thresholds.level(), 31);
         state.add(17);
         assert_eq!(state.level(), 1);
         assert_eq!(state.packet().id, 0x1f);
