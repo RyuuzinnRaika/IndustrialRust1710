@@ -1401,6 +1401,38 @@ impl Inventory {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn new_sign_recipe_shift_crafting_is_atomic_when_inventory_is_full() {
+        let sign = Stack { id: 323, count: 16, damage: 0 };
+        let mut inv = Inventory::default();
+        for slot in 9..45 {
+            inv.slots[slot] = Some(sign);
+        }
+        // A stack with only one free slot cannot accept the recipe's three
+        // signs, so the entire transaction must be rejected without debit.
+        inv.slots[9] = Some(Stack { count: 15, ..sign });
+        for index in [0, 1, 2, 3, 4, 5] {
+            inv.workbench[index] = Some(Stack { id: 5, count: 2, damage: 0 });
+        }
+        inv.workbench[7] = Some(Stack { id: 280, count: 2, damage: 0 });
+        assert_eq!(
+            inv.crafting_result(1),
+            Some(Stack { id: 323, count: 3, damage: 0 })
+        );
+        let blocked = inv.clone();
+        assert!(inv.click_window(1, 0, 0, 1));
+        assert_eq!(inv, blocked);
+        // Free another slot. Both craft iterations must debit each ingredient
+        // twice and yield exactly six signs, not one partial/ghost batch.
+        inv.slots[10] = None;
+        assert!(inv.click_window(1, 0, 0, 1));
+        assert!(inv.workbench.iter().all(Option::is_none));
+        assert_eq!(inv.slots[9], Some(sign));
+        assert_eq!(inv.slots[10], Some(Stack { count: 5, ..sign }));
+        assert!(inv.crafting_result(1).is_none());
+        assert!(inv.encoded().is_ok());
+    }
+
+    #[test]
     fn brewing_gui_rejects_invalid_bottle_reagent_and_shift_moves() {
         let mut inv = Inventory::default();
         let mut slots = [None; 4];
