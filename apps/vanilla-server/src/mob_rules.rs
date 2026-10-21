@@ -6,8 +6,6 @@ use crate::{player::PlayerPosition, world::World};
 pub enum SpawnCategory {
     Passive,
     Hostile,
-    Water,
-    Ambient,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -46,8 +44,6 @@ pub fn eligible(group: SpawnCategory, c: SpawnCheck) -> bool {
         SpawnCategory::Passive => {
             c.grass_below && c.block_light.max(c.sky_light) >= 9 && c.biome != 0 && c.biome != 2
         }
-        SpawnCategory::Water => c.biome == 0,
-        SpawnCategory::Ambient => c.block_light.max(c.sky_light) <= 7,
     }
 }
 fn opaque(id: u16) -> bool {
