@@ -324,7 +324,7 @@ impl World {
                 if in_bounds(nx, ny, nz) && self.get(nx, ny, nz) == 0 {
                     changes
                         .entry((nx, ny as u8, nz))
-                        .or_insert((id << 4) | level + 1);
+                        .or_insert((id << 4) | (level + 1));
                 }
             }
         }
