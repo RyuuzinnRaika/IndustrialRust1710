@@ -1695,7 +1695,14 @@ fn play(
                     active_furnace = None;
                     active_hopper = None;
                     active_brewer = None;
-                    let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
+                    let generated_loot = world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .generated_dungeon_loot(pos.0, pos.1, pos.2);
+                    let mut guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
+                    if let Some(loot) = generated_loot {
+                        guard.initialize_generated(chest_path, pos, loot)?;
+                    }
                     let items = inventory.chest_window_items(
                         active_window,
                         &chest_window_state(&guard, pos, active_chest_partner),
