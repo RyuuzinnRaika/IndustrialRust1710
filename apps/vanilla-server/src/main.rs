@@ -965,7 +965,10 @@ fn play(
                                             && hoppers
                                                 .lock()
                                                 .map_err(|_| bad("hopper lock poisoned"))?
-                                                .has_contents(target));
+                                                .has_contents(target))
+                                        || (block == 117 && brewers.lock()
+                                            .map_err(|_| bad("brewer lock poisoned"))?
+                                            .is_nonempty(target));
                                     if !occupied {
                                         let mut ground = ground_items.lock().map_err(|_| {
                                             io::Error::other("ground items lock poisoned")
@@ -1059,7 +1062,10 @@ fn play(
                                     && hoppers
                                         .lock()
                                         .map_err(|_| bad("hopper lock poisoned"))?
-                                        .has_contents((x, y, z)));
+                                        .has_contents((x, y, z)))
+                                || (block == 117 && brewers.lock()
+                                    .map_err(|_| bad("brewer lock poisoned"))?
+                                    .is_nonempty((x, y, z)));
                             if occupied {
                                 false
                             } else {
@@ -1620,6 +1626,45 @@ fn play(
                         &chest_window_state(&storage, pos, active_chest_partner),
                     );
                     drop(storage);
+                } else if let Some(pos) = active_brewer {
+                    let still_open={
+                        let w=world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        w.get(pos.0,pos.1,pos.2)>>4==117
+                            && near(location,pos.0,pos.1,pos.2)
+                    };
+                    let mut storage=brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
+                    let original=storage.get(pos);
+                    let mut changed=original.slots;
+                    let mut candidate=inventory.clone();
+                    let change=if still_open && requested_window {
+                        candidate.chest_click(&mut changed,slot,button,mode)
+                    } else {None};
+                    let mut next=original;
+                    next.slots=changed;
+                    if change.is_some() && next.valid() {
+                        accepted=true;
+                        let inv_changed=candidate != *inventory;
+                        let brewer_changed=next != original;
+                        if inv_changed && brewer_changed {
+                            let staged=storage.staged_update(pos,next)?;
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[(inventory_path,candidate.encoded()?),
+                                  (brewer_path,staged.encoded()?)],
+                            )?;
+                            *inventory=candidate;
+                            *storage=staged;
+                        } else if brewer_changed {
+                            let staged=storage.staged_update(pos,next)?;
+                            storage.commit_staged(brewer_path,staged)?;
+                        } else if inv_changed {
+                            candidate.save(inventory_path)?;
+                            *inventory=candidate;
+                        }
+                    }
+                    last_brewer_view=storage.get(pos);
+                    response_items=inventory.chest_window_items(active_window,&last_brewer_view.slots);
+                    drop(storage);
                 } else if let Some(pos) = active_hopper {
                     let still_open = {
                         let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -1681,6 +1726,9 @@ fn play(
                     for property in last_furnace_view.properties(active_window) {
                         send(s, 0x31, &property)?;
                     }
+                }
+                if active_brewer.is_some() {
+                    send(s, 0x31, &last_brewer_view.property(active_window))?;
                 }
                 send(s, 0x2f, &inventory.cursor_packet())?;
             }
@@ -2355,6 +2403,27 @@ fn main() -> io::Result<()> {
                 })();
                 if let Err(error) = tick_result {
                     eprintln!("HOPPER TRANSFER ERROR: {error}; stopping transfers");
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+    // Fuel-free 1.7.10 brewing progresses at the shared monotonic 20Hz rate.
+    let brewer_worker=Arc::clone(&brewers);
+    let brewer_file=Arc::clone(&brewer_path);
+    let brewer_clock=Arc::clone(&clock);
+    thread::spawn(move || {
+        let mut last=brewer_clock.ticks();
+        loop {
+            let now=brewer_clock.ticks();
+            if now>last {
+                let steps=(now-last).min(20) as u32;
+                last=now;
+                let result=brewer_worker.lock().map_err(|_| bad("brewer lock poisoned"))
+                    .and_then(|mut stands|stands.advance(&brewer_file,steps));
+                if let Err(error)=result {
+                    eprintln!("BREWING TICK STORAGE ERROR: {error}");
                     break;
                 }
             }
