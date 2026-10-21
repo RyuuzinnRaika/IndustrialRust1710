@@ -63,7 +63,10 @@ impl Kind {
         }
     }
     fn passive(self) -> bool {
-        matches!(self, Self::Cow | Self::Pig | Self::Sheep | Self::Chicken | Self::Villager)
+        matches!(
+            self,
+            Self::Cow | Self::Pig | Self::Sheep | Self::Chicken | Self::Villager
+        )
     }
     fn peaceful_safe(self) -> bool {
         self.passive() || matches!(self, Self::IronGolem)
@@ -116,7 +119,11 @@ impl Kind {
             Self::IronGolem => 265,
             Self::Villager | Self::EnderDragon | Self::Wither => return None,
         };
-        Some(Stack { id, count: 1, damage: 0 })
+        Some(Stack {
+            id,
+            count: 1,
+            damage: 0,
+        })
     }
     fn breeding_food(self, held: i16) -> bool {
         match self {
@@ -183,11 +190,16 @@ impl Mob {
         Event { id: 0x1a, body }
     }
     fn death_drop(self) -> Option<(Stack, (i32, i32, i32))> {
-        self.kind.drop(self.size).map(|stack| (stack, (
-            self.position.x.floor() as i32,
-            self.position.y.floor() as i32,
-            self.position.z.floor() as i32,
-        )))
+        self.kind.drop(self.size).map(|stack| {
+            (
+                stack,
+                (
+                    self.position.x.floor() as i32,
+                    self.position.y.floor() as i32,
+                    self.position.z.floor() as i32,
+                ),
+            )
+        })
     }
     fn nearby(self, position: PlayerPosition, radius: f64) -> bool {
         let dx = self.position.x - position.x;
@@ -374,15 +386,29 @@ impl Mobs {
     fn insert(&mut self, kind: Kind, position: PlayerPosition, baby: bool) -> Event {
         self.insert_sized(kind, position, baby, 1)
     }
-    fn insert_sized(&mut self, kind: Kind, position: PlayerPosition, baby: bool, size: u8) -> Event {
-        let size = if kind.splitting() { size.clamp(1, 4) } else { 1 };
+    fn insert_sized(
+        &mut self,
+        kind: Kind,
+        position: PlayerPosition,
+        baby: bool,
+        size: u8,
+    ) -> Event {
+        let size = if kind.splitting() {
+            size.clamp(1, 4)
+        } else {
+            1
+        };
         let id = self.next_id;
         self.next_id += 1;
         let mob = Mob {
             id,
             kind,
             position,
-            health: if kind.splitting() { i16::from(size) * i16::from(size) } else { kind.health() },
+            health: if kind.splitting() {
+                i16::from(size) * i16::from(size)
+            } else {
+                kind.health()
+            },
             hit_tick: 0,
             bite_tick: 0,
             fuse: 0,
@@ -441,7 +467,10 @@ impl Mobs {
                     }),
                     z: z as f64 + 0.5,
                 };
-                if !physics::collides(world, &p) && physics::supported(world, &p) && (difficulty > 0 || n == 2) {
+                if !physics::collides(world, &p)
+                    && physics::supported(world, &p)
+                    && (difficulty > 0 || n == 2)
+                {
                     state.insert(
                         if n == 0 {
                             Kind::Zombie
@@ -725,7 +754,11 @@ impl Mobs {
             .values()
             .filter(|mob| mob.kind.passive())
             .count();
-        let hostile = self.entities.values().filter(|m| !m.kind.peaceful_safe()).count();
+        let hostile = self
+            .entities
+            .values()
+            .filter(|m| !m.kind.peaceful_safe())
+            .count();
         let dimension = world.dimension();
         for index in 0..4u64 {
             let seed = hash(
@@ -758,7 +791,10 @@ impl Mobs {
             };
             // Underground probes seek a two-block-tall air pocket above solid
             // ground. Never create arbitrary mobs inside rock or liquids.
-            if dimension == crate::dimensions::Dimension::Overworld && seed & 3 == 0 && height.is_some_and(|h| h > 18) {
+            if dimension == crate::dimensions::Dimension::Overworld
+                && seed & 3 == 0
+                && height.is_some_and(|h| h > 18)
+            {
                 let height = height.unwrap();
                 let mut probe = 12 + ((seed >> 17) % (height - 13) as u64) as i32;
                 for _ in 0..20 {
@@ -794,7 +830,8 @@ impl Mobs {
                 continue;
             }
             let kind = if is_passive {
-                if passive >= PASSIVE_CAP || matches!(biome, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24) {
+                if passive >= PASSIVE_CAP || matches!(biome, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24)
+                {
                     continue;
                 }
                 match seed % 4 {
@@ -839,8 +876,14 @@ impl Mobs {
                 }
             };
             let size = if kind.splitting() {
-                match (seed >> 33) % 3 { 0 => 1, 1 => 2, _ => 4 }
-            } else { 1 };
+                match (seed >> 33) % 3 {
+                    0 => 1,
+                    1 => 2,
+                    _ => 4,
+                }
+            } else {
+                1
+            };
             let baby = kind == Kind::Zombie && (seed >> 21).is_multiple_of(20);
             events.push(self.insert_sized(kind, position, baby, size));
             break; // Bound per-cycle packets and CPU.
@@ -910,8 +953,8 @@ impl Mobs {
                     mob.health -= 1;
                     if mob.health <= 0 {
                         if let Some(drop) = mob.death_drop() {
-                        self.pending_drops.push(drop);
-                    }
+                            self.pending_drops.push(drop);
+                        }
                         events.push(mob.status(3));
                         dead.push(mob.id);
                         continue;
@@ -954,8 +997,7 @@ impl Mobs {
                 if mob.kind == Kind::IronGolem {
                     continue; // Guardian targeting is handled separately below.
                 }
-                if matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman)
-                    && now >= mob.anger_until
+                if matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman) && now >= mob.anger_until
                 {
                     continue; // Neutral until attacked; anger expires after 60 seconds.
                 }
@@ -1044,10 +1086,15 @@ impl Mobs {
                 if len < 1e-6 {
                     continue;
                 }
-                let speed = if mob.kind.passive() { 0.065 }
-                    else if mob.kind.splitting() { 0.08 + f64::from(mob.size) * 0.025 }
-                    else if mob.baby { 0.18 }
-                    else { 0.11 };
+                let speed = if mob.kind.passive() {
+                    0.065
+                } else if mob.kind.splitting() {
+                    0.08 + f64::from(mob.size) * 0.025
+                } else if mob.baby {
+                    0.18
+                } else {
+                    0.11
+                };
                 let candidate = PlayerPosition {
                     x: mob.position.x + dx / len * speed,
                     z: mob.position.z + dz / len * speed,
@@ -1085,16 +1132,26 @@ impl Mobs {
             // Iron golems target nearby hostile mobs, never players or villagers.
             // Resolve after the iteration to avoid mutable aliasing and keep
             // each hit authoritative for all connected clients.
-            let guardians: Vec<Mob> = self.entities.values()
-                .filter(|m| m.kind == Kind::IronGolem
-                    && (m.bite_tick == 0 || now.saturating_sub(m.bite_tick) >= 20))
-                .copied().collect();
+            let guardians: Vec<Mob> = self
+                .entities
+                .values()
+                .filter(|m| {
+                    m.kind == Kind::IronGolem
+                        && (m.bite_tick == 0 || now.saturating_sub(m.bite_tick) >= 20)
+                })
+                .copied()
+                .collect();
             for guardian in guardians {
-                let victim = self.entities.values()
-                    .filter(|other| other.kind.hostile_to_players()
-                        && other.nearby(guardian.position, 3.0))
-                    .min_by(|a, b| distance(a.position, guardian.position)
-                        .total_cmp(&distance(b.position, guardian.position)))
+                let victim = self
+                    .entities
+                    .values()
+                    .filter(|other| {
+                        other.kind.hostile_to_players() && other.nearby(guardian.position, 3.0)
+                    })
+                    .min_by(|a, b| {
+                        distance(a.position, guardian.position)
+                            .total_cmp(&distance(b.position, guardian.position))
+                    })
                     .map(|mob| mob.id);
                 if let Some(victim) = victim {
                     if let Some(golem) = self.entities.get_mut(&guardian.id) {
@@ -1181,9 +1238,10 @@ impl Mobs {
                         impacted = true;
                         break;
                     }
-                } else if let Some(mob) = self.entities.values()
-                    .find(|mob| mob.id != arrow.shooter.unwrap_or(-1)
-                        && mob.nearby(sample, 0.9))
+                } else if let Some(mob) = self
+                    .entities
+                    .values()
+                    .find(|mob| mob.id != arrow.shooter.unwrap_or(-1) && mob.nearby(sample, 0.9))
                 {
                     arrow_hits.push((mob.id, arrow.damage));
                     impacted = true;
@@ -1231,9 +1289,18 @@ impl Mobs {
         });
         for mob in self.entities.values_mut() {
             if (mob.kind.hostile_to_players()
-                    || (matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman)
-                        && tick < mob.anger_until))
-                && !matches!(mob.kind, Kind::Skeleton | Kind::Creeper | Kind::Ghast | Kind::Blaze | Kind::Witch | Kind::EnderDragon | Kind::Wither)
+                || (matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman)
+                    && tick < mob.anger_until))
+                && !matches!(
+                    mob.kind,
+                    Kind::Skeleton
+                        | Kind::Creeper
+                        | Kind::Ghast
+                        | Kind::Blaze
+                        | Kind::Witch
+                        | Kind::EnderDragon
+                        | Kind::Wither
+                )
                 && mob.nearby(player, 1.6)
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
@@ -1280,9 +1347,15 @@ mod tests {
         assert!(size.body.windows(2).any(|bytes| bytes == [16, 4]));
         assert_eq!(mobs.entities.get(&0).unwrap().health, 16);
         let baby = mobs.insert(Kind::Zombie, pos, true);
-        assert!(baby.body.windows(5).any(|bytes| bytes == [76, 255, 255, 162, 64]));
+        assert!(baby
+            .body
+            .windows(5)
+            .any(|bytes| bytes == [76, 255, 255, 162, 64]));
         let villager = mobs.insert(Kind::Villager, pos, false);
-        assert!(villager.body.windows(5).any(|bytes| bytes == [80, 0, 0, 0, 0]));
+        assert!(villager
+            .body
+            .windows(5)
+            .any(|bytes| bytes == [80, 0, 0, 0, 0]));
     }
 
     #[test]
@@ -1297,7 +1370,9 @@ mod tests {
         let children: Vec<_> = mobs.entities.values().copied().collect();
         assert!((2..=4).contains(&children.len()));
         assert!(children.iter().all(|child| child.kind == Kind::Slime
-            && child.size == 2 && child.health == 4 && child.id != 0));
+            && child.size == 2
+            && child.health == 4
+            && child.id != 0));
         let id = children[0].id;
         mobs.entities.get_mut(&id).unwrap().health = 1;
         let result = mobs.player_attack(id, pos, None, 30).unwrap();
@@ -1305,7 +1380,12 @@ mod tests {
         assert!(mobs.entities.values().any(|mob| mob.size == 1));
         let unique: std::collections::BTreeSet<_> = mobs.entities.keys().copied().collect();
         assert_eq!(unique.len(), mobs.entities.len());
-        assert_eq!(mobs.spawn_events().filter(|packet| packet.id == 0x0f).count(), mobs.entities.len());
+        assert_eq!(
+            mobs.spawn_events()
+                .filter(|packet| packet.id == 0x0f)
+                .count(),
+            mobs.entities.len()
+        );
     }
 
     #[test]
