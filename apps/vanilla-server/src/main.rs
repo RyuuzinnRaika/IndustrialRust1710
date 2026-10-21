@@ -539,26 +539,18 @@ fn play(
         }
         // The first active session advances the shared mob simulation.
         if survival && vitals.health > 0.0 {
-            let players = hub.positions()?;
+            let participants = hub.participants()?;
+            let players: Vec<PlayerPosition> = participants.iter().map(|&(_, pos)| pos).collect();
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
             let updates = creatures.tick(now_tick, &w, &players);
-            let hurt = creatures.hurt_player(*player, now_tick);
             let explosions = creatures.take_explosions();
+            creatures.queue_explosion_hits(&explosions, &participants);
+            let hurt = creatures.hurt_player(entity_id, *player, now_tick);
             let drops = creatures.take_drops();
             drop(creatures);
-            let mut damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
+            let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
             for explosion in explosions {
-                let dx = explosion.position.x - player.x;
-                let dy = explosion.position.y - player.y;
-                let dz = explosion.position.z - player.z;
-                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                if dist < explosion.radius * 2.0 {
-                    let fraction = (1.0 - dist / (explosion.radius * 2.0)).max(0.0);
-                    damage += (f32::from(inventory.armor_points()).mul_add(-0.04, 1.0)
-                        * (fraction * fraction * 14.0 + 1.0) as f32)
-                        .max(0.0);
-                }
                 hub.broadcast(explosion.packet());
                 // One blast removes at most 64 non-tile blocks, protecting persisted containers.
                 let mut destroyed = 0;
