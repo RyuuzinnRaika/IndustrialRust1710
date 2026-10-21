@@ -624,7 +624,11 @@ impl Mobs {
         players: &[PlayerPosition],
         events: &mut Vec<Event>,
     ) {
-        if !self.enabled || players.is_empty() || !now.is_multiple_of(80) {
+        if !self.enabled
+            || world.dimension() != crate::dimensions::Dimension::Overworld
+            || players.is_empty()
+            || !now.is_multiple_of(80)
+        {
             return;
         }
         let passive = self
