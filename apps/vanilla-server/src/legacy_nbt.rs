@@ -196,7 +196,6 @@ mod tests {
         assert!(parse_chunk(&fastnbt::to_bytes(&sample()).unwrap(), 2, -1).is_err());
     }
 
-
     #[test]
     fn chunk_tile_entities_must_belong_to_the_enclosing_column() {
         fn tile(x: i32, z: i32) -> Value {
