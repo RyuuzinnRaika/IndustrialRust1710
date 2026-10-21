@@ -137,6 +137,7 @@ mod tests {
         let clock = Clock {
             ticks: AtomicU64::new(initial),
             running: AtomicBool::new(false),
+            time_offset: AtomicU64::new(0),
         };
         assert_eq!(clock.weather(), (true, true));
         clock.save_ticks(&path).unwrap();
