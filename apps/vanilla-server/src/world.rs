@@ -90,6 +90,12 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 64 | 71 // doors
             | 96 // trapdoors
             | 93 | 94 // repeater
+            | 83 // sugar cane
+            | 81 // cactus
+            | 104 | 105 // pumpkin / melon stems
+            | 115 // nether wart
+            | 127 // cocoa
+            | 86 | 103 // pumpkins and melons
             | 141 | 142 // carrot/potato
             | 50 // wall/ground torch: simplified attachment
             | 55 // redstone dust (client item 331)
@@ -393,7 +399,7 @@ impl World {
             if id == 55 {
                 self.pending_circuit.insert(pos);
             }
-            if matches!(id, 6 | 18 | 59 | 60 | 141 | 142) {
+            if matches!(id, 6 | 18 | 59 | 60 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142) {
                 self.pending_ecology.insert(pos);
             } else {
                 self.pending_ecology.remove(&pos);
