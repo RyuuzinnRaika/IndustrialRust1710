@@ -140,13 +140,6 @@ pub fn result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
         }
     }
     if w == 3 && h == 3 {
-        if at(1, 0).is_none()
-            && plank(at(0, 0)) && plank(at(2, 0))
-            && plank(at(0, 1)) && plank(at(2, 1))
-            && at(1, 1).is_none()
-            && (0..3).all(|x| plank(at(x, 2))) {
-            return product(333, 1, 0); // boat
-        }
         if (0..3).all(|y| (0..3).all(|x| {
             if x == 0 || x == 2 {
                 stick(at(x, y))
@@ -182,6 +175,12 @@ pub fn result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
         })) {
             return product(27, 6, 0); // powered rails
         }
+    }
+    if w == 3 && h == 2
+        && plank(at(0, 0)) && at(1, 0).is_none() && plank(at(2, 0))
+        && (0..3).all(|x| plank(at(x, 1)))
+    {
+        return product(333, 1, 0); // boat
     }
     if w == 3 && h == 2 && same_material(at(0, 0), 265)
         && at(1, 0).is_none() && same_material(at(2, 0), 265)
@@ -264,7 +263,7 @@ mod tests {
         assert_eq!(shaped(&[338,0,0,0],2), product(353,1,0));
         assert_eq!(shaped(&[265,0,0,265],2), product(359,1,0));
         assert_eq!(shaped(&[0,265,265,0],2), product(359,1,0));
-        assert_eq!(shaped(&[5,0,5,5,0,5,5,5,5],3), product(333,1,0));
+        assert_eq!(shaped(&[5,0,5,5,5,5,0,0,0],3), product(333,1,0));
         assert_eq!(shaped(&[280,0,280,280,280,280,280,0,280],3), product(65,3,0));
         assert_eq!(shaped(&[265,0,265,265,280,265,265,0,265],3), product(66,16,0));
         assert_eq!(shaped(&[266,0,266,266,280,266,266,331,266],3), product(27,6,0));
