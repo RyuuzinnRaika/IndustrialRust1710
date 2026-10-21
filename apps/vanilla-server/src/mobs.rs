@@ -24,17 +24,21 @@ enum Kind {
     Skeleton,
     Creeper,
     Spider,
+    #[allow(dead_code)] // Registered for the Protocol 5 species integration.
     CaveSpider,
     Enderman,
     Slime,
     Witch,
+    #[allow(dead_code)] // Registered for the Protocol 5 species integration.
     Ghast,
     Blaze,
     ZombiePigman,
     MagmaCube,
     Villager,
     IronGolem,
+    #[allow(dead_code)] // Registered for the Protocol 5 species integration.
     EnderDragon,
+    #[allow(dead_code)] // Registered for the Protocol 5 species integration.
     Wither,
 }
 impl Kind {
@@ -846,9 +850,9 @@ impl Mobs {
                 }
                 match dimension {
                     crate::dimensions::Dimension::Overworld => {
-                        if y < 40 && (seed >> 24).is_multiple_of(16) {
-                            Kind::Slime
-                        } else if biome == 6 && !sunlight(now) && (seed >> 25).is_multiple_of(12) {
+                        if (y < 40 && (seed >> 24).is_multiple_of(16))
+                            || (biome == 6 && !sunlight(now) && (seed >> 25).is_multiple_of(12))
+                        {
                             Kind::Slime
                         } else {
                             match seed % 16 {
