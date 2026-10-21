@@ -196,8 +196,23 @@ impl World {
         }
         false
     }
-    /// Power cannot travel infinitely across powered/activator rails.
-    /// Bound traversal to eight rail segments as in 1.7.10.
+    /// Powered/activator rails have only two physical endpoints. For sloped
+    /// rails the uphill endpoint is one block higher. Return endpoint
+    /// direction and height relative to the supporting block.
+    fn rail_ports(metadata: u16) -> Option<[(i32, i32, i32); 2]> {
+        match metadata & 7 {
+            0 => Some([(0, -1, 0), (0, 1, 0)]),
+            1 => Some([(-1, 0, 0), (1, 0, 0)]),
+            2 => Some([(-1, 0, 0), (1, 0, 1)]),
+            3 => Some([(-1, 0, 1), (1, 0, 0)]),
+            4 => Some([(0, -1, 1), (0, 1, 0)]),
+            5 => Some([(0, -1, 0), (0, 1, 1)]),
+            _ => None,
+        }
+    }
+
+    /// At most eight connected rail segments. Merely adjacent perpendicular
+    /// rails must not transmit power; endpoints must face and meet at height.
     fn rail_powered(&self, x: i32, y: i32, z: i32, id: u16) -> bool {
         use std::collections::{BTreeSet, VecDeque};
         let mut seen = BTreeSet::from([(x, y, z)]);
@@ -209,14 +224,24 @@ impl World {
             if distance >= 8 {
                 continue;
             }
-            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                for dy in [-1, 0, 1] {
-                    let at = (rx + dx, ry + dy, rz + dz);
-                    if in_bounds(at.0, at.1, at.2)
-                        && self.get(at.0, at.1, at.2) >> 4 == id
-                        && seen.insert(at)
-                    {
-                        next.push_back((at.0, at.1, at.2, distance + 1));
+            let current = self.get(rx, ry, rz);
+            let Some(ports) = Self::rail_ports(current & 7) else { continue };
+            for (dx, dz, height) in ports {
+                for dy in -1..=1 {
+                    let (nx, ny, nz) = (rx + dx, ry + dy, rz + dz);
+                    if !in_bounds(nx, ny, nz) || seen.contains(&(nx, ny, nz)) {
+                        continue;
+                    }
+                    let candidate = self.get(nx, ny, nz);
+                    if candidate >> 4 != id {
+                        continue;
+                    }
+                    let Some(other_ports) = Self::rail_ports(candidate & 7) else { continue };
+                    let connected = other_ports.iter().any(|&(ox, oz, oh)| {
+                        ox == -dx && oz == -dz && ry + height == ny + oh
+                    });
+                    if connected && seen.insert((nx, ny, nz)) {
+                        next.push_back((nx, ny, nz, distance + 1));
                     }
                 }
             }
@@ -529,6 +554,31 @@ impl World {
 mod redstone_regression_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn powered_rails_follow_orientation_not_simple_adjacency() {
+        let mut w = World::new();
+        w.import_block(0, 65, 0, (27 << 4) | 1).unwrap(); // east/west
+        w.import_block(1, 65, 0, (27 << 4) | 0).unwrap(); // north/south
+        w.import_block(1, 65, 1, 152 << 4).unwrap();
+        // The second rail is powered, but it is perpendicular to the first.
+        assert!(w.rail_powered(1, 65, 0, 27));
+        assert!(!w.rail_powered(0, 65, 0, 27));
+        w.import_block(1, 65, 0, (27 << 4) | 1).unwrap();
+        assert!(w.rail_powered(0, 65, 0, 27));
+    }
+
+    #[test]
+    fn powered_rail_slope_connects_to_raised_flat_rail() {
+        let mut w = World::new();
+        w.import_block(0, 65, 0, (27 << 4) | 2).unwrap(); // ascending east
+        w.import_block(1, 66, 0, (27 << 4) | 1).unwrap();
+        w.import_block(2, 66, 0, 152 << 4).unwrap();
+        assert!(w.rail_powered(0, 65, 0, 27));
+        // Reversing the slope disconnects the same two rail blocks.
+        w.import_block(0, 65, 0, (27 << 4) | 3).unwrap();
+        assert!(!w.rail_powered(0, 65, 0, 27));
+    }
 
     #[test]
     fn powered_repeater_only_outputs_in_its_facing_direction() {
