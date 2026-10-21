@@ -494,7 +494,7 @@ impl Mobs {
             };
             // Roughly one in three attempts explores a cave rather than
             // placing every hostile at the surface of a mountain.
-            let underground = (seed >> 20) % 3 == 0;
+            let underground = (seed >> 20).is_multiple_of(3);
             let y = if underground {
                 let base_y = 12 + ((seed >> 24) % 35) as i32;
                 (base_y..=base_y + 24).find(|height| {
