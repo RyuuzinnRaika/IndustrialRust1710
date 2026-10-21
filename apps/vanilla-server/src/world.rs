@@ -505,6 +505,9 @@ impl World {
                 // Falling fluids use metadata level 8, not level 1. They
                 // remain falling while fed vertically from their source.
                 let mut next = if fed_from_above { 8 } else { 9 };
+                // Vanilla Overworld lava dissipates faster than water:
+                // one horizontal lava step costs two fluid levels.
+                let horizontal_cost: u16 = if id == 10 { 2 } else { 1 };
                 let sides = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)];
                 let mut source_neighbors = 0;
                 for (nx, nz) in sides {
@@ -513,7 +516,11 @@ impl World {
                         if other & 15 == 0 {
                             source_neighbors += 1;
                         }
-                        next = next.min((other & 15) + 1);
+                        // Falling neighbors (metadata 8) are not a horizontal
+                        // upstream source; only stationary lateral flow feeds.
+                        if other & 15 < 8 {
+                            next = next.min((other & 15) + horizontal_cost);
+                        }
                     }
                 }
                 let solid_below = y > 0 && !matches!(self.get(x, y - 1, z) >> 4, 0 | 8..=11);
@@ -544,7 +551,7 @@ impl World {
                 in_bounds(down.0, down.1, down.2) && self.get(down.0, down.1, down.2) == 0;
             let targets: Vec<(i32, i32, i32)> = if falling {
                 vec![down]
-            } else if level == 7 {
+            } else if (level & 7) + if id == 10 { 2 } else { 1 } > 7 {
                 Vec::new()
             } else {
                 vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
@@ -554,7 +561,11 @@ impl World {
                     continue;
                 }
                 let existing = self.get(nx, ny, nz);
-                let next_level = if falling { 8 } else { (level & 7) + 1 };
+                let next_level = if falling {
+                    8
+                } else {
+                    (level & 7) + if id == 10 { 2 } else { 1 }
+                };
                 let desired = (id << 4) | next_level;
                 if existing == 0 || (existing >> 4 == id && existing & 15 > next_level) {
                     let target = (nx, ny as u8, nz);
