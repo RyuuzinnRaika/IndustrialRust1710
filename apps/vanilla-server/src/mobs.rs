@@ -1023,6 +1023,63 @@ impl Mobs {
                     }
                 }
             }
+            // A zombie close enough to attack a villager may convert it.
+            // Destroy + spawn is necessary because Protocol 5 mob type is
+            // immutable for a single client-side entity instance.
+            if now.is_multiple_of(40) {
+                let zombies: Vec<PlayerPosition> = self.entities.values()
+                    .filter(|mob| mob.kind == Kind::Zombie)
+                    .map(|mob| mob.position).collect();
+                for villager in self.entities.values_mut() {
+                    if villager.kind == Kind::Villager && zombies.iter()
+                        .any(|p| distance(*p, villager.position) < 1.5)
+                        && hash(now ^ villager.id as u64) & 1 == 0
+                    {
+                        events.push(multiplayer::destroy(villager.id));
+                        villager.kind = Kind::Zombie;
+                        villager.health = Kind::Zombie.health();
+                        villager.angry = true;
+                        events.push(villager.spawn());
+                    }
+                }
+            }
+            // Iron golems target hostile server entities rather than players.
+            // Cooldowns protect 20TPS when many monsters surround the golem.
+            let golems: Vec<(i32, PlayerPosition, u64)> = self.entities.values()
+                .filter(|m| m.kind == Kind::IronGolem)
+                .map(|m| (m.id, m.position, m.bite_tick)).collect();
+            for (golem_id, at, last_hit) in golems {
+                if last_hit != 0 && now.saturating_sub(last_hit) < 20 { continue; }
+                let foe = self.entities.iter().find(|(_,mob)| {
+                    !mob.kind.passive()
+                        && !matches!(mob.kind, Kind::IronGolem | Kind::ZombiePigman)
+                        && distance(mob.position, at) < 2.5
+                }).map(|(&id,_)| id);
+                if let Some(foe) = foe {
+                    if let Some(golem) = self.entities.get_mut(&golem_id) {
+                        golem.bite_tick = now;
+                    }
+                    if let Some(enemy) = self.entities.get_mut(&foe) {
+                        enemy.health -= 8;
+                        let dead = *enemy;
+                        events.push(enemy.status(if enemy.health <= 0 { 3 } else { 2 }));
+                        if enemy.health <= 0 {
+                            if dead.kind != Kind::Villager
+                                && !(matches!(dead.kind, Kind::Slime | Kind::MagmaCube)
+                                    && dead.split_size > 1) {
+                                self.pending_drops.push((dead.kind.drop(),(
+                                    dead.position.x.floor() as i32,
+                                    dead.position.y.floor() as i32,
+                                    dead.position.z.floor() as i32,
+                                )));
+                            }
+                            self.entities.remove(&foe);
+                            events.push(multiplayer::destroy(foe));
+                            events.extend(self.split_children(dead));
+                        }
+                    }
+                }
+            }
             for id in dead {
                 if self.entities.remove(&id).is_some() {
                     events.push(multiplayer::destroy(id));
