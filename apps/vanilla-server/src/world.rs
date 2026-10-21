@@ -1191,6 +1191,26 @@ mod tests {
         assert_eq!(World::new().chunk_data(0, 0).0, 0x18);
     }
     #[test]
+    fn overworld_lava_attenuates_twice_as_fast_as_water() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-lava-attenuation-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 64, 0, 10 << 4).unwrap();
+        for _ in 0..48 {
+            world.block_tick(&path, 128).unwrap();
+        }
+        assert_eq!(world.get(1, 64, 0), (10 << 4) | 2);
+        assert_eq!(world.get(2, 64, 0), (10 << 4) | 4);
+        assert_eq!(world.get(3, 64, 0), (10 << 4) | 6);
+        assert_eq!(world.get(4, 64, 0), 0);
+        let loaded = World::load(&path).unwrap();
+        assert_eq!(loaded.get(3, 64, 0), (10 << 4) | 6);
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn water_flow_and_circuit_propagation_are_bounded_and_persistent() {
         let path =
             std::env::temp_dir().join(format!("ir1710-fluid-circuit-{}.irw", std::process::id()));
