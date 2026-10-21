@@ -55,11 +55,35 @@ fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
         || name.ends_with(".furnaces.json")
         || name.ends_with(".hoppers.json")
         || name.ends_with(".brewers.json")
-        || name.ends_with(".drops.json"))
+        || name.ends_with(".drops.json")
+        || (rel.components().count() == 1 && name.ends_with(".irw"))
+    )
     {
         return Err(invalid("journal target type not allowed"));
     }
     Ok(rel.to_path_buf())
+}
+/// Refuse symlinks (and nonregular leaf files) to avoid replaying an
+/// otherwise valid journal into files outside the save directory.
+fn check_target(base: &Path, relative_path: &Path) -> io::Result<()> {
+    let parts: Vec<_> = relative_path.components().collect();
+    let mut current = base.to_path_buf();
+    for (index, component) in parts.iter().enumerate() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink()
+                    || (index + 1 == parts.len() && !metadata.is_file())
+                    || (index + 1 < parts.len() && !metadata.is_dir())
+                {
+                    return Err(invalid("journal target is a symlink or invalid file type"));
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
 }
 fn root(journal: &Path) -> &Path {
     journal
@@ -104,6 +128,7 @@ fn apply(journal: &Path, record: &Record) -> io::Result<()> {
     let mut seen = std::collections::HashSet::new();
     for file in &record.files {
         let checked = relative(base, &base.join(&file.relative))?;
+        check_target(base, &checked)?;
         if !seen.insert(checked)
             || file.contents.len() > MAX_TARGET_BYTES
             || fingerprint(&file.contents) != file.checksum
@@ -119,6 +144,10 @@ fn apply(journal: &Path, record: &Record) -> io::Result<()> {
             fs::remove_file(&temp)?;
         }
         atomic_write(&destination, &file.contents)?;
+        if let Some(parent) = destination.parent() {
+            // A rename into players/ must sync players/, not only world/.
+            sync_directory(parent)?;
+        }
     }
     sync_directory(base)?;
     fs::remove_file(journal)?;
@@ -154,8 +183,10 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .map_err(|_| invalid("journal lock poisoned"))?;
-    if journal.exists() {
-        return Err(invalid("unrecovered transaction: restart required"));
+    match fs::symlink_metadata(journal) {
+        Ok(_) => return Err(invalid("unrecovered transaction: restart required")),
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
     }
     if changes.len() < 2 || changes.len() > 3 {
         return Err(invalid("expected multi-file transaction"));
@@ -167,8 +198,10 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
             if bytes.len() > MAX_TARGET_BYTES {
                 return Err(invalid("journal target too big"));
             }
+            let checked = relative(base, path)?;
+            check_target(base, &checked)?;
             Ok(Target {
-                relative: relative(base, path)?,
+                relative: checked,
                 contents: bytes.clone(),
                 checksum: fingerprint(bytes),
             })
@@ -305,6 +338,51 @@ mod tests {
         assert!(!journal.exists());
         fs::remove_dir_all(home).unwrap();
     }
+    #[test]
+    fn world_inventory_container_transaction_is_recoverable() {
+        let home = std::env::temp_dir().join(format!("ir-journal-world-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("players")).unwrap();
+        let world = home.join("flat.irw");
+        let inv = home.join("players/alex.inventory.json");
+        let chest = home.join("flat.chests.json");
+        let journal = home.join("flat.pending-txn.json");
+        commit(&journal, &[
+            (&world, b"IRW1-new".to_vec()),
+            (&inv, b"inventory-new".to_vec()),
+            (&chest, b"chests-new".to_vec()),
+        ]).unwrap();
+        assert_eq!(fs::read(&world).unwrap(), b"IRW1-new");
+        assert_eq!(fs::read(&inv).unwrap(), b"inventory-new");
+        assert_eq!(fs::read(&chest).unwrap(), b"chests-new");
+        recover(&journal).unwrap();
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_participants_without_writing_outside_world() {
+        use std::os::unix::fs::symlink;
+        let home = std::env::temp_dir().join(format!("ir-journal-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("players")).unwrap();
+        let outside = home.with_extension("external");
+        fs::write(&outside, b"original").unwrap();
+        let target = home.join("players/alex.inventory.json");
+        symlink(&outside, &target).unwrap();
+        let second = home.join("flat.chests.json");
+        let journal = home.join("flat.pending-txn.json");
+        let result = commit(&journal, &[
+            (&target, b"overwrite".to_vec()),
+            (&second, b"new".to_vec()),
+        ]);
+        assert!(result.is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"original");
+        assert!(!journal.exists());
+        fs::remove_file(outside).unwrap();
+        fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn corrupt_journal_fails_closed() {
         let home = std::env::temp_dir().join(format!("ir-journal-corrupt-{}", std::process::id()));
