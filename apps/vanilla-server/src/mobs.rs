@@ -232,6 +232,12 @@ pub struct Attack {
     pub experience: u32,
 }
 #[derive(Debug)]
+pub struct AnimalInteraction {
+    pub metadata: Option<Event>,
+    pub item: Option<(Stack, (i32, i32, i32))>,
+    pub milk: bool,
+}
+#[derive(Debug)]
 pub struct Explosion {
     pub position: PlayerPosition,
     pub radius: f64,
@@ -488,14 +494,14 @@ impl Mobs {
         id: i32,
         at: PlayerPosition,
         held: Option<Stack>,
-    ) -> Option<(Option<Event>, Option<(Stack, (i32, i32, i32))>, bool)> {
+    ) -> Option<AnimalInteraction> {
         let mob = self.entities.get_mut(&id)?;
-        if !mob.nearby(at, 3.0) || mob.baby {
-            return None;
-        }
+        if !mob.nearby(at, 3.0) || mob.baby { return None; }
         let stack = held?;
         match (mob.kind, stack.id) {
-            (Kind::Cow, 325) if stack.count == 1 => Some((None, None, true)),
+            (Kind::Cow, 325) if stack.count == 1 => Some(AnimalInteraction {
+                metadata: None, item: None, milk: true,
+            }),
             (Kind::Sheep, 359) if !mob.sheared => {
                 mob.sheared = true;
                 let mut body = mob.id.to_be_bytes().to_vec();
@@ -505,18 +511,11 @@ impl Mobs {
                     mob.position.y.floor() as i32,
                     mob.position.z.floor() as i32,
                 );
-                Some((
-                    Some(Event { id: 0x1c, body }),
-                    Some((
-                        Stack {
-                            id: 35,
-                            count: 1,
-                            damage: 0,
-                        },
-                        pos,
-                    )),
-                    false,
-                ))
+                Some(AnimalInteraction {
+                    metadata: Some(Event { id: 0x1c, body }),
+                    item: Some((Stack { id: 35, count: 1, damage: 0 }, pos)),
+                    milk: false,
+                })
             }
             _ => None,
         }
