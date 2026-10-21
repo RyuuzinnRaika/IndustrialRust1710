@@ -6,7 +6,7 @@
 use crate::inventory::Stack;
 use crate::world;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -28,6 +28,8 @@ fn key((x, y, z): Position) -> String {
 pub struct Chests {
     version: u8,
     entries: BTreeMap<String, [Option<Stack>; CHEST_SLOTS]>,
+    #[serde(default)]
+    generated_claimed: BTreeSet<String>,
     #[serde(skip)]
     revision: u64,
 }
@@ -36,6 +38,7 @@ impl Default for Chests {
         Self {
             version: VERSION,
             entries: BTreeMap::new(),
+            generated_claimed: BTreeSet::new(),
             revision: 0,
         }
     }
@@ -47,6 +50,15 @@ impl Chests {
     fn validate(&self) -> io::Result<()> {
         if self.version != VERSION || self.entries.len() > MAX_CHESTS {
             return Err(invalid("invalid chest version or count"));
+        }
+        if self.generated_claimed.len() > MAX_CHESTS {
+            return Err(invalid("too many generated chest claims"));
+        }
+        for position in &self.generated_claimed {
+            let parts: Vec<_> = position.split(',').map(str::parse::<i32>).collect();
+            if parts.len() != 3 || parts.iter().any(Result::is_err) {
+                return Err(invalid("invalid generated chest claim"));
+            }
         }
         for (name, slots) in &self.entries {
             let coords: Vec<_> = name.split(',').map(str::parse::<i32>).collect();
@@ -123,6 +135,41 @@ impl Chests {
         *self = candidate;
         Ok(())
     }
+    /// Initializes an IRW4 dungeon loot chest exactly once. The claimed marker
+    /// remains after the chest has been emptied or mined, preventing duplication.
+    /// The new slots and marker are committed atomically in the chest file.
+    pub fn initialize_generated(
+        &mut self,
+        path: &Path,
+        pos: Position,
+        loot: [(i16, u8); 3],
+    ) -> io::Result<()> {
+        if !world::in_bounds(pos.0, pos.1, pos.2) {
+            return Err(invalid("generated chest outside world"));
+        }
+        let key = key(pos);
+        if self.generated_claimed.contains(&key) {
+            return Ok(());
+        }
+        let mut staged = self.clone();
+        staged.generated_claimed.insert(key.clone());
+        if !staged.entries.contains_key(&key) {
+            let mut slots = [None; CHEST_SLOTS];
+            for (index, (id, count)) in loot.into_iter().enumerate() {
+                let stack = Stack { id, count, damage: 0 };
+                if !stack.is_valid() {
+                    return Err(invalid("invalid generated loot stack"));
+                }
+                slots[index * 5 + 2] = Some(stack);
+            }
+            staged.entries.insert(key, slots);
+        }
+        staged.revision = self.revision.wrapping_add(1);
+        staged.save(path)?;
+        *self = staged;
+        Ok(())
+    }
+
     pub fn slots(&self, pos: Position) -> [Option<Stack>; CHEST_SLOTS] {
         self.entries
             .get(&key(pos))
