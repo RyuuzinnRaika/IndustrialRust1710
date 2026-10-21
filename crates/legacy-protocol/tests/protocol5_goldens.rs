@@ -58,9 +58,9 @@ impl Read for Fragments {
 #[test]
 fn pipelined_packets_survive_fragmentation_and_socket_timeouts() {
     let data = [
-        vec![2, 0x03, 0x61],    // play chat (tiny fixture)
+        vec![2, 0x03, 0x61],       // play chat (tiny fixture)
         vec![3, 0x00, 0x01, 0x02], // keepalive payload
-        vec![2, 0x09, 0x08],    // held item change
+        vec![2, 0x09, 0x08],       // held item change
     ];
     let input: Vec<u8> = data.iter().flatten().copied().collect();
     let mut reads = VecDeque::new();
@@ -94,8 +94,8 @@ fn rejects_oversize_frames_and_invalid_varints_before_payload_allocation() {
         io::ErrorKind::InvalidData
     );
     for malformed in [
-        vec![0],                         // zero-size frame
-        vec![0x80, 0x80, 0x80, 0x80, 16], // high fifth byte
+        vec![0],                               // zero-size frame
+        vec![0x80, 0x80, 0x80, 0x80, 16],      // high fifth byte
         vec![0x80, 0x80, 0x80, 0x80, 0x80, 0], // six-byte VarInt
     ] {
         assert!(read_frame(&mut malformed.as_slice()).is_err());
