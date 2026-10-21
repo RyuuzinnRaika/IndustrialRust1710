@@ -183,6 +183,9 @@ pub fn biome_block(seed: u64, x: i32, y: i32, z: i32) -> u16 {
     if y >= top - 3 {
         return if kind == 2 || kind == 0 { 12 << 4 } else { DIRT };
     }
+    // Mountain uplift must be filled rather than leaving a hollow gap
+    // between the old and opt-in IRW3 surfaces.
+    if y > surface(seed,x,z) { return 1 << 4; }
     block(seed,x,y,z)
 }
 
