@@ -50,30 +50,30 @@ pub fn max_count(id: i16) -> u8 {
 pub fn max_durability(id: i16) -> Option<i16> {
     match id {
         256..=258 | 267 | 292 => Some(250), // iron
-        259 | 346 => Some(64),               // flint & steel, fishing rod
-        261 => Some(384),                    // bow
-        268..=271 | 290 => Some(59),         // wood
-        272..=275 | 291 => Some(131),        // stone
-        276..=279 | 293 => Some(1561),       // diamond
-        283..=286 | 294 => Some(32),         // gold
+        259 | 346 => Some(64),              // flint & steel, fishing rod
+        261 => Some(384),                   // bow
+        268..=271 | 290 => Some(59),        // wood
+        272..=275 | 291 => Some(131),       // stone
+        276..=279 | 293 => Some(1561),      // diamond
+        283..=286 | 294 => Some(32),        // gold
         298 => Some(55),                    // leather helmet
         299 => Some(80),
         300 => Some(75),
         301 => Some(65),
-        302 | 306 => Some(165),              // chain/iron helmet
-        303 | 307 => Some(240),              // chain/iron chestplate
-        304 | 308 => Some(225),              // chain/iron leggings
-        305 | 309 => Some(195),              // chain/iron boots
-        310 => Some(363),                   // diamond armor
+        302 | 306 => Some(165), // chain/iron helmet
+        303 | 307 => Some(240), // chain/iron chestplate
+        304 | 308 => Some(225), // chain/iron leggings
+        305 | 309 => Some(195), // chain/iron boots
+        310 => Some(363),       // diamond armor
         311 => Some(528),
         312 => Some(495),
         313 => Some(429),
-        314 => Some(77),                    // golden armor
+        314 => Some(77), // golden armor
         315 => Some(112),
         316 => Some(105),
         317 => Some(91),
-        359 => Some(238),                   // shears
-        398 => Some(25),                    // carrot on a stick
+        359 => Some(238), // shears
+        398 => Some(25),  // carrot on a stick
         _ => None,
     }
 }
@@ -94,7 +94,7 @@ pub fn valid_damage(id: i16, damage: i16) -> bool {
         263 | 322 | 350 => damage <= 1, // charcoal, golden apple, cooked fish
         349 => damage <= 3,             // raw fish variants
         351 => damage <= 15,            // dye / ink variants
-        358 | 373 | 383 => true,         // filled map, potion bitflags, spawn eggs
+        358 | 373 | 383 => true,        // filled map, potion bitflags, spawn eggs
         397 => damage <= 4,             // heads, including player head
         _ => damage == 0,
     }
@@ -138,13 +138,31 @@ mod tests {
 
     #[test]
     fn distinguish_variant_damage_and_durability() {
-        for (id, damage) in [(35, 15), (263, 1), (349, 3), (351, 15),
-            (373, 0x4000 | 8194), (383, 120), (397, 3), (310, 363),
-            (276, 1561), (358, 2048)] {
+        for (id, damage) in [
+            (35, 15),
+            (263, 1),
+            (349, 3),
+            (351, 15),
+            (373, 0x4000 | 8194),
+            (383, 120),
+            (397, 3),
+            (310, 363),
+            (276, 1561),
+            (358, 2048),
+        ] {
             assert!(valid_stack(id, 1, damage), "{id}:{damage}");
         }
-        for (id, damage) in [(35, 16), (264, 1), (350, 2), (349, 4),
-            (351, 16), (397, 5), (310, 364), (276, 1562), (373, -1)] {
+        for (id, damage) in [
+            (35, 16),
+            (264, 1),
+            (350, 2),
+            (349, 4),
+            (351, 16),
+            (397, 5),
+            (310, 364),
+            (276, 1562),
+            (373, -1),
+        ] {
             assert!(!valid_stack(id, 1, damage), "{id}:{damage}");
         }
     }
