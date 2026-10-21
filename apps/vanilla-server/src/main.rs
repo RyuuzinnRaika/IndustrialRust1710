@@ -2830,7 +2830,9 @@ fn main() -> io::Result<()> {
             || biome_seed.is_some()
             || expanded_seed.is_some()
         {
-            return Err(bad("--backup-world requires --world FILE and no import/export/seed"));
+            return Err(bad(
+                "--backup-world requires --world FILE and no import/export/seed",
+            ));
         }
         let dir = world_path
             .parent()
@@ -2841,7 +2843,12 @@ fn main() -> io::Result<()> {
         }
         let mut lock = session_lock::WorldSessionLock::acquire(dir)?;
         let stats = backup_world::create(dir, &destination, &mut lock)?;
-        println!("World backup complete: {} files ({} bytes) at {}", stats.files, stats.bytes, destination.display());
+        println!(
+            "World backup complete: {} files ({} bytes) at {}",
+            stats.files,
+            stats.bytes,
+            destination.display()
+        );
         return Ok(());
     }
     if let Some(source) = anvil_import_path {

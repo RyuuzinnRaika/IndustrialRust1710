@@ -48,7 +48,10 @@ fn copy_directory(src: &Path, dst: &Path, stats: &mut BackupStats) -> io::Result
             }
             File::open(&target)?.sync_all()?;
             stats.files += 1;
-            stats.bytes = stats.bytes.checked_add(copied).ok_or_else(|| invalid("backup size overflow"))?;
+            stats.bytes = stats
+                .bytes
+                .checked_add(copied)
+                .ok_or_else(|| invalid("backup size overflow"))?;
         } else {
             return Err(invalid("backup refuses special files"));
         }
@@ -71,13 +74,23 @@ pub fn create(
     let dest_name = destination
         .file_name()
         .ok_or_else(|| invalid("destination must be a directory name"))?;
-    let parent = destination.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let canonical_parent = fs::canonicalize(parent)?;
     if canonical_parent.starts_with(&canonical_source) {
-        return Err(invalid("backup destination must not be inside the source world"));
+        return Err(invalid(
+            "backup destination must not be inside the source world",
+        ));
     }
     match fs::symlink_metadata(destination) {
-        Ok(_) => return Err(io::Error::new(ErrorKind::AlreadyExists, "backup destination exists")),
+        Ok(_) => {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "backup destination exists",
+            ))
+        }
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
@@ -94,7 +107,10 @@ pub fn create(
         // Rename is on the same filesystem because staging is a sibling.
         // Check again to reject a destination concurrently created elsewhere.
         if fs::symlink_metadata(destination).is_ok() {
-            return Err(io::Error::new(ErrorKind::AlreadyExists, "backup destination appeared"));
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "backup destination appeared",
+            ));
         }
         fs::rename(&staging, destination)?;
         sync_directory(parent)?;
@@ -114,7 +130,9 @@ mod tests {
     #[test]
     fn backup_is_complete_create_only_and_does_not_overwrite() {
         let root = std::env::temp_dir().join(format!(
-            "ir1710-backup-{}-{:?}", std::process::id(), std::thread::current().id()
+            "ir1710-backup-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
         ));
         let _ = fs::remove_dir_all(&root);
         let world = root.join("world");
@@ -126,7 +144,10 @@ mod tests {
         let stats = create(&world, &dest, &mut session).unwrap();
         assert_eq!(stats.files, 3); // Two saves and session.lock.
         assert_eq!(fs::read(dest.join("flat.irw")).unwrap(), b"IRW1");
-        assert_eq!(fs::read(dest.join("players/test.dat")).unwrap(), b"save-data");
+        assert_eq!(
+            fs::read(dest.join("players/test.dat")).unwrap(),
+            b"save-data"
+        );
         assert!(create(&world, &dest, &mut session).is_err());
         assert!(create(&world, &world.join("nested"), &mut session).is_err());
         assert_eq!(fs::read(world.join("flat.irw")).unwrap(), b"IRW1");
@@ -137,7 +158,9 @@ mod tests {
     #[test]
     fn replaced_session_timestamp_prevents_backup_publication() {
         let root = std::env::temp_dir().join(format!(
-            "ir1710-backup-race-{}-{:?}", std::process::id(), std::thread::current().id()
+            "ir1710-backup-race-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("world")).unwrap();
@@ -155,7 +178,9 @@ mod tests {
     fn backup_rejects_symlink_inputs_and_never_publishes_partial_data() {
         use std::os::unix::fs::symlink;
         let root = std::env::temp_dir().join(format!(
-            "ir1710-backup-link-{}-{:?}", std::process::id(), std::thread::current().id()
+            "ir1710-backup-link-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("world")).unwrap();
