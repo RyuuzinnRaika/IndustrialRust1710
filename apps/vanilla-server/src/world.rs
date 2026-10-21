@@ -44,6 +44,8 @@ pub struct World {
     pending_light_chunks: BTreeSet<(i32, i32)>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
     fluid_phase: u64,
+    // Set from Clock; the weather simulation has one authoritative owner.
+    raining: bool,
 }
 
 /// A persisted world mutation can create a temporary ground-item event.
@@ -135,6 +137,9 @@ pub fn is_placeable(block_id: u16) -> bool {
     )
 }
 impl World {
+    pub fn set_raining(&mut self, raining: bool) {
+        self.raining = raining;
+    }
     /// Tracks which chunk columns contain changes, without allocating a full world.
     pub fn drain_drops(&mut self) -> Vec<WorldDrop> {
         std::mem::take(&mut self.pending_drops)
@@ -253,7 +258,7 @@ impl World {
             if !in_bounds(x, candidate_y, z) {
                 continue;
             }
-            if matches!(self.get(x, candidate_y, z) >> 4, 12 | 13) {
+            if matches!(self.get(x, candidate_y, z) >> 4, 12 | 13 | 145) {
                 self.pending_gravity.insert((x, candidate_y as u8, z));
             }
         }
@@ -269,7 +274,7 @@ impl World {
         for &(x, y, z) in &scheduled {
             let height = i32::from(y);
             let block = self.get(x, height, z);
-            if height == 0 || !matches!(block >> 4, 12 | 13) {
+            if height == 0 || !matches!(block >> 4, 12 | 13 | 145) {
                 continue;
             }
             if self.get(x, height - 1, z) != 0 {
@@ -357,7 +362,7 @@ impl World {
             if id == 55 {
                 self.pending_circuit.insert(pos);
             }
-            if matches!(id, 6 | 18 | 59 | 60 | 141 | 142) {
+            if matches!(id, 6 | 18 | 51 | 59 | 60 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142) {
                 self.pending_ecology.insert(pos);
             } else {
                 self.pending_ecology.remove(&pos);
@@ -365,8 +370,20 @@ impl World {
             if matches!(
                 id,
                 6 | 50
+                    | 81
+                    | 83
+                    | 104
+                    | 105
+                    | 115
+                    | 127
                     | 55
                     | 59
+                    | 81
+                    | 83
+                    | 104
+                    | 105
+                    | 115
+                    | 127
                     | 66
                     | 70
                     | 72
@@ -856,7 +873,7 @@ impl World {
             if world.edits.insert((x, y, z), block).is_some() {
                 return Err(invalid("duplicate world block"));
             }
-            if matches!(block >> 4, 12 | 13) {
+            if matches!(block >> 4, 12 | 13 | 145) {
                 world.pending_gravity.insert((x, y, z));
             }
             if matches!(block >> 4, 8..=11) {
@@ -865,7 +882,7 @@ impl World {
             if block >> 4 == 55 {
                 world.pending_circuit.insert((x, y, z));
             }
-            if matches!(block >> 4, 6 | 18 | 59 | 60 | 141 | 142) {
+            if matches!(block >> 4, 6 | 18 | 51 | 59 | 60 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142) {
                 world.pending_ecology.insert((x, y, z));
             }
             if matches!(
