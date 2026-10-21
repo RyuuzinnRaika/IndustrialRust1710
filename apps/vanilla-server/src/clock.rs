@@ -49,7 +49,8 @@ impl Clock {
     /// Move the shared daylight clock to morning after a completed sleep.
     pub fn skip_to_morning(&self) {
         let day = self.day_time() as u64;
-        self.time_offset.fetch_add((24000 - day) % 24000, Ordering::AcqRel);
+        self.time_offset
+            .fetch_add((24000 - day) % 24000, Ordering::AcqRel);
     }
     #[cfg(test)]
     pub fn stop(&self) {
