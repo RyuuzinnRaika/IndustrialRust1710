@@ -102,7 +102,15 @@ fn shapes(id: u16, meta: u16) -> Vec<Shape> {
         }
         64 | 71 => {
             // For both halves use the lower door metadata (see shapes_at).
-            let orientation = (meta + if meta & 4 != 0 { 1 } else { 0 }) & 3;
+            // Bottom metadata carries open state; upper bit 0 carries hinge
+            // direction. A right-hinged open door swings the opposite way.
+            let orientation = if meta & 4 == 0 {
+                meta & 3
+            } else if meta & 16 != 0 {
+                (meta + 3) & 3
+            } else {
+                (meta + 1) & 3
+            };
             let thin = match orientation {
                 0 => Shape { z1: 0.1875, ..FULL },
                 1 => Shape { x0: 0.8125, ..FULL },
@@ -198,12 +206,24 @@ fn shapes_at(world: &World, x: i32, y: i32, z: i32) -> Vec<Shape> {
     let state = world.get(x, y, z);
     let id = state >> 4;
     let mut metadata = state & 15;
-    if matches!(id, 64 | 71) && metadata & 8 != 0 {
-        let bottom = world.get(x, y - 1, z);
+    if matches!(id, 64 | 71) {
+        let bottom = if metadata & 8 != 0 {
+            world.get(x, y - 1, z)
+        } else {
+            state
+        };
+        let upper = if metadata & 8 != 0 {
+            state
+        } else {
+            world.get(x, y + 1, z)
+        };
         if bottom >> 4 != id {
             return Vec::new();
         }
         metadata = bottom & 7;
+        if upper >> 4 == id && upper & 1 != 0 {
+            metadata |= 16;
+        }
     }
     shapes(id, metadata)
 }
@@ -615,6 +635,17 @@ mod group_b_collision_tests {
         assert!(collides(&world, &position));
         world.import_block(0, 64, 0, (107 << 4) | 4).unwrap();
         assert!(!collides(&world, &position));
+    }
+
+    #[test]
+    fn opened_door_collision_respects_upper_hinge_bit() {
+        let mut world = World::new();
+        let position = PlayerPosition { x: 0.1, y: 64.0, z: 0.5 };
+        world.import_block(0, 64, 0, (64 << 4) | 4).unwrap();
+        world.import_block(0, 65, 0, (64 << 4) | 8).unwrap();
+        assert!(!collides(&world, &position));
+        world.import_block(0, 65, 0, (64 << 4) | 9).unwrap();
+        assert!(collides(&world, &position));
     }
 
     #[test]
