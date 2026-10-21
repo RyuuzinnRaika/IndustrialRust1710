@@ -100,7 +100,11 @@ impl ServerProperties {
                 .split_once('=')
                 .ok_or_else(|| invalid("invalid server.properties assignment"))?;
             let key = key.trim();
-            if key.is_empty() || values.insert(key.to_owned(), value.trim().to_owned()).is_some() {
+            if key.is_empty()
+                || values
+                    .insert(key.to_owned(), value.trim().to_owned())
+                    .is_some()
+            {
                 return Err(invalid("empty or duplicate server.properties key"));
             }
         }
@@ -116,9 +120,7 @@ impl ServerProperties {
                 "white-list=false is unsafe for the current offline-mode server",
             ));
         }
-        if boolean(&values, "enable-rcon", false)?
-            || boolean(&values, "enable-query", false)?
-        {
+        if boolean(&values, "enable-rcon", false)? || boolean(&values, "enable-query", false)? {
             return Err(invalid("RCON/Query listeners are not implemented"));
         }
         let level_name = values
@@ -135,10 +137,7 @@ impl ServerProperties {
         if port == 0 {
             return Err(invalid("server-port cannot be zero"));
         }
-        let host = values
-            .get("server-ip")
-            .map(String::as_str)
-            .unwrap_or("");
+        let host = values.get("server-ip").map(String::as_str).unwrap_or("");
         let ip = if host.is_empty() {
             IpAddr::V4(Ipv4Addr::LOCALHOST)
         } else {
@@ -152,7 +151,11 @@ impl ServerProperties {
         };
         // These are wired to constants in the current server. Reject a
         // different value instead of silently claiming the setting took effect.
-        for (name, only) in [("view-distance", "2"), ("difficulty", "1"), ("max-players", "8")] {
+        for (name, only) in [
+            ("view-distance", "2"),
+            ("difficulty", "1"),
+            ("max-players", "8"),
+        ] {
             if values.get(name).is_some_and(|value| value != only) {
                 return Err(invalid(
                     "server.properties requests an unsupported view-distance/difficulty/max-players",
@@ -163,15 +166,30 @@ impl ServerProperties {
             .get("level-seed")
             .is_some_and(|value| !value.is_empty())
         {
-            return Err(invalid("level-seed is not yet connected to world generation"));
+            return Err(invalid(
+                "level-seed is not yet connected to world generation",
+            ));
         }
-        if values.get("level-type").is_some_and(|value| value != "FLAT") {
+        if values
+            .get("level-type")
+            .is_some_and(|value| value != "FLAT")
+        {
             return Err(invalid("level-type must be FLAT with legacy IRW storage"));
         }
         let accepted = [
-            "server-port", "server-ip", "level-name", "gamemode", "online-mode",
-            "white-list", "enable-rcon", "enable-query", "view-distance",
-            "difficulty", "max-players", "level-seed", "level-type",
+            "server-port",
+            "server-ip",
+            "level-name",
+            "gamemode",
+            "online-mode",
+            "white-list",
+            "enable-rcon",
+            "enable-query",
+            "view-distance",
+            "difficulty",
+            "max-players",
+            "level-seed",
+            "level-type",
         ];
         let ignored: Vec<&str> = values
             .keys()
