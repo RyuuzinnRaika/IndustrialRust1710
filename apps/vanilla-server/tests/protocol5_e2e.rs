@@ -1479,7 +1479,6 @@ fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
     server.wait_idle();
 }
 
-
 #[test]
 fn e50_four_clients_disconnect_reconnect_and_keep_consistent_status() {
     let server = NativeServer::start();
