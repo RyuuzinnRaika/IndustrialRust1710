@@ -1246,13 +1246,23 @@ fn play(
                                         (location.1.floor() as i32).clamp(0, 254),
                                         location.2.floor() as i32,
                                     );
-                                    // Inventory debit before entity persistence prevents
-                                    // duplication; failure between saves may lose items.
-                                    candidate.save(inventory_path)?;
+                                    // Debit and drop must be one durable redo transaction;
+                                    // a crash must never erase the stack between two saves.
+                                    let (staged_ground, spawned) =
+                                        ground.stage_put_many(&[stack], target)?;
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &[
+                                            (inventory_path, candidate.encoded()?),
+                                            (ground_path, staged_ground.encoded()?),
+                                        ],
+                                    )?;
                                     *inventory = candidate;
-                                    let item = ground.put(ground_path, stack, target)?;
+                                    *ground = staged_ground;
                                     send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                                    hub.register_ground_item(&item);
+                                    for item in spawned {
+                                        hub.register_ground_item(&item);
+                                    }
                                 } else {
                                     send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
                                 }
