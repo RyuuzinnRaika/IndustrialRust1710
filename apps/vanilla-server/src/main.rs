@@ -364,21 +364,36 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
 /// Double chests are two adjacent, independently persisted 27-slot halves.
 /// Canonical ordering is shared by all viewers regardless of clicked side.
 fn chest_neighbor(world: &World, pos: ChestPosition) -> Option<ChestPosition> {
-    let (x,y,z) = pos;
-    [(x-1,y,z),(x+1,y,z),(x,y,z-1),(x,y,z+1)]
-        .into_iter().find(|&(x,y,z)| world.get(x,y,z) >> 4 == 54)
+    let (x, y, z) = pos;
+    [(x - 1, y, z), (x + 1, y, z), (x, y, z - 1), (x, y, z + 1)]
+        .into_iter()
+        .find(|&(x, y, z)| world.get(x, y, z) >> 4 == 54)
 }
 fn can_place_chest(world: &World, pos: ChestPosition) -> bool {
-    let (x,y,z)=pos;
-    let neighbors: Vec<_> = [(x-1,y,z),(x+1,y,z),(x,y,z-1),(x,y,z+1)]
-        .into_iter().filter(|&(x,y,z)| world.get(x,y,z) >> 4 == 54).collect();
-    if neighbors.len() > 1 { return false; }
-    neighbors.first().is_none_or(|&neighbor| chest_neighbor(world,neighbor).is_none())
+    let (x, y, z) = pos;
+    let neighbors: Vec<_> = [(x - 1, y, z), (x + 1, y, z), (x, y, z - 1), (x, y, z + 1)]
+        .into_iter()
+        .filter(|&(x, y, z)| world.get(x, y, z) >> 4 == 54)
+        .collect();
+    if neighbors.len() > 1 {
+        return false;
+    }
+    neighbors
+        .first()
+        .is_none_or(|&neighbor| chest_neighbor(world, neighbor).is_none())
 }
-fn chest_window_state(storage: &Chests, pos: ChestPosition, partner: Option<ChestPosition>) -> Vec<Option<Stack>> {
-    let mut data = Vec::with_capacity(if partner.is_some() {54} else {27});
+fn chest_window_state(
+    storage: &Chests,
+    pos: ChestPosition,
+    partner: Option<ChestPosition>,
+) -> Vec<Option<Stack>> {
+    let mut data = Vec::with_capacity(if partner.is_some() { 54 } else { 27 });
     if let Some(other) = partner {
-        let (first,second) = if pos < other {(pos,other)} else {(other,pos)};
+        let (first, second) = if pos < other {
+            (pos, other)
+        } else {
+            (other, pos)
+        };
         data.extend_from_slice(&storage.slots(first));
         data.extend_from_slice(&storage.slots(second));
     } else {
@@ -386,16 +401,31 @@ fn chest_window_state(storage: &Chests, pos: ChestPosition, partner: Option<Ches
     }
     data
 }
-fn stage_chest_window(storage: &Chests, pos: ChestPosition, partner: Option<ChestPosition>, slots: &[Option<Stack>]) -> io::Result<Chests> {
-    if slots.len() != if partner.is_some() {54} else {27} { return Err(bad("wrong chest slot count")); }
-    let mut first = [None;27];
+fn stage_chest_window(
+    storage: &Chests,
+    pos: ChestPosition,
+    partner: Option<ChestPosition>,
+    slots: &[Option<Stack>],
+) -> io::Result<Chests> {
+    if slots.len() != if partner.is_some() { 54 } else { 27 } {
+        return Err(bad("wrong chest slot count"));
+    }
+    let mut first = [None; 27];
     first.copy_from_slice(&slots[..27]);
     if let Some(other) = partner {
-        let mut second = [None;27];
+        let mut second = [None; 27];
         second.copy_from_slice(&slots[27..]);
-        let (left,right) = if pos < other {(pos,other)} else {(other,pos)};
-        storage.staged_update(left,first)?.staged_update(right,second)
-    } else { storage.staged_update(pos,first) }
+        let (left, right) = if pos < other {
+            (pos, other)
+        } else {
+            (other, pos)
+        };
+        storage
+            .staged_update(left, first)?
+            .staged_update(right, second)
+    } else {
+        storage.staged_update(pos, first)
+    }
 }
 
 struct PlayerSession<'a> {
@@ -480,7 +510,10 @@ fn play(
         if let Some(pos) = active_chest {
             let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
             if guard.revision() != observed_chest_revision {
-                let data = inventory.chest_window_items(active_window, &chest_window_state(&guard, pos, active_chest_partner));
+                let data = inventory.chest_window_items(
+                    active_window,
+                    &chest_window_state(&guard, pos, active_chest_partner),
+                );
                 observed_chest_revision = guard.revision();
                 drop(guard);
                 send(s, 0x30, &data)?;
@@ -1028,53 +1061,76 @@ fn play(
                 }
                 // Two-part bed placement. The two block IDs are committed in
                 // one world save, and the held item is debited before placement.
-                if face == 1 && world::in_bounds(x,y,z) && near(location,x,y,z)
+                if face == 1
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
                     && inventory.can_place(held)
-                    && inventory.held().is_some_and(|stack| stack.id == 355) {
-                    let foot = (x,y+1,z);
+                    && inventory.held().is_some_and(|stack| stack.id == 355)
+                {
+                    let foot = (x, y + 1, z);
                     let facing = ((yaw / 90.0).floor() as i32 + 2).rem_euclid(4) as u16;
-                    let (dx,dz) = match facing {
-                        0 => (0,1), 1 => (-1,0), 2 => (0,-1), _ => (1,0)
+                    let (dx, dz) = match facing {
+                        0 => (0, 1),
+                        1 => (-1, 0),
+                        2 => (0, -1),
+                        _ => (1, 0),
                     };
-                    let head = (foot.0+dx,foot.1,foot.2+dz);
+                    let head = (foot.0 + dx, foot.1, foot.2 + dz);
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                    let supported = world::in_bounds(foot.0,foot.1,foot.2)
-                        && world::in_bounds(head.0,head.1,head.2)
-                        && w.get(x,y,z) != 0
-                        && w.get(foot.0,foot.1,foot.2) == 0
-                        && w.get(head.0,head.1,head.2) == 0;
+                    let supported = world::in_bounds(foot.0, foot.1, foot.2)
+                        && world::in_bounds(head.0, head.1, head.2)
+                        && w.get(x, y, z) != 0
+                        && w.get(foot.0, foot.1, foot.2) == 0
+                        && w.get(head.0, head.1, head.2) == 0;
                     if supported {
                         let mut candidate = inventory.clone();
                         let paid = !survival || candidate.consume_held();
                         if paid {
-                            if survival { candidate.save(inventory_path)?; }
-                            let changed = w.update_many_and_save(world_path, &[
-                                (foot.0,foot.1,foot.2,(26 << 4) | facing),
-                                (head.0,head.1,head.2,(26 << 4) | facing | 8),
-                            ])?;
+                            if survival {
+                                candidate.save(inventory_path)?;
+                            }
+                            let changed = w.update_many_and_save(
+                                world_path,
+                                &[
+                                    (foot.0, foot.1, foot.2, (26 << 4) | facing),
+                                    (head.0, head.1, head.2, (26 << 4) | facing | 8),
+                                ],
+                            )?;
                             if changed {
-                                if survival { *inventory = candidate; send(s,0x30,&inventory.window_items())?; }
-                                hub.broadcast(block_change_event(&w,foot.0,foot.1,foot.2));
-                                hub.broadcast(block_change_event(&w,head.0,head.1,head.2));
-                            } else if survival { inventory.save(inventory_path)?; }
+                                if survival {
+                                    *inventory = candidate;
+                                    send(s, 0x30, &inventory.window_items())?;
+                                }
+                                hub.broadcast(block_change_event(&w, foot.0, foot.1, foot.2));
+                                hub.broadcast(block_change_event(&w, head.0, head.1, head.2));
+                            } else if survival {
+                                inventory.save(inventory_path)?;
+                            }
                         }
                     } else {
-                        for (bx,by,bz) in [foot,head] {
-                            if world::in_bounds(bx,by,bz) {
-                                let event = block_change_event(&w,bx,by,bz);
-                                send(s,event.id,&event.body)?;
+                        for (bx, by, bz) in [foot, head] {
+                            if world::in_bounds(bx, by, bz) {
+                                let event = block_change_event(&w, bx, by, bz);
+                                send(s, event.id, &event.body)?;
                             }
                         }
                     }
                     continue;
                 }
-                if (0..=5).contains(&face) && world::in_bounds(x,y,z)
-                    && near(location,x,y,z)
-                    && world.lock().map_err(|_| bad("world mutex poisoned"))?.get(x,y,z) >> 4 == 26 {
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 26
+                {
                     let time = clock.day_time();
                     if survival && (12542..=23458).contains(&time) {
                         let mut candidate = inventory.clone();
-                        candidate.set_bed_spawn(x,y,z)?;
+                        candidate.set_bed_spawn(x, y, z)?;
                         candidate.save(inventory_path)?;
                         *inventory = candidate;
                         let mut packet = Vec::new();
@@ -1082,15 +1138,15 @@ fn play(
                         packet.extend_from_slice(&x.to_be_bytes());
                         packet.push(y as u8);
                         packet.extend_from_slice(&z.to_be_bytes());
-                        send(s,0x0a,&packet)?;
+                        send(s, 0x0a, &packet)?;
                         // A lone player may complete sleep immediately. More
                         // players must use their own beds; never skip their night.
                         if hub.positions()?.len() <= 1 {
                             clock.skip_to_morning();
                             let mut wake = Vec::new();
-                            write_varint(entity_id as u32,&mut wake);
+                            write_varint(entity_id as u32, &mut wake);
                             wake.push(2); // leave bed animation
-                            send(s,0x0b,&wake)?;
+                            send(s, 0x0b, &wake)?;
                         }
                     } else if survival {
                         as_chat(s, "You can only sleep at night.")?;
@@ -1156,7 +1212,8 @@ fn play(
                     };
                     let pos = (x, y, z);
                     active_chest = Some(pos);
-                    active_chest_partner = world.lock()
+                    active_chest_partner = world
+                        .lock()
                         .map_err(|_| bad("world mutex poisoned"))
                         .map(|w| chest_neighbor(&w, pos))?;
                     active_furnace = None;
@@ -1167,7 +1224,11 @@ fn play(
                     let mut opened = vec![active_window];
                     write_string("minecraft:chest", &mut opened)?;
                     write_string(&json!({"text":"Chest"}).to_string(), &mut opened)?;
-                    opened.push(if active_chest_partner.is_some() {54} else {27});
+                    opened.push(if active_chest_partner.is_some() {
+                        54
+                    } else {
+                        27
+                    });
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &items)?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
@@ -1225,8 +1286,8 @@ fn play(
                                 327 => 10,
                                 _ => stack.id as u16,
                             };
-                            let invalid_chest_merge = block_id == 54
-                                && !can_place_chest(&w, (nx,ny,nz));
+                            let invalid_chest_merge =
+                                block_id == 54 && !can_place_chest(&w, (nx, ny, nz));
                             if (world::is_placeable(block_id) || block_id == 61)
                                 && block_id != 7
                                 && !invalid_chest_merge
@@ -1357,8 +1418,10 @@ fn play(
                             let staged = machines.staged_update(pos, next)?;
                             journal::commit(
                                 &furnace_path.with_extension("pending-txn.json"),
-                                &[(inventory_path, candidate.encoded()?),
-                                  (furnace_path, staged.encoded()?)],
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (furnace_path, staged.encoded()?),
+                                ],
                             )?;
                             *inventory = candidate;
                             *machines = staged;
@@ -1379,8 +1442,9 @@ fn play(
                         let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                         w.get(pos.0, pos.1, pos.2) >> 4 == 54
                             && near(location, pos.0, pos.1, pos.2)
-                            && active_chest_partner.is_none_or(|partner|
-                                w.get(partner.0,partner.1,partner.2) >> 4 == 54)
+                            && active_chest_partner.is_none_or(|partner| {
+                                w.get(partner.0, partner.1, partner.2) >> 4 == 54
+                            })
                     };
                     let mut storage = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
                     let original = chest_window_state(&storage, pos, active_chest_partner);
@@ -1396,16 +1460,28 @@ fn play(
                         let inventory_changed = candidate != *inventory;
                         let storage_changed = original != changed_slots;
                         if inventory_changed && storage_changed {
-                            let staged = stage_chest_window(&storage, pos, active_chest_partner, &changed_slots)?;
+                            let staged = stage_chest_window(
+                                &storage,
+                                pos,
+                                active_chest_partner,
+                                &changed_slots,
+                            )?;
                             journal::commit(
                                 &chest_path.with_extension("pending-txn.json"),
-                                &[(inventory_path, candidate.encoded()?),
-                                  (chest_path, staged.encoded()?)],
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (chest_path, staged.encoded()?),
+                                ],
                             )?;
                             *inventory = candidate;
                             *storage = staged;
                         } else if storage_changed {
-                            let staged = stage_chest_window(&storage, pos, active_chest_partner, &changed_slots)?;
+                            let staged = stage_chest_window(
+                                &storage,
+                                pos,
+                                active_chest_partner,
+                                &changed_slots,
+                            )?;
                             storage.commit_staged(chest_path, staged)?;
                         } else if inventory_changed {
                             candidate.save(inventory_path)?;
@@ -1474,14 +1550,23 @@ fn play(
                     )?;
                     let origin = {
                         let fallback = safe_spawn(world)?;
-                        if let Some((x,y,z)) = inventory.bed_spawn() {
+                        if let Some((x, y, z)) = inventory.bed_spawn() {
                             let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                            if guard.get(x,y,z) >> 4 == 26
-                                && world::in_bounds(x,y+1,z)
-                                && guard.get(x,y+1,z) == 0 {
-                                PlayerPosition { x: x as f64 + 0.5, y: y as f64 + 1.0, z: z as f64 + 0.5 }
-                            } else { fallback }
-                        } else { fallback }
+                            if guard.get(x, y, z) >> 4 == 26
+                                && world::in_bounds(x, y + 1, z)
+                                && guard.get(x, y + 1, z) == 0
+                            {
+                                PlayerPosition {
+                                    x: x as f64 + 0.5,
+                                    y: y as f64 + 1.0,
+                                    z: z as f64 + 0.5,
+                                }
+                            } else {
+                                fallback
+                            }
+                        } else {
+                            fallback
+                        }
                     };
                     let fresh_vitals = Vitals::default();
                     origin.save_state(player_path, fresh_vitals)?;
