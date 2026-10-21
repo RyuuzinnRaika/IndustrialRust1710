@@ -521,20 +521,49 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
-        // The first active session advances the shared mob simulation.
+        // Shared entity state advances at most once per server tick regardless of
+        // how many sessions poll it. All world mutations happen under the world lock.
         if survival && vitals.health > 0.0 {
             let players = hub.positions()?;
-            let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
-            let updates = creatures.tick(now_tick, &w, &players);
-            let hurt = creatures.hurt_player(*player, now_tick);
+            let updates = creatures.tick_with_day(now_tick, clock.day_time(), &w, &players);
+            let damage = creatures.damage_player(*player, now_tick);
+            let explosions = creatures.take_explosions();
+            let kills = creatures.take_drops();
             drop(creatures);
-            drop(w);
-            for update in updates {
-                hub.broadcast(update);
+            for update in updates {hub.broadcast(update);}
+            for center in explosions {
+                let blocks = w.explode(world_path, center)?;
+                for (x, y, z) in blocks {
+                    hub.broadcast(block_change_event(&w, x, y, z));
+                }
+                // Protocol 5 explosion packet: XYZ/radius/zero duplicate records/velocity.
+                let mut body = Vec::new();
+                for n in [center.0 as f32 + 0.5,center.1 as f32 + 0.5,
+                          center.2 as f32 + 0.5,3.0] {
+                    body.extend_from_slice(&n.to_be_bytes());
+                }
+                body.extend_from_slice(&0_i32.to_be_bytes());
+                for _ in 0..3 {body.extend_from_slice(&0_f32.to_be_bytes());}
+                hub.broadcast(Event{id:0x27,body});
             }
-            if hurt {
-                vitals.health = (vitals.health - vitals::armored_damage(2.0, inventory.armor_points())).max(0.0);
+            drop(w);
+            for (stack, at, xp) in kills {
+                let mut ground = ground_items.lock().map_err(|_| bad("ground items mutex poisoned"))?;
+                if !ground.is_full() {
+                    let dropped = ground.put(ground_path, stack, at)?;
+                    for packet in dropped.spawn() {hub.broadcast(packet);}
+                }
+                drop(ground);
+                let pos = PlayerPosition{x:at.0 as f64 + 0.5,
+                    y:at.1 as f64 + 0.5,z:at.2 as f64 + 0.5};
+                if let Some(event) = orbs.lock().map_err(|_| bad("orb mutex poisoned"))?
+                    .spawn(pos,xp,now_tick) {hub.broadcast(event);}
+            }
+            if damage != 0 {
+                vitals.health = (vitals.health - vitals::armored_damage(
+                    f32::from(damage),inventory.armor_points())).max(0.0);
                 player.save_state(player_path, *vitals)?;
                 send(s, 0x06, &health_packet(*vitals))?;
             }
