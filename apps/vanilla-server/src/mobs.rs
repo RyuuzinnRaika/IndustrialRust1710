@@ -223,6 +223,33 @@ impl Mob {
         dx * dx + dy * dy + dz * dz <= radius * radius
     }
 }
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+enum ProjectileKind {
+    #[default]
+    Arrow,
+    WitchPotion,
+    GhastFireball,
+    BlazeFireball,
+    WitherSkull,
+}
+impl ProjectileKind {
+    fn protocol(self) -> u8 {
+        match self {
+            Self::Arrow => 60,
+            Self::WitchPotion => 73,
+            Self::GhastFireball => 63,
+            Self::BlazeFireball => 64,
+            Self::WitherSkull => 66,
+        }
+    }
+    fn gravity(self) -> f64 {
+        match self {
+            Self::Arrow => 0.05,
+            Self::WitchPotion => 0.05,
+            _ => 0.0,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct Arrow {
     id: i32,
@@ -230,6 +257,8 @@ struct Arrow {
     velocity: [f64; 3],
     shooter: Option<i32>,
     hostile: bool,
+    #[serde(default)]
+    kind: ProjectileKind,
     age: u16,
     damage: u8,
 }
@@ -237,7 +266,7 @@ impl Arrow {
     fn spawn(self) -> Event {
         let mut body = Vec::new();
         write_varint(self.id as u32, &mut body);
-        body.push(60); // Protocol 5 arrow object
+        body.push(self.kind.protocol()); // Protocol 5 spawn object
         for p in [self.position.x, self.position.y, self.position.z] {
             body.extend_from_slice(&((p * 32.0).floor() as i32).to_be_bytes());
         }
@@ -289,6 +318,10 @@ pub struct Mobs {
     pending_blast_damage: BTreeMap<i32, u8>,
     #[serde(skip)]
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
+    #[serde(skip)]
+    pending_effects: Vec<(PlayerPosition, u8, u16, u64)>,
+    #[serde(skip)]
+    active_effects: BTreeMap<i32, (u8, u64, u64)>,
     #[serde(skip)]
     explosions: Vec<Explosion>,
     last_tick: u64,
@@ -854,12 +887,34 @@ impl Mobs {
             },
             velocity: [vx, vy, vz],
             shooter,
+            kind: ProjectileKind::Arrow,
             age: 0,
             damage,
         };
         let event = arrow.spawn();
         self.arrows.insert(id, arrow);
         Some(event)
+    }
+    fn fire_special(
+        &mut self,
+        shooter: i32,
+        at: PlayerPosition,
+        yaw: f32,
+        pitch: f32,
+        kind: ProjectileKind,
+    ) -> Option<Event> {
+        let (speed, damage) = match kind {
+            ProjectileKind::WitchPotion => (0.75, 2),
+            ProjectileKind::GhastFireball => (0.7, 6),
+            ProjectileKind::BlazeFireball => (0.9, 5),
+            ProjectileKind::WitherSkull => (0.85, 7),
+            ProjectileKind::Arrow => return None,
+        };
+        self.fire_arrow(Some(shooter), at, yaw, pitch, speed, damage)?;
+        let id = self.next_id - 1;
+        let projectile = self.arrows.get_mut(&id)?;
+        projectile.kind = kind;
+        Some(projectile.spawn())
     }
     /// Spawn attempts use dimension, biome, true 3D player distance, support,
     /// and the world's propagated sky and block light. The modest caps are
@@ -1195,7 +1250,26 @@ impl Mobs {
                         .atan2(target.z - mob.position.z)
                         .to_degrees() as f32;
                     let pitch = -(target.y + 1.0 - mob.position.y).atan2(d).to_degrees() as f32;
-                    shots.push((mob.id, mob.position, yaw, pitch));
+                    shots.push((mob.id, mob.position, yaw, pitch, ProjectileKind::Arrow));
+                }
+                let spell = match mob.kind {
+                    Kind::Witch if d < 12.0 => Some((ProjectileKind::WitchPotion, 60)),
+                    Kind::Blaze if d < 24.0 => Some((ProjectileKind::BlazeFireball, 40)),
+                    Kind::Ghast if d < 64.0 => Some((ProjectileKind::GhastFireball, 60)),
+                    Kind::Wither if d < 40.0 => Some((ProjectileKind::WitherSkull, 40)),
+                    _ => None,
+                };
+                if let Some((kind, interval)) = spell {
+                    if can_see(world, mob.position, target)
+                        && now.saturating_sub(mob.bite_tick) >= interval
+                    {
+                        mob.bite_tick = now;
+                        let yaw = (-(target.x - mob.position.x))
+                            .atan2(target.z - mob.position.z).to_degrees() as f32;
+                        let pitch = -(target.y + 1.0 - mob.position.y)
+                            .atan2(d).to_degrees() as f32;
+                        shots.push((mob.id, mob.position, yaw, pitch, kind));
+                    }
                 }
                 let destination = if mob.kind == Kind::Skeleton && d < 7.0 {
                     PlayerPosition {
@@ -1325,10 +1399,13 @@ impl Mobs {
                     events.extend(self.split(parent));
                 }
             }
-            for (id, at, yaw, pitch) in shots {
-                if let Some(packet) = self.fire_arrow(Some(id), at, yaw, pitch, 1.5, 3) {
-                    events.push(packet);
-                }
+            for (id, at, yaw, pitch, kind) in shots {
+                let event = if kind == ProjectileKind::Arrow {
+                    self.fire_arrow(Some(id), at, yaw, pitch, 1.5, 3)
+                } else {
+                    self.fire_special(id, at, yaw, pitch, kind)
+                };
+                if let Some(packet) = event { events.push(packet); }
             }
             self.tick_arrows(world, players, now, &mut events);
         }
@@ -1362,7 +1439,7 @@ impl Mobs {
                 z: previous.z + arrow.velocity[2],
             };
             arrow.velocity[0] *= 0.99;
-            arrow.velocity[1] = arrow.velocity[1] * 0.99 - 0.05;
+            arrow.velocity[1] = arrow.velocity[1] * 0.99 - arrow.kind.gravity();
             arrow.velocity[2] *= 0.99;
             if arrow.age >= 100 || !next.is_valid() {
                 removed.push(arrow.id);
@@ -1381,6 +1458,9 @@ impl Mobs {
                     z: previous.z + (next.z - previous.z) * t,
                 };
                 if !sample.is_valid() || physics::collides(world, &sample) {
+                    if matches!(arrow.kind, ProjectileKind::GhastFireball | ProjectileKind::WitherSkull) {
+                        self.explosions.push(Explosion { position: sample, radius: 1.0 });
+                    }
                     impacted = true;
                     break;
                 }
@@ -1390,6 +1470,18 @@ impl Mobs {
                             && (p.y + 0.9 - sample.y).abs() < 1.3
                     }) {
                         self.pending_hits.push((*hit, arrow.damage, now));
+                        match arrow.kind {
+                            ProjectileKind::WitchPotion => {
+                                self.pending_effects.push((*hit, 19, 160, now));
+                            }
+                            ProjectileKind::WitherSkull => {
+                                self.pending_effects.push((*hit, 20, 100, now));
+                            }
+                            ProjectileKind::GhastFireball => {
+                                self.explosions.push(Explosion { position: sample, radius: 1.0 });
+                            }
+                            _ => {}
+                        }
                         impacted = true;
                         break;
                     }
@@ -1432,7 +1524,35 @@ impl Mobs {
             events.push(multiplayer::destroy(id));
         }
     }
+    /// Apply a hostile potion effect to the correct player, not all peers.
+    /// Caller broadcasts the generated Protocol 5 entity-effect packet.
+    pub fn take_player_effects(
+        &mut self, player_id: i32, player: PlayerPosition, tick: u64
+    ) -> Vec<Event> {
+        let mut packets = Vec::new();
+        let mut remaining = Vec::new();
+        for (at, effect, duration, created) in std::mem::take(&mut self.pending_effects) {
+            if tick.saturating_sub(created) >= 30 { continue; }
+            if distance_3d(at, player) < 0.85 {
+                self.active_effects.insert(player_id, (effect, tick + u64::from(duration), tick));
+                let mut body = player_id.to_be_bytes().to_vec();
+                body.push(effect);
+                body.push(0); // amplifier 0
+                body.extend_from_slice(&(duration as i16).to_be_bytes());
+                packets.push(Event { id: 0x1d, body });
+            } else {
+                remaining.push((at, effect, duration, created));
+            }
+        }
+        self.pending_effects = remaining;
+        packets
+    }
     pub fn hurt_player(&mut self, player_id: i32, player: PlayerPosition, tick: u64) -> u8 {
+        self.hurt_player_with_health(player_id, player, tick, 20.0)
+    }
+    pub fn hurt_player_with_health(
+        &mut self, player_id: i32, player: PlayerPosition, tick: u64, health: f32
+    ) -> u8 {
         let mut amount = self.pending_blast_damage.remove(&player_id).unwrap_or(0);
         self.pending_hits.retain(|(p, d, t)| {
             if tick.saturating_sub(*t) < 30 && (p.x - player.x).hypot(p.z - player.z) < 0.75 {
@@ -1462,6 +1582,18 @@ impl Mobs {
                 mob.bite_tick = tick;
                 amount = amount.saturating_add(if mob.kind == Kind::Spider { 2 } else { 3 });
                 break;
+            }
+        }
+        // Poison (19) cannot kill by itself; Wither (20) can. Both are
+        // server-timed regardless of the client's displayed potion animation.
+        if let Some((effect, expires, last)) = self.active_effects.get_mut(&player_id) {
+            if tick >= *expires {
+                self.active_effects.remove(&player_id);
+            } else if tick.saturating_sub(*last) >= (if *effect == 19 { 25 } else { 40 }) {
+                *last = tick;
+                if *effect == 20 || health > 1.0 {
+                    amount = amount.saturating_add(1);
+                }
             }
         }
         match self.difficulty.unwrap_or(1) {
