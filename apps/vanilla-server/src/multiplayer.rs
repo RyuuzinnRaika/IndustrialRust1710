@@ -232,7 +232,11 @@ mod tests {
     #[test]
     fn entity_movement_and_destroy_are_protocol5_varints() {
         use legacy_protocol::read_varint;
-        let at = PlayerPosition { x: 1.5, y: 65.0, z: -2.5 };
+        let at = PlayerPosition {
+            x: 1.5,
+            y: 65.0,
+            z: -2.5,
+        };
         let event = teleport(500_000, &at, 45.0, 0.0);
         assert_eq!(event.id, 0x18);
         let mut input = event.body.as_slice();
