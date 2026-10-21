@@ -1030,9 +1030,10 @@ fn play(
                             send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
                             hub.broadcast(event);
                         }
-                    } else if let Some((metadata, item, milk)) =
+                    } else if let Some(result) =
                         creatures.animal_interact(target_id, *player, inventory.held())
                     {
+                        let mobs::AnimalInteraction { metadata, item, milk } = result;
                         if milk {
                             let mut candidate = inventory.clone();
                             if candidate.exchange_single_held(325, 335) {
