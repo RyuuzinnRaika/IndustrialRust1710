@@ -416,6 +416,11 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[1, 1], &[1, 1]]) {
         return product(98, 4, 0);
     }
+    // Three milk buckets, sugar, an egg and three wheat produce a cake.
+    // Inventory::spend_ingredients returns the empty buckets atomically.
+    if matches(&[&[335, 335, 335], &[353, 344, 353], &[296, 296, 296]]) {
+        return product(354, 1, 0);
+    }
     // Workstations, containers and redstone machines from Java 1.7.10.
     if matches(&[&[0, 369, 0], &[4, 4, 4]]) {
         return product(117, 1, 0); // brewing stand
@@ -806,7 +811,8 @@ mod tests {
             None,
             None,
         ];
-        assert_eq!(result(&modern_fence, 3), None);
+        // This modern fence shape is actually a valid fence GATE in Java 1.7.10.
+        assert_eq!(result(&modern_fence, 3), product(107, 1, 0));
 
         let powered_rail = [
             item(266),
