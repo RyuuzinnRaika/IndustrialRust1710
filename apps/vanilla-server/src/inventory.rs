@@ -351,6 +351,28 @@ impl Inventory {
         None
     }
     /// Q removes one held item; Ctrl+Q removes the entire held stack.
+    /// Take an outside-window cursor drop. The caller MUST commit this debit
+    /// together with the spawned ground-item snapshot before publishing state.
+    /// Protocol 5: left-click drops the full cursor, right-click drops one.
+    pub fn drop_cursor(&mut self, button: i8) -> Option<Stack> {
+        let mut current = self.cursor?;
+        match button {
+            0 => {
+                self.cursor = None;
+                Some(current)
+            }
+            1 => {
+                current.count -= 1;
+                self.cursor = (current.count > 0).then_some(current);
+                Some(Stack {
+                    count: 1,
+                    ..current
+                })
+            }
+            _ => None,
+        }
+    }
+
     pub fn drop_held(&mut self, whole_stack: bool) -> Option<Stack> {
         let slot = &mut self.slots[36 + self.selected as usize];
         let held = slot.take()?;
@@ -1400,6 +1422,31 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn outside_drop_cursor_only_debits_requested_quantity() {
+        let original = Stack {
+            id: 332,
+            count: 3,
+            damage: 0,
+        };
+        let mut inv = Inventory::default();
+        inv.cursor = Some(original);
+        assert_eq!(inv.drop_cursor(9), None);
+        assert_eq!(inv.cursor, Some(original));
+        assert_eq!(
+            inv.drop_cursor(1),
+            Some(Stack {
+                count: 1,
+                ..original
+            })
+        );
+        assert_eq!(inv.cursor, Some(Stack { count: 2, ..original }));
+        assert_eq!(inv.drop_cursor(0), Some(Stack { count: 2, ..original }));
+        assert_eq!(inv.cursor, None);
+        assert_eq!(inv.drop_cursor(0), None);
+        assert!(inv.encoded().is_ok());
+    }
+
     #[test]
     fn new_sign_recipe_shift_crafting_is_atomic_when_inventory_is_full() {
         let sign = Stack {
