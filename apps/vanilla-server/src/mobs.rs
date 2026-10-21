@@ -186,7 +186,7 @@ pub struct Mobs {
     entities: BTreeMap<i32, Mob>,
     arrows: BTreeMap<i32, Arrow>,
     orbs: BTreeMap<i32, (PlayerPosition, u16, u64)>,
-    pending_hits: Vec<(PlayerPosition, u8, u64)>,
+    pending_hits: Vec<(i32, u8, u64)>,
     pending_blast_damage: BTreeMap<i32, u8>,
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
     explosions: Vec<Explosion>,
@@ -517,7 +517,13 @@ impl Mobs {
         }
     }
     /// Tick at most four elapsed 20Hz steps; caller owns broadcast fan-out.
-    pub fn tick(&mut self, now: u64, world: &World, players: &[PlayerPosition]) -> Vec<Event> {
+    pub fn tick(
+        &mut self,
+        now: u64,
+        world: &World,
+        players: &[PlayerPosition],
+        participants: &[(i32, PlayerPosition)],
+    ) -> Vec<Event> {
         let steps = now.saturating_sub(self.last_tick).min(MAX_STEPS);
         self.last_tick = now;
         let mut events = Vec::new();
@@ -713,7 +719,7 @@ impl Mobs {
                     events.push(packet);
                 }
             }
-            self.tick_arrows(world, players, now, &mut events);
+            self.tick_arrows(world, participants, now, &mut events);
         }
         if self.explosions.len() > 32 {
             self.explosions.truncate(32);
@@ -723,7 +729,7 @@ impl Mobs {
     fn tick_arrows(
         &mut self,
         world: &World,
-        players: &[PlayerPosition],
+        participants: &[(i32, PlayerPosition)],
         now: u64,
         events: &mut Vec<Event>,
     ) {
@@ -749,10 +755,22 @@ impl Mobs {
                 .shooter
                 .is_some_and(|id| self.entities.contains_key(&id))
             {
-                if let Some(hit) = players.iter().find(|p| {
-                    (p.x - next.x).hypot(p.z - next.z) < 0.85 && (p.y + 0.9 - next.y).abs() < 1.3
+                if let Some(&(player_id, _)) = participants.iter().find(|(_, p)| {
+                    let start = arrow.position;
+                    let dx = next.x - start.x;
+                    let dy = next.y - start.y;
+                    let dz = next.z - start.z;
+                    let len2 = dx * dx + dy * dy + dz * dz;
+                    let t = if len2 > 0.0 {
+                        ((p.x - start.x) * dx + (p.y + 0.9 - start.y) * dy
+                            + (p.z - start.z) * dz) / len2
+                    } else { 0.0 }.clamp(0.0, 1.0);
+                    let horizontal = (p.x - start.x - dx * t)
+                        .hypot(p.z - start.z - dz * t);
+                    let vertical = (p.y + 0.9 - start.y - dy * t).abs();
+                    horizontal < 0.85 && vertical < 1.3
                 }) {
-                    self.pending_hits.push((*hit, arrow.damage, now));
+                    self.pending_hits.push((player_id, arrow.damage, now));
                     removed.push(arrow.id);
                     continue;
                 }
@@ -792,13 +810,15 @@ impl Mobs {
     }
     pub fn hurt_player(&mut self, player_id: i32, player: PlayerPosition, tick: u64) -> u8 {
         let mut amount = self.pending_blast_damage.remove(&player_id).unwrap_or(0);
-        self.pending_hits.retain(|(p, d, t)| {
-            if tick.saturating_sub(*t) < 30 && (p.x - player.x).hypot(p.z - player.z) < 0.75 {
-                amount = amount.saturating_add(*d);
-                false
-            } else {
-                tick.saturating_sub(*t) < 30
+        self.pending_hits.retain(|(id, damage, when)| {
+            if tick.saturating_sub(*when) >= 30 {
+                return false;
             }
+            if *id == player_id {
+                amount = amount.saturating_add(*damage);
+                return false;
+            }
+            true
         });
         for mob in self.entities.values_mut() {
             if !mob.kind.passive()
@@ -859,9 +879,9 @@ mod tests {
         let spawned = mobs.spawn_xp(at, 5).unwrap();
         let id = *mobs.orbs.keys().next().unwrap();
         assert_eq!(spawned.id, 0x11);
-        assert_eq!(mobs.tick(5999, &World::new(), &[]).len(), 0);
+        assert_eq!(mobs.tick(5999, &World::new(), &[], &[]).len(), 0);
         assert!(mobs.orbs.contains_key(&id));
-        let destroyed = mobs.tick(6000, &World::new(), &[]);
+        let destroyed = mobs.tick(6000, &World::new(), &[], &[]);
         assert_eq!(destroyed.len(), 1);
         assert_eq!(destroyed[0].id, 0x13);
         assert!(mobs.orbs.is_empty());
