@@ -14,6 +14,7 @@ mod hoppers;
 mod inventory;
 mod journal;
 mod mobs;
+mod mob_rules;
 mod multiplayer;
 mod navigation;
 mod physics;
