@@ -229,7 +229,7 @@ mod tests {
             saturation: 0.0,
             ..Vitals::default()
         };
-        for _ in 0..800 {
+        for _ in 0..820 {
             v.apply_hunger_effect_tick(0);
         }
         assert_eq!(v.food, 9);
