@@ -125,7 +125,7 @@ pub(crate) fn parse_chunk(nbt: &[u8], cx: i32, cz: i32) -> io::Result<ChunkRoot>
             return Err(invalid("invalid legacy section block"));
         }
     }
-    crate::legacy_inventory_nbt::validate_tiles(&parsed.level.tile_entities)?;
+    crate::legacy_inventory_nbt::validate_tiles(&parsed.level.tile_entities, Some((cx, cz)))?;
     Ok(parsed)
 }
 
@@ -194,5 +194,29 @@ mod tests {
         bad.level.sections[0].y = -1;
         assert!(parse_chunk(&fastnbt::to_bytes(&bad).unwrap(), -1, 2).is_err());
         assert!(parse_chunk(&fastnbt::to_bytes(&sample()).unwrap(), 2, -1).is_err());
+    }
+
+    #[test]
+    fn chunk_tile_entities_must_belong_to_the_enclosing_column() {
+        fn tile(x: i32, z: i32) -> Value {
+            let item = crate::legacy_inventory_nbt::TileEntity {
+                id: "Chest".to_string(),
+                x,
+                y: 65,
+                z,
+                items: None,
+                extra: BTreeMap::new(),
+            };
+            fastnbt::from_bytes(&fastnbt::to_bytes(&item).unwrap()).unwrap()
+        }
+        let mut chunk = sample(); // chunk (-1, 2): x -16..-1, z 32..47
+        chunk.level.tile_entities = vec![tile(-1, 32)];
+        assert!(parse_chunk(&fastnbt::to_bytes(&chunk).unwrap(), -1, 2).is_ok());
+
+        chunk.level.tile_entities = vec![tile(0, 32)];
+        assert!(parse_chunk(&fastnbt::to_bytes(&chunk).unwrap(), -1, 2).is_err());
+
+        chunk.level.tile_entities = vec![tile(-1, 32), tile(-1, 32)];
+        assert!(parse_chunk(&fastnbt::to_bytes(&chunk).unwrap(), -1, 2).is_err());
     }
 }
