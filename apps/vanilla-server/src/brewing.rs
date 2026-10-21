@@ -224,9 +224,6 @@ impl Brewers {
         value.validate()?;
         Ok(value)
     }
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
     pub fn get(&self, pos: Position) -> Brewer {
         self.entries.get(&key(pos)).copied().unwrap_or_default()
     }
