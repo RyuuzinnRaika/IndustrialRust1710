@@ -29,6 +29,19 @@ fn is_reagent(item: Stack) -> bool {
         372 | 353 | 377 | 370 | 382 | 375 | 378 | 396 | 376 | 331 | 348 | 289
     )
 }
+/// Authoritative 1.7.10 brewing slot limits, used before GUI mutations and
+/// when loading a saved brewing stand. Bottles are non-stackable; only the
+/// fourth slot accepts brewing reagents.
+pub fn slot_accepts(slot: i16, item: Stack) -> bool {
+    if !item.is_valid() {
+        return false;
+    }
+    match slot {
+        0..=2 => valid_potion(Some(item)),
+        3 => is_reagent(item),
+        _ => false,
+    }
+}
 /// Static 1.7.10 potion damage metadata: 0 is water, 16 awkward, 819x effects.
 pub fn result(bottle: Stack, reagent: Stack) -> Option<Stack> {
     if bottle.id != 373 {
@@ -104,8 +117,10 @@ pub struct Brewer {
 }
 impl Brewer {
     pub fn valid(&self) -> bool {
-        self.slots[..3].iter().all(|&item| valid_potion(item))
-            && self.slots[3].is_none_or(|s| s.is_valid() && is_reagent(s))
+        self.slots
+            .iter()
+            .enumerate()
+            .all(|(slot, item)| item.is_none_or(|s| slot_accepts(slot as i16, s)))
             && self.brew_time <= BREW_TICKS
     }
     fn product_possible(&self) -> bool {
