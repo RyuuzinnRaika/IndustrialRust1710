@@ -343,7 +343,7 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
         return product(325, 1, 0);
     }
 
-    if matches(&[&[0, 265], &[265, 0]]) {
+    if matches(&[&[0, 265], &[265, 0]]) || matches(&[&[265, 0], &[0, 265]]) {
         return product(359, 1, 0);
     }
     // Storage blocks must debit all nine source items.
@@ -424,6 +424,18 @@ mod tests {
     use super::*;
     fn item(id: i16) -> Option<Stack> {
         product(id, 1, 0)
+    }
+    #[test]
+    fn shears_accept_both_mirrored_diagonals_without_extra_material() {
+        assert_eq!(
+            result(&[item(265), None, None, item(265)], 2),
+            product(359, 1, 0)
+        );
+        assert_eq!(
+            result(&[None, item(265), item(265), None], 2),
+            product(359, 1, 0)
+        );
+        assert_eq!(result(&[item(265), None, None, None], 2), None);
     }
     #[test]
     fn armor_bow_and_arrow_require_exact_legacy_patterns() {
