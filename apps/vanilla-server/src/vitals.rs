@@ -1,6 +1,7 @@
 //! Server-owned Minecraft 1.7.10 Survival food and health subset.
 //! Bounded food/exhaustion arithmetic and 20TPS healing/starvation.
-//! Does not yet implement potions, item NBT, food effects or full sprint logic.
+//! Potion state lives in the session. Item NBT, food status effects and sprint
+//! exhaustion still require dedicated protocol integration.
 use crate::inventory::Stack;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,35 +38,38 @@ impl Vitals {
     }
 
     /// Limited 1.7.10 food set. Saturation modifier is the vanilla-like multiplier.
-    fn nutrition(id: i16) -> Option<(i32, f32)> {
-        match id {
-            260 => Some((4, 0.3)), // apple
-            297 => Some((5, 0.6)), // bread
-            319 => Some((3, 0.3)), // raw pork
-            320 => Some((8, 0.8)), // cooked pork
-            349 => Some((2, 0.1)), // raw fish
-            350 => Some((5, 0.6)), // cooked fish
-            357 => Some((2, 0.1)), // cookie
-            360 => Some((2, 0.3)), // melon
-            363 => Some((3, 0.3)), // raw beef
-            364 => Some((8, 0.8)), // steak
-            365 => Some((2, 0.3)), // raw chicken
-            366 => Some((6, 0.6)), // cooked chicken
-            391 => Some((3, 0.6)), // carrot
-            392 => Some((1, 0.3)), // potato
-            393 => Some((5, 0.6)), // baked potato
-            400 => Some((8, 0.3)), // pumpkin pie
+    fn nutrition(stack: Stack) -> Option<(i32, f32)> {
+        match (stack.id, stack.damage) {
+            (260, _) => Some((4, 0.3)), // apple
+            (297, _) => Some((5, 0.6)), // bread
+            (319, _) => Some((3, 0.3)), // raw pork
+            (320, _) => Some((8, 0.8)), // cooked pork
+            (349, 0 | 1) => Some((2, 0.1)), // cod / salmon
+            (349, 2 | 3) => Some((1, 0.1)), // clownfish / pufferfish (effects TODO)
+            (350, 0) => Some((5, 0.6)), // cooked cod
+            (350, 1) => Some((6, 0.8)), // cooked salmon
+            (357, _) => Some((2, 0.1)), // cookie
+            (360, _) => Some((2, 0.3)), // melon
+            (363, _) => Some((3, 0.3)), // raw beef
+            (364, _) => Some((8, 0.8)), // steak
+            (365, _) => Some((2, 0.3)), // raw chicken
+            (366, _) => Some((6, 0.6)), // cooked chicken
+            (391, _) => Some((3, 0.6)), // carrot
+            (392, _) => Some((1, 0.3)), // potato
+            (393, _) => Some((5, 0.6)), // baked potato
+            (400, _) => Some((8, 0.3)),
+            (396, _) => Some((6, 1.2)), // golden carrot // pumpkin pie
             _ => None,
         }
     }
 
     pub fn can_eat(&self, stack: Stack) -> bool {
-        self.health > 0.0 && self.food < 20 && Self::nutrition(stack.id).is_some()
+        self.health > 0.0 && self.food < 20 && Self::nutrition(stack).is_some()
     }
 
     /// Apply food only after the inventory was durably charged.
     pub fn eat(&mut self, stack: Stack) -> bool {
-        let Some((restore, modifier)) = Self::nutrition(stack.id) else {
+        let Some((restore, modifier)) = Self::nutrition(stack) else {
             return false;
         };
         if !self.can_eat(stack) {
@@ -76,13 +80,19 @@ impl Vitals {
         true
     }
 
-    /// Vanilla-inspired exhaustion: 4 points drains saturation before food.
-    pub fn travel(&mut self, horizontal_blocks: f64) -> bool {
-        if self.health <= 0.0 || !horizontal_blocks.is_finite() || horizontal_blocks <= 0.0 {
+    /// Apply and settle exhaustion. Use for movement, combat and regeneration.
+    /// Four exhaustion points drain saturation first, then one food point.
+    pub fn add_exhaustion(&mut self, amount: f32) -> bool {
+        if self.health <= 0.0 || !amount.is_finite() || amount <= 0.0 {
             return false;
         }
         let before = (self.food, self.saturation, self.exhaustion);
-        self.exhaustion = (self.exhaustion + (horizontal_blocks.min(64.0) as f32 * 0.01)).min(40.0);
+        self.exhaustion = (self.exhaustion + amount).min(40.0);
+        self.settle_exhaustion();
+        before != (self.food, self.saturation, self.exhaustion)
+    }
+
+    fn settle_exhaustion(&mut self) {
         while self.exhaustion >= 4.0 {
             self.exhaustion -= 4.0;
             if self.saturation > 0.0 {
@@ -91,7 +101,14 @@ impl Vitals {
                 self.food -= 1;
             }
         }
-        before != (self.food, self.saturation, self.exhaustion)
+    }
+
+    /// Walking movement; sprint/jump multipliers require movement-state input.
+    pub fn travel(&mut self, horizontal_blocks: f64) -> bool {
+        if self.health <= 0.0 || !horizontal_blocks.is_finite() || horizontal_blocks <= 0.0 {
+            return false;
+        }
+        self.add_exhaustion(horizontal_blocks.min(64.0) as f32 * 0.01)
     }
 
     /// Returns true if health or food changed. Must run only once per game tick.
@@ -109,7 +126,7 @@ impl Vitals {
                     self.food_timer = 0;
                     if recovering {
                         self.health = (self.health + 1.0).min(20.0);
-                        self.exhaustion = (self.exhaustion + 3.0).min(40.0);
+                        self.add_exhaustion(3.0);
                     } else {
                         self.health = (self.health - 1.0).max(1.0);
                     }
@@ -125,6 +142,33 @@ impl Vitals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn golden_carrot_and_fish_metadata_follow_legacy_food_values() {
+        let mut v = Vitals { food: 10, saturation: 0.0, ..Vitals::default() };
+        assert!(v.eat(Stack { id: 396, count: 1, damage: 0 }));
+        assert_eq!(v.food, 16);
+        assert!((v.saturation - 14.4).abs() < 0.001);
+        let salmon = Stack { id: 350, count: 1, damage: 1 };
+        assert!(v.eat(salmon));
+        assert_eq!(v.food, 20);
+        assert!(!Vitals::default().can_eat(Stack { id: 350, count: 1, damage: 2 }));
+    }
+
+    #[test]
+    fn regeneration_exhaustion_drains_saturation_without_waiting_for_movement() {
+        let mut v = Vitals {
+            health: 19.0, food: 20, saturation: 1.0, exhaustion: 3.5,
+            food_timer: 79,
+        };
+        assert!(v.tick(1));
+        assert_eq!(v.health, 20.0);
+        assert_eq!(v.food, 20);
+        assert_eq!(v.saturation, 0.0);
+        assert!((v.exhaustion - 2.5).abs() < 0.001);
+        assert!(v.valid());
+    }
+
     fn food(id: i16) -> Stack {
         Stack {
             id,
