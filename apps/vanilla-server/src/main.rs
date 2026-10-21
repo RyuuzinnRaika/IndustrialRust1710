@@ -794,8 +794,21 @@ fn play(
                 }
             }
             if damage > 0.0 {
+                // Only armor-blockable Mob/explosion hits wear equipment. Do
+                // not charge armor for hunger, falling, or poison. Persist
+                // wear before advertising the hit to prevent an equipment
+                // rollback from minting durability on reconnect.
+                let mut worn = inventory.clone();
+                let armor_changed = worn.wear_armor_on_hit(hurt);
+                if armor_changed {
+                    worn.save(inventory_path)?;
+                    *inventory = worn;
+                }
                 vitals.health = (vitals.health - damage.ceil()).max(0.0);
                 player.save_state(player_path, *vitals)?;
+                if armor_changed {
+                    send(s, 0x30, &inventory.window_items())?;
+                }
                 send(s, 0x06, &health_packet(*vitals))?;
             }
         }
