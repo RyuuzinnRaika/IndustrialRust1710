@@ -406,7 +406,9 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     until_packet(&mut bob, 0x0c, |_| true);
     send_position(&mut bob, 4.5, 65.0, 4.5);
     until_packet(&mut alice, 0x18, |b| {
-        b.len() > 4 && i32::from_be_bytes(b[..4].try_into().unwrap()) == bob_id
+        let mut raw = b;
+        read_varint(&mut raw).ok() == Some(bob_id as u32)
+            && raw.len() == 15 // three i32 positions, yaw, pitch, onGround
     });
     alice
         .write_all(&frame(1, &mc_string("hello from Rust")))
@@ -416,7 +418,10 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     });
     drop(alice);
     until_packet(&mut bob, 0x13, |b| {
-        b.len() >= 5 && i32::from_be_bytes(b[1..5].try_into().unwrap()) == alice_id
+        let mut raw = b;
+        read_varint(&mut raw).ok() == Some(1)
+            && read_varint(&mut raw).ok() == Some(alice_id as u32)
+            && raw.is_empty()
     });
     drop(bob);
     server.wait_idle();
@@ -545,7 +550,10 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
         b.len() == 8 && b[..4] == drop_id.to_be_bytes()
     });
     until_packet(&mut client, 0x13, |b| {
-        b.len() == 5 && b[0] == 1 && b[1..] == drop_id.to_be_bytes()
+        let mut raw = b;
+        read_varint(&mut raw).ok() == Some(1)
+            && read_varint(&mut raw).ok() == Some(drop_id as u32)
+            && raw.is_empty()
     });
     let pickup_file: Value = serde_json::from_slice(&fs::read(&drop_path).unwrap()).unwrap();
     assert!(pickup_file["entries"].as_object().unwrap().is_empty());
