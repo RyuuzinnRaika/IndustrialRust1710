@@ -725,22 +725,6 @@ impl World {
         Ok(changed.then_some(next))
     }
 
-    /// Persist a small related block edit (such as the two bed halves) as
-    /// one world snapshot, never exposing a half-built object to clients.
-    // Legacy helper retained only for unit tests; runtime uses staged+journaled saves.
-    #[cfg(test)]
-    pub fn update_many_and_save(
-        &mut self,
-        path: &Path,
-        changes: &[(i32, i32, i32, u16)],
-    ) -> io::Result<bool> {
-        let Some(next) = self.staged_updates(changes)? else {
-            return Ok(false);
-        };
-        next.save(path)?;
-        *self = next;
-        Ok(true)
-    }
     pub fn update_and_save(
         &mut self,
         path: &Path,
