@@ -136,6 +136,25 @@ impl<'a> Input<'a> {
         }
         Ok(Some(stack))
     }
+    /// Protocol 5 Click Window carries a *client-reported* slot snapshot.
+    /// The snapshot is never used to authorize a mutation, and may contain
+    /// valid NBT even when the server-side Stack model cannot store tags yet.
+    /// Consume its exact length without converting or losing an item.
+    fn skip_untrusted_slot(&mut self) -> io::Result<()> {
+        let id = self.i16()?;
+        if id == -1 {
+            return Ok(());
+        }
+        self.take(3)?; // count + damage
+        let nbt_len = self.i16()?;
+        if nbt_len < -1 {
+            return Err(bad("invalid claimed item NBT length"));
+        }
+        if nbt_len >= 0 {
+            self.take(nbt_len as usize)?;
+        }
+        Ok(())
+    }
     fn finish(&self) -> io::Result<()> {
         if self.0.is_empty() {
             Ok(())
@@ -2186,7 +2205,7 @@ fn play(
                 let mode = input.i8()?;
                 // Client-provided clicked-item snapshots must never authorize
                 // an inventory change: all modifications are server-owned.
-                let _claimed = input.slot()?;
+                input.skip_untrusted_slot()?;
                 input.finish()?;
                 let mut requested_window = window >= 0 && window as u8 == active_window;
                 let mut accepted = false;
@@ -3637,6 +3656,28 @@ mod tests {
         none.finish().unwrap();
         // An NBT-bearing client item must not be accepted as a bare stack.
         assert!(Input(&[0, 1, 1, 0, 0, 0, 3, 0, 0, 0]).slot().is_err());
+    }
+    #[test]
+    fn click_window_ignores_untrusted_nbt_snapshot_without_disconnect() {
+        // 1.7.10 packet: item id, count, damage, signed NBT bytes length,
+        // NBT payload. It must be fully consumed but never become server state.
+        let mut snapshot = Input(&[0, 1, 1, 0, 0, 0, 3, 10, 0, 0]);
+        snapshot.skip_untrusted_slot().unwrap();
+        snapshot.finish().unwrap();
+
+        // A zero/invalid item ID claim is not inventory authority.
+        let mut fake = Input(&[0x7f, 0x7f, 0xff, 0, 0, 0xff, 0xff]);
+        fake.skip_untrusted_slot().unwrap();
+        fake.finish().unwrap();
+
+        let mut truncated = Input(&[0, 1, 1, 0, 0, 0, 4, 10, 0, 0]);
+        assert!(truncated.skip_untrusted_slot().is_err());
+        let mut illegal_length = Input(&[0, 1, 1, 0, 0, 0xff, 0xfe]);
+        assert!(illegal_length.skip_untrusted_slot().is_err());
+
+        // Creative inventory still rejects tagged stacks instead of silently
+        // stripping names/enchantments and minting an incorrect item.
+        assert!(Input(&[0, 1, 1, 0, 0, 0, 3, 10, 0, 0]).slot().is_err());
     }
     #[test]
     fn offline_uuid_is_deterministic() {
