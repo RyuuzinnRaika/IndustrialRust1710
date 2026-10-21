@@ -2,11 +2,13 @@
 //! Wire packet structure is independently encoded from the public 1.7 protocol.
 //! No Pumpkin code is copied or linked.
 use crate::player::PlayerPosition;
+use crate::world::VIEW_DISTANCE;
 use legacy_protocol::{write_string, write_varint};
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub const MAX_PLAYERS: usize = 8;
 const QUEUE_CAPACITY: usize = 512;
@@ -22,6 +24,7 @@ pub struct Peer {
     pub uuid: String,
     pub position: PlayerPosition,
     tx: SyncSender<Event>,
+    overloaded: Arc<AtomicBool>,
 }
 #[derive(Default)]
 struct Inner {
@@ -39,12 +42,21 @@ fn enqueue(peer: &Peer, packet: &Event) {
     match peer.tx.try_send(packet.clone()) {
         Ok(()) => {}
         Err(TrySendError::Full(_)) => {
-            // A misbehaving or disconnected client cannot block the whole server.
-            // TODO: proactively disconnect clients whose queues repeatedly overflow.
-            eprintln!("outgoing packet queue full for {}", peer.name);
+            // Drop the whole session rather than silently losing a state update.
+            // The session thread checks this flag every poll and disconnects.
+            if !peer.overloaded.swap(true, Ordering::Release) {
+                eprintln!("outgoing packet queue full; disconnecting {}", peer.name);
+            }
         }
         Err(TrySendError::Disconnected(_)) => {}
     }
+}
+
+/// The server sends player entities only inside the client's loaded view.
+pub fn visible(observer: &PlayerPosition, target: &PlayerPosition) -> bool {
+    let chunk = |n: f64| (n.floor() as i32).div_euclid(16);
+    (chunk(observer.x) - chunk(target.x)).abs() <= VIEW_DISTANCE
+        && (chunk(observer.z) - chunk(target.z)).abs() <= VIEW_DISTANCE
 }
 
 pub fn list_entry(name: &str, online: bool) -> io::Result<Event> {
@@ -101,6 +113,12 @@ pub enum JoinError {
     Duplicate,
 }
 impl Hub {
+    /// Healthy sessions have not lost any authoritative outbound packets.
+    pub fn is_healthy(&self, id: i32) -> bool {
+        self.0.lock().ok().and_then(|inner| {
+            inner.players.get(&id).map(|peer| !peer.overloaded.load(Ordering::Acquire))
+        }).unwrap_or(false)
+    }
     pub fn count(&self) -> io::Result<usize> {
         Ok(self.0.lock().map_err(|_| poisoned())?.players.len())
     }
@@ -152,13 +170,16 @@ impl Hub {
             uuid,
             position,
             tx,
+            overloaded: Arc::new(AtomicBool::new(false)),
         };
         // Existing players learn of the new user in queue order.
         let presence = list_entry(&peer.name, true).map_err(|_| JoinError::Full)?;
         let entity = spawn(&peer).map_err(|_| JoinError::Full)?;
         for other in &existing {
             enqueue(other, &presence);
-            enqueue(other, &entity);
+            if visible(&other.position, &peer.position) {
+                enqueue(other, &entity);
+            }
         }
         inner.players.insert(id, peer);
         Ok((id, rx, existing))
@@ -169,7 +190,9 @@ impl Hub {
                 let removed = list_entry(&gone.name, false).ok();
                 let entity = destroy(id);
                 for peer in inner.players.values() {
-                    enqueue(peer, &entity);
+                    if visible(&peer.position, &gone.position) {
+                        enqueue(peer, &entity);
+                    }
                     if let Some(item) = &removed {
                         enqueue(peer, item);
                     }
@@ -180,11 +203,27 @@ impl Hub {
     pub fn move_player(&self, id: i32, position: PlayerPosition, yaw: f32, pitch: f32) {
         if let Ok(mut inner) = self.0.lock() {
             if let Some(peer) = inner.players.get_mut(&id) {
+                let old_position = peer.position;
                 peer.position = position;
                 let packet = teleport(id, &position, yaw, pitch);
+                let appeared = spawn(peer).ok();
+                let vanished = destroy(id);
                 for other in inner.players.values() {
-                    if other.id != id {
-                        enqueue(other, &packet);
+                    if other.id == id {
+                        continue;
+                    }
+                    match (
+                        visible(&other.position, &old_position),
+                        visible(&other.position, &position),
+                    ) {
+                        (true, true) => enqueue(other, &packet),
+                        (true, false) => enqueue(other, &vanished),
+                        (false, true) => {
+                            if let Some(event) = &appeared {
+                                enqueue(other, event);
+                            }
+                        }
+                        (false, false) => {}
                     }
                 }
             }
@@ -201,6 +240,38 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn out_of_view_players_spawn_on_entry_and_destroy_on_exit() {
+        let hub = Hub::default();
+        let (a, _a_rx, _) = hub
+            .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        let far = PlayerPosition { x: 160.5, y: 65.0, z: 0.5 };
+        let (_b, b_rx, previous) = hub
+            .add("Bob".into(), "uuid-b".into(), far)
+            .unwrap();
+        assert_eq!(previous.len(), 1); // globally listed, not spawned
+        assert!(b_rx.try_recv().is_err());
+        hub.move_player(a, PlayerPosition { x: 161.5, y: 65.0, z: 0.5 }, 0.0, 0.0);
+        assert_eq!(b_rx.try_recv().unwrap().id, 0x0c);
+        hub.move_player(a, PlayerPosition { x: 162.5, y: 65.0, z: 0.5 }, 0.0, 0.0);
+        assert_eq!(b_rx.try_recv().unwrap().id, 0x18);
+        hub.move_player(a, PlayerPosition::default(), 0.0, 0.0);
+        assert_eq!(b_rx.try_recv().unwrap().id, 0x13);
+        assert!(b_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_overflow_marks_session_unhealthy_instead_of_silent_desync() {
+        let hub = Hub::default();
+        let (id, _rx, _) = hub
+            .add("FullQueue".into(), "uuid".into(), PlayerPosition::default())
+            .unwrap();
+        for _ in 0..=QUEUE_CAPACITY {
+            hub.broadcast(Event { id: 0x03, body: vec![] });
+        }
+        assert!(!hub.is_healthy(id));
+    }
     #[test]
     fn protocol5_player_list_and_spawn() {
         let list = list_entry("RustTester", true).unwrap();
