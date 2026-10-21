@@ -159,6 +159,30 @@ fn rule(block: u16) -> Option<BlockRule> {
         drop,
     })
 }
+/// Deterministic, bounded bonus drops for manual harvesting. The primary
+/// BlockDrop remains compatible with existing mining/inventory accounting.
+pub fn additional_drop(block:u16, pos:(i32,i32,i32), tick:u64) -> Option<Stack> {
+    let (x,y,z)=pos;
+    let mut roll=tick
+        ^ (x as i64 as u64).wrapping_mul(0x9e3779b185ebca87)
+        ^ (y as i64 as u64).wrapping_mul(0xc2b2ae3d27d4eb4f)
+        ^ (z as i64 as u64).wrapping_mul(0x165667b19e3779f9);
+    roll ^= roll >> 30;
+    roll=roll.wrapping_mul(0xbf58476d1ce4e5b9);
+    roll ^= roll >> 27;
+    roll=roll.wrapping_mul(0x94d049bb133111eb);
+    roll ^= roll >> 31;
+    let (id,count) = match block >> 4 {
+        18 if roll % 200 == 0 => (260,1), // apple
+        18 if roll % 20 == 0 => (6,1), // sapling
+        59 if block & 7 == 7 => (295,1 + (roll % 3) as u8),
+        141 if block & 7 == 7 => (391,1 + (roll % 3) as u8),
+        142 if block & 7 == 7 => (392,1 + (roll % 3) as u8),
+        _ => return None,
+    };
+    Some(Stack {id, count, damage:0})
+}
+
 /// Server-authoritative minimum for breaking a known block; tick quantized,
 /// 30 game ticks × hardness / speed if harvestable, otherwise 100 × hardness.
 /// Not all environmental penalties of vanilla 1.7.10 are modeled.
