@@ -207,10 +207,16 @@ impl World {
     }
     /// Opt-in IRW4 world. Older world versions retain their exact terrain.
     pub fn expanded(seed: u64, dimension: crate::dimensions::Dimension) -> Self {
-        Self { generation: Generation::Expanded(seed, dimension), ..Self::default() }
+        Self {
+            generation: Generation::Expanded(seed, dimension),
+            ..Self::default()
+        }
     }
     pub fn extended_identity(&self) -> Option<(u64, crate::dimensions::Dimension)> {
-        match self.generation { Generation::Expanded(seed, dim) => Some((seed, dim)), _ => None }
+        match self.generation {
+            Generation::Expanded(seed, dim) => Some((seed, dim)),
+            _ => None,
+        }
     }
     pub fn with_biomes(seed: u64) -> Self {
         Self {
@@ -220,7 +226,9 @@ impl World {
     }
     pub fn natural_seed(&self) -> Option<u64> {
         match self.generation {
-            Generation::Natural(seed) | Generation::Biomes(seed) | Generation::Expanded(seed, _) => Some(seed),
+            Generation::Natural(seed)
+            | Generation::Biomes(seed)
+            | Generation::Expanded(seed, _) => Some(seed),
             Generation::Flat => None,
         }
     }
@@ -228,7 +236,9 @@ impl World {
         match self.generation {
             Generation::Natural(seed) => f64::from(crate::terrain::surface(seed, 0, 0) + 1),
             Generation::Biomes(seed) => f64::from(crate::terrain::biome_surface(seed, 0, 0) + 1),
-            Generation::Expanded(seed, crate::dimensions::Dimension::Overworld) => f64::from(crate::worldgen::height(seed, 0, 0) + 1),
+            Generation::Expanded(seed, crate::dimensions::Dimension::Overworld) => {
+                f64::from(crate::worldgen::height(seed, 0, 0) + 1)
+            }
             Generation::Expanded(_, crate::dimensions::Dimension::Nether) => 80.0,
             Generation::Expanded(_, crate::dimensions::Dimension::End) => 81.0,
             Generation::Flat => 65.0,
@@ -239,7 +249,9 @@ impl World {
             Generation::Flat => Self::default_block(y),
             Generation::Natural(seed) => crate::terrain::block(seed, x, i32::from(y), z),
             Generation::Biomes(seed) => crate::terrain::biome_block(seed, x, i32::from(y), z),
-            Generation::Expanded(seed, dim) => crate::worldgen::block(seed, dim, x, i32::from(y), z),
+            Generation::Expanded(seed, dim) => {
+                crate::worldgen::block(seed, dim, x, i32::from(y), z)
+            }
         }
     }
     pub fn default_block(y: u8) -> u16 {
@@ -1031,9 +1043,12 @@ impl World {
                     Generation::Biomes(seed) => {
                         crate::terrain::biome(seed, chunk_x * 16 + x, chunk_z * 16 + z)
                     }
-                    Generation::Expanded(seed, dim) => {
-                        crate::worldgen::biome_for_dimension(seed, dim, chunk_x * 16 + x, chunk_z * 16 + z)
-                    }
+                    Generation::Expanded(seed, dim) => crate::worldgen::biome_for_dimension(
+                        seed,
+                        dim,
+                        chunk_x * 16 + x,
+                        chunk_z * 16 + z,
+                    ),
                     _ => 1,
                 };
                 bytes.push(kind);
