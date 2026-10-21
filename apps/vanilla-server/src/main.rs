@@ -2922,6 +2922,8 @@ fn main() -> io::Result<()> {
                     Ok(v) => v,
                     Err(_) => break,
                 };
+                // Fire uses the same clock/weather source as client rain packets.
+                gravity_world.set_raining(weather.0);
                 for _ in 0..steps {
                     match gravity_world.gravity_tick(&furnace_world_path, 64) {
                         Ok(changes) => {
