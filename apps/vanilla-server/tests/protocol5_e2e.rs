@@ -227,14 +227,34 @@ fn read_position(packet: &[u8]) -> [f64; 3] {
         f64::from_be_bytes(packet[16..24].try_into().unwrap()),
     ]
 }
+/// Read a Play packet while acting like a live Protocol 5 client:
+/// server KeepAlive requests must be acknowledged even during long E2E tests.
+#[track_caller]
 fn until_packet(socket: &mut TcpStream, id: u32, matches: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+    let caller = std::panic::Location::caller();
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut seen = 0usize;
     for _ in 0..MAX_PACKETS {
-        let (packet_id, body) = receive(socket);
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for packet {id:#x} at {caller}; received {seen} packets"
+        );
+        let packet = read_frame(&mut *socket).unwrap_or_else(|error| {
+            panic!("waiting for packet {id:#x} at {caller}, after {seen} packets: {error}")
+        });
+        let mut raw = packet.as_slice();
+        let packet_id = read_varint(&mut raw).expect("valid Play packet ID");
+        let body = raw.to_vec();
+        seen += 1;
+        if packet_id == 0 && body.len() == 4 {
+            // S00 KeepAlive: the same signed 32-bit identifier is returned in C00.
+            socket.write_all(&frame(0, &body)).expect("reply to KeepAlive");
+        }
         if packet_id == id && matches(&body) {
             return body;
         }
     }
-    panic!("expected packet {id:#x} not received");
+    panic!("expected packet {id:#x} at {caller} not received after {seen} packets");
 }
 fn await_file(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(6);
