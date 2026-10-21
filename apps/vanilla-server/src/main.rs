@@ -620,9 +620,19 @@ fn play(
             let grounded = simulated
                 .as_ref()
                 .is_some_and(|candidate| physics::supported(&gravity_world, candidate));
+            let no_fall_damage = simulated.as_ref().is_some_and(|candidate| {
+                physics::in_water(&gravity_world, candidate)
+                    || physics::in_lava(&gravity_world, candidate)
+                    || physics::on_ladder(&gravity_world, candidate)
+            });
             drop(gravity_world);
             if let Some(candidate) = simulated {
-                let damage = fall.update(candidate.y, grounded);
+                let damage = if no_fall_damage {
+                    fall.reset(candidate.y);
+                    0
+                } else {
+                    fall.update(candidate.y, grounded)
+                };
                 let mut next_vitals = *vitals;
                 next_vitals.health = (next_vitals.health - f32::from(damage)).max(0.0);
                 // Save accepted position and HP before sending an update.
@@ -866,8 +876,16 @@ fn play(
                         continue;
                     }
                     let landed = physics::supported(&collision_world, &candidate);
+                    let no_fall_damage = physics::in_water(&collision_world, &candidate)
+                        || physics::in_lava(&collision_world, &candidate)
+                        || physics::on_ladder(&collision_world, &candidate);
                     drop(collision_world);
-                    let damage = fall.update(y, landed);
+                    let damage = if no_fall_damage {
+                        fall.reset(y);
+                        0
+                    } else {
+                        fall.update(y, landed)
+                    };
                     if damage != 0 {
                         vitals.health = (vitals.health - f32::from(damage)).max(0.0);
                         player.save_state(player_path, *vitals)?;
