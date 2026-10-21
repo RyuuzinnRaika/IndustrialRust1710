@@ -259,6 +259,8 @@ impl World {
         for movement in &moved {
             self.wake_gravity(movement.to.0, movement.to.1, movement.to.2);
             self.wake_gravity(movement.from.0, movement.from.1, movement.from.2);
+            self.wake_block_updates(movement.to.0, movement.to.1, movement.to.2);
+            self.wake_block_updates(movement.from.0, movement.from.1, movement.from.2);
         }
         Ok(moved)
     }
@@ -290,7 +292,7 @@ impl World {
             }
             let id = self.get(nx, ny, nz) >> 4;
             let pos = (nx, ny as u8, nz);
-            if matches!(id, 8 | 10) {
+            if matches!(id, 8 | 9 | 10 | 11) {
                 self.pending_fluid.insert(pos);
             }
             if id == 55 {
@@ -354,7 +356,7 @@ impl World {
             .pending_fluid
             .iter()
             .filter(|&&(x, y, z)| {
-                self.get(x, i32::from(y), z) >> 4 != 10 || self.fluid_phase.is_multiple_of(4)
+                !matches!(self.get(x, i32::from(y), z) >> 4,10 | 11) || self.fluid_phase.is_multiple_of(4)
             })
             .take(budget)
             .copied()
@@ -367,11 +369,12 @@ impl World {
         for &(x, y, z) in &wet {
             let y = i32::from(y);
             let block = self.get(x, y, z);
-            let id = block >> 4;
+            let id = match block >> 4 {
+                8 | 9 => 8,
+                10 | 11 => 10,
+                _ => continue,
+            };
             let mut level = block & 15;
-            if !matches!(id, 8 | 10) {
-                continue;
-            }
             let adjacent = [
                 (x - 1, y, z),
                 (x + 1, y, z),
@@ -408,7 +411,8 @@ impl World {
             // removed, instead of leaving permanent unsupported water.
             if level != 0 {
                 let above = self.get(x, y + 1, z);
-                let mut next = if above >> 4 == id {
+                let above_id = above >> 4;
+                let mut next = if above_id == id || above_id == id + 1 {
                     ((above & 15) + 1).min(7)
                 } else {
                     8
@@ -417,7 +421,7 @@ impl World {
                 let mut source_neighbors = 0;
                 for (nx, nz) in sides {
                     let other = self.get(nx, y, nz);
-                    if other >> 4 == id {
+                    if other >> 4 == id || other >> 4 == id + 1 {
                         if other & 15 == 0 {
                             source_neighbors += 1;
                         }
@@ -698,7 +702,7 @@ impl World {
             if matches!(block >> 4, 12 | 13) {
                 world.pending_gravity.insert((x, y, z));
             }
-            if matches!(block >> 4, 8 | 10) {
+            if matches!(block >> 4, 8 | 9 | 10 | 11) {
                 world.pending_fluid.insert((x, y, z));
             }
             if block >> 4 == 55 {
