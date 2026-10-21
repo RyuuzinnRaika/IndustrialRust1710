@@ -76,6 +76,10 @@ fn tool(stack: Option<Stack>) -> Option<Tool> {
 }
 /// 1.7.10-style damage count and break thresholds for basic tools.
 pub fn tool_max_uses(stack: Stack) -> Option<i16> {
+    // Shears have 238 uses in Java 1.7.10 but are not mining tools.
+    if stack.id == 359 && stack.count == 1 && (0..238).contains(&stack.damage) {
+        return Some(238);
+    }
     tool(Some(stack)).map(|value| value.max_uses)
 }
 #[derive(Clone, Copy)]
