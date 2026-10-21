@@ -47,6 +47,7 @@ impl WorldSessionLock {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false) // Never alter the file before acquiring its lock.
             .open(lock_file)?;
         FileExt::try_lock_exclusive(&file)?;
         let duration = SystemTime::now()
