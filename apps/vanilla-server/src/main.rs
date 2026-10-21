@@ -1966,6 +1966,8 @@ fn main() -> io::Result<()> {
     let furnace_world = Arc::clone(&world);
     let furnace_world_path = Arc::clone(&path);
     let furnace_hub = Arc::clone(&hub);
+    let leaf_drops = Arc::clone(&ground_items);
+    let leaf_drops_file = Arc::clone(&ground_path);
     thread::spawn(move || {
         let mut last = furnace_clock.ticks();
         let mut last_weather = furnace_clock.weather();
@@ -2053,6 +2055,27 @@ fn main() -> io::Result<()> {
                         Ok(changed) => {
                             for (x, y, z) in changed {
                                 furnace_hub.broadcast(block_change_event(&gravity_world, x, y, z));
+                            }
+                            let decayed = gravity_world.drain_drops();
+                            if !decayed.is_empty() {
+                                let mut ground = match leaf_drops.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                for fallen in decayed {
+                                    if ground.is_full() { break; }
+                                    match ground.put(&leaf_drops_file,fallen.stack,fallen.pos) {
+                                        Ok(item) => {
+                                            for packet in item.spawn() {
+                                                furnace_hub.broadcast(packet);
+                                            }
+                                        }
+                                        Err(error) => {
+                                            eprintln!("LEAF DROP STORAGE ERROR: {error}");
+                                            return;
+                                        }
+                                    }
+                                }
                             }
                         }
                         Err(error) => {
