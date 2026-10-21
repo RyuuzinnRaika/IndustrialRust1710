@@ -1,6 +1,7 @@
 //! Bounded, sparse, deterministic flat world streamed by chunk.
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
 use std::collections::{BTreeMap, BTreeSet};
+mod lighting;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
@@ -657,8 +658,19 @@ impl World {
                 }
             }
         }
-        bytes.extend(std::iter::repeat_n(0u8, sections.len() * 2048)); // block light
-        bytes.extend(std::iter::repeat_n(0xffu8, sections.len() * 2048)); // sky light
+        let (block_light, sky_light) = self.light_arrays(chunk_x, chunk_z);
+        for channel in [&block_light, &sky_light] {
+            for &section in &sections {
+                for y in 0..16 {
+                    for z in 0..16 {
+                        for x in (0..16).step_by(2) {
+                            let offset = ((section * 16 + y) * 256 + z * 16 + x) as usize;
+                            bytes.push(channel[offset] | (channel[offset + 1] << 4));
+                        }
+                    }
+                }
+            }
+        }
         bytes.extend(std::iter::repeat_n(1u8, 256)); // plains biome
         (mask, bytes)
     }
