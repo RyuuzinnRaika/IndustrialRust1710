@@ -79,19 +79,20 @@ pub fn spawn(peer: &Peer) -> io::Result<Event> {
     Ok(Event { id: 0x0c, body })
 }
 pub fn teleport(id: i32, pos: &PlayerPosition, yaw: f32, pitch: f32) -> Event {
-    let mut body = Vec::with_capacity(18);
-    body.extend_from_slice(&id.to_be_bytes());
+    let mut body = Vec::with_capacity(20);
+    write_varint(id as u32, &mut body);
     for coord in [pos.x, pos.y, pos.z] {
         body.extend_from_slice(&fixed(coord).to_be_bytes());
     }
     body.push(angle(yaw));
     body.push(angle(pitch));
+    body.push(1); // Protocol 5 requires an onGround boolean.
     Event { id: 0x18, body }
 }
 pub fn destroy(id: i32) -> Event {
-    let mut body = Vec::with_capacity(5);
-    body.push(1); // Signed byte count, always 1.
-    body.extend_from_slice(&id.to_be_bytes());
+    let mut body = Vec::with_capacity(10);
+    write_varint(1, &mut body);
+    write_varint(id as u32, &mut body);
     Event { id: 0x13, body }
 }
 
@@ -227,6 +228,23 @@ mod tests {
             hub.add("rusttester".into(), "uid".into(), PlayerPosition::default()),
             Err(JoinError::Duplicate)
         ));
+    }
+    #[test]
+    fn entity_movement_and_destroy_are_protocol5_varints() {
+        use legacy_protocol::read_varint;
+        let at = PlayerPosition { x: 1.5, y: 65.0, z: -2.5 };
+        let event = teleport(500_000, &at, 45.0, 0.0);
+        assert_eq!(event.id, 0x18);
+        let mut input = event.body.as_slice();
+        assert_eq!(read_varint(&mut input).unwrap(), 500_000);
+        assert_eq!(input.len(), 15); // three i32, two angles, onGround
+        assert_eq!(input[14], 1);
+        let dead = destroy(500_000);
+        assert_eq!(dead.id, 0x13);
+        let mut input = dead.body.as_slice();
+        assert_eq!(read_varint(&mut input).unwrap(), 1);
+        assert_eq!(read_varint(&mut input).unwrap(), 500_000);
+        assert!(input.is_empty());
     }
     #[test]
     fn movement_events_and_departure() {
