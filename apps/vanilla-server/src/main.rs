@@ -1026,6 +1026,77 @@ fn play(
                         continue;
                     }
                 }
+                // Two-part bed placement. The two block IDs are committed in
+                // one world save, and the held item is debited before placement.
+                if face == 1 && world::in_bounds(x,y,z) && near(location,x,y,z)
+                    && inventory.can_place(held)
+                    && inventory.held().is_some_and(|stack| stack.id == 355) {
+                    let foot = (x,y+1,z);
+                    let facing = ((yaw / 90.0).floor() as i32 + 2).rem_euclid(4) as u16;
+                    let (dx,dz) = match facing {
+                        0 => (0,1), 1 => (-1,0), 2 => (0,-1), _ => (1,0)
+                    };
+                    let head = (foot.0+dx,foot.1,foot.2+dz);
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let supported = world::in_bounds(foot.0,foot.1,foot.2)
+                        && world::in_bounds(head.0,head.1,head.2)
+                        && w.get(x,y,z) != 0
+                        && w.get(foot.0,foot.1,foot.2) == 0
+                        && w.get(head.0,head.1,head.2) == 0;
+                    if supported {
+                        let mut candidate = inventory.clone();
+                        let paid = !survival || candidate.consume_held();
+                        if paid {
+                            if survival { candidate.save(inventory_path)?; }
+                            let changed = w.update_many_and_save(world_path, &[
+                                (foot.0,foot.1,foot.2,(26 << 4) | facing),
+                                (head.0,head.1,head.2,(26 << 4) | facing | 8),
+                            ])?;
+                            if changed {
+                                if survival { *inventory = candidate; send(s,0x30,&inventory.window_items())?; }
+                                hub.broadcast(block_change_event(&w,foot.0,foot.1,foot.2));
+                                hub.broadcast(block_change_event(&w,head.0,head.1,head.2));
+                            } else if survival { inventory.save(inventory_path)?; }
+                        }
+                    } else {
+                        for (bx,by,bz) in [foot,head] {
+                            if world::in_bounds(bx,by,bz) {
+                                let event = block_change_event(&w,bx,by,bz);
+                                send(s,event.id,&event.body)?;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if (0..=5).contains(&face) && world::in_bounds(x,y,z)
+                    && near(location,x,y,z)
+                    && world.lock().map_err(|_| bad("world mutex poisoned"))?.get(x,y,z) >> 4 == 26 {
+                    let time = clock.day_time();
+                    if survival && (12542..=23458).contains(&time) {
+                        let mut candidate = inventory.clone();
+                        candidate.set_bed_spawn(x,y,z)?;
+                        candidate.save(inventory_path)?;
+                        *inventory = candidate;
+                        let mut packet = Vec::new();
+                        write_varint(entity_id as u32, &mut packet);
+                        packet.extend_from_slice(&x.to_be_bytes());
+                        packet.push(y as u8);
+                        packet.extend_from_slice(&z.to_be_bytes());
+                        send(s,0x0a,&packet)?;
+                        // A lone player may complete sleep immediately. More
+                        // players must use their own beds; never skip their night.
+                        if hub.positions()?.len() <= 1 {
+                            clock.skip_to_morning();
+                            let mut wake = Vec::new();
+                            write_varint(entity_id as u32,&mut wake);
+                            wake.push(2); // leave bed animation
+                            send(s,0x0b,&wake)?;
+                        }
+                    } else if survival {
+                        as_chat(s, "You can only sleep at night.")?;
+                    }
+                    continue;
+                }
                 if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
@@ -1401,7 +1472,17 @@ fn play(
                         hub,
                         location,
                     )?;
-                    let origin = safe_spawn(world)?;
+                    let origin = {
+                        let fallback = safe_spawn(world)?;
+                        if let Some((x,y,z)) = inventory.bed_spawn() {
+                            let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                            if guard.get(x,y,z) >> 4 == 26
+                                && world::in_bounds(x,y+1,z)
+                                && guard.get(x,y+1,z) == 0 {
+                                PlayerPosition { x: x as f64 + 0.5, y: y as f64 + 1.0, z: z as f64 + 0.5 }
+                            } else { fallback }
+                        } else { fallback }
+                    };
                     let fresh_vitals = Vitals::default();
                     origin.save_state(player_path, fresh_vitals)?;
                     *vitals = fresh_vitals;
