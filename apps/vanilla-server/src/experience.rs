@@ -93,9 +93,7 @@ impl Experience {
     pub fn add(&mut self, value: u32) {
         self.total = self.total.saturating_add(value).min(MAX_TOTAL);
     }
-    pub fn total(&self) -> u32 {
-        self.total
-    }
+    #[cfg(test)]
     pub fn level(&self) -> u16 {
         level_of(self.total).0
     }
