@@ -1479,3 +1479,82 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 }
+
+#[cfg(test)]
+mod group_b_regression_tests {
+    use super::*;
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "ir1710-b-{name}-{}.irw",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn falling_water_uses_legacy_level_eight_and_survives_reload() {
+        let path = temp("flow-level8");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world
+            .update_and_save(&path, 0, 75, 0, 8 << 4)
+            .unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 74, 0), (8 << 4) | 8);
+        let mut reloaded = World::load(&path).unwrap();
+        reloaded.block_tick(&path, 64).unwrap();
+        assert_eq!(reloaded.get(0, 74, 0), (8 << 4) | 8);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn comparator_uses_delayed_analog_output_and_survives_world_reload() {
+        let path = temp("comparator-delay");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world
+            .update_and_save(&path, -1, 65, 0, (69 << 4) | 8)
+            .unwrap();
+        world
+            .update_and_save(&path, 0, 65, 0, (149 << 4) | 1)
+            .unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 65, 0) >> 4, 149);
+        world.block_tick(&path, 64).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 65, 0) >> 4, 150);
+        assert!(world.power_into((0, 65, 0), (1, 65, 0)));
+        let mut restored = World::load(&path).unwrap();
+        for _ in 0..3 {
+            restored.block_tick(&path, 64).unwrap();
+        }
+        assert!(restored.power_into((0, 65, 0), (1, 65, 0)));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cactus_and_netther_wart_support_is_validated() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 12 << 4).unwrap();
+        world.import_block(1, 64, 0, 88 << 4).unwrap();
+        assert!(world.can_support(0, 65, 0, 81 << 4));
+        assert!(world.can_support(1, 65, 0, 115 << 4));
+        assert!(!world.can_support(0, 65, 0, 115 << 4));
+        assert!(!world.can_support(1, 65, 0, 83 << 4));
+    }
+
+    #[test]
+    fn raining_extinguishes_fire_through_existing_tick_pipeline() {
+        let path = temp("rain-fire");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 65, 0, 51 << 4).unwrap();
+        world.set_raining(true);
+        for _ in 0..20 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(0, 65, 0), 0);
+        assert_eq!(World::load(&path).unwrap().get(0, 65, 0), 0);
+        std::fs::remove_file(path).unwrap();
+    }
+}
