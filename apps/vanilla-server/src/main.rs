@@ -1417,7 +1417,7 @@ fn play(
                         if inv_changed && furnace_changed {
                             let staged = machines.staged_update(pos, next)?;
                             journal::commit(
-                                &furnace_path.with_extension("pending-txn.json"),
+                                &world_path.with_extension("pending-txn.json"),
                                 &[
                                     (inventory_path, candidate.encoded()?),
                                     (furnace_path, staged.encoded()?),
@@ -1467,7 +1467,7 @@ fn play(
                                 &changed_slots,
                             )?;
                             journal::commit(
-                                &chest_path.with_extension("pending-txn.json"),
+                                &world_path.with_extension("pending-txn.json"),
                                 &[
                                     (inventory_path, candidate.encoded()?),
                                     (chest_path, staged.encoded()?),
@@ -1977,6 +1977,8 @@ fn main() -> io::Result<()> {
     );
     // Replay interrupted multi-file credits before loading any container or
     // accepting connections. Corrupt/unrecoverable logs prevent startup.
+    journal::recover(&world_path.with_extension("pending-txn.json"))?;
+    // Accept older independent log locations for one-time migration.
     journal::recover(&Chests::location(&world_path).with_extension("pending-txn.json"))?;
     journal::recover(&Furnaces::location(&world_path).with_extension("pending-txn.json"))?;
     let (clock, _clock_thread) = Clock::start();
