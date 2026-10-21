@@ -602,4 +602,5 @@ mod tests {
             None,
         ];
         assert_eq!(result(&mixed_slabs, 3), None);
-   }
+    }
+}
