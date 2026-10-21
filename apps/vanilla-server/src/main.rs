@@ -2713,13 +2713,18 @@ fn start_admin_console(
                     Ok(())
                 }
                 ["/time", "set", value] => (|| -> io::Result<()> {
-                    let value = value.parse::<u64>().map_err(|_| bad("invalid time value"))?;
+                    let value = value
+                        .parse::<u64>()
+                        .map_err(|_| bad("invalid time value"))?;
                     clock.set_day_time(value)?;
                     clock.save_ticks(&clock_file)?;
                     let mut packet = Vec::with_capacity(16);
                     packet.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
                     packet.extend_from_slice(&clock.day_time().to_be_bytes());
-                    hub.broadcast(Event { id: 0x03, body: packet });
+                    hub.broadcast(Event {
+                        id: 0x03,
+                        body: packet,
+                    });
                     println!("Daytime set to {}", clock.day_time());
                     Ok(())
                 })(),
@@ -2738,11 +2743,21 @@ fn start_admin_console(
                     Ok(())
                 })(),
                 ["/tp", name, x, y, z] => (|| -> io::Result<()> {
-                    let parse = |value: &str| value.parse::<f64>()
-                        .map_err(|_| bad("invalid teleport number"));
-                    let position = PlayerPosition { x: parse(x)?, y: parse(y)?, z: parse(z)? };
+                    let parse = |value: &str| {
+                        value
+                            .parse::<f64>()
+                            .map_err(|_| bad("invalid teleport number"))
+                    };
+                    let position = PlayerPosition {
+                        x: parse(x)?,
+                        y: parse(y)?,
+                        z: parse(z)?,
+                    };
                     if !hub.request_admin_teleport(name, position)? {
-                        return Err(io::Error::new(ErrorKind::NotFound, "target player not online"));
+                        return Err(io::Error::new(
+                            ErrorKind::NotFound,
+                            "target player not online",
+                        ));
                     }
                     println!("Teleport queued for {name}");
                     Ok(())

@@ -111,17 +111,26 @@ impl Clock {
             Err(e) => return Err(e),
         };
         if bytes.len() != 20 && bytes.len() != 37 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad clock length"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad clock length",
+            ));
         }
         let v1 = bytes.len() == 20 && &bytes[..4] == SNAPSHOT_MAGIC_V1;
         let v2 = bytes.len() == 37 && &bytes[..4] == SNAPSHOT_MAGIC_V2;
         if !v1 && !v2 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad clock header"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad clock header",
+            ));
         }
         let ticks = u64::from_be_bytes(bytes[4..12].try_into().unwrap());
         let inverse = u64::from_be_bytes(bytes[12..20].try_into().unwrap());
         if inverse != !ticks {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "corrupt clock ticks"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "corrupt clock ticks",
+            ));
         }
         if v1 {
             return Ok(ClockSnapshot { ticks, ..empty });
@@ -130,9 +139,16 @@ impl Clock {
         let inverse = u64::from_be_bytes(bytes[28..36].try_into().unwrap());
         let weather_override = bytes[36];
         if inverse != !time_offset || time_offset >= 24_000 || weather_override > 3 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "corrupt clock state"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "corrupt clock state",
+            ));
         }
-        Ok(ClockSnapshot { ticks, time_offset, weather_override })
+        Ok(ClockSnapshot {
+            ticks,
+            time_offset,
+            weather_override,
+        })
     }
 
     pub fn ticks(&self) -> u64 {
@@ -145,10 +161,14 @@ impl Clock {
     /// Set 1.7.10 daylight time. World age is unaffected.
     pub fn set_day_time(&self, requested: u64) -> io::Result<()> {
         if requested >= 24_000 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "daytime must be 0..23999"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "daytime must be 0..23999",
+            ));
         }
         let base = (6000 + self.ticks() % 24_000) % 24_000;
-        self.time_offset.store((requested + 24_000 - base) % 24_000, Ordering::Release);
+        self.time_offset
+            .store((requested + 24_000 - base) % 24_000, Ordering::Release);
         Ok(())
     }
     pub fn set_weather(&self, requested: &str) -> io::Result<()> {
@@ -157,7 +177,12 @@ impl Clock {
             "clear" => 1,
             "rain" => 2,
             "thunder" => 3,
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "weather must be auto|clear|rain|thunder")),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "weather must be auto|clear|rain|thunder",
+                ))
+            }
         };
         self.weather_override.store(value, Ordering::Release);
         Ok(())
@@ -233,7 +258,6 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-
     #[test]
     fn legacy_snapshot_migrates_and_console_settings_survive_restart() {
         let path = std::env::temp_dir().join(format!(
@@ -256,7 +280,10 @@ mod tests {
         runner.join().unwrap();
         let snapshot = Clock::load_state(&path).unwrap();
         let (again, handle) = Clock::start_from(snapshot);
-        assert_eq!(again.day_time(), (18_000 + (again.ticks() - snapshot.ticks) % 24_000) as i64 % 24_000);
+        assert_eq!(
+            again.day_time(),
+            (18_000 + (again.ticks() - snapshot.ticks) % 24_000) as i64 % 24_000
+        );
         assert_eq!(again.weather(), (true, true));
         assert!(again.set_day_time(24_000).is_err());
         assert!(again.set_weather("storm").is_err());
@@ -265,7 +292,10 @@ mod tests {
         let mut bytes = fs::read(&path).unwrap();
         bytes[25] ^= 1;
         fs::write(&path, bytes).unwrap();
-        assert_eq!(Clock::load_state(&path).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            Clock::load_state(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         fs::remove_file(&path).unwrap();
     }
     #[test]
