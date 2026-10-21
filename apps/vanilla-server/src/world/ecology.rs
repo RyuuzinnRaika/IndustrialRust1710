@@ -30,6 +30,27 @@ impl World {
         let below = self.get(x, y - 1, z) >> 4;
         match id {
             6 => plantable(below),
+            83 => {
+                // Sugar cane requires grass, dirt, sand or another cane;
+                // a root cane also needs adjacent water at soil level.
+                if below == 83 { true } else {
+                    matches!(below, 2 | 3 | 12) && [(1,0),(-1,0),(0,1),(0,-1)]
+                        .iter().any(|&(dx,dz)| matches!(self.get(x+dx,y-1,z+dz)>>4, 8|9))
+                }
+            }
+            81 => {
+                // Cactus cannot touch a solid block horizontally.
+                matches!(below, 12 | 81) && [(1,0),(-1,0),(0,1),(0,-1)]
+                    .iter().all(|&(dx,dz)| !solid(self.get(x+dx,y,z+dz)>>4))
+            }
+            104 | 105 => below == 60,
+            115 => below == 88, // soul sand
+            127 => {
+                // Cocoa is attached to jungle logs (log metadata species=3).
+                let (dx,dz) = match block & 3 {0=>(0,1),1=>(-1,0),2=>(0,-1),_=>(1,0)};
+                let support=self.get(x+dx,y,z+dz);
+                support>>4 == 17 && support & 3 == 3
+            },
             59 | 141 | 142 => below == 60,
             50 | 75 | 76 => {
                 let support = match block & 7 {
@@ -168,6 +189,12 @@ impl World {
                     | 76
                     | 93
                     | 94
+                    | 81
+                    | 83
+                    | 104
+                    | 105
+                    | 115
+                    | 127
                     | 141
                     | 142
                     | 64
@@ -218,6 +245,42 @@ impl World {
                         && chance(self.fluid_phase, x, height, z, if damp > 0 { 2 } else { 4 })
                     {
                         changes.insert((x, y, z), (id << 4) | ((block & 7) + 1));
+                    }
+                }
+                83 | 81 => {
+                    // Vanilla height cap of three blocks, no duplicate entities.
+                    if height < 255 && self.get(x, height+1, z) == 0
+                        && chance(self.fluid_phase, x, height, z, 4)
+                    {
+                        let mut count=1;
+                        for dy in 1..3 {
+                            if self.get(x, height-dy, z)>>4 == id {count+=1;} else {break;}
+                        }
+                        if count < 3 {
+                            changes.insert((x,(height+1) as u8,z),id<<4);
+                        }
+                    }
+                }
+                115 if block & 3 < 3 && chance(self.fluid_phase, x, height, z, 3) => {
+                    changes.insert((x,y,z),block+1);
+                }
+                127 if (block>>2)&3 < 2 && chance(self.fluid_phase, x, height, z, 4) => {
+                    changes.insert((x,y,z),block+4);
+                }
+                104 | 105 if block & 7 < 7 && chance(self.fluid_phase,x,height,z,3) => {
+                    changes.insert((x,y,z),block+1);
+                }
+                104 | 105 if block & 7 == 7 && chance(self.fluid_phase,x,height,z,4) => {
+                    let fruit=if id==104 {86} else {103};
+                    let directions=[(1,0),(-1,0),(0,1),(0,-1)];
+                    if !directions.iter().any(|&(dx,dz)| self.get(x+dx,height,z+dz)>>4 == fruit) {
+                        for &(dx,dz) in &directions {
+                            if self.get(x+dx,height,z+dz)==0
+                                && matches!(self.get(x+dx,height-1,z+dz)>>4,2|3|60) {
+                                changes.insert((x+dx,y,z+dz),fruit<<4);
+                                break;
+                            }
+                        }
                     }
                 }
                 6 if chance(self.fluid_phase, x, height, z, 4) => {
