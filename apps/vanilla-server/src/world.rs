@@ -971,4 +971,62 @@ mod tests {
         assert_eq!(loaded.chunk_data(-4, 1).0, 0x19);
         fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn water_sources_regenerate_and_disconnected_flows_recede() {
+        let path = std::env::temp_dir().join(format!("ir1710-water-recede-{}.irw",std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path, -1,64,0,8 << 4).unwrap();
+        w.update_and_save(&path, 1,64,0,8 << 4).unwrap();
+        w.update_and_save(&path, 0,64,0,(8 << 4)|1).unwrap();
+        w.block_tick(&path,64).unwrap();
+        assert_eq!(w.get(0,64,0),8 << 4);
+        w.update_and_save(&path,-1,64,0,0).unwrap();
+        w.update_and_save(&path,1,64,0,0).unwrap();
+        w.update_and_save(&path,0,64,0,0).unwrap();
+        for _ in 0..90 { w.block_tick(&path,64).unwrap(); }
+        assert_eq!(w.get(0,64,0),0);
+        assert_eq!(World::load(&path).unwrap().get(0,64,0),0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn lava_delay_and_cross_chunk_block_light() {
+        let path = std::env::temp_dir().join(format!("ir1710-lava-delay-{}.irw",std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path,0,64,0,10 << 4).unwrap();
+        for _ in 0..3 { w.block_tick(&path,64).unwrap(); }
+        assert_eq!(w.get(1,64,0),0);
+        w.block_tick(&path,64).unwrap();
+        assert_eq!(w.get(1,64,0),(10 << 4)|1);
+        w.update_and_save(&path,15,64,0,50 << 4).unwrap();
+        let (block,sky) = w.light_arrays(1,0);
+        assert!(block[(64 * 256) + 0] > 0);
+        assert_eq!(sky[(80 * 256) + 0],15);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn crops_hydrate_and_grow_saplings_become_trees_and_attachments_fall() {
+        let path = std::env::temp_dir().join(format!("ir1710-ecology-{}.irw",std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path,0,63,0,60 << 4).unwrap();
+        w.update_and_save(&path,2,64,0,8 << 4).unwrap();
+        w.update_and_save(&path,0,64,0,59 << 4).unwrap();
+        w.update_and_save(&path,8,64,0,6 << 4).unwrap();
+        for _ in 0..400 { w.block_tick(&path,64).unwrap(); }
+        assert_eq!(w.get(0,63,0),(60 << 4)|7);
+        assert_eq!(w.get(0,64,0),(59 << 4)|7);
+        assert_eq!(w.get(8,64,0) >> 4,17);
+        // A broken support causes a torch to detach via the next tick.
+        w.update_and_save(&path,12,64,0,50 << 4).unwrap();
+        w.update_and_save(&path,12,63,0,0).unwrap();
+        w.block_tick(&path,64).unwrap();
+        assert_eq!(w.get(12,64,0),0);
+        assert_eq!(World::load(&path).unwrap().get(0,64,0),(59 << 4)|7);
+        fs::remove_file(path).unwrap();
+    }
 }
