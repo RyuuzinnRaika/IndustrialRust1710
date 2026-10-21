@@ -40,13 +40,9 @@ pub fn visible(world: &World, from: PlayerPosition, to: PlayerPosition) -> bool 
 
 /// Block-light and sky-light use the same computed arrays sent to clients.
 /// Daylight reduction is a separate game-time decision, not an edit to skylight.
-pub fn can_spawn(
-    world: &World,
-    at: PlayerPosition,
-    passive: bool,
-    nighttime: bool,
-) -> bool {
-    if !at.is_valid() || !crate::physics::supported(world, &at)
+pub fn can_spawn(world: &World, at: PlayerPosition, passive: bool, nighttime: bool) -> bool {
+    if !at.is_valid()
+        || !crate::physics::supported(world, &at)
         || crate::physics::collides(world, &at)
     {
         return false;
@@ -69,7 +65,14 @@ pub fn can_spawn(
 pub fn blast_exposure(world: &World, center: PlayerPosition, target: PlayerPosition) -> f64 {
     let mut clear = 0u8;
     for height in [0.1, 0.9, 1.6] {
-        if visible(world, center, PlayerPosition { y: target.y + height, ..target }) {
+        if visible(
+            world,
+            center,
+            PlayerPosition {
+                y: target.y + height,
+                ..target
+            },
+        ) {
             clear += 1;
         }
     }
@@ -97,8 +100,16 @@ mod tests {
         world.import_block(1, 65, 0, 1 << 4).unwrap();
         world.import_block(1, 66, 0, 1 << 4).unwrap();
         world.import_block(1, 67, 0, 1 << 4).unwrap();
-        let from = PlayerPosition { x: 0.5, y: 65.5, z: 0.5 };
-        let to = PlayerPosition { x: 2.5, y: 65.5, z: 0.5 };
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 65.5,
+            z: 0.5,
+        };
+        let to = PlayerPosition {
+            x: 2.5,
+            y: 65.5,
+            z: 0.5,
+        };
         assert!(!visible(&world, from, to));
         assert_eq!(blast_exposure(&world, from, to), 0.0);
         assert_eq!(blast_damage(3.0, 2.0, 0.0), 0);
@@ -108,15 +119,27 @@ mod tests {
     #[test]
     fn transparent_air_keeps_clear_line_of_sight() {
         let world = World::new();
-        let from = PlayerPosition { x: 0.5, y: 65.5, z: 0.5 };
-        let to = PlayerPosition { x: 2.5, y: 65.5, z: 0.5 };
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 65.5,
+            z: 0.5,
+        };
+        let to = PlayerPosition {
+            x: 2.5,
+            y: 65.5,
+            z: 0.5,
+        };
         assert!(visible(&world, from, to));
     }
 
     #[test]
     fn bright_surface_is_safe_by_day() {
         let world = World::new();
-        let at = PlayerPosition { x: 0.5, y: 64.0, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
         assert!(!can_spawn(&world, at, false, false));
         assert!(can_spawn(&world, at, true, false));
         assert!(can_spawn(&world, at, false, true));
