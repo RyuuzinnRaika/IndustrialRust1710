@@ -25,6 +25,7 @@ enum Kind {
     Skeleton,
     Creeper,
     Spider,
+    CaveSpider,
 }
 impl Kind {
     fn protocol(self) -> u8 {
@@ -37,6 +38,7 @@ impl Kind {
             Self::Skeleton => 51,
             Self::Creeper => 50,
             Self::Spider => 52,
+            Self::CaveSpider => 59,
         }
     }
     fn passive(self) -> bool {
@@ -47,6 +49,7 @@ impl Kind {
             Self::Chicken => 4,
             Self::Sheep | Self::Pig | Self::Cow => 10,
             Self::Spider => 16,
+            Self::CaveSpider => 12,
             Self::Creeper => 20,
             Self::Skeleton => 20,
             Self::Zombie => 20,
@@ -61,7 +64,7 @@ impl Kind {
             Self::Chicken => 365,
             Self::Skeleton => 352,
             Self::Creeper => 289,
-            Self::Spider => 287,
+            Self::Spider | Self::CaveSpider => 287,
         };
         Stack {
             id,
@@ -109,8 +112,13 @@ impl Mob {
         }
         body.extend_from_slice(&[0, 0]); // flags byte
         if self.baby {
-            body.push((12 << 3) | 2); // metadata index 12, type 2 (int)
-            body.extend_from_slice(&(-24000i32).to_be_bytes());
+            if self.kind == Kind::Zombie {
+                body.push(12 << 3); // zombie metadata 12: type 0, baby boolean
+                body.push(1);
+            } else {
+                body.push((12 << 3) | 2); // animal metadata 12: type 2, growing age
+                body.extend_from_slice(&(-24000i32).to_be_bytes());
+            }
         }
         body.push(0x7f);
         Event { id: 0x0f, body }
@@ -187,6 +195,7 @@ pub struct Mobs {
     arrows: BTreeMap<i32, Arrow>,
     orbs: BTreeMap<i32, (PlayerPosition, u16, u64)>,
     pending_hits: Vec<(i32, u8, u64)>,
+    poison: BTreeMap<i32, (u64, u64)>,
     pending_blast_damage: BTreeMap<i32, u8>,
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
     explosions: Vec<Explosion>,
@@ -483,9 +492,24 @@ impl Mobs {
             } else {
                 crate::terrain::surface(terrain, x, z)
             };
+            // Roughly one in three attempts explores a cave rather than
+            // placing every hostile at the surface of a mountain.
+            let underground = (seed >> 20) % 3 == 0;
+            let y = if underground {
+                let base_y = 12 + ((seed >> 24) % 35) as i32;
+                (base_y..=base_y + 24).find(|height| {
+                    *height < surface - 2 &&
+                    world.get(x, *height, z) == 0 &&
+                    world.get(x, *height + 1, z) == 0 &&
+                    world.get(x, *height - 1, z) >> 4 != 0
+                })
+            } else {
+                Some(surface + 1)
+            };
+            let Some(y) = y else { continue; };
             let p = PlayerPosition {
                 x: x as f64 + 0.5,
-                y: (surface + 1) as f64,
+                y: y as f64,
                 z: z as f64 + 0.5,
             };
             if !p.is_valid()
@@ -496,7 +520,7 @@ impl Mobs {
                 continue;
             }
             let is_night = (now % 24000) >= 13000 && (now % 24000) <= 23000;
-            let wants_passive = !is_night && seed & 1 == 0;
+            let wants_passive = !underground && !is_night && seed & 1 == 0;
             let kind = if wants_passive {
                 if passive >= PASSIVE_CAP || !rules::can_spawn(world, p, true, is_night) {
                     continue;
@@ -515,10 +539,11 @@ impl Mobs {
                     0 => Kind::Zombie,
                     1 => Kind::Skeleton,
                     2 => Kind::Creeper,
-                    _ => Kind::Spider,
+                    _ => if underground { Kind::CaveSpider } else { Kind::Spider },
                 }
             };
-            events.push(self.insert(kind, p, false));
+            let baby = kind == Kind::Zombie && (seed >> 12).is_multiple_of(20);
+            events.push(self.insert(kind, p, baby));
             break; // One per spawn cycle bounds packet and CPU cost.
         }
     }
@@ -545,6 +570,7 @@ impl Mobs {
         });
         self.pending_hits
             .retain(|(_, _, t)| now.saturating_sub(*t) < 30);
+        self.poison.retain(|_, (until, _)| now < *until);
         self.spawn_natural(now, world, players, &mut events);
         for _ in 0..steps {
             let mut shots = Vec::new();
@@ -552,7 +578,7 @@ impl Mobs {
             let mut sunlight_kills = Vec::new();
             let mut eggs = Vec::new();
             for mob in self.entities.values_mut() {
-                if mob.baby {
+                if mob.baby && mob.kind.passive() {
                     mob.age_ticks = mob.age_ticks.saturating_add(1);
                     if mob.age_ticks >= 24000 {
                         mob.baby = false;
@@ -579,7 +605,7 @@ impl Mobs {
                     mob.egg_tick = now + 6000 + hash(mob.id as u64 ^ now) % 6001;
                 }
                 let is_night = (now % 24000) >= 13000 && (now % 24000) <= 23000;
-                if mob.kind == Kind::Spider {
+                if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     mob.aggressive = is_night
                         || !sky_exposed(world, mob.position)
                         || (mob.hit_tick > 0 && now.saturating_sub(mob.hit_tick) < 200);
@@ -608,7 +634,7 @@ impl Mobs {
                     .filter(|p| {
                         mob.nearby(
                             *p,
-                            if mob.kind.passive() || (mob.kind == Kind::Spider && !mob.aggressive) {
+                            if mob.kind.passive() || (matches!(mob.kind, Kind::Spider | Kind::CaveSpider) && !mob.aggressive) {
                                 12.0
                             } else {
                                 24.0
@@ -660,7 +686,7 @@ impl Mobs {
                     shots.push((mob.id, mob.position, yaw, pitch));
                 }
                 let destination =
-                    if mob.kind.passive() || (mob.kind == Kind::Spider && !mob.aggressive) {
+                    if mob.kind.passive() || (matches!(mob.kind, Kind::Spider | Kind::CaveSpider) && !mob.aggressive) {
                         if !(now / 80 + mob.id as u64).is_multiple_of(4) {
                             continue;
                         }
@@ -700,7 +726,7 @@ impl Mobs {
                 if len < 1e-6 {
                     continue;
                 }
-                let speed = if mob.kind.passive() { 0.065 } else { 0.11 };
+                let speed = if mob.kind.passive() { 0.065 } else if mob.baby { 0.16 } else { 0.11 };
                 let candidate = PlayerPosition {
                     x: mob.position.x + dx / len * speed,
                     z: mob.position.z + dz / len * speed,
@@ -711,7 +737,7 @@ impl Mobs {
                 {
                     mob.position = candidate;
                     events.push(multiplayer::teleport(mob.id, &candidate, 0.0, 0.0));
-                } else if mob.kind == Kind::Spider {
+                } else if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     // Climb alongside a wall, never through it.
                     let front = PlayerPosition {
                         x: mob.position.x + dx / len * 0.6,
@@ -924,17 +950,28 @@ impl Mobs {
             }
             true
         });
+        let mut apply_poison = false;
         for mob in self.entities.values_mut() {
             if !mob.kind.passive()
                 && mob.kind != Kind::Skeleton
                 && mob.kind != Kind::Creeper
-                && (mob.kind != Kind::Spider || mob.aggressive)
+                && (!matches!(mob.kind, Kind::Spider | Kind::CaveSpider) || mob.aggressive)
                 && mob.nearby(player, 1.6)
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
                 mob.bite_tick = tick;
-                amount = amount.saturating_add(if mob.kind == Kind::Spider { 2 } else { 3 });
+                amount = amount.saturating_add(if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) { 2 } else { 3 });
+                apply_poison = mob.kind == Kind::CaveSpider;
                 break;
+            }
+        }
+        if apply_poison {
+            self.poison.insert(player_id, (tick.saturating_add(140), tick));
+        }
+        if let Some((until, last)) = self.poison.get_mut(&player_id) {
+            if tick < *until && tick.saturating_sub(*last) >= 25 {
+                amount = amount.saturating_add(1);
+                *last = tick;
             }
         }
         amount
@@ -1091,6 +1128,30 @@ mod tests {
             )
             .is_none());
     }
+    #[test]
+    fn cave_spider_poison_is_attached_to_one_player() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition::default();
+        mobs.insert(Kind::CaveSpider, at, false);
+        assert_eq!(mobs.hurt_player(10, at, 20), 2);
+        assert_eq!(mobs.hurt_player(11, at, 21), 0);
+        assert_eq!(mobs.hurt_player(10, at, 46), 1);
+        assert_eq!(mobs.hurt_player(11, at, 46), 0);
+    }
+
+    #[test]
+    fn baby_zombie_metadata_is_a_byte_and_never_matures() {
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, PlayerPosition::default(), true);
+        let baby = *mobs.entities.values().next().unwrap();
+        let packet = baby.spawn();
+        assert!(packet.body.ends_with(&[12 << 3, 1, 0x7f]));
+        for tick in 1..=8 {
+            mobs.tick(tick, &World::new(), &[], &[]);
+        }
+        assert!(mobs.entities.values().next().unwrap().baby);
+    }
+
     #[test]
     fn flat_world_has_no_mobs_and_bow_shot_is_bounded() {
         assert!(Mobs::new(&World::new(), true).entities.is_empty());
