@@ -21,6 +21,7 @@ mod player;
 mod survival;
 mod survival_damage;
 mod terrain;
+mod telemetry;
 mod vitals;
 mod whitelist;
 mod world;
@@ -2852,13 +2853,18 @@ fn main() -> io::Result<()> {
     let leaf_drops = Arc::clone(&ground_items);
     let leaf_drops_file = Arc::clone(&ground_path);
     thread::spawn(move || {
+        let mut telemetry = telemetry::TickTelemetry::new(
+            furnace_world_path.with_extension("metrics.jsonl"),
+        );
         let mut last = furnace_clock.ticks();
         let mut last_clock_snapshot = last;
         let mut last_weather = furnace_clock.weather();
         loop {
             let now = furnace_clock.ticks();
             if now > last {
+                let worker_started = Instant::now();
                 let steps = (now - last).min(20) as u32;
+                let missed = (now - last).saturating_sub(u64::from(steps));
                 last = now;
                 // One small durable write per second, with no replay of
                 // elapsed wall-clock downtime after an unexpected stop.
@@ -2981,6 +2987,13 @@ fn main() -> io::Result<()> {
                 for (cx, cz) in gravity_world.drain_light_chunks(32) {
                     furnace_hub.broadcast(chunk_relight_event(cx, cz));
                 }
+                drop(gravity_world);
+                telemetry.record(
+                    worker_started.elapsed(),
+                    steps,
+                    missed,
+                    furnace_hub.count().unwrap_or(0),
+                );
             }
             thread::sleep(Duration::from_millis(10));
         }
