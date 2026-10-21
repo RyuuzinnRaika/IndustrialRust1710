@@ -723,7 +723,7 @@ fn play(
             let players = hub.positions()?;
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
-            let updates = creatures.tick(now_tick, &w, &players);
+            let updates = creatures.tick(now_tick, &w, &players, &participants);
             let explosions = creatures.take_explosions();
             creatures.queue_explosion_hits(&explosions, &participants, &w);
             let hurt = creatures.hurt_player(entity_id, *player, now_tick);
