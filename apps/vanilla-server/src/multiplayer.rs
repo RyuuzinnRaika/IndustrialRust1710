@@ -72,8 +72,7 @@ pub fn visible(observer: &PlayerPosition, target: &PlayerPosition) -> bool {
     ) else {
         return false;
     };
-    (ax - bx).abs() <= i64::from(VIEW_DISTANCE)
-        && (az - bz).abs() <= i64::from(VIEW_DISTANCE)
+    (ax - bx).abs() <= i64::from(VIEW_DISTANCE) && (az - bz).abs() <= i64::from(VIEW_DISTANCE)
 }
 
 pub fn list_entry(name: &str, online: bool) -> io::Result<Event> {
