@@ -1392,7 +1392,7 @@ mod tests {
         assert!(inv.click_window(0, 1, 0, 0));
         assert!(inv.click_window(0, 0, 0, 1));
         assert!(inv.crafting_result(0).is_none());
-        assert_eq!(inv.slots[36].unwrap().count, 12);
+        assert_eq!(inv.slots[9].unwrap().count, 12);
         assert_eq!(inv.slots[1], None);
     }
     #[test]
