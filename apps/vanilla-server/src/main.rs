@@ -880,12 +880,14 @@ fn play(
                                                 .get(target)
                                                 .occupied());
                                     if !occupied {
+                                        let bonus = survival::additional_drop(w.get(x,y,z),target,now_tick);
                                         let mut ground = ground_items.lock().map_err(|_| {
                                             io::Error::other("ground items lock poisoned")
                                         })?;
                                         // A filled entity pool must not destroy a
                                         // block that should have created an item.
-                                        if result.drop.is_none() || !ground.is_full() {
+                                        if (result.drop.is_none() && bonus.is_none())
+                                            || !ground.is_full() {
                                             let mut candidate = inventory.clone();
                                             let wore =
                                                 result.wear_tool && candidate.wear_held_tool();
@@ -921,6 +923,14 @@ fn play(
                                                         )?;
                                                         for packet in item.spawn() {
                                                             hub.broadcast(packet);
+                                                        }
+                                                    }
+                                                    if let Some(stack) = bonus {
+                                                        if !ground.is_full() {
+                                                            let item=ground.put(ground_path,stack,target)?;
+                                                            for packet in item.spawn() {
+                                                                hub.broadcast(packet);
+                                                            }
                                                         }
                                                     }
                                                     changed = true;
