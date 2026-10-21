@@ -39,9 +39,14 @@ fn movable(block: u16) -> bool {
         0 | 7 | 8
             ..=11
                 | 18
+                // Vanilla 1.7.10 pistons must never push tile entities: doing so
+                // would detach their persisted inventory/state from the block.
+                | 23 // dispenser
+                | 25 // note block
                 | 29
                 | 33
                 | 34
+                | 52 // mob spawner
                 | 54
                 | 61
                 | 62
@@ -49,6 +54,7 @@ fn movable(block: u16) -> bool {
                 | 71
                 | 75
                 | 76
+                | 84 // jukebox
                 | 93
                 | 94
                 | 96
@@ -56,6 +62,13 @@ fn movable(block: u16) -> bool {
                 | 117
                 | 120
                 | 130
+                | 137 // command block
+                | 140 // flower pot
+                | 144 // skull
+                | 146 // trapped chest
+                | 151 // daylight sensor
+                | 154 // hopper
+                | 158 // dropper
                 | 138
     )
 }
@@ -391,6 +404,15 @@ mod redstone_regression_tests {
         assert_eq!(w.get(1, 64, 0) & 15, 15);
         assert_eq!(w.get(0, 64, 1) & 15, 0);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn piston_never_moves_inventory_or_tile_entity_blocks() {
+        for id in [23, 25, 52, 54, 61, 84, 117, 130, 137, 140, 144, 146, 154, 158] {
+            assert!(!movable(id << 4), "block ID {id} must not be pushed");
+        }
+        assert!(movable(1 << 4));
+        assert!(movable(5 << 4));
     }
 
     #[test]
