@@ -117,6 +117,12 @@ impl Inventory {
         value.validate()?;
         Ok(value)
     }
+    pub fn encoded(&self) -> io::Result<Vec<u8>> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| invalid("encode inventory"))?;
+        if bytes.len() as u64 > MAX_SAVE_BYTES { return Err(invalid("inventory too large")); }
+        Ok(bytes)
+    }
     pub fn save(&self, path: &Path) -> io::Result<()> {
         self.validate()?;
         let bytes = serde_json::to_vec(self).map_err(|_| invalid("could not encode inventory"))?;
