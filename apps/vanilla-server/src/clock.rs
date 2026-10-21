@@ -95,6 +95,7 @@ impl Clock {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn load_ticks(path: &Path) -> io::Result<u64> {
         Ok(Self::load_state(path)?.ticks)
     }
