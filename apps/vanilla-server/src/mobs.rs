@@ -1050,30 +1050,43 @@ impl Mobs {
                 z: arrow.position.z + arrow.velocity[2],
             };
             arrow.velocity[0] *= 0.99;
-            arrow.velocity[1] = arrow.velocity[1] * 0.99 - 0.05;
+            arrow.velocity[1] = arrow.velocity[1] * 0.99
+                - if matches!(arrow.object_type, 60 | 73) { 0.05 } else { 0.0 };
             arrow.velocity[2] *= 0.99;
-            if arrow.age >= 100 || !next.is_valid() || physics::collides(world, &next) {
+            let blocked = !next.is_valid() || physics::collides(world, &next);
+            if arrow.age >= 100 || blocked {
+                if blocked && matches!(arrow.object_type, 63 | 64 | 66) && next.is_valid() {
+                    self.explosions.push(Explosion {
+                        position: next,
+                        radius: if arrow.object_type == 63 { 1.5 } else { 1.0 },
+                    });
+                }
                 removed.push(arrow.id);
                 continue;
             }
             arrow.position = next;
-            if arrow
-                .shooter
-                .is_some_and(|id| self.entities.contains_key(&id))
-            {
-                if let Some(hit) = players.iter().find(|p| {
-                    (p.x - next.x).hypot(p.z - next.z) < 0.85 && (p.y + 0.9 - next.y).abs() < 1.3
+            if arrow.shooter.is_some_and(|id| self.entities.contains_key(&id)) {
+                if let Some(&(id, _)) = players.iter().find(|(_, p)| {
+                    (p.x - next.x).hypot(p.z - next.z) < 0.85
+                        && (p.y + 0.9 - next.y).abs() < 1.3
                 }) {
-                    self.pending_hits.push((*hit, arrow.damage, now));
+                    self.pending_hits.push((id, arrow.damage, now));
+                    if arrow.object_type == 73 {
+                        self.pending_poison.insert(id, 160);
+                    }
+                    if matches!(arrow.object_type, 63 | 64 | 66) {
+                        self.explosions.push(Explosion {
+                            position: next,
+                            radius: if arrow.object_type == 63 { 1.5 } else { 1.0 },
+                        });
+                    }
                     removed.push(arrow.id);
                     continue;
                 }
-            } else {
-                if let Some(mob) = self.entities.values().find(|m| m.nearby(next, 0.9)) {
-                    arrow_hits.push((mob.id, arrow.damage));
-                    removed.push(arrow.id);
-                    continue;
-                }
+            } else if let Some(mob) = self.entities.values().find(|m| m.nearby(next, 0.9)) {
+                arrow_hits.push((mob.id, arrow.damage));
+                removed.push(arrow.id);
+                continue;
             }
             events.push(multiplayer::teleport(arrow.id, &next, 0.0, 0.0));
         }
