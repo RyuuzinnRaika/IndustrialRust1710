@@ -88,7 +88,15 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 18 // leaves
             | 59 // wheat
             | 60 // farmland (via hoe)
-            | 66 // rails
+            | 27 | 28 | 66 | 157 // rails (powered/detector/normal/activator)
+            | 81 | 83 // cactus and sugar cane
+            | 104 | 105 // pumpkin/melon stems
+            | 115 // Nether wart
+            | 127 // cocoa pods
+            | 107 // fence gate
+            | 44 | 126 // half slabs
+            | 53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164 // stairs
+            | 149 | 150 // comparator
             | 70 | 72 // pressure plates
             | 77 | 143 // buttons
             | 29 | 33 // pistons
