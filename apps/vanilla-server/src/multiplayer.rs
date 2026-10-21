@@ -212,13 +212,15 @@ impl Hub {
             if let Some(peer) = inner.players.get_mut(&id) {
                 let old_position = peer.position;
                 peer.position = position;
+                let moved = peer.clone();
                 let packet = teleport(id, &position, yaw, pitch);
-                let appeared = spawn(peer).ok();
+                let appeared = spawn(&moved).ok();
                 let vanished = destroy(id);
                 for other in inner.players.values() {
                     if other.id == id {
                         continue;
                     }
+                    // Notify *both* directions of the visibility transition.
                     match (
                         visible(&other.position, &old_position),
                         visible(&other.position, &position),
@@ -231,6 +233,18 @@ impl Hub {
                             }
                         }
                         (false, false) => {}
+                    }
+                    match (
+                        visible(&old_position, &other.position),
+                        visible(&position, &other.position),
+                    ) {
+                        (true, false) => enqueue(&moved, &destroy(other.id)),
+                        (false, true) => {
+                            if let Ok(event) = spawn(other) {
+                                enqueue(&moved, &event);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -250,7 +264,7 @@ mod tests {
     #[test]
     fn out_of_view_players_spawn_on_entry_and_destroy_on_exit() {
         let hub = Hub::default();
-        let (a, _a_rx, _) = hub
+        let (a, a_rx, _) = hub
             .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
             .unwrap();
         let far = PlayerPosition {
@@ -261,6 +275,8 @@ mod tests {
         let (_b, b_rx, previous) = hub.add("Bob".into(), "uuid-b".into(), far).unwrap();
         assert_eq!(previous.len(), 1); // globally listed, not spawned
         assert!(b_rx.try_recv().is_err());
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x38); // global player list
+        assert!(a_rx.try_recv().is_err());
         hub.move_player(
             a,
             PlayerPosition {
@@ -272,6 +288,7 @@ mod tests {
             0.0,
         );
         assert_eq!(b_rx.try_recv().unwrap().id, 0x0c);
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x0c);
         hub.move_player(
             a,
             PlayerPosition {
@@ -285,6 +302,7 @@ mod tests {
         assert_eq!(b_rx.try_recv().unwrap().id, 0x18);
         hub.move_player(a, PlayerPosition::default(), 0.0, 0.0);
         assert_eq!(b_rx.try_recv().unwrap().id, 0x13);
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x13);
         assert!(b_rx.try_recv().is_err());
     }
 
