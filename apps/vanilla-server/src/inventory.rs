@@ -1209,7 +1209,9 @@ impl Inventory {
             }
             // Non-stackable fuels (notably lava buckets) must never merge
             // beyond their own capacity through a Shift-click transaction.
-            let room = stack.max_count().saturating_sub(existing.map_or(0, |v| v.count));
+            let room = stack
+                .max_count()
+                .saturating_sub(existing.map_or(0, |v| v.count));
             let moving = room.min(stack.count);
             if moving == 0 {
                 return Some(ChestDirection::InventoryOnly);
