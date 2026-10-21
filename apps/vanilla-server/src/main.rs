@@ -940,9 +940,11 @@ fn play(
                                                 .map_err(|_| bad("furnace lock poisoned"))?
                                                 .get(target)
                                                 .occupied())
-                                        || (block == 154 && hoppers.lock()
-                                            .map_err(|_| bad("hopper lock poisoned"))?
-                                            .has_contents(target));
+                                        || (block == 154
+                                            && hoppers
+                                                .lock()
+                                                .map_err(|_| bad("hopper lock poisoned"))?
+                                                .has_contents(target));
                                     if !occupied {
                                         let mut ground = ground_items.lock().map_err(|_| {
                                             io::Error::other("ground items lock poisoned")
@@ -1032,9 +1034,11 @@ fn play(
                                         .map_err(|_| bad("furnace lock poisoned"))?
                                         .get((x, y, z))
                                         .occupied())
-                                || (block == 154 && hoppers.lock()
-                                    .map_err(|_| bad("hopper lock poisoned"))?
-                                    .has_contents((x,y,z)));
+                                || (block == 154
+                                    && hoppers
+                                        .lock()
+                                        .map_err(|_| bad("hopper lock poisoned"))?
+                                        .has_contents((x, y, z)));
                             if occupied {
                                 false
                             } else {
@@ -1243,7 +1247,10 @@ fn play(
                     active_furnace = None;
                     active_hopper = None;
                     let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
-                    let items = inventory.chest_window_items(active_window, &chest_window_state(&guard, pos, active_chest_partner));
+                    let items = inventory.chest_window_items(
+                        active_window,
+                        &chest_window_state(&guard, pos, active_chest_partner),
+                    );
                     observed_chest_revision = guard.revision();
                     drop(guard);
                     let mut opened = vec![active_window];
@@ -1259,29 +1266,39 @@ fn play(
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     continue;
                 }
-                if (0..=5).contains(&face) && world::in_bounds(x,y,z)
-                    && near(location,x,y,z)
-                    && world.lock().map_err(|_| bad("world mutex poisoned"))?.get(x,y,z) >> 4 == 154
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 154
                 {
-                    let pos=(x,y,z);
-                    let mut guard=hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
-                    guard.register(hopper_path,pos)?;
-                    active_window=next_window;
-                    next_window=if next_window>=100 {1} else {next_window+1};
-                    active_hopper=Some(pos);
-                    active_chest=None;
-                    active_chest_partner=None;
-                    active_furnace=None;
-                    observed_hopper_revision=guard.revision();
-                    let items=inventory.chest_window_items(active_window,&guard.slots(pos));
+                    let pos = (x, y, z);
+                    let mut guard = hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
+                    guard.register(hopper_path, pos)?;
+                    active_window = next_window;
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
+                    active_hopper = Some(pos);
+                    active_chest = None;
+                    active_chest_partner = None;
+                    active_furnace = None;
+                    observed_hopper_revision = guard.revision();
+                    let items = inventory.chest_window_items(active_window, &guard.slots(pos));
                     drop(guard);
-                    let mut opened=vec![active_window];
-                    write_string("minecraft:hopper",&mut opened)?;
-                    write_string(&json!({"text":"Hopper"}).to_string(),&mut opened)?;
+                    let mut opened = vec![active_window];
+                    write_string("minecraft:hopper", &mut opened)?;
+                    write_string(&json!({"text":"Hopper"}).to_string(), &mut opened)?;
                     opened.push(5);
-                    send(s,0x2d,&opened)?;
-                    send(s,0x30,&items)?;
-                    send(s,0x2f,&inventory.cursor_packet())?;
+                    send(s, 0x2d, &opened)?;
+                    send(s, 0x30, &items)?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
                     continue;
                 }
                 if (0..=5).contains(&face)
@@ -1395,8 +1412,10 @@ fn play(
                                     )?;
                                 }
                                 if changed && block_id == 154 {
-                                    hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?
-                                        .register(hopper_path,(nx,ny,nz))?;
+                                    hoppers
+                                        .lock()
+                                        .map_err(|_| bad("hopper lock poisoned"))?
+                                        .register(hopper_path, (nx, ny, nz))?;
                                 }
                             }
                         }
@@ -1545,45 +1564,52 @@ fn play(
                         let _ = direction;
                     }
                     observed_chest_revision = storage.revision();
-                    response_items =
-                        inventory.chest_window_items(active_window, &chest_window_state(&storage, pos, active_chest_partner));
+                    response_items = inventory.chest_window_items(
+                        active_window,
+                        &chest_window_state(&storage, pos, active_chest_partner),
+                    );
                     drop(storage);
                 } else if let Some(pos) = active_hopper {
                     let still_open = {
-                        let w=world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                        w.get(pos.0,pos.1,pos.2)>>4 == 154
-                            && near(location,pos.0,pos.1,pos.2)
+                        let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        w.get(pos.0, pos.1, pos.2) >> 4 == 154
+                            && near(location, pos.0, pos.1, pos.2)
                     };
-                    let mut storage=hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
-                    let original=storage.slots(pos);
-                    let mut changed=original;
-                    let mut candidate=inventory.clone();
-                    let change=if still_open && requested_window {
-                        candidate.chest_click(&mut changed,slot,button,mode)
-                    } else {None};
+                    let mut storage = hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
+                    let original = storage.slots(pos);
+                    let mut changed = original;
+                    let mut candidate = inventory.clone();
+                    let change = if still_open && requested_window {
+                        candidate.chest_click(&mut changed, slot, button, mode)
+                    } else {
+                        None
+                    };
                     if change.is_some() {
-                        accepted=true;
-                        let inv_changed=candidate != *inventory;
-                        let hopper_changed=changed != original;
+                        accepted = true;
+                        let inv_changed = candidate != *inventory;
+                        let hopper_changed = changed != original;
                         if inv_changed && hopper_changed {
-                            let staged=storage.staged_update(pos,changed)?;
+                            let staged = storage.staged_update(pos, changed)?;
                             journal::commit(
                                 &world_path.with_extension("pending-txn.json"),
-                                &[(inventory_path,candidate.encoded()?),
-                                  (hopper_path,staged.encoded()?)],
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (hopper_path, staged.encoded()?),
+                                ],
                             )?;
-                            *inventory=candidate;
-                            *storage=staged;
+                            *inventory = candidate;
+                            *storage = staged;
                         } else if hopper_changed {
-                            let staged=storage.staged_update(pos,changed)?;
-                            storage.commit_staged(hopper_path,staged)?;
+                            let staged = storage.staged_update(pos, changed)?;
+                            storage.commit_staged(hopper_path, staged)?;
                         } else if inv_changed {
                             candidate.save(inventory_path)?;
-                            *inventory=candidate;
+                            *inventory = candidate;
                         }
                     }
-                    observed_hopper_revision=storage.revision();
-                    response_items=inventory.chest_window_items(active_window,&storage.slots(pos));
+                    observed_hopper_revision = storage.revision();
+                    response_items =
+                        inventory.chest_window_items(active_window, &storage.slots(pos));
                     drop(storage);
                 } else {
                     let mut candidate = inventory.clone();
@@ -2228,32 +2254,46 @@ fn main() -> io::Result<()> {
     });
     // Hopper movement is an independent bounded job on the same 20Hz clock.
     // Only a single 8-tick transfer cycle is processed after any scheduler stall.
-    let hopper_worker=Arc::clone(&hoppers);
-    let hopper_file=Arc::clone(&hopper_path);
-    let hopper_clock=Arc::clone(&clock);
-    let hopper_world=Arc::clone(&world);
-    let hopper_chests=Arc::clone(&chests);
-    let hopper_chest_file=Arc::clone(&chest_path);
-    let hopper_furnaces=Arc::clone(&furnaces);
-    let hopper_furnace_file=Arc::clone(&furnace_path);
-    let hopper_world_path=Arc::clone(&path);
+    let hopper_worker = Arc::clone(&hoppers);
+    let hopper_file = Arc::clone(&hopper_path);
+    let hopper_clock = Arc::clone(&clock);
+    let hopper_world = Arc::clone(&world);
+    let hopper_chests = Arc::clone(&chests);
+    let hopper_chest_file = Arc::clone(&chest_path);
+    let hopper_furnaces = Arc::clone(&furnaces);
+    let hopper_furnace_file = Arc::clone(&furnace_path);
+    let hopper_world_path = Arc::clone(&path);
     thread::spawn(move || {
-        let mut last_cycle=hopper_clock.ticks()/8;
+        let mut last_cycle = hopper_clock.ticks() / 8;
         loop {
-            let cycle=hopper_clock.ticks()/8;
-            if cycle>last_cycle {
-                last_cycle=cycle;
-                let tick_result=(|| -> io::Result<()> {
-                    let world=hopper_world.lock().map_err(|_| bad("world lock poisoned"))?;
-                    let mut chests=hopper_chests.lock().map_err(|_| bad("chest lock poisoned"))?;
-                    let mut furnaces=hopper_furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
-                    let mut hoppers=hopper_worker.lock().map_err(|_| bad("hopper lock poisoned"))?;
-                    hoppers.advance(&world,&mut chests,&hopper_chest_file,&mut furnaces,
-                        &hopper_furnace_file,&hopper_file,
-                        &hopper_world_path.with_extension("pending-txn.json"))?;
+            let cycle = hopper_clock.ticks() / 8;
+            if cycle > last_cycle {
+                last_cycle = cycle;
+                let tick_result = (|| -> io::Result<()> {
+                    let world = hopper_world
+                        .lock()
+                        .map_err(|_| bad("world lock poisoned"))?;
+                    let mut chests = hopper_chests
+                        .lock()
+                        .map_err(|_| bad("chest lock poisoned"))?;
+                    let mut furnaces = hopper_furnaces
+                        .lock()
+                        .map_err(|_| bad("furnace lock poisoned"))?;
+                    let mut hoppers = hopper_worker
+                        .lock()
+                        .map_err(|_| bad("hopper lock poisoned"))?;
+                    hoppers.advance(
+                        &world,
+                        &mut chests,
+                        &hopper_chest_file,
+                        &mut furnaces,
+                        &hopper_furnace_file,
+                        &hopper_file,
+                        &hopper_world_path.with_extension("pending-txn.json"),
+                    )?;
                     Ok(())
                 })();
-                if let Err(error)=tick_result {
+                if let Err(error) = tick_result {
                     eprintln!("HOPPER TRANSFER ERROR: {error}; stopping transfers");
                     break;
                 }
