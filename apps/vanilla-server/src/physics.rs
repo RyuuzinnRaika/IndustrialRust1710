@@ -1,7 +1,6 @@
 //! Bounded collision and fall tracking for the flat 1.7.10 Survival prototype.
 //! The client still simulates its own gravity; the server validates positions,
-//! recognizes contact with solid blocks, and owns fall damage. Fluids, slabs,
-//! stairs, ladders, vehicles and full per-tick physics remain unsupported.
+//! recognizes contact with solid blocks, and owns fall damage. Fluid buoyancy and server-owned horizontal velocity remain partial.
 use crate::player::PlayerPosition;
 use crate::world::World;
 
@@ -10,110 +9,93 @@ const HEIGHT: f64 = 1.8;
 const EPS: f64 = 1e-7;
 const GROUND_TOLERANCE: f64 = 0.0625;
 
-fn solid(id: u16) -> bool {
-    // Only full blocks supported by the current flat-world prototype.
-    // Chests are conservatively approximated as full cubes until proper AABBs.
-    matches!(
-        id,
-        1 | 2
-            | 3
-            | 4
-            | 5
-            | 7
-            | 12
-            | 13
-            | 14
-            | 15
-            | 16
-            | 17
-            | 20
-            | 21
-            | 24
-            | 35
-            | 41
-            | 42
-            | 45
-            | 49
-            | 54
-            | 56
-            | 57
-            | 58
-            | 61
-            | 62
-            | 73
-            | 74
-            | 80
-            | 82
-            | 87
-            | 89
-            | 98
-            | 129
-            | 155
-            | 159
-            | 162
-            | 168
-            | 169
-            | 170
-            | 172
-            | 173
-    )
-}
-
-fn horizontal_box(position: &PlayerPosition) -> (i32, i32, i32, i32) {
-    (
-        (position.x - HALF_WIDTH + EPS).floor() as i32,
-        (position.x + HALF_WIDTH - EPS).floor() as i32,
-        (position.z - HALF_WIDTH + EPS).floor() as i32,
-        (position.z + HALF_WIDTH - EPS).floor() as i32,
-    )
-}
-
-/// Reject positions that overlap a known, fully solid block.
-pub fn collides(world: &World, position: &PlayerPosition) -> bool {
-    let (min_x, max_x, min_z, max_z) = horizontal_box(position);
-    let min_y = (position.y + EPS).floor() as i32;
-    let max_y = (position.y + HEIGHT - EPS).floor() as i32;
-    (min_x..=max_x)
-        .any(|x| (min_z..=max_z).any(|z| (min_y..=max_y).any(|y| solid(world.get(x, y, z) >> 4))))
-}
-
-/// A client's onGround flag alone is not evidence of contact with a block.
-pub fn supported(world: &World, position: &PlayerPosition) -> bool {
-    let foot_block = (position.y - GROUND_TOLERANCE).floor() as i32;
-    if ((foot_block + 1) as f64 - position.y).abs() > GROUND_TOLERANCE {
-        return false;
+/// Block-space collision volume, including metadata-dependent partial heights.
+#[derive(Clone,Copy)]
+struct Shape { x0:f64,x1:f64,y0:f64,y1:f64,z0:f64,z1:f64 }
+const FULL:Shape=Shape{x0:0.0,x1:1.0,y0:0.0,y1:1.0,z0:0.0,z1:1.0};
+fn shapes(id:u16,meta:u16)->Vec<Shape> {
+    match id {
+        0|6|8|9|10|11|31|32|37|38|39|40|50|51|55|59|65|66|69|70|72|75|76|77|78|83|90|104|105|106|111|115|131|132|141|142|143|147|148|149|150|151|157|171 => Vec::new(),
+        44|126|182 => {
+            let mut box_=FULL;
+            if meta&8 != 0 { box_.y0=0.5; } else { box_.y1=0.5; }
+            vec![box_]
+        }
+        53|67|108|109|114|128|134|135|136|156|163|164 => {
+            let upper=meta&4!=0;
+            let mut slab=FULL;
+            if upper { slab.y0=0.5; } else { slab.y1=0.5; }
+            let mut step=FULL;
+            if upper { step.y1=0.5; } else { step.y0=0.5; }
+            match meta&3 {
+                0 => step.x0=0.5, 1 => step.x1=0.5,
+                2 => step.z0=0.5, _ => step.z1=0.5
+            }
+            vec![slab,step]
+        }
+        85|107|113|139 => vec![Shape{y1:1.5,..FULL}],
+        60 => vec![Shape{y1:0.9375,..FULL}],
+        43|125|181 => vec![FULL],
+        _ => if matches!(id,1|2|3|4|5|7|12|13|14|15|16|17|18|19|20|21|22|23|24|25|29|33|35|41|42|45|47|48|49|54|56|57|58|61|62|73|74|80|82|84|86|87|88|89|91|98|99|100|103|110|112|121|123|124|129|130|133|137|145|152|153|155|159|162|168|169|170|172|173|174|179) {vec![FULL]} else {Vec::new()}
     }
-    let (min_x, max_x, min_z, max_z) = horizontal_box(position);
-    (min_x..=max_x).any(|x| (min_z..=max_z).any(|z| solid(world.get(x, foot_block, z) >> 4)))
 }
-
-/// Check the destination and fixed-height, long horizontal movements.
-/// A true swept-collision solver and server-owned velocity are future work.
-pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPosition) -> bool {
-    if collides(world, next) {
-        return false;
-    }
-    let dx = next.x - previous.x;
-    let dz = next.z - previous.z;
-    let horizontal = dx.hypot(dz);
-    if horizontal > 64.0 || (next.y - previous.y).abs() > 128.0 {
-        return false;
-    }
-    // Long, level movements cannot tunnel through a wall between endpoints.
-    // Do not use a straight-line sweep while jumping: the actual arc differs.
-    if horizontal > 0.75 && (next.y - previous.y).abs() < 0.25 {
-        let steps = (horizontal / 0.25).ceil() as usize;
-        for i in 1..steps {
-            let fraction = i as f64 / steps as f64;
-            let sample = PlayerPosition {
-                x: previous.x + dx * fraction,
-                y: previous.y + (next.y - previous.y) * fraction,
-                z: previous.z + dz * fraction,
-            };
-            if collides(world, &sample) {
-                return false;
+fn overlap(a0:f64,a1:f64,b0:f64,b1:f64)->bool {
+    a0 < b1-EPS && a1 > b0+EPS
+}
+fn horizontal_box(position:&PlayerPosition)->(i32,i32,i32,i32) {
+    ((position.x-HALF_WIDTH+EPS).floor() as i32,
+     (position.x+HALF_WIDTH-EPS).floor() as i32,
+     (position.z-HALF_WIDTH+EPS).floor() as i32,
+     (position.z+HALF_WIDTH-EPS).floor() as i32)
+}
+fn contact(world:&World,position:&PlayerPosition,bx:i32,by:i32,bz:i32,shape:Shape)->bool {
+    let _=world;
+    overlap(position.x-HALF_WIDTH,position.x+HALF_WIDTH,bx as f64+shape.x0,bx as f64+shape.x1)
+        && overlap(position.y,position.y+HEIGHT,by as f64+shape.y0,by as f64+shape.y1)
+        && overlap(position.z-HALF_WIDTH,position.z+HALF_WIDTH,bz as f64+shape.z0,bz as f64+shape.z1)
+}
+/// Reject AABB intersections with solid, half-height and stair shapes.
+pub fn collides(world:&World,position:&PlayerPosition)->bool {
+    let (min_x,max_x,min_z,max_z)=horizontal_box(position);
+    let min_y=position.y.floor() as i32-1;
+    let max_y=(position.y+HEIGHT).ceil() as i32;
+    (min_x..=max_x).any(|x|(min_z..=max_z).any(|z|(min_y..=max_y).any(|y|{
+        let state=world.get(x,y,z);
+        shapes(state>>4,state&15).into_iter().any(|shape|contact(world,position,x,y,z,shape))
+    })))
+}
+fn support_top(world:&World,position:&PlayerPosition)->Option<f64> {
+    let (min_x,max_x,min_z,max_z)=horizontal_box(position);
+    let target=position.y;
+    let mut highest=None;
+    for x in min_x..=max_x { for z in min_z..=max_z {
+        for y in (target.floor() as i32-2)..=(target.floor() as i32) {
+            let state=world.get(x,y,z);
+            for shape in shapes(state>>4,state&15) {
+                let top=y as f64+shape.y1;
+                if top<=target+GROUND_TOLERANCE && top>=target-GROUND_TOLERANCE &&
+                    overlap(position.x-HALF_WIDTH,position.x+HALF_WIDTH,x as f64+shape.x0,x as f64+shape.x1) &&
+                    overlap(position.z-HALF_WIDTH,position.z+HALF_WIDTH,z as f64+shape.z0,z as f64+shape.z1)
+                { highest=Some(highest.map_or(top,|v:f64|v.max(top))); }
             }
         }
+    }}
+    highest
+}
+pub fn supported(world:&World,position:&PlayerPosition)->bool {
+    support_top(world,position).is_some()
+}
+/// Sweep both horizontal and vertical segments to prevent endpoint tunnelling.
+pub fn valid_movement(world:&World,previous:&PlayerPosition,next:&PlayerPosition)->bool {
+    if !next.is_valid() || collides(world,next) { return false; }
+    let dx=next.x-previous.x; let dy=next.y-previous.y; let dz=next.z-previous.z;
+    let horizontal=dx.hypot(dz);
+    if horizontal>64.0 || dy.abs()>128.0 { return false; }
+    let steps=(horizontal.max(dy.abs())/0.2).ceil().clamp(1.0,640.0) as usize;
+    for i in 1..steps {
+        let f=i as f64/steps as f64;
+        let sample=PlayerPosition{x:previous.x+dx*f,y:previous.y+dy*f,z:previous.z+dz*f};
+        if collides(world,&sample) { return false; }
     }
     true
 }
@@ -125,23 +107,25 @@ const IDLE_GRACE_TICKS: u64 = 6;
 const MAX_CATCH_UP_STEPS: u64 = 4;
 
 /// Resolve vertical descent against solid block top faces without tunnelling.
-fn resolve_descent(world: &World, position: &PlayerPosition, wanted_y: f64) -> f64 {
-    let wanted_y = wanted_y.max(0.0);
-    let (min_x, max_x, min_z, max_z) = horizontal_box(position);
-    let bottom = ((wanted_y.floor() as i32) - 1).max(0);
-    let top = (position.y.floor() as i32).min(255);
-    for y in (bottom..=top).rev() {
-        let surface = f64::from(y + 1);
-        if surface < wanted_y - EPS || surface > position.y + EPS {
-            continue;
+fn resolve_descent(world:&World,position:&PlayerPosition,wanted_y:f64)->f64 {
+    let wanted=wanted_y.max(0.0);
+    let (min_x,max_x,min_z,max_z)=horizontal_box(position);
+    let mut best=wanted;
+    for x in min_x..=max_x { for z in min_z..=max_z {
+        for y in (wanted.floor() as i32-2).max(0)..=(position.y.floor() as i32).min(255) {
+            let state=world.get(x,y,z);
+            for shape in shapes(state>>4,state&15) {
+                let top=y as f64+shape.y1;
+                if top>=best-EPS && top<=position.y+EPS &&
+                    overlap(position.x-HALF_WIDTH,position.x+HALF_WIDTH,x as f64+shape.x0,x as f64+shape.x1) &&
+                    overlap(position.z-HALF_WIDTH,position.z+HALF_WIDTH,z as f64+shape.z0,z as f64+shape.z1) {
+                    best=best.max(top);
+                }
+            }
         }
-        if (min_x..=max_x).any(|x| (min_z..=max_z).any(|z| solid(world.get(x, y, z) >> 4))) {
-            return surface;
-        }
-    }
-    wanted_y
+    }}
+    best
 }
-
 /// A 20Hz, server-owned fallback for clients that stop sending position
 /// packets while airborne. Active 1.7.10 clients normally predict gravity.
 #[derive(Debug)]
