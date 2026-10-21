@@ -1,5 +1,5 @@
 //! Bounded Protocol 5 natural-survival entities. No external entity registry.
-mod rules;
+pub(crate) mod rules;
 use crate::inventory::Stack;
 use crate::multiplayer::{self, Event};
 use crate::navigation;
