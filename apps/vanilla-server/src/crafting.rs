@@ -492,9 +492,6 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if shapeless(&[368, 377]) {
         return product(381, 1, 0); // eye of ender
     }
-    if matches(&[&[280, 5, 280], &[280, 5, 280]]) {
-        return product(107, 1, 0); // fence gate
-    }
     None
 }
 
@@ -822,7 +819,8 @@ mod tests {
             None,
             None,
         ];
-        assert_eq!(result(&modern_fence, 3), None);
+        // In 1.7.10 the 1.8 fence pattern already crafts a fence *gate*.
+        assert_eq!(result(&modern_fence, 3), product(107, 1, 0));
 
         let powered_rail = [
             item(266),
