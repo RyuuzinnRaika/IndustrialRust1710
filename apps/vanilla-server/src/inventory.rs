@@ -242,6 +242,21 @@ impl Inventory {
         }
         true
     }
+    /// Consume one arrow and one bow durability, returning the changed arrow
+    /// slot. This can only be called after the server verified a charged bow.
+    pub fn use_bow(&mut self)->Option<i16> {
+        let held_idx=36+self.selected as usize;
+        let bow=self.slots[held_idx]?;
+        if bow.id!=261||bow.count!=1||bow.damage>=384 {return None;}
+        let arrow_idx=(9..45).find(|&i|self.slots[i].is_some_and(|s|s.id==262&&s.count>0))?;
+        let mut arrow=self.slots[arrow_idx]?;
+        arrow.count-=1;
+        self.slots[arrow_idx]=(arrow.count>0).then_some(arrow);
+        let mut next=bow;
+        next.damage+=1;
+        self.slots[held_idx]=(next.damage<384).then_some(next);
+        Some(arrow_idx as i16)
+    }
     /// Damage one server-held, unenchanted tool on a committed block break.
     /// Returns true only if a real tool was damaged or broke. Hand mining
     /// and ordinary blocks/items do not acquire arbitrary damage metadata.
