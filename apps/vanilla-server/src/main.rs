@@ -1325,8 +1325,7 @@ fn play(
                                         // This prevents item loss or duplication
                                         // after interruption between save files.
                                         let mut candidate = inventory.clone();
-                                        let wore =
-                                            result.wear_tool && candidate.wear_held_tool();
+                                        let wore = result.wear_tool && candidate.wear_held_tool();
                                         let mut stacks = Vec::new();
                                         if let Some(drop) = result.drop {
                                             stacks.push(Stack {
@@ -1344,10 +1343,8 @@ fn play(
                                             {
                                                 let (staged_ground, spawned) =
                                                     ground.stage_put_many(&stacks, target)?;
-                                                let mut writes = vec![(
-                                                    world_path,
-                                                    staged_world.encoded()?,
-                                                )];
+                                                let mut writes =
+                                                    vec![(world_path, staged_world.encoded()?)];
                                                 if wore {
                                                     writes.push((
                                                         inventory_path,
@@ -1364,9 +1361,8 @@ fn play(
                                                     staged_world.save(world_path)?;
                                                 } else {
                                                     journal::commit(
-                                                        &world_path.with_extension(
-                                                            "pending-txn.json",
-                                                        ),
+                                                        &world_path
+                                                            .with_extension("pending-txn.json"),
                                                         &writes,
                                                     )?;
                                                 }
