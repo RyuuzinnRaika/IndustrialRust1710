@@ -1304,16 +1304,13 @@ fn play(
                         inventory.furnace_window_items(active_window, &last_furnace_view);
                     drop(machines);
                 } else if let Some(pos) = active_chest {
-                    let still_open = world
-                        .lock()
-                        .map_err(|_| bad("world mutex poisoned"))?
-                        .get(pos.0, pos.1, pos.2)
-                        >> 4
-                        == 54
-                        && near(location, pos.0, pos.1, pos.2)
-                        && active_chest_partner.is_none_or(|partner| {
-                            world.lock().is_ok_and(|w| w.get(partner.0,partner.1,partner.2) >> 4 == 54)
-                        });
+                    let still_open = {
+                        let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        w.get(pos.0, pos.1, pos.2) >> 4 == 54
+                            && near(location, pos.0, pos.1, pos.2)
+                            && active_chest_partner.is_none_or(|partner|
+                                w.get(partner.0,partner.1,partner.2) >> 4 == 54)
+                    };
                     let mut storage = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
                     let original = chest_window_state(&storage, pos, active_chest_partner);
                     let mut changed_slots = original.clone();
