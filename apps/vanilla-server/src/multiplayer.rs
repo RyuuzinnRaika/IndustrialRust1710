@@ -115,7 +115,11 @@ impl Hub {
     /// Stable entity IDs are required for one-shot area damage distribution.
     pub fn participants(&self) -> io::Result<Vec<(i32, PlayerPosition)>> {
         let inner = self.0.lock().map_err(|_| poisoned())?;
-        Ok(inner.players.values().map(|peer| (peer.id, peer.position)).collect())
+        Ok(inner
+            .players
+            .values()
+            .map(|peer| (peer.id, peer.position))
+            .collect())
     }
     pub fn add(
         &self,
