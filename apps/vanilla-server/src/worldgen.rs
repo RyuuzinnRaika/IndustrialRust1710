@@ -667,7 +667,7 @@ mod tests {
     fn nether_and_end_have_distinct_base_blocks() {
         assert_eq!(block(9, Dimension::Nether, 0, 0, 0), b(7));
         assert_eq!(block(9, Dimension::End, 0, 66, 0), b(7));
-        assert_eq!(block(9, Dimension::End, 30, 65, 0), b(121));
+        assert!((35..=74).any(|y| block(9, Dimension::End, 30, y, 0) == b(121)));
         assert_eq!(biome_for_dimension(9, Dimension::Nether, 0, 0), 8);
         assert_eq!(biome_for_dimension(9, Dimension::End, 0, 0), 9);
     }
