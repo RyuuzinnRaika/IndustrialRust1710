@@ -75,7 +75,8 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 42
             | 45
             | 49
-            | 54 // chest (single only)
+            | 26 // two-block bed
+            | 54 // chest (single or double)
             | 56 // diamond ore
             | 57
             | 58 // crafting table: opens workbench window when used
@@ -393,6 +394,31 @@ impl World {
         Ok(changed)
     }
 
+    /// Persist a small related block edit (such as the two bed halves) as
+    /// one world snapshot, never exposing a half-built object to clients.
+    pub fn update_many_and_save(
+        &mut self, path: &Path, changes: &[(i32, i32, i32, u16)]
+    ) -> io::Result<bool> {
+        if changes.is_empty() || changes.len() > 2 { return Err(invalid("invalid batch size")); }
+        let mut next = self.clone();
+        let mut seen = BTreeSet::new();
+        let mut changed = false;
+        for &(x,y,z,block) in changes {
+            if !in_bounds(x,y,z) || block >> 4 > 255 || !seen.insert((x,y,z)) {
+                return Err(invalid("invalid batched block update"));
+            }
+            if next.get(x,y,z) == block { continue; }
+            let key=(x,y as u8,z);
+            if block == next.base_block(x,y as u8,z) { next.edits.remove(&key); }
+            else { next.edits.insert(key,block); }
+            if next.edits.len() > MAX_EDITS { return Err(invalid("too many edited blocks")); }
+            next.wake_gravity(x,y,z);
+            next.wake_block_updates(x,y,z);
+            changed = true;
+        }
+        if changed { next.save(path)?; *self = next; }
+        Ok(changed)
+    }
     pub fn update_and_save(
         &mut self,
         path: &Path,
