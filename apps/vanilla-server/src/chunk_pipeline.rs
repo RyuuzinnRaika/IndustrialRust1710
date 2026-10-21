@@ -27,7 +27,9 @@ pub struct PendingChunk(Receiver<io::Result<Vec<u8>>>);
 
 impl PendingChunk {
     pub fn finish(self) -> io::Result<Vec<u8>> {
-        self.0.recv().map_err(|_| io::Error::other("chunk encoder stopped"))?
+        self.0
+            .recv()
+            .map_err(|_| io::Error::other("chunk encoder stopped"))?
     }
 }
 
