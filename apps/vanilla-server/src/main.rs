@@ -1057,7 +1057,8 @@ fn play(
                                         stack,
                                         food_effect_roll(now_tick, entity_id),
                                     ) {
-                                        let expires_at = now_tick.saturating_add(u64::from(effect.duration_ticks));
+                                        let expires_at = now_tick
+                                            .saturating_add(u64::from(effect.duration_ticks));
                                         // Weaker/shorter food effects cannot erase an
                                         // existing stronger or longer potion effect.
                                         let replace = active_effects
@@ -1651,7 +1652,8 @@ fn play(
                                 bow_start = Some(now_tick);
                             } else if vitals.can_eat(stack)
                                 || (stack.id == 373 && brewing::effect(stack).is_some())
-                                || stack.id == 335 // milk is drinkable at full hunger
+                                || stack.id == 335
+                            // milk is drinkable at full hunger
                             {
                                 eating = Some((now_tick, stack));
                             }
