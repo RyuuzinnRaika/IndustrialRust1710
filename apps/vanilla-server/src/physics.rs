@@ -99,6 +99,15 @@ pub fn supported(world:&World, position:&PlayerPosition)->bool {
     }}}
     false
 }
+/// Small point probe against the same voxel AABBs used for players.
+pub fn projectile_collides(world:&World,p:&PlayerPosition)->bool {
+    let x=p.x.floor() as i32;let y=p.y.floor() as i32;let z=p.z.floor() as i32;
+    shapes(world.get(x,y,z)).into_iter().flatten().any(|b| {
+        p.x>x as f64+b.x0 && p.x<x as f64+b.x1 &&
+        p.y>y as f64+b.y0 && p.y<y as f64+b.y1 &&
+        p.z>z as f64+b.z0 && p.z<z as f64+b.z1
+    })
+}
 pub fn in_water(world:&World,p:&PlayerPosition)->bool {
     [0.1,0.9,1.62].into_iter().any(|dy| matches!(world.get(p.x.floor() as i32,(p.y+dy).floor() as i32,p.z.floor() as i32)>>4,8|9))
 }
