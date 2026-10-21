@@ -416,6 +416,82 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[1, 1], &[1, 1]]) {
         return product(98, 4, 0);
     }
+    // Workstations, containers and redstone machines from Java 1.7.10.
+    if matches(&[&[0, 369, 0], &[4, 4, 4]]) {
+        return product(117, 1, 0); // brewing stand
+    }
+    if matches(&[&[0, 340, 0], &[264, 49, 264], &[49, 49, 49]]) {
+        return product(116, 1, 0); // enchanting table
+    }
+    if matches(&[&[42, 42, 42], &[0, 265, 0], &[265, 265, 265]]) {
+        return product(145, 1, 0); // anvil
+    }
+    if matches(&[&[265, 0, 265], &[265, 54, 265], &[0, 265, 0]]) {
+        return product(154, 1, 0); // hopper
+    }
+    if matches(&[&[265, 0, 265], &[265, 0, 265], &[265, 265, 265]]) {
+        return product(118, 1, 0); // cauldron
+    }
+    if matches(&[&[4, 4, 4], &[4, 261, 4], &[4, 331, 4]]) {
+        return product(23, 1, 0); // dispenser
+    }
+    if matches(&[&[4, 4, 4], &[4, 0, 4], &[4, 331, 4]]) {
+        return product(158, 1, 0); // dropper
+    }
+    if matches(&[&[-1, -1, -1], &[4, 265, 4], &[4, 331, 4]]) {
+        return product(33, 1, 0); // piston
+    }
+    if shapeless(&[33, 341]) {
+        return product(29, 1, 0); // sticky piston
+    }
+    if matches(&[&[-1, -1, -1], &[340, 340, 340], &[-1, -1, -1]]) {
+        return product(47, 1, 0); // bookshelf
+    }
+    if matches(&[&[-1, -1, -1], &[-1, 331, -1], &[-1, -1, -1]]) {
+        return product(25, 1, 0); // note block
+    }
+    if matches(&[&[-1, -1, -1], &[-1, 264, -1], &[-1, -1, -1]]) {
+        return product(84, 1, 0); // jukebox
+    }
+    if matches(&[&[0, 265, 0], &[265, 331, 265], &[0, 265, 0]]) {
+        return product(345, 1, 0); // compass
+    }
+    if matches(&[&[0, 266, 0], &[266, 331, 266], &[0, 266, 0]]) {
+        return product(347, 1, 0); // clock
+    }
+    if matches(&[&[0, 76, 0], &[76, 406, 76], &[1, 1, 1]]) {
+        return product(404, 1, 0); // comparator
+    }
+    if matches(&[&[265, 0, 265], &[265, 70, 265], &[265, 331, 265]]) {
+        return product(28, 6, 0); // detector rails
+    }
+    if matches(&[&[265, 280, 265], &[265, 76, 265], &[265, 280, 265]]) {
+        return product(157, 6, 0); // activator rails
+    }
+    if matches(&[&[371, 371, 371], &[371, 391, 371], &[371, 371, 371]]) {
+        return product(396, 1, 0); // golden carrot
+    }
+    if matches(&[&[49, 49, 49], &[49, 381, 49], &[49, 49, 49]]) {
+        return product(130, 1, 0); // ender chest
+    }
+    if matches(&[&[280, -1, 280], &[280, -1, 280]]) {
+        return product(107, 1, 0); // fence gate
+    }
+    if matches(&[&[265, 0, 265], &[265, 265, 265]]) {
+        return product(328, 1, 0); // minecart
+    }
+    if matches(&[&[20, 0, 20], &[0, 20, 0]]) {
+        return product(374, 3, 0); // glass bottles
+    }
+    if shapeless(&[54, 131]) {
+        return product(146, 1, 0); // trapped chest
+    }
+    if shapeless(&[368, 377]) {
+        return product(381, 1, 0); // eye of ender
+    }
+    if matches(&[&[280, 5, 280], &[280, 5, 280]]) {
+        return product(107, 1, 0); // fence gate
+    }
     None
 }
 
@@ -425,6 +501,52 @@ mod tests {
     fn item(id: i16) -> Option<Stack> {
         product(id, 1, 0)
     }
+    #[test]
+    fn crafting_workstations_use_exact_1710_patterns() {
+        let make = |ids: [i16; 9]| ids.map(|id| if id == 0 { None } else { item(id) });
+        assert_eq!(
+            result(&make([0, 369, 0, 4, 4, 4, 0, 0, 0]), 3),
+            product(117, 1, 0)
+        );
+        assert_eq!(
+            result(&make([0, 340, 0, 264, 49, 264, 49, 49, 49]), 3),
+            product(116, 1, 0)
+        );
+        assert_eq!(
+            result(&make([42, 42, 42, 0, 265, 0, 265, 265, 265]), 3),
+            product(145, 1, 0)
+        );
+        assert_eq!(
+            result(&make([265, 0, 265, 265, 54, 265, 0, 265, 0]), 3),
+            product(154, 1, 0)
+        );
+        assert_eq!(
+            result(&make([265, 0, 265, 265, 54, 265, 0, 0, 0]), 3),
+            None
+        );
+    }
+
+    #[test]
+    fn crafted_sixteen_stack_and_metadata_recipes_have_exact_outputs() {
+        let make = |ids: [i16; 9]| ids.map(|id| if id == 0 { None } else { item(id) });
+        assert_eq!(
+            result(&make([371, 371, 371, 371, 391, 371, 371, 371, 371]), 3),
+            product(396, 1, 0)
+        );
+        assert_eq!(
+            result(&make([265, 0, 265, 265, 70, 265, 265, 331, 265]), 3),
+            product(28, 6, 0)
+        );
+        assert_eq!(
+            result(&make([0, 76, 0, 76, 406, 76, 1, 1, 1]), 3),
+            product(404, 1, 0)
+        );
+        assert_eq!(
+            result(&make([0, 76, 0, 76, 406, 76, 4, 4, 4]), 3),
+            None
+        );
+    }
+
     #[test]
     fn shears_accept_both_mirrored_diagonals_without_extra_material() {
         assert_eq!(
