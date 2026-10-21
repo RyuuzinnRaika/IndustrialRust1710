@@ -44,15 +44,27 @@ pub(crate) struct LevelData {
     pub day_time: Option<i64>,
     #[serde(rename = "GameType", default, skip_serializing_if = "Option::is_none")]
     pub game_type: Option<i32>,
-    #[serde(rename = "generatorName", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "generatorName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub generator: Option<String>,
     #[serde(rename = "raining", default, skip_serializing_if = "Option::is_none")]
     pub raining: Option<i8>,
-    #[serde(rename = "thundering", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "thundering",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub thundering: Option<i8>,
     #[serde(rename = "rainTime", default, skip_serializing_if = "Option::is_none")]
     pub rain_time: Option<i32>,
-    #[serde(rename = "thunderTime", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "thunderTime",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub thunder_time: Option<i32>,
     #[serde(rename = "GameRules", default, skip_serializing_if = "Option::is_none")]
     pub game_rules: Option<Value>,
@@ -143,7 +155,9 @@ mod tests {
         assert_eq!(parsed.data.seed, -123);
         assert_eq!(parsed.data.day_time, Some(6000));
         let second = parse_level(&fastnbt::to_bytes(&parsed).unwrap()).unwrap();
-        assert!(matches!(second.extra.get("CustomWorldTag"), Some(Value::String(value)) if value == "unchanged"));
+        assert!(
+            matches!(second.extra.get("CustomWorldTag"), Some(Value::String(value)) if value == "unchanged")
+        );
 
         let path = std::env::temp_dir().join(format!(
             "ir1710-level-read-{}-{:?}.dat",

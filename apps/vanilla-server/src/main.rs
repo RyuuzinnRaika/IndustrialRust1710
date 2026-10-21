@@ -2685,9 +2685,12 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
 fn main() -> io::Result<()> {
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
-    let properties = if std::env::args()
-        .any(|arg| arg == "--help" || arg == "--backup-world" || arg == "--inspect-player-data" || arg == "--inspect-level-dat")
-    {
+    let properties = if std::env::args().any(|arg| {
+        arg == "--help"
+            || arg == "--backup-world"
+            || arg == "--inspect-player-data"
+            || arg == "--inspect-level-dat"
+    }) {
         None
     } else {
         server_config::ServerProperties::load_optional(Path::new("server.properties"))?
@@ -2842,14 +2845,20 @@ fn main() -> io::Result<()> {
         ));
     }
     if let Some(path) = level_inspect_path {
-        if player_inspect_path.is_some() || backup_destination.is_some()
-            || anvil_import_path.is_some() || anvil_export_path.is_some()
+        if player_inspect_path.is_some()
+            || backup_destination.is_some()
+            || anvil_import_path.is_some()
+            || anvil_export_path.is_some()
         {
-            return Err(bad("--inspect-level-dat cannot be combined with other file operations"));
+            return Err(bad(
+                "--inspect-level-dat cannot be combined with other file operations",
+            ));
         }
         let level = level_dat::read_level_file(&path)?;
-        println!("Anvil 19133 level.dat verified (read-only): name={}, seed={}, time={}",
-            level.data.name, level.data.seed, level.data.time);
+        println!(
+            "Anvil 19133 level.dat verified (read-only): name={}, seed={}, time={}",
+            level.data.name, level.data.seed, level.data.time
+        );
         return Ok(());
     }
     if let Some(path) = player_inspect_path {
