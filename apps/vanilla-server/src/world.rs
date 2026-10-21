@@ -690,10 +690,7 @@ impl World {
 
     /// Stage one or two block updates without publishing them. Used with the
     /// redo journal to durably commit inventory debits and world placements.
-    pub fn staged_updates(
-        &self,
-        changes: &[(i32, i32, i32, u16)],
-    ) -> io::Result<Option<Self>> {
+    pub fn staged_updates(&self, changes: &[(i32, i32, i32, u16)]) -> io::Result<Option<Self>> {
         if changes.is_empty() || changes.len() > 2 {
             return Err(invalid("invalid batch size"));
         }
