@@ -250,6 +250,19 @@ impl Hub {
             }
         }
     }
+    /// Broadcast ephemeral entity/projectile effects only to clients whose
+    /// loaded 5x5 chunk view includes the originating position. Persistent
+    /// entities still require a separate spawn/despawn interest index.
+    pub fn broadcast_in_view(&self, origin: PlayerPosition, packet: Event) {
+        if let Ok(inner) = self.0.lock() {
+            for peer in inner.players.values() {
+                if visible(&peer.position, &origin) {
+                    enqueue(peer, &packet);
+                }
+            }
+        }
+    }
+
     pub fn broadcast(&self, packet: Event) {
         if let Ok(inner) = self.0.lock() {
             for peer in inner.players.values() {
@@ -406,5 +419,49 @@ mod tests {
         assert_eq!(b_rx.try_recv().unwrap().id, 0x13);
         assert_eq!(b_rx.try_recv().unwrap().id, 0x38);
         hub.remove(b);
+    }
+    #[test]
+    fn spatial_projectile_events_are_not_sent_to_distant_players() {
+        let hub = Hub::default();
+        let near = PlayerPosition::default();
+        let far = PlayerPosition {
+            x: 160.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let (_a, a_rx, _) = hub.add("Near".into(), "uuid-a".into(), near).unwrap();
+        let (_b, b_rx, _) = hub.add("Far".into(), "uuid-b".into(), far).unwrap();
+        // One global player list entry already exists for A; discard it.
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x38);
+        assert!(a_rx.try_recv().is_err());
+        assert!(b_rx.try_recv().is_err());
+
+        hub.broadcast_in_view(
+            near,
+            Event {
+                id: 0x0e,
+                body: vec![1, 2, 3],
+            },
+        );
+        assert_eq!(a_rx.try_recv().unwrap().body, [1, 2, 3]);
+        assert!(b_rx.try_recv().is_err());
+
+        // A distant explosion is visible only to B.
+        hub.broadcast_in_view(
+            far,
+            Event {
+                id: 0x27,
+                body: vec![4, 5],
+            },
+        );
+        assert_eq!(b_rx.try_recv().unwrap().body, [4, 5]);
+        assert!(a_rx.try_recv().is_err());
+        // Broadcast remains global for chat and world state.
+        hub.broadcast(Event {
+            id: 0x02,
+            body: vec![],
+        });
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x02);
+        assert_eq!(b_rx.try_recv().unwrap().id, 0x02);
     }
 }

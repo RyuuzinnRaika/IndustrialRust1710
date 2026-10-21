@@ -784,7 +784,7 @@ fn play(
             drop(creatures);
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
             for explosion in explosions {
-                hub.broadcast(explosion.packet());
+                hub.broadcast_in_view(explosion.position, explosion.packet());
                 // One blast removes at most 64 non-tile blocks, protecting persisted containers.
                 let mut destroyed = 0;
                 let (cx, cy, cz) = (
@@ -1407,7 +1407,7 @@ fn play(
                                         candidate.save(inventory_path)?;
                                         *inventory = candidate;
                                         send(s, 0x30, &inventory.window_items())?;
-                                        hub.broadcast(arrow);
+                                        hub.broadcast_in_view(*player, arrow);
                                     }
                                 }
                             }
