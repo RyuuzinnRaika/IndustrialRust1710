@@ -390,7 +390,10 @@ mod tests {
         );
         let [_, metadata] = item.spawn();
         let mut metadata_data = metadata.body.as_slice();
-        assert_eq!(legacy_protocol::read_varint(&mut metadata_data).unwrap(), item.id as u32);
+        assert_eq!(
+            legacy_protocol::read_varint(&mut metadata_data).unwrap(),
+            item.id as u32
+        );
         assert_eq!(metadata_data[3], 32);
         assert_eq!(drops.take(&file, item.id).unwrap(), Some(item));
         fs::remove_dir_all(root).unwrap();
