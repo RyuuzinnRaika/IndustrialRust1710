@@ -436,7 +436,7 @@ impl Mobs {
                     }),
                     z: z as f64 + 0.5,
                 };
-                if !physics::collides(world, &p) && physics::supported(world, &p) {
+                if !physics::collides(world, &p) && physics::supported(world, &p) && (difficulty > 0 || n == 2) {
                     state.insert(
                         if n == 0 {
                             Kind::Zombie
@@ -710,11 +710,7 @@ impl Mobs {
         players: &[PlayerPosition],
         events: &mut Vec<Event>,
     ) {
-        if !self.enabled
-            || world.dimension() != crate::dimensions::Dimension::Overworld
-            || players.is_empty()
-            || !now.is_multiple_of(80)
-        {
+        if !self.enabled || players.is_empty() || !now.is_multiple_of(80) {
             return;
         }
         let passive = self
@@ -722,7 +718,8 @@ impl Mobs {
             .values()
             .filter(|mob| mob.kind.passive())
             .count();
-        let hostile = self.entities.len() - passive;
+        let hostile = self.entities.values().filter(|m| !m.kind.peaceful_safe()).count();
+        let dimension = world.dimension();
         for index in 0..4u64 {
             let seed = hash(
                 now ^ index.wrapping_mul(0x9e3779b97f4a7c15) ^ world.natural_seed().unwrap_or(0),
@@ -731,13 +728,31 @@ impl Mobs {
             let radius = 24 + (seed % 65) as i32;
             let x = player.x.floor() as i32 + if seed & 1 == 0 { radius } else { -radius };
             let z = player.z.floor() as i32 + (((seed >> 8) % 65) as i32 - 32);
-            let Some(height) = world.surface_height_at(x, z) else {
-                continue; // Other dimensions need their own placement routines.
+            // Overworld has a heightmap; Nether and End have ceilings/islands
+            // instead, so seek a bounded standable cavern floor.
+            let height = world.surface_height_at(x, z);
+            let mut y = if let Some(height) = height {
+                height + 1
+            } else {
+                let start = 24 + ((seed >> 16) % 88) as i32;
+                let mut found = None;
+                for offset in 0..88 {
+                    let probe = 24 + (start - 24 + offset) % 88;
+                    if world.get(x, probe - 1, z) >> 4 != 0
+                        && world.get(x, probe, z) == 0
+                        && world.get(x, probe + 1, z) == 0
+                    {
+                        found = Some(probe);
+                        break;
+                    }
+                }
+                let Some(ground) = found else { continue };
+                ground
             };
             // Underground probes seek a two-block-tall air pocket above solid
             // ground. Never create arbitrary mobs inside rock or liquids.
-            let mut y = height + 1;
-            if seed & 3 == 0 && height > 18 {
+            if dimension == crate::dimensions::Dimension::Overworld && seed & 3 == 0 && height.is_some_and(|h| h > 18) {
+                let height = height.unwrap();
                 let mut probe = 12 + ((seed >> 17) % (height - 13) as u64) as i32;
                 for _ in 0..20 {
                     if world.get(x, probe - 1, z) != 0
@@ -766,13 +781,13 @@ impl Mobs {
             let grass = world.get(x, y - 1, z) >> 4 == 2;
             let open = sky_exposed(world, position);
             let (block_light, sky_light) = world.light_at(x, y, z);
-            let is_passive = grass && open && sunlight(now) && (seed & 1 == 0);
-            if !spawn_light_ok(block_light, sky_light, now, is_passive) {
+            let overworld = dimension == crate::dimensions::Dimension::Overworld;
+            let is_passive = overworld && grass && open && sunlight(now) && (seed & 1 == 0);
+            if overworld && !spawn_light_ok(block_light, sky_light, now, is_passive) {
                 continue;
             }
             let kind = if is_passive {
-                if passive >= PASSIVE_CAP || matches!(biome, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24)
-                {
+                if passive >= PASSIVE_CAP || matches!(biome, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24) {
                     continue;
                 }
                 match seed % 4 {
@@ -785,14 +800,42 @@ impl Mobs {
                 if self.difficulty == Some(0) || hostile >= HOSTILE_CAP {
                     continue;
                 }
-                match seed % 4 {
-                    0 => Kind::Zombie,
-                    1 => Kind::Skeleton,
-                    2 => Kind::Creeper,
-                    _ => Kind::Spider,
+                match dimension {
+                    crate::dimensions::Dimension::Overworld => {
+                        if y < 40 && (seed >> 24).is_multiple_of(16) {
+                            Kind::Slime
+                        } else if biome == 6 && !sunlight(now) && (seed >> 25).is_multiple_of(12) {
+                            Kind::Slime
+                        } else {
+                            match seed % 16 {
+                                0..=4 => Kind::Zombie,
+                                5..=8 => Kind::Skeleton,
+                                9..=11 => Kind::Creeper,
+                                12..=13 => Kind::Spider,
+                                14 => Kind::Enderman,
+                                _ => Kind::Witch,
+                            }
+                        }
+                    }
+                    crate::dimensions::Dimension::Nether => {
+                        // Blaze spawning is limited to the existing fortress substrate.
+                        let fortress = world.get(x, y - 1, z) >> 4 == 112;
+                        if fortress && seed.is_multiple_of(4) {
+                            Kind::Blaze
+                        } else if (seed >> 24).is_multiple_of(8) {
+                            Kind::MagmaCube
+                        } else {
+                            Kind::ZombiePigman
+                        }
+                    }
+                    crate::dimensions::Dimension::End => Kind::Enderman,
                 }
             };
-            events.push(self.insert(kind, position, false));
+            let size = if kind.splitting() {
+                match (seed >> 33) % 3 { 0 => 1, 1 => 2, _ => 4 }
+            } else { 1 };
+            let baby = kind == Kind::Zombie && (seed >> 21).is_multiple_of(20);
+            events.push(self.insert_sized(kind, position, baby, size));
             break; // Bound per-cycle packets and CPU.
         }
     }
@@ -833,7 +876,7 @@ impl Mobs {
                     if mob.age_ticks >= 24000 {
                         mob.baby = false;
                         let mut body = mob.id.to_be_bytes().to_vec();
-                        body.push((12 << 3) | 2);
+                        body.push((2 << 5) | 12);
                         body.extend_from_slice(&0i32.to_be_bytes());
                         body.push(0x7f);
                         events.push(Event { id: 0x1c, body });
@@ -893,7 +936,7 @@ impl Mobs {
                 let Some(target) = nearest else {
                     continue;
                 };
-                if mob.kind == Kind::Spider
+                if matches!(mob.kind, Kind::Spider | Kind::CaveSpider)
                     && sunlight(now)
                     && sky_exposed(world, mob.position)
                     && distance(target, mob.position) > 3.0
@@ -901,6 +944,11 @@ impl Mobs {
                     continue; // Daylight spiders are neutral until provoked.
                 }
                 let d = distance(target, mob.position);
+                if matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman)
+                    && now >= mob.anger_until
+                {
+                    continue; // Neutral until attacked; anger expires after 60 seconds.
+                }
                 if mob.kind == Kind::Creeper {
                     if d < 3.0 {
                         mob.fuse = mob.fuse.saturating_add(1);
@@ -965,7 +1013,10 @@ impl Mobs {
                 if len < 1e-6 {
                     continue;
                 }
-                let speed = if mob.kind.passive() { 0.065 } else { 0.11 };
+                let speed = if mob.kind.passive() { 0.065 }
+                    else if mob.kind.splitting() { 0.08 + f64::from(mob.size) * 0.025 }
+                    else if mob.baby { 0.18 }
+                    else { 0.11 };
                 let candidate = PlayerPosition {
                     x: mob.position.x + dx / len * speed,
                     z: mob.position.z + dz / len * speed,
@@ -1095,9 +1146,10 @@ impl Mobs {
             }
         });
         for mob in self.entities.values_mut() {
-            if !mob.kind.passive()
-                && mob.kind != Kind::Skeleton
-                && mob.kind != Kind::Creeper
+            if (mob.kind.hostile_to_players()
+                    || (matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman)
+                        && tick < mob.anger_until))
+                && !matches!(mob.kind, Kind::Skeleton | Kind::Creeper | Kind::Ghast | Kind::Blaze | Kind::Witch | Kind::EnderDragon | Kind::Wither)
                 && mob.nearby(player, 1.6)
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
