@@ -147,6 +147,7 @@ struct Mob {
     split_size: u8,
     carried: Option<u16>,
     profession: u8,
+    angry: bool,
 }
 impl Mob {
     fn spawn(self) -> Event {
@@ -305,6 +306,7 @@ impl Mobs {
             split_size: if matches!(kind, Kind::Slime | Kind::MagmaCube) { 2 } else { 1 },
             carried: None,
             profession: (id.unsigned_abs() % 5) as u8,
+            angry: !matches!(kind, Kind::Spider | Kind::CaveSpider | Kind::ZombiePigman | Kind::IronGolem),
         };
         let event = mob.spawn();
         self.entities.insert(id, mob);
@@ -611,6 +613,51 @@ impl Mobs {
             let mut shots = Vec::new();
             let mut dead = Vec::new();
             for mob in self.entities.values_mut() {
+                // Passive lifecycle is simulated only on the server.
+                if mob.kind == Kind::Chicken && !mob.baby {
+                    if mob.egg_timer > 0 { mob.egg_timer -= 1; }
+                    if mob.egg_timer == 0 {
+                        self.pending_drops.push((Stack{id:344,count:1,damage:0},(
+                            mob.position.x.floor() as i32,
+                            mob.position.y.floor() as i32,
+                            mob.position.z.floor() as i32,
+                        )));
+                        mob.egg_timer = 6000 + (hash(now ^ mob.id as u64) % 6000) as u32;
+                    }
+                }
+                if mob.kind == Kind::Wither && now.is_multiple_of(20) {
+                    mob.health = (mob.health + 1).min(mob.kind.health());
+                }
+                if now.is_multiple_of(20) {
+                    if mob.kind.burns_in_sun() && sky_exposed(world, mob.position)
+                        && now % 24000 < 12000 {
+                        mob.burning = 160;
+                    }
+                    if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
+                        let (sky, block)=world.light_at(
+                            mob.position.x.floor() as i32, mob.position.y.floor() as i32,
+                            mob.position.z.floor() as i32);
+                        mob.angry = sky.max(block) <= 11;
+                    }
+                }
+                if mob.burning > 0 {
+                    mob.burning -= 1;
+                    if now.is_multiple_of(20) {
+                        mob.health -= 1;
+                        if mob.health <= 0 {
+                            events.push(mob.status(3));
+                            self.pending_drops.push((
+                                mob.kind.drop(), (
+                                    mob.position.x.floor() as i32,
+                                    mob.position.y.floor() as i32,
+                                    mob.position.z.floor() as i32,
+                                )));
+                            dead.push(mob.id);
+                            continue;
+                        }
+                        events.push(mob.status(2));
+                    }
+                }
                 if mob.baby {
                     mob.age_ticks = mob.age_ticks.saturating_add(1);
                     if mob.age_ticks >= 24000 {
@@ -622,7 +669,8 @@ impl Mobs {
                         events.push(Event { id: 0x1c, body });
                     }
                 }
-                if !players.is_empty() && distance_to_players(mob.position, players) > 128.0 {
+                if !players.is_empty() && !mob.kind.passive()
+                    && !mob.kind.is_boss() && distance_to_players(mob.position, players) > 128.0 {
                     dead.push(mob.id);
                     continue;
                 }
@@ -636,6 +684,7 @@ impl Mobs {
                 let Some(target) = nearest else {
                     continue;
                 };
+                if !mob.angry && !mob.kind.passive() { continue; }
                 let d = distance(target, mob.position);
                 if mob.kind == Kind::Creeper {
                     if d < 3.0 {
@@ -652,7 +701,12 @@ impl Mobs {
                         continue;
                     }
                 }
-                if mob.kind == Kind::Skeleton && d < 16.0 && now.saturating_sub(mob.bite_tick) >= 40
+                if mob.kind == Kind::Skeleton && (5.0..16.0).contains(&d)
+                    && now.saturating_sub(mob.bite_tick) >= 40
+                    && mob_rules::visible(
+                        world,
+                        PlayerPosition { y: mob.position.y+1.55, ..mob.position },
+                        PlayerPosition { y: target.y+1.55, ..target }, 16.0)
                 {
                     mob.bite_tick = now;
                     let yaw = (-(target.x - mob.position.x))
@@ -669,6 +723,12 @@ impl Mobs {
                         x: mob.position.x + if mob.id % 2 == 0 { 1.0 } else { -1.0 },
                         z: mob.position.z + if mob.id % 3 == 0 { 1.0 } else { -1.0 },
                         ..mob.position
+                    }
+                } else if mob.kind == Kind::Skeleton && d < 5.0 {
+                    PlayerPosition {
+                        x: mob.position.x + mob.position.x - target.x,
+                        y: mob.position.y,
+                        z: mob.position.z + mob.position.z - target.z,
                     }
                 } else {
                     target
@@ -825,6 +885,7 @@ impl Mobs {
         });
         for mob in self.entities.values_mut() {
             if !mob.kind.passive()
+                && mob.angry
                 && mob.kind != Kind::Skeleton
                 && mob.kind != Kind::Creeper
                 && mob.nearby(player, 1.6)
