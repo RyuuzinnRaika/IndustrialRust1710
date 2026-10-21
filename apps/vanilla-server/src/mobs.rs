@@ -268,7 +268,7 @@ impl Mobs {
         players: &[PlayerPosition],
         events: &mut Vec<Event>,
     ) {
-        if !self.enabled || players.is_empty() || tick % 20 != 0 {
+        if !self.enabled || players.is_empty() || !tick.is_multiple_of(20) {
             return;
         }
         let hostile_count = self
@@ -357,10 +357,6 @@ impl Mobs {
             }
         }
     }
-    /// Compatibility entrypoint for pre-existing tests and callers.
-    pub fn tick(&mut self, now: u64, world: &World, players: &[PlayerPosition]) -> Vec<Event> {
-        self.tick_with_day(now, (now % 24000) as i64, world, players)
-    }
     pub fn tick_with_day(
         &mut self,
         now: u64,
@@ -394,7 +390,7 @@ impl Mobs {
                 if sq > 128.0 * 128.0
                     || (sq > 32.0 * 32.0
                         && tick.saturating_sub(mob.born) > 600
-                        && (tick + mob.id as u64) % 400 == 0)
+                        && (tick + mob.id as u64).is_multiple_of(400))
                 {
                     remove.push(mob.id);
                     continue;
@@ -412,8 +408,7 @@ impl Mobs {
                     }
                 }
                 if mob.species == Species::Skeleton
-                    && sq <= 15.0 * 15.0
-                    && sq >= 3.0 * 3.0
+                    && (3.0 * 3.0..=15.0 * 15.0).contains(&sq)
                     && tick.saturating_sub(mob.bite_tick) >= 40
                 {
                     mob.bite_tick = tick;
@@ -423,7 +418,7 @@ impl Mobs {
                     Some(near)
                 } else if tick % 80 < 40 {
                     // gentle deterministic animal wandering
-                    let offset = if (mob.id as u64 / 3 + tick / 80) % 2 == 0 {
+                    let offset = if (mob.id as u64 / 3 + tick / 80).is_multiple_of(2) {
                         1.5
                     } else {
                         -1.5
@@ -739,9 +734,6 @@ impl Mobs {
             }
         }
         amount.min(20)
-    }
-    pub fn hurt_player(&mut self, player: PlayerPosition, tick: u64) -> bool {
-        self.damage_player(player, tick) > 0
     }
     pub fn take_explosions(&mut self) -> Vec<(i32, i32, i32)> {
         std::mem::take(&mut self.explosions)
