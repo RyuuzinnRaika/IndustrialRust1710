@@ -85,6 +85,24 @@ impl Chests {
         value.validate()?;
         Ok(value)
     }
+    pub fn encoded(&self) -> io::Result<Vec<u8>> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| invalid("encode chest"))?;
+        if bytes.len() as u64 > MAX_BYTES { return Err(invalid("chest capacity reached")); }
+        Ok(bytes)
+    }
+    pub fn staged_update(&self, pos: Position, slots: [Option<Stack>; CHEST_SLOTS]) -> io::Result<Self> {
+        if !world::in_bounds(pos.0, pos.1, pos.2)
+            || slots.iter().flatten().any(|item| !item.is_valid()) {
+            return Err(invalid("invalid chest staged update"));
+        }
+        let mut candidate = self.clone();
+        if slots.iter().all(Option::is_none) { candidate.entries.remove(&key(pos)); }
+        else { candidate.entries.insert(key(pos), slots); }
+        candidate.encoded()?;
+        candidate.revision = self.revision.wrapping_add(1);
+        Ok(candidate)
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }
