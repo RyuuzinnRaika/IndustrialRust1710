@@ -275,7 +275,10 @@ impl Inventory {
         let mut changed = Vec::new();
         for slot in (36..45).chain(9..36) {
             if let Some(current) = next.slots[slot].as_mut() {
-                if current.id == item.id && current.damage == item.damage && current.count < current.max_count() {
+                if current.id == item.id
+                    && current.damage == item.damage
+                    && current.count < current.max_count()
+                {
                     let add = (current.max_count() - current.count).min(remaining);
                     current.count += add;
                     remaining -= add;
@@ -1188,7 +1191,8 @@ impl Inventory {
                     Some(mut current)
                         if current.id == output.id
                             && current.damage == output.damage
-                            && u16::from(current.count) + u16::from(output.count) <= u16::from(output.max_count()) =>
+                            && u16::from(current.count) + u16::from(output.count)
+                                <= u16::from(output.max_count()) =>
                     {
                         current.count += output.count;
                         Some(current)
@@ -1358,7 +1362,15 @@ mod tests {
     fn shift_crafting_consumes_each_iteration_and_stops_at_capacity() {
         let mut inv = Inventory::default();
         // 2x2 player grid ingredients are only set through server-owned clicks.
-        inv.creative_set(36, Some(Stack { id: 17, count: 3, damage: 0 })).unwrap();
+        inv.creative_set(
+            36,
+            Some(Stack {
+                id: 17,
+                count: 3,
+                damage: 0,
+            }),
+        )
+        .unwrap();
         assert!(inv.click_window(0, 36, 0, 0));
         assert!(inv.click_window(0, 1, 0, 0));
         assert!(inv.click_window(0, 0, 0, 1));
