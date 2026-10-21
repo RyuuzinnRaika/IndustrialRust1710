@@ -1320,86 +1320,88 @@ fn play(
                                         let mut ground = ground_items.lock().map_err(|_| {
                                             io::Error::other("ground items lock poisoned")
                                         })?;
-                                        // A filled entity pool must not destroy a
-                                        // block that should have created an item.
-                                        if (result.drop.is_none() && bonus.is_none())
-                                            || !ground.is_full()
-                                        {
-                                            let mut candidate = inventory.clone();
-                                            let wore =
-                                                result.wear_tool && candidate.wear_held_tool();
-                                            // Commit durability consumption before
-                                            // changing the world, not vice-versa.
-                                            if wore {
-                                                candidate.save(inventory_path)?;
-                                            }
-                                            match w.update_and_save(world_path, x, y, z, 0) {
-                                                Ok(true) => {
-                                                    if wore {
-                                                        *inventory = candidate;
-                                                        send(
-                                                            s,
-                                                            0x2f,
-                                                            &inventory
-                                                                .set_slot(inventory.held_slot())?,
-                                                        )?;
-                                                    }
-                                                    if let Some(drop) = result.drop {
-                                                        let stack = Stack {
-                                                            id: drop.id,
-                                                            count: 1,
-                                                            damage: drop.damage,
-                                                        };
-                                                        // A crash after world save and
-                                                        // before entity persistence can
-                                                        // lose an item, never clone it.
-                                                        let item = ground.put(
-                                                            ground_path,
-                                                            stack,
-                                                            target,
-                                                        )?;
-                                                        hub.register_ground_item(&item);
-                                                    }
-                                                    if let Some(stack) = bonus {
-                                                        if !ground.is_full() {
-                                                            let item = ground.put(
-                                                                ground_path,
-                                                                stack,
-                                                                target,
-                                                            )?;
-                                                            hub.register_ground_item(&item);
-                                                        }
-                                                    }
-                                                    changed = true;
-                                                    let reward = match block {
-                                                        16 => 2,
-                                                        21 => 4,
-                                                        56 => 5,
-                                                        73 | 74 => 3,
-                                                        129 => 5,
-                                                        153 => 3,
-                                                        _ => 0,
-                                                    };
-                                                    if reward > 0 {
-                                                        if let Some(orb) = mobs
-                                                            .lock()
-                                                            .map_err(|_| bad("mob mutex poisoned"))?
-                                                            .spawn_xp(*player, reward)
-                                                        {
-                                                            hub.broadcast(orb);
-                                                        }
-                                                    }
+                                        // Stage the block removal, tool wear and
+                                        // all drops before publishing *any* state.
+                                        // This prevents item loss or duplication
+                                        // after interruption between save files.
+                                        let mut candidate = inventory.clone();
+                                        let wore =
+                                            result.wear_tool && candidate.wear_held_tool();
+                                        let mut stacks = Vec::new();
+                                        if let Some(drop) = result.drop {
+                                            stacks.push(Stack {
+                                                id: drop.id,
+                                                count: 1,
+                                                damage: drop.damage,
+                                            });
+                                        }
+                                        if let Some(extra) = bonus {
+                                            stacks.push(extra);
+                                        }
+                                        if ground.has_capacity_for(stacks.len()) {
+                                            if let Some(staged_world) =
+                                                w.staged_updates(&[(x, y, z, 0)])?
+                                            {
+                                                let (staged_ground, spawned) =
+                                                    ground.stage_put_many(&stacks, target)?;
+                                                let mut writes = vec![(
+                                                    world_path,
+                                                    staged_world.encoded()?,
+                                                )];
+                                                if wore {
+                                                    writes.push((
+                                                        inventory_path,
+                                                        candidate.encoded()?,
+                                                    ));
                                                 }
-                                                Ok(false) => {
-                                                    if wore {
-                                                        inventory.save(inventory_path)?;
-                                                    }
+                                                if !spawned.is_empty() {
+                                                    writes.push((
+                                                        ground_path,
+                                                        staged_ground.encoded()?,
+                                                    ));
                                                 }
-                                                Err(error) => {
-                                                    if wore {
-                                                        inventory.save(inventory_path)?;
+                                                if writes.len() == 1 {
+                                                    staged_world.save(world_path)?;
+                                                } else {
+                                                    journal::commit(
+                                                        &world_path.with_extension(
+                                                            "pending-txn.json",
+                                                        ),
+                                                        &writes,
+                                                    )?;
+                                                }
+                                                *w = staged_world;
+                                                *ground = staged_ground;
+                                                if wore {
+                                                    *inventory = candidate;
+                                                    send(
+                                                        s,
+                                                        0x2f,
+                                                        &inventory
+                                                            .set_slot(inventory.held_slot())?,
+                                                    )?;
+                                                }
+                                                for item in spawned {
+                                                    hub.register_ground_item(&item);
+                                                }
+                                                changed = true;
+                                                let reward = match block {
+                                                    16 => 2,
+                                                    21 => 4,
+                                                    56 => 5,
+                                                    73 | 74 => 3,
+                                                    129 => 5,
+                                                    153 => 3,
+                                                    _ => 0,
+                                                };
+                                                if reward > 0 {
+                                                    if let Some(orb) = mobs
+                                                        .lock()
+                                                        .map_err(|_| bad("mob mutex poisoned"))?
+                                                        .spawn_xp(*player, reward)
+                                                    {
+                                                        hub.broadcast(orb);
                                                     }
-                                                    return Err(error);
                                                 }
                                             }
                                         }
