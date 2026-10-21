@@ -293,7 +293,9 @@ pub struct Mobs {
     entities: BTreeMap<i32, Mob>,
     arrows: BTreeMap<i32, Arrow>,
     orbs: BTreeMap<i32, (PlayerPosition, u16)>,
-    pending_hits: Vec<(PlayerPosition, u8, u64)>,
+    pending_hits: Vec<(i32, u8, u64)>,
+    participants: Vec<(i32, PlayerPosition)>,
+    pending_poison: BTreeMap<i32, u16>,
     pending_blast_damage: BTreeMap<i32, u8>,
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
     explosions: Vec<Explosion>,
@@ -405,6 +407,15 @@ impl Mobs {
             }
         }
         state
+    }
+    /// Tie all projectile hits to stable entity IDs, including overlapping
+    /// player positions; called by the 20TPS worker before ticking entities.
+    pub fn set_participants(&mut self, players: &[(i32, PlayerPosition)]) {
+        self.participants = players.iter().copied()
+            .filter(|(_, p)| p.is_valid()).take(32).collect();
+    }
+    pub fn take_player_effect(&mut self, player_id: i32) -> Option<(u8, u16)> {
+        self.pending_poison.remove(&player_id).map(|duration| (19, duration))
     }
     pub fn spawn_events(&self) -> impl Iterator<Item = Event> + '_ {
         self.entities
@@ -979,7 +990,8 @@ impl Mobs {
                     events.push(packet);
                 }
             }
-            self.tick_arrows(world, players, now, &mut events);
+            let participants = self.participants.clone();
+            self.tick_arrows(world, &participants, now, &mut events);
         }
         if self.explosions.len() > 32 {
             self.explosions.truncate(32);
@@ -1024,7 +1036,7 @@ impl Mobs {
     fn tick_arrows(
         &mut self,
         world: &World,
-        players: &[PlayerPosition],
+        players: &[(i32, PlayerPosition)],
         now: u64,
         events: &mut Vec<Event>,
     ) {
@@ -1092,9 +1104,9 @@ impl Mobs {
     }
     pub fn hurt_player(&mut self, player_id: i32, player: PlayerPosition, tick: u64) -> u8 {
         let mut amount = self.pending_blast_damage.remove(&player_id).unwrap_or(0);
-        self.pending_hits.retain(|(p, d, t)| {
-            if tick.saturating_sub(*t) < 30 && (p.x - player.x).hypot(p.z - player.z) < 0.75 {
-                amount = amount.saturating_add(*d);
+        self.pending_hits.retain(|(id, damage, t)| {
+            if *id == player_id && tick.saturating_sub(*t) < 30 {
+                amount = amount.saturating_add(*damage);
                 false
             } else {
                 tick.saturating_sub(*t) < 30
@@ -1110,7 +1122,12 @@ impl Mobs {
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
                 mob.bite_tick = tick;
-                amount = amount.saturating_add(if mob.kind == Kind::Spider { 2 } else { 3 });
+                amount = amount.saturating_add(if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
+                    2
+                } else { 3 });
+                if mob.kind == Kind::CaveSpider {
+                    self.pending_poison.insert(player_id, 140);
+                }
                 break;
             }
         }
