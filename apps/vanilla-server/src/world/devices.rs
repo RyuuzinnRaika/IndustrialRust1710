@@ -23,7 +23,8 @@ impl World {
         let value = self.get(x,y,z);
         match value >> 4 {
             55 => value & 15 > 0,
-            69 | 70 | 72 | 77 | 143 => value & 8 != 0,
+            69 | 77 | 143 => value & 8 != 0,
+            70 | 72 => value & 1 != 0,
             76 | 94 | 152 => true,
             _ => false,
         }
@@ -81,8 +82,9 @@ impl World {
             if self.fluid_phase >= when {
                 let (x,y,z) = pos;
                 let current = self.get(x,i32::from(y),z);
-                if matches!(current >> 4, 70 | 72 | 77 | 143) && current & 8 != 0 {
-                    changes.insert(pos,current & !8);
+                let flag = if matches!(current >> 4,70 | 72) {1} else {8};
+                if matches!(current >> 4, 70 | 72 | 77 | 143) && current & flag != 0 {
+                    changes.insert(pos,current & !flag);
                 }
             }
         }
@@ -191,7 +193,7 @@ impl World {
         let block = self.get(x,y,z);
         if !matches!(block >> 4, 70 | 72) { return Ok(false); }
         self.pending_buttons.insert((x,y as u8,z),self.fluid_phase+10);
-        if block & 8 != 0 { return Ok(false); }
-        self.update_and_save(path,x,y,z,block | 8)
+        if block & 1 != 0 { return Ok(false); }
+        self.update_and_save(path,x,y,z,block | 1)
     }
 }
