@@ -494,11 +494,140 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if shapeless(&[368, 377]) {
         return product(381, 1, 0); // eye of ender
     }
+    // Common 1.7.10 survival recipes (pre-1.8 output counts and IDs).
+    if w == 1 && h == 1 {
+        let single = at(0, 0)?;
+        match single.id {
+            5 => return product(143, 1, 0), // wooden button (any plank)
+            1 if single.damage == 0 => return product(77, 1, 0), // stone button
+            352 => return product(351, 3, 15), // bone meal
+            369 => return product(377, 2, 0), // blaze powder
+            _ => {}
+        }
+    }
+    if w == 2 && h == 1 && (0..2).all(|x| at(x, 0).is_some_and(|s| s.id == 1 && s.damage == 0)) {
+        return product(70, 1, 0); // stone pressure plate
+    }
+    if matches(&[&[266, 266]]) {
+        return product(147, 1, 0); // light weighted pressure plate
+    }
+    if matches(&[&[265, 265]]) {
+        return product(148, 1, 0); // heavy weighted pressure plate
+    }
+    if matches(&[&[-1, 0, -1], &[0, -1, 0]]) {
+        return product(281, 4, 0); // four wooden bowls
+    }
+    if matches(&[&[280, 0, 280], &[280, 280, 280], &[280, 0, 280]]) {
+        return product(65, 3, 0); // three ladders
+    }
+    if matches(&[&[-1, -1, -1], &[-1, -1, -1], &[0, 280, 0]]) {
+        return product(323, 3, 0); // three signs in Java 1.7.10
+    }
+    if matches(&[&[265], &[280], &[-1]]) {
+        return product(131, 2, 0); // tripwire hooks
+    }
+    if matches(&[&[86], &[50]]) {
+        return product(91, 1, 0); // jack o'lantern
+    }
+    if matches(&[&[336, 336], &[336, 336]]) {
+        return product(45, 1, 0); // brick block
+    }
+    if matches(&[&[337, 337], &[337, 337]]) {
+        return product(82, 1, 0); // clay block
+    }
+    if matches(&[&[332, 332], &[332, 332]]) {
+        return product(80, 1, 0); // snow block
+    }
+    if matches(&[&[348, 348], &[348, 348]]) {
+        return product(89, 1, 0); // glowstone
+    }
+    if matches(&[&[405, 405], &[405, 405]]) {
+        return product(112, 1, 0); // nether brick block
+    }
+    if matches(&[&[406, 406], &[406, 406]]) {
+        return product(155, 1, 0); // quartz block
+    }
+    if matches(&[&[280, 280, 280], &[280, 334, 280], &[280, 280, 280]]) {
+        return product(389, 1, 0); // item frame
+    }
+    if matches(&[&[280, 280, 280], &[280, -2, 280], &[280, 280, 280]]) {
+        return product(321, 1, 0); // painting (any wool)
+    }
+    if matches(&[&[0, 0, 280], &[0, 280, 287], &[280, 0, 287]]) {
+        return product(346, 1, 0); // fishing rod
+    }
+    if matches(&[&[289, 12, 289], &[12, 289, 12], &[289, 12, 289]]) {
+        return product(46, 1, 0); // TNT
+    }
+    if matches(&[&[266, 266, 266], &[266, 260, 266], &[266, 266, 266]]) {
+        return product(322, 1, 0); // golden apple
+    }
+    if matches(&[&[41, 41, 41], &[41, 260, 41], &[41, 41, 41]]) {
+        return product(322, 1, 1); // enchanted golden apple (craftable in 1.7.10)
+    }
+    if matches(&[&[371, 371, 371], &[371, 360, 371], &[371, 371, 371]]) {
+        return product(382, 1, 0); // glistering melon
+    }
+    if shapeless(&[39, 40, 281]) {
+        return product(282, 1, 0); // mushroom stew, bowl returned by eating
+    }
+    if shapeless(&[375, 353, 39]) {
+        return product(376, 1, 0); // fermented spider eye
+    }
+    if shapeless(&[341, 377]) {
+        return product(378, 1, 0); // magma cream
+    }
+    for (machine, item) in [(54, 342), (61, 343), (46, 407), (154, 408)] {
+        if shapeless(&[328, machine]) {
+            return product(item, 1, 0); // chest/furnace/TNT/hopper minecart
+        }
+    }
     None
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn expanded_1710_survival_recipes_are_shaped_and_bounded() {
+        let make = |ids: [i16; 9]| ids.map(|id| if id == 0 { None } else { product(id, 1, 0) });
+        let cases = [
+            ([280, 0, 280, 280, 280, 280, 280, 0, 280], (65, 3, 0)),
+            ([5, 5, 5, 5, 5, 5, 0, 280, 0], (323, 3, 0)),
+            ([280, 280, 280, 280, 334, 280, 280, 280, 280], (389, 1, 0)),
+            ([266, 266, 266, 266, 260, 266, 266, 266, 266], (322, 1, 0)),
+            ([41, 41, 41, 41, 260, 41, 41, 41, 41], (322, 1, 1)),
+            ([289, 12, 289, 12, 289, 12, 289, 12, 289], (46, 1, 0)),
+            ([0, 0, 280, 0, 280, 287, 280, 0, 287], (346, 1, 0)),
+            ([0, 265, 0, 0, 280, 0, 0, 5, 0], (131, 2, 0)),
+        ];
+        for (inputs, (id, count, damage)) in cases {
+            assert_eq!(result(&make(inputs), 3), product(id, count, damage));
+        }
+        // Missing just one ingredient cannot accidentally produce a free item.
+        assert_eq!(result(&make([280, 0, 280, 280, 0, 280, 280, 0, 280]), 3), None);
+        // 1.7.10 buttons require real stone, not a granite metadata variant.
+        assert_eq!(result(&[product(1, 1, 1), None, None, None], 2), None);
+    }
+
+    #[test]
+    fn expanded_1710_shapeless_and_metadata_recipes() {
+        let make = |ids: [i16; 4]| ids.map(|id| if id == 0 { None } else { product(id, 1, 0) });
+        for (ids, output) in [
+            ([39, 40, 281, 0], (282, 1, 0)),
+            ([375, 353, 39, 0], (376, 1, 0)),
+            ([341, 377, 0, 0], (378, 1, 0)),
+            ([328, 154, 0, 0], (408, 1, 0)),
+            ([337, 337, 337, 337], (82, 1, 0)),
+            ([406, 406, 406, 406], (155, 1, 0)),
+        ] {
+            assert_eq!(result(&make(ids), 2), product(output.0, output.1, output.2));
+        }
+        assert_eq!(result(&make([352, 0, 0, 0]), 2), product(351, 3, 15));
+        assert_eq!(result(&make([369, 0, 0, 0]), 2), product(377, 2, 0));
+        assert_eq!(result(&make([1, 1, 0, 0]), 2), product(70, 1, 0));
+        assert_eq!(result(&make([266, 266, 0, 0]), 2), product(147, 1, 0));
+    }
+
     #[test]
     fn legacy_workstations_and_bucket_cake_have_bounded_recipes() {
         let make = |ids: [i16; 9]| {
