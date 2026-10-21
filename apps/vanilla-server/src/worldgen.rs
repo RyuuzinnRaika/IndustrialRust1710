@@ -213,13 +213,55 @@ pub struct OreSpec {
     pub vein_size: u8,
 }
 pub const ORES: [OreSpec; 7] = [
-    OreSpec { id: 16, min_y: 1, max_y: 128, attempts_per_chunk: 20, vein_size: 16 },
-    OreSpec { id: 15, min_y: 1, max_y: 64, attempts_per_chunk: 20, vein_size: 8 },
-    OreSpec { id: 14, min_y: 1, max_y: 32, attempts_per_chunk: 2, vein_size: 8 },
-    OreSpec { id: 73, min_y: 1, max_y: 16, attempts_per_chunk: 8, vein_size: 7 },
-    OreSpec { id: 56, min_y: 1, max_y: 16, attempts_per_chunk: 1, vein_size: 7 },
-    OreSpec { id: 21, min_y: 12, max_y: 32, attempts_per_chunk: 1, vein_size: 6 },
-    OreSpec { id: 129, min_y: 4, max_y: 32, attempts_per_chunk: 1, vein_size: 5 },
+    OreSpec {
+        id: 16,
+        min_y: 1,
+        max_y: 128,
+        attempts_per_chunk: 20,
+        vein_size: 16,
+    },
+    OreSpec {
+        id: 15,
+        min_y: 1,
+        max_y: 64,
+        attempts_per_chunk: 20,
+        vein_size: 8,
+    },
+    OreSpec {
+        id: 14,
+        min_y: 1,
+        max_y: 32,
+        attempts_per_chunk: 2,
+        vein_size: 8,
+    },
+    OreSpec {
+        id: 73,
+        min_y: 1,
+        max_y: 16,
+        attempts_per_chunk: 8,
+        vein_size: 7,
+    },
+    OreSpec {
+        id: 56,
+        min_y: 1,
+        max_y: 16,
+        attempts_per_chunk: 1,
+        vein_size: 7,
+    },
+    OreSpec {
+        id: 21,
+        min_y: 12,
+        max_y: 32,
+        attempts_per_chunk: 1,
+        vein_size: 6,
+    },
+    OreSpec {
+        id: 129,
+        min_y: 4,
+        max_y: 32,
+        attempts_per_chunk: 1,
+        vein_size: 5,
+    },
 ];
 
 /// A fixed-size, contiguous, center-first vein. The inner 2x2x2 cube
@@ -686,8 +728,9 @@ mod tests {
                 }
             }
         }
-        assert!(ORES.iter().all(|spec| spec.min_y <= spec.max_y
-            && spec.vein_size > 0 && spec.vein_size <= 32));
+        assert!(ORES
+            .iter()
+            .all(|spec| spec.min_y <= spec.max_y && spec.vein_size > 0 && spec.vein_size <= 32));
     }
     #[test]
     fn cross_chunk_border_is_seed_and_order_independent() {
