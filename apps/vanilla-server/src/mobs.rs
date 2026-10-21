@@ -1396,4 +1396,41 @@ mod tests {
         assert_eq!(mobs.arrows.len(), 1);
         assert_eq!(mobs.arrows.values().next().unwrap().spawn().id, 0x0e);
     }
+    #[test]
+    fn summoned_species_preserve_global_entity_ids() {
+        let world = World::new();
+        let mut mobs = Mobs::default();
+        let origin = PlayerPosition {x:0.5,y:64.0,z:0.5};
+        for name in ["zombie","cavespider","enderman","witch","ghast","blaze",
+            "zombiepigman","magmacube","villager","irongolem","enderdragon","wither"] {
+            let event = mobs.summon(name,&world,origin).unwrap();
+            assert_eq!(event.id,0x0f);
+        }
+        assert_eq!(mobs.entities.len(),12);
+        let ids: Vec<i32> = mobs.entities.keys().copied().collect();
+        assert_eq!(ids, (0..12).collect::<Vec<_>>());
+        assert_eq!(mobs.spawn_events().count(),12);
+    }
+    #[test]
+    fn slime_melee_death_creates_four_small_slimes() {
+        let mut mobs=Mobs::default();
+        let pos=PlayerPosition::default();
+        mobs.insert(Kind::Slime,pos,false);
+        let result=mobs.player_attack(0,pos,Some(Stack{id:276,count:1,damage:0}),20).unwrap();
+        assert!(result.drop.is_none());
+        assert_eq!(result.events.iter().filter(|e|e.id==0x0f).count(),4);
+        assert_eq!(mobs.entities.len(),4);
+        assert!(mobs.entities.values().all(|m|m.split_size==1));
+    }
+    #[test]
+    fn cave_spider_poison_is_specific_to_entity_id() {
+        let mut mobs=Mobs::default();
+        let pos=PlayerPosition::default();
+        mobs.insert(Kind::CaveSpider,pos,false);
+        if let Some(mob)=mobs.entities.get_mut(&0) { mob.angry=true; }
+        assert_eq!(mobs.hurt_player(11,pos,20),2);
+        assert_eq!(mobs.take_player_effect(11),Some((19,140)));
+        assert_eq!(mobs.take_player_effect(12),None);
+    }
+
 }
