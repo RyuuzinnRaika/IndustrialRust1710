@@ -55,10 +55,31 @@ impl Stack {
     pub fn max_count(self) -> u8 {
         match self.id {
             323 | 325 | 332 | 344 | 368 | 381 => 16,
-            256..=259 | 261 | 267..=279 | 282..=286 | 290..=294
-            | 298..=317 | 326..=329 | 333 | 335 | 342 | 343
-            | 346 | 354 | 355 | 358 | 359 | 373 | 386 | 387 | 398 | 403
-            | 407 | 408 | 417..=419 | 2256..=2267 => 1,
+            256..=259
+            | 261
+            | 267..=279
+            | 282..=286
+            | 290..=294
+            | 298..=317
+            | 326..=329
+            | 333
+            | 335
+            | 342
+            | 343
+            | 346
+            | 354
+            | 355
+            | 358
+            | 359
+            | 373
+            | 386
+            | 387
+            | 398
+            | 403
+            | 407
+            | 408
+            | 417..=419
+            | 2256..=2267 => 1,
             _ => 64,
         }
     }
@@ -263,7 +284,10 @@ impl Inventory {
         let mut changed = Vec::new();
         for slot in (36..45).chain(9..36) {
             if let Some(current) = next.slots[slot].as_mut() {
-                if current.id == item.id && current.damage == item.damage && current.count < item.max_count() {
+                if current.id == item.id
+                    && current.damage == item.damage
+                    && current.count < item.max_count()
+                {
                     let add = (item.max_count() - current.count).min(remaining);
                     current.count += add;
                     remaining -= add;
@@ -425,7 +449,10 @@ impl Inventory {
         let end = if window == 0 { 45 } else { 46 };
         for slot in begin..end {
             if let Some(mut stack) = self.lookup(window, slot) {
-                if stack.id == moving.id && stack.damage == moving.damage && stack.count < moving.max_count() {
+                if stack.id == moving.id
+                    && stack.damage == moving.damage
+                    && stack.count < moving.max_count()
+                {
                     let count = (moving.max_count() - stack.count).min(moving.count);
                     stack.count += count;
                     moving.count -= count;
@@ -476,7 +503,8 @@ impl Inventory {
             Some(mut old)
                 if old.id == output.id
                     && old.damage == output.damage
-                    && u16::from(old.count) + u16::from(output.count) <= u16::from(output.max_count()) =>
+                    && u16::from(old.count) + u16::from(output.count)
+                        <= u16::from(output.max_count()) =>
             {
                 old.count += output.count;
                 Some(old)
@@ -1162,7 +1190,8 @@ impl Inventory {
                     Some(mut current)
                         if current.id == output.id
                             && current.damage == output.damage
-                            && u16::from(current.count) + u16::from(output.count) <= u16::from(output.max_count()) =>
+                            && u16::from(current.count) + u16::from(output.count)
+                                <= u16::from(output.max_count()) =>
                     {
                         current.count += output.count;
                         Some(current)
@@ -1305,8 +1334,16 @@ mod tests {
     #[test]
     fn legacy_stack_limits_apply_to_all_inventory_windows() {
         use super::{Inventory, Stack};
-        let egg = Stack { id: 344, count: 16, damage: 0 };
-        let potion = Stack { id: 373, count: 1, damage: 8194 };
+        let egg = Stack {
+            id: 344,
+            count: 16,
+            damage: 0,
+        };
+        let potion = Stack {
+            id: 373,
+            count: 1,
+            damage: 8194,
+        };
         assert!(egg.is_valid());
         assert!(!Stack { count: 17, ..egg }.is_valid());
         assert!(potion.is_valid());
@@ -1315,7 +1352,13 @@ mod tests {
         let mut chest = [None; 27];
         assert!(inv.receive_stack(egg).is_some());
         assert!(inv.receive_stack(egg).is_some());
-        assert_eq!(inv.possessions().iter().map(|s| u32::from(s.count)).sum::<u32>(), 32);
+        assert_eq!(
+            inv.possessions()
+                .iter()
+                .map(|s| u32::from(s.count))
+                .sum::<u32>(),
+            32
+        );
         // Two complete 16-stacks must remain separate.
         assert_eq!(inv.possessions().len(), 2);
         assert!(inv.chest_click(&mut chest, 27, 0, 0).is_some());
@@ -1325,22 +1368,43 @@ mod tests {
     fn possession_snapshot_never_counts_armor_twice() {
         use super::{Inventory, Stack};
         let mut inv = Inventory::default();
-        inv.slots[5] = Some(Stack { id: 306, count: 1, damage: 0 });
-        inv.slots[36] = Some(Stack { id: 1, count: 4, damage: 0 });
+        inv.slots[5] = Some(Stack {
+            id: 306,
+            count: 1,
+            damage: 0,
+        });
+        inv.slots[36] = Some(Stack {
+            id: 1,
+            count: 4,
+            damage: 0,
+        });
         assert_eq!(inv.possessions().len(), 2);
-        assert_eq!(inv.possessions().iter().map(|s| u32::from(s.count)).sum::<u32>(), 5);
+        assert_eq!(
+            inv.possessions()
+                .iter()
+                .map(|s| u32::from(s.count))
+                .sum::<u32>(),
+            5
+        );
     }
 
     #[test]
     fn shift_crafting_repeats_and_conserves_ingredients() {
         use super::{Inventory, Stack};
         let mut inv = Inventory::default();
-        inv.slots[1] = Some(Stack { id: 17, count: 3, damage: 0 });
+        inv.slots[1] = Some(Stack {
+            id: 17,
+            count: 3,
+            damage: 0,
+        });
         assert!(inv.click(0, 0, 1));
         assert!(inv.slots[1].is_none());
-        let planks: u32 = inv.slots[9..45].iter().flatten()
+        let planks: u32 = inv.slots[9..45]
+            .iter()
+            .flatten()
             .filter(|stack| stack.id == 5)
-            .map(|stack| u32::from(stack.count)).sum();
+            .map(|stack| u32::from(stack.count))
+            .sum();
         assert_eq!(planks, 12);
     }
 
