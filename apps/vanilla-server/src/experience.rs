@@ -13,10 +13,12 @@ pub struct Experience {
     pub total: u32,
 }
 fn required(level: u32) -> u32 {
+    // Minecraft Java Edition 1.7.10's pre-1.8 XP progression.
+    // 0..=15: 17, 16..=30: 3*level - 28, 31+: 7*level - 148.
     match level {
-        0..=15 => 2 * level + 7,
-        16..=30 => 5 * level - 38,
-        _ => 9 * level - 158,
+        0..=15 => 17,
+        16..=30 => 3 * level - 28,
+        _ => 7 * level - 148,
     }
 }
 impl Experience {
@@ -72,12 +74,24 @@ impl Experience {
 mod tests {
     use super::*;
     #[test]
-    fn experience_levels_at_seven_and_seventeen() {
+    fn experience_levels_follow_minecraft_1710_thresholds() {
         let mut e = Experience::default();
+        assert_eq!(e.level_and_fraction().0, 0);
         assert!(e.grant(7));
-        assert_eq!(e.level_and_fraction().0, 1);
+        assert_eq!(e.level_and_fraction().0, 0);
         e.grant(10);
+        assert_eq!(e.level_and_fraction().0, 1);
+        e.grant(17);
         assert_eq!(e.level_and_fraction().0, 2);
         assert_eq!(e.packet().len(), 8);
+        assert_eq!(required(0), 17);
+        assert_eq!(required(15), 17);
+        assert_eq!(required(16), 20);
+        assert_eq!(required(30), 62);
+        assert_eq!(required(31), 69);
+        e.total = 255;
+        assert_eq!(e.level_and_fraction().0, 15);
+        e.total = 825;
+        assert_eq!(e.level_and_fraction().0, 30);
     }
 }
