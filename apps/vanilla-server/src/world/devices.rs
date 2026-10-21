@@ -77,7 +77,6 @@ impl World {
     }
     pub(super) fn device_changes(&mut self, budget: usize) -> BTreeMap<Position,u16> {
         let mut changes = BTreeMap::new();
-        let mut done = Vec::new();
         for (&pos,&when) in &self.pending_buttons {
             if self.fluid_phase >= when {
                 let (x,y,z) = pos;
@@ -85,10 +84,8 @@ impl World {
                 if matches!(current >> 4, 70 | 72 | 77 | 143) && current & 8 != 0 {
                     changes.insert(pos,current & !8);
                 }
-                done.push(pos);
             }
         }
-        for pos in done { self.pending_buttons.remove(&pos); }
         if self.pending_devices.is_empty() { return changes; }
         let len = self.pending_devices.len();
         let start = (self.fluid_phase as usize).wrapping_mul(budget) % len;
@@ -140,7 +137,7 @@ impl World {
             77 | 143 => old | 8,
             96 => old ^ 4,
             93 | 94 => (old & !12) | (((((old & 12) >> 2) + 1) & 3) << 2),
-            64 | 71 => {
+            64 => {
                 // Top-half clicks operate on the bottom-half metadata.
                 let lower_y = if old & 8 != 0 {y-1} else {y};
                 let bottom = self.get(x,lower_y,z);
@@ -158,6 +155,35 @@ impl World {
                 self.fluid_phase + if id == 77 { 20 } else { 30 });
         }
         Ok(touched)
+    }
+
+    /// Place both halves of a door in one save; failures roll back both cells.
+    pub fn place_door(&mut self,path:&Path,x:i32,y:i32,z:i32,id:u16,orientation:u16)
+        -> io::Result<bool> {
+        if !matches!(id,64 | 71) || !in_bounds(x,y,z) || !in_bounds(x,y+1,z)
+            || self.get(x,y,z) != 0 || self.get(x,y+1,z) != 0
+            || !self.can_support(x,y,z,id << 4) { return Ok(false); }
+        let lower=(x,y as u8,z);
+        let upper=(x,(y+1) as u8,z);
+        let old_lower=self.edits.get(&lower).copied();
+        let old_upper=self.edits.get(&upper).copied();
+        self.set_gravity_cell(lower,(id << 4) | (orientation & 3));
+        self.set_gravity_cell(upper,(id << 4) | 8);
+        let result=if self.edits.len() > super::MAX_EDITS {
+            Err(io::Error::new(io::ErrorKind::InvalidData,"too many door edits"))
+        } else {self.save(path)};
+        if let Err(error)=result {
+            for (key,previous) in [(lower,old_lower),(upper,old_upper)] {
+                match previous {
+                    Some(value)=>{self.edits.insert(key,value);}
+                    None=>{self.edits.remove(&key);}
+                }
+            }
+            return Err(error);
+        }
+        self.wake_block_updates(x,y,z);
+        self.wake_block_updates(x,y+1,z);
+        Ok(true)
     }
 
     /// Pressure plates stay down for ten ticks after last player contact.
