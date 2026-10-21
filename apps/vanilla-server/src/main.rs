@@ -742,7 +742,7 @@ fn play(
                 input.finish()?;
                 if survival && vitals.health > 0.0 && action == 0 {
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
-                    if let Some(event) = creatures.feed(target_id, inventory.held(), now_tick) {
+                    if let Some(event) = creatures.feed(target_id, *player, inventory.held(), now_tick) {
                         let mut candidate = inventory.clone();
                         if candidate.consume_held() {
                             candidate.save(inventory_path)?;
