@@ -174,6 +174,12 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
             })
         })
         .collect::<io::Result<_>>()?;
+    // Reject duplicates *before* publishing the durable redo record.
+    // Otherwise a bad request would strand a journal and prevent startup.
+    let mut seen = std::collections::HashSet::new();
+    if files.iter().any(|file| !seen.insert(&file.relative)) {
+        return Err(invalid("duplicate journal target"));
+    }
     let record = Record {
         version: VERSION,
         files,
@@ -236,6 +242,66 @@ mod tests {
         recover(&journal).unwrap();
         assert_eq!(fs::read(&a).unwrap(), b"after-a");
         assert_eq!(fs::read(&b).unwrap(), b"after-b");
+        assert!(!journal.exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn duplicate_targets_cannot_strand_a_committed_journal() {
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-duplicate-{}", std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("players")).unwrap();
+        let journal = home.join("world.pending-txn.json");
+        let target = home.join("players/test.inventory.json");
+        let error = commit(
+            &journal,
+            &[(target.as_path(), b"first".to_vec()), (target.as_path(), b"second".to_vec())],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(!journal.exists());
+        assert!(!target.exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn three_participant_crash_recovery_replays_all_and_is_idempotent() {
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-three-{}", std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("players")).unwrap();
+        let a = home.join("players/test.inventory.json");
+        let b = home.join("world.chests.json");
+        let c = home.join("world.hoppers.json");
+        let journal = home.join("world.pending-txn.json");
+        let names = [&a, &b, &c];
+        let record = Record {
+            version: VERSION,
+            files: names
+                .iter()
+                .enumerate()
+                .map(|(i, path)| {
+                    let contents = format!("version-2-{i}").into_bytes();
+                    Target {
+                        relative: relative(&home, path).unwrap(),
+                        checksum: fingerprint(&contents),
+                        contents,
+                    }
+                })
+                .collect(),
+        };
+        for name in names {
+            fs::write(name, b"version-1").unwrap();
+        }
+        fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::write(&a, b"version-2-0").unwrap(); // crash after first rename
+        recover(&journal).unwrap();
+        for (i, name) in [&a, &b, &c].iter().enumerate() {
+            assert_eq!(fs::read(name).unwrap(), format!("version-2-{i}").as_bytes());
+        }
+        recover(&journal).unwrap(); // no further changes
         assert!(!journal.exists());
         fs::remove_dir_all(home).unwrap();
     }
