@@ -870,28 +870,30 @@ impl Mobs {
                         continue;
                     }
                 }
-                if mob.kind == Kind::Skeleton
-                    && (5.0..16.0).contains(&d)
-                    && now.saturating_sub(mob.bite_tick) >= 40
-                    && mob_rules::visible(
-                        world,
-                        PlayerPosition {
-                            y: mob.position.y + 1.55,
-                            ..mob.position
-                        },
-                        PlayerPosition {
-                            y: target.y + 1.55,
-                            ..target
-                        },
-                        16.0,
-                    )
-                {
-                    mob.bite_tick = now;
-                    let yaw = (-(target.x - mob.position.x))
-                        .atan2(target.z - mob.position.z)
-                        .to_degrees() as f32;
-                    let pitch = -(target.y + 1.0 - mob.position.y).atan2(d).to_degrees() as f32;
-                    shots.push((mob.id, mob.position, yaw, pitch));
+                let ranged = match mob.kind {
+                    Kind::Skeleton if (5.0..16.0).contains(&d) =>
+                        Some((60, 1.5, 3u8, 40u64)),
+                    Kind::Witch if d < 12.0 =>
+                        Some((73, 0.75, 3, 60)),
+                    Kind::Ghast if d < 48.0 =>
+                        Some((63, 0.85, 6, 55)),
+                    Kind::Blaze if d < 18.0 =>
+                        Some((64, 1.0, 5, 45)),
+                    Kind::Wither if d < 32.0 =>
+                        Some((66, 1.0, 8, 40)),
+                    _ => None,
+                };
+                if let Some((object_type, speed, damage, delay)) = ranged {
+                    if now.saturating_sub(mob.bite_tick) >= delay
+                        && mob_rules::visible(
+                            world,
+                            PlayerPosition { y: mob.position.y + 1.5, ..mob.position },
+                            PlayerPosition { y: target.y + 1.5, ..target },
+                            64.0)
+                    {
+                        mob.bite_tick = now;
+                        shots.push((mob.id, mob.position, target, object_type, speed, damage));
+                    }
                 }
                 let destination = if mob.kind.passive() {
                     if !(now / 80 + mob.id as u64).is_multiple_of(4) {
@@ -970,8 +972,10 @@ impl Mobs {
                     events.push(multiplayer::destroy(id));
                 }
             }
-            for (id, at, yaw, pitch) in shots {
-                if let Some(packet) = self.fire_arrow(Some(id), at, yaw, pitch, 1.5, 3) {
+            for (id, at, target, object_type, speed, damage) in shots {
+                if let Some(packet) = self.fire_mob_projectile(
+                    id, at, target, object_type, speed, damage
+                ) {
                     events.push(packet);
                 }
             }
@@ -1100,7 +1104,8 @@ impl Mobs {
             if !mob.kind.passive()
                 && mob.angry
                 && mob.kind != Kind::Skeleton
-                && mob.kind != Kind::Creeper
+                && !matches!(mob.kind,
+                    Kind::Creeper | Kind::Witch | Kind::Ghast | Kind::Blaze | Kind::Wither)
                 && mob.nearby(player, 1.6)
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
