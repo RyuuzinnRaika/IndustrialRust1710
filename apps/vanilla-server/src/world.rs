@@ -273,7 +273,41 @@ impl World {
             let block = self.get(x, y, z);
             let id = block >> 4;
             let level = block & 15;
-            if !matches!(id, 8 | 10) || level >= 7 {
+            if !matches!(id, 8 | 10) {
+                continue;
+            }
+            // Minecraft 1.7.10's water/lava contact solidifies the lava,
+            // not the water. Source lava becomes obsidian; flowing lava
+            // becomes cobblestone. Resolve contacts before normal spreading
+            // so a lava source cannot also create new flow in this tick.
+            let adjacent = [
+                (x - 1, y, z), (x + 1, y, z),
+                (x, y, z - 1), (x, y, z + 1),
+                (x, y - 1, z), (x, y + 1, z),
+            ];
+            if id == 10 {
+                let touches_water = adjacent.into_iter().any(|(nx, ny, nz)| {
+                    in_bounds(nx, ny, nz) && matches!(self.get(nx, ny, nz) >> 4, 8 | 9)
+                });
+                if touches_water {
+                    changes.insert((x, y as u8, z), (if level == 0 { 49 } else { 4 }) << 4);
+                    continue;
+                }
+            } else {
+                for (nx, ny, nz) in adjacent {
+                    if !in_bounds(nx, ny, nz) {
+                        continue;
+                    }
+                    let other = self.get(nx, ny, nz);
+                    if matches!(other >> 4, 10 | 11) {
+                        changes.insert(
+                            (nx, ny as u8, nz),
+                            (if other & 15 == 0 { 49 } else { 4 }) << 4,
+                        );
+                    }
+                }
+            }
+            if level >= 7 {
                 continue;
             }
             let down = (x, y - 1, z);
@@ -690,6 +724,33 @@ mod tests {
         assert_eq!(saved.get(1, 64, 0), 55 << 4);
         fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn water_lava_contacts_solidify_sources_and_flowing_lava_atomically() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-lava-contact-{}.irw", std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        // On the flat world's solid grass, each fluid is confined to y=64.
+        world.update_and_save(&path, 0, 64, 0, 8 << 4).unwrap();
+        world.update_and_save(&path, 1, 64, 0, 10 << 4).unwrap();
+        world.update_and_save(&path, -3, 64, 0, 8 << 4).unwrap();
+        world.update_and_save(&path, -2, 64, 0, (10 << 4) | 3).unwrap();
+
+        // A failed batch save must not leave a solid block in memory or
+        // consume the queued contacts. The following retry must work.
+        assert!(world.block_tick(&path.join("invalid"), 64).is_err());
+        assert_eq!(world.get(1, 64, 0), 10 << 4);
+        assert_eq!(world.get(-2, 64, 0), (10 << 4) | 3);
+        let changed = world.block_tick(&path, 64).unwrap();
+        assert!(changed.contains(&(1, 64, 0)));
+        assert!(changed.contains(&(-2, 64, 0)));
+        assert_eq!(world.get(1, 64, 0), 49 << 4); // obsidian
+        assert_eq!(world.get(-2, 64, 0), 4 << 4); // cobblestone
+        assert_eq!(World::load(&path).unwrap().get(1, 64, 0), 49 << 4);
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn source_flow_respects_edit_budget_and_legacy_flat() {
         let mut w = World::new();
