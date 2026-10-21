@@ -1491,17 +1491,26 @@ fn play(
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     if matches!(w.get(x, y, z) >> 4, 2 | 3) && w.get(x, y + 1, z) == 0 {
                         let mut after = inventory.clone();
-                        if !survival || after.wear_held_tool() {
+                        if (!survival || after.wear_held_tool())
+                            && let Some(next) = w.staged_updates(&[(x, y, z, 60 << 4)])?
+                        {
                             if survival {
-                                after.save(inventory_path)?;
+                                journal::commit(
+                                    &world_path.with_extension("pending-txn.json"),
+                                    &[
+                                        (world_path, next.encoded()?),
+                                        (inventory_path, after.encoded()?),
+                                    ],
+                                )?;
+                                *inventory = after;
+                            } else {
+                                next.save(world_path)?;
                             }
-                            if w.update_and_save(world_path, x, y, z, 60 << 4)? {
-                                if survival {
-                                    *inventory = after;
-                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                                }
-                                hub.broadcast(block_change_event(&w, x, y, z));
+                            *w = next;
+                            if survival {
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
                             }
+                            hub.broadcast(block_change_event(&w, x, y, z));
                         }
                         continue;
                     }
@@ -1555,25 +1564,29 @@ fn play(
                         let mut candidate = inventory.clone();
                         let paid = !survival || candidate.consume_held();
                         if paid {
-                            if survival {
-                                candidate.save(inventory_path)?;
-                            }
-                            let changed = w.update_many_and_save(
-                                world_path,
-                                &[
-                                    (foot.0, foot.1, foot.2, (26 << 4) | facing),
-                                    (head.0, head.1, head.2, (26 << 4) | facing | 8),
-                                ],
-                            )?;
-                            if changed {
+                            let edits = [
+                                (foot.0, foot.1, foot.2, (26 << 4) | facing),
+                                (head.0, head.1, head.2, (26 << 4) | facing | 8),
+                            ];
+                            if let Some(next) = w.staged_updates(&edits)? {
                                 if survival {
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &[
+                                            (world_path, next.encoded()?),
+                                            (inventory_path, candidate.encoded()?),
+                                        ],
+                                    )?;
                                     *inventory = candidate;
+                                } else {
+                                    next.save(world_path)?;
+                                }
+                                *w = next;
+                                if survival {
                                     send(s, 0x30, &inventory.window_items())?;
                                 }
                                 hub.broadcast(block_change_event(&w, foot.0, foot.1, foot.2));
                                 hub.broadcast(block_change_event(&w, head.0, head.1, head.2));
-                            } else if survival {
-                                inventory.save(inventory_path)?;
                             }
                         }
                     } else {
@@ -1880,8 +1893,19 @@ fn play(
                                 && !invalid_chest_merge
                                 && w.get(x, y, z) != 0
                                 && w.get(nx, ny, nz) == 0
+                                && (!matches!(block_id, 64 | 71)
+                                    || (world::in_bounds(nx, ny + 1, nz)
+                                        && w.get(nx, ny + 1, nz) == 0))
                                 && near(location, nx, ny, nz)
                             {
+                                let edits = if matches!(block_id, 64 | 71) {
+                                    vec![
+                                        (nx, ny, nz, (block_id << 4) | (metadata & 3)),
+                                        (nx, ny + 1, nz, (block_id << 4) | 8),
+                                    ]
+                                } else {
+                                    vec![(nx, ny, nz, (block_id << 4) | metadata)]
+                                };
                                 if survival {
                                     let mut remaining = inventory.clone();
                                     let removed = remaining.consume_held();
@@ -1897,46 +1921,24 @@ fn play(
                                         true
                                     };
                                     if removed && bucket_ok {
-                                        // Persist item consumption before the world edit so a
-                                        // crash cannot grant a free block on restart.
-                                        remaining.save(inventory_path)?;
-                                        match if matches!(block_id, 64 | 71) {
-                                            w.place_door(world_path, nx, ny, nz, block_id, metadata)
-                                        } else {
-                                            w.update_and_save(
-                                                world_path,
-                                                nx,
-                                                ny,
-                                                nz,
-                                                (block_id << 4) | metadata,
-                                            )
-                                        } {
-                                            Ok(true) => {
-                                                *inventory = remaining;
-                                                changed = true;
-                                                send(s, 0x30, &inventory.window_items())?;
-                                            }
-                                            Ok(false) => {
-                                                inventory.save(inventory_path)?;
-                                            }
-                                            Err(error) => {
-                                                inventory.save(inventory_path)?;
-                                                return Err(error);
-                                            }
+                                        if let Some(next) = w.staged_updates(&edits)? {
+                                            journal::commit(
+                                                &world_path.with_extension("pending-txn.json"),
+                                                &[
+                                                    (world_path, next.encoded()?),
+                                                    (inventory_path, remaining.encoded()?),
+                                                ],
+                                            )?;
+                                            *w = next;
+                                            *inventory = remaining;
+                                            changed = true;
+                                            send(s, 0x30, &inventory.window_items())?;
                                         }
                                     }
-                                } else {
-                                    changed = if matches!(block_id, 64 | 71) {
-                                        w.place_door(world_path, nx, ny, nz, block_id, metadata)?
-                                    } else {
-                                        w.update_and_save(
-                                            world_path,
-                                            nx,
-                                            ny,
-                                            nz,
-                                            (block_id << 4) | metadata,
-                                        )?
-                                    };
+                                } else if let Some(next) = w.staged_updates(&edits)? {
+                                    next.save(world_path)?;
+                                    *w = next;
+                                    changed = true;
                                 }
                                 if changed && block_id == 154 {
                                     hoppers
