@@ -17,10 +17,6 @@ pub struct Clock {
     running: AtomicBool,
 }
 impl Clock {
-    pub fn start() -> (Arc<Self>, JoinHandle<()>) {
-        Self::start_at(0)
-    }
-
     /// Start the monotonic server ticker from an already validated snapshot.
     /// Server downtime deliberately does not advance in-game time.
     pub fn start_at(initial_ticks: u64) -> (Arc<Self>, JoinHandle<()>) {
@@ -154,7 +150,7 @@ mod tests {
 
     #[test]
     fn clock_advances_and_stops() {
-        let (clock, handle) = Clock::start();
+        let (clock, handle) = Clock::start_at(0);
         thread::sleep(Duration::from_millis(125));
         let count = clock.ticks();
         assert!((1..=6).contains(&count), "ticks={count}");
