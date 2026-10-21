@@ -1402,7 +1402,11 @@ impl Inventory {
 mod tests {
     #[test]
     fn new_sign_recipe_shift_crafting_is_atomic_when_inventory_is_full() {
-        let sign = Stack { id: 323, count: 16, damage: 0 };
+        let sign = Stack {
+            id: 323,
+            count: 16,
+            damage: 0,
+        };
         let mut inv = Inventory::default();
         for slot in 9..45 {
             inv.slots[slot] = Some(sign);
@@ -1411,12 +1415,24 @@ mod tests {
         // signs, so the entire transaction must be rejected without debit.
         inv.slots[9] = Some(Stack { count: 15, ..sign });
         for index in [0, 1, 2, 3, 4, 5] {
-            inv.workbench[index] = Some(Stack { id: 5, count: 2, damage: 0 });
+            inv.workbench[index] = Some(Stack {
+                id: 5,
+                count: 2,
+                damage: 0,
+            });
         }
-        inv.workbench[7] = Some(Stack { id: 280, count: 2, damage: 0 });
+        inv.workbench[7] = Some(Stack {
+            id: 280,
+            count: 2,
+            damage: 0,
+        });
         assert_eq!(
             inv.crafting_result(1),
-            Some(Stack { id: 323, count: 3, damage: 0 })
+            Some(Stack {
+                id: 323,
+                count: 3,
+                damage: 0
+            })
         );
         let blocked = inv.clone();
         assert!(inv.click_window(1, 0, 0, 1));
