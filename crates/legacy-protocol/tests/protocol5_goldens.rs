@@ -115,3 +115,50 @@ fn nbt_tag_compound_minimal_fixture_roundtrips_without_guessing_bytes() {
     assert_eq!(fixture[7], 7);
     assert_eq!(fixture[8], 0);
 }
+
+#[test]
+fn inventory_window_fixtures_preserve_protocol5_slot_and_frame_layout() {
+    // Clientbound S2F: window 0, hotbar index 36, cobblestone x64,
+    // damage 2, NBT=-1. Packet length is an exact one-byte VarInt.
+    const SET_SLOT: &[u8] = &[11, 0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 255, 255];
+    assert_eq!(
+        read_frame(&mut SET_SLOT).unwrap(),
+        [0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 255, 255]
+    );
+    // S30: window 0, two entries: empty and 1 x stone, no NBT.
+    const WINDOW_ITEMS: &[u8] = &[
+        13, 0x30, 0, 0, 2, 255, 255, 0, 1, 32, 0, 0, 255, 255,
+    ];
+    let mut packet = WINDOW_ITEMS;
+    let raw = read_frame(&mut packet).unwrap();
+    assert_eq!(raw[0], 0x30);
+    assert_eq!(u16::from_be_bytes([raw[2], raw[3]]), 2);
+    assert_eq!(&raw[4..], &[255, 255, 0, 1, 32, 0, 0, 255, 255]);
+}
+
+#[test]
+fn all_two_part_fragment_boundaries_preserve_inventory_packets() {
+    let payload = [0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 255, 255];
+    let mut framed = Vec::new();
+    write_frame(&mut framed, &payload).unwrap();
+    for split in 1..framed.len() {
+        let mut source = Fragments {
+            reads: VecDeque::from([
+                Ok(framed[..split].to_vec()),
+                Err(io::ErrorKind::TimedOut.into()),
+                Ok(framed[split..].to_vec()),
+            ]),
+        };
+        let mut parser = BufferedFrameReader::new();
+        assert!(
+            parser.poll(&mut source).unwrap().is_none(),
+            "split at {split}"
+        );
+        assert!(parser.poll(&mut source).unwrap().is_none());
+        assert_eq!(
+            parser.poll(&mut source).unwrap().unwrap(),
+            payload,
+            "split at {split}"
+        );
+    }
+}
