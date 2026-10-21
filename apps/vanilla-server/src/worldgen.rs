@@ -162,7 +162,8 @@ fn lake_cut(seed: u64, x: i32, z: i32) -> f64 {
             }
             let cx = gx * 128 + 16 + (hash(seed, gx, 10, gz) % 96) as i32;
             let cz = gz * 128 + 16 + (hash(seed, gx, 11, gz) % 96) as i32;
-            let center = 67.0 + n2(seed ^ 0xc001, cx, cz, 320) * 32.0
+            let center = 67.0
+                + n2(seed ^ 0xc001, cx, cz, 320) * 32.0
                 + n2(seed ^ 0xabcd, cx, cz, 145).max(0.0) * 19.0;
             if !(58.0..=76.0).contains(&center) {
                 continue;
