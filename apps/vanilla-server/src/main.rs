@@ -2860,7 +2860,9 @@ fn main() -> io::Result<()> {
             || anvil_import_path.is_some()
             || anvil_export_path.is_some()
         {
-            return Err(bad("Anvil region inspection cannot be combined with other file operations"));
+            return Err(bad(
+                "Anvil region inspection cannot be combined with other file operations",
+            ));
         }
         let count = legacy_region::inspect_region(&path)?;
         println!("1.7.10 Anvil region validated (read-only): {count} chunks");

@@ -23,8 +23,12 @@ fn coordinates(file: &Path) -> io::Result<(i32, i32)> {
     if parts.len() != 4 || parts[0] != "r" || parts[3] != "mca" {
         return Err(invalid("expected Anvil r.X.Z.mca"));
     }
-    let x = parts[1].parse().map_err(|_| invalid("invalid Anvil region X"))?;
-    let z = parts[2].parse().map_err(|_| invalid("invalid Anvil region Z"))?;
+    let x = parts[1]
+        .parse()
+        .map_err(|_| invalid("invalid Anvil region X"))?;
+    let z = parts[2]
+        .parse()
+        .map_err(|_| invalid("invalid Anvil region Z"))?;
     Ok((x, z))
 }
 
@@ -75,10 +79,7 @@ pub(crate) fn inspect_region(path: &Path) -> io::Result<usize> {
             if offset == 0 && used == 0 {
                 continue;
             }
-            if offset < 2
-                || used == 0
-                || offset.checked_add(used).is_none_or(|end| end > sectors)
-            {
+            if offset < 2 || used == 0 || offset.checked_add(used).is_none_or(|end| end > sectors) {
                 return Err(invalid("invalid Anvil region location entry"));
             }
             for sector in &mut occupied[offset..offset + used] {
@@ -127,7 +128,10 @@ mod tests {
         let target = root.join("snapshot");
         anvil_export::export(&World::new(), &target).unwrap();
         assert_eq!(inspect_region(&target.join("region/r.0.0.mca")).unwrap(), 9);
-        assert_eq!(inspect_region(&target.join("region/r.-1.0.mca")).unwrap(), 6);
+        assert_eq!(
+            inspect_region(&target.join("region/r.-1.0.mca")).unwrap(),
+            6
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
