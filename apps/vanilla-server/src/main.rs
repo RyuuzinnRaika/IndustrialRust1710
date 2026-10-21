@@ -3,13 +3,16 @@
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
 mod anvil_export;
 mod anvil_import;
+mod brewing;
 mod chests;
 mod clock;
 mod crafting;
 mod experience;
 mod furnaces;
 mod ground_items;
+mod hoppers;
 mod inventory;
+mod journal;
 mod mobs;
 mod multiplayer;
 mod navigation;
@@ -22,6 +25,7 @@ mod vitals;
 mod whitelist;
 mod world;
 
+use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use experience::Experience;
@@ -29,7 +33,8 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use ground_items::GroundItems;
-use inventory::{ChestDirection, Inventory, Stack};
+use hoppers::{Hoppers, Position as HopperPosition};
+use inventory::{Inventory, Stack};
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
     PROTOCOL_VERSION,
@@ -380,6 +385,89 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
     let dz = player.2 - (z as f64 + 0.5);
     dx * dx + dy * dy + dz * dz <= 64.0
 }
+/// Double chests are two adjacent, independently persisted 27-slot halves.
+/// Canonical ordering is shared by all viewers regardless of clicked side.
+fn chest_neighbor(world: &World, pos: ChestPosition) -> Option<ChestPosition> {
+    let (x, y, z) = pos;
+    [(x - 1, y, z), (x + 1, y, z), (x, y, z - 1), (x, y, z + 1)]
+        .into_iter()
+        .find(|&(x, y, z)| world.get(x, y, z) >> 4 == 54)
+}
+fn can_place_chest(world: &World, pos: ChestPosition) -> bool {
+    let (x, y, z) = pos;
+    let neighbors: Vec<_> = [(x - 1, y, z), (x + 1, y, z), (x, y, z - 1), (x, y, z + 1)]
+        .into_iter()
+        .filter(|&(x, y, z)| world.get(x, y, z) >> 4 == 54)
+        .collect();
+    if neighbors.len() > 1 {
+        return false;
+    }
+    neighbors
+        .first()
+        .is_none_or(|&neighbor| chest_neighbor(world, neighbor).is_none())
+}
+fn chest_window_state(
+    storage: &Chests,
+    pos: ChestPosition,
+    partner: Option<ChestPosition>,
+) -> Vec<Option<Stack>> {
+    let mut data = Vec::with_capacity(if partner.is_some() { 54 } else { 27 });
+    if let Some(other) = partner {
+        let (first, second) = if pos < other {
+            (pos, other)
+        } else {
+            (other, pos)
+        };
+        data.extend_from_slice(&storage.slots(first));
+        data.extend_from_slice(&storage.slots(second));
+    } else {
+        data.extend_from_slice(&storage.slots(pos));
+    }
+    data
+}
+fn stage_chest_window(
+    storage: &Chests,
+    pos: ChestPosition,
+    partner: Option<ChestPosition>,
+    slots: &[Option<Stack>],
+) -> io::Result<Chests> {
+    if slots.len() != if partner.is_some() { 54 } else { 27 } {
+        return Err(bad("wrong chest slot count"));
+    }
+    let mut first = [None; 27];
+    first.copy_from_slice(&slots[..27]);
+    if let Some(other) = partner {
+        let mut second = [None; 27];
+        second.copy_from_slice(&slots[27..]);
+        let (left, right) = if pos < other {
+            (pos, other)
+        } else {
+            (other, pos)
+        };
+        storage
+            .staged_update(left, first)?
+            .staged_update(right, second)
+    } else {
+        storage.staged_update(pos, first)
+    }
+}
+
+/// The client receives all potion-effect packets; health-bearing effects are
+/// also enforced server-side rather than trusting client-reported HP.
+#[derive(Clone, Copy)]
+struct ActiveEffect {
+    kind: u8,
+    amplifier: u8,
+    expires_at: u64,
+    next_periodic: u64,
+}
+fn potion_effect_packet(entity: i32, kind: u8, amplifier: u8, duration: u16) -> Vec<u8> {
+    let mut packet = entity.to_be_bytes().to_vec();
+    packet.push(kind);
+    packet.push(amplifier);
+    packet.extend_from_slice(&(duration as i16).to_be_bytes());
+    packet
+}
 struct PlayerSession<'a> {
     position: &'a mut PlayerPosition,
     vitals: &'a mut Vitals,
@@ -395,6 +483,10 @@ struct PlayerSession<'a> {
     chest_path: &'a Path,
     furnaces: &'a Mutex<Furnaces>,
     furnace_path: &'a Path,
+    hoppers: &'a Mutex<Hoppers>,
+    hopper_path: &'a Path,
+    brewers: &'a Mutex<Brewers>,
+    brewer_path: &'a Path,
     survival: bool,
     hub: &'a Hub,
     entity_id: i32,
@@ -424,6 +516,10 @@ fn play(
         chest_path,
         furnaces,
         furnace_path,
+        hoppers,
+        hopper_path,
+        brewers,
+        brewer_path,
         survival,
         hub,
         entity_id,
@@ -452,15 +548,22 @@ fn play(
     let mut mining: Option<MiningProgress> = None;
     let mut active_window: u8 = 0;
     let mut active_chest: Option<ChestPosition> = None;
+    let mut active_chest_partner: Option<ChestPosition> = None;
     let mut active_furnace: Option<FurnacePosition> = None;
+    let mut active_hopper: Option<HopperPosition> = None;
+    let mut active_brewer: Option<BrewerPosition> = None;
+    let mut last_brewer_view = Brewer::default();
     let mut last_furnace_view = Furnace::default();
     let mut observed_chest_revision: u64 = 0;
+    let mut observed_hopper_revision: u64 = 0;
     let mut next_window: u8 = 1;
     let mut last_pickup = Instant::now();
     let mut eating: Option<(u64, Stack)> = None;
     let mut bow_start: Option<u64> = None;
     let mut hazards = Hazards::new();
     let mut last_hazards_tick = clock.ticks();
+    let mut active_effects: Vec<ActiveEffect> = Vec::new();
+    let mut last_effect_tick = clock.ticks();
     loop {
         while let Ok(event) = events.try_recv() {
             if event.id == CHUNK_RELIGHT_EVENT {
@@ -490,8 +593,37 @@ fn play(
         if let Some(pos) = active_chest {
             let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
             if guard.revision() != observed_chest_revision {
-                let data = inventory.chest_window_items(active_window, &guard.slots(pos));
+                let data = inventory.chest_window_items(
+                    active_window,
+                    &chest_window_state(&guard, pos, active_chest_partner),
+                );
                 observed_chest_revision = guard.revision();
+                drop(guard);
+                send(s, 0x30, &data)?;
+            }
+        }
+        if let Some(pos) = active_brewer {
+            let guard = brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
+            let current = guard.get(pos);
+            if current != last_brewer_view {
+                let changed_slots = current.slots != last_brewer_view.slots;
+                last_brewer_view = current;
+                drop(guard);
+                if changed_slots {
+                    send(
+                        s,
+                        0x30,
+                        &inventory.chest_window_items(active_window, &current.slots),
+                    )?;
+                }
+                send(s, 0x31, &current.property(active_window))?;
+            }
+        }
+        if let Some(pos) = active_hopper {
+            let guard = hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
+            if guard.revision() != observed_hopper_revision {
+                let data = inventory.chest_window_items(active_window, &guard.slots(pos));
+                observed_hopper_revision = guard.revision();
                 drop(guard);
                 send(s, 0x30, &data)?;
             }
@@ -525,11 +657,15 @@ fn play(
             if let Some(item) = ground.nearby_ready(location) {
                 let mut candidate = inventory.clone();
                 if let Some(slots) = candidate.receive_stack(item.stack) {
-                    // Commit removal to disk before inventory credit to avoid
-                    // duplicate pickup after process interruption. This is not
-                    // yet a cross-file atomic transaction and can lose items.
-                    if let Some(collected) = ground.take(ground_path, item.id)? {
-                        candidate.save(inventory_path)?;
+                    if let Some((staged_ground, collected)) = ground.stage_take(item.id)? {
+                        journal::commit(
+                            &world_path.with_extension("pending-txn.json"),
+                            &[
+                                (ground_path, staged_ground.encoded()?),
+                                (inventory_path, candidate.encoded()?),
+                            ],
+                        )?;
+                        *ground = staged_ground;
                         *inventory = candidate;
                         for packet in collected.collected(entity_id) {
                             hub.broadcast(packet);
@@ -708,11 +844,80 @@ fn play(
         }
         // A food right-click starts a 32 tick use animation. The server owns
         // completion, selection, consumption, and the resulting food values.
+        if survival && now_tick > last_effect_tick {
+            last_effect_tick = now_tick;
+            let old_health = vitals.health;
+            for effect in &mut active_effects {
+                if now_tick >= effect.next_periodic && now_tick < effect.expires_at {
+                    let amount = f32::from(effect.amplifier) + 1.0;
+                    if effect.kind == 10 {
+                        vitals.health = (vitals.health + amount).min(20.0);
+                    }
+                    if effect.kind == 19 {
+                        vitals.health = (vitals.health - amount).max(1.0);
+                    }
+                    effect.next_periodic = now_tick + if effect.kind == 10 { 50 } else { 25 };
+                }
+            }
+            for effect in &active_effects {
+                if now_tick >= effect.expires_at {
+                    let mut removed = entity_id.to_be_bytes().to_vec();
+                    removed.push(effect.kind);
+                    send(s, 0x1e, &removed)?;
+                }
+            }
+            active_effects.retain(|effect| now_tick < effect.expires_at);
+            if vitals.health != old_health {
+                player.save_state(player_path, *vitals)?;
+                send(s, 0x06, &health_packet(*vitals))?;
+            }
+        }
+        // Food and drink consumption both finish after 32 server ticks.
         if survival && vitals.health > 0.0 {
             if let Some((began, stack)) = eating {
                 if now_tick.saturating_sub(began) >= 32 {
                     eating = None;
-                    if inventory.held() == Some(stack) && vitals.can_eat(stack) {
+                    if inventory.held() == Some(stack) && stack.id == 373 {
+                        if let Some((kind, amplifier, duration)) = brewing::effect(stack) {
+                            let mut remaining = inventory.clone();
+                            if remaining.consume_held()
+                                && remaining
+                                    .receive_stack(Stack {
+                                        id: 374,
+                                        count: 1,
+                                        damage: 0,
+                                    })
+                                    .is_some()
+                            {
+                                // Inventory debit is durable before temporary status or HP gain.
+                                remaining.save(inventory_path)?;
+                                *inventory = remaining;
+                                if kind == 6 {
+                                    vitals.health =
+                                        (vitals.health + 4.0 * f32::from(amplifier + 1)).min(20.0);
+                                } else if kind == 7 {
+                                    vitals.health =
+                                        (vitals.health - 6.0 * f32::from(amplifier + 1)).max(0.0);
+                                } else {
+                                    active_effects.retain(|effect| effect.kind != kind);
+                                    active_effects.push(ActiveEffect {
+                                        kind,
+                                        amplifier,
+                                        expires_at: now_tick + u64::from(duration),
+                                        next_periodic: now_tick + if kind == 10 { 50 } else { 25 },
+                                    });
+                                }
+                                player.save_state(player_path, *vitals)?;
+                                send(s, 0x30, &inventory.window_items())?;
+                                send(s, 0x06, &health_packet(*vitals))?;
+                                send(
+                                    s,
+                                    0x1d,
+                                    &potion_effect_packet(entity_id, kind, amplifier, duration),
+                                )?;
+                            }
+                        }
+                    } else if inventory.held() == Some(stack) && vitals.can_eat(stack) {
                         let mut remaining = inventory.clone();
                         if remaining.consume_held() {
                             let mut after = *vitals;
@@ -737,6 +942,7 @@ fn play(
                 inventory_path,
                 ground_items,
                 ground_path,
+                world_path,
                 hub,
                 location,
             )?;
@@ -1077,7 +1283,17 @@ fn play(
                                                 .lock()
                                                 .map_err(|_| bad("furnace lock poisoned"))?
                                                 .get(target)
-                                                .occupied());
+                                                .occupied())
+                                        || (block == 154
+                                            && hoppers
+                                                .lock()
+                                                .map_err(|_| bad("hopper lock poisoned"))?
+                                                .has_contents(target))
+                                        || (block == 117
+                                            && brewers
+                                                .lock()
+                                                .map_err(|_| bad("brewer lock poisoned"))?
+                                                .is_nonempty(target));
                                     if !occupied {
                                         let bonus = survival::additional_drop(
                                             w.get(x, y, z),
@@ -1203,7 +1419,17 @@ fn play(
                                         .lock()
                                         .map_err(|_| bad("furnace lock poisoned"))?
                                         .get((x, y, z))
-                                        .occupied());
+                                        .occupied())
+                                || (block == 154
+                                    && hoppers
+                                        .lock()
+                                        .map_err(|_| bad("hopper lock poisoned"))?
+                                        .has_contents((x, y, z)))
+                                || (block == 117
+                                    && brewers
+                                        .lock()
+                                        .map_err(|_| bad("brewer lock poisoned"))?
+                                        .is_nonempty((x, y, z)));
                             if occupied {
                                 false
                             } else {
@@ -1236,7 +1462,9 @@ fn play(
                         if inventory.can_place(held) {
                             if stack.id == 261 {
                                 bow_start = Some(now_tick);
-                            } else if vitals.can_eat(stack) {
+                            } else if vitals.can_eat(stack)
+                                || (stack.id == 373 && brewing::effect(stack).is_some())
+                            {
                                 eating = Some((now_tick, stack));
                             }
                         }
@@ -1293,6 +1521,100 @@ fn play(
                         continue;
                     }
                 }
+                // Two-part bed placement. The two block IDs are committed in
+                // one world save, and the held item is debited before placement.
+                if face == 1
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && inventory.can_place(held)
+                    && inventory.held().is_some_and(|stack| stack.id == 355)
+                {
+                    let foot = (x, y + 1, z);
+                    let facing = ((yaw / 90.0).floor() as i32 + 2).rem_euclid(4) as u16;
+                    let (dx, dz) = match facing {
+                        0 => (0, 1),
+                        1 => (-1, 0),
+                        2 => (0, -1),
+                        _ => (1, 0),
+                    };
+                    let head = (foot.0 + dx, foot.1, foot.2 + dz);
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let supported = world::in_bounds(foot.0, foot.1, foot.2)
+                        && world::in_bounds(head.0, head.1, head.2)
+                        && w.get(x, y, z) != 0
+                        && w.get(foot.0, foot.1, foot.2) == 0
+                        && w.get(head.0, head.1, head.2) == 0;
+                    if supported {
+                        let mut candidate = inventory.clone();
+                        let paid = !survival || candidate.consume_held();
+                        if paid {
+                            if survival {
+                                candidate.save(inventory_path)?;
+                            }
+                            let changed = w.update_many_and_save(
+                                world_path,
+                                &[
+                                    (foot.0, foot.1, foot.2, (26 << 4) | facing),
+                                    (head.0, head.1, head.2, (26 << 4) | facing | 8),
+                                ],
+                            )?;
+                            if changed {
+                                if survival {
+                                    *inventory = candidate;
+                                    send(s, 0x30, &inventory.window_items())?;
+                                }
+                                hub.broadcast(block_change_event(&w, foot.0, foot.1, foot.2));
+                                hub.broadcast(block_change_event(&w, head.0, head.1, head.2));
+                            } else if survival {
+                                inventory.save(inventory_path)?;
+                            }
+                        }
+                    } else {
+                        for (bx, by, bz) in [foot, head] {
+                            if world::in_bounds(bx, by, bz) {
+                                let event = block_change_event(&w, bx, by, bz);
+                                send(s, event.id, &event.body)?;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 26
+                {
+                    let time = clock.day_time();
+                    if survival && (12542..=23458).contains(&time) {
+                        let mut candidate = inventory.clone();
+                        candidate.set_bed_spawn(x, y, z)?;
+                        candidate.save(inventory_path)?;
+                        *inventory = candidate;
+                        let mut packet = Vec::new();
+                        packet.extend_from_slice(&entity_id.to_be_bytes());
+                        packet.extend_from_slice(&x.to_be_bytes());
+                        packet.push(y as u8);
+                        packet.extend_from_slice(&z.to_be_bytes());
+                        send(s, 0x0a, &packet)?;
+                        // A lone player may complete sleep immediately. More
+                        // players must use their own beds; never skip their night.
+                        if hub.positions()?.len() <= 1 {
+                            clock.skip_to_morning();
+                            let mut wake = Vec::new();
+                            write_varint(entity_id as u32, &mut wake);
+                            wake.push(2); // leave bed animation
+                            send(s, 0x0b, &wake)?;
+                        }
+                    } else if survival {
+                        as_chat(s, "You can only sleep at night.")?;
+                    }
+                    continue;
+                }
                 if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
@@ -1313,7 +1635,10 @@ fn play(
                         next_window + 1
                     };
                     active_chest = None;
+                    active_chest_partner = None;
                     active_furnace = Some(pos);
+                    active_hopper = None;
+                    active_brewer = None;
                     let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
                     last_furnace_view = guard.get(pos);
                     drop(guard);
@@ -1351,15 +1676,103 @@ fn play(
                     };
                     let pos = (x, y, z);
                     active_chest = Some(pos);
+                    active_chest_partner = world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))
+                        .map(|w| chest_neighbor(&w, pos))?;
                     active_furnace = None;
+                    active_hopper = None;
+                    active_brewer = None;
                     let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
-                    let items = inventory.chest_window_items(active_window, &guard.slots(pos));
+                    let items = inventory.chest_window_items(
+                        active_window,
+                        &chest_window_state(&guard, pos, active_chest_partner),
+                    );
                     observed_chest_revision = guard.revision();
                     drop(guard);
                     let mut opened = vec![active_window];
                     write_string("minecraft:chest", &mut opened)?;
                     write_string(&json!({"text":"Chest"}).to_string(), &mut opened)?;
-                    opened.push(27); // 3 rows of nine, excluding player inventory
+                    opened.push(if active_chest_partner.is_some() {
+                        54
+                    } else {
+                        27
+                    });
+                    send(s, 0x2d, &opened)?;
+                    send(s, 0x30, &items)?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 117
+                {
+                    let pos = (x, y, z);
+                    active_window = next_window;
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
+                    active_brewer = Some(pos);
+                    active_chest = None;
+                    active_chest_partner = None;
+                    active_furnace = None;
+                    active_hopper = None;
+                    let guard = brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
+                    last_brewer_view = guard.get(pos);
+                    drop(guard);
+                    let mut opened = vec![active_window];
+                    write_string("minecraft:brewing_stand", &mut opened)?;
+                    write_string(&json!({"text":"Brewing Stand"}).to_string(), &mut opened)?;
+                    opened.push(4);
+                    send(s, 0x2d, &opened)?;
+                    send(
+                        s,
+                        0x30,
+                        &inventory.chest_window_items(active_window, &last_brewer_view.slots),
+                    )?;
+                    send(s, 0x31, &last_brewer_view.property(active_window))?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 154
+                {
+                    let pos = (x, y, z);
+                    let mut guard = hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
+                    guard.register(hopper_path, pos)?;
+                    active_window = next_window;
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
+                    active_hopper = Some(pos);
+                    active_brewer = None;
+                    active_chest = None;
+                    active_chest_partner = None;
+                    active_furnace = None;
+                    observed_hopper_revision = guard.revision();
+                    let items = inventory.chest_window_items(active_window, &guard.slots(pos));
+                    drop(guard);
+                    let mut opened = vec![active_window];
+                    write_string("minecraft:hopper", &mut opened)?;
+                    write_string(&json!({"text":"Hopper"}).to_string(), &mut opened)?;
+                    opened.push(5);
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &items)?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
@@ -1379,7 +1792,10 @@ fn play(
                     // Window 0 is always the player's personal 2x2 grid.
                     active_window = next_window;
                     active_chest = None;
+                    active_chest_partner = None;
                     active_furnace = None;
+                    active_hopper = None;
+                    active_brewer = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -1412,6 +1828,7 @@ fn play(
                             // dust ID331 -> wire55, water/lava buckets -> fluid8/10.
                             let block_id = match stack.id {
                                 331 => 55,
+                                379 => 117,
                                 326 => 8,
                                 327 => 10,
                                 295 => 59,  // wheat seeds
@@ -1422,10 +1839,8 @@ fn play(
                                 330 => 71,  // iron door
                                 _ => stack.id as u16,
                             };
-                            let adjacent_chest = block_id == 54
-                                && [(nx + 1, nz), (nx - 1, nz), (nx, nz + 1), (nx, nz - 1)]
-                                    .iter()
-                                    .any(|&(cx, cz)| w.get(cx, ny, cz) >> 4 == 54);
+                            let invalid_chest_merge =
+                                block_id == 54 && !can_place_chest(&w, (nx, ny, nz));
                             let metadata = if matches!(block_id, 50 | 77 | 143) {
                                 match face {
                                     1 => 5,
@@ -1455,7 +1870,7 @@ fn play(
                             if (world::is_placeable(block_id) || block_id == 61)
                                 && w.can_support(nx, ny, nz, (block_id << 4) | metadata)
                                 && block_id != 7
-                                && !adjacent_chest
+                                && !invalid_chest_merge
                                 && w.get(x, y, z) != 0
                                 && w.get(nx, ny, nz) == 0
                                 && near(location, nx, ny, nz)
@@ -1515,6 +1930,12 @@ fn play(
                                             (block_id << 4) | metadata,
                                         )?
                                     };
+                                }
+                                if changed && block_id == 154 {
+                                    hoppers
+                                        .lock()
+                                        .map_err(|_| bad("hopper lock poisoned"))?
+                                        .register(hopper_path, (nx, ny, nz))?;
                                 }
                             }
                         }
@@ -1592,25 +2013,24 @@ fn play(
                         accepted = true;
                         let inv_changed = candidate != *inventory;
                         let furnace_changed = next != previous;
-                        // Source-first, analogous to the chest transactions:
-                        // preserves at-most-once credit during crashes.
-                        if direction == ChestDirection::IntoChest {
-                            if inv_changed {
-                                candidate.save(inventory_path)?;
-                                *inventory = candidate;
-                            }
-                            if furnace_changed {
-                                machines.update(furnace_path, pos, next)?;
-                            }
-                        } else {
-                            if furnace_changed {
-                                machines.update(furnace_path, pos, next)?;
-                            }
-                            if inv_changed {
-                                candidate.save(inventory_path)?;
-                                *inventory = candidate;
-                            }
+                        if inv_changed && furnace_changed {
+                            let staged = machines.staged_update(pos, next)?;
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (furnace_path, staged.encoded()?),
+                                ],
+                            )?;
+                            *inventory = candidate;
+                            *machines = staged;
+                        } else if furnace_changed {
+                            machines.update(furnace_path, pos, next)?;
+                        } else if inv_changed {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
                         }
+                        let _ = direction;
                     }
                     last_furnace_view = machines.get(pos);
                     response_items =
@@ -1645,19 +2065,26 @@ fn play(
                     }
                     drop(machines);
                 } else if let Some(pos) = active_chest {
-                    let still_open = world
-                        .lock()
-                        .map_err(|_| bad("world mutex poisoned"))?
-                        .get(pos.0, pos.1, pos.2)
-                        >> 4
-                        == 54
-                        && near(location, pos.0, pos.1, pos.2);
+                    let still_open = {
+                        let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        w.get(pos.0, pos.1, pos.2) >> 4 == 54
+                            && near(location, pos.0, pos.1, pos.2)
+                            && active_chest_partner.is_none_or(|partner| {
+                                w.get(partner.0, partner.1, partner.2) >> 4 == 54
+                            })
+                    };
                     let mut storage = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
-                    let original = storage.slots(pos);
-                    let mut changed_slots = original;
+                    let original = chest_window_state(&storage, pos, active_chest_partner);
+                    let mut changed_slots = original.clone();
                     let mut candidate = inventory.clone();
                     let change = if still_open && requested_window {
-                        candidate.chest_click(&mut changed_slots, slot, button, mode)
+                        candidate.chest_click_window(
+                            active_window,
+                            &mut changed_slots,
+                            slot,
+                            button,
+                            mode,
+                        )
                     } else {
                         None
                     };
@@ -1665,28 +2092,137 @@ fn play(
                         accepted = true;
                         let inventory_changed = candidate != *inventory;
                         let storage_changed = original != changed_slots;
-                        // The transfer source is persisted first, to avoid
-                        // item duplication at a crash boundary. Two files
-                        // are still not an atomic transaction: loss is possible.
-                        if direction == ChestDirection::IntoChest {
-                            if inventory_changed {
-                                candidate.save(inventory_path)?;
-                                *inventory = candidate;
-                            }
-                            if storage_changed {
-                                storage.update(chest_path, pos, changed_slots)?;
-                            }
-                        } else {
-                            if storage_changed {
-                                storage.update(chest_path, pos, changed_slots)?;
-                            }
-                            if inventory_changed {
-                                candidate.save(inventory_path)?;
-                                *inventory = candidate;
-                            }
+                        if inventory_changed && storage_changed {
+                            let staged = stage_chest_window(
+                                &storage,
+                                pos,
+                                active_chest_partner,
+                                &changed_slots,
+                            )?;
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (chest_path, staged.encoded()?),
+                                ],
+                            )?;
+                            *inventory = candidate;
+                            *storage = staged;
+                        } else if storage_changed {
+                            let staged = stage_chest_window(
+                                &storage,
+                                pos,
+                                active_chest_partner,
+                                &changed_slots,
+                            )?;
+                            storage.commit_staged(chest_path, staged)?;
+                        } else if inventory_changed {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
                         }
+                        let _ = direction;
                     }
                     observed_chest_revision = storage.revision();
+                    response_items = inventory.chest_window_items(
+                        active_window,
+                        &chest_window_state(&storage, pos, active_chest_partner),
+                    );
+                    drop(storage);
+                } else if let Some(pos) = active_brewer {
+                    let still_open = {
+                        let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        w.get(pos.0, pos.1, pos.2) >> 4 == 117
+                            && near(location, pos.0, pos.1, pos.2)
+                    };
+                    let mut storage = brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
+                    let original = storage.get(pos);
+                    let mut changed = original.slots;
+                    let mut candidate = inventory.clone();
+                    let change = if still_open && requested_window {
+                        candidate.chest_click_window(
+                            active_window,
+                            &mut changed,
+                            slot,
+                            button,
+                            mode,
+                        )
+                    } else {
+                        None
+                    };
+                    let mut next = original;
+                    next.slots = changed;
+                    if change.is_some() && next.valid() {
+                        accepted = true;
+                        let inv_changed = candidate != *inventory;
+                        let brewer_changed = next != original;
+                        if inv_changed && brewer_changed {
+                            let staged = storage.staged_update(pos, next)?;
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (brewer_path, staged.encoded()?),
+                                ],
+                            )?;
+                            *inventory = candidate;
+                            *storage = staged;
+                        } else if brewer_changed {
+                            let staged = storage.staged_update(pos, next)?;
+                            storage.commit_staged(brewer_path, staged)?;
+                        } else if inv_changed {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
+                        }
+                    }
+                    last_brewer_view = storage.get(pos);
+                    response_items =
+                        inventory.chest_window_items(active_window, &last_brewer_view.slots);
+                    drop(storage);
+                } else if let Some(pos) = active_hopper {
+                    let still_open = {
+                        let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        w.get(pos.0, pos.1, pos.2) >> 4 == 154
+                            && near(location, pos.0, pos.1, pos.2)
+                    };
+                    let mut storage = hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
+                    let original = storage.slots(pos);
+                    let mut changed = original;
+                    let mut candidate = inventory.clone();
+                    let change = if still_open && requested_window {
+                        candidate.chest_click_window(
+                            active_window,
+                            &mut changed,
+                            slot,
+                            button,
+                            mode,
+                        )
+                    } else {
+                        None
+                    };
+                    if change.is_some() {
+                        accepted = true;
+                        let inv_changed = candidate != *inventory;
+                        let hopper_changed = changed != original;
+                        if inv_changed && hopper_changed {
+                            let staged = storage.staged_update(pos, changed)?;
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (hopper_path, staged.encoded()?),
+                                ],
+                            )?;
+                            *inventory = candidate;
+                            *storage = staged;
+                        } else if hopper_changed {
+                            let staged = storage.staged_update(pos, changed)?;
+                            storage.commit_staged(hopper_path, staged)?;
+                        } else if inv_changed {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
+                        }
+                    }
+                    observed_hopper_revision = storage.revision();
                     response_items =
                         inventory.chest_window_items(active_window, &storage.slots(pos));
                     drop(storage);
@@ -1710,6 +2246,9 @@ fn play(
                         send(s, 0x31, &property)?;
                     }
                 }
+                if active_brewer.is_some() {
+                    send(s, 0x31, &last_brewer_view.property(active_window))?;
+                }
                 send(s, 0x2f, &inventory.cursor_packet())?;
             }
             15 => {
@@ -1727,7 +2266,10 @@ fn play(
                     // deleting them if a player closes the crafting window.
                     active_window = 0;
                     active_chest = None;
+                    active_chest_partner = None;
                     active_furnace = None;
+                    active_hopper = None;
+                    active_brewer = None;
                     send(s, 0x30, &inventory.window_items())?;
                 }
             }
@@ -1741,10 +2283,30 @@ fn play(
                         inventory_path,
                         ground_items,
                         ground_path,
+                        world_path,
                         hub,
                         location,
                     )?;
-                    let origin = safe_spawn(world)?;
+                    let origin = {
+                        let fallback = safe_spawn(world)?;
+                        if let Some((x, y, z)) = inventory.bed_spawn() {
+                            let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                            if guard.get(x, y, z) >> 4 == 26
+                                && world::in_bounds(x, y + 1, z)
+                                && guard.get(x, y + 1, z) == 0
+                            {
+                                PlayerPosition {
+                                    x: x as f64 + 0.5,
+                                    y: y as f64 + 1.0,
+                                    z: z as f64 + 0.5,
+                                }
+                            } else {
+                                fallback
+                            }
+                        } else {
+                            fallback
+                        }
+                    };
                     let fresh_vitals = Vitals::default();
                     origin.save_state(player_path, fresh_vitals)?;
                     *vitals = fresh_vitals;
@@ -1795,14 +2357,15 @@ fn play(
         }
     }
 }
-/// Debit all player possessions before publishing death drops. A cross-file
-/// transaction journal is not yet implemented: a storage fault can lose items,
-/// but cannot re-credit the source inventory and duplicate them.
+/// Commit both the debited inventory and all spawned death drops as one
+/// redo-journaled transaction. Until both snapshots are durable, neither
+/// state is visible to players.
 fn commit_death_drops(
     inventory: &mut Inventory,
     inventory_path: &Path,
     ground_items: &Mutex<GroundItems>,
     ground_path: &Path,
+    world_path: &Path,
     hub: &Hub,
     location: (f64, f64, f64),
 ) -> io::Result<()> {
@@ -1818,14 +2381,22 @@ fn commit_death_drops(
     }
     let mut empty = inventory.clone();
     empty.clear_possessions();
-    empty.save(inventory_path)?;
-    *inventory = empty;
     let block = (
         (location.0.floor() as i32).clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
         (location.1.floor() as i32).clamp(0, 254),
         (location.2.floor() as i32).clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
     );
-    for item in ground.put_many(ground_path, &possessions, block)? {
+    let (staged_ground, spawned) = ground.stage_put_many(&possessions, block)?;
+    journal::commit(
+        &world_path.with_extension("pending-txn.json"),
+        &[
+            (inventory_path, empty.encoded()?),
+            (ground_path, staged_ground.encoded()?),
+        ],
+    )?;
+    *inventory = empty;
+    *ground = staged_ground;
+    for item in spawned {
         for packet in item.spawn() {
             hub.broadcast(packet);
         }
@@ -1861,6 +2432,10 @@ struct ServerContext {
     chest_path: Arc<PathBuf>,
     furnaces: Arc<Mutex<Furnaces>>,
     furnace_path: Arc<PathBuf>,
+    hoppers: Arc<Mutex<Hoppers>>,
+    hopper_path: Arc<PathBuf>,
+    brewers: Arc<Mutex<Brewers>>,
+    brewer_path: Arc<PathBuf>,
     survival: bool,
 }
 fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
@@ -1877,6 +2452,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         chest_path,
         furnaces,
         furnace_path,
+        hoppers,
+        hopper_path,
+        brewers,
+        brewer_path,
         survival,
     } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -2049,6 +2628,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             chest_path: &chest_path,
             furnaces: &furnaces,
             furnace_path: &furnace_path,
+            hoppers: &hoppers,
+            hopper_path: &hopper_path,
+            brewers: &brewers,
+            brewer_path: &brewer_path,
             survival,
             hub: &hub,
             entity_id,
@@ -2189,6 +2772,12 @@ fn main() -> io::Result<()> {
         "Whitelist: {} permitted name(s) (NOT cryptographic identity authentication)",
         list.len()
     );
+    // Replay interrupted multi-file credits before loading any container or
+    // accepting connections. Corrupt/unrecoverable logs prevent startup.
+    journal::recover(&world_path.with_extension("pending-txn.json"))?;
+    // Accept older independent log locations for one-time migration.
+    journal::recover(&Chests::location(&world_path).with_extension("pending-txn.json"))?;
+    journal::recover(&Furnaces::location(&world_path).with_extension("pending-txn.json"))?;
     let (clock, _clock_thread) = Clock::start();
     let loaded_world = if world_path.exists() {
         let existing = World::load(&world_path)?;
@@ -2230,6 +2819,10 @@ fn main() -> io::Result<()> {
     let chests = Arc::new(Mutex::new(Chests::load(&chest_path)?));
     let furnace_path = Arc::new(Furnaces::location(&world_path));
     let furnaces = Arc::new(Mutex::new(Furnaces::load(&furnace_path)?));
+    let hopper_path = Arc::new(Hoppers::location(&world_path));
+    let hoppers = Arc::new(Mutex::new(Hoppers::load(&hopper_path)?));
+    let brewer_path = Arc::new(Brewers::location(&world_path));
+    let brewers = Arc::new(Mutex::new(Brewers::load(&brewer_path)?));
     let listener = TcpListener::bind(bind)?;
     println!(
         "IndustrialRust1710: listening on {} (1.7.10 vanilla, up to 8 players)",
@@ -2376,6 +2969,78 @@ fn main() -> io::Result<()> {
             thread::sleep(Duration::from_millis(10));
         }
     });
+    // Hopper movement is an independent bounded job on the same 20Hz clock.
+    // Only a single 8-tick transfer cycle is processed after any scheduler stall.
+    let hopper_worker = Arc::clone(&hoppers);
+    let hopper_file = Arc::clone(&hopper_path);
+    let hopper_clock = Arc::clone(&clock);
+    let hopper_world = Arc::clone(&world);
+    let hopper_chests = Arc::clone(&chests);
+    let hopper_chest_file = Arc::clone(&chest_path);
+    let hopper_furnaces = Arc::clone(&furnaces);
+    let hopper_furnace_file = Arc::clone(&furnace_path);
+    let hopper_world_path = Arc::clone(&path);
+    thread::spawn(move || {
+        let mut last_cycle = hopper_clock.ticks() / 8;
+        loop {
+            let cycle = hopper_clock.ticks() / 8;
+            if cycle > last_cycle {
+                last_cycle = cycle;
+                let tick_result = (|| -> io::Result<()> {
+                    let world = hopper_world
+                        .lock()
+                        .map_err(|_| bad("world lock poisoned"))?;
+                    let mut chests = hopper_chests
+                        .lock()
+                        .map_err(|_| bad("chest lock poisoned"))?;
+                    let mut furnaces = hopper_furnaces
+                        .lock()
+                        .map_err(|_| bad("furnace lock poisoned"))?;
+                    let mut hoppers = hopper_worker
+                        .lock()
+                        .map_err(|_| bad("hopper lock poisoned"))?;
+                    hoppers.advance(
+                        &world,
+                        &mut chests,
+                        &hopper_chest_file,
+                        &mut furnaces,
+                        &hopper_furnace_file,
+                        &hopper_file,
+                        &hopper_world_path.with_extension("pending-txn.json"),
+                    )?;
+                    Ok(())
+                })();
+                if let Err(error) = tick_result {
+                    eprintln!("HOPPER TRANSFER ERROR: {error}; stopping transfers");
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+    // Fuel-free 1.7.10 brewing progresses at the shared monotonic 20Hz rate.
+    let brewer_worker = Arc::clone(&brewers);
+    let brewer_file = Arc::clone(&brewer_path);
+    let brewer_clock = Arc::clone(&clock);
+    thread::spawn(move || {
+        let mut last = brewer_clock.ticks();
+        loop {
+            let now = brewer_clock.ticks();
+            if now > last {
+                let steps = (now - last).min(20) as u32;
+                last = now;
+                let result = brewer_worker
+                    .lock()
+                    .map_err(|_| bad("brewer lock poisoned"))
+                    .and_then(|mut stands| stands.advance(&brewer_file, steps));
+                if let Err(error) = result {
+                    eprintln!("BREWING TICK STORAGE ERROR: {error}");
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
     for accepted in listener.incoming() {
         let stream = accepted?;
         if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
@@ -2395,6 +3060,10 @@ fn main() -> io::Result<()> {
         let storage_path = Arc::clone(&chest_path);
         let machine_storage = Arc::clone(&furnaces);
         let machine_file = Arc::clone(&furnace_path);
+        let hopper_storage = Arc::clone(&hoppers);
+        let hopper_file = Arc::clone(&hopper_path);
+        let brewer_storage = Arc::clone(&brewers);
+        let brewer_file = Arc::clone(&brewer_path);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -2412,6 +3081,10 @@ fn main() -> io::Result<()> {
                     chest_path: storage_path,
                     furnaces: machine_storage,
                     furnace_path: machine_file,
+                    hoppers: hopper_storage,
+                    hopper_path: hopper_file,
+                    brewers: brewer_storage,
+                    brewer_path: brewer_file,
                     survival,
                 },
             ) {

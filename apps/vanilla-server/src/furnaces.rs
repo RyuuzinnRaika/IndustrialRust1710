@@ -255,6 +255,28 @@ impl Furnaces {
         drop(out);
         fs::rename(temp, path)
     }
+    pub fn encoded(&self) -> io::Result<Vec<u8>> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| invalid("encode furnace data"))?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(invalid("furnace save exceeds cap"));
+        }
+        Ok(bytes)
+    }
+    pub fn staged_update(&self, pos: Position, next: Furnace) -> io::Result<Self> {
+        if !world::in_bounds(pos.0, pos.1, pos.2) || !next.valid() {
+            return Err(invalid("invalid furnace staged update"));
+        }
+        let mut candidate = self.clone();
+        if next == Furnace::default() {
+            candidate.entries.remove(&key(pos));
+        } else {
+            candidate.entries.insert(key(pos), next);
+        }
+        candidate.encoded()?;
+        candidate.revision = self.revision.wrapping_add(1);
+        Ok(candidate)
+    }
     pub fn get(&self, pos: Position) -> Furnace {
         self.entries.get(&key(pos)).copied().unwrap_or_default()
     }
