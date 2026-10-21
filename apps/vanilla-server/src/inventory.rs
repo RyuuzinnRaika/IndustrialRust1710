@@ -124,6 +124,53 @@ impl Inventory {
     fn armor_compatible(slot: usize, stack: Stack) -> bool {
         armor_accepts(slot as i16, stack)
     }
+    /// Damage limits for Java 1.7.10 armor (helmet, chest, legs, boots).
+    /// Decorative pumpkins and skulls do not take armor wear.
+    fn armor_durability(id: i16) -> Option<i16> {
+        match id {
+            298 => Some(55),
+            299 => Some(80),
+            300 => Some(75),
+            301 => Some(65),
+            302 | 306 => Some(165),
+            303 | 307 => Some(240),
+            304 | 308 => Some(225),
+            305 | 309 => Some(195),
+            310 => Some(363),
+            311 => Some(528),
+            312 => Some(495),
+            313 => Some(429),
+            314 => Some(77),
+            315 => Some(112),
+            316 => Some(105),
+            317 => Some(91),
+            _ => None,
+        }
+    }
+
+    /// Wear all equipped armor on an armor-blockable attack. In 1.7.10
+    /// durability loss is max(1, floor(raw damage / 4)) per equipped piece.
+    /// Caller persists the staged inventory before acknowledging the hit.
+    pub fn wear_armor_on_hit(&mut self, incoming_damage: u8) -> bool {
+        if incoming_damage == 0 {
+            return false;
+        }
+        let wear = (i16::from(incoming_damage) / 4).max(1);
+        let mut changed = false;
+        for slot in &mut self.slots[5..9] {
+            let Some(mut piece) = *slot else {
+                continue;
+            };
+            let Some(max_uses) = Self::armor_durability(piece.id) else {
+                continue;
+            };
+            piece.damage = piece.damage.saturating_add(wear);
+            *slot = (piece.damage < max_uses).then_some(piece);
+            changed = true;
+        }
+        changed
+    }
+
     pub fn armor_points(&self) -> u8 {
         self.slots[5..9]
             .iter()
@@ -1418,6 +1465,38 @@ mod tests {
         inv.clear_possessions();
         assert_eq!(inv.armor_points(), 0);
         assert!(!inv.possessions().contains(&helm));
+    }
+
+    #[test]
+    fn armor_uses_legacy_durability_and_breaks_on_combat_damage() {
+        let mut inv = Inventory::default();
+        let helmet = Stack {
+            id: 298,
+            count: 1,
+            damage: 54,
+        };
+        let chest = Stack {
+            id: 307,
+            count: 1,
+            damage: 100,
+        };
+        let pumpkin = Stack {
+            id: 86,
+            count: 1,
+            damage: 0,
+        };
+        inv.creative_set(5, Some(helmet)).unwrap();
+        inv.creative_set(6, Some(chest)).unwrap();
+        assert!(!inv.wear_armor_on_hit(0));
+        assert!(inv.wear_armor_on_hit(7));
+        assert_eq!(inv.slots[5], None); // leather helmet broke
+        assert_eq!(inv.slots[6].unwrap().damage, 101); // 7 / 4 => 1
+        assert!(inv.wear_armor_on_hit(12));
+        assert_eq!(inv.slots[6].unwrap().damage, 104); // 12 / 4 => 3
+        inv.creative_set(5, Some(pumpkin)).unwrap();
+        assert!(inv.wear_armor_on_hit(4));
+        assert_eq!(inv.slots[5], Some(pumpkin)); // decorative item is unaffected
+        assert!(inv.encoded().is_ok());
     }
 
     #[test]
