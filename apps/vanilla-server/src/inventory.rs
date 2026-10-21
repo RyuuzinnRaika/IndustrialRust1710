@@ -1440,8 +1440,20 @@ mod tests {
                 ..original
             })
         );
-        assert_eq!(inv.cursor, Some(Stack { count: 2, ..original }));
-        assert_eq!(inv.drop_cursor(0), Some(Stack { count: 2, ..original }));
+        assert_eq!(
+            inv.cursor,
+            Some(Stack {
+                count: 2,
+                ..original
+            })
+        );
+        assert_eq!(
+            inv.drop_cursor(0),
+            Some(Stack {
+                count: 2,
+                ..original
+            })
+        );
         assert_eq!(inv.cursor, None);
         assert_eq!(inv.drop_cursor(0), None);
         assert!(inv.encoded().is_ok());
