@@ -688,13 +688,12 @@ impl World {
         Ok(changed)
     }
 
-    /// Persist a small related block edit (such as the two bed halves) as
-    /// one world snapshot, never exposing a half-built object to clients.
-    pub fn update_many_and_save(
-        &mut self,
-        path: &Path,
+    /// Stage one or two block updates without publishing them. Used with the
+    /// redo journal to durably commit inventory debits and world placements.
+    pub fn staged_updates(
+        &self,
         changes: &[(i32, i32, i32, u16)],
-    ) -> io::Result<bool> {
+    ) -> io::Result<Option<Self>> {
         if changes.is_empty() || changes.len() > 2 {
             return Err(invalid("invalid batch size"));
         }
@@ -705,7 +704,8 @@ impl World {
             if !in_bounds(x, y, z) || block >> 4 > 255 || !seen.insert((x, y, z)) {
                 return Err(invalid("invalid batched block update"));
             }
-            if next.get(x, y, z) == block {
+            let previous = next.get(x, y, z);
+            if previous == block {
                 continue;
             }
             let key = (x, y as u8, z);
@@ -717,15 +717,30 @@ impl World {
             if next.edits.len() > MAX_EDITS {
                 return Err(invalid("too many edited blocks"));
             }
+            next.mark_lighting_changed(x, z, previous, block);
             next.wake_gravity(x, y, z);
             next.wake_block_updates(x, y, z);
+            if matches!(previous >> 4, 17 | 162) || matches!(block >> 4, 17 | 162) {
+                next.wake_leaves(x, y, z);
+            }
             changed = true;
         }
-        if changed {
-            next.save(path)?;
-            *self = next;
-        }
-        Ok(changed)
+        Ok(changed.then_some(next))
+    }
+
+    /// Persist a small related block edit (such as the two bed halves) as
+    /// one world snapshot, never exposing a half-built object to clients.
+    pub fn update_many_and_save(
+        &mut self,
+        path: &Path,
+        changes: &[(i32, i32, i32, u16)],
+    ) -> io::Result<bool> {
+        let Some(next) = self.staged_updates(changes)? else {
+            return Ok(false);
+        };
+        next.save(path)?;
+        *self = next;
+        Ok(true)
     }
     pub fn update_and_save(
         &mut self,
@@ -901,7 +916,7 @@ impl World {
         }
         Ok(world)
     }
-    fn write_to(&self, f: &mut File) -> io::Result<()> {
+    fn write_to<W: Write>(&self, f: &mut W) -> io::Result<()> {
         match self.generation {
             Generation::Flat => f.write_all(MAGIC)?,
             Generation::Natural(seed) => {
@@ -922,6 +937,13 @@ impl World {
         }
         Ok(())
     }
+    /// In-memory world image used only after all staged edits validate.
+    pub fn encoded(&self) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.write_to(&mut bytes)?;
+        Ok(bytes)
+    }
+
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
