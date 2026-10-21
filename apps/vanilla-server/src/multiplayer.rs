@@ -273,6 +273,27 @@ mod tests {
         assert!(!hub.is_healthy(id));
     }
     #[test]
+    fn golden_protocol5_player_entity_bytes() {
+        // Independently fixed Protocol 5 S0C, S13, S18 and S38 fixtures.
+        let hub = Hub::default();
+        let (id, _rx, _) = hub
+            .add("A".into(), "u".into(), PlayerPosition::default())
+            .unwrap();
+        let peer = hub.0.lock().unwrap().players[&id].clone();
+        assert_eq!(spawn(&peer).unwrap().body, [
+            1, 1, b'u', 1, b'A', 0, // ID, UUID, name, properties
+            0, 0, 0, 16, 0, 0, 8, 32, 0, 0, 0, 16, // fixed-point XYZ
+            0, 0, 0, 0, 0x7f, // yaw, pitch, held item, metadata terminator
+        ]);
+        assert_eq!(destroy(id).body, [1, 0, 0, 0, 1]);
+        assert_eq!(list_entry("A", true).unwrap().body, [1, b'A', 1, 0, 0]);
+        assert_eq!(
+            teleport(id, &PlayerPosition::default(), 90.0, 0.0).body,
+            [0, 0, 0, 1, 0, 0, 0, 16, 0, 0, 8, 32, 0, 0, 0, 16, 64, 0]
+        );
+    }
+
+    #[test]
     fn protocol5_player_list_and_spawn() {
         let list = list_entry("RustTester", true).unwrap();
         assert_eq!(list.id, 0x38);
