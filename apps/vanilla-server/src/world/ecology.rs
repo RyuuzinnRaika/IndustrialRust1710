@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 fn solid(id: u16) -> bool {
     !matches!(id, 0 | 6 | 8..=11 | 18 | 20 | 31 | 37..=40 | 50 | 55 | 59
         | 63 | 66 | 69 | 70 | 72 | 75..=78 | 83 | 93 | 94 | 96
-        | 141 | 142 | 143)
+        | 104 | 105 | 107 | 115 | 127 | 141 | 142 | 143 | 149 | 150)
 }
 fn chance(phase: u64, x: i32, y: i32, z: i32, divisor: u64) -> bool {
     let mut v = phase
@@ -65,7 +65,7 @@ impl World {
                 };
                 solid(support)
             }
-            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 => solid(below),
+            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 | 149 | 150 => solid(below),
             77 | 143 => {
                 let neighbor = match block & 7 {
                     1 => self.get(x - 1, y, z) >> 4,
@@ -205,6 +205,8 @@ impl World {
                     | 77
                     | 143
                     | 96
+                    | 149
+                    | 150
             ) && !self.can_support(x, i32::from(y), z, block)
             {
                 changes.insert((x, y, z), 0);
