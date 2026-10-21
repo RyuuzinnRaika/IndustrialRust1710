@@ -90,6 +90,7 @@ fn bounded_decompress<R: Read>(decoder: R, max: u64) -> io::Result<Vec<u8>> {
     Ok(decoded)
 }
 fn snapshot_marker(source: &Path) -> io::Result<()> {
+    let _ = crate::level_dat::read_level_file(&source.join("level.dat"))?;
     let level = bounded_read(&source.join("level.dat"), MAX_LEVEL_DAT)?;
     let bytes = bounded_decompress(GzDecoder::new(&level[..]), MAX_LEVEL_DAT)?;
     let root: SnapshotLevel = fastnbt::from_bytes(&bytes).map_err(wrap)?;
