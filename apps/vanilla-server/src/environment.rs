@@ -36,7 +36,7 @@ impl Ambient {
             (pos.y + 1.62).floor() as i32,
             pos.z.floor() as i32,
         ) >> 4;
-        let submerged = matches!(eye_block, 8 | 9);
+        let submerged = matches!(eye_block, 8 | 9) && physics::in_water(world, pos);
         let lava = physics::in_lava(world, pos);
         let standing_fire = [0.1, 0.9].into_iter().any(|offset| {
             world.get(
