@@ -281,9 +281,12 @@ impl World {
             // becomes cobblestone. Resolve contacts before normal spreading
             // so a lava source cannot also create new flow in this tick.
             let adjacent = [
-                (x - 1, y, z), (x + 1, y, z),
-                (x, y, z - 1), (x, y, z + 1),
-                (x, y - 1, z), (x, y + 1, z),
+                (x - 1, y, z),
+                (x + 1, y, z),
+                (x, y, z - 1),
+                (x, y, z + 1),
+                (x, y - 1, z),
+                (x, y + 1, z),
             ];
             if id == 10 {
                 let touches_water = adjacent.into_iter().any(|(nx, ny, nz)| {
@@ -726,16 +729,17 @@ mod tests {
     }
     #[test]
     fn water_lava_contacts_solidify_sources_and_flowing_lava_atomically() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-lava-contact-{}.irw", std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-lava-contact-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
         // On the flat world's solid grass, each fluid is confined to y=64.
         world.update_and_save(&path, 0, 64, 0, 8 << 4).unwrap();
         world.update_and_save(&path, 1, 64, 0, 10 << 4).unwrap();
         world.update_and_save(&path, -3, 64, 0, 8 << 4).unwrap();
-        world.update_and_save(&path, -2, 64, 0, (10 << 4) | 3).unwrap();
+        world
+            .update_and_save(&path, -2, 64, 0, (10 << 4) | 3)
+            .unwrap();
 
         // A failed batch save must not leave a solid block in memory or
         // consume the queued contacts. The following retry must work.
