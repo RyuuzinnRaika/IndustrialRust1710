@@ -353,7 +353,11 @@ fn dungeon(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
         return None;
     }
     if y == cy || y == cy + 4 || (x - cx).abs() == 3 || (z - cz).abs() == 3 {
-        return Some(b(if hash(seed, x, y, z).is_multiple_of(4) { 48 } else { 4 }));
+        return Some(b(if hash(seed, x, y, z).is_multiple_of(4) {
+            48
+        } else {
+            4
+        }));
     }
     if y == cy + 1 && x == cx && z == cz {
         return Some(b(52));
@@ -597,7 +601,8 @@ fn nether(seed: u64, x: i32, y: i32, z: i32) -> u16 {
             x.div_euclid(3),
             y.div_euclid(3),
             z.div_euclid(3),
-        ).is_multiple_of(89)
+        )
+        .is_multiple_of(89)
     {
         block = b(89);
     }
