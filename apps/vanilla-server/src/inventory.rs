@@ -8,6 +8,22 @@ use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 pub const SLOT_COUNT: usize = 45;
+/// Protocol 5 player armor: helmet, chestplate, leggings, boots.
+fn armor_accepts(slot: i16, item: Stack) -> bool {
+    if item.count != 1 { return false; }
+    matches!((slot, item.id),
+        (5, 86 | 298 | 302 | 306 | 310 | 314 | 397)
+        | (6, 299 | 303 | 307 | 311 | 315)
+        | (7, 300 | 304 | 308 | 312 | 316)
+        | (8, 301 | 305 | 309 | 313 | 317))
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Drag {
+    window: u8,
+    button: Option<i8>,
+    slots: Vec<i16>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChestDirection {
     InventoryOnly,
@@ -46,6 +62,8 @@ pub struct Inventory {
     cursor: Option<Stack>,
     #[serde(default)]
     workbench: [Option<Stack>; 9],
+    #[serde(skip)]
+    drag: Drag,
 }
 impl Default for Inventory {
     fn default() -> Self {
@@ -55,6 +73,7 @@ impl Default for Inventory {
             slots: vec![None; SLOT_COUNT],
             cursor: None,
             workbench: [None; 9],
+            drag: Drag::default(),
         }
     }
 }
@@ -67,7 +86,7 @@ impl Inventory {
             || self.selected > 8
             || self.slots.len() != SLOT_COUNT
             || self.slots[0].is_some()
-            || self.slots[5..9].iter().any(Option::is_some)
+            || self.slots[5..9].iter().enumerate().any(|(n, item)| item.is_some_and(|stack| !armor_accepts((n + 5) as i16, stack)))
             || self
                 .workbench
                 .iter()
@@ -129,9 +148,11 @@ impl Inventory {
         if stack.is_some_and(|item| !item.is_valid()) {
             return Err(invalid("invalid Creative item"));
         }
-        // No crafting/armor/dragged item windows implemented. Client-side
-        // destroy slot and world drops are intentionally unsupported.
-        if !(9..45).contains(&slot) {
+        // Client-side destroy slot and world drops are unsupported.
+        if !(9..45).contains(&slot) && !(5..=8).contains(&slot) {
+            return Ok(false);
+        }
+        if (5..=8).contains(&slot) && stack.is_some_and(|s| !armor_accepts(slot, s)) {
             return Ok(false);
         }
         self.slots[slot as usize] = stack;
@@ -191,7 +212,7 @@ impl Inventory {
     pub fn possessions(&self) -> Vec<Stack> {
         self.slots[1..5]
             .iter()
-            .chain(self.slots[9..45].iter())
+            .chain(self.slots[5..45].iter())
             .chain(self.workbench.iter())
             .chain(std::slice::from_ref(&self.cursor))
             .flatten()
@@ -203,7 +224,7 @@ impl Inventory {
         for slot in &mut self.slots[1..5] {
             *slot = None;
         }
-        for slot in &mut self.slots[9..45] {
+        for slot in &mut self.slots[5..45] {
             *slot = None;
         }
         self.workbench.fill(None);
@@ -260,7 +281,7 @@ impl Inventory {
     fn slot_index(window: u8, slot: i16) -> Option<(bool, usize)> {
         match (window, slot) {
             (0, 1..=4) => Some((false, slot as usize)),
-            (0, 9..=44) => Some((false, slot as usize)),
+            (0, 5..=44) => Some((false, slot as usize)),
             (1..=u8::MAX, 1..=9) => Some((true, (slot - 1) as usize)),
             (1..=u8::MAX, 10..=45) => Some((false, (slot - 1) as usize)),
             _ => None,
@@ -356,11 +377,71 @@ impl Inventory {
         self.cursor = carried;
         true
     }
+    /// Vanilla click-drag is a three-phase protocol; client-provided stack counts
+    /// are never trusted.
+    fn drag_click(&mut self, window: u8, slot: i16, button: i8) -> bool {
+        let kind = match button { 0 | 1 | 2 => 0, 4 | 5 | 6 => 4, _ => return false };
+        match button {
+            0 | 4 if slot == -999 => {
+                self.drag = Drag { window, button: Some(kind), slots: Vec::new() };
+                true
+            }
+            1 | 5 if self.drag.window == window && self.drag.button == Some(kind) => {
+                if slot == 0 || ((5..=8).contains(&slot) && window == 0)
+                    || Self::slot_index(window, slot).is_none() { return false; }
+                if !self.drag.slots.contains(&slot) { self.drag.slots.push(slot); }
+                true
+            }
+            2 | 6 if slot == -999 && self.drag.window == window
+                && self.drag.button == Some(kind) => {
+                let slots = std::mem::take(&mut self.drag.slots);
+                self.drag = Drag::default();
+                let Some(mut held) = self.cursor else { return true };
+                if slots.is_empty() { return true; }
+                let each = if kind == 0 { held.count / slots.len().min(64) as u8 } else { 1 };
+                if each == 0 { return true; }
+                for dest in slots {
+                    let existing = self.lookup(window, dest);
+                    if let Some(other) = existing {
+                        if other.id != held.id || other.damage != held.damage { continue; }
+                    }
+                    let current = existing.map_or(0, |s| s.count);
+                    let adding = each.min(64 - current).min(held.count);
+                    if adding == 0 { continue; }
+                    self.assign(window, dest, Some(Stack { count: current + adding, ..held }));
+                    held.count -= adding;
+                    if held.count == 0 { break; }
+                }
+                self.cursor = (held.count != 0).then_some(held);
+                true
+            }
+            _ => { self.drag = Drag::default(); false }
+        }
+    }
+    fn collect_matching(&mut self, window: u8) -> bool {
+        let Some(mut carried) = self.cursor else { return true };
+        let end = if window == 0 { 45 } else { 46 };
+        for slot in 1..end {
+            if window == 0 && (5..=8).contains(&slot) { continue; }
+            let Some(mut other) = self.lookup(window, slot) else { continue };
+            if other.id != carried.id || other.damage != carried.damage { continue; }
+            let count = (64 - carried.count).min(other.count);
+            if count == 0 { break; }
+            carried.count += count;
+            other.count -= count;
+            self.assign(window, slot, (other.count != 0).then_some(other));
+        }
+        self.cursor = Some(carried);
+        true
+    }
     /// Execute only bounded, server-owned window transactions.
     ///
     /// Client-provided snapshots are never trusted; unsupported modes,
     /// unsupported armor slots and outside-drop return false.
     pub fn click_window(&mut self, window: u8, slot: i16, button: i8, mode: i8) -> bool {
+        if mode == 5 { return self.drag_click(window, slot, button); }
+        self.drag = Drag::default();
+        if mode == 6 && button == 0 && slot >= 0 { return self.collect_matching(window); }
         if slot == 0 {
             return match (mode, button) {
                 (0, 0 | 1) => self.take_recipe(window, false),
@@ -413,6 +494,10 @@ impl Inventory {
                     (target, hand, 1) => (hand, target),
                     _ => unreachable!("validated button"),
                 };
+                if window == 0 && (5..=8).contains(&slot)
+                    && new_slot.is_some_and(|item| !armor_accepts(slot, item)) {
+                    return false;
+                }
                 self.assign(window, slot, new_slot);
                 self.cursor = new_cursor;
                 true
@@ -422,6 +507,15 @@ impl Inventory {
                 let Some(mut moving) = self.lookup(window, slot) else {
                     return true;
                 };
+                if window == 0 && slot >= 9 {
+                    for armor_slot in 5..=8 {
+                        if armor_accepts(armor_slot, moving) && self.lookup(window, armor_slot).is_none() {
+                            self.assign(window, armor_slot, Some(moving));
+                            self.assign(window, slot, None);
+                            return true;
+                        }
+                    }
+                }
                 let main_start = if window == 0 { 9 } else { 10 };
                 let hotbar_start = if window == 0 { 36 } else { 37 };
                 let destination = if slot < main_start {
@@ -459,7 +553,7 @@ impl Inventory {
                 self.assign(window, slot, (moving.count > 0).then_some(moving));
                 true
             }
-            2 if (0..=8).contains(&button) => {
+            2 if (0..=8).contains(&button) && !(window == 0 && (5..=8).contains(&slot)) => {
                 let other = if window == 0 { 36 } else { 37 } + i16::from(button);
                 let old = self.lookup(window, slot);
                 let held = self.lookup(window, other);
