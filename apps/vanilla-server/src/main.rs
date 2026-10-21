@@ -5,6 +5,7 @@ mod anvil_export;
 mod anvil_import;
 mod brewing;
 mod chests;
+mod chunk_pipeline;
 mod clock;
 mod crafting;
 mod experience;
@@ -20,6 +21,7 @@ mod physics;
 mod player;
 mod survival;
 mod survival_damage;
+mod telemetry;
 mod terrain;
 mod vitals;
 mod whitelist;
@@ -29,8 +31,6 @@ use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use experience::Experience;
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use ground_items::GroundItems;
 use hoppers::{Hoppers, Position as HopperPosition};
@@ -45,7 +45,7 @@ use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use serde_json::json;
 use std::collections::BTreeSet;
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -247,8 +247,14 @@ fn join(
         send(s, 0x2b, &weather)?;
     }
 
-    for (cx, cz) in view_chunks(chunk_center(position)) {
-        send_chunk(s, world, cx, cz)?;
+    // Prefetch all visible chunks into a fixed-size compression queue.
+    // Independent workers compress while the world mutex stays unlocked.
+    let pending: Vec<_> = view_chunks(chunk_center(position))
+        .into_iter()
+        .map(|(cx, cz)| queue_chunk(world, cx, cz))
+        .collect::<io::Result<_>>()?;
+    for chunk in pending {
+        send(s, 0x21, &chunk.finish()?)?;
     }
 
     // Clientbound 0x30 / 0x09: authoritative Creative inventory and hotbar.
@@ -292,23 +298,15 @@ fn view_chunks(center: (i32, i32)) -> BTreeSet<(i32, i32)> {
     }
     chunks
 }
-fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
+fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipeline::PendingChunk> {
     let (mask, data) = world
         .lock()
         .map_err(|_| bad("world mutex poisoned"))?
         .chunk_data(cx, cz);
-    let mut compressor = ZlibEncoder::new(Vec::new(), Compression::fast());
-    compressor.write_all(&data)?;
-    let compressed = compressor.finish()?;
-    let mut packet = Vec::with_capacity(17 + compressed.len());
-    packet.extend_from_slice(&cx.to_be_bytes());
-    packet.extend_from_slice(&cz.to_be_bytes());
-    packet.push(1);
-    packet.extend_from_slice(&mask.to_be_bytes());
-    packet.extend_from_slice(&0u16.to_be_bytes());
-    packet.extend_from_slice(&(compressed.len() as i32).to_be_bytes());
-    packet.extend_from_slice(&compressed);
-    send(s, 0x21, &packet)
+    chunk_pipeline::submit(cx, cz, mask, data)
+}
+fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
+    send(s, 0x21, &queue_chunk(world, cx, cz)?.finish()?)
 }
 fn unload_chunk(s: &mut TcpStream, cx: i32, cz: i32) -> io::Result<()> {
     // Protocol 5: full column with zero section bitmap and no data.
@@ -331,8 +329,12 @@ fn sync_chunks(
     for &(cx, cz) in loaded.difference(&desired) {
         unload_chunk(s, cx, cz)?;
     }
-    for &(cx, cz) in desired.difference(loaded) {
-        send_chunk(s, world, cx, cz)?;
+    let pending: Vec<_> = desired
+        .difference(loaded)
+        .map(|&(cx, cz)| queue_chunk(world, cx, cz))
+        .collect::<io::Result<_>>()?;
+    for chunk in pending {
+        send(s, 0x21, &chunk.finish()?)?;
     }
     *loaded = desired;
     Ok(())
@@ -565,6 +567,11 @@ fn play(
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
     loop {
+        if !hub.is_healthy(entity_id) {
+            return Err(io::Error::other(
+                "outbound packet overflow or session removed",
+            ));
+        }
         while let Ok(event) = events.try_recv() {
             if event.id == CHUNK_RELIGHT_EVENT {
                 if event.body.len() == 8 {
@@ -2583,8 +2590,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     for other in &previous {
         let list = multiplayer::list_entry(&other.name, true)?;
         send(&mut s, list.id, &list.body)?;
-        let spawn = multiplayer::spawn(other)?;
-        send(&mut s, spawn.id, &spawn.body)?;
+        if multiplayer::visible(&player_state, &other.position) {
+            let spawn = multiplayer::spawn(other)?;
+            send(&mut s, spawn.id, &spawn.body)?;
+        }
     }
     // Send existing persisted items to newly joining clients. They are
     // independent of the player's chunk updates in this bounded prototype.
@@ -2852,13 +2861,17 @@ fn main() -> io::Result<()> {
     let leaf_drops = Arc::clone(&ground_items);
     let leaf_drops_file = Arc::clone(&ground_path);
     thread::spawn(move || {
+        let mut telemetry =
+            telemetry::TickTelemetry::new(furnace_world_path.with_extension("metrics.jsonl"));
         let mut last = furnace_clock.ticks();
         let mut last_clock_snapshot = last;
         let mut last_weather = furnace_clock.weather();
         loop {
             let now = furnace_clock.ticks();
             if now > last {
+                let worker_started = Instant::now();
                 let steps = (now - last).min(20) as u32;
+                let missed = (now - last).saturating_sub(u64::from(steps));
                 last = now;
                 // One small durable write per second, with no replay of
                 // elapsed wall-clock downtime after an unexpected stop.
@@ -2981,6 +2994,13 @@ fn main() -> io::Result<()> {
                 for (cx, cz) in gravity_world.drain_light_chunks(32) {
                     furnace_hub.broadcast(chunk_relight_event(cx, cz));
                 }
+                drop(gravity_world);
+                telemetry.record(
+                    worker_started.elapsed(),
+                    steps,
+                    missed,
+                    furnace_hub.count().unwrap_or(0),
+                );
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -3115,6 +3135,45 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn golden_protocol5_empty_window_cursor_and_chunk_layout() {
+        // S30 Window Items: unsigned window ID, signed short slot count,
+        // followed by 45 slots with i16(-1) absent-item sentinels.
+        let inventory = Inventory::default();
+        let mut expected = vec![0, 0, 45];
+        expected.extend(std::iter::repeat_n(0xff, 90));
+        assert_eq!(inventory.window_items(), expected);
+        // S2F Set Slot for the cursor is window=-1, slot=-1, empty item.
+        assert_eq!(inventory.cursor_packet(), [0xff; 5]);
+
+        // S21 flat-world chunk: sections 3+4 with block IDs, nibble
+        // metadata, both light channels, then 256 biome bytes.
+        let (mask, payload) = World::new().chunk_data(0, 0);
+        assert_eq!(mask, 0x0018);
+        assert_eq!(payload.len(), 8192 + 4096 + 8192 + 256);
+        assert_eq!(&payload[payload.len() - 256..], &[1u8; 256]);
+    }
+    #[test]
+    fn protocol5_slot_nbt_length_is_validated() {
+        let empty = [-1i16; 1]
+            .into_iter()
+            .flat_map(i16::to_be_bytes)
+            .collect::<Vec<_>>();
+        assert!(Input(&empty).slot().unwrap().is_none());
+        // Item id=1, count=1, damage=0, NBT=-1 (no tag).
+        let mut none = Input(&[0, 1, 1, 0, 0, 255, 255]);
+        assert_eq!(
+            none.slot().unwrap(),
+            Some(Stack {
+                id: 1,
+                count: 1,
+                damage: 0
+            })
+        );
+        none.finish().unwrap();
+        // An NBT-bearing client item must not be accepted as a bare stack.
+        assert!(Input(&[0, 1, 1, 0, 0, 0, 3, 0, 0, 0]).slot().is_err());
+    }
     #[test]
     fn offline_uuid_is_deterministic() {
         assert_eq!(offline_uuid("Notch"), offline_uuid("Notch"));
