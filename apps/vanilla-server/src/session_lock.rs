@@ -98,7 +98,10 @@ mod tests {
         let mut first = WorldSessionLock::acquire(&root).unwrap();
         let bytes = fs::read(root.join("session.lock")).unwrap();
         assert_eq!(bytes.len(), 8);
-        assert_eq!(i64::from_be_bytes(bytes.try_into().unwrap()), first.started_ms);
+        assert_eq!(
+            i64::from_be_bytes(bytes.try_into().unwrap()),
+            first.started_ms
+        );
         assert!(first.verify().is_ok());
         assert!(WorldSessionLock::acquire(&root).is_err());
         drop(first);
