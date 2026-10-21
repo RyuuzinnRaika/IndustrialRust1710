@@ -39,8 +39,17 @@ pub struct World {
     pending_devices: BTreeSet<Position>,
     pending_repeaters: BTreeMap<Position, (u64, bool)>,
     pending_buttons: BTreeMap<Position, u64>,
+    pending_drops: Vec<WorldDrop>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
     fluid_phase: u64,
+}
+
+/// A persisted world mutation can create a temporary ground-item event.
+/// World state is written first, then the 20TPS worker saves item entities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorldDrop {
+    pub pos: (i32, i32, i32),
+    pub stack: crate::inventory::Stack,
 }
 
 /// A gravity block moved exactly one vertical cell during one 20Hz world tick.
@@ -122,6 +131,9 @@ pub fn is_placeable(block_id: u16) -> bool {
 }
 impl World {
     /// Tracks which chunk columns contain changes, without allocating a full world.
+    pub fn drain_drops(&mut self) -> Vec<WorldDrop> {
+        std::mem::take(&mut self.pending_drops)
+    }
     pub fn edited_chunks(&self) -> BTreeSet<(i32, i32)> {
         self.edits
             .keys()
@@ -518,6 +530,15 @@ impl World {
         }
 
         if !changes.is_empty() {
+            // Decaying oak leaves may yield a sapling or apple. Stage these
+            // before mutation, but expose them only after a successful save.
+            let leaf_drops: Vec<WorldDrop> = changes.iter().filter_map(|(&(x,y,z),&next)| {
+                let old=self.get(x,i32::from(y),z);
+                if next != 0 || old >> 4 != 18 {return None;}
+                let pos=(x,i32::from(y),z);
+                crate::survival::additional_drop(old,pos,self.fluid_phase)
+                    .map(|stack| WorldDrop {pos,stack})
+            }).take(256).collect();
             let undo: Vec<(Position, Option<u16>)> = changes
                 .keys()
                 .map(|&p| (p, self.edits.get(&p).copied()))
@@ -543,6 +564,7 @@ impl World {
                 }
                 return Err(error);
             }
+            self.pending_drops.extend(leaf_drops);
         }
 
         for pos in wet {
