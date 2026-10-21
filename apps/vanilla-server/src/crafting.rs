@@ -52,6 +52,12 @@ pub fn result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if w == 1 && h == 2 && at(0, 0).is_some_and(|item| item.id == 263) && stick(at(0, 1)) {
         return product(50, 4, 0); // four torches from coal/charcoal and a stick
     }
+    if w == 1 && h == 2 && same_material(at(0, 0), 331) && stick(at(0, 1)) {
+        return product(76, 1, 0); // active redstone torch
+    }
+    if w == 1 && h == 2 && stick(at(0, 0)) && same_material(at(0, 1), 4) {
+        return product(69, 1, 0); // lever
+    }
     if w == 3 && h == 1 && (0..3).all(|x| same_material(at(x, 0), 296)) {
         return product(297, 1, 0); // bread from wheat
     }
@@ -212,6 +218,14 @@ mod tests {
             product(54, 1, 0)
         );
         assert_eq!(result(&[item(3); 9], 3), None);
+        assert_eq!(
+            result(&[item(331), None, item(280), None], 2),
+            product(76, 1, 0)
+        );
+        assert_eq!(
+            result(&[item(280), None, item(4), None], 2),
+            product(69, 1, 0)
+        );
         assert_eq!(
             result(&[item(263), None, item(280), None], 2),
             product(50, 4, 0)

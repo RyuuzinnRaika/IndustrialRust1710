@@ -227,14 +227,36 @@ fn read_position(packet: &[u8]) -> [f64; 3] {
         f64::from_be_bytes(packet[16..24].try_into().unwrap()),
     ]
 }
+/// Read a Play packet while acting like a live Protocol 5 client:
+/// server KeepAlive requests must be acknowledged even during long E2E tests.
+#[track_caller]
 fn until_packet(socket: &mut TcpStream, id: u32, matches: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+    let caller = std::panic::Location::caller();
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut seen = 0usize;
     for _ in 0..MAX_PACKETS {
-        let (packet_id, body) = receive(socket);
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for packet {id:#x} at {caller}; received {seen} packets"
+        );
+        let packet = read_frame(&mut *socket).unwrap_or_else(|error| {
+            panic!("waiting for packet {id:#x} at {caller}, after {seen} packets: {error}")
+        });
+        let mut raw = packet.as_slice();
+        let packet_id = read_varint(&mut raw).expect("valid Play packet ID");
+        let body = raw.to_vec();
+        seen += 1;
+        if packet_id == 0 && body.len() == 4 {
+            // S00 KeepAlive: the same signed 32-bit identifier is returned in C00.
+            socket
+                .write_all(&frame(0, &body))
+                .expect("reply to KeepAlive");
+        }
         if packet_id == id && matches(&body) {
             return body;
         }
     }
-    panic!("expected packet {id:#x} not received");
+    panic!("expected packet {id:#x} at {caller} not received after {seen} packets");
 }
 fn await_file(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(6);
@@ -541,7 +563,12 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     placed.extend_from_slice(&(-1i16).to_be_bytes());
     placed.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &placed)).unwrap();
-    until_packet(&mut client, 0x2f, |b| b == [0, 0, 36, 255, 255]);
+    // Successful placement sends the full server-owned inventory (S30),
+    // because consuming a bucket can also return an empty bucket elsewhere.
+    // The selected hotbar slot 36 must now be empty.
+    until_packet(&mut client, 0x30, |b| {
+        b.len() >= 77 && b[..3] == [0, 0, 45] && b[75..77] == [255, 255]
+    });
     until_packet(&mut client, 0x23, |b| {
         b.len() >= 11 && b[4] == 64 && b[9] == 3
     });
@@ -1313,5 +1340,73 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     server.wait_idle();
     let (rejoined, _, _) = server.join("RustTester");
     drop(rejoined);
+    server.wait_idle();
+}
+
+#[test]
+fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
+    let server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+    let mut place = |id: i16, x: i32| {
+        let mut creative = 36i16.to_be_bytes().to_vec();
+        creative.extend_from_slice(&id.to_be_bytes());
+        creative.push(1);
+        creative.extend_from_slice(&0i16.to_be_bytes());
+        creative.extend_from_slice(&(-1i16).to_be_bytes());
+        client.write_all(&frame(0x10, &creative)).unwrap();
+        until_packet(&mut client, 0x2f, |body| {
+            body.len() == 10 && body[3..5] == id.to_be_bytes()
+        });
+        let mut packet = x.to_be_bytes().to_vec();
+        packet.push(63);
+        packet.extend_from_slice(&0i32.to_be_bytes());
+        packet.push(1);
+        packet.extend_from_slice(&id.to_be_bytes());
+        packet.push(1);
+        packet.extend_from_slice(&0i16.to_be_bytes());
+        packet.extend_from_slice(&(-1i16).to_be_bytes());
+        packet.extend_from_slice(&[8, 8, 8]);
+        client.write_all(&frame(8, &packet)).unwrap();
+        until_packet(&mut client, 0x23, |body| {
+            body.len() == 11
+                && body[0..4] == x.to_be_bytes()
+                && body[4] == 64
+                && body[9] == if id == 331 { 55 } else { id as u8 }
+        });
+    };
+    place(69, -4); // lever
+    place(331, -3); // redstone dust item -> wire block55
+    place(8, 5); // source water supported by grass
+    drop(place); // release closure's mutable TcpStream borrow
+    until_packet(&mut client, 0x23, |body| {
+        body.len() == 11
+            && body[0..4] == 6i32.to_be_bytes()
+            && body[4] == 64
+            && body[9] == 8
+            && body[10] >= 1
+    });
+    // Right click the lever to turn on the 15-strength redstone source.
+    let mut click = (-4i32).to_be_bytes().to_vec();
+    click.push(64);
+    click.extend_from_slice(&0i32.to_be_bytes());
+    click.push(1);
+    click.extend_from_slice(&(-1i16).to_be_bytes()); // empty held snapshot
+    click.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &click)).unwrap();
+    until_packet(&mut client, 0x23, |body| {
+        body.len() == 11
+            && body[0..4] == (-4i32).to_be_bytes()
+            && body[4] == 64
+            && body[9] == 69
+            && body[10] & 8 != 0
+    });
+    until_packet(&mut client, 0x23, |body| {
+        body.len() == 11
+            && body[0..4] == (-3i32).to_be_bytes()
+            && body[4] == 64
+            && body[9] == 55
+            && body[10] == 15
+    });
+    drop(client);
     server.wait_idle();
 }

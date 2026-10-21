@@ -975,6 +975,18 @@ fn play(
                     }
                     continue;
                 }
+                // Server-authoritative lever use: toggle powered flag,
+                // then let queued redstone-wire updates propagate per tick.
+                if (0..=5).contains(&face) && world::in_bounds(x, y, z) && near(location, x, y, z) {
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let old = w.get(x, y, z);
+                    if old >> 4 == 69 {
+                        if w.update_and_save(world_path, x, y, z, old ^ 8)? {
+                            hub.broadcast(block_change_event(&w, x, y, z));
+                        }
+                        continue;
+                    }
+                }
                 if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
@@ -1090,7 +1102,14 @@ fn play(
                     // Only the selected server-held stack may place blocks.
                     if inventory.can_place(held) {
                         if let Some(stack) = inventory.held() {
-                            let block_id = stack.id as u16;
+                            // Survival inventory items are not always block IDs:
+                            // dust ID331 -> wire55, water/lava buckets -> fluid8/10.
+                            let block_id = match stack.id {
+                                331 => 55,
+                                326 => 8,
+                                327 => 10,
+                                _ => stack.id as u16,
+                            };
                             let adjacent_chest = block_id == 54
                                 && [(nx + 1, nz), (nx - 1, nz), (nx, nz + 1), (nx, nz - 1)]
                                     .iter()
@@ -1104,7 +1123,19 @@ fn play(
                             {
                                 if survival {
                                     let mut remaining = inventory.clone();
-                                    if remaining.consume_held() {
+                                    let removed = remaining.consume_held();
+                                    let bucket_ok = if matches!(stack.id, 326 | 327) {
+                                        remaining
+                                            .receive_stack(Stack {
+                                                id: 325,
+                                                count: 1,
+                                                damage: 0,
+                                            })
+                                            .is_some()
+                                    } else {
+                                        true
+                                    };
+                                    if removed && bucket_ok {
                                         // Persist item consumption before the world edit so a
                                         // crash cannot grant a free block on restart.
                                         remaining.save(inventory_path)?;
@@ -1118,11 +1149,7 @@ fn play(
                                             Ok(true) => {
                                                 *inventory = remaining;
                                                 changed = true;
-                                                send(
-                                                    s,
-                                                    0x2f,
-                                                    &inventory.set_slot(inventory.held_slot())?,
-                                                )?;
+                                                send(s, 0x30, &inventory.window_items())?;
                                             }
                                             Ok(false) => {
                                                 inventory.save(inventory_path)?;
@@ -1868,6 +1895,19 @@ fn main() -> io::Result<()> {
                         }
                         Err(error) => {
                             eprintln!("GRAVITY TICK STORAGE ERROR: {error}");
+                            return;
+                        }
+                    }
+                    // Queued fluid and redstone updates use the same tick and
+                    // save all staged block changes with one world-file commit.
+                    match gravity_world.block_tick(&furnace_world_path, 64) {
+                        Ok(changed) => {
+                            for (x, y, z) in changed {
+                                furnace_hub.broadcast(block_change_event(&gravity_world, x, y, z));
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("BLOCK TICK STORAGE ERROR: {error}");
                             return;
                         }
                     }
