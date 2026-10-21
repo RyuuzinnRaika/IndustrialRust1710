@@ -2375,7 +2375,7 @@ fn play(
                     drop(storage);
                 } else {
                     let mut candidate = inventory.clone();
-                    accepted = requested_window
+                    accepted |= requested_window
                         && candidate.click_window(active_window, slot, button, mode);
                     if accepted && candidate != *inventory {
                         candidate.save(inventory_path)?;
