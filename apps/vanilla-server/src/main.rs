@@ -21,6 +21,7 @@ mod navigation;
 mod physics;
 mod player;
 mod server_config;
+mod session_lock;
 mod survival;
 mod survival_damage;
 mod telemetry;
@@ -2839,10 +2840,9 @@ fn main() -> io::Result<()> {
         println!("This is a partial flat-world snapshot, not a completed survival world.");
         return Ok(());
     }
+    // Even explicit --world must not place an IRW file inside a vanilla save.
+    server_config::verify_legacy_storage(&world_path)?;
     if let Some(config) = properties.as_ref() {
-        if world_path == config.world_path {
-            server_config::verify_legacy_storage(&world_path)?;
-        }
         eprintln!(
             "server.properties: level-name={} (legacy IRW storage; Anvil is NOT enabled)",
             config.level_name
@@ -2857,6 +2857,14 @@ fn main() -> io::Result<()> {
         "Whitelist: {} permitted name(s) (NOT cryptographic identity authentication)",
         list.len()
     );
+    // Acquire a 1.7.10-compatible session.lock before reading or creating
+    // world state. The guard remains held until the server process exits.
+    let world_directory = world_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut session_guard = session_lock::WorldSessionLock::acquire(world_directory)?;
+    session_guard.verify()?;
     // Replay interrupted multi-file credits before loading any container or
     // accepting connections. Corrupt/unrecoverable logs prevent startup.
     journal::recover(&world_path.with_extension("pending-txn.json"))?;
