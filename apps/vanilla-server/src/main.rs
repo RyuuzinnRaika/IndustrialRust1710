@@ -1218,7 +1218,7 @@ fn play(
                         .map(|w| chest_neighbor(&w, pos))?;
                     active_furnace = None;
                     let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
-                    let items = inventory.chest_window_items(active_window, &guard.slots(pos));
+                    let items = inventory.chest_window_items(active_window, &chest_window_state(&guard, pos, active_chest_partner));
                     observed_chest_revision = guard.revision();
                     drop(guard);
                     let mut opened = vec![active_window];
@@ -1491,7 +1491,7 @@ fn play(
                     }
                     observed_chest_revision = storage.revision();
                     response_items =
-                        inventory.chest_window_items(active_window, &storage.slots(pos));
+                        inventory.chest_window_items(active_window, &chest_window_state(&storage, pos, active_chest_partner));
                     drop(storage);
                 } else {
                     let mut candidate = inventory.clone();
