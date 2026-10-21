@@ -319,25 +319,24 @@ impl Inventory {
     /// Snapshot all droppable player possessions before clearing them.
     /// Does not include the virtual crafting result or empty armor slots.
     pub fn possessions(&self) -> Vec<Stack> {
-        self.slots[1..9]
+        // Protocol 5 window 0: slots 1..4 are the 2x2 crafting grid,
+        // 5..8 are armor, and 9..44 are the backpack and hotbar. Each
+        // occupied slot must be counted exactly once or death duplicates gear.
+        self.slots[1..45]
             .iter()
-            .chain(self.slots[5..45].iter())
             .chain(self.workbench.iter())
             .chain(std::slice::from_ref(&self.cursor))
             .flatten()
             .copied()
             .collect()
     }
-    /// Clear only possessions; used after ground-drop capacity is checked.
+    /// Clear precisely the same slots included by possessions(). This is
+    /// committed atomically with the ground-item snapshot by the caller.
     pub fn clear_possessions(&mut self) {
-        for slot in &mut self.slots[1..9] {
-            *slot = None;
-        }
-        for slot in &mut self.slots[5..45] {
-            *slot = None;
-        }
+        self.slots[1..45].fill(None);
         self.workbench.fill(None);
         self.cursor = None;
+        self.drag = Drag::default();
     }
 
     /// Commit one server-owned held item consumption (Survival only).
@@ -1419,6 +1418,61 @@ mod tests {
         inv.clear_possessions();
         assert_eq!(inv.armor_points(), 0);
         assert!(!inv.possessions().contains(&helm));
+    }
+
+    #[test]
+    fn death_drops_armor_and_crafting_slots_exactly_once() {
+        let mut inventory = Inventory::default();
+        let helmet = Stack {
+            id: 306,
+            count: 1,
+            damage: 12,
+        };
+        let chestplate = Stack {
+            id: 307,
+            count: 1,
+            damage: 7,
+        };
+        let boots = Stack {
+            id: 309,
+            count: 1,
+            damage: 3,
+        };
+        let logs = Stack {
+            id: 17,
+            count: 4,
+            damage: 2,
+        };
+        let diamonds = Stack {
+            id: 264,
+            count: 5,
+            damage: 0,
+        };
+        let sticks = Stack {
+            id: 280,
+            count: 2,
+            damage: 0,
+        };
+        inventory.creative_set(5, Some(helmet)).unwrap();
+        inventory.creative_set(6, Some(chestplate)).unwrap();
+        inventory.creative_set(8, Some(boots)).unwrap();
+        inventory.slots[1] = Some(logs);
+        inventory.slots[9] = Some(diamonds);
+        inventory.cursor = Some(sticks);
+        inventory.workbench[0] = Some(sticks);
+
+        let before = inventory.possessions();
+        assert_eq!(before.len(), 7);
+        assert_eq!(before.iter().filter(|&&s| s == helmet).count(), 1);
+        assert_eq!(before.iter().filter(|&&s| s == chestplate).count(), 1);
+        assert_eq!(before.iter().filter(|&&s| s == boots).count(), 1);
+        let total: u32 = before.iter().map(|s| u32::from(s.count)).sum();
+        assert_eq!(total, 16);
+
+        inventory.clear_possessions();
+        assert!(inventory.possessions().is_empty());
+        assert_eq!(inventory.armor_points(), 0);
+        assert!(inventory.encoded().is_ok());
     }
 
     #[test]
