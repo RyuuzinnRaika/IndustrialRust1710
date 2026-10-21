@@ -1004,6 +1004,32 @@ fn play(
                 input.finish()?;
                 if survival && vitals.health > 0.0 && action == 0 {
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    // Shears, a sheep's shared metadata, inventory durability and
+                    // spawned wool are all decided by the server.
+                    if inventory.held().is_some_and(|item| item.id == 359) {
+                        if let Some((wool, event)) =
+                            creatures.shear(target_id, *player, inventory.held())
+                        {
+                            let mut next_inventory = inventory.clone();
+                            if next_inventory.wear_held_tool() {
+                                next_inventory.save(inventory_path)?;
+                                *inventory = next_inventory;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                let mut ground = ground_items
+                                    .lock()
+                                    .map_err(|_| bad("ground items mutex poisoned"))?;
+                                if !ground.is_full() {
+                                    let at = (player.x.floor() as i32, player.y.floor() as i32, player.z.floor() as i32);
+                                    let dropped = ground.put(ground_path, wool, at)?;
+                                    for packet in dropped.spawn() {
+                                        hub.broadcast(packet);
+                                    }
+                                }
+                                hub.broadcast(event);
+                            }
+                            continue;
+                        }
+                    }
                     if let Some(event) =
                         creatures.feed(target_id, *player, inventory.held(), now_tick)
                     {
