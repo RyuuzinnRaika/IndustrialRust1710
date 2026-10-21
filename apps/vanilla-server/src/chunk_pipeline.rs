@@ -120,6 +120,9 @@ fn submit_with_wait(
 }
 
 /// Nonblocking submission for callers that cannot tolerate any backpressure.
+// Kept as the future simulation-tick entrypoint; current production uses
+// bounded retries on the connection thread instead.
+#[allow(dead_code)]
 pub fn submit(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChunk> {
     submit_with_wait(x, z, mask, raw, Duration::ZERO)
 }
