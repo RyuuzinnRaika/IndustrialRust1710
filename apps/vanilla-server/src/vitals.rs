@@ -22,17 +22,16 @@ pub fn food_side_effects(stack: Stack, chance: u8) -> Vec<FoodEffect> {
     match (stack.id, stack.damage) {
         (365, _) if chance < 30 => vec![effect(17, 0, 600)], // raw chicken
         (367, _) if chance < 80 => vec![effect(17, 0, 600)], // rotten flesh
-        (375, _) => vec![effect(19, 0, 100)], // spider eye: poison for five seconds
+        (375, _) => vec![effect(19, 0, 100)],                // spider eye: poison for five seconds
         (394, _) if chance < 60 => vec![effect(19, 0, 100)], // poisonous potato
         (349, 3) => vec![
-            effect(17, 2, 300), // pufferfish: Hunger III, 15 seconds
+            effect(17, 2, 300),  // pufferfish: Hunger III, 15 seconds
             effect(19, 3, 1200), // Poison IV, 60 seconds
-            effect(9, 1, 300), // Nausea II, 15 seconds
+            effect(9, 1, 300),   // Nausea II, 15 seconds
         ],
         _ => Vec::new(),
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vitals {
@@ -203,7 +202,11 @@ impl Vitals {
 mod tests {
     #[test]
     fn raw_food_side_effect_chances_and_metadata_are_bounded() {
-        let food = |id, damage| Stack { id, damage, count: 1 };
+        let food = |id, damage| Stack {
+            id,
+            damage,
+            count: 1,
+        };
         assert_eq!(food_side_effects(food(365, 0), 29)[0].kind, 17);
         assert!(food_side_effects(food(365, 0), 30).is_empty());
         assert_eq!(food_side_effects(food(367, 0), 79)[0].duration_ticks, 600);
@@ -214,9 +217,21 @@ mod tests {
         assert_eq!(
             food_side_effects(food(349, 3), 99),
             vec![
-                FoodEffect { kind: 17, amplifier: 2, duration_ticks: 300 },
-                FoodEffect { kind: 19, amplifier: 3, duration_ticks: 1200 },
-                FoodEffect { kind: 9, amplifier: 1, duration_ticks: 300 },
+                FoodEffect {
+                    kind: 17,
+                    amplifier: 2,
+                    duration_ticks: 300
+                },
+                FoodEffect {
+                    kind: 19,
+                    amplifier: 3,
+                    duration_ticks: 1200
+                },
+                FoodEffect {
+                    kind: 9,
+                    amplifier: 1,
+                    duration_ticks: 300
+                },
             ]
         );
         assert!(food_side_effects(food(349, 2), 20).is_empty());
@@ -240,7 +255,11 @@ mod tests {
     #[test]
     fn starvation_respects_classic_difficulty_floors() {
         for (difficulty, minimum) in [(0, 20.0), (1, 10.0), (2, 1.0), (3, 0.0)] {
-            let mut v = Vitals { food: 0, saturation: 0.0, ..Vitals::default() };
+            let mut v = Vitals {
+                food: 0,
+                saturation: 0.0,
+                ..Vitals::default()
+            };
             for _ in 0..100 {
                 v.tick_with_difficulty(20, difficulty);
             }
