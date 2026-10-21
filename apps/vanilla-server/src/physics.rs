@@ -12,28 +12,94 @@ const GROUND_TOLERANCE: f64 = 0.0625;
 
 /// Axis-aligned collision box in local block coordinates.
 #[derive(Clone, Copy)]
-struct Shape { x0: f64, y0: f64, z0: f64, x1: f64, y1: f64, z1: f64 }
-const FULL: Shape = Shape { x0: 0.0, y0: 0.0, z0: 0.0, x1: 1.0, y1: 1.0, z1: 1.0 };
+struct Shape {
+    x0: f64,
+    y0: f64,
+    z0: f64,
+    x1: f64,
+    y1: f64,
+    z1: f64,
+}
+const FULL: Shape = Shape {
+    x0: 0.0,
+    y0: 0.0,
+    z0: 0.0,
+    x1: 1.0,
+    y1: 1.0,
+    z1: 1.0,
+};
 
 fn full_block(id: u16) -> bool {
-    matches!(id,
-        1 | 2 | 3 | 4 | 5 | 7 | 12 | 13 | 14 | 15 | 16 | 17 |
-        18 | 20 | 21 | 24 | 35 | 41 | 42 | 45 | 46 | 49 | 54 |
-        56 | 57 | 58 | 61 | 62 | 73 | 74 | 80 | 82 | 87 | 89 |
-        98 | 129 | 155 | 159 | 162 | 168 | 169 | 170 | 172 | 173)
+    matches!(
+        id,
+        1 | 2
+            | 3
+            | 4
+            | 5
+            | 7
+            | 12
+            | 13
+            | 14
+            | 15
+            | 16
+            | 17
+            | 18
+            | 20
+            | 21
+            | 24
+            | 35
+            | 41
+            | 42
+            | 45
+            | 46
+            | 49
+            | 54
+            | 56
+            | 57
+            | 58
+            | 61
+            | 62
+            | 73
+            | 74
+            | 80
+            | 82
+            | 87
+            | 89
+            | 98
+            | 129
+            | 155
+            | 159
+            | 162
+            | 168
+            | 169
+            | 170
+            | 172
+            | 173
+    )
 }
 /// Slabs, stairs, snow and carpets have sub-block shapes. Ladders and fluids
 /// never present an impassable full cube. No heap allocation in hot paths.
 fn shapes(block: u16) -> [Option<Shape>; 2] {
     let id = block >> 4;
     let meta = block & 15;
-    if full_block(id) { return [Some(FULL), None]; }
-    if matches!(id, 44 | 126) {
-        let (y0,y1) = if meta & 8 == 0 { (0.0,0.5) } else { (0.5,1.0) };
-        return [Some(Shape { y0,y1,..FULL }),None];
+    if full_block(id) {
+        return [Some(FULL), None];
     }
-    if matches!(id, 43 | 125) { return [Some(FULL), None]; } // double slabs
-    if matches!(id, 53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164 | 180) {
+    if matches!(id, 44 | 126) {
+        let (y0, y1) = if meta & 8 == 0 {
+            (0.0, 0.5)
+        } else {
+            (0.5, 1.0)
+        };
+        return [Some(Shape { y0, y1, ..FULL }), None];
+    }
+    if matches!(id, 43 | 125) {
+        return [Some(FULL), None];
+    } // double slabs
+    if matches!(
+        id,
+        53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164 | 180
+    ) {
         let upper = meta & 4 != 0;
         let base = if upper {
             Shape { y0: 0.5, ..FULL }
@@ -53,13 +119,22 @@ fn shapes(block: u16) -> [Option<Shape>; 2] {
         };
         return [Some(base), Some(tread)];
     }
-    if id == 78 { // snow layers
-        return [Some(Shape { y1: ((meta + 1).min(8) as f64) / 8.0,..FULL }),None];
+    if id == 78 {
+        // snow layers
+        return [
+            Some(Shape {
+                y1: ((meta + 1).min(8) as f64) / 8.0,
+                ..FULL
+            }),
+            None,
+        ];
     }
-    if id == 85 || id == 113 { return [Some(Shape { y1: 1.5, ..FULL }),None]; }
-    [None,None]
+    if id == 85 || id == 113 {
+        return [Some(Shape { y1: 1.5, ..FULL }), None];
+    }
+    [None, None]
 }
-fn horizontal_box(position: &PlayerPosition) -> (i32,i32,i32,i32) {
+fn horizontal_box(position: &PlayerPosition) -> (i32, i32, i32, i32) {
     (
         (position.x - HALF_WIDTH + EPS).floor() as i32,
         (position.x + HALF_WIDTH - EPS).floor() as i32,
@@ -67,71 +142,139 @@ fn horizontal_box(position: &PlayerPosition) -> (i32,i32,i32,i32) {
         (position.z + HALF_WIDTH - EPS).floor() as i32,
     )
 }
-fn overlap(a0:f64,a1:f64,b0:f64,b1:f64)->bool { a0 < b1 - EPS && a1 > b0 + EPS }
-fn horizontal_overlap(pos:&PlayerPosition,x:i32,z:i32,b:Shape)->bool {
-    overlap(pos.x-HALF_WIDTH,pos.x+HALF_WIDTH,x as f64+b.x0,x as f64+b.x1) &&
-    overlap(pos.z-HALF_WIDTH,pos.z+HALF_WIDTH,z as f64+b.z0,z as f64+b.z1)
+fn overlap(a0: f64, a1: f64, b0: f64, b1: f64) -> bool {
+    a0 < b1 - EPS && a1 > b0 + EPS
+}
+fn horizontal_overlap(pos: &PlayerPosition, x: i32, z: i32, b: Shape) -> bool {
+    overlap(
+        pos.x - HALF_WIDTH,
+        pos.x + HALF_WIDTH,
+        x as f64 + b.x0,
+        x as f64 + b.x1,
+    ) && overlap(
+        pos.z - HALF_WIDTH,
+        pos.z + HALF_WIDTH,
+        z as f64 + b.z0,
+        z as f64 + b.z1,
+    )
 }
 /// AABB hit test for a 0.6 wide, 1.8 high player; no client onGround trust.
-pub fn collides(world:&World, position:&PlayerPosition)->bool {
-    let (min_x,max_x,min_z,max_z)=horizontal_box(position);
-    let min_y=(position.y+EPS).floor() as i32;
-    let max_y=(position.y+HEIGHT-EPS).floor() as i32;
-    for x in min_x..=max_x { for z in min_z..=max_z { for y in min_y..=max_y {
-        for b in shapes(world.get(x,y,z)).into_iter().flatten() {
-            if horizontal_overlap(position,x,z,b) &&
-                overlap(position.y,position.y+HEIGHT,y as f64+b.y0,y as f64+b.y1) {
-                return true;
+pub fn collides(world: &World, position: &PlayerPosition) -> bool {
+    let (min_x, max_x, min_z, max_z) = horizontal_box(position);
+    let min_y = (position.y + EPS).floor() as i32;
+    let max_y = (position.y + HEIGHT - EPS).floor() as i32;
+    for x in min_x..=max_x {
+        for z in min_z..=max_z {
+            for y in min_y..=max_y {
+                for b in shapes(world.get(x, y, z)).into_iter().flatten() {
+                    if horizontal_overlap(position, x, z, b)
+                        && overlap(
+                            position.y,
+                            position.y + HEIGHT,
+                            y as f64 + b.y0,
+                            y as f64 + b.y1,
+                        )
+                    {
+                        return true;
+                    }
+                }
             }
         }
-    }}}
+    }
     false
 }
-pub fn supported(world:&World, position:&PlayerPosition)->bool {
-    let (min_x,max_x,min_z,max_z)=horizontal_box(position);
-    let foot=(position.y.floor() as i32).saturating_sub(1);
-    for x in min_x..=max_x { for z in min_z..=max_z { for y in foot..=(foot+2) {
-        for b in shapes(world.get(x,y,z)).into_iter().flatten() {
-            let top=y as f64 + b.y1;
-            if (position.y - top).abs() <= GROUND_TOLERANCE &&
-                horizontal_overlap(position,x,z,b) { return true; }
+pub fn supported(world: &World, position: &PlayerPosition) -> bool {
+    let (min_x, max_x, min_z, max_z) = horizontal_box(position);
+    let foot = (position.y.floor() as i32).saturating_sub(1);
+    for x in min_x..=max_x {
+        for z in min_z..=max_z {
+            for y in foot..=(foot + 2) {
+                for b in shapes(world.get(x, y, z)).into_iter().flatten() {
+                    let top = y as f64 + b.y1;
+                    if (position.y - top).abs() <= GROUND_TOLERANCE
+                        && horizontal_overlap(position, x, z, b)
+                    {
+                        return true;
+                    }
+                }
+            }
         }
-    }}}
+    }
     false
 }
 /// Small point probe against the same voxel AABBs used for players.
-pub fn projectile_collides(world:&World,p:&PlayerPosition)->bool {
-    let x=p.x.floor() as i32;let y=p.y.floor() as i32;let z=p.z.floor() as i32;
-    shapes(world.get(x,y,z)).into_iter().flatten().any(|b| {
-        p.x>x as f64+b.x0 && p.x<x as f64+b.x1 &&
-        p.y>y as f64+b.y0 && p.y<y as f64+b.y1 &&
-        p.z>z as f64+b.z0 && p.z<z as f64+b.z1
+pub fn projectile_collides(world: &World, p: &PlayerPosition) -> bool {
+    let x = p.x.floor() as i32;
+    let y = p.y.floor() as i32;
+    let z = p.z.floor() as i32;
+    shapes(world.get(x, y, z)).into_iter().flatten().any(|b| {
+        p.x > x as f64 + b.x0
+            && p.x < x as f64 + b.x1
+            && p.y > y as f64 + b.y0
+            && p.y < y as f64 + b.y1
+            && p.z > z as f64 + b.z0
+            && p.z < z as f64 + b.z1
     })
 }
-pub fn in_water(world:&World,p:&PlayerPosition)->bool {
-    [0.1,0.9,1.62].into_iter().any(|dy| matches!(world.get(p.x.floor() as i32,(p.y+dy).floor() as i32,p.z.floor() as i32)>>4,8|9))
+pub fn in_water(world: &World, p: &PlayerPosition) -> bool {
+    [0.1, 0.9, 1.62].into_iter().any(|dy| {
+        matches!(
+            world.get(
+                p.x.floor() as i32,
+                (p.y + dy).floor() as i32,
+                p.z.floor() as i32
+            ) >> 4,
+            8 | 9
+        )
+    })
 }
-pub fn in_lava(world:&World,p:&PlayerPosition)->bool {
-    [0.1,0.9].into_iter().any(|dy| matches!(world.get(p.x.floor() as i32,(p.y+dy).floor() as i32,p.z.floor() as i32)>>4,10|11))
+pub fn in_lava(world: &World, p: &PlayerPosition) -> bool {
+    [0.1, 0.9].into_iter().any(|dy| {
+        matches!(
+            world.get(
+                p.x.floor() as i32,
+                (p.y + dy).floor() as i32,
+                p.z.floor() as i32
+            ) >> 4,
+            10 | 11
+        )
+    })
 }
-pub fn on_ladder(world:&World,p:&PlayerPosition)->bool {
-    [0.1,1.0].into_iter().any(|dy| world.get(p.x.floor() as i32,(p.y+dy).floor() as i32,p.z.floor() as i32)>>4 == 65)
+pub fn on_ladder(world: &World, p: &PlayerPosition) -> bool {
+    [0.1, 1.0].into_iter().any(|dy| {
+        world.get(
+            p.x.floor() as i32,
+            (p.y + dy).floor() as i32,
+            p.z.floor() as i32,
+        ) >> 4
+            == 65
+    })
 }
 /// Probe a level horizontal walk. The client predicts swimming and ladder
 /// climbing; the server still rejects tunnelling through collidable blocks.
-pub fn valid_movement(world:&World, previous:&PlayerPosition,next:&PlayerPosition)->bool {
-    if collides(world,next) {return false;}
-    let dx=next.x-previous.x;
-    let dy=next.y-previous.y;
-    let dz=next.z-previous.z;
-    let horizontal=dx.hypot(dz);
-    if horizontal>64.0 || dy.abs()>128.0 {return false;}
-    if horizontal>0.75 && dy.abs()<0.25 {
-        let steps=(horizontal/0.25).ceil() as usize;
+pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPosition) -> bool {
+    if collides(world, next) {
+        return false;
+    }
+    let dx = next.x - previous.x;
+    let dy = next.y - previous.y;
+    let dz = next.z - previous.z;
+    let horizontal = dx.hypot(dz);
+    if horizontal > 64.0 || dy.abs() > 128.0 {
+        return false;
+    }
+    if horizontal > 0.75 && dy.abs() < 0.25 {
+        let steps = (horizontal / 0.25).ceil() as usize;
         for i in 1..steps {
-            let fraction=i as f64/steps as f64;
-            let sample=PlayerPosition{x:previous.x+dx*fraction,y:previous.y+dy*fraction,z:previous.z+dz*fraction};
-            if collides(world,&sample) {return false;}
+            let fraction = i as f64 / steps as f64;
+            let sample = PlayerPosition {
+                x: previous.x + dx * fraction,
+                y: previous.y + dy * fraction,
+                z: previous.z + dz * fraction,
+            };
+            if collides(world, &sample) {
+                return false;
+            }
         }
     }
     true
@@ -144,19 +287,27 @@ const IDLE_GRACE_TICKS: u64 = 6;
 const MAX_CATCH_UP_STEPS: u64 = 4;
 
 /// Resolve vertical descent against solid block top faces without tunnelling.
-fn resolve_descent(world:&World,position:&PlayerPosition,wanted_y:f64)->f64 {
-    let wanted_y=wanted_y.max(0.0);
-    let (min_x,max_x,min_z,max_z)=horizontal_box(position);
-    let min_y=(wanted_y.floor() as i32-2).max(0);
-    let max_y=position.y.floor() as i32;
-    let mut floor=wanted_y;
-    for y in min_y..=max_y {for x in min_x..=max_x {for z in min_z..=max_z {
-        for b in shapes(world.get(x,y,z)).into_iter().flatten() {
-            let top=y as f64+b.y1;
-            if top>=wanted_y-EPS && top<=position.y+EPS &&
-                horizontal_overlap(position,x,z,b) { floor=floor.max(top); }
+fn resolve_descent(world: &World, position: &PlayerPosition, wanted_y: f64) -> f64 {
+    let wanted_y = wanted_y.max(0.0);
+    let (min_x, max_x, min_z, max_z) = horizontal_box(position);
+    let min_y = (wanted_y.floor() as i32 - 2).max(0);
+    let max_y = position.y.floor() as i32;
+    let mut floor = wanted_y;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            for z in min_z..=max_z {
+                for b in shapes(world.get(x, y, z)).into_iter().flatten() {
+                    let top = y as f64 + b.y1;
+                    if top >= wanted_y - EPS
+                        && top <= position.y + EPS
+                        && horizontal_overlap(position, x, z, b)
+                    {
+                        floor = floor.max(top);
+                    }
+                }
+            }
         }
-    }}}
+    }
     floor
 }
 
