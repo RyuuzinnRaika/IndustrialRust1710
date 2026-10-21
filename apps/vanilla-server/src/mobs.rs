@@ -178,6 +178,13 @@ impl Mob {
         body.push(value);
         Event { id: 0x1a, body }
     }
+    fn death_drop(self) -> Option<(Stack, (i32, i32, i32))> {
+        self.kind.drop(self.size).map(|stack| (stack, (
+            self.position.x.floor() as i32,
+            self.position.y.floor() as i32,
+            self.position.z.floor() as i32,
+        )))
+    }
     fn nearby(self, position: PlayerPosition, radius: f64) -> bool {
         let dx = self.position.x - position.x;
         let dz = self.position.z - position.z;
@@ -387,6 +394,31 @@ impl Mobs {
         self.entities.insert(id, mob);
         event
     }
+    /// Split a defeated large slime/magma cube; every child receives an
+    /// independent authoritative ID and an ordinary Protocol 5 spawn packet.
+    fn split(&mut self, parent: Mob) -> Vec<Event> {
+        if !parent.kind.splitting() || parent.size <= 1 {
+            return Vec::new();
+        }
+        let child_size = parent.size / 2;
+        let count = 2 + (hash(parent.id as u64 ^ self.last_tick) % 3) as usize;
+        let mut events = Vec::new();
+        for index in 0..count {
+            if self.entities.len() >= 128 {
+                break;
+            }
+            let angle = (index as f64) * std::f64::consts::TAU / count as f64;
+            let position = PlayerPosition {
+                x: parent.position.x + angle.cos() * 0.4,
+                y: parent.position.y,
+                z: parent.position.z + angle.sin() * 0.4,
+            };
+            if position.is_valid() {
+                events.push(self.insert_sized(parent.kind, position, false, child_size));
+            }
+        }
+        events
+    }
     /// Natural Survival only, preserving flat E2E world behaviour.
     pub fn new_with_difficulty(world: &World, enabled: bool, difficulty: u8) -> Self {
         let mut state = Self {
@@ -518,15 +550,11 @@ impl Mobs {
             }
             for id in dead {
                 if let Some(mob) = self.entities.remove(&id) {
-                    self.pending_drops.push((
-                        mob.kind.drop(mob.size).unwrap_or(Stack { id: 0, count: 0, damage: 0 }),
-                        (
-                            mob.position.x.floor() as i32,
-                            mob.position.y.floor() as i32,
-                            mob.position.z.floor() as i32,
-                        ),
-                    ));
+                    if let Some(drop) = mob.death_drop() {
+                        self.pending_drops.push(drop);
+                    }
                     events.push(multiplayer::destroy(id));
+                    events.extend(self.split(mob));
                 }
             }
         }
@@ -553,14 +581,7 @@ impl Mobs {
             } else {
                 vec![mob.status(2)]
             },
-            drop: killed.then_some((
-                mob.kind.drop(mob.size).unwrap_or(Stack { id: 0, count: 0, damage: 0 }),
-                (
-                    mob.position.x.floor() as i32,
-                    mob.position.y.floor() as i32,
-                    mob.position.z.floor() as i32,
-                ),
-            )),
+            drop: if killed { mob.death_drop() } else { None },
             experience: if killed {
                 if mob.kind.passive() {
                     2
@@ -571,8 +592,13 @@ impl Mobs {
                 0
             },
         };
+        let mut result = result;
         if killed {
-            self.entities.remove(&id);
+            if let Some(parent) = self.entities.remove(&id) {
+                result.events.extend(self.split(parent));
+            }
+        } else if matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman) {
+            mob.anger_until = tick.saturating_add(1200);
         }
         Some(result)
     }
@@ -833,14 +859,9 @@ impl Mobs {
                 {
                     mob.health -= 1;
                     if mob.health <= 0 {
-                        self.pending_drops.push((
-                            mob.kind.drop(mob.size).unwrap_or(Stack { id: 0, count: 0, damage: 0 }),
-                            (
-                                mob.position.x.floor() as i32,
-                                mob.position.y.floor() as i32,
-                                mob.position.z.floor() as i32,
-                            ),
-                        ));
+                        if let Some(drop) = mob.death_drop() {
+                        self.pending_drops.push(drop);
+                    }
                         events.push(mob.status(3));
                         dead.push(mob.id);
                         continue;
@@ -980,8 +1001,9 @@ impl Mobs {
                 }
             }
             for id in dead {
-                if self.entities.remove(&id).is_some() {
+                if let Some(parent) = self.entities.remove(&id) {
                     events.push(multiplayer::destroy(id));
+                    events.extend(self.split(parent));
                 }
             }
             for (id, at, yaw, pitch) in shots {
@@ -1044,17 +1066,14 @@ impl Mobs {
             if let Some(mob) = self.entities.get_mut(&id) {
                 mob.health -= i16::from(damage);
                 if mob.health <= 0 {
-                    self.pending_drops.push((
-                        mob.kind.drop(mob.size).unwrap_or(Stack { id: 0, count: 0, damage: 0 }),
-                        (
-                            mob.position.x.floor() as i32,
-                            mob.position.y.floor() as i32,
-                            mob.position.z.floor() as i32,
-                        ),
-                    ));
+                    if let Some(drop) = mob.death_drop() {
+                        self.pending_drops.push(drop);
+                    }
                     events.push(mob.status(3));
                     events.push(multiplayer::destroy(id));
-                    self.entities.remove(&id);
+                    if let Some(parent) = self.entities.remove(&id) {
+                        events.extend(self.split(parent));
+                    }
                 } else {
                     events.push(mob.status(2));
                 }
