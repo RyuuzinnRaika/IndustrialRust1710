@@ -477,6 +477,17 @@ struct ActiveEffect {
     expires_at: u64,
     next_periodic: u64,
 }
+/// Legacy status effects tick faster at higher amplifiers. A Potion II must
+/// never heal or poison at the level-I interval.
+fn periodic_effect_interval(kind: u8, amplifier: u8) -> u64 {
+    let base = match kind {
+        10 => 50_u64, // regeneration
+        19 => 25_u64, // poison
+        _ => return u64::MAX,
+    };
+    (base.checked_shr(u32::from(amplifier)).unwrap_or(0)).max(1)
+}
+
 fn potion_effect_packet(entity: i32, kind: u8, amplifier: u8, duration: u16) -> Vec<u8> {
     let mut packet = entity.to_be_bytes().to_vec();
     packet.push(kind);
@@ -890,7 +901,8 @@ fn play(
                     if effect.kind == 19 {
                         vitals.health = (vitals.health - amount).max(1.0);
                     }
-                    effect.next_periodic = now_tick + if effect.kind == 10 { 50 } else { 25 };
+                    effect.next_periodic =
+                        now_tick.saturating_add(periodic_effect_interval(effect.kind, effect.amplifier));
                 }
             }
             for effect in &active_effects {
@@ -938,7 +950,8 @@ fn play(
                                         kind,
                                         amplifier,
                                         expires_at: now_tick + u64::from(duration),
-                                        next_periodic: now_tick + if kind == 10 { 50 } else { 25 },
+                                        next_periodic: now_tick
+                                            .saturating_add(periodic_effect_interval(kind, amplifier)),
                                     });
                                 }
                                 player.save_state(player_path, *vitals)?;
@@ -3269,6 +3282,23 @@ fn main() -> io::Result<()> {
     }
     Ok(())
 }
+#[cfg(test)]
+mod effect_interval_tests {
+    use super::periodic_effect_interval;
+
+    #[test]
+    fn amplification_speeds_up_legacy_regeneration_and_poison() {
+        assert_eq!(periodic_effect_interval(10, 0), 50);
+        assert_eq!(periodic_effect_interval(10, 1), 25);
+        assert_eq!(periodic_effect_interval(10, 2), 12);
+        assert_eq!(periodic_effect_interval(19, 0), 25);
+        assert_eq!(periodic_effect_interval(19, 1), 12);
+        assert_eq!(periodic_effect_interval(19, 2), 6);
+        assert_eq!(periodic_effect_interval(19, u8::MAX), 1);
+        assert_eq!(periodic_effect_interval(1, 0), u64::MAX);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
