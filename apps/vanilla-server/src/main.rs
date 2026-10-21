@@ -1885,9 +1885,7 @@ fn play(
                                 let direction = ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3;
                                 direction | if face == 0 { 4 } else { 0 }
                             } else if block_id == 107 {
-                                ((yaw.rem_euclid(360.0) / 90.0).round() as u16)
-                                    & 3((yaw.rem_euclid(360.0) / 90.0).round() as u16)
-                                    & 3
+                                ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
                             } else if matches!(
                                 block_id,
                                 59 | 141 | 142 | 104 | 105 | 81 | 83 | 115 | 8 | 10
