@@ -330,7 +330,7 @@ impl Mobs {
             } else {
                 surface
             };
-            if y < 2 || y >= 254 {
+            if !(2..254).contains(&y) {
                 continue;
             }
             let at = PlayerPosition {
