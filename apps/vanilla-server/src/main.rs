@@ -45,7 +45,7 @@ use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use serde_json::json;
 use std::collections::BTreeSet;
-use std::io::{self, ErrorKind};
+use std::io::{self, BufRead, ErrorKind};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2653,6 +2653,60 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     experience_saved?;
     result
 }
+/// Local server console only. Never grant these operations to unauthenticated
+/// offline-mode player names or an in-game chat packet.
+fn start_admin_console(hub: Arc<Hub>, clock: Arc<Clock>, whitelist_file: Arc<PathBuf>) {
+    let _console = thread::spawn(move || {
+        let input = io::stdin();
+        for next in input.lock().lines() {
+            let Ok(line) = next else {
+                eprintln!("ADMIN: console input unavailable");
+                break;
+            };
+            let parts: Vec<_> = line.split_whitespace().collect();
+            let result = match parts.as_slice() {
+                [] => continue,
+                ["/help"] | ["help"] => {
+                    println!("Admin console: /list, /time query daytime, /weather query, /whitelist list|add NAME|remove NAME");
+                    Ok(())
+                }
+                ["/list"] | ["list"] => hub.names().map(|names| {
+                    println!("Players ({}): {}", names.len(), names.join(", "));
+                }),
+                ["/time", "query", "daytime"] => {
+                    println!("Daytime: {}", clock.day_time());
+                    Ok(())
+                }
+                ["/weather", "query"] => {
+                    let (rain, thunder) = clock.weather();
+                    println!("Weather: rain={rain} thunder={thunder}");
+                    Ok(())
+                }
+                ["/whitelist", "list"] => Whitelist::load(&whitelist_file).map(|list| {
+                    println!("Whitelisted name count: {}", list.len());
+                }),
+                ["/whitelist", "add", name] => {
+                    Whitelist::change_member(&whitelist_file, name, true).map(|changed| {
+                        println!("Whitelist add {name}: changed={changed}");
+                    })
+                }
+                ["/whitelist", "remove", name] => {
+                    Whitelist::change_member(&whitelist_file, name, false).map(|changed| {
+                        println!("Whitelist remove {name}: changed={changed}");
+                    })
+                }
+                _ => {
+                    eprintln!("ADMIN: unknown console command (use /help)");
+                    continue;
+                }
+            };
+            if let Err(error) = result {
+                eprintln!("ADMIN: command failed: {error}");
+            }
+        }
+    });
+}
+
 fn main() -> io::Result<()> {
     let mut bind = "127.0.0.1:25565".parse::<SocketAddr>().unwrap();
     let mut world_path = PathBuf::from("world/flat.irw");
@@ -2853,6 +2907,11 @@ fn main() -> io::Result<()> {
     let connections = Arc::new(AtomicUsize::new(0));
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
+    start_admin_console(
+        Arc::clone(&hub),
+        Arc::clone(&clock),
+        Arc::clone(&allow_path),
+    );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
     // wall-clock downtime after the process was stopped.
