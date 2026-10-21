@@ -49,10 +49,11 @@ impl Default for Hoppers {
 fn move_one(src: &mut [Option<Stack>], dst: &mut [Option<Stack>]) -> bool {
     for value in src.iter_mut() {
         let Some(mut stack) = *value else { continue };
-        let target = dst.iter_mut().find(|target| target.is_some_and(|s|
+        let target_index = dst.iter().position(|target| target.is_some_and(|s|
             s.id == stack.id && s.damage == stack.damage && s.count < 64))
-            .or_else(|| dst.iter_mut().find(|target| target.is_none()));
-        let Some(target) = target else { continue };
+            .or_else(|| dst.iter().position(Option::is_none));
+        let Some(index) = target_index else { continue };
+        let target = &mut dst[index];
         if let Some(dest) = target { dest.count += 1; }
         else { *target = Some(Stack { count:1, ..stack }); }
         stack.count -= 1;
