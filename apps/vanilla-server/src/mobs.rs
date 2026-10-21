@@ -1082,6 +1082,58 @@ mod tests {
             .is_none());
     }
     #[test]
+    fn natural_spawn_checks_propagated_light_and_night() {
+        let mut world = World::new();
+        let x = 2;
+        let y = 70;
+        let z = 2;
+        assert_eq!(world.light_at(x, y, z).0, 0);
+        assert!(!spawn_light_ok(0, 15, 6000, false));
+        assert!(spawn_light_ok(0, 15, 18000, false));
+        assert!(!spawn_light_ok(9, 0, 18000, false));
+        world.import_block(x, y, z, 50 << 4).unwrap();
+        assert_eq!(world.light_at(x + 1, y, z).0, 13);
+        assert!(!spawn_light_ok(world.light_at(x + 1, y, z).0, 0, 18000, false));
+    }
+    #[test]
+    fn skeleton_line_of_sight_is_blocked_by_a_stone_wall() {
+        let mut world = World::new();
+        let a = PlayerPosition { x: 0.5, y: 66.0, z: 0.5 };
+        let b = PlayerPosition { x: 4.5, y: 66.0, z: 0.5 };
+        assert!(can_see(&world, a, b));
+        world.import_block(2, 67, 0, 1 << 4).unwrap();
+        assert!(!can_see(&world, a, b));
+    }
+    #[test]
+    fn explosions_respect_block_occlusion() {
+        let mut world = World::new();
+        let source = PlayerPosition { x: 0.5, y: 66.0, z: 0.5 };
+        let target = PlayerPosition { x: 4.5, y: 66.0, z: 0.5 };
+        let blast = Explosion { position: source, radius: 3.0 };
+        let clear = blast_damage(&world, &blast, target);
+        assert!(clear > 0);
+        for y in 66..=68 {
+            for z in -1..=1 {
+                world.import_block(2, y, z, 1 << 4).unwrap();
+            }
+        }
+        assert!(blast_damage(&world, &blast, target) < clear);
+    }
+    #[test]
+    fn sheep_shearing_is_single_use_and_shared_with_joiners() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition { x: 0.5, y: 66.0, z: 0.5 };
+        let spawn = mobs.insert(Kind::Sheep, at, false);
+        assert_eq!(spawn.id, 0x0f);
+        let held = Some(Stack { id: 359, count: 1, damage: 0 });
+        let (wool, metadata) = mobs.shear(0, at, held).unwrap();
+        assert_eq!(wool.id, 35);
+        assert_eq!(metadata.id, 0x1c);
+        assert!(mobs.shear(0, at, held).is_none());
+        let snapshot = mobs.spawn_events().next().unwrap();
+        assert!(snapshot.body.windows(2).any(|part| part == [16, 0x10]));
+    }
+    #[test]
     fn flat_world_has_no_mobs_and_bow_shot_is_bounded() {
         assert!(Mobs::new(&World::new(), true).entities.is_empty());
         let mut mobs = Mobs::default();
