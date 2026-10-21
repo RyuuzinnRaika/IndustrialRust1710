@@ -18,6 +18,7 @@ pub struct ServerProperties {
     pub bind: SocketAddr,
     pub world_path: PathBuf,
     pub survival: bool,
+    pub difficulty: u8,
     pub level_name: String,
 }
 
@@ -149,11 +150,15 @@ impl ServerProperties {
             "1" | "creative" => false,
             _ => return Err(invalid("unsupported gamemode in server.properties")),
         };
-        // These are wired to constants in the current server. Reject a
-        // different value instead of silently claiming the setting took effect.
+        let difficulty = values.get("difficulty").map(String::as_str)
+            .unwrap_or("1").parse::<u8>()
+            .map_err(|_| invalid("difficulty must be in 0..=3"))?;
+        if difficulty > 3 {
+            return Err(invalid("difficulty must be in 0..=3"));
+        }
+        // These settings remain fixed until their runtime subsystems can honour them.
         for (name, only) in [
             ("view-distance", "2"),
-            ("difficulty", "1"),
             ("max-players", "8"),
         ] {
             if values.get(name).is_some_and(|value| value != only) {
@@ -206,6 +211,7 @@ impl ServerProperties {
             bind: SocketAddr::new(ip, port),
             world_path: PathBuf::from(level_name).join("flat.irw"),
             survival,
+            difficulty,
             level_name: level_name.to_string(),
         })
     }
@@ -234,6 +240,11 @@ gamemode=1
         assert_eq!(p.bind.to_string(), "127.0.0.1:25580");
         assert_eq!(p.world_path, PathBuf::from("TestWorld/flat.irw"));
         assert!(!p.survival);
+        assert_eq!(p.difficulty, 1);
+        for difficulty in 0..=3 {
+            let text = SAFE.replace("difficulty=1", &format!("difficulty={difficulty}"));
+            assert_eq!(ServerProperties::parse(&text).unwrap().difficulty, difficulty);
+        }
     }
 
     #[test]
@@ -245,6 +256,7 @@ gamemode=1
             SAFE.replace("level-name=TestWorld", "level-name=CON"),
             SAFE.replace("gamemode=1", "gamemode=2"),
             SAFE.replace("view-distance=2", "view-distance=10"),
+            SAFE.replace("difficulty=1", "difficulty=4"),
             SAFE.replace("server-port=25580", "server-port=0"),
             SAFE.replace("online-mode=false", "online-mode=false\nonline-mode=false"),
         ] {
