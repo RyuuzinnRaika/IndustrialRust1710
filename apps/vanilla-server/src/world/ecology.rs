@@ -30,6 +30,18 @@ impl World {
         let below = self.get(x, y - 1, z) >> 4;
         match id {
             6 => plantable(below),
+            83 => below == 83 || (matches!(below, 2 | 3 | 12) &&
+                [(1,0),(-1,0),(0,1),(0,-1)].iter().any(|&(dx,dz)|
+                    matches!(self.get(x+dx,y-1,z+dz)>>4,8|9))),
+            81 => matches!(below, 12 | 81) &&
+                [(1,0),(-1,0),(0,1),(0,-1)].iter().all(|&(dx,dz)|
+                    self.get(x+dx,y,z+dz)==0),
+            115 => below == 88,
+            104 | 105 => below == 60,
+            127 => {
+                let (dx,dz) = match block & 3 {0=>(0,1),1=>(-1,0),2=>(0,-1),_=>(1,0)};
+                matches!(self.get(x+dx,y,z+dz)>>4,17|162)
+            },
             59 | 141 | 142 => below == 60,
             50 | 75 | 76 => {
                 let support = match block & 7 {
@@ -170,6 +182,7 @@ impl World {
                     | 94
                     | 141
                     | 142
+                    | 81 | 83 | 104 | 105 | 115 | 127
                     | 64
                     | 71
                     | 77
@@ -210,6 +223,38 @@ impl World {
                         changes.insert((x, y, z), (60 << 4) | (moisture - 1));
                     } else if !matches!(self.get(x, height + 1, z) >> 4, 59 | 141 | 142) {
                         changes.insert((x, y, z), 3 << 4);
+                    }
+                }
+                83 | 81 if height < 255 && self.get(x,height+1,z)==0
+                    && chance(self.fluid_phase,x,height,z,3) => {
+                    let mut bottom=height;
+                    while bottom>0 && self.get(x,bottom-1,z)>>4==id { bottom-=1; }
+                    if height-bottom<2 {
+                        changes.insert((x,(height+1) as u8,z),id<<4);
+                    }
+                }
+                115 if block & 3 < 3 && chance(self.fluid_phase,x,height,z,3) => {
+                    changes.insert((x,y,z),block+1);
+                }
+                127 if block & 12 < 8 && chance(self.fluid_phase,x,height,z,3) => {
+                    changes.insert((x,y,z),block+4);
+                }
+                104 | 105 if block & 7 < 7 && chance(self.fluid_phase,x,height,z,3) => {
+                    changes.insert((x,y,z),block+1);
+                }
+                104 | 105 if block & 7 == 7 => {
+                    let fruit=if id==104 {86} else {103};
+                    let dirs=[(1,0),(-1,0),(0,1),(0,-1)];
+                    if !dirs.iter().any(|&(dx,dz)| self.get(x+dx,height,z+dz)>>4==fruit) {
+                        for (dx,dz) in dirs {
+                            let nx=x+dx; let nz=z+dz;
+                            if in_bounds(nx,height,nz) && self.get(nx,height,nz)==0
+                                && matches!(self.get(nx,height-1,nz)>>4,2|3|60)
+                                && chance(self.fluid_phase,nx,height,nz,4) {
+                                changes.insert((nx,y,nz),fruit<<4);
+                                break;
+                            }
+                        }
                     }
                 }
                 59 | 141 | 142 if block & 7 < 7 => {
