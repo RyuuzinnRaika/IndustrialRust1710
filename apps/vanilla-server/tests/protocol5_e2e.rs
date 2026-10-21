@@ -1143,7 +1143,10 @@ fn native_survival_collision_damage_death_respawn_and_health_persistence() {
     drop(rejoined);
     server.wait_idle();
     let (final_session, _, position) = server.join("RustTester");
-    assert_eq!(position, [0.5, 65.0, 0.5]);
+    // During a slow reconnect the 20TPS idle-gravity fallback may already
+    // have started falling from the respawn Y=65 toward the safe floor Y=64.
+    assert_eq!([position[0], position[2]], [0.5, 0.5]);
+    assert!((64.0..=65.0).contains(&position[1]), "respawn Y={}", position[1]);
     drop(final_session);
 }
 
@@ -1340,6 +1343,70 @@ fn native_survival_food_hunger_health_and_death_drops_roundtrip() {
     server.wait_idle();
     let (rejoined, _, _) = server.join("RustTester");
     drop(rejoined);
+    server.wait_idle();
+}
+
+#[test]
+fn native_protocol5_light_refresh_restreams_a_chunk_after_torch_placement() {
+    let server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+
+    // A server-owned Creative hotbar slot holds a torch.
+    let mut creative = 36i16.to_be_bytes().to_vec();
+    creative.extend_from_slice(&50i16.to_be_bytes());
+    creative.push(1);
+    creative.extend_from_slice(&0i16.to_be_bytes());
+    creative.extend_from_slice(&(-1i16).to_be_bytes());
+    client.write_all(&frame(0x10, &creative)).unwrap();
+    until_packet(&mut client, 0x2f, |body| {
+        body.len() == 10 && body[3..5] == 50i16.to_be_bytes()
+    });
+
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63); // place above the flat world's grass
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&50i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |body| {
+        body.len() == 11
+            && body[0..4] == 0i32.to_be_bytes()
+            && body[4] == 64
+            && body[5..9] == 0i32.to_be_bytes()
+            && body[9] == 50
+    });
+
+    // Relighting requires an actual Protocol 5 map-chunk payload rather than
+    // a block-change packet alone. Decode the 1.7.10 Block Light nibble.
+    until_packet(&mut client, 0x21, |body| {
+        if body.len() < 17
+            || body[0..4] != 0i32.to_be_bytes()
+            || body[4..8] != 0i32.to_be_bytes()
+        {
+            return false;
+        }
+        let mask = u16::from_be_bytes(body[9..11].try_into().unwrap());
+        if mask & (1 << 4) == 0 {
+            return false;
+        }
+        let compressed_len = i32::from_be_bytes(body[13..17].try_into().unwrap());
+        if compressed_len <= 0 || body.len() != 17 + compressed_len as usize {
+            return false;
+        }
+        let mut chunk = Vec::new();
+        ZlibDecoder::new(&body[17..])
+            .read_to_end(&mut chunk)
+            .unwrap();
+        let sections = mask.count_ones() as usize;
+        let section_index = (mask & 0xF).count_ones() as usize;
+        let light_offset = 4096 * sections + 2048 * sections + 2048 * section_index;
+        chunk[light_offset] & 0xF == 14
+    });
+    drop(client);
     server.wait_idle();
 }
 
