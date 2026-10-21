@@ -40,7 +40,7 @@ impl Hazards {
         if submerged {
             self.air = self.air.saturating_sub(1);
             self.wet_ticks = self.wet_ticks.saturating_add(1);
-            if self.air == 0 && self.wet_ticks % 20 == 0 {
+            if self.air == 0 && self.wet_ticks.is_multiple_of(20) {
                 bypass += 2.0;
             }
         } else {

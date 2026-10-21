@@ -431,7 +431,7 @@ impl Mobs {
         players: &[PlayerPosition],
         events: &mut Vec<Event>,
     ) {
-        if !self.enabled || players.is_empty() || now % 80 != 0 {
+        if !self.enabled || players.is_empty() || !now.is_multiple_of(80) {
             return;
         }
         let passive = self.entities.values().filter(|m| m.kind.passive()).count();
@@ -539,7 +539,7 @@ impl Mobs {
                     shots.push((mob.id, mob.position, yaw, pitch));
                 }
                 let destination = if mob.kind.passive() {
-                    if (now / 80 + mob.id as u64) % 4 != 0 {
+                    if !(now / 80 + mob.id as u64).is_multiple_of(4) {
                         continue;
                     }
                     PlayerPosition {
@@ -553,7 +553,7 @@ impl Mobs {
                 if d < if mob.kind.passive() { 1.0 } else { 1.5 } {
                     continue;
                 }
-                let waypoint = if now % 20 == 0 {
+                let waypoint = if now.is_multiple_of(20) {
                     navigation::next_step(world, mob.position, destination, 64)
                         .unwrap_or(destination)
                 } else {
