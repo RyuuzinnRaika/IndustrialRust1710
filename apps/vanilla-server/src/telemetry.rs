@@ -106,7 +106,12 @@ fn resident_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     status.lines().find_map(|line| {
         let value = line.strip_prefix("VmRSS:")?;
-        value.split_whitespace().next()?.parse::<u64>().ok()?.checked_mul(1024)
+        value
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1024)
     })
 }
 
