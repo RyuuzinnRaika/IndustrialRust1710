@@ -498,15 +498,17 @@ impl Mobs {
             let y = if underground {
                 let base_y = 12 + ((seed >> 24) % 35) as i32;
                 (base_y..=base_y + 24).find(|height| {
-                    *height < surface - 2 &&
-                    world.get(x, *height, z) == 0 &&
-                    world.get(x, *height + 1, z) == 0 &&
-                    world.get(x, *height - 1, z) >> 4 != 0
+                    *height < surface - 2
+                        && world.get(x, *height, z) == 0
+                        && world.get(x, *height + 1, z) == 0
+                        && world.get(x, *height - 1, z) >> 4 != 0
                 })
             } else {
                 Some(surface + 1)
             };
-            let Some(y) = y else { continue; };
+            let Some(y) = y else {
+                continue;
+            };
             let p = PlayerPosition {
                 x: x as f64 + 0.5,
                 y: y as f64,
@@ -539,7 +541,13 @@ impl Mobs {
                     0 => Kind::Zombie,
                     1 => Kind::Skeleton,
                     2 => Kind::Creeper,
-                    _ => if underground { Kind::CaveSpider } else { Kind::Spider },
+                    _ => {
+                        if underground {
+                            Kind::CaveSpider
+                        } else {
+                            Kind::Spider
+                        }
+                    }
                 }
             };
             let baby = kind == Kind::Zombie && (seed >> 12).is_multiple_of(20);
@@ -634,7 +642,10 @@ impl Mobs {
                     .filter(|p| {
                         mob.nearby(
                             *p,
-                            if mob.kind.passive() || (matches!(mob.kind, Kind::Spider | Kind::CaveSpider) && !mob.aggressive) {
+                            if mob.kind.passive()
+                                || (matches!(mob.kind, Kind::Spider | Kind::CaveSpider)
+                                    && !mob.aggressive)
+                            {
                                 12.0
                             } else {
                                 24.0
@@ -685,25 +696,26 @@ impl Mobs {
                     let pitch = -(target.y + 1.0 - mob.position.y).atan2(d).to_degrees() as f32;
                     shots.push((mob.id, mob.position, yaw, pitch));
                 }
-                let destination =
-                    if mob.kind.passive() || (matches!(mob.kind, Kind::Spider | Kind::CaveSpider) && !mob.aggressive) {
-                        if !(now / 80 + mob.id as u64).is_multiple_of(4) {
-                            continue;
-                        }
-                        PlayerPosition {
-                            x: mob.position.x + if mob.id % 2 == 0 { 1.0 } else { -1.0 },
-                            z: mob.position.z + if mob.id % 3 == 0 { 1.0 } else { -1.0 },
-                            ..mob.position
-                        }
-                    } else if mob.kind == Kind::Skeleton && d < 6.0 {
-                        PlayerPosition {
-                            x: mob.position.x + (mob.position.x - target.x).signum() * 6.0,
-                            z: mob.position.z + (mob.position.z - target.z).signum() * 6.0,
-                            ..mob.position
-                        }
-                    } else {
-                        target
-                    };
+                let destination = if mob.kind.passive()
+                    || (matches!(mob.kind, Kind::Spider | Kind::CaveSpider) && !mob.aggressive)
+                {
+                    if !(now / 80 + mob.id as u64).is_multiple_of(4) {
+                        continue;
+                    }
+                    PlayerPosition {
+                        x: mob.position.x + if mob.id % 2 == 0 { 1.0 } else { -1.0 },
+                        z: mob.position.z + if mob.id % 3 == 0 { 1.0 } else { -1.0 },
+                        ..mob.position
+                    }
+                } else if mob.kind == Kind::Skeleton && d < 6.0 {
+                    PlayerPosition {
+                        x: mob.position.x + (mob.position.x - target.x).signum() * 6.0,
+                        z: mob.position.z + (mob.position.z - target.z).signum() * 6.0,
+                        ..mob.position
+                    }
+                } else {
+                    target
+                };
                 if mob.kind == Kind::Skeleton && (6.0..=12.0).contains(&d) {
                     continue;
                 }
@@ -726,7 +738,13 @@ impl Mobs {
                 if len < 1e-6 {
                     continue;
                 }
-                let speed = if mob.kind.passive() { 0.065 } else if mob.baby { 0.16 } else { 0.11 };
+                let speed = if mob.kind.passive() {
+                    0.065
+                } else if mob.baby {
+                    0.16
+                } else {
+                    0.11
+                };
                 let candidate = PlayerPosition {
                     x: mob.position.x + dx / len * speed,
                     z: mob.position.z + dz / len * speed,
@@ -960,13 +978,19 @@ impl Mobs {
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
                 mob.bite_tick = tick;
-                amount = amount.saturating_add(if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) { 2 } else { 3 });
+                amount =
+                    amount.saturating_add(if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
+                        2
+                    } else {
+                        3
+                    });
                 apply_poison = mob.kind == Kind::CaveSpider;
                 break;
             }
         }
         if apply_poison {
-            self.poison.insert(player_id, (tick.saturating_add(140), tick));
+            self.poison
+                .insert(player_id, (tick.saturating_add(140), tick));
         }
         if let Some((until, last)) = self.poison.get_mut(&player_id) {
             if tick < *until && tick.saturating_sub(*last) >= 25 {
@@ -1135,7 +1159,10 @@ mod tests {
         mobs.insert(Kind::CaveSpider, at, false);
         assert_eq!(mobs.hurt_player(10, at, 20), 2);
         assert_eq!(mobs.hurt_player(11, at, 21), 0);
-        let away = PlayerPosition { x: at.x + 30.0, ..at };
+        let away = PlayerPosition {
+            x: at.x + 30.0,
+            ..at
+        };
         assert_eq!(mobs.hurt_player(10, away, 46), 1);
         assert_eq!(mobs.hurt_player(11, away, 46), 0);
     }
