@@ -156,7 +156,11 @@ impl Chests {
         if !staged.entries.contains_key(&key) {
             let mut slots = [None; CHEST_SLOTS];
             for (index, (id, count)) in loot.into_iter().enumerate() {
-                let stack = Stack { id, count, damage: 0 };
+                let stack = Stack {
+                    id,
+                    count,
+                    damage: 0,
+                };
                 if !stack.is_valid() {
                     return Err(invalid("invalid generated loot stack"));
                 }
@@ -240,9 +244,8 @@ mod tests {
     use super::*;
     #[test]
     fn generated_chest_loot_is_claimed_once_even_after_emptying() {
-        let file = std::env::temp_dir().join(format!(
-            "ir1710-dungeon-chest-{}.json", std::process::id()
-        ));
+        let file =
+            std::env::temp_dir().join(format!("ir1710-dungeon-chest-{}.json", std::process::id()));
         let _ = fs::remove_file(&file);
         let pos = (-12, 25, 44);
         let mut chests = Chests::default();
