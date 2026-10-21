@@ -2093,9 +2093,51 @@ fn play(
                 // an inventory change: all modifications are server-owned.
                 let _claimed = input.slot()?;
                 input.finish()?;
-                let requested_window = window >= 0 && window as u8 == active_window;
+                let mut requested_window = window >= 0 && window as u8 == active_window;
                 let mut accepted = false;
                 let response_items;
+                // A left/right click outside the window is an inventory-to-world
+                // transaction, NOT an ordinary window slot. First stage both
+                // snapshots, then persist together through the redo journal.
+                // Afterwards refresh whichever container GUI was open without
+                // reprocessing this click as a second transaction.
+                if requested_window && slot == -999 && mode == 0 && matches!(button, 0 | 1) {
+                    let mut candidate = inventory.clone();
+                    if let Some(stack) = candidate.drop_cursor(button) {
+                        let mut ground = ground_items
+                            .lock()
+                            .map_err(|_| bad("ground item lock poisoned"))?;
+                        if ground.has_capacity_for(1) {
+                            let at = (
+                                (location.0.floor() as i32)
+                                    .clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
+                                (location.1.floor() as i32).clamp(0, 254),
+                                (location.2.floor() as i32)
+                                    .clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
+                            );
+                            let (next_ground, spawned) = ground.stage_put_many(&[stack], at)?;
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (ground_path, next_ground.encoded()?),
+                                ],
+                            )?;
+                            *inventory = candidate;
+                            *ground = next_ground;
+                            for item in spawned {
+                                for event in item.spawn() {
+                                    hub.broadcast(event);
+                                }
+                            }
+                            accepted = true;
+                        }
+                    } else {
+                        // Clicking outside with an empty cursor is a valid no-op.
+                        accepted = true;
+                    }
+                    requested_window = false;
+                }
                 if let Some(pos) = active_furnace {
                     let still_open = matches!(
                         world
@@ -2333,7 +2375,7 @@ fn play(
                     drop(storage);
                 } else {
                     let mut candidate = inventory.clone();
-                    accepted = requested_window
+                    accepted |= requested_window
                         && candidate.click_window(active_window, slot, button, mode);
                     if accepted && candidate != *inventory {
                         candidate.save(inventory_path)?;
@@ -2392,6 +2434,10 @@ fn play(
                         hub,
                         location,
                     )?;
+                    // Preserve the death site before changing the saved player
+                    // position. XP orbs belong beside the dropped inventory,
+                    // never at a distant bed or fallback world spawn.
+                    let death_position = *player;
                     let origin = {
                         let fallback = safe_spawn(world)?;
                         if let Some((x, y, z)) = inventory.bed_spawn() {
@@ -2435,7 +2481,7 @@ fn play(
                     if let Some(orb) = mobs
                         .lock()
                         .map_err(|_| bad("mob mutex poisoned"))?
-                        .spawn_xp(*player, drop_amount)
+                        .spawn_xp(death_position, drop_amount)
                     {
                         hub.broadcast(orb);
                     }

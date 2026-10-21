@@ -351,6 +351,28 @@ impl Inventory {
         None
     }
     /// Q removes one held item; Ctrl+Q removes the entire held stack.
+    /// Take an outside-window cursor drop. The caller MUST commit this debit
+    /// together with the spawned ground-item snapshot before publishing state.
+    /// Protocol 5: left-click drops the full cursor, right-click drops one.
+    pub fn drop_cursor(&mut self, button: i8) -> Option<Stack> {
+        let mut current = self.cursor?;
+        match button {
+            0 => {
+                self.cursor = None;
+                Some(current)
+            }
+            1 => {
+                current.count -= 1;
+                self.cursor = (current.count > 0).then_some(current);
+                Some(Stack {
+                    count: 1,
+                    ..current
+                })
+            }
+            _ => None,
+        }
+    }
+
     pub fn drop_held(&mut self, whole_stack: bool) -> Option<Stack> {
         let slot = &mut self.slots[36 + self.selected as usize];
         let held = slot.take()?;
@@ -1400,6 +1422,93 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn outside_drop_cursor_only_debits_requested_quantity() {
+        let original = Stack {
+            id: 332,
+            count: 3,
+            damage: 0,
+        };
+        let mut inv = Inventory {
+            cursor: Some(original),
+            ..Inventory::default()
+        };
+        assert_eq!(inv.drop_cursor(9), None);
+        assert_eq!(inv.cursor, Some(original));
+        assert_eq!(
+            inv.drop_cursor(1),
+            Some(Stack {
+                count: 1,
+                ..original
+            })
+        );
+        assert_eq!(
+            inv.cursor,
+            Some(Stack {
+                count: 2,
+                ..original
+            })
+        );
+        assert_eq!(
+            inv.drop_cursor(0),
+            Some(Stack {
+                count: 2,
+                ..original
+            })
+        );
+        assert_eq!(inv.cursor, None);
+        assert_eq!(inv.drop_cursor(0), None);
+        assert!(inv.encoded().is_ok());
+    }
+
+    #[test]
+    fn new_sign_recipe_shift_crafting_is_atomic_when_inventory_is_full() {
+        let sign = Stack {
+            id: 323,
+            count: 16,
+            damage: 0,
+        };
+        let mut inv = Inventory::default();
+        for slot in 9..45 {
+            inv.slots[slot] = Some(sign);
+        }
+        // A stack with only one free slot cannot accept the recipe's three
+        // signs, so the entire transaction must be rejected without debit.
+        inv.slots[9] = Some(Stack { count: 15, ..sign });
+        for index in [0, 1, 2, 3, 4, 5] {
+            inv.workbench[index] = Some(Stack {
+                id: 5,
+                count: 2,
+                damage: 0,
+            });
+        }
+        inv.workbench[7] = Some(Stack {
+            id: 280,
+            count: 2,
+            damage: 0,
+        });
+        assert_eq!(
+            inv.crafting_result(1),
+            Some(Stack {
+                id: 323,
+                count: 3,
+                damage: 0
+            })
+        );
+        let blocked = inv.clone();
+        assert!(inv.click_window(1, 0, 0, 1));
+        assert_eq!(inv, blocked);
+        // Free another slot. Both craft iterations must debit each ingredient
+        // twice and yield exactly six signs, not one partial/ghost batch.
+        inv.slots[10] = None;
+        assert!(inv.click_window(1, 0, 0, 1));
+        assert!(inv.workbench.iter().all(Option::is_none));
+        assert_eq!(inv.slots[9], Some(sign));
+        assert_eq!(inv.slots[10], Some(Stack { count: 5, ..sign }));
+        assert!(inv.crafting_result(1).is_none());
+        assert!(inv.encoded().is_ok());
+    }
+
     #[test]
     fn brewing_gui_rejects_invalid_bottle_reagent_and_shift_moves() {
         let mut inv = Inventory::default();
