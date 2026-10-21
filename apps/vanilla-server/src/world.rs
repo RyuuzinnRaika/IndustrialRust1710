@@ -455,7 +455,16 @@ impl World {
                     ) {
                         continue;
                     }
-                    draft.import_block(x, y, z, 0)?;
+                    let key = (x, y as u8, z);
+                    if draft.base_block(x, y as u8, z) != 0
+                        && !draft.edits.contains_key(&key)
+                        && draft.edits.len() >= MAX_EDITS
+                    {
+                        return Err(invalid("explosion exceeds world edit limit"));
+                    }
+                    draft.set_gravity_cell(key, 0);
+                    draft.wake_gravity(x, y, z);
+                    draft.wake_block_updates(x, y, z);
                     changed.push((x, y, z));
                 }
             }
