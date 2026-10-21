@@ -106,12 +106,19 @@ impl Vitals {
         }
     }
 
-    /// Walking movement; sprint/jump multipliers require movement-state input.
+    /// Walking movement, retained for callers that do not track sprint state.
     pub fn travel(&mut self, horizontal_blocks: f64) -> bool {
+        self.travel_with_sprint(horizontal_blocks, false)
+    }
+
+    /// The 1.7.10 client reports sprint start/stop through Entity Action.
+    /// Exhaustion is authoritative and bounded even on large position jumps.
+    pub fn travel_with_sprint(&mut self, horizontal_blocks: f64, sprinting: bool) -> bool {
         if self.health <= 0.0 || !horizontal_blocks.is_finite() || horizontal_blocks <= 0.0 {
             return false;
         }
-        self.add_exhaustion(horizontal_blocks.min(64.0) as f32 * 0.01)
+        let per_block = if sprinting { 0.1 } else { 0.01 };
+        self.add_exhaustion(horizontal_blocks.min(64.0) as f32 * per_block)
     }
 
     /// Returns true if health or food changed. Must run only once per game tick.
@@ -144,6 +151,19 @@ impl Vitals {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sprinting_drains_saturation_faster_without_creating_negative_food() {
+        let mut walking = Vitals::default();
+        let mut sprinting = Vitals::default();
+        assert!(walking.travel(40.0));
+        assert!(sprinting.travel_with_sprint(40.0, true));
+        assert_eq!(walking.saturation, 5.0);
+        assert_eq!(sprinting.saturation, 4.0);
+        assert!(sprinting.valid());
+        assert!(!sprinting.travel_with_sprint(f64::NAN, true));
+        assert!(!sprinting.travel_with_sprint(-1.0, true));
+    }
+
     #[test]
     fn legacy_stew_and_emergency_food_have_bounded_nutrition() {
         for (id, food_gain, saturation_gain) in [
