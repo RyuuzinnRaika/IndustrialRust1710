@@ -77,6 +77,7 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 49
             | 26 // two-block bed
             | 54 // chest (single or double)
+            | 154 // hopper
             | 56 // diamond ore
             | 57
             | 58 // crafting table: opens workbench window when used
