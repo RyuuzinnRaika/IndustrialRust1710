@@ -239,6 +239,26 @@ impl Chests {
 mod tests {
     use super::*;
     #[test]
+    fn generated_chest_loot_is_claimed_once_even_after_emptying() {
+        let file = std::env::temp_dir().join(format!(
+            "ir1710-dungeon-chest-{}.json", std::process::id()
+        ));
+        let _ = fs::remove_file(&file);
+        let pos = (-12, 25, 44);
+        let mut chests = Chests::default();
+        let loot = [(265, 2), (296, 3), (331, 1)];
+        chests.initialize_generated(&file, pos, loot).unwrap();
+        let contents = chests.slots(pos);
+        assert_eq!(contents[2].unwrap().id, 265);
+        chests.update(&file, pos, [None; CHEST_SLOTS]).unwrap();
+        let mut restored = Chests::load(&file).unwrap();
+        restored.initialize_generated(&file, pos, loot).unwrap();
+        assert!(!restored.is_nonempty(pos));
+        assert!(restored.generated_claimed.contains("-12,25,44"));
+        let _ = fs::remove_file(file);
+    }
+
+    #[test]
     fn shared_chest_persists_and_invalid_entries_fail_closed() {
         let file = std::env::temp_dir().join(format!("ir1710-{}-chests.json", std::process::id()));
         let _ = fs::remove_file(&file);
