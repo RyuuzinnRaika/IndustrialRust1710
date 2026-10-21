@@ -1,4 +1,5 @@
 //! Bounded Protocol 5 natural-survival entities. No external entity registry.
+mod rules;
 use crate::inventory::Stack;
 use crate::multiplayer::{self, Event};
 use crate::navigation;
@@ -90,6 +91,9 @@ struct Mob {
     baby: bool,
     age_ticks: u32,
     waypoint: Option<PlayerPosition>,
+    egg_tick: u64,
+    sun_tick: u64,
+    aggressive: bool,
 }
 impl Mob {
     fn spawn(self) -> Event {
@@ -230,45 +234,21 @@ impl Mobs {
             baby,
             age_ticks: 0,
             waypoint: None,
+            egg_tick: if kind == Kind::Chicken { self.last_tick + 6000 + hash(id as u64) % 6001 } else { 0 },
+            sun_tick: 0,
+            aggressive: true,
         };
         let event = mob.spawn();
         self.entities.insert(id, mob);
         event
     }
-    /// Natural Survival only, preserving flat E2E world behaviour.
+    /// No free startup mobs: even the first entity must pass normal spawn rules.
     pub fn new(world: &World, enabled: bool) -> Self {
-        let mut state = Self {
+        Self {
             next_id: BASE_ID,
             enabled: enabled && world.is_natural(),
             ..Self::default()
-        };
-        if state.enabled {
-            for (n, (x, z)) in [(8, 9), (-8, 7), (7, -8), (-9, -7)].into_iter().enumerate() {
-                let p = PlayerPosition {
-                    x: x as f64 + 0.5,
-                    y: world.natural_seed().map_or(65.0, |seed| {
-                        crate::terrain::surface(seed, x, z) as f64 + 1.0
-                    }),
-                    z: z as f64 + 0.5,
-                };
-                if !physics::collides(world, &p) && physics::supported(world, &p) {
-                    state.insert(
-                        if n == 0 {
-                            Kind::Zombie
-                        } else if n == 1 {
-                            Kind::Skeleton
-                        } else if n == 2 {
-                            Kind::Cow
-                        } else {
-                            Kind::Creeper
-                        },
-                        p,
-                        false,
-                    );
-                }
-            }
         }
-        state
     }
     pub fn spawn_events(&self) -> impl Iterator<Item = Event> + '_ {
         self.entities
@@ -334,6 +314,7 @@ impl Mobs {
         &mut self,
         explosions: &[Explosion],
         participants: &[(i32, PlayerPosition)],
+        world: &World,
     ) {
         for explosion in explosions {
             for &(id, player) in participants {
@@ -344,8 +325,9 @@ impl Mobs {
                 if dist >= explosion.radius * 2.0 {
                     continue;
                 }
-                let fraction = 1.0 - dist / (explosion.radius * 2.0);
-                let raw = (fraction * fraction * 14.0 + 1.0).ceil() as u8;
+                let exposure = rules::blast_exposure(world, explosion.position, player);
+                let raw = rules::blast_damage(explosion.radius, dist, exposure);
+                if raw == 0 { continue; }
                 let entry = self.pending_blast_damage.entry(id).or_default();
                 *entry = entry.saturating_add(raw).min(20);
             }
@@ -410,7 +392,7 @@ impl Mobs {
             || !first.kind.passive()
             || first.baby
             || !first.kind.breeding_food(food)
-            || (first.breed_tick != 0 && tick.saturating_sub(first.breed_tick) < 600)
+            || (first.breed_tick != 0 && tick.saturating_sub(first.breed_tick) < 6000)
         {
             return None;
         }
@@ -418,7 +400,7 @@ impl Mobs {
             m.id != id
                 && m.kind == first.kind
                 && !m.baby
-                && (m.breed_tick == 0 || tick.saturating_sub(m.breed_tick) >= 600)
+                && (m.breed_tick == 0 || tick.saturating_sub(m.breed_tick) >= 6000)
                 && distance(m.position, first.position) < 7.0
         })?;
         self.entities.get_mut(&id)?.breed_tick = tick;
@@ -487,9 +469,17 @@ impl Mobs {
             let Some(terrain) = world.natural_seed() else {
                 return;
             };
+            if world.is_biome_world() && crate::terrain::biome(terrain, x, z) == 0 {
+                continue; // Skip deep-ocean surface spawns until swimming AI exists.
+            }
+            let surface = if world.is_biome_world() {
+                crate::terrain::biome_surface(terrain, x, z)
+            } else {
+                crate::terrain::surface(terrain, x, z)
+            };
             let p = PlayerPosition {
                 x: x as f64 + 0.5,
-                y: (crate::terrain::surface(terrain, x, z) + 1) as f64,
+                y: (surface + 1) as f64,
                 z: z as f64 + 0.5,
             };
             if !p.is_valid()
@@ -499,11 +489,10 @@ impl Mobs {
             {
                 continue;
             }
-            let open = sky_exposed(world, p);
             let is_night = (now % 24000) >= 13000 && (now % 24000) <= 23000;
-            let grass = world.get(x, p.y as i32 - 1, z) >> 4 == 2;
-            let kind = if open && !is_night && grass {
-                if passive >= PASSIVE_CAP {
+            let wants_passive = !is_night && seed & 1 == 0;
+            let kind = if wants_passive {
+                if passive >= PASSIVE_CAP || !rules::can_spawn(world, p, true, is_night) {
                     continue;
                 }
                 match seed % 4 {
@@ -513,7 +502,7 @@ impl Mobs {
                     _ => Kind::Chicken,
                 }
             } else {
-                if hostile >= HOSTILE_CAP || (open && !is_night) {
+                if hostile >= HOSTILE_CAP || !rules::can_spawn(world, p, false, is_night) {
                     continue;
                 }
                 match seed % 4 {
@@ -548,6 +537,8 @@ impl Mobs {
         for _ in 0..steps {
             let mut shots = Vec::new();
             let mut dead = Vec::new();
+            let mut sunlight_kills = Vec::new();
+            let mut eggs = Vec::new();
             for mob in self.entities.values_mut() {
                 if mob.baby {
                     mob.age_ticks = mob.age_ticks.saturating_add(1);
@@ -560,6 +551,32 @@ impl Mobs {
                         events.push(Event { id: 0x1c, body });
                     }
                 }
+                if mob.kind == Kind::Chicken && !mob.baby && now >= mob.egg_tick {
+                    eggs.push((Stack { id: 344, count: 1, damage: 0 }, (
+                        mob.position.x.floor() as i32,
+                        mob.position.y.floor() as i32,
+                        mob.position.z.floor() as i32,
+                    )));
+                    mob.egg_tick = now + 6000 + hash(mob.id as u64 ^ now) % 6001;
+                }
+                let is_night = (now % 24000) >= 13000 && (now % 24000) <= 23000;
+                if mob.kind == Kind::Spider {
+                    mob.aggressive = is_night || !sky_exposed(world, mob.position)
+                        || (mob.hit_tick > 0 && now.saturating_sub(mob.hit_tick) < 200);
+                }
+                if matches!(mob.kind, Kind::Zombie | Kind::Skeleton)
+                    && !is_night && sky_exposed(world, mob.position)
+                    && now.saturating_sub(mob.sun_tick) >= 20
+                {
+                    mob.sun_tick = now;
+                    mob.health -= 1;
+                    events.push(mob.status(2));
+                    if mob.health <= 0 {
+                        sunlight_kills.push(*mob);
+                        dead.push(mob.id);
+                        continue;
+                    }
+                }
                 if !players.is_empty() && distance_to_players(mob.position, players) > 128.0 {
                     dead.push(mob.id);
                     continue;
@@ -567,7 +584,7 @@ impl Mobs {
                 let nearest = players
                     .iter()
                     .copied()
-                    .filter(|p| mob.nearby(*p, if mob.kind.passive() { 12.0 } else { 24.0 }))
+                    .filter(|p| mob.nearby(*p, if mob.kind.passive() || (mob.kind == Kind::Spider && !mob.aggressive) { 12.0 } else { 24.0 }))
                     .min_by(|a, b| {
                         distance(*a, mob.position).total_cmp(&distance(*b, mob.position))
                     });
@@ -591,6 +608,9 @@ impl Mobs {
                     }
                 }
                 if mob.kind == Kind::Skeleton && d < 16.0 && now.saturating_sub(mob.bite_tick) >= 40
+                    && rules::visible(world,
+                        PlayerPosition { y: mob.position.y + 1.3, ..mob.position },
+                        PlayerPosition { y: target.y + 1.3, ..target })
                 {
                     mob.bite_tick = now;
                     let yaw = (-(target.x - mob.position.x))
@@ -599,7 +619,7 @@ impl Mobs {
                     let pitch = -(target.y + 1.0 - mob.position.y).atan2(d).to_degrees() as f32;
                     shots.push((mob.id, mob.position, yaw, pitch));
                 }
-                let destination = if mob.kind.passive() {
+                let destination = if mob.kind.passive() || (mob.kind == Kind::Spider && !mob.aggressive) {
                     if !(now / 80 + mob.id as u64).is_multiple_of(4) {
                         continue;
                     }
@@ -608,10 +628,19 @@ impl Mobs {
                         z: mob.position.z + if mob.id % 3 == 0 { 1.0 } else { -1.0 },
                         ..mob.position
                     }
+                } else if mob.kind == Kind::Skeleton && d < 6.0 {
+                    PlayerPosition {
+                        x: mob.position.x + (mob.position.x - target.x).signum() * 6.0,
+                        z: mob.position.z + (mob.position.z - target.z).signum() * 6.0,
+                        ..mob.position
+                    }
                 } else {
                     target
                 };
-                if d < if mob.kind.passive() { 1.0 } else { 1.5 } {
+                if mob.kind == Kind::Skeleton && (6.0..=12.0).contains(&d) {
+                    continue;
+                }
+                if d < if mob.kind.passive() { 1.0 } else { 1.5 } && mob.kind != Kind::Skeleton {
                     continue;
                 }
                 if now.is_multiple_of(20) || mob.waypoint.is_none() {
@@ -665,6 +694,15 @@ impl Mobs {
                     }
                 }
             }
+            for killed in sunlight_kills {
+                self.pending_drops.push((killed.kind.drop(), (
+                    killed.position.x.floor() as i32,
+                    killed.position.y.floor() as i32,
+                    killed.position.z.floor() as i32,
+                )));
+                events.push(killed.status(3));
+            }
+            self.pending_drops.extend(eggs);
             for id in dead {
                 if self.entities.remove(&id).is_some() {
                     events.push(multiplayer::destroy(id));
@@ -701,7 +739,8 @@ impl Mobs {
             arrow.velocity[0] *= 0.99;
             arrow.velocity[1] = arrow.velocity[1] * 0.99 - 0.05;
             arrow.velocity[2] *= 0.99;
-            if arrow.age >= 100 || !next.is_valid() || physics::collides(world, &next) {
+            if arrow.age >= 100 || !next.is_valid() || physics::collides(world, &next)
+                || !rules::visible(world, arrow.position, next) {
                 removed.push(arrow.id);
                 continue;
             }
@@ -765,6 +804,7 @@ impl Mobs {
             if !mob.kind.passive()
                 && mob.kind != Kind::Skeleton
                 && mob.kind != Kind::Creeper
+                && (mob.kind != Kind::Spider || mob.aggressive)
                 && mob.nearby(player, 1.6)
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
@@ -802,7 +842,7 @@ mod tests {
             position: nearby,
             radius: 3.0,
         }];
-        mobs.queue_explosion_hits(&explosions, &[(1, nearby), (2, nearby), (3, far)]);
+        mobs.queue_explosion_hits(&explosions, &[(1, nearby), (2, nearby), (3, far)], &World::new());
         let first = mobs.hurt_player(1, nearby, 10);
         let second = mobs.hurt_player(2, nearby, 10);
         assert!(first > 0);
@@ -831,7 +871,9 @@ mod tests {
     fn natural_mobs_spawn_in_protocol5() {
         let world = World::natural(42);
         let mut mobs = Mobs::new(&world, true);
-        assert!(!mobs.entities.is_empty());
+        assert!(mobs.entities.is_empty()); // No starter entities bypass spawn rules.
+        let spawned = mobs.insert(Kind::Zombie, PlayerPosition { x: 0.5, y: 65.0, z: 0.5 }, false);
+        assert_eq!(spawned.id, 0x0f);
         let zombie = *mobs.entities.values().next().unwrap();
         assert_eq!(zombie.kind, Kind::Zombie);
         let packet = zombie.spawn();
