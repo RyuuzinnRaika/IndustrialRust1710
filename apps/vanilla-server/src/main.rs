@@ -8,6 +8,7 @@ mod clock;
 mod crafting;
 mod furnaces;
 mod ground_items;
+mod hoppers;
 mod inventory;
 mod journal;
 mod mobs;
@@ -26,6 +27,7 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use ground_items::GroundItems;
+use hoppers::{Hoppers, Position as HopperPosition};
 use inventory::{Inventory, Stack};
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
@@ -441,6 +443,8 @@ struct PlayerSession<'a> {
     chest_path: &'a Path,
     furnaces: &'a Mutex<Furnaces>,
     furnace_path: &'a Path,
+    hoppers: &'a Mutex<Hoppers>,
+    hopper_path: &'a Path,
     survival: bool,
     hub: &'a Hub,
     entity_id: i32,
@@ -468,6 +472,8 @@ fn play(
         chest_path,
         furnaces,
         furnace_path,
+        hoppers,
+        hopper_path,
         survival,
         hub,
         entity_id,
@@ -496,8 +502,10 @@ fn play(
     let mut active_chest: Option<ChestPosition> = None;
     let mut active_chest_partner: Option<ChestPosition> = None;
     let mut active_furnace: Option<FurnacePosition> = None;
+    let mut active_hopper: Option<HopperPosition> = None;
     let mut last_furnace_view = Furnace::default();
     let mut observed_chest_revision: u64 = 0;
+    let mut observed_hopper_revision: u64 = 0;
     let mut next_window: u8 = 1;
     let mut last_pickup = Instant::now();
     let mut eating: Option<(u64, Stack)> = None;
@@ -515,6 +523,15 @@ fn play(
                     &chest_window_state(&guard, pos, active_chest_partner),
                 );
                 observed_chest_revision = guard.revision();
+                drop(guard);
+                send(s, 0x30, &data)?;
+            }
+        }
+        if let Some(pos) = active_hopper {
+            let guard = hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
+            if guard.revision() != observed_hopper_revision {
+                let data = inventory.chest_window_items(active_window, &guard.slots(pos));
+                observed_hopper_revision = guard.revision();
                 drop(guard);
                 send(s, 0x30, &data)?;
             }
@@ -1175,6 +1192,7 @@ fn play(
                     active_chest = None;
                     active_chest_partner = None;
                     active_furnace = Some(pos);
+                    active_hopper = None;
                     let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
                     last_furnace_view = guard.get(pos);
                     drop(guard);
@@ -1217,6 +1235,7 @@ fn play(
                         .map_err(|_| bad("world mutex poisoned"))
                         .map(|w| chest_neighbor(&w, pos))?;
                     active_furnace = None;
+                    active_hopper = None;
                     let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
                     let items = inventory.chest_window_items(active_window, &chest_window_state(&guard, pos, active_chest_partner));
                     observed_chest_revision = guard.revision();
@@ -1232,6 +1251,31 @@ fn play(
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &items)?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
+                if (0..=5).contains(&face) && world::in_bounds(x,y,z)
+                    && near(location,x,y,z)
+                    && world.lock().map_err(|_| bad("world mutex poisoned"))?.get(x,y,z) >> 4 == 154
+                {
+                    let pos=(x,y,z);
+                    let mut guard=hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
+                    guard.register(hopper_path,pos)?;
+                    active_window=next_window;
+                    next_window=if next_window>=100 {1} else {next_window+1};
+                    active_hopper=Some(pos);
+                    active_chest=None;
+                    active_chest_partner=None;
+                    active_furnace=None;
+                    observed_hopper_revision=guard.revision();
+                    let items=inventory.chest_window_items(active_window,&guard.slots(pos));
+                    drop(guard);
+                    let mut opened=vec![active_window];
+                    write_string("minecraft:hopper",&mut opened)?;
+                    write_string(&json!({"text":"Hopper"}).to_string(),&mut opened)?;
+                    opened.push(5);
+                    send(s,0x2d,&opened)?;
+                    send(s,0x30,&items)?;
+                    send(s,0x2f,&inventory.cursor_packet())?;
                     continue;
                 }
                 if (0..=5).contains(&face)
@@ -1250,6 +1294,7 @@ fn play(
                     active_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
+                    active_hopper = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -1493,6 +1538,43 @@ fn play(
                     response_items =
                         inventory.chest_window_items(active_window, &chest_window_state(&storage, pos, active_chest_partner));
                     drop(storage);
+                } else if let Some(pos) = active_hopper {
+                    let still_open = {
+                        let w=world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        w.get(pos.0,pos.1,pos.2)>>4 == 154
+                            && near(location,pos.0,pos.1,pos.2)
+                    };
+                    let mut storage=hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
+                    let original=storage.slots(pos);
+                    let mut changed=original;
+                    let mut candidate=inventory.clone();
+                    let change=if still_open && requested_window {
+                        candidate.chest_click(&mut changed,slot,button,mode)
+                    } else {None};
+                    if change.is_some() {
+                        accepted=true;
+                        let inv_changed=candidate != *inventory;
+                        let hopper_changed=changed != original;
+                        if inv_changed && hopper_changed {
+                            let staged=storage.staged_update(pos,changed)?;
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[(inventory_path,candidate.encoded()?),
+                                  (hopper_path,staged.encoded()?)],
+                            )?;
+                            *inventory=candidate;
+                            *storage=staged;
+                        } else if hopper_changed {
+                            let staged=storage.staged_update(pos,changed)?;
+                            storage.commit_staged(hopper_path,staged)?;
+                        } else if inv_changed {
+                            candidate.save(inventory_path)?;
+                            *inventory=candidate;
+                        }
+                    }
+                    observed_hopper_revision=storage.revision();
+                    response_items=inventory.chest_window_items(active_window,&storage.slots(pos));
+                    drop(storage);
                 } else {
                     let mut candidate = inventory.clone();
                     accepted = requested_window
@@ -1532,6 +1614,7 @@ fn play(
                     active_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
+                    active_hopper = None;
                     send(s, 0x30, &inventory.window_items())?;
                 }
             }
@@ -1668,6 +1751,8 @@ struct ServerContext {
     chest_path: Arc<PathBuf>,
     furnaces: Arc<Mutex<Furnaces>>,
     furnace_path: Arc<PathBuf>,
+    hoppers: Arc<Mutex<Hoppers>>,
+    hopper_path: Arc<PathBuf>,
     survival: bool,
 }
 fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
@@ -1684,6 +1769,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         chest_path,
         furnaces,
         furnace_path,
+        hoppers,
+        hopper_path,
         survival,
     } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1849,6 +1936,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             chest_path: &chest_path,
             furnaces: &furnaces,
             furnace_path: &furnace_path,
+            hoppers: &hoppers,
+            hopper_path: &hopper_path,
             survival,
             hub: &hub,
             entity_id,
@@ -2015,6 +2104,8 @@ fn main() -> io::Result<()> {
     let chests = Arc::new(Mutex::new(Chests::load(&chest_path)?));
     let furnace_path = Arc::new(Furnaces::location(&world_path));
     let furnaces = Arc::new(Mutex::new(Furnaces::load(&furnace_path)?));
+    let hopper_path = Arc::new(Hoppers::location(&world_path));
+    let hoppers = Arc::new(Mutex::new(Hoppers::load(&hopper_path)?));
     let listener = TcpListener::bind(bind)?;
     println!(
         "IndustrialRust1710: listening on {} (1.7.10 vanilla, up to 8 players)",
@@ -2144,6 +2235,8 @@ fn main() -> io::Result<()> {
         let storage_path = Arc::clone(&chest_path);
         let machine_storage = Arc::clone(&furnaces);
         let machine_file = Arc::clone(&furnace_path);
+        let hopper_storage = Arc::clone(&hoppers);
+        let hopper_file = Arc::clone(&hopper_path);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -2161,6 +2254,8 @@ fn main() -> io::Result<()> {
                     chest_path: storage_path,
                     furnaces: machine_storage,
                     furnace_path: machine_file,
+                    hoppers: hopper_storage,
+                    hopper_path: hopper_file,
                     survival,
                 },
             ) {
