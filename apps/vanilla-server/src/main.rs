@@ -17,6 +17,7 @@ mod hoppers;
 mod inventory;
 mod journal;
 mod legacy_nbt;
+mod legacy_inventory_nbt;
 mod mobs;
 mod multiplayer;
 mod navigation;
@@ -2683,7 +2684,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
 fn main() -> io::Result<()> {
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
-    let properties = if std::env::args().any(|arg| arg == "--help" || arg == "--backup-world") {
+    let properties = if std::env::args().any(|arg| arg == "--help" || arg == "--backup-world" || arg == "--inspect-player-data") {
         None
     } else {
         server_config::ServerProperties::load_optional(Path::new("server.properties"))?
@@ -2696,6 +2697,7 @@ fn main() -> io::Result<()> {
         .as_ref()
         .map(|config| config.world_path.clone())
         .unwrap_or_else(|| PathBuf::from("world/flat.irw"));
+    let mut player_inspect_path: Option<PathBuf> = None;
     let mut anvil_export_path: Option<PathBuf> = None;
     let mut anvil_import_path: Option<PathBuf> = None;
     let mut backup_destination: Option<PathBuf> = None;
@@ -2711,7 +2713,7 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -2788,6 +2790,12 @@ fn main() -> io::Result<()> {
                         .ok_or_else(|| bad("missing --import-anvil directory"))?,
                 ));
             }
+            "--inspect-player-data" => {
+                player_inspect_path = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| bad("missing --inspect-player-data FILE"))?,
+                ));
+            }
             "--backup-world" => {
                 backup_destination = Some(PathBuf::from(
                     args.next()
@@ -2822,6 +2830,17 @@ fn main() -> io::Result<()> {
         return Err(bad(
             "--export-anvil and --import-anvil are mutually exclusive",
         ));
+    }
+    if let Some(path) = player_inspect_path {
+        if backup_destination.is_some()
+            || anvil_import_path.is_some()
+            || anvil_export_path.is_some()
+        {
+            return Err(bad("--inspect-player-data cannot be combined with backup/import/export"));
+        }
+        let (inventory, ender) = legacy_inventory_nbt::inspect_player(&path)?;
+        println!("Legacy 1.7.10 playerdata verified (read-only): {inventory} inventory stacks, {ender} ender stacks");
+        return Ok(());
     }
     if let Some(destination) = backup_destination {
         if !explicit_world

@@ -125,6 +125,7 @@ pub(crate) fn parse_chunk(nbt: &[u8], cx: i32, cz: i32) -> io::Result<ChunkRoot>
             return Err(invalid("invalid legacy section block"));
         }
     }
+    crate::legacy_inventory_nbt::validate_tiles(&parsed.level.tile_entities)?;
     Ok(parsed)
 }
 
