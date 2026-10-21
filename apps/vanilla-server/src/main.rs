@@ -1021,7 +1021,11 @@ fn play(
                                     .lock()
                                     .map_err(|_| bad("ground items mutex poisoned"))?;
                                 if !ground.is_full() {
-                                    let at = (player.x.floor() as i32, player.y.floor() as i32, player.z.floor() as i32);
+                                    let at = (
+                                        player.x.floor() as i32,
+                                        player.y.floor() as i32,
+                                        player.z.floor() as i32,
+                                    );
                                     let dropped = ground.put(ground_path, wool, at)?;
                                     for packet in dropped.spawn() {
                                         hub.broadcast(packet);
@@ -2768,10 +2772,15 @@ fn main() -> io::Result<()> {
             "--survival" => survival = true,
             "--creative" => survival = false,
             "--difficulty" => {
-                difficulty = args.next().ok_or_else(|| bad("missing --difficulty value"))?
-                    .parse::<u8>().map_err(|_| bad("invalid difficulty"))?;
-                if difficulty > 3 { return Err(bad("difficulty must be 0..=3")); }
-            },
+                difficulty = args
+                    .next()
+                    .ok_or_else(|| bad("missing --difficulty value"))?
+                    .parse::<u8>()
+                    .map_err(|_| bad("invalid difficulty"))?;
+                if difficulty > 3 {
+                    return Err(bad("difficulty must be 0..=3"));
+                }
+            }
             "--terrain-seed" => {
                 requested_seed = Some(
                     args.next()
