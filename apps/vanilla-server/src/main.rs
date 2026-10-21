@@ -510,6 +510,9 @@ fn play(
         if survival && vitals.health > 0.0 && last_xp_pickup.elapsed() >= Duration::from_millis(150)
         {
             let mut pending = orbs.lock().map_err(|_| bad("orb mutex poisoned"))?;
+            for event in pending.expire(clock.ticks()) {
+                hub.broadcast(event);
+            }
             if let Some((id, points)) = pending.nearby(*player, clock.ticks()) {
                 let mut next = experience.clone();
                 next.add(u32::from(points));
@@ -1580,6 +1583,9 @@ fn play(
                     {
                         send(s, mob.id, &mob.body)?;
                     }
+                    for orb in orbs.lock().map_err(|_| bad("orb mutex poisoned"))?.spawn_events() {
+                        send(s, orb.id, &orb.body)?;
+                    }
                     send(s, 0x06, &health_packet(*vitals))?;
                     let xp_packet = experience.packet();
                     send(s, xp_packet.id, &xp_packet.body)?;
@@ -1824,6 +1830,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             .spawn_events()
         {
             send(&mut s, mob.id, &mob.body)?;
+        }
+        for orb in orbs.lock().map_err(|_| bad("orb mutex poisoned"))?.spawn_events() {
+            send(&mut s, orb.id, &orb.body)?;
         }
     }
     let packet = experience.packet();
