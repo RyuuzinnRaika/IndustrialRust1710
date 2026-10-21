@@ -168,8 +168,9 @@ impl Orbs {
     }
     pub fn collect(&mut self, id: i32, collector: i32) -> Option<Vec<Event>> {
         self.items.remove(&id)?;
-        let mut body = id.to_be_bytes().to_vec();
-        body.extend_from_slice(&collector.to_be_bytes());
+        let mut body = Vec::with_capacity(10);
+        write_varint(id as u32, &mut body);
+        write_varint(collector as u32, &mut body);
         Some(vec![Event { id: 0x0d, body }, multiplayer::destroy(id)])
     }
 }
@@ -209,7 +210,13 @@ mod tests {
         assert_eq!(orbs.spawn(pos, 5, 0).unwrap().id, 0x11);
         let (id, amount) = orbs.nearby(pos, 5).unwrap();
         assert_eq!(amount, 5);
-        assert!(orbs.collect(id, 10).is_some());
+        let packets = orbs.collect(id, 10).unwrap();
+        use legacy_protocol::read_varint;
+        let mut body = packets[0].body.as_slice();
+        assert_eq!(read_varint(&mut body).unwrap(), id as u32);
+        assert_eq!(read_varint(&mut body).unwrap(), 10);
+        assert!(body.is_empty());
+        assert_eq!(packets[1].id, 0x13);
         assert!(orbs.collect(id, 10).is_none());
     }
 }
