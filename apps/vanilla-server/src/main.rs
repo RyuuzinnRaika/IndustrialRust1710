@@ -443,6 +443,7 @@ fn play(
     let mut observed_chest_revision: u64 = 0;
     let mut next_window: u8 = 1;
     let mut last_pickup = Instant::now();
+    let mut last_xp_pickup = Instant::now();
     let mut eating: Option<(u64, Stack)> = None;
     loop {
         while let Ok(event) = events.try_recv() {
@@ -504,6 +505,21 @@ fn play(
                 }
             }
             last_pickup = Instant::now();
+        }
+        if survival && vitals.health>0.0 && last_xp_pickup.elapsed()>=Duration::from_millis(150) {
+            let mut pending=orbs.lock().map_err(|_|bad("orb mutex poisoned"))?;
+            if let Some((id,points))=pending.nearby(*player,clock.ticks()) {
+                let mut next=experience.clone();
+                next.add(u32::from(points));
+                next.save(xp_path)?;
+                *experience=next;
+                if let Some(packets)=pending.collect(id,entity_id) {
+                    for packet in packets {hub.broadcast(packet);}
+                }
+                let packet=experience.packet();
+                send(s,packet.id,&packet.body)?;
+            }
+            last_xp_pickup=Instant::now();
         }
         if admission_check.elapsed() >= Duration::from_secs(2) {
             // Reload on a bounded interval: file removal, corruption or revocation
@@ -688,6 +704,20 @@ fn play(
                 let target_id = input.varint()?;
                 let action = input.varint()?;
                 input.finish()?;
+                if survival && vitals.health > 0.0 && action == 0 {
+                    if let Some(held)=inventory.held() {
+                        let mut creatures=mobs.lock().map_err(|_|bad("mob mutex poisoned"))?;
+                        if let Some(events)=creatures.feed_animal(target_id,held.id,now_tick) {
+                            let mut candidate=inventory.clone();
+                            if candidate.consume_held() {
+                                candidate.save(inventory_path)?;
+                                *inventory=candidate;
+                                send(s,0x2f,&inventory.set_slot(inventory.held_slot())?)?;
+                                for event in events {hub.broadcast(event);}
+                            }
+                        }
+                    }
+                }
                 if survival && vitals.health > 0.0 && action == 1 {
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
                     let result =
@@ -700,6 +730,7 @@ fn play(
                             *inventory = next_inventory;
                             send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
                         }
+                        let kill_at=hit.drop.as_ref().map(|(_,at)|*at);
                         if let Some((stack, at)) = hit.drop {
                             let mut ground = ground_items
                                 .lock()
@@ -711,8 +742,11 @@ fn play(
                                 }
                             }
                         }
-                        for event in hit.events {
-                            hub.broadcast(event);
+                        for event in hit.events {hub.broadcast(event);}
+                        if let Some(at)=kill_at {
+                            let pos=PlayerPosition{x:at.0 as f64+0.5,y:at.1 as f64+0.5,z:at.2 as f64+0.5};
+                            if let Some(packet)=orbs.lock().map_err(|_|bad("orb mutex poisoned"))?
+                                .spawn(pos,hit.xp,now_tick) {hub.broadcast(packet);}
                         }
                     }
                 }
@@ -1418,6 +1452,8 @@ fn play(
                     )?;
                     let origin = safe_spawn(world)?;
                     let fresh_vitals = Vitals::default();
+                    experience.reset();
+                    experience.save(xp_path)?;
                     origin.save_state(player_path, fresh_vitals)?;
                     *vitals = fresh_vitals;
                     *player = origin;
@@ -1440,6 +1476,8 @@ fn play(
                         send(s, mob.id, &mob.body)?;
                     }
                     send(s, 0x06, &health_packet(*vitals))?;
+                    let xp_packet=experience.packet();
+                    send(s,xp_packet.id,&xp_packet.body)?;
                     send(s, 0x30, &inventory.window_items())?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     send_player_position(s, player)?;
