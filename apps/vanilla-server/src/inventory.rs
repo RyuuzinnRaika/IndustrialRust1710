@@ -974,16 +974,8 @@ impl Inventory {
             0 if button == 0 || button == 1 => {
                 let existing = self.chest_stack(chest, slot);
                 let carried = self.cursor;
-                // Two unlike stacks must never be swapped across storage and
-                // player files without a durable multi-file transaction.
-                if storage
-                    && existing.is_some()
-                    && carried.is_some()
-                    && (existing.unwrap().id != carried.unwrap().id
-                        || existing.unwrap().damage != carried.unwrap().damage)
-                {
-                    return None;
-                }
+                // Unlike items can be swapped: main.rs journals the storage
+                // and player (including cursor) snapshots in one transaction.
                 let (new_slot, new_cursor) = match (existing, carried, button) {
                     (item, None, 0) => (None, item),
                     (None, item, 0) => (item, None),
@@ -1219,13 +1211,8 @@ impl Inventory {
                     return None;
                 }
             }
-            if old.is_some()
-                && hand.is_some()
-                && (old.unwrap().id != hand.unwrap().id
-                    || old.unwrap().damage != hand.unwrap().damage)
-            {
-                return None; // unsupported unlike-stack swap across two files
-            }
+            // A different valid recipe/fuel may replace an existing input.
+            // The caller journals both files before acknowledging the click.
             let (next_slot, next_cursor) = match (old, hand, button) {
                 (item, None, 0) => (None, item),
                 (None, item, 0) => (item, None),
@@ -1749,27 +1736,22 @@ mod tests {
         assert_eq!(sum(&inv, &chest), 12);
     }
     #[test]
-    fn chest_rejects_cross_storage_swaps_with_unlike_items() {
+    fn chest_swaps_unlike_items_without_duplication() {
         let mut inv = Inventory::default();
         let mut chest = [None; 27];
-        chest[0] = Some(Stack {
-            id: 1,
-            count: 2,
-            damage: 0,
-        });
-        inv.creative_set(
-            36,
-            Some(Stack {
-                id: 3,
-                count: 2,
-                damage: 0,
-            }),
-        )
-        .unwrap();
+        let stone = Stack { id: 1, count: 2, damage: 0 };
+        let dirt = Stack { id: 3, count: 2, damage: 0 };
+        chest[0] = Some(stone);
+        inv.creative_set(36, Some(dirt)).unwrap();
         assert!(inv.chest_click(&mut chest, 54, 0, 0).is_some());
-        let before = (inv.clone(), chest);
-        assert_eq!(inv.chest_click(&mut chest, 0, 0, 0), None);
-        assert_eq!((inv, chest), before);
+        assert_eq!(inv.cursor, Some(dirt));
+        assert_eq!(
+            inv.chest_click(&mut chest, 0, 0, 0),
+            Some(ChestDirection::IntoChest)
+        );
+        assert_eq!(chest[0], Some(dirt));
+        assert_eq!(inv.cursor, Some(stone));
+        assert!(inv.held().is_none());
     }
     #[test]
     fn window_zero_moves_stacks_without_creating_or_losing_items() {
