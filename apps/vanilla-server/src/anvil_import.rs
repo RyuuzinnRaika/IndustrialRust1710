@@ -123,6 +123,9 @@ fn region_coords(name: &str) -> io::Result<(i32, i32)> {
 }
 
 fn decode_chunk(world: &mut World, nbt: &[u8], cx: i32, cz: i32) -> io::Result<()> {
+    // Shared Minecraft 1.7.10 legacy NBT validation before the strict,
+    // self-export-only IRW import conversion below.
+    let _ = crate::legacy_nbt::parse_chunk(nbt, cx, cz)?;
     let root: ChunkRoot = fastnbt::from_bytes(nbt).map_err(wrap)?;
     let chunk = root.level;
     if (chunk.x, chunk.z) != (cx, cz) {

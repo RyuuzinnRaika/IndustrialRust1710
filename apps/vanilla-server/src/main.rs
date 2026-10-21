@@ -16,6 +16,7 @@ mod ground_items;
 mod hoppers;
 mod inventory;
 mod journal;
+mod legacy_nbt;
 mod mobs;
 mod multiplayer;
 mod navigation;
