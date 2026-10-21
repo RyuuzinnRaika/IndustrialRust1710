@@ -52,7 +52,8 @@ impl GroundItem {
         }
         body.extend_from_slice(&[0, 0]); // pitch/yaw
         body.extend_from_slice(&0i32.to_be_bytes()); // no velocity
-        let mut metadata = self.id.to_be_bytes().to_vec();
+        let mut metadata = Vec::with_capacity(20);
+        write_varint(self.id as u32, &mut metadata);
         metadata.push((5 << 5) | 10); // item slot type 5, DataWatcher index 10
         metadata.extend_from_slice(&self.stack.id.to_be_bytes());
         metadata.push(self.stack.count);
@@ -74,8 +75,9 @@ impl GroundItem {
         x * x + y * y + z * z <= 4.0
     }
     pub fn collected(&self, player: i32) -> [Event; 2] {
-        let mut collect = self.id.to_be_bytes().to_vec();
-        collect.extend_from_slice(&player.to_be_bytes());
+        let mut collect = Vec::with_capacity(10);
+        write_varint(self.id as u32, &mut collect);
+        write_varint(player as u32, &mut collect);
         [
             Event {
                 id: 0x0d,
@@ -313,10 +315,15 @@ mod tests {
         assert_eq!(object.body[5], 2);
         assert_eq!(object.body.len(), 24);
         assert_eq!(metadata.id, 0x1c);
-        assert_eq!(&metadata.body[4..], &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
+        let mut metadata_data = metadata.body.as_slice();
+        assert_eq!(legacy_protocol::read_varint(&mut metadata_data).unwrap(), item.id as u32);
+        assert_eq!(metadata_data, &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
         let [collect, destroy] = item.collected(42);
         assert_eq!(collect.id, 0x0d);
-        assert_eq!(&collect.body[4..], &42i32.to_be_bytes());
+        let mut collect_data = collect.body.as_slice();
+        assert_eq!(legacy_protocol::read_varint(&mut collect_data).unwrap(), item.id as u32);
+        assert_eq!(legacy_protocol::read_varint(&mut collect_data).unwrap(), 42);
+        assert!(collect_data.is_empty());
         assert_eq!(destroy.id, 0x13);
         assert!(item.in_pickup_range((0.5, 65.0, 0.5)));
         assert!(!item.in_pickup_range((4.5, 65.0, 0.5)));
