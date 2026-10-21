@@ -168,6 +168,7 @@ impl Hoppers {
         let next = self.staged_update(pos, [None; HOPPER_SLOTS])?;
         self.commit_staged(path, next)
     }
+    #[allow(clippy::too_many_arguments)] // World, three storages and their durable file paths.
     pub fn advance(
         &mut self,
         world: &World,
