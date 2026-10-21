@@ -393,6 +393,30 @@ impl World {
         Ok(changed)
     }
 
+    /// One atomic world-file commit for a bounded radius-three explosion.
+    /// Leave bedrock, liquids, block entities and unbreakable/unknown blocks
+    /// intact: without transactional container drop handling they are unsafe.
+    pub fn explode(&mut self,path:&Path,center:(i32,i32,i32))->io::Result<Vec<(i32,i32,i32)>> {
+        let mut draft=self.clone();
+        let mut changed=Vec::new();
+        for dx in -3_i32..=3 {for dy in -3_i32..=3 {for dz in -3_i32..=3 {
+            if dx*dx+dy*dy+dz*dz>9 {continue;}
+            let (x,y,z)=(center.0+dx,center.1+dy,center.2+dz);
+            if !in_bounds(x,y,z){continue;}
+            let block=draft.get(x,y,z)>>4;
+            if !matches!(block, 1|2|3|4|5|12|13|14|15|16|17|18|20|21|
+                 24|35|41|42|45|56|57|73|74|80|82|87|89|98|129|
+                 155|159|162|168|169|170|172|173) {continue;}
+            draft.import_block(x,y,z,0)?;
+            changed.push((x,y,z));
+        }}}
+        if !changed.is_empty() {
+            draft.save(path)?;
+            *self=draft;
+        }
+        Ok(changed)
+    }
+
     pub fn update_and_save(
         &mut self,
         path: &Path,
