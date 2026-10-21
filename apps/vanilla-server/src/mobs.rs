@@ -15,8 +15,10 @@ use std::path::{Path, PathBuf};
 const BASE_ID: i32 = 500_000;
 const MAX_STEPS: u64 = 4;
 const ATTACK_INTERVAL: u64 = 20;
-const HOSTILE_CAP: usize = 32;
-const PASSIVE_CAP: usize = 24;
+const VANILLA_HOSTILE_CAP: usize = 70;
+const VANILLA_PASSIVE_CAP: usize = 10;
+const HOSTILE_CAP: usize = 70;
+const PASSIVE_CAP: usize = 32; // Include manually bred animals without culling.
 const ARROW_CAP: usize = 128;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 enum Kind {
@@ -157,6 +159,7 @@ struct Mob {
     waypoint: Option<PlayerPosition>,
     sheared: bool,
     next_egg_tick: u64,
+    profession: u8,
     size: u8,
     anger_until: u64,
 }
@@ -183,7 +186,11 @@ impl Mob {
         }
         if self.kind == Kind::Villager {
             body.push((2 << 5) | 16); // profession integer: farmer (0)
-            body.extend_from_slice(&0i32.to_be_bytes());
+            body.extend_from_slice(&i32::from(self.profession).to_be_bytes());
+        }
+        if matches!(self.kind, Kind::EnderDragon | Kind::Wither) {
+            body.push((3 << 5) | 6); // boss health as DataWatcher float
+            body.extend_from_slice(&(f32::from(self.health)).to_be_bytes());
         }
         if self.kind == Kind::Sheep {
             body.push(16); // sheep colour + sheared bit (byte metadata)
@@ -286,6 +293,7 @@ pub struct Mobs {
     explosions: Vec<Explosion>,
     last_tick: u64,
     next_id: i32,
+    dragon_defeated: bool,
     enabled: bool,
     difficulty: Option<u8>,
     #[serde(skip)]
@@ -507,12 +515,40 @@ impl Mobs {
             waypoint: None,
             sheared: false,
             next_egg_tick: self.last_tick + 6000 + u64::from(id.unsigned_abs() % 6000),
+            profession: (hash(self.last_tick ^ id as u64) % 5) as u8,
             size,
             anger_until: 0,
         };
         let event = mob.spawn();
         self.entities.insert(id, mob);
         event
+    }
+    /// Construct a server-owned boss. External summoning rules must validate
+    /// soul sand/skulls or End progression before calling this method.
+    pub fn summon_boss(&mut self, world: &World, kind: u8, position: PlayerPosition) -> Option<Event> {
+        let creature = match kind { 63 => Kind::EnderDragon, 64 => Kind::Wither, _ => return None };
+        if !position.is_valid() || !self.enabled || self.difficulty == Some(0)
+            || self.entities.values().any(|entity| entity.kind == creature)
+            || (creature == Kind::EnderDragon &&
+                (world.dimension() != crate::dimensions::Dimension::End || self.dragon_defeated)) {
+            return None;
+        }
+        Some(self.insert(creature, position, false))
+    }
+    /// A bounded, server-authoritative emerald trade (GUI protocol pending).
+    /// Item transfer must be committed atomically by the calling session.
+    pub fn village_offer(&self, id: i32, player: PlayerPosition, held: Option<Stack>) -> Option<Stack> {
+        let villager = self.entities.get(&id)?;
+        if villager.kind != Kind::Villager || !villager.nearby(player, 3.0)
+            || held?.id != 388 { return None; }
+        let product = match villager.profession {
+            0 => (297, 6), // farmer: bread
+            1 => (340, 1), // librarian: book
+            2 => (331, 3), // priest: redstone
+            3 => (265, 2), // blacksmith: iron ingot
+            _ => (320, 4), // butcher: cooked pork
+        };
+        Some(Stack { id: product.0, count: product.1, damage: 0 })
     }
     /// Split a defeated large slime/magma cube; every child receives an
     /// independent authoritative ID and an ordinary Protocol 5 spawn packet.
@@ -706,18 +742,18 @@ impl Mobs {
             },
             drop: if killed { mob.death_drop() } else { None },
             experience: if killed {
-                if mob.kind.passive() {
-                    2
-                } else {
-                    5
+                match mob.kind {
+                    Kind::EnderDragon => 12_000,
+                    Kind::Wither => 50,
+                    _ if mob.kind.passive() => 2,
+                    _ => 5,
                 }
-            } else {
-                0
-            },
+            } else { 0 },
         };
         let mut result = result;
         if killed {
             if let Some(parent) = self.entities.remove(&id) {
+                if parent.kind == Kind::EnderDragon { self.dragon_defeated = true; }
                 result.events.extend(self.split(parent));
             }
         } else if matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman) {
@@ -835,7 +871,7 @@ impl Mobs {
         players: &[PlayerPosition],
         events: &mut Vec<Event>,
     ) {
-        if !self.enabled || players.is_empty() || !now.is_multiple_of(80) {
+        if !self.enabled || players.is_empty() || !now.is_multiple_of(20) {
             return;
         }
         let passive = self
@@ -848,6 +884,8 @@ impl Mobs {
             .values()
             .filter(|m| !m.kind.peaceful_safe())
             .count();
+        let hostile_cap = natural_mob_cap(players, VANILLA_HOSTILE_CAP).min(HOSTILE_CAP);
+        let passive_cap = natural_mob_cap(players, VANILLA_PASSIVE_CAP).min(PASSIVE_CAP);
         let dimension = world.dimension();
         for index in 0..4u64 {
             let seed = hash(
@@ -914,12 +952,12 @@ impl Mobs {
             let open = sky_exposed(world, position);
             let (block_light, sky_light) = world.light_at(x, y, z);
             let overworld = dimension == crate::dimensions::Dimension::Overworld;
-            let is_passive = overworld && grass && open && sunlight(now) && (seed & 1 == 0);
+            let is_passive = overworld && grass && open && now.is_multiple_of(400) && (seed & 1 == 0);
             if overworld && !spawn_light_ok(block_light, sky_light, now, is_passive) {
                 continue;
             }
             let kind = if is_passive {
-                if passive >= PASSIVE_CAP || matches!(biome, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24)
+                if passive >= passive_cap || matches!(biome, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24)
                 {
                     continue;
                 }
@@ -930,7 +968,7 @@ impl Mobs {
                     _ => Kind::Chicken,
                 }
             } else {
-                if self.difficulty == Some(0) || hostile >= HOSTILE_CAP {
+                if self.difficulty == Some(0) || hostile >= hostile_cap {
                     continue;
                 }
                 match dimension {
@@ -1004,6 +1042,14 @@ impl Mobs {
                     false
                 }
             });
+        }
+        if self.enabled && world.dimension() == crate::dimensions::Dimension::End
+            && !self.dragon_defeated && !players.is_empty()
+            && !self.entities.values().any(|mob| mob.kind == Kind::EnderDragon) {
+            // The End has exactly one natural dragon until its defeat is saved.
+            if let Some(spawn) = self.summon_boss(world, 63, PlayerPosition {
+                x: 0.5, y: 95.0, z: 0.5,
+            }) { events.push(spawn); }
         }
         self.spawn_natural(now, world, players, &mut events);
         for _ in 0..steps {
@@ -1083,6 +1129,19 @@ impl Mobs {
                     continue; // Daylight spiders are neutral until provoked.
                 }
                 let d = distance(target, mob.position);
+                if mob.kind == Kind::EnderDragon {
+                    // Server-owned orbit while the fight is active.
+                    let angle = now as f64 * 0.015;
+                    let next = PlayerPosition {
+                        x: angle.cos() * 24.0, y: 95.0 + (angle * 0.5).sin() * 8.0,
+                        z: angle.sin() * 24.0,
+                    };
+                    if next.is_valid() {
+                        mob.position = next;
+                        events.push(multiplayer::teleport(mob.id, &next, 0.0, 0.0));
+                    }
+                    continue;
+                }
                 if mob.kind == Kind::IronGolem {
                     continue; // Guardian targeting is handled separately below.
                 }
@@ -1412,6 +1471,21 @@ impl Mobs {
             _ => amount,
         }
     }
+}
+/// Unique 17x17 eligible chunk union. Vanilla's mob cap scales with this
+/// area, not with raw online player count or the protocol render distance.
+fn natural_mob_cap(players: &[PlayerPosition], base: usize) -> usize {
+    let mut chunks = std::collections::BTreeSet::new();
+    for player in players {
+        let cx = (player.x.floor() as i32).div_euclid(16);
+        let cz = (player.z.floor() as i32).div_euclid(16);
+        for x in cx - 8..=cx + 8 {
+            for z in cz - 8..=cz + 8 {
+                chunks.insert((x, z));
+            }
+        }
+    }
+    base.saturating_mul(chunks.len()) / 289
 }
 fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
     players
