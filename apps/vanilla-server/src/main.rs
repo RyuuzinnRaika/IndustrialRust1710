@@ -1697,7 +1697,7 @@ fn play(
                     let mut changed_slots = original.clone();
                     let mut candidate = inventory.clone();
                     let change = if still_open && requested_window {
-                        candidate.chest_click(&mut changed_slots, slot, button, mode)
+                        candidate.chest_click_window(active_window, &mut changed_slots, slot, button, mode)
                     } else {
                         None
                     };
@@ -1752,7 +1752,7 @@ fn play(
                     let mut changed = original.slots;
                     let mut candidate = inventory.clone();
                     let change = if still_open && requested_window {
-                        candidate.chest_click(&mut changed, slot, button, mode)
+                        candidate.chest_click_window(active_window, &mut changed, slot, button, mode)
                     } else {
                         None
                     };
@@ -1796,7 +1796,7 @@ fn play(
                     let mut changed = original;
                     let mut candidate = inventory.clone();
                     let change = if still_open && requested_window {
-                        candidate.chest_click(&mut changed, slot, button, mode)
+                        candidate.chest_click_window(active_window, &mut changed, slot, button, mode)
                     } else {
                         None
                     };
