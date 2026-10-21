@@ -488,6 +488,16 @@ fn periodic_effect_interval(kind: u8, amplifier: u8) -> u64 {
     (base.checked_shr(u32::from(amplifier)).unwrap_or(0)).max(1)
 }
 
+/// Protocol 5 Entity Action 3/4 starts and stops sprinting. Other actions
+/// (sneaking, waking up, horse controls) never alter the sprint flag.
+fn sprint_action(current: bool, action: i32, food: i32) -> bool {
+    match action {
+        3 => food > 6,
+        4 => false,
+        _ => current,
+    }
+}
+
 fn potion_effect_packet(entity: i32, kind: u8, amplifier: u8, duration: u16) -> Vec<u8> {
     let mut packet = entity.to_be_bytes().to_vec();
     packet.push(kind);
@@ -587,6 +597,7 @@ fn play(
     let mut last_pickup = Instant::now();
     let mut eating: Option<(u64, Stack)> = None;
     let mut bow_start: Option<u64> = None;
+    let mut sprinting = false;
     let mut hazards = Hazards::new();
     let mut last_hazards_tick = clock.ticks();
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
@@ -1199,7 +1210,10 @@ fn play(
                 if survival {
                     let old_food = vitals.food;
                     let old_saturation = vitals.saturation;
-                    vitals.travel((x - player.x).hypot(z - player.z));
+                    vitals.travel_with_sprint(
+                        (x - player.x).hypot(z - player.z),
+                        sprinting && vitals.food > 6,
+                    );
                     if vitals.food != old_food || vitals.saturation != old_saturation {
                         player.save_state(player_path, *vitals)?;
                         send(s, 0x06, &health_packet(*vitals))?;
@@ -1251,6 +1265,17 @@ fn play(
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, *player, yaw, pitch);
                     last_movement_broadcast = Instant::now();
+                }
+            }
+            11 => {
+                // Java 1.7.10 (Protocol 5) serverbound Entity Action:
+                // VarInt entity ID, VarInt action, VarInt horse jump boost.
+                let _reported_entity_id = input.varint()?;
+                let action = input.varint()?;
+                let _jump_boost = input.varint()?;
+                input.finish()?;
+                if survival {
+                    sprinting = sprint_action(sprinting, action, vitals.food);
                 }
             }
             7 => {
@@ -3283,6 +3308,19 @@ fn main() -> io::Result<()> {
     }
     Ok(())
 }
+#[cfg(test)]
+mod sprint_action_tests {
+    use super::sprint_action;
+
+    #[test]
+    fn protocol5_sprint_starts_only_with_food_above_six() {
+        assert!(!sprint_action(false, 3, 6));
+        assert!(sprint_action(false, 3, 7));
+        assert!(sprint_action(true, 0, 20));
+        assert!(!sprint_action(true, 4, 20));
+    }
+}
+
 #[cfg(test)]
 mod effect_interval_tests {
     use super::periodic_effect_interval;
