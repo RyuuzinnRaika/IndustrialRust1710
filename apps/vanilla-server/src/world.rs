@@ -16,11 +16,13 @@ pub const MAX_CHUNK: i32 = WORLD_LIMIT / 16 - 1;
 const MAX_EDITS: usize = 65_536;
 const MAGIC: &[u8; 4] = b"IRW1";
 const NATURAL_MAGIC: &[u8; 4] = b"IRW2";
+const BIOME_MAGIC: &[u8; 4] = b"IRW3";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Generation {
     #[default]
     Flat,
     Natural(u64),
+    Biomes(u64),
 }
 type Position = (i32, u8, i32);
 #[derive(Default, Clone, Debug)]
@@ -128,17 +130,24 @@ impl World {
         }
     }
     pub fn is_natural(&self) -> bool {
-        matches!(self.generation, Generation::Natural(_))
+        matches!(self.generation, Generation::Natural(_) | Generation::Biomes(_))
+    }
+    pub fn is_biome_world(&self) -> bool {
+        matches!(self.generation, Generation::Biomes(_))
+    }
+    pub fn with_biomes(seed: u64) -> Self {
+        Self { generation: Generation::Biomes(seed), ..Self::default() }
     }
     pub fn natural_seed(&self) -> Option<u64> {
         match self.generation {
-            Generation::Natural(seed) => Some(seed),
+            Generation::Natural(seed) | Generation::Biomes(seed) => Some(seed),
             Generation::Flat => None,
         }
     }
     pub fn spawn_y(&self) -> f64 {
         match self.generation {
             Generation::Natural(seed) => f64::from(crate::terrain::surface(seed, 0, 0) + 1),
+            Generation::Biomes(seed) => f64::from(crate::terrain::biome_surface(seed, 0, 0) + 1),
             Generation::Flat => 65.0,
         }
     }
@@ -146,6 +155,7 @@ impl World {
         match self.generation {
             Generation::Flat => Self::default_block(y),
             Generation::Natural(seed) => crate::terrain::block(seed, x, i32::from(y), z),
+            Generation::Biomes(seed) => crate::terrain::biome_block(seed, x, i32::from(y), z),
         }
     }
     pub fn default_block(y: u8) -> u16 {
@@ -586,6 +596,10 @@ impl World {
                 let seed = u64::from_be_bytes(bytes[4..12].try_into().unwrap());
                 (Self::natural(seed), 16)
             }
+            value if value == BIOME_MAGIC && bytes.len() >= 16 => {
+                let seed = u64::from_be_bytes(bytes[4..12].try_into().unwrap());
+                (Self::with_biomes(seed), 16)
+            }
             _ => return Err(invalid("unknown IRW world format")),
         };
         let count = u32::from_be_bytes(bytes[offset - 4..offset].try_into().unwrap()) as usize;
@@ -626,6 +640,10 @@ impl World {
             Generation::Flat => f.write_all(MAGIC)?,
             Generation::Natural(seed) => {
                 f.write_all(NATURAL_MAGIC)?;
+                f.write_all(&seed.to_be_bytes())?;
+            }
+            Generation::Biomes(seed) => {
+                f.write_all(BIOME_MAGIC)?;
                 f.write_all(&seed.to_be_bytes())?;
             }
         }
@@ -715,7 +733,15 @@ impl World {
                 }
             }
         }
-        bytes.extend(std::iter::repeat_n(1u8, 256)); // plains biome
+        for z in 0..16 {
+            for x in 0..16 {
+                let kind = match self.generation {
+                    Generation::Biomes(seed) => crate::terrain::biome(seed,chunk_x*16+x,chunk_z*16+z),
+                    _ => 1,
+                };
+                bytes.push(kind);
+            }
+        }
         (mask, bytes)
     }
 }
