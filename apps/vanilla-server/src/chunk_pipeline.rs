@@ -35,9 +35,7 @@ impl PendingChunk {
         match self.0.try_recv() {
             Ok(result) => result.map(Some),
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => {
-                Err(io::Error::other("chunk encoder stopped"))
-            }
+            Err(TryRecvError::Disconnected) => Err(io::Error::other("chunk encoder stopped")),
         }
     }
 
