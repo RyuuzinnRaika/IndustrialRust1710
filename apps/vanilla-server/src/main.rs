@@ -719,9 +719,9 @@ fn play(
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
             let updates = creatures.tick(now_tick, &w, &players);
             let explosions = creatures.take_explosions();
-            creatures.queue_explosion_hits(&explosions, &participants);
+            creatures.queue_explosion_hits(&w, &explosions, &participants);
             let hurt = creatures.hurt_player(entity_id, *player, now_tick);
-            let drops = creatures.take_drops();
+            let mut drops = creatures.take_drops();
             drop(creatures);
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
             for explosion in explosions {
@@ -740,12 +740,26 @@ fn play(
                             if d > explosion.radius * explosion.radius {
                                 continue;
                             }
+                            let endpoint = PlayerPosition {
+                                x: x as f64+0.5,y: y as f64,z: z as f64+0.5
+                            };
+                            if !mob_rules::visible(&w, explosion.position, endpoint,
+                                explosion.radius.max(1.0)) { continue; }
                             let block = w.get(x, y, z) >> 4;
-                            if matches!(block, 0 | 7 | 49 | 54 | 61 | 62) {
+                            // Never vaporize bedrock, obsidian or persisted tile containers.
+                            if matches!(block, 0 | 7 | 49 | 54 | 61 | 62 | 23 | 117 | 130 | 146 | 154 | 158) {
                                 continue;
                             }
                             if w.update_and_save(world_path, x, y, z, 0)? {
                                 hub.broadcast(block_change_event(&w, x, y, z));
+                                // Preserve collectible block resources after a blast.
+                                let id: i16 = match block {
+                                    1 => 4, 2 => 3, 16 => 263, 56 => 264,
+                                    73 | 74 => 331, _ => block as i16,
+                                };
+                                if id > 0 {
+                                    drops.push((Stack{id, count:1, damage:0},(x,y,z)));
+                                }
                                 destroyed += 1;
                                 if destroyed >= 64 {
                                     break 'blast;
