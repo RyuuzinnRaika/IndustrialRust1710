@@ -18,12 +18,14 @@ const MAX_EDITS: usize = 65_536;
 const MAGIC: &[u8; 4] = b"IRW1";
 const NATURAL_MAGIC: &[u8; 4] = b"IRW2";
 const BIOME_MAGIC: &[u8; 4] = b"IRW3";
+const EXPANDED_MAGIC: &[u8; 4] = b"IRW4";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Generation {
     #[default]
     Flat,
     Natural(u64),
     Biomes(u64),
+    Expanded(u64, crate::dimensions::Dimension),
 }
 type Position = (i32, u8, i32);
 #[derive(Default, Clone, Debug)]
@@ -197,11 +199,18 @@ impl World {
     pub fn is_natural(&self) -> bool {
         matches!(
             self.generation,
-            Generation::Natural(_) | Generation::Biomes(_)
+            Generation::Natural(_) | Generation::Biomes(_) | Generation::Expanded(_, _)
         )
     }
     pub fn is_biome_world(&self) -> bool {
         matches!(self.generation, Generation::Biomes(_))
+    }
+    /// Opt-in IRW4 world. Older world versions retain their exact terrain.
+    pub fn expanded(seed: u64, dimension: crate::dimensions::Dimension) -> Self {
+        Self { generation: Generation::Expanded(seed, dimension), ..Self::default() }
+    }
+    pub fn extended_identity(&self) -> Option<(u64, crate::dimensions::Dimension)> {
+        match self.generation { Generation::Expanded(seed, dim) => Some((seed, dim)), _ => None }
     }
     pub fn with_biomes(seed: u64) -> Self {
         Self {
@@ -211,7 +220,7 @@ impl World {
     }
     pub fn natural_seed(&self) -> Option<u64> {
         match self.generation {
-            Generation::Natural(seed) | Generation::Biomes(seed) => Some(seed),
+            Generation::Natural(seed) | Generation::Biomes(seed) | Generation::Expanded(seed, _) => Some(seed),
             Generation::Flat => None,
         }
     }
@@ -219,6 +228,9 @@ impl World {
         match self.generation {
             Generation::Natural(seed) => f64::from(crate::terrain::surface(seed, 0, 0) + 1),
             Generation::Biomes(seed) => f64::from(crate::terrain::biome_surface(seed, 0, 0) + 1),
+            Generation::Expanded(seed, crate::dimensions::Dimension::Overworld) => f64::from(crate::worldgen::height(seed, 0, 0) + 1),
+            Generation::Expanded(_, crate::dimensions::Dimension::Nether) => 80.0,
+            Generation::Expanded(_, crate::dimensions::Dimension::End) => 81.0,
             Generation::Flat => 65.0,
         }
     }
@@ -227,6 +239,7 @@ impl World {
             Generation::Flat => Self::default_block(y),
             Generation::Natural(seed) => crate::terrain::block(seed, x, i32::from(y), z),
             Generation::Biomes(seed) => crate::terrain::biome_block(seed, x, i32::from(y), z),
+            Generation::Expanded(seed, dim) => crate::worldgen::block(seed, dim, x, i32::from(y), z),
         }
     }
     pub fn default_block(y: u8) -> u16 {
@@ -839,6 +852,12 @@ impl World {
                 let seed = u64::from_be_bytes(bytes[4..12].try_into().unwrap());
                 (Self::with_biomes(seed), 16)
             }
+            value if value == EXPANDED_MAGIC && bytes.len() >= 17 => {
+                let seed = u64::from_be_bytes(bytes[4..12].try_into().unwrap());
+                let dimension = crate::dimensions::Dimension::from_protocol(bytes[12] as i8)
+                    .ok_or_else(|| invalid("invalid IRW4 dimension id"))?;
+                (Self::expanded(seed, dimension), 17)
+            }
             _ => return Err(invalid("unknown IRW world format")),
         };
         let count = u32::from_be_bytes(bytes[offset - 4..offset].try_into().unwrap()) as usize;
@@ -912,6 +931,11 @@ impl World {
                 f.write_all(BIOME_MAGIC)?;
                 f.write_all(&seed.to_be_bytes())?;
             }
+            Generation::Expanded(seed, dim) => {
+                f.write_all(EXPANDED_MAGIC)?;
+                f.write_all(&seed.to_be_bytes())?;
+                f.write_all(&[dim.protocol_id() as u8])?;
+            }
         }
         f.write_all(&(self.edits.len() as u32).to_be_bytes())?;
         for (&(x, y, z), &block) in &self.edits {
@@ -939,7 +963,9 @@ impl World {
     /// sections are transmitted when edited. This avoids dropping high-altitude
     /// or underground edits on re-login or crossing a chunk boundary.
     pub fn chunk_data(&self, chunk_x: i32, chunk_z: i32) -> (u16, Vec<u8>) {
-        let mut mask: u16 = if self.is_natural() {
+        let mut mask: u16 = if self.extended_identity().is_some() {
+            0x01ff
+        } else if self.is_natural() {
             0x00ff
         } else {
             (1 << 3) | (1 << 4)
@@ -1004,6 +1030,9 @@ impl World {
                 let kind = match self.generation {
                     Generation::Biomes(seed) => {
                         crate::terrain::biome(seed, chunk_x * 16 + x, chunk_z * 16 + z)
+                    }
+                    Generation::Expanded(seed, dim) => {
+                        crate::worldgen::biome_for_dimension(seed, dim, chunk_x * 16 + x, chunk_z * 16 + z)
                     }
                     _ => 1,
                 };
