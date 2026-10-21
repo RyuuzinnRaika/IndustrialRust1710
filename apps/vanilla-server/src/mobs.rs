@@ -539,6 +539,9 @@ impl Mobs {
         self.arrows.insert(id, arrow);
         Some(event)
     }
+    /// Natural spawning is gated by authoritative world lighting, biome,
+    /// collision, difficulty and category caps. Never spawn inside 24 blocks
+    /// of any player, even when another player is far away.
     fn spawn_natural(
         &mut self,
         now: u64,
@@ -546,60 +549,54 @@ impl Mobs {
         players: &[PlayerPosition],
         events: &mut Vec<Event>,
     ) {
-        if !self.enabled || players.is_empty() || !now.is_multiple_of(80) {
-            return;
-        }
+        if !self.enabled || players.is_empty() || !now.is_multiple_of(80) { return; }
+        let Some(seed_world) = world.natural_seed() else { return; };
         let passive = self.entities.values().filter(|m| m.kind.passive()).count();
         let hostile = self.entities.len() - passive;
         for index in 0..4u64 {
-            let seed = hash(
-                now ^ index.wrapping_mul(0x9e3779b97f4a7c15) ^ world.natural_seed().unwrap_or(0),
-            );
-            let player = players[(seed as usize) % players.len()];
-            let distance = 24 + (seed % 25) as i32;
-            let x = player.x.floor() as i32 + if seed & 1 == 0 { distance } else { -distance };
-            let z = player.z.floor() as i32 + (((seed >> 8) % 49) as i32 - 24);
-            let Some(terrain) = world.natural_seed() else {
-                return;
-            };
-            let p = PlayerPosition {
-                x: x as f64 + 0.5,
-                y: (crate::terrain::surface(terrain, x, z) + 1) as f64,
-                z: z as f64 + 0.5,
-            };
-            if !p.is_valid()
-                || distance_to_players(p, players) < 24.0
-                || !physics::supported(world, &p)
-                || physics::collides(world, &p)
-            {
-                continue;
-            }
-            let open = sky_exposed(world, p);
-            let is_night = (now % 24000) >= 13000 && (now % 24000) <= 23000;
-            let grass = world.get(x, p.y as i32 - 1, z) >> 4 == 2;
-            let kind = if open && !is_night && grass {
-                if passive >= PASSIVE_CAP {
-                    continue;
-                }
-                match seed % 4 {
-                    0 => Kind::Cow,
-                    1 => Kind::Pig,
-                    2 => Kind::Sheep,
-                    _ => Kind::Chicken,
-                }
+            let seed = hash(now ^ index.wrapping_mul(0x9e3779b97f4a7c15) ^ seed_world);
+            let reference = players[(seed as usize) % players.len()];
+            let radial = 24 + (seed % 25) as i32;
+            let x = reference.x.floor() as i32 + if seed & 1 == 0 { radial } else { -radial };
+            let z = reference.z.floor() as i32 + (((seed >> 8) % 49) as i32 - 24);
+            let y = if world.is_biome_world() {
+                crate::terrain::biome_surface(seed_world, x, z) + 1
             } else {
-                if hostile >= HOSTILE_CAP || (open && !is_night) {
-                    continue;
-                }
-                match seed % 4 {
-                    0 => Kind::Zombie,
-                    1 => Kind::Skeleton,
-                    2 => Kind::Creeper,
-                    _ => Kind::Spider,
-                }
+                crate::terrain::surface(seed_world, x, z) + 1
             };
-            events.push(self.insert(kind, p, false));
-            break; // One per spawn cycle bounds packet and CPU cost.
+            let p = PlayerPosition { x: x as f64 + 0.5, y: y as f64, z: z as f64 + 0.5 };
+            if !p.is_valid() || !physics::supported(world, &p)
+                || physics::collides(world, &p) { continue; }
+            let dist = distance_to_players(p, players);
+            let (sky, block) = world.light_at(x, y, z);
+            let daylight = (now % 24000) < 12000 || (now % 24000) > 23500;
+            let sky = if daylight { sky } else { sky.saturating_sub(11) };
+            let biome = if world.is_biome_world() {
+                crate::terrain::biome(seed_world, x, z)
+            } else { 1 };
+            let common = SpawnCheck {
+                sky_light: sky, block_light: block, daytime: daylight,
+                biome, distance: dist, nearby_players: true,
+                current: passive, capacity: PASSIVE_CAP,
+                difficulty: 1, // Existing Protocol 5 login advertises Normal.
+                grass_below: world.get(x,y-1,z) >> 4 == 2,
+                has_room: true,
+            };
+            let kind = if mob_rules::eligible(SpawnCategory::Passive, common) {
+                match seed % 4 {
+                    0 => Kind::Cow, 1 => Kind::Pig, 2 => Kind::Sheep, _ => Kind::Chicken,
+                }
+            } else if mob_rules::eligible(SpawnCategory::Hostile, SpawnCheck {
+                current: hostile, capacity: HOSTILE_CAP, ..common
+            }) {
+                match (seed >> 4) % 7 {
+                    0 => Kind::Zombie, 1 => Kind::Skeleton, 2 => Kind::Creeper,
+                    3 => Kind::Spider, 4 => Kind::Enderman, 5 => Kind::Witch,
+                    _ => Kind::Slime,
+                }
+            } else { continue; };
+            events.push(self.insert(kind,p,false));
+            break; // Bound network traffic to one natural spawn per cycle.
         }
     }
     /// Tick at most four elapsed 20Hz steps; caller owns broadcast fan-out.
@@ -844,7 +841,7 @@ impl Mobs {
 fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
     players
         .iter()
-        .map(|other| distance(p, *other))
+        .map(|other| ((p.x-other.x).powi(2) + (p.y-other.y).powi(2) + (p.z-other.z).powi(2)).sqrt())
         .fold(f64::INFINITY, f64::min)
 }
 #[cfg(test)]
