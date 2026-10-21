@@ -540,7 +540,7 @@ fn play(
         // The first active session advances the shared mob simulation.
         if survival && vitals.health > 0.0 {
             let participants = hub.participants()?;
-            let players: Vec<PlayerPosition> = participants.iter().map(|&(_, pos)| pos).collect();
+            let players = hub.positions()?;
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
             let updates = creatures.tick(now_tick, &w, &players);
