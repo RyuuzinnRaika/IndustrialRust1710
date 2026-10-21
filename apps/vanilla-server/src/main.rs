@@ -745,7 +745,8 @@ fn play(
             let explosions = creatures.take_explosions();
             updates.extend(creatures.queue_explosion_hits(&w, &explosions, &participants));
             updates.extend(creatures.take_player_effects(entity_id, *player, now_tick));
-            let hurt = creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
+            let hurt =
+                creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
             let drops = creatures.take_drops();
             drop(creatures);
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
@@ -1042,9 +1043,9 @@ fn play(
                     // Server-controlled villager barter, never trust a client
                     // supplied output stack. Clone first to ensure we can fit
                     // the reward without deleting the emerald on a full bag.
-                    if let Some(output) = creatures.village_offer(
-                        target_id, *player, inventory.held()
-                    ) {
+                    if let Some(output) =
+                        creatures.village_offer(target_id, *player, inventory.held())
+                    {
                         let mut candidate = inventory.clone();
                         if candidate.consume_held() && candidate.receive_stack(output).is_some() {
                             candidate.save(inventory_path)?;
@@ -2726,7 +2727,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     // Always lock world before mobs to match the gameplay tick lock order.
     let mob_saved = {
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-        mobs.lock().map_err(|_| bad("mob mutex poisoned"))?.save(&guard)
+        mobs.lock()
+            .map_err(|_| bad("mob mutex poisoned"))?
+            .save(&guard)
     };
     let player_saved = player_state.save_state(&player_file, player_vitals);
     let inventory_saved = inventory_state.save(&inventory_file);
@@ -2994,7 +2997,12 @@ fn main() -> io::Result<()> {
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-        Mobs::load_or_new(&guard, survival, difficulty, &world_path.with_extension("mobs.json"))?
+        Mobs::load_or_new(
+            &guard,
+            survival,
+            difficulty,
+            &world_path.with_extension("mobs.json"),
+        )?
     }));
     let ground_path = Arc::new(GroundItems::location(&world_path));
     let ground_items = Arc::new(Mutex::new(if survival {
