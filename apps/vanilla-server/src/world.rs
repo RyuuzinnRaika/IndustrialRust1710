@@ -29,6 +29,8 @@ pub struct World {
     pending_gravity: BTreeSet<Position>,
     pending_fluid: BTreeSet<Position>,
     pending_circuit: BTreeSet<Position>,
+    // Monotonic simulation phase; no catch-up while the server is stopped.
+    fluid_phase: u64,
 }
 
 /// A gravity block moved exactly one vertical cell during one 20Hz world tick.
@@ -264,7 +266,13 @@ impl World {
     /// Bounded 20TPS flow/conduction step. IRW save occurs once per tick.
     /// Empty fluid destinations and wire strengths are staged before mutation.
     pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
-        let wet: Vec<Position> = self.pending_fluid.iter().take(budget).copied().collect();
+
+        self.fluid_phase = self.fluid_phase.wrapping_add(1);
+        // Lava updates every fourth server tick, water every tick. Delayed
+        // lava positions remain queued rather than getting silently dropped.
+        let wet: Vec<Position> = self.pending_fluid.iter()
+            .filter(|&&(x, y, z)| self.get(x, i32::from(y), z) >> 4 != 10 || self.fluid_phase % 4 == 0)
+            .take(budget).copied().collect();
         let wired: Vec<Position> = self.pending_circuit.iter().take(budget).copied().collect();
         let mut changes: BTreeMap<Position, u16> = BTreeMap::new();
 
@@ -272,59 +280,89 @@ impl World {
             let y = i32::from(y);
             let block = self.get(x, y, z);
             let id = block >> 4;
-            let level = block & 15;
+            let mut level = block & 15;
             if !matches!(id, 8 | 10) {
                 continue;
             }
-            // Minecraft 1.7.10's water/lava contact solidifies the lava,
-            // not the water. Source lava becomes obsidian; flowing lava
-            // becomes cobblestone. Resolve contacts before normal spreading
-            // so a lava source cannot also create new flow in this tick.
             let adjacent = [
-                (x - 1, y, z),
-                (x + 1, y, z),
-                (x, y, z - 1),
-                (x, y, z + 1),
-                (x, y - 1, z),
-                (x, y + 1, z),
+                (x - 1, y, z), (x + 1, y, z),
+                (x, y, z - 1), (x, y, z + 1),
+                (x, y - 1, z), (x, y + 1, z),
             ];
+            // Resolve water/lava contact before flowing, preserving the
+            // source-lava -> obsidian and flowing-lava -> cobblestone rules.
             if id == 10 {
-                let touches_water = adjacent.into_iter().any(|(nx, ny, nz)| {
+                if adjacent.iter().any(|&(nx, ny, nz)| {
                     in_bounds(nx, ny, nz) && matches!(self.get(nx, ny, nz) >> 4, 8 | 9)
-                });
-                if touches_water {
+                }) {
                     changes.insert((x, y as u8, z), (if level == 0 { 49 } else { 4 }) << 4);
                     continue;
                 }
             } else {
-                for (nx, ny, nz) in adjacent {
-                    if !in_bounds(nx, ny, nz) {
-                        continue;
-                    }
+                for &(nx, ny, nz) in &adjacent {
+                    if !in_bounds(nx, ny, nz) { continue; }
                     let other = self.get(nx, ny, nz);
                     if matches!(other >> 4, 10 | 11) {
-                        changes.insert(
-                            (nx, ny as u8, nz),
-                            (if other & 15 == 0 { 49 } else { 4 }) << 4,
-                        );
+                        changes.insert((nx, ny as u8, nz),
+                            (if other & 15 == 0 { 49 } else { 4 }) << 4);
                     }
                 }
             }
-            if level >= 7 {
-                continue;
+            // A flow cell must be connected to a better upstream level.
+            // This makes disconnected rivers recede after their source is
+            // removed, instead of leaving permanent unsupported water.
+            if level != 0 {
+                let above = self.get(x, y + 1, z);
+                let mut next = if above >> 4 == id {
+                    ((above & 15) + 1).min(7)
+                } else { 8 };
+                let sides = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)];
+                let mut source_neighbors = 0;
+                for (nx, nz) in sides {
+                    let other = self.get(nx, y, nz);
+                    if other >> 4 == id {
+                        if other & 15 == 0 { source_neighbors += 1; }
+                        next = next.min((other & 15) + 1);
+                    }
+                }
+                let solid_below = y > 0 && !matches!(self.get(x, y - 1, z) >> 4, 0 | 8 | 9 | 10 | 11);
+                if id == 8 && source_neighbors >= 2 && solid_below {
+                    next = 0;
+                }
+                if next > 7 {
+                    changes.insert((x, y as u8, z), 0);
+                    continue;
+                }
+                if next != level {
+                    changes.insert((x, y as u8, z), (id << 4) | next);
+                    level = next;
+                }
             }
+            if level >= 7 { continue; }
             let down = (x, y - 1, z);
-            let targets: Vec<(i32, i32, i32)> =
-                if in_bounds(down.0, down.1, down.2) && self.get(down.0, down.1, down.2) == 0 {
-                    vec![down]
-                } else {
-                    vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
-                };
+            // Flow down first. Falling lava contacting water below creates
+            // stone at the destination rather than replacing the water.
+            if in_bounds(down.0, down.1, down.2) {
+                let below = self.get(down.0, down.1, down.2);
+                if id == 10 && matches!(below >> 4, 8 | 9) {
+                    changes.insert((down.0, down.1 as u8, down.2), 1 << 4);
+                    continue;
+                }
+            }
+            let falling = in_bounds(down.0, down.1, down.2)
+                && self.get(down.0, down.1, down.2) == 0;
+            let targets: Vec<(i32, i32, i32)> = if falling { vec![down] } else {
+                vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
+            };
             for (nx, ny, nz) in targets {
-                if in_bounds(nx, ny, nz) && self.get(nx, ny, nz) == 0 {
-                    changes
-                        .entry((nx, ny as u8, nz))
-                        .or_insert((id << 4) | (level + 1));
+                if !in_bounds(nx, ny, nz) { continue; }
+                let existing = self.get(nx, ny, nz);
+                let desired = (id << 4) | (level + 1);
+                if existing == 0 || (existing >> 4 == id && existing & 15 > level + 1) {
+                    let target = (nx, ny as u8, nz);
+                    if changes.get(&target).is_none_or(|&v| v == 0 || (v >> 4 == id && v & 15 > level + 1)) {
+                        changes.insert(target, desired);
+                    }
                 }
             }
         }
@@ -337,14 +375,26 @@ impl World {
             }
             let mut strongest = 0u16;
             for (nx, nz) in [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)] {
-                let block = self.get(nx, y, nz);
-                let source = match block >> 4 {
-                    69 if block & 8 != 0 => 15, // active lever
-                    76 => 15,                   // redstone torch
-                    55 => (block & 15).saturating_sub(1),
-                    _ => 0,
-                };
-                strongest = strongest.max(source);
+                // Dust climbs one block when there is air above the
+                // current dust, or descends along a block edge.
+                let height = if self.get(nx, y, nz) >> 4 == 55 {
+                    y
+                } else if self.get(nx, y, nz) != 0
+                    && self.get(x, y + 1, z) == 0 {
+                    y + 1
+                } else { y - 1 };
+                for check_y in [y, height] {
+                    if !in_bounds(nx, check_y, nz) { continue; }
+                    let power = self.get(nx, check_y, nz);
+                    let signal = match power >> 4 {
+                        69 if power & 8 != 0 => 15,
+                        76 => 15,
+                        55 => (power & 15).saturating_sub(1),
+                        94 => 15, // powered repeater
+                        _ => 0,
+                    };
+                    strongest = strongest.max(signal);
+                }
             }
             if current & 15 != strongest {
                 changes.insert((x, y as u8, z), (55 << 4) | strongest);
