@@ -1718,11 +1718,12 @@ fn main() -> io::Result<()> {
     let mut insecure_offline_lan = false;
     let mut survival = false;
     let mut requested_seed: Option<u64> = None;
+    let mut biome_seed: Option<u64> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--terrain-seed U64]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--terrain-seed U64] [--biome-seed U64]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -1757,6 +1758,11 @@ fn main() -> io::Result<()> {
                         .map_err(|_| bad("invalid terrain seed (expected unsigned integer)"))?,
                 );
             }
+            "--biome-seed" => {
+                biome_seed = Some(args.next()
+                    .ok_or_else(|| bad("missing --biome-seed value"))?
+                    .parse().map_err(|_| bad("invalid biome seed"))?);
+            }
             "--export-anvil" => {
                 anvil_export_path = Some(PathBuf::from(
                     args.next()
@@ -1772,11 +1778,12 @@ fn main() -> io::Result<()> {
             _ => return Err(bad("unknown command-line argument")),
         }
     }
-    if requested_seed.is_some()
-        && (!survival || anvil_export_path.is_some() || anvil_import_path.is_some())
+    if (requested_seed.is_some() || biome_seed.is_some())
+        && (!survival || anvil_export_path.is_some() || anvil_import_path.is_some()
+            || (requested_seed.is_some() && biome_seed.is_some()))
     {
         return Err(bad(
-            "--terrain-seed requires --survival and cannot be used with import/export",
+            "specify exactly one seed type with --survival, without import/export",
         ));
     }
     if anvil_export_path.is_some() && anvil_import_path.is_some() {
@@ -1825,13 +1832,20 @@ fn main() -> io::Result<()> {
     let loaded_world = if world_path.exists() {
         let existing = World::load(&world_path)?;
         if let Some(seed) = requested_seed {
-            if existing.natural_seed() != Some(seed) {
-                return Err(bad(
-                    "existing world has a different generation type or seed",
-                ));
+            if existing.natural_seed() != Some(seed) || existing.is_biome_world() {
+                return Err(bad("existing world has different generation type or seed"));
+            }
+        }
+        if let Some(seed) = biome_seed {
+            if existing.natural_seed() != Some(seed) || !existing.is_biome_world() {
+                return Err(bad("existing world is not a matching IRW3 biome world"));
             }
         }
         existing
+    } else if let Some(seed) = biome_seed {
+        let initial = World::with_biomes(seed);
+        initial.save_new(&world_path)?;
+        initial
     } else if let Some(seed) = requested_seed {
         let initial = World::natural(seed);
         // Create-only: never replace an existing IRW1 world or another seed.
