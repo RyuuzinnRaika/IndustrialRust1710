@@ -1,0 +1,289 @@
+//! E41: immutable Protocol 5 wire fixtures plus real Rust-server packet checks.
+//! These tests are NOT a substitute for an unmodified Java 1.7.10 GUI run.
+use flate2::read::ZlibDecoder;
+use legacy_protocol::{read_frame, read_varint, write_frame, write_string, write_varint, Cursor};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+fn packet(id: u32, payload: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_varint(id, &mut body);
+    body.extend_from_slice(payload);
+    let mut frame = Vec::new();
+    write_frame(&mut frame, &body).unwrap();
+    frame
+}
+
+fn handshake(port: u16, target: u32) -> Vec<u8> {
+    let mut body = vec![5]; // Protocol 5 VarInt.
+    write_string("localhost", &mut body).unwrap();
+    body.extend_from_slice(&port.to_be_bytes());
+    write_varint(target, &mut body);
+    packet(0, &body)
+}
+
+fn received(socket: &mut TcpStream) -> (u32, Vec<u8>) {
+    let data = read_frame(socket).expect("Protocol 5 framed packet");
+    let mut bytes = data.as_slice();
+    let id = read_varint(&mut bytes).expect("packet ID");
+    (id, bytes.to_vec())
+}
+
+#[test]
+fn frozen_handshake_and_keepalive_wire_images() {
+    assert_eq!(
+        handshake(25565, 2),
+        [0x0f, 0, 5, 9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0x63, 0xdd, 2]
+    );
+    assert_eq!(
+        packet(1, &[1, 2, 3, 4, 5, 6, 7, 8]),
+        [9, 1, 1, 2, 3, 4, 5, 6, 7, 8]
+    );
+    let mut stream = packet(0x38, &[4, b'B', b'e', b't', b'a', 1, 0, 0]);
+    let mut src = stream.as_slice();
+    let data = read_frame(&mut src).unwrap();
+    assert_eq!(data, [0x38, 4, b'B', b'e', b't', b'a', 1, 0, 0]);
+    assert!(src.is_empty());
+    stream[0] = 0; // Zero-length frame is invalid.
+    assert!(read_frame(&mut stream.as_slice()).is_err());
+}
+
+// Frozen Java 1.7-era NBT: anonymous TAG_Compound root, a Chest tile,
+// and one SlotItem compound. Unlike constructing both sides with fastnbt,
+// the expected bytes are independent of the serializer under test.
+const CHEST_NBT: &[u8] = &[
+    10, 0, 0, 8, 0, 2, b'i', b'd', 0, 5, b'C', b'h', b'e', b's', b't', 3, 0, 1, b'x', 0, 0, 0, 1,
+    3, 0, 1, b'y', 0, 0, 0, 64, 3, 0, 1, b'z', 0, 0, 0, 2, 9, 0, 5, b'I', b't', b'e', b'm', b's',
+    10, 0, 0, 0, 1, 1, 0, 4, b'S', b'l', b'o', b't', 0, 2, 0, 2, b'i', b'd', 0, 54, 1, 0, 5, b'C',
+    b'o', b'u', b'n', b't', 1, 2, 0, 6, b'D', b'a', b'm', b'a', b'g', b'e', 0, 0, 0, 0,
+];
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct ChestFixture {
+    id: String,
+    x: i32,
+    y: i32,
+    z: i32,
+    #[serde(rename = "Items")]
+    items: Vec<ItemFixture>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct ItemFixture {
+    #[serde(rename = "Slot")]
+    slot: i8,
+    id: i16,
+    #[serde(rename = "Count")]
+    count: i8,
+    #[serde(rename = "Damage")]
+    damage: i16,
+}
+
+#[test]
+fn frozen_chest_tileentity_nbt_roundtrip() {
+    let chest: ChestFixture = fastnbt::from_bytes(CHEST_NBT).unwrap();
+    assert_eq!(chest.id, "Chest");
+    assert_eq!((chest.x, chest.y, chest.z), (1, 64, 2));
+    assert_eq!(
+        chest.items,
+        vec![ItemFixture {
+            slot: 0,
+            id: 54,
+            count: 1,
+            damage: 0
+        }]
+    );
+    assert_eq!(fastnbt::to_bytes(&chest).unwrap(), CHEST_NBT);
+}
+
+struct Server {
+    process: Child,
+    directory: PathBuf,
+    port: u16,
+}
+
+impl Server {
+    fn start() -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "industrialrust1710-e41-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("whitelist.json"),
+            r#"[{"name":"Alpha"},{"name":"Beta"}]"#,
+        )
+        .unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let process = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
+            .args(["--bind", &format!("127.0.0.1:{port}")])
+            .arg("--whitelist")
+            .arg(directory.join("whitelist.json"))
+            .arg("--world")
+            .arg(directory.join("fixture.irw"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut server = Self {
+            process,
+            directory,
+            port,
+        };
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return server;
+            }
+            assert!(
+                server.process.try_wait().unwrap().is_none(),
+                "server exited"
+            );
+            assert!(Instant::now() < deadline, "server startup timeout");
+            thread::sleep(Duration::from_millis(40));
+        }
+    }
+
+    fn login(&self, name: &str) -> TcpStream {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        stream.write_all(&handshake(self.port, 2)).unwrap();
+        let mut user = Vec::new();
+        write_string(name, &mut user).unwrap();
+        stream.write_all(&packet(0, &user)).unwrap();
+        let (id, payload) = received(&mut stream);
+        assert_eq!(id, 2, "login rejection: {payload:?}");
+        let mut cursor = Cursor::new(&payload);
+        assert_eq!(cursor.read_string(36).unwrap().len(), 36);
+        assert_eq!(cursor.read_string(16).unwrap(), name);
+        cursor.finish().unwrap();
+        stream
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn check_chunk(data: &[u8]) {
+    assert!(data.len() > 17);
+    assert_eq!(data[8], 1, "must be full chunk");
+    let mask = u16::from_be_bytes([data[9], data[10]]);
+    assert_eq!(mask & 0x18, 0x18, "flat-world sections 3 and 4");
+    assert_eq!(&data[11..13], &[0, 0], "no Add bitmap");
+    let compressed = i32::from_be_bytes(data[13..17].try_into().unwrap());
+    assert!(compressed > 0);
+    assert_eq!(17 + compressed as usize, data.len());
+    let mut uncompressed = Vec::new();
+    ZlibDecoder::new(&data[17..])
+        .take(200_000)
+        .read_to_end(&mut uncompressed)
+        .unwrap();
+    assert_eq!(
+        uncompressed.len(),
+        mask.count_ones() as usize * 10_240 + 256
+    );
+}
+
+fn consume_initial(socket: &mut TcpStream, expected_entity_id: i32) {
+    let mut join = false;
+    let mut chunks = 0;
+    let mut window_items = false;
+    let mut position = false;
+    for _ in 0..110 {
+        let (id, body) = received(socket);
+        match id {
+            0x01 => {
+                let mut expected = expected_entity_id.to_be_bytes().to_vec();
+                expected.extend_from_slice(&[1, 0, 2, 8, 7]);
+                expected.extend_from_slice(b"default");
+                assert_eq!(body, expected, "Join Game Protocol 5 golden bytes");
+                join = true;
+            }
+            0x21 => {
+                check_chunk(&body);
+                chunks += 1;
+            }
+            0x30 => {
+                let mut expected = vec![0, 0, 45]; // Window 0, 45 signed-short slots.
+                for _ in 0..45 {
+                    expected.extend_from_slice(&(-1i16).to_be_bytes());
+                }
+                assert_eq!(body, expected, "empty 1.7.10 Window Items golden bytes");
+                window_items = true;
+            }
+            0x08 => {
+                assert_eq!(body.len(), 33, "Player Position + Look length");
+                position = true;
+                break;
+            }
+            0x00 if body.len() == 4 => socket.write_all(&packet(0, &body)).unwrap(),
+            _ => {}
+        }
+    }
+    assert!(
+        join && window_items && position,
+        "initial login packets missing"
+    );
+    assert_eq!(chunks, 25, "initial 5x5 chunk view");
+}
+
+#[test]
+fn live_protocol5_entity_chunk_inventory_and_window_golden() {
+    let server = Server::start();
+    let mut alpha = server.login("Alpha");
+    consume_initial(&mut alpha, 1);
+    let mut beta = server.login("Beta");
+    consume_initial(&mut beta, 2);
+
+    // The first client's bounded event queue must see the second user.
+    let mut saw_list = false;
+    let mut saw_entity = false;
+    for _ in 0..80 {
+        let (id, body) = received(&mut alpha);
+        match id {
+            0x38 if body == [4, b'B', b'e', b't', b'a', 1, 0, 0] => saw_list = true,
+            0x0c => {
+                // Golden Spawn Player 1.7.10: entity VarInt, UUID/name strings,
+                // empty properties, XYZ fixed *32, yaw/pitch, item and metadata.
+                let mut expected = vec![2, 36];
+                expected.extend_from_slice(b"1110dc55-a244-318c-9843-101d405cbf34");
+                expected.extend_from_slice(&[4, b'B', b'e', b't', b'a', 0]);
+                expected
+                    .extend_from_slice(&[0, 0, 0, 16, 0, 0, 8, 32, 0, 0, 0, 16, 0, 0, 0, 0, 0x7f]);
+                assert_eq!(body, expected, "Spawn Player Protocol 5 golden bytes");
+                saw_entity = true;
+            }
+            0x00 if body.len() == 4 => alpha.write_all(&packet(0, &body)).unwrap(),
+            _ => {}
+        }
+        if saw_list && saw_entity {
+            break;
+        }
+    }
+    assert!(
+        saw_list && saw_entity,
+        "second player not visible to first player"
+    );
+}
