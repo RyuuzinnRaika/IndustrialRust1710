@@ -523,10 +523,7 @@ mod tests {
             result(&make([265, 0, 265, 265, 54, 265, 0, 265, 0]), 3),
             product(154, 1, 0)
         );
-        assert_eq!(
-            result(&make([265, 0, 265, 265, 54, 265, 0, 0, 0]), 3),
-            None
-        );
+        assert_eq!(result(&make([265, 0, 265, 265, 54, 265, 0, 0, 0]), 3), None);
     }
 
     #[test]
@@ -544,10 +541,7 @@ mod tests {
             result(&make([0, 76, 0, 76, 406, 76, 1, 1, 1]), 3),
             product(404, 1, 0)
         );
-        assert_eq!(
-            result(&make([0, 76, 0, 76, 406, 76, 4, 4, 4]), 3),
-            None
-        );
+        assert_eq!(result(&make([0, 76, 0, 76, 406, 76, 4, 4, 4]), 3), None);
     }
 
     #[test]
