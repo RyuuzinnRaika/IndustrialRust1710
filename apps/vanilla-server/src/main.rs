@@ -9,6 +9,7 @@ mod crafting;
 mod furnaces;
 mod ground_items;
 mod inventory;
+mod journal;
 mod mobs;
 mod multiplayer;
 mod physics;
@@ -1240,25 +1241,22 @@ fn play(
                         accepted = true;
                         let inv_changed = candidate != *inventory;
                         let furnace_changed = next != previous;
-                        // Source-first, analogous to the chest transactions:
-                        // preserves at-most-once credit during crashes.
-                        if direction == ChestDirection::IntoChest {
-                            if inv_changed {
-                                candidate.save(inventory_path)?;
-                                *inventory = candidate;
-                            }
-                            if furnace_changed {
-                                machines.update(furnace_path, pos, next)?;
-                            }
-                        } else {
-                            if furnace_changed {
-                                machines.update(furnace_path, pos, next)?;
-                            }
-                            if inv_changed {
-                                candidate.save(inventory_path)?;
-                                *inventory = candidate;
-                            }
+                        if inv_changed && furnace_changed {
+                            let staged = machines.staged_update(pos, next)?;
+                            journal::commit(
+                                &furnace_path.with_extension("pending-txn.json"),
+                                &[(inventory_path, candidate.encoded()?),
+                                  (furnace_path, staged.encoded()?)],
+                            )?;
+                            *inventory = candidate;
+                            *machines = staged;
+                        } else if furnace_changed {
+                            machines.update(furnace_path, pos, next)?;
+                        } else if inv_changed {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
                         }
+                        let _ = direction;
                     }
                     last_furnace_view = machines.get(pos);
                     response_items =
@@ -1285,26 +1283,22 @@ fn play(
                         accepted = true;
                         let inventory_changed = candidate != *inventory;
                         let storage_changed = original != changed_slots;
-                        // The transfer source is persisted first, to avoid
-                        // item duplication at a crash boundary. Two files
-                        // are still not an atomic transaction: loss is possible.
-                        if direction == ChestDirection::IntoChest {
-                            if inventory_changed {
-                                candidate.save(inventory_path)?;
-                                *inventory = candidate;
-                            }
-                            if storage_changed {
-                                storage.update(chest_path, pos, changed_slots)?;
-                            }
-                        } else {
-                            if storage_changed {
-                                storage.update(chest_path, pos, changed_slots)?;
-                            }
-                            if inventory_changed {
-                                candidate.save(inventory_path)?;
-                                *inventory = candidate;
-                            }
+                        if inventory_changed && storage_changed {
+                            let staged = storage.staged_update(pos, changed_slots)?;
+                            journal::commit(
+                                &chest_path.with_extension("pending-txn.json"),
+                                &[(inventory_path, candidate.encoded()?),
+                                  (chest_path, staged.encoded()?)],
+                            )?;
+                            *inventory = candidate;
+                            *storage = staged;
+                        } else if storage_changed {
+                            storage.update(chest_path, pos, changed_slots)?;
+                        } else if inventory_changed {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
                         }
+                        let _ = direction;
                     }
                     observed_chest_revision = storage.revision();
                     response_items =
@@ -1772,6 +1766,10 @@ fn main() -> io::Result<()> {
         "Whitelist: {} permitted name(s) (NOT cryptographic identity authentication)",
         list.len()
     );
+    // Replay interrupted multi-file credits before loading any container or
+    // accepting connections. Corrupt/unrecoverable logs prevent startup.
+    journal::recover(&Chests::location(&world_path).with_extension("pending-txn.json"))?;
+    journal::recover(&Furnaces::location(&world_path).with_extension("pending-txn.json"))?;
     let (clock, _clock_thread) = Clock::start();
     let loaded_world = if world_path.exists() {
         let existing = World::load(&world_path)?;
