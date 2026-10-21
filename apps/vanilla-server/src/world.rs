@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 mod lighting;
 mod ecology;
+mod devices;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
@@ -35,6 +36,9 @@ pub struct World {
     pending_circuit: BTreeSet<Position>,
     pending_support: BTreeSet<Position>,
     pending_ecology: BTreeSet<Position>,
+    pending_devices: BTreeSet<Position>,
+    pending_repeaters: BTreeMap<Position, (u64, bool)>,
+    pending_buttons: BTreeMap<Position, u64>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
     fluid_phase: u64,
 }
@@ -68,6 +72,10 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 60 // farmland (via hoe)
             | 66 // rails
             | 70 | 72 // pressure plates
+            | 77 | 143 // buttons
+            | 29 | 33 // pistons
+            | 64 | 71 // doors
+            | 96 // trapdoors
             | 93 | 94 // repeater
             | 141 | 142 // carrot/potato
             | 50 // wall/ground torch: simplified attachment
@@ -287,8 +295,14 @@ impl World {
             } else {
                 self.pending_ecology.remove(&pos);
             }
-            if matches!(id, 6 | 50 | 55 | 59 | 66 | 70 | 72 | 75 | 76 | 93 | 94 | 141 | 142) {
+            if matches!(id, 6 | 50 | 55 | 59 | 66 | 70 | 72 | 75 | 76 | 77 | 93 | 94 | 141 | 142 | 143 | 64 | 71 | 96) {
                 self.pending_support.insert(pos);
+            }
+            if matches!(id, 29 | 33 | 93 | 94) {
+                self.pending_devices.insert(pos);
+            } else {
+                self.pending_devices.remove(&pos);
+                self.pending_repeaters.remove(&pos);
             }
         }
     }
@@ -318,6 +332,7 @@ impl World {
         let wired: Vec<Position> = self.pending_circuit.iter().take(budget).copied().collect();
         let supported: Vec<Position> = self.pending_support.iter().take(budget).copied().collect();
         let mut changes: BTreeMap<Position, u16> = self.ecology_changes(budget);
+        changes.extend(self.device_changes(budget));
 
         for &(x, y, z) in &wet {
             let y = i32::from(y);
@@ -629,8 +644,14 @@ impl World {
             if matches!(block >> 4, 6 | 18 | 59 | 60 | 141 | 142) {
                 world.pending_ecology.insert((x,y,z));
             }
-            if matches!(block >> 4, 6 | 50 | 55 | 59 | 66 | 70 | 72 | 75 | 76 | 93 | 94 | 141 | 142) {
+            if matches!(block >> 4, 6 | 50 | 55 | 59 | 66 | 70 | 72 | 75 | 76 | 77 | 93 | 94 | 141 | 142 | 143 | 64 | 71 | 96) {
                 world.pending_support.insert((x,y,z));
+            }
+            if matches!(block >> 4,29 | 33 | 93 | 94) {
+                world.pending_devices.insert((x,y,z));
+            }
+            if matches!(block >> 4, 70 | 72 | 77 | 143) && block & 8 != 0 {
+                world.pending_buttons.insert((x,y,z), 20);
             }
         }
         Ok(world)
