@@ -1429,8 +1429,10 @@ mod tests {
             count: 3,
             damage: 0,
         };
-        let mut inv = Inventory::default();
-        inv.cursor = Some(original);
+        let mut inv = Inventory {
+            cursor: Some(original),
+            ..Inventory::default()
+        };
         assert_eq!(inv.drop_cursor(9), None);
         assert_eq!(inv.cursor, Some(original));
         assert_eq!(
