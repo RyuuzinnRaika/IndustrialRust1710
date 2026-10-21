@@ -11,12 +11,14 @@ const TICK: Duration = Duration::from_millis(50);
 pub struct Clock {
     ticks: AtomicU64,
     running: AtomicBool,
+    time_offset: AtomicU64,
 }
 impl Clock {
     pub fn start() -> (Arc<Self>, JoinHandle<()>) {
         let clock = Arc::new(Self {
             ticks: AtomicU64::new(0),
             running: AtomicBool::new(true),
+            time_offset: AtomicU64::new(0),
         });
         let worker = Arc::clone(&clock);
         let handle = thread::spawn(move || {
@@ -42,7 +44,12 @@ impl Clock {
         self.ticks.load(Ordering::Acquire)
     }
     pub fn day_time(&self) -> i64 {
-        ((6000 + self.ticks() % 24000) % 24000) as i64
+        ((6000 + (self.ticks() + self.time_offset.load(Ordering::Acquire)) % 24000) % 24000) as i64
+    }
+    /// Move the shared daylight clock to morning after a completed sleep.
+    pub fn skip_to_morning(&self) {
+        let day = self.day_time() as u64;
+        self.time_offset.fetch_add((24000 - day) % 24000, Ordering::AcqRel);
     }
     #[cfg(test)]
     pub fn stop(&self) {
