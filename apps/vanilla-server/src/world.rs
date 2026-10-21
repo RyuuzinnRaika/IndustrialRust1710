@@ -654,7 +654,8 @@ impl World {
             if matches!(block >> 4,29 | 33 | 93 | 94) {
                 world.pending_devices.insert((x,y,z));
             }
-            if matches!(block >> 4, 70 | 72 | 77 | 143) && block & 8 != 0 {
+            if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
+                || (matches!(block >> 4, 77 | 143) && block & 8 != 0) {
                 world.pending_buttons.insert((x,y,z), 20);
             }
         }
