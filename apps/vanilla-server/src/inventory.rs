@@ -122,16 +122,7 @@ impl Default for Inventory {
 impl Inventory {
     /// Equipment slots are 5=helmet, 6=chest, 7=leggings, 8=boots in window zero.
     fn armor_compatible(slot: usize, stack: Stack) -> bool {
-        if stack.count != 1 {
-            return false;
-        }
-        match slot {
-            5 => matches!(stack.id, 298 | 302 | 306 | 310 | 314),
-            6 => matches!(stack.id, 299 | 303 | 307 | 311 | 315),
-            7 => matches!(stack.id, 300 | 304 | 308 | 312 | 316),
-            8 => matches!(stack.id, 301 | 305 | 309 | 313 | 317),
-            _ => false,
-        }
+        armor_accepts(slot as i16, stack)
     }
     pub fn armor_points(&self) -> u8 {
         self.slots[5..9]
@@ -1406,6 +1397,24 @@ mod tests {
             .map(|stack| u32::from(stack.count))
             .sum();
         assert_eq!(planks, 12);
+    }
+
+    #[test]
+    fn valid_headwear_is_accepted_on_save_and_in_gui() {
+        let mut inventory = super::Inventory::default();
+        inventory.slots[5] = Some(super::Stack {
+            id: 86,
+            count: 1,
+            damage: 0,
+        });
+        assert!(inventory.validate().is_ok());
+        assert_eq!(inventory.possessions().len(), 1);
+        inventory.slots[5] = Some(super::Stack {
+            id: 397,
+            count: 1,
+            damage: 0,
+        });
+        assert!(inventory.validate().is_ok());
     }
 
     #[test]
