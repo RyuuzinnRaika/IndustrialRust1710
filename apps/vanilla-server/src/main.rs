@@ -23,9 +23,9 @@ mod whitelist;
 mod world;
 
 use chests::{Chests, Position as ChestPosition};
-use environment::Ambient;
-use experience::{Experience,Orbs};
 use clock::Clock;
+use environment::Ambient;
+use experience::{Experience, Orbs};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
@@ -507,20 +507,23 @@ fn play(
             }
             last_pickup = Instant::now();
         }
-        if survival && vitals.health>0.0 && last_xp_pickup.elapsed()>=Duration::from_millis(150) {
-            let mut pending=orbs.lock().map_err(|_|bad("orb mutex poisoned"))?;
-            if let Some((id,points))=pending.nearby(*player,clock.ticks()) {
-                let mut next=experience.clone();
+        if survival && vitals.health > 0.0 && last_xp_pickup.elapsed() >= Duration::from_millis(150)
+        {
+            let mut pending = orbs.lock().map_err(|_| bad("orb mutex poisoned"))?;
+            if let Some((id, points)) = pending.nearby(*player, clock.ticks()) {
+                let mut next = experience.clone();
                 next.add(u32::from(points));
                 next.save(xp_path)?;
-                *experience=next;
-                if let Some(packets)=pending.collect(id,entity_id) {
-                    for packet in packets {hub.broadcast(packet);}
+                *experience = next;
+                if let Some(packets) = pending.collect(id, entity_id) {
+                    for packet in packets {
+                        hub.broadcast(packet);
+                    }
                 }
-                let packet=experience.packet();
-                send(s,packet.id,&packet.body)?;
+                let packet = experience.packet();
+                send(s, packet.id, &packet.body)?;
             }
-            last_xp_pickup=Instant::now();
+            last_xp_pickup = Instant::now();
         }
         if admission_check.elapsed() >= Duration::from_secs(2) {
             // Reload on a bounded interval: file removal, corruption or revocation
@@ -549,7 +552,9 @@ fn play(
             let explosions = creatures.take_explosions();
             let kills = creatures.take_drops();
             drop(creatures);
-            for update in updates {hub.broadcast(update);}
+            for update in updates {
+                hub.broadcast(update);
+            }
             for center in explosions {
                 let blocks = w.explode(world_path, center)?;
                 for (x, y, z) in blocks {
@@ -557,30 +562,49 @@ fn play(
                 }
                 // Protocol 5 explosion packet: XYZ/radius/zero duplicate records/velocity.
                 let mut body = Vec::new();
-                for n in [center.0 as f32 + 0.5,center.1 as f32 + 0.5,
-                          center.2 as f32 + 0.5,3.0] {
+                for n in [
+                    center.0 as f32 + 0.5,
+                    center.1 as f32 + 0.5,
+                    center.2 as f32 + 0.5,
+                    3.0,
+                ] {
                     body.extend_from_slice(&n.to_be_bytes());
                 }
                 body.extend_from_slice(&0_i32.to_be_bytes());
-                for _ in 0..3 {body.extend_from_slice(&0_f32.to_be_bytes());}
-                hub.broadcast(Event{id:0x27,body});
+                for _ in 0..3 {
+                    body.extend_from_slice(&0_f32.to_be_bytes());
+                }
+                hub.broadcast(Event { id: 0x27, body });
             }
             drop(w);
             for (stack, at, xp) in kills {
-                let mut ground = ground_items.lock().map_err(|_| bad("ground items mutex poisoned"))?;
+                let mut ground = ground_items
+                    .lock()
+                    .map_err(|_| bad("ground items mutex poisoned"))?;
                 if !ground.is_full() {
                     let dropped = ground.put(ground_path, stack, at)?;
-                    for packet in dropped.spawn() {hub.broadcast(packet);}
+                    for packet in dropped.spawn() {
+                        hub.broadcast(packet);
+                    }
                 }
                 drop(ground);
-                let pos = PlayerPosition{x:at.0 as f64 + 0.5,
-                    y:at.1 as f64 + 0.5,z:at.2 as f64 + 0.5};
-                if let Some(event) = orbs.lock().map_err(|_| bad("orb mutex poisoned"))?
-                    .spawn(pos,xp,now_tick) {hub.broadcast(event);}
+                let pos = PlayerPosition {
+                    x: at.0 as f64 + 0.5,
+                    y: at.1 as f64 + 0.5,
+                    z: at.2 as f64 + 0.5,
+                };
+                if let Some(event) = orbs
+                    .lock()
+                    .map_err(|_| bad("orb mutex poisoned"))?
+                    .spawn(pos, xp, now_tick)
+                {
+                    hub.broadcast(event);
+                }
             }
             if damage != 0 {
-                vitals.health = (vitals.health - vitals::armored_damage(
-                    f32::from(damage),inventory.armor_points())).max(0.0);
+                vitals.health = (vitals.health
+                    - vitals::armored_damage(f32::from(damage), inventory.armor_points()))
+                .max(0.0);
                 player.save_state(player_path, *vitals)?;
                 send(s, 0x06, &health_packet(*vitals))?;
             }
@@ -706,15 +730,17 @@ fn play(
                 let action = input.varint()?;
                 input.finish()?;
                 if survival && vitals.health > 0.0 && action == 0 {
-                    if let Some(held)=inventory.held() {
-                        let mut creatures=mobs.lock().map_err(|_|bad("mob mutex poisoned"))?;
-                        if let Some(events)=creatures.feed_animal(target_id,held.id,now_tick) {
-                            let mut candidate=inventory.clone();
+                    if let Some(held) = inventory.held() {
+                        let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                        if let Some(events) = creatures.feed_animal(target_id, held.id, now_tick) {
+                            let mut candidate = inventory.clone();
                             if candidate.consume_held() {
                                 candidate.save(inventory_path)?;
-                                *inventory=candidate;
-                                send(s,0x2f,&inventory.set_slot(inventory.held_slot())?)?;
-                                for event in events {hub.broadcast(event);}
+                                *inventory = candidate;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                for event in events {
+                                    hub.broadcast(event);
+                                }
                             }
                         }
                     }
@@ -731,7 +757,7 @@ fn play(
                             *inventory = next_inventory;
                             send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
                         }
-                        let kill_at=hit.drop.as_ref().map(|(_,at)|*at);
+                        let kill_at = hit.drop.as_ref().map(|(_, at)| *at);
                         if let Some((stack, at)) = hit.drop {
                             let mut ground = ground_items
                                 .lock()
@@ -743,11 +769,22 @@ fn play(
                                 }
                             }
                         }
-                        for event in hit.events {hub.broadcast(event);}
-                        if let Some(at)=kill_at {
-                            let pos=PlayerPosition{x:at.0 as f64+0.5,y:at.1 as f64+0.5,z:at.2 as f64+0.5};
-                            if let Some(packet)=orbs.lock().map_err(|_|bad("orb mutex poisoned"))?
-                                .spawn(pos,hit.xp,now_tick) {hub.broadcast(packet);}
+                        for event in hit.events {
+                            hub.broadcast(event);
+                        }
+                        if let Some(at) = kill_at {
+                            let pos = PlayerPosition {
+                                x: at.0 as f64 + 0.5,
+                                y: at.1 as f64 + 0.5,
+                                z: at.2 as f64 + 0.5,
+                            };
+                            if let Some(packet) = orbs
+                                .lock()
+                                .map_err(|_| bad("orb mutex poisoned"))?
+                                .spawn(pos, hit.xp, now_tick)
+                            {
+                                hub.broadcast(packet);
+                            }
                         }
                     }
                 }
@@ -876,16 +913,22 @@ fn play(
                 if survival {
                     if action == 5 {
                         eating = None; // Release Use Item.
-                        if let Some(start)=bow_drawing.take() {
-                            let mut candidate=inventory.clone();
-                            if let Some(arrow_slot)=candidate.use_bow() {
-                                let mut mob_state=mobs.lock().map_err(|_|bad("mob mutex poisoned"))?;
-                                if let Some(projectile)=mob_state.player_shoot(entity_id,*player,
-                                   yaw,pitch,now_tick.saturating_sub(start)) {
+                        if let Some(start) = bow_drawing.take() {
+                            let mut candidate = inventory.clone();
+                            if let Some(arrow_slot) = candidate.use_bow() {
+                                let mut mob_state =
+                                    mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                                if let Some(projectile) = mob_state.player_shoot(
+                                    entity_id,
+                                    *player,
+                                    yaw,
+                                    pitch,
+                                    now_tick.saturating_sub(start),
+                                ) {
                                     candidate.save(inventory_path)?;
-                                    *inventory=candidate;
-                                    send(s,0x2f,&inventory.set_slot(arrow_slot)?)?;
-                                    send(s,0x2f,&inventory.set_slot(inventory.held_slot())?)?;
+                                    *inventory = candidate;
+                                    send(s, 0x2f, &inventory.set_slot(arrow_slot)?)?;
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
                                     hub.broadcast(projectile);
                                 }
                             }
@@ -1000,8 +1043,11 @@ fn play(
                                                     changed = true;
                                                     // Ore XP is awarded only after a real
                                                     // committed Survival block removal.
-                                                    xp_reward=match block {
-                                                        16=>1,21|73|74=>3,56|129=>5,_=>0
+                                                    xp_reward = match block {
+                                                        16 => 1,
+                                                        21 | 73 | 74 => 3,
+                                                        56 | 129 => 5,
+                                                        _ => 0,
                                                     };
                                                 }
                                                 Ok(false) => {
@@ -1023,10 +1069,19 @@ fn play(
                             let event = block_change_event(&w, x, y, z);
                             if changed {
                                 hub.broadcast(event);
-                                if xp_reward>0 {
-                                    let at=PlayerPosition{x:x as f64+0.5,y:y as f64+0.5,z:z as f64+0.5};
-                                    if let Some(packet)=orbs.lock().map_err(|_|bad("orb mutex poisoned"))?
-                                        .spawn(at,xp_reward,now_tick) {hub.broadcast(packet);}
+                                if xp_reward > 0 {
+                                    let at = PlayerPosition {
+                                        x: x as f64 + 0.5,
+                                        y: y as f64 + 0.5,
+                                        z: z as f64 + 0.5,
+                                    };
+                                    if let Some(packet) = orbs
+                                        .lock()
+                                        .map_err(|_| bad("orb mutex poisoned"))?
+                                        .spawn(at, xp_reward, now_tick)
+                                    {
+                                        hub.broadcast(packet);
+                                    }
                                 }
                             } else {
                                 send(s, event.id, &event.body)?;
@@ -1081,10 +1136,10 @@ fn play(
                 // Only an authenticated, selected inventory stack can be used.
                 if survival && x == -1 && y == 255 && z == -1 && face == -1 {
                     if let Some(stack) = inventory.held() {
-                        if inventory.can_place(held) && stack.id==261 {
-                            bow_drawing=Some(now_tick);
+                        if inventory.can_place(held) && stack.id == 261 {
+                            bow_drawing = Some(now_tick);
                         } else if inventory.can_place(held) && vitals.can_eat(stack) {
-                            eating=Some((now_tick,stack));
+                            eating = Some((now_tick, stack));
                         }
                     }
                     continue;
@@ -1505,8 +1560,8 @@ fn play(
                         send(s, mob.id, &mob.body)?;
                     }
                     send(s, 0x06, &health_packet(*vitals))?;
-                    let xp_packet=experience.packet();
-                    send(s,xp_packet.id,&xp_packet.body)?;
+                    let xp_packet = experience.packet();
+                    send(s, xp_packet.id, &xp_packet.body)?;
                     send(s, 0x30, &inventory.window_items())?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     send_player_position(s, player)?;
