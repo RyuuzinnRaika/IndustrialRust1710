@@ -173,8 +173,8 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
     roll = roll.wrapping_mul(0x94d049bb133111eb);
     roll ^= roll >> 31;
     let (id, count) = match block >> 4 {
-        18 if roll % 200 == 0 => (260, 1), // apple
-        18 if roll % 20 == 0 => (6, 1),    // sapling
+        18 if roll.is_multiple_of(200) => (260, 1), // apple
+        18 if roll.is_multiple_of(20) => (6, 1),    // sapling
         59 if block & 7 == 7 => (295, 1 + (roll % 3) as u8),
         141 if block & 7 == 7 => (391, 1 + (roll % 3) as u8),
         142 if block & 7 == 7 => (392, 1 + (roll % 3) as u8),
