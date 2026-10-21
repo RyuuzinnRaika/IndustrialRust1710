@@ -368,7 +368,8 @@ impl World {
             .pending_fluid
             .iter()
             .filter(|&&(x, y, z)| {
-                !matches!(self.get(x, i32::from(y), z) >> 4,10 | 11) || self.fluid_phase.is_multiple_of(4)
+                !matches!(self.get(x, i32::from(y), z) >> 4, 10 | 11)
+                    || self.fluid_phase.is_multiple_of(4)
             })
             .take(budget)
             .copied()
@@ -532,13 +533,19 @@ impl World {
         if !changes.is_empty() {
             // Decaying oak leaves may yield a sapling or apple. Stage these
             // before mutation, but expose them only after a successful save.
-            let leaf_drops: Vec<WorldDrop> = changes.iter().filter_map(|(&(x,y,z),&next)| {
-                let old=self.get(x,i32::from(y),z);
-                if next != 0 || old >> 4 != 18 {return None;}
-                let pos=(x,i32::from(y),z);
-                crate::survival::additional_drop(old,pos,self.fluid_phase)
-                    .map(|stack| WorldDrop {pos,stack})
-            }).take(256).collect();
+            let leaf_drops: Vec<WorldDrop> = changes
+                .iter()
+                .filter_map(|(&(x, y, z), &next)| {
+                    let old = self.get(x, i32::from(y), z);
+                    if next != 0 || old >> 4 != 18 {
+                        return None;
+                    }
+                    let pos = (x, i32::from(y), z);
+                    crate::survival::additional_drop(old, pos, self.fluid_phase)
+                        .map(|stack| WorldDrop { pos, stack })
+                })
+                .take(256)
+                .collect();
             let undo: Vec<(Position, Option<u16>)> = changes
                 .keys()
                 .map(|&p| (p, self.edits.get(&p).copied()))
