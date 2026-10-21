@@ -409,22 +409,18 @@ impl Mobs {
     /// to receive damage independently, once each.
     pub fn queue_explosion_hits(
         &mut self,
+        world: &World,
         explosions: &[Explosion],
         participants: &[(i32, PlayerPosition)],
     ) {
         for explosion in explosions {
             for &(id, player) in participants {
-                let dx = explosion.position.x - player.x;
-                let dy = explosion.position.y - player.y;
-                let dz = explosion.position.z - player.z;
-                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                if dist >= explosion.radius * 2.0 {
-                    continue;
-                }
-                let fraction = 1.0 - dist / (explosion.radius * 2.0);
-                let raw = (fraction * fraction * 14.0 + 1.0).ceil() as u8;
+                let damage = mob_rules::blast_damage(world, explosion.position, player, explosion.radius);
+                if damage == 0 { continue; }
+                // A queue per entity, not a spatial queue, prevents the first
+                // of several co-located players from consuming all hits.
                 let entry = self.pending_blast_damage.entry(id).or_default();
-                *entry = entry.saturating_add(raw).min(20);
+                *entry = entry.saturating_add(damage).min(20);
             }
         }
     }
@@ -802,6 +798,29 @@ impl Mobs {
         if self.explosions.len() > 32 {
             self.explosions.truncate(32);
         }
+        // Apply the same attenuated, occlusion-aware blast to other mobs.
+        let mut blasted = Vec::new();
+        for explosion in &self.explosions {
+            for (&id, mob) in &self.entities {
+                let damage = mob_rules::blast_damage(world, explosion.position, mob.position, explosion.radius);
+                if damage > 0 { blasted.push((id, damage)); }
+            }
+        }
+        for (id, damage) in blasted {
+            if let Some(mob) = self.entities.get_mut(&id) {
+                mob.health -= i16::from(damage);
+                events.push(mob.status(if mob.health <= 0 {3} else {2}));
+                if mob.health <= 0 {
+                    if mob.kind != Kind::Villager {
+                        self.pending_drops.push((mob.kind.drop(), (
+                            mob.position.x.floor() as i32, mob.position.y.floor() as i32,
+                            mob.position.z.floor() as i32)));
+                    }
+                    self.entities.remove(&id);
+                    events.push(multiplayer::destroy(id));
+                }
+            }
+        }
         events
     }
     fn tick_arrows(
@@ -925,7 +944,7 @@ mod tests {
             position: nearby,
             radius: 3.0,
         }];
-        mobs.queue_explosion_hits(&explosions, &[(1, nearby), (2, nearby), (3, far)]);
+        mobs.queue_explosion_hits(&World::new(), &explosions, &[(1, nearby), (2, nearby), (3, far)]);
         let first = mobs.hurt_player(1, nearby, 10);
         let second = mobs.hurt_player(2, nearby, 10);
         assert!(first > 0);
