@@ -3,6 +3,7 @@
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
 mod anvil_export;
 mod anvil_import;
+mod brewing;
 mod chests;
 mod clock;
 mod crafting;
@@ -21,6 +22,7 @@ mod vitals;
 mod whitelist;
 mod world;
 
+use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use flate2::write::ZlibEncoder;
@@ -445,6 +447,8 @@ struct PlayerSession<'a> {
     furnace_path: &'a Path,
     hoppers: &'a Mutex<Hoppers>,
     hopper_path: &'a Path,
+    brewers: &'a Mutex<Brewers>,
+    brewer_path: &'a Path,
     survival: bool,
     hub: &'a Hub,
     entity_id: i32,
@@ -474,6 +478,8 @@ fn play(
         furnace_path,
         hoppers,
         hopper_path,
+        brewers,
+        brewer_path,
         survival,
         hub,
         entity_id,
@@ -503,6 +509,8 @@ fn play(
     let mut active_chest_partner: Option<ChestPosition> = None;
     let mut active_furnace: Option<FurnacePosition> = None;
     let mut active_hopper: Option<HopperPosition> = None;
+    let mut active_brewer: Option<BrewerPosition> = None;
+    let mut last_brewer_view = Brewer::default();
     let mut last_furnace_view = Furnace::default();
     let mut observed_chest_revision: u64 = 0;
     let mut observed_hopper_revision: u64 = 0;
@@ -525,6 +533,19 @@ fn play(
                 observed_chest_revision = guard.revision();
                 drop(guard);
                 send(s, 0x30, &data)?;
+            }
+        }
+        if let Some(pos) = active_brewer {
+            let guard=brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
+            let current=guard.get(pos);
+            if current != last_brewer_view {
+                let changed_slots=current.slots!=last_brewer_view.slots;
+                last_brewer_view=current;
+                drop(guard);
+                if changed_slots {
+                    send(s,0x30,&inventory.chest_window_items(active_window,&current.slots))?;
+                }
+                send(s,0x31,&current.property(active_window))?;
             }
         }
         if let Some(pos) = active_hopper {
@@ -1203,6 +1224,7 @@ fn play(
                     active_chest_partner = None;
                     active_furnace = Some(pos);
                     active_hopper = None;
+                    active_brewer = None;
                     let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
                     last_furnace_view = guard.get(pos);
                     drop(guard);
@@ -1246,6 +1268,7 @@ fn play(
                         .map(|w| chest_neighbor(&w, pos))?;
                     active_furnace = None;
                     active_hopper = None;
+                    active_brewer = None;
                     let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
                     let items = inventory.chest_window_items(
                         active_window,
@@ -1264,6 +1287,31 @@ fn play(
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &items)?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
+                if (0..=5).contains(&face) && world::in_bounds(x,y,z)
+                    && near(location,x,y,z)
+                    && world.lock().map_err(|_| bad("world mutex poisoned"))?.get(x,y,z) >> 4 == 117
+                {
+                    let pos=(x,y,z);
+                    active_window=next_window;
+                    next_window=if next_window>=100 {1} else {next_window+1};
+                    active_brewer=Some(pos);
+                    active_chest=None;
+                    active_chest_partner=None;
+                    active_furnace=None;
+                    active_hopper=None;
+                    let guard=brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
+                    last_brewer_view=guard.get(pos);
+                    drop(guard);
+                    let mut opened=vec![active_window];
+                    write_string("minecraft:brewing_stand",&mut opened)?;
+                    write_string(&json!({"text":"Brewing Stand"}).to_string(),&mut opened)?;
+                    opened.push(4);
+                    send(s,0x2d,&opened)?;
+                    send(s,0x30,&inventory.chest_window_items(active_window,&last_brewer_view.slots))?;
+                    send(s,0x31,&last_brewer_view.property(active_window))?;
+                    send(s,0x2f,&inventory.cursor_packet())?;
                     continue;
                 }
                 if (0..=5).contains(&face)
@@ -1286,6 +1334,7 @@ fn play(
                         next_window + 1
                     };
                     active_hopper = Some(pos);
+                    active_brewer = None;
                     active_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
@@ -1318,6 +1367,7 @@ fn play(
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
+                    active_brewer = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -1350,6 +1400,7 @@ fn play(
                             // dust ID331 -> wire55, water/lava buckets -> fluid8/10.
                             let block_id = match stack.id {
                                 331 => 55,
+                                379 => 117,
                                 326 => 8,
                                 327 => 10,
                                 _ => stack.id as u16,
@@ -1651,6 +1702,7 @@ fn play(
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
+                    active_brewer = None;
                     send(s, 0x30, &inventory.window_items())?;
                 }
             }
@@ -1789,6 +1841,8 @@ struct ServerContext {
     furnace_path: Arc<PathBuf>,
     hoppers: Arc<Mutex<Hoppers>>,
     hopper_path: Arc<PathBuf>,
+    brewers: Arc<Mutex<Brewers>>,
+    brewer_path: Arc<PathBuf>,
     survival: bool,
 }
 fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
@@ -1807,6 +1861,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         furnace_path,
         hoppers,
         hopper_path,
+        brewers,
+        brewer_path,
         survival,
     } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -1974,6 +2030,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             furnace_path: &furnace_path,
             hoppers: &hoppers,
             hopper_path: &hopper_path,
+            brewers: &brewers,
+            brewer_path: &brewer_path,
             survival,
             hub: &hub,
             entity_id,
@@ -2142,6 +2200,8 @@ fn main() -> io::Result<()> {
     let furnaces = Arc::new(Mutex::new(Furnaces::load(&furnace_path)?));
     let hopper_path = Arc::new(Hoppers::location(&world_path));
     let hoppers = Arc::new(Mutex::new(Hoppers::load(&hopper_path)?));
+    let brewer_path = Arc::new(Brewers::location(&world_path));
+    let brewers = Arc::new(Mutex::new(Brewers::load(&brewer_path)?));
     let listener = TcpListener::bind(bind)?;
     println!(
         "IndustrialRust1710: listening on {} (1.7.10 vanilla, up to 8 players)",
@@ -2322,6 +2382,8 @@ fn main() -> io::Result<()> {
         let machine_file = Arc::clone(&furnace_path);
         let hopper_storage = Arc::clone(&hoppers);
         let hopper_file = Arc::clone(&hopper_path);
+        let brewer_storage = Arc::clone(&brewers);
+        let brewer_file = Arc::clone(&brewer_path);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -2341,6 +2403,8 @@ fn main() -> io::Result<()> {
                     furnace_path: machine_file,
                     hoppers: hopper_storage,
                     hopper_path: hopper_file,
+                    brewers: brewer_storage,
+                    brewer_path: brewer_file,
                     survival,
                 },
             ) {
