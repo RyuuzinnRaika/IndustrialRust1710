@@ -1146,7 +1146,11 @@ fn native_survival_collision_damage_death_respawn_and_health_persistence() {
     // During a slow reconnect the 20TPS idle-gravity fallback may already
     // have started falling from the respawn Y=65 toward the safe floor Y=64.
     assert_eq!([position[0], position[2]], [0.5, 0.5]);
-    assert!((64.0..=65.0).contains(&position[1]), "respawn Y={}", position[1]);
+    assert!(
+        (64.0..=65.0).contains(&position[1]),
+        "respawn Y={}",
+        position[1]
+    );
     drop(final_session);
 }
 
@@ -1383,10 +1387,7 @@ fn native_protocol5_light_refresh_restreams_a_chunk_after_torch_placement() {
     // Relighting requires an actual Protocol 5 map-chunk payload rather than
     // a block-change packet alone. Decode the 1.7.10 Block Light nibble.
     until_packet(&mut client, 0x21, |body| {
-        if body.len() < 17
-            || body[0..4] != 0i32.to_be_bytes()
-            || body[4..8] != 0i32.to_be_bytes()
-        {
+        if body.len() < 17 || body[0..4] != 0i32.to_be_bytes() || body[4..8] != 0i32.to_be_bytes() {
             return false;
         }
         let mask = u16::from_be_bytes(body[9..11].try_into().unwrap());
