@@ -261,9 +261,8 @@ impl Mobs {
     /// Surface skylight proxy, with an actual unbroken vertical column.
     /// Does not replace vanilla propagated skylight through translucent blocks.
     fn sky_open(world: &World, x: i32, y: i32, z: i32) -> bool {
-        ((y + 1)..=255).all(|height| {
-            matches!(world.get(x, height, z) >> 4, 0 | 8 | 9 | 18 | 20 | 65 | 78)
-        })
+        ((y + 1)..=255)
+            .all(|height| matches!(world.get(x, height, z) >> 4, 0 | 8 | 9 | 18 | 20 | 65 | 78))
     }
     /// Bounded block-light proxy near common 1.7.10 light emitters.
     /// Conservative: reduces undesired spawning around torches, furnaces and lava.
@@ -272,7 +271,9 @@ impl Mobs {
             for dz in -7_i32..=7 {
                 for dy in -3_i32..=3 {
                     let distance = dx.abs() + dz.abs() + dy.abs();
-                    if distance >= 14 { continue; }
+                    if distance >= 14 {
+                        continue;
+                    }
                     let light = match world.get(x + dx, y + dy, z + dz) >> 4 {
                         50 | 76 | 62 => 14,
                         89 | 91 | 10 | 11 => 15,
@@ -280,7 +281,9 @@ impl Mobs {
                         74 => 9,
                         _ => 0,
                     };
-                    if light > distance + 7 { return true; }
+                    if light > distance + 7 {
+                        return true;
+                    }
                 }
             }
         }
@@ -327,7 +330,9 @@ impl Mobs {
             } else {
                 surface
             };
-            if y < 2 || y >= 254 { continue; }
+            if y < 2 || y >= 254 {
+                continue;
+            }
             let at = PlayerPosition {
                 x: x as f64 + 0.5,
                 y: y as f64,
@@ -349,7 +354,12 @@ impl Mobs {
             let daytime = (0..12000).contains(&(day_time.rem_euclid(24000)));
             let passive = attempt % 3 == 0;
             if passive {
-                if self.entities.values().filter(|m| !m.species.hostile()).count() >= MAX_PASSIVE
+                if self
+                    .entities
+                    .values()
+                    .filter(|m| !m.species.hostile())
+                    .count()
+                    >= MAX_PASSIVE
                     || y != surface
                     || world.get(x, y - 1, z) >> 4 != 2
                     || !open
@@ -755,7 +765,10 @@ impl Mobs {
             }
             let key = (mob.id, player_id);
             if mob.nearby(player, 1.6)
-                && self.melee_cooldowns.get(&key).is_none_or(|last| tick.saturating_sub(*last) >= 20)
+                && self
+                    .melee_cooldowns
+                    .get(&key)
+                    .is_none_or(|last| tick.saturating_sub(*last) >= 20)
             {
                 self.melee_cooldowns.insert(key, tick);
                 amount = amount.saturating_add(if mob.species == Species::Spider { 2 } else { 3 });
@@ -875,8 +888,13 @@ mod tests {
     fn each_player_gets_independent_hit_tracking() {
         let mut mobs = Mobs::default();
         let pos = PlayerPosition::default();
-        mobs.hits.push(PendingHit {center:pos, radius:3.0, damage:4,
-            expires:100, victims:Vec::new()});
+        mobs.hits.push(PendingHit {
+            center: pos,
+            radius: 3.0,
+            damage: 4,
+            expires: 100,
+            victims: Vec::new(),
+        });
         assert_eq!(mobs.damage_player(1, pos, 95), 4);
         assert_eq!(mobs.damage_player(2, pos, 95), 4);
         assert_eq!(mobs.damage_player(1, pos, 95), 0);
