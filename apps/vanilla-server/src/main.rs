@@ -1414,9 +1414,14 @@ fn play(
                                 let still_in_output = next.slots[2]
                                     .filter(|item| item.id == old.id && item.damage == old.damage)
                                     .map_or(0, |item| item.count);
-                                experience::smelting_reward(old.id, old.count.saturating_sub(still_in_output))
+                                experience::smelting_reward(
+                                    old.id,
+                                    old.count.saturating_sub(still_in_output),
+                                )
                             })
-                        } else { 0 };
+                        } else {
+                            0
+                        };
                         // Source-first, analogous to the chest transactions:
                         // preserves at-most-once credit during crashes.
                         if direction == ChestDirection::IntoChest {
