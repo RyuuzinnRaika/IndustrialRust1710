@@ -88,6 +88,8 @@ struct Mob {
     fuse: u8,
     breed_tick: u64,
     baby: bool,
+    age_ticks: u32,
+    waypoint: Option<PlayerPosition>,
 }
 impl Mob {
     fn spawn(self) -> Event {
@@ -140,10 +142,12 @@ impl Arrow {
         }
         body.extend_from_slice(&[0, 0]);
         body.extend_from_slice(&self.shooter.unwrap_or(0).to_be_bytes());
-        for speed in self.velocity {
-            body.extend_from_slice(
-                &((speed * 8000.0).clamp(-32768.0, 32767.0) as i16).to_be_bytes(),
-            );
+        if self.shooter.is_some() {
+            for speed in self.velocity {
+                body.extend_from_slice(
+                    &((speed*8000.0).clamp(-32768.0,32767.0) as i16).to_be_bytes()
+                );
+            }
         }
         Event { id: 0x0e, body }
     }
@@ -223,6 +227,8 @@ impl Mobs {
             fuse: 0,
             breed_tick: 0,
             baby,
+            age_ticks: 0,
+            waypoint: None,
         };
         let event = mob.spawn();
         self.entities.insert(id, mob);
@@ -370,7 +376,7 @@ impl Mobs {
         if !first.kind.passive()
             || first.baby
             || !first.kind.breeding_food(food)
-            || tick.saturating_sub(first.breed_tick) < 600
+            || (first.breed_tick != 0 && tick.saturating_sub(first.breed_tick) < 600)
         {
             return None;
         }
@@ -378,7 +384,7 @@ impl Mobs {
             m.id != id
                 && m.kind == first.kind
                 && !m.baby
-                && tick.saturating_sub(m.breed_tick) >= 600
+                && (m.breed_tick == 0 || tick.saturating_sub(m.breed_tick) >= 600)
                 && distance(m.position, first.position) < 7.0
         })?;
         self.entities.get_mut(&id)?.breed_tick = tick;
@@ -499,6 +505,17 @@ impl Mobs {
             let mut shots = Vec::new();
             let mut dead = Vec::new();
             for mob in self.entities.values_mut() {
+                if mob.baby {
+                    mob.age_ticks=mob.age_ticks.saturating_add(1);
+                    if mob.age_ticks>=24000 {
+                        mob.baby=false;
+                        let mut body=mob.id.to_be_bytes().to_vec();
+                        body.push((12<<3)|2);
+                        body.extend_from_slice(&0i32.to_be_bytes());
+                        body.push(0x7f);
+                        events.push(Event{id:0x1c,body});
+                    }
+                }
                 if !players.is_empty() && distance_to_players(mob.position, players) > 128.0 {
                     dead.push(mob.id);
                     continue;
@@ -553,12 +570,13 @@ impl Mobs {
                 if d < if mob.kind.passive() { 1.0 } else { 1.5 } {
                     continue;
                 }
-                let waypoint = if now.is_multiple_of(20) {
-                    navigation::next_step(world, mob.position, destination, 64)
-                        .unwrap_or(destination)
-                } else {
-                    destination
-                };
+                if now.is_multiple_of(20) || mob.waypoint.is_none() {
+                    mob.waypoint=navigation::next_step(world,mob.position,destination,64);
+                }
+                if mob.waypoint.is_some_and(|p|distance(p,mob.position)<0.25) {
+                    mob.waypoint=None;
+                }
+                let waypoint=mob.waypoint.unwrap_or(destination);
                 let dx = waypoint.x - mob.position.x;
                 let dz = waypoint.z - mob.position.z;
                 let len = dx.hypot(dz);
@@ -576,6 +594,19 @@ impl Mobs {
                 {
                     mob.position = candidate;
                     events.push(multiplayer::teleport(mob.id, &candidate, 0.0, 0.0));
+                } else if mob.kind==Kind::Spider {
+                    // Climb alongside a wall, never through it.
+                    let front=PlayerPosition{x:mob.position.x+dx/len*0.6,
+                        z:mob.position.z+dz/len*0.6,..mob.position};
+                    let wall=world.get(front.x.floor() as i32,front.y.floor() as i32,
+                        front.z.floor() as i32)>>4;
+                    if wall!=0 && !matches!(wall,8|9|10|11) {
+                        let climbed=PlayerPosition{y:mob.position.y+0.2,..mob.position};
+                        if climbed.is_valid() && !physics::collides(world,&climbed) {
+                            mob.position=climbed;
+                            events.push(multiplayer::teleport(mob.id,&climbed,0.0,0.0));
+                        }
+                    }
                 }
             }
             for id in dead {
@@ -744,6 +775,16 @@ mod tests {
             .id,
             367
         );
+    }
+    #[test]
+    fn passive_animals_breed_once_per_cooldown() {
+        let mut mobs=Mobs::default();
+        let at=PlayerPosition::default();
+        mobs.insert(Kind::Cow,at,false);
+        mobs.insert(Kind::Cow,PlayerPosition{x:at.x+1.0,..at},false);
+        assert!(mobs.feed(0,Some(Stack{id:296,count:1,damage:0}),100).is_some());
+        assert!(mobs.entities.values().any(|m|m.baby));
+        assert!(mobs.feed(1,Some(Stack{id:296,count:1,damage:0}),101).is_none());
     }
     #[test]
     fn flat_world_has_no_mobs_and_bow_shot_is_bounded() {
