@@ -124,6 +124,53 @@ impl Inventory {
     fn armor_compatible(slot: usize, stack: Stack) -> bool {
         armor_accepts(slot as i16, stack)
     }
+    /// Damage limits for Java 1.7.10 armor (helmet, chest, legs, boots).
+    /// Decorative pumpkins and skulls do not take armor wear.
+    fn armor_durability(id: i16) -> Option<i16> {
+        match id {
+            298 => Some(55),
+            299 => Some(80),
+            300 => Some(75),
+            301 => Some(65),
+            302 | 306 => Some(165),
+            303 | 307 => Some(240),
+            304 | 308 => Some(225),
+            305 | 309 => Some(195),
+            310 => Some(363),
+            311 => Some(528),
+            312 => Some(495),
+            313 => Some(429),
+            314 => Some(77),
+            315 => Some(112),
+            316 => Some(105),
+            317 => Some(91),
+            _ => None,
+        }
+    }
+
+    /// Wear all equipped armor on an armor-blockable attack. In 1.7.10
+    /// durability loss is max(1, floor(raw damage / 4)) per equipped piece.
+    /// Caller persists the staged inventory before acknowledging the hit.
+    pub fn wear_armor_on_hit(&mut self, incoming_damage: u8) -> bool {
+        if incoming_damage == 0 {
+            return false;
+        }
+        let wear = (i16::from(incoming_damage) / 4).max(1);
+        let mut changed = false;
+        for slot in &mut self.slots[5..9] {
+            let Some(mut piece) = *slot else {
+                continue;
+            };
+            let Some(max_uses) = Self::armor_durability(piece.id) else {
+                continue;
+            };
+            piece.damage = piece.damage.saturating_add(wear);
+            *slot = (piece.damage < max_uses).then_some(piece);
+            changed = true;
+        }
+        changed
+    }
+
     pub fn armor_points(&self) -> u8 {
         self.slots[5..9]
             .iter()
@@ -319,25 +366,24 @@ impl Inventory {
     /// Snapshot all droppable player possessions before clearing them.
     /// Does not include the virtual crafting result or empty armor slots.
     pub fn possessions(&self) -> Vec<Stack> {
-        self.slots[1..9]
+        // Protocol 5 window 0: slots 1..4 are the 2x2 crafting grid,
+        // 5..8 are armor, and 9..44 are the backpack and hotbar. Each
+        // occupied slot must be counted exactly once or death duplicates gear.
+        self.slots[1..45]
             .iter()
-            .chain(self.slots[5..45].iter())
             .chain(self.workbench.iter())
             .chain(std::slice::from_ref(&self.cursor))
             .flatten()
             .copied()
             .collect()
     }
-    /// Clear only possessions; used after ground-drop capacity is checked.
+    /// Clear precisely the same slots included by possessions(). This is
+    /// committed atomically with the ground-item snapshot by the caller.
     pub fn clear_possessions(&mut self) {
-        for slot in &mut self.slots[1..9] {
-            *slot = None;
-        }
-        for slot in &mut self.slots[5..45] {
-            *slot = None;
-        }
+        self.slots[1..45].fill(None);
         self.workbench.fill(None);
         self.cursor = None;
+        self.drag = Drag::default();
     }
 
     /// Commit one server-owned held item consumption (Survival only).
@@ -1419,6 +1465,115 @@ mod tests {
         inv.clear_possessions();
         assert_eq!(inv.armor_points(), 0);
         assert!(!inv.possessions().contains(&helm));
+    }
+
+    #[test]
+    fn stew_consumption_replaces_one_bowl_without_creating_extra_items() {
+        let mut inventory = Inventory::default();
+        let stew = Stack {
+            id: 282,
+            count: 1,
+            damage: 0,
+        };
+        let bowl = Stack {
+            id: 281,
+            count: 1,
+            damage: 0,
+        };
+        inventory.creative_set(36, Some(stew)).unwrap();
+        assert!(inventory.consume_held());
+        assert_eq!(inventory.held(), None);
+        assert!(inventory.receive_stack(bowl).is_some());
+        assert_eq!(inventory.held(), Some(bowl));
+        assert!(inventory.encoded().is_ok());
+        assert!(!inventory.consume_item(282));
+    }
+
+    #[test]
+    fn armor_uses_legacy_durability_and_breaks_on_combat_damage() {
+        let mut inv = Inventory::default();
+        let helmet = Stack {
+            id: 298,
+            count: 1,
+            damage: 54,
+        };
+        let chest = Stack {
+            id: 307,
+            count: 1,
+            damage: 100,
+        };
+        let pumpkin = Stack {
+            id: 86,
+            count: 1,
+            damage: 0,
+        };
+        inv.creative_set(5, Some(helmet)).unwrap();
+        inv.creative_set(6, Some(chest)).unwrap();
+        assert!(!inv.wear_armor_on_hit(0));
+        assert!(inv.wear_armor_on_hit(7));
+        assert_eq!(inv.slots[5], None); // leather helmet broke
+        assert_eq!(inv.slots[6].unwrap().damage, 101); // 7 / 4 => 1
+        assert!(inv.wear_armor_on_hit(12));
+        assert_eq!(inv.slots[6].unwrap().damage, 104); // 12 / 4 => 3
+        inv.creative_set(5, Some(pumpkin)).unwrap();
+        assert!(inv.wear_armor_on_hit(4));
+        assert_eq!(inv.slots[5], Some(pumpkin)); // decorative item is unaffected
+        assert!(inv.encoded().is_ok());
+    }
+
+    #[test]
+    fn death_drops_armor_and_crafting_slots_exactly_once() {
+        let mut inventory = Inventory::default();
+        let helmet = Stack {
+            id: 306,
+            count: 1,
+            damage: 12,
+        };
+        let chestplate = Stack {
+            id: 307,
+            count: 1,
+            damage: 7,
+        };
+        let boots = Stack {
+            id: 309,
+            count: 1,
+            damage: 3,
+        };
+        let logs = Stack {
+            id: 17,
+            count: 4,
+            damage: 2,
+        };
+        let diamonds = Stack {
+            id: 264,
+            count: 5,
+            damage: 0,
+        };
+        let sticks = Stack {
+            id: 280,
+            count: 2,
+            damage: 0,
+        };
+        inventory.creative_set(5, Some(helmet)).unwrap();
+        inventory.creative_set(6, Some(chestplate)).unwrap();
+        inventory.creative_set(8, Some(boots)).unwrap();
+        inventory.slots[1] = Some(logs);
+        inventory.slots[9] = Some(diamonds);
+        inventory.cursor = Some(sticks);
+        inventory.workbench[0] = Some(sticks);
+
+        let before = inventory.possessions();
+        assert_eq!(before.len(), 7);
+        assert_eq!(before.iter().filter(|&&s| s == helmet).count(), 1);
+        assert_eq!(before.iter().filter(|&&s| s == chestplate).count(), 1);
+        assert_eq!(before.iter().filter(|&&s| s == boots).count(), 1);
+        let total: u32 = before.iter().map(|s| u32::from(s.count)).sum();
+        assert_eq!(total, 16);
+
+        inventory.clear_possessions();
+        assert!(inventory.possessions().is_empty());
+        assert_eq!(inventory.armor_points(), 0);
+        assert!(inventory.encoded().is_ok());
     }
 
     #[test]

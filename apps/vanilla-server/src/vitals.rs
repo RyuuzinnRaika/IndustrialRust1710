@@ -40,6 +40,7 @@ impl Vitals {
     fn nutrition(stack: Stack) -> Option<(i32, f32)> {
         match (stack.id, stack.damage) {
             (260, _) => Some((4, 0.3)),     // apple
+            (282, _) => Some((6, 0.6)),     // mushroom stew (bowl returned by caller)
             (297, _) => Some((5, 0.6)),     // bread
             (319, _) => Some((3, 0.3)),     // raw pork
             (320, _) => Some((8, 0.8)),     // cooked pork
@@ -53,9 +54,12 @@ impl Vitals {
             (364, _) => Some((8, 0.8)),     // steak
             (365, _) => Some((2, 0.3)),     // raw chicken
             (366, _) => Some((6, 0.6)),     // cooked chicken
+            (367, _) => Some((4, 0.1)),     // rotten flesh (Hunger effect TODO)
+            (375, _) => Some((2, 0.8)),     // spider eye (Poison effect TODO)
             (391, _) => Some((3, 0.6)),     // carrot
             (392, _) => Some((1, 0.3)),     // potato
             (393, _) => Some((5, 0.6)),     // baked potato
+            (394, _) => Some((2, 0.3)),     // poisonous potato (Poison effect TODO)
             (400, _) => Some((8, 0.3)),     // pumpkin pie
             (396, _) => Some((6, 1.2)),     // golden carrot
             _ => None,
@@ -140,6 +144,31 @@ impl Vitals {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_stew_and_emergency_food_have_bounded_nutrition() {
+        for (id, food_gain, saturation_gain) in [
+            (282, 6, 7.2_f32),
+            (367, 4, 0.8),
+            (375, 2, 3.2),
+            (394, 2, 1.2),
+        ] {
+            let stack = Stack {
+                id,
+                count: 1,
+                damage: 0,
+            };
+            let mut vitals = Vitals {
+                food: 5,
+                saturation: 0.0,
+                ..Vitals::default()
+            };
+            assert!(vitals.can_eat(stack));
+            assert!(vitals.eat(stack));
+            assert_eq!(vitals.food, 5 + food_gain);
+            assert!((vitals.saturation - saturation_gain).abs() < 0.001);
+        }
+    }
+
     #[test]
     fn metadata_food_and_regeneration_exhaustion_are_server_accounted() {
         let mut v = Vitals {

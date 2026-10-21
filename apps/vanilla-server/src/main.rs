@@ -482,6 +482,17 @@ struct ActiveEffect {
     expires_at: u64,
     next_periodic: u64,
 }
+/// Legacy status effects tick faster at higher amplifiers. A Potion II must
+/// never heal or poison at the level-I interval.
+fn periodic_effect_interval(kind: u8, amplifier: u8) -> u64 {
+    let base = match kind {
+        10 => 50_u64, // regeneration
+        19 => 25_u64, // poison
+        _ => return u64::MAX,
+    };
+    (base.checked_shr(u32::from(amplifier)).unwrap_or(0)).max(1)
+}
+
 fn potion_effect_packet(entity: i32, kind: u8, amplifier: u8, duration: u16) -> Vec<u8> {
     let mut packet = entity.to_be_bytes().to_vec();
     packet.push(kind);
@@ -799,8 +810,21 @@ fn play(
                 }
             }
             if damage > 0.0 {
+                // Only armor-blockable Mob/explosion hits wear equipment. Do
+                // not charge armor for hunger, falling, or poison. Persist
+                // wear before advertising the hit to prevent an equipment
+                // rollback from minting durability on reconnect.
+                let mut worn = inventory.clone();
+                let armor_changed = worn.wear_armor_on_hit(hurt);
+                if armor_changed {
+                    worn.save(inventory_path)?;
+                    *inventory = worn;
+                }
                 vitals.health = (vitals.health - damage.ceil()).max(0.0);
                 player.save_state(player_path, *vitals)?;
+                if armor_changed {
+                    send(s, 0x30, &inventory.window_items())?;
+                }
                 send(s, 0x06, &health_packet(*vitals))?;
             }
         }
@@ -870,7 +894,7 @@ fn play(
         }
         // A food right-click starts a 32 tick use animation. The server owns
         // completion, selection, consumption, and the resulting food values.
-        if survival && now_tick > last_effect_tick {
+        if survival && vitals.health > 0.0 && now_tick > last_effect_tick {
             last_effect_tick = now_tick;
             let old_health = vitals.health;
             for effect in &mut active_effects {
@@ -882,7 +906,8 @@ fn play(
                     if effect.kind == 19 {
                         vitals.health = (vitals.health - amount).max(1.0);
                     }
-                    effect.next_periodic = now_tick + if effect.kind == 10 { 50 } else { 25 };
+                    effect.next_periodic = now_tick
+                        .saturating_add(periodic_effect_interval(effect.kind, effect.amplifier));
                 }
             }
             for effect in &active_effects {
@@ -930,7 +955,9 @@ fn play(
                                         kind,
                                         amplifier,
                                         expires_at: now_tick + u64::from(duration),
-                                        next_periodic: now_tick + if kind == 10 { 50 } else { 25 },
+                                        next_periodic: now_tick.saturating_add(
+                                            periodic_effect_interval(kind, amplifier),
+                                        ),
                                     });
                                 }
                                 player.save_state(player_path, *vitals)?;
@@ -948,13 +975,31 @@ fn play(
                         if remaining.consume_held() {
                             let mut after = *vitals;
                             if after.eat(stack) {
-                                // Debit inventory before player-NBT food credit.
-                                remaining.save(inventory_path)?;
-                                player.save_state(player_path, after)?;
-                                *inventory = remaining;
-                                *vitals = after;
-                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                                send(s, 0x06, &health_packet(*vitals))?;
+                                // Mushroom stew is a nonstackable bowl meal in
+                                // Java 1.7.10. Reserve the returned bowl in the
+                                // same staged inventory BEFORE persisting the
+                                // debit, otherwise a full bag could erase it.
+                                let container_returned = stack.id != 282
+                                    || remaining
+                                        .receive_stack(Stack {
+                                            id: 281,
+                                            count: 1,
+                                            damage: 0,
+                                        })
+                                        .is_some();
+                                if container_returned {
+                                    // Debit inventory before player-NBT food credit.
+                                    remaining.save(inventory_path)?;
+                                    player.save_state(player_path, after)?;
+                                    *inventory = remaining;
+                                    *vitals = after;
+                                    if stack.id == 282 {
+                                        send(s, 0x30, &inventory.window_items())?;
+                                    } else {
+                                        send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                    }
+                                    send(s, 0x06, &health_packet(*vitals))?;
+                                }
                             }
                         }
                     }
@@ -2348,6 +2393,11 @@ fn play(
                     idle_gravity = IdleGravity::new(now_tick);
                     eating = None;
                     bow_start = None;
+                    // Death clears every temporary potion effect; stale
+                    // regeneration must never resurrect a dead player before
+                    // the server has committed death drops and respawn.
+                    active_effects.clear();
+                    last_effect_tick = now_tick;
                     hazards = Hazards::new();
                     last_hazards_tick = now_tick;
                     // In vanilla, death loses XP and may leave up to 100 XP in orbs.
@@ -3348,6 +3398,23 @@ fn main() -> io::Result<()> {
     }
     Ok(())
 }
+#[cfg(test)]
+mod effect_interval_tests {
+    use super::periodic_effect_interval;
+
+    #[test]
+    fn amplification_speeds_up_legacy_regeneration_and_poison() {
+        assert_eq!(periodic_effect_interval(10, 0), 50);
+        assert_eq!(periodic_effect_interval(10, 1), 25);
+        assert_eq!(periodic_effect_interval(10, 2), 12);
+        assert_eq!(periodic_effect_interval(19, 0), 25);
+        assert_eq!(periodic_effect_interval(19, 1), 12);
+        assert_eq!(periodic_effect_interval(19, 2), 6);
+        assert_eq!(periodic_effect_interval(19, u8::MAX), 1);
+        assert_eq!(periodic_effect_interval(1, 0), u64::MAX);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
