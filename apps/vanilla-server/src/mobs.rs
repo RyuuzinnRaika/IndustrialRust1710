@@ -307,7 +307,7 @@ impl Mobs {
         player: PlayerPosition,
         collector: i32,
     ) -> Option<(u32, Vec<Event>)> {
-        let (&id, &(_, amount)) = self.orbs.iter().find(|(_, (at, _, _))| {
+        let (&id, &(_, amount, _)) = self.orbs.iter().find(|(_, (at, _, _))| {
             let d =
                 (at.x - player.x).powi(2) + (at.y - player.y).powi(2) + (at.z - player.z).powi(2);
             d <= 2.25
