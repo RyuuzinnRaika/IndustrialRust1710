@@ -106,8 +106,8 @@ impl Experience {
         let mut body = Vec::new();
         let fraction = progress as f32 / to_next(level) as f32;
         body.extend_from_slice(&fraction.to_be_bytes());
-        body.extend_from_slice(&(level.min(i16::MAX as u16) as i16).to_be_bytes());
-        body.extend_from_slice(&(self.total.min(i16::MAX as u32) as i16).to_be_bytes());
+        write_varint(u32::from(level), &mut body);
+        write_varint(self.total, &mut body);
         Event { id: 0x1f, body }
     }
 }
@@ -238,7 +238,12 @@ mod tests {
         state.add(17);
         assert_eq!(state.level(), 1);
         assert_eq!(state.packet().id, 0x1f);
-        assert_eq!(state.packet().body.len(), 8);
+        let packet = state.packet();
+        let mut cursor = &packet.body[4..];
+        use legacy_protocol::read_varint;
+        assert_eq!(read_varint(&mut cursor).unwrap(), 1);
+        assert_eq!(read_varint(&mut cursor).unwrap(), 17);
+        assert!(cursor.is_empty());
         state.add(1000);
         assert!(state.level() > 16);
     }
