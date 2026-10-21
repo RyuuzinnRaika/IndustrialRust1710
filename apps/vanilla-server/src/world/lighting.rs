@@ -36,8 +36,7 @@ impl World {
         let mut direct = vec![0u8; 18 * 18 * 256];
         let mut passable = vec![false; 16 * 256 * 16];
         let direct_index = |x: i32, y: i32, z: i32| -> usize {
-            ((y as usize * 18 + (z - min_z + 1) as usize) * 18)
-                + (x - min_x + 1) as usize
+            ((y as usize * 18 + (z - min_z + 1) as usize) * 18) + (x - min_x + 1) as usize
         };
         for z in min_z - 1..min_z + 17 {
             for x in min_x - 1..min_x + 17 {
