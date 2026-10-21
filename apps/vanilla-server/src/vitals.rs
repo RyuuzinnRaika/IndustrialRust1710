@@ -142,16 +142,40 @@ impl Vitals {
 mod tests {
     #[test]
     fn metadata_food_and_regeneration_exhaustion_are_server_accounted() {
-        let mut v = Vitals { food: 10, saturation: 0.0, ..Vitals::default() };
-        assert!(v.eat(Stack { id: 396, count: 1, damage: 0 }));
+        let mut v = Vitals {
+            food: 10,
+            saturation: 0.0,
+            ..Vitals::default()
+        };
+        assert!(v.eat(Stack {
+            id: 396,
+            count: 1,
+            damage: 0
+        }));
         assert_eq!(v.food, 16);
         assert!((v.saturation - 14.4).abs() < 0.001);
-        let mut salmon = Vitals { food: 10, saturation: 0.0, ..Vitals::default() };
-        assert!(salmon.eat(Stack { id: 350, count: 1, damage: 1 }));
+        let mut salmon = Vitals {
+            food: 10,
+            saturation: 0.0,
+            ..Vitals::default()
+        };
+        assert!(salmon.eat(Stack {
+            id: 350,
+            count: 1,
+            damage: 1
+        }));
         assert_eq!(salmon.food, 16);
         assert!((salmon.saturation - 9.6).abs() < 0.001);
-        let mut regen = Vitals { food: 20, saturation: 0.0, health: 18.0, exhaustion: 2.0, ..Vitals::default() };
-        for _ in 0..4 { regen.tick(20); }
+        let mut regen = Vitals {
+            food: 20,
+            saturation: 0.0,
+            health: 18.0,
+            exhaustion: 2.0,
+            ..Vitals::default()
+        };
+        for _ in 0..4 {
+            regen.tick(20);
+        }
         assert_eq!(regen.health, 19.0);
         assert_eq!(regen.food, 19);
         assert!((regen.exhaustion - 1.0).abs() < 0.001);
