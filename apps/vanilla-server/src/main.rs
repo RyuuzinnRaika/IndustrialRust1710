@@ -231,6 +231,9 @@ fn join(
     time.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
     time.extend_from_slice(&clock.day_time().to_be_bytes());
     send(s, 0x03, &time)?;
+    for weather in clock.weather_packets() {
+        send(s, 0x2b, &weather)?;
+    }
 
     for (cx, cz) in view_chunks(chunk_center(position)) {
         send_chunk(s, world, cx, cz)?;
@@ -1873,11 +1876,19 @@ fn main() -> io::Result<()> {
     let furnace_hub = Arc::clone(&hub);
     thread::spawn(move || {
         let mut last = furnace_clock.ticks();
+        let mut last_weather = furnace_clock.weather();
         loop {
             let now = furnace_clock.ticks();
             if now > last {
                 let steps = (now - last).min(20) as u32;
                 last = now;
+                let weather = furnace_clock.weather();
+                if weather != last_weather {
+                    for body in furnace_clock.weather_packets() {
+                        furnace_hub.broadcast(Event { id: 0x2b, body });
+                    }
+                    last_weather = weather;
+                }
                 let lighting = {
                     let mut storage = match furnace_worker.lock() {
                         Ok(v) => v,
