@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -47,7 +47,7 @@ impl Harness {
         server
     }
 
-    fn spawn(dir: &PathBuf, port: u16) -> Child {
+    fn spawn(dir: &Path, port: u16) -> Child {
         Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
             .args(["--bind", &format!("127.0.0.1:{port}")])
             .arg("--whitelist")
