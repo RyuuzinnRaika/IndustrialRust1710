@@ -90,8 +90,15 @@ impl BufferedFrameReader {
         if let Some(frame) = self.take_complete()? {
             return Ok(Some(frame));
         }
+        // A valid max-size frame can be immediately followed by another
+        // frame in the TCP stream. Bound each socket read to the remaining
+        // capacity rather than over-reading and rejecting both packets.
+        let capacity = (MAX_FRAME_BYTES + 5).saturating_sub(self.received.len());
+        if capacity == 0 {
+            return Err(invalid("receive buffer exceeds frame cap"));
+        }
         let mut buf = [0u8; 8192];
-        let count = match reader.read(&mut buf) {
+        let count = match reader.read(&mut buf[..capacity.min(8192)]) {
             Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
             Ok(count) => count,
             Err(error)
@@ -273,5 +280,26 @@ mod tests {
         assert_eq!(c.read_string(255).unwrap(), "localhost");
         assert_eq!(c.read_u16().unwrap(), 25565);
         c.finish().unwrap();
+    }
+
+
+    #[test]
+    fn max_size_frame_followed_by_small_frame_does_not_false_overflow() {
+        let first = vec![0x5a; MAX_FRAME_BYTES];
+        let mut stream = Vec::new();
+        write_frame(&mut stream, &first).unwrap();
+        write_frame(&mut stream, &[0x01, 0x02]).unwrap();
+        let mut stream = stream.as_slice();
+        let mut reader = BufferedFrameReader::new();
+
+        let received = loop {
+            if let Some(packet) = reader.poll(&mut stream).unwrap() {
+                break packet;
+            }
+        };
+        assert_eq!(received, first);
+        let second = reader.poll(&mut stream).unwrap().unwrap();
+        assert_eq!(second, [0x01, 0x02]);
+        assert!(reader.poll(&mut stream).is_err()); // Clean EOF.
     }
 }
