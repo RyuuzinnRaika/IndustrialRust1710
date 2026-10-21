@@ -485,8 +485,7 @@ impl World {
                         next = next.min((other & 15) + 1);
                     }
                 }
-                let solid_below =
-                    y > 0 && !matches!(self.get(x, y - 1, z) >> 4, 0 | 8..=11);
+                let solid_below = y > 0 && !matches!(self.get(x, y - 1, z) >> 4, 0 | 8..=11);
                 if id == 8 && source_neighbors >= 2 && solid_below {
                     next = 0;
                 }
