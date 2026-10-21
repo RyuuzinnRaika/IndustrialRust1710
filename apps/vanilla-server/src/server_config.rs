@@ -150,17 +150,17 @@ impl ServerProperties {
             "1" | "creative" => false,
             _ => return Err(invalid("unsupported gamemode in server.properties")),
         };
-        let difficulty = values.get("difficulty").map(String::as_str)
-            .unwrap_or("1").parse::<u8>()
+        let difficulty = values
+            .get("difficulty")
+            .map(String::as_str)
+            .unwrap_or("1")
+            .parse::<u8>()
             .map_err(|_| invalid("difficulty must be in 0..=3"))?;
         if difficulty > 3 {
             return Err(invalid("difficulty must be in 0..=3"));
         }
         // These settings remain fixed until their runtime subsystems can honour them.
-        for (name, only) in [
-            ("view-distance", "2"),
-            ("max-players", "8"),
-        ] {
+        for (name, only) in [("view-distance", "2"), ("max-players", "8")] {
             if values.get(name).is_some_and(|value| value != only) {
                 return Err(invalid(
                     "server.properties requests an unsupported view-distance/difficulty/max-players",
@@ -243,7 +243,10 @@ gamemode=1
         assert_eq!(p.difficulty, 1);
         for difficulty in 0..=3 {
             let text = SAFE.replace("difficulty=1", &format!("difficulty={difficulty}"));
-            assert_eq!(ServerProperties::parse(&text).unwrap().difficulty, difficulty);
+            assert_eq!(
+                ServerProperties::parse(&text).unwrap().difficulty,
+                difficulty
+            );
         }
     }
 
