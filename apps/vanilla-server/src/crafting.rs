@@ -145,6 +145,114 @@ pub fn result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
             }
         }
     }
+    additional_result(grid, width)
+}
+
+/// Additional vanilla 1.7.10 recipes, matched against a trimmed 2x2/3x3 grid.
+/// -1 means any plank metadata, -2 any wool color and -3 any coal metadata.
+fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
+    let occupied: Vec<_> = grid.iter().enumerate().filter(|(_, v)| v.is_some())
+        .map(|(n, _)| (n % width, n / width)).collect();
+    let left = occupied.iter().map(|p| p.0).min()?;
+    let top = occupied.iter().map(|p| p.1).min()?;
+    let w = occupied.iter().map(|p| p.0).max()? - left + 1;
+    let h = occupied.iter().map(|p| p.1).max()? - top + 1;
+    let at = |x: usize, y: usize| grid[(top + y) * width + left + x];
+    let matches = |rows: &[&[i16]]| -> bool {
+        if rows.len() != h || rows.iter().any(|row| row.len() != w) { return false; }
+        rows.iter().enumerate().all(|(y, row)| row.iter().enumerate().all(|(x, id)| {
+            match (id, at(x, y)) {
+                (0, None) => true,
+                (&-1, Some(stack)) => stack.id == 5,
+                (&-2, Some(stack)) => stack.id == 35,
+                (&-3, Some(stack)) => stack.id == 263,
+                (id, Some(stack)) => *id == stack.id,
+                _ => false,
+            }
+        }))
+    };
+    let shapeless = |ingredients: &[i16]| -> bool {
+        if ingredients.len() != occupied.len() { return false; }
+        let mut remaining = ingredients.to_vec();
+        for item in grid.iter().flatten() {
+            let Some(index) = remaining.iter().position(|id| match id {
+                -1 => item.id == 5, -2 => item.id == 35, -3 => item.id == 263,
+                id => *id == item.id,
+            }) else { return false };
+            remaining.remove(index);
+        }
+        remaining.is_empty()
+    };
+    if w == 1 && h == 1 {
+        let single = at(0, 0)?;
+        for (block, ingredient, count) in [
+            (41, 266, 9), (42, 265, 9), (57, 264, 9), (22, 351, 9),
+            (133, 388, 9), (173, 263, 9), (170, 296, 9),
+        ] {
+            if single.id == block { return product(ingredient, count, 0); }
+        }
+        if single.id == 338 { return product(353, 1, 0); } // sugar cane to sugar
+    }
+    if shapeless(&[318, 265]) { return product(259, 1, 0); } // flint and steel
+    if matches(&[&[338,338,338]]) { return product(339, 3, 0); } // paper
+    if matches(&[&[339,339,339], &[0, 297,0], &[0,0,0]]) {
+        return product(340, 1, 0);
+    }
+    if matches(&[&[280,318,288]]) { return product(262, 4, 0); }
+    if matches(&[&[265,265,0], &[265,265,0]]) { return product(101, 16, 0); }
+    if matches(&[&[20,20,20], &[20,20,20]]) { return product(102, 16, 0); }
+    if matches(&[&[-1,-1,-1]]) { return product(126, 6, 0); }
+    if matches(&[&[4,4,4]]) { return product(44, 6, 3); }
+    if matches(&[&[1,1,1]]) { return product(44, 6, 0); }
+    if matches(&[&[45,45,45]]) { return product(44, 6, 4); }
+    if matches(&[&[155,155,155]]) { return product(44, 6, 7); }
+    if matches(&[&[-1,-1,-1], &[-1,-1,-1]]) { return product(96, 2, 0); }
+    if matches(&[&[265,265], &[265,265], &[265,265]]) { return product(330, 3, 0); }
+    if matches(&[&[-1,-1], &[-1,-1], &[-1,-1]]) { return product(324, 3, 0); }
+    if matches(&[&[-1,-1,-1], &[280,280,280], &[280,280,280]]) { return product(323, 3, 0); }
+    if matches(&[&[280,0,280], &[280,280,280], &[280,0,280]]) { return product(65, 3, 0); }
+    if matches(&[&[280,-1,280], &[280,-1,280]]) { return product(85, 2, 0); }
+    if matches(&[&[-1,0,-1], &[-1,-1,-1]]) { return product(333, 1, 0); }
+    if matches(&[&[-2,-2,-2], &[-1,-1,-1]]) { return product(355, 1, 0); }
+    if matches(&[&[0,265,0], &[265,0,265]]) { return product(325, 1, 0); }
+    if matches(&[&[265,0,265], &[265,265,265]]) { return product(328, 1, 0); }
+    if matches(&[&[265,0], &[0,265]]) { return product(359, 1, 0); }
+    if matches(&[&[331,331], &[331,331]]) { return product(152, 1, 0); }
+    if matches(&[&[263,263], &[263,263]]) { return product(173, 1, 0); }
+    if matches(&[&[296,296,296], &[296,296,296], &[296,296,296]]) { return product(170, 1, 0); }
+    for (item, block) in [(265,42), (266,41), (264,57), (388,133)] {
+        if matches(&[&[item,item,item], &[item,item,item], &[item,item,item]]) {
+            return product(block, 1, 0);
+        }
+    }
+    for (material, helmet, chestplate, leggings, boots) in [
+        (334,298,299,300,301), (265,306,307,308,309),
+        (264,310,311,312,313), (266,314,315,316,317),
+    ] {
+        if matches(&[&[material,material,material], &[material,0,material]]) {
+            return product(helmet, 1, 0);
+        }
+        if matches(&[&[material,0,material], &[material,material,material], &[material,material,material]]) {
+            return product(chestplate, 1, 0);
+        }
+        if matches(&[&[material,material,material], &[material,0,material], &[material,0,material]]) {
+            return product(leggings, 1, 0);
+        }
+        if matches(&[&[material,0,material], &[material,0,material]]) {
+            return product(boots, 1, 0);
+        }
+    }
+    if matches(&[&[280,287,0], &[280,0,287], &[280,287,0]]) {
+        return product(261, 1, 0);
+    }
+    if matches(&[&[265,331,265], &[265,280,265], &[265,331,265]]) {
+        return product(27, 6, 0);
+    }
+    if matches(&[&[265,0,265], &[265,280,265], &[265,0,265]]) {
+        return product(66, 16, 0);
+    }
+    if matches(&[&[76,331,76], &[1,1,1]]) { return product(356, 1, 0); }
+    if matches(&[&[4,4], &[4,4]]) { return product(98, 4, 0); }
     None
 }
 
