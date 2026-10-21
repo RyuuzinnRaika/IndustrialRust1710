@@ -63,7 +63,44 @@ fn shapes(id: u16, meta: u16) -> Vec<Shape> {
             }
             vec![slab, step]
         }
-        85 | 107 | 113 | 139 => vec![Shape { y1: 1.5, ..FULL }],
+        85 | 113 | 139 => vec![Shape { y1: 1.5, ..FULL }],
+        107 => {
+            if meta & 4 != 0 {
+                Vec::new() // An opened fence gate has no collision volume.
+            } else if meta & 1 == 0 {
+                vec![Shape { z0: 0.375, z1: 0.625, y1: 1.5, ..FULL }]
+            } else {
+                vec![Shape { x0: 0.375, x1: 0.625, y1: 1.5, ..FULL }]
+            }
+        }
+        96 => {
+            if meta & 4 == 0 {
+                if meta & 8 != 0 {
+                    vec![Shape { y0: 0.8125, ..FULL }]
+                } else {
+                    vec![Shape { y1: 0.1875, ..FULL }]
+                }
+            } else {
+                let thin = match meta & 3 {
+                    0 => Shape { z0: 0.8125, ..FULL },
+                    1 => Shape { z1: 0.1875, ..FULL },
+                    2 => Shape { x0: 0.8125, ..FULL },
+                    _ => Shape { x1: 0.1875, ..FULL },
+                };
+                vec![thin]
+            }
+        }
+        64 | 71 => {
+            // For both halves use the lower door metadata (see shapes_at).
+            let orientation = (meta + if meta & 4 != 0 { 1 } else { 0 }) & 3;
+            let thin = match orientation {
+                0 => Shape { z1: 0.1875, ..FULL },
+                1 => Shape { x0: 0.8125, ..FULL },
+                2 => Shape { z0: 0.8125, ..FULL },
+                _ => Shape { x1: 0.1875, ..FULL },
+            };
+            vec![thin]
+        },
         60 => vec![Shape { y1: 0.9375, ..FULL }],
         43 | 125 | 181 => vec![FULL],
         _ => {
@@ -147,6 +184,19 @@ fn shapes(id: u16, meta: u16) -> Vec<Shape> {
         }
     }
 }
+fn shapes_at(world: &World, x: i32, y: i32, z: i32) -> Vec<Shape> {
+    let state = world.get(x, y, z);
+    let id = state >> 4;
+    let mut metadata = state & 15;
+    if matches!(id, 64 | 71) && metadata & 8 != 0 {
+        let bottom = world.get(x, y - 1, z);
+        if bottom >> 4 != id {
+            return Vec::new();
+        }
+        metadata = bottom & 7;
+    }
+    shapes(id, metadata)
+}
 fn overlap(a0: f64, a1: f64, b0: f64, b1: f64) -> bool {
     a0 < b1 - EPS && a1 > b0 + EPS
 }
@@ -193,7 +243,7 @@ pub fn collides(world: &World, position: &PlayerPosition) -> bool {
         (min_z..=max_z).any(|z| {
             (min_y..=max_y).any(|y| {
                 let state = world.get(x, y, z);
-                shapes(state >> 4, state & 15)
+                shapes_at(world, x, y, z)
                     .into_iter()
                     .any(|shape| contact(world, position, x, y, z, shape))
             })
@@ -208,7 +258,7 @@ fn support_top(world: &World, position: &PlayerPosition) -> Option<f64> {
         for z in min_z..=max_z {
             for y in (target.floor() as i32 - 2)..=(target.floor() as i32) {
                 let state = world.get(x, y, z);
-                for shape in shapes(state >> 4, state & 15) {
+                for shape in shapes_at(world, x, y, z) {
                     let top = y as f64 + shape.y1;
                     if top <= target + GROUND_TOLERANCE
                         && top >= target - GROUND_TOLERANCE
@@ -316,7 +366,7 @@ fn resolve_descent(world: &World, position: &PlayerPosition, wanted_y: f64) -> f
         for z in min_z..=max_z {
             for y in (wanted.floor() as i32 - 2).max(0)..=(position.y.floor() as i32).min(255) {
                 let state = world.get(x, y, z);
-                for shape in shapes(state >> 4, state & 15) {
+                for shape in shapes_at(world, x, y, z) {
                     let top = y as f64 + shape.y1;
                     if top >= best - EPS
                         && top <= position.y + EPS
