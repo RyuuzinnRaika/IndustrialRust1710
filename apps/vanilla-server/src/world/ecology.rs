@@ -164,7 +164,7 @@ impl World {
                 changes.insert((x, y, z), 0);
             }
         }
-        if self.fluid_phase % 20 != 0 || self.pending_ecology.is_empty() {
+        if !self.fluid_phase.is_multiple_of(20) || self.pending_ecology.is_empty() {
             return changes;
         }
         let len = self.pending_ecology.len();
