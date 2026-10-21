@@ -2778,7 +2778,6 @@ fn main() -> io::Result<()> {
     // Accept older independent log locations for one-time migration.
     journal::recover(&Chests::location(&world_path).with_extension("pending-txn.json"))?;
     journal::recover(&Furnaces::location(&world_path).with_extension("pending-txn.json"))?;
-    let (clock, _clock_thread) = Clock::start();
     let loaded_world = if world_path.exists() {
         let existing = World::load(&world_path)?;
         if let Some(seed) = requested_seed {
@@ -2802,8 +2801,15 @@ fn main() -> io::Result<()> {
         initial.save_new(&world_path)?;
         initial
     } else {
-        World::new()
+        // Even a new flat world needs a durable identity so that its clock
+        // snapshot belongs to a real, versioned IRW1 world after restart.
+        let initial = World::new();
+        initial.save_new(&world_path)?;
+        initial
     };
+    let clock_path = Arc::new(world_path.with_extension("clock"));
+    let restored_ticks = Clock::load_ticks(&clock_path)?;
+    let (clock, _clock_thread) = Clock::start_at(restored_ticks);
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -2839,6 +2845,7 @@ fn main() -> io::Result<()> {
     let furnace_worker = Arc::clone(&furnaces);
     let furnace_file = Arc::clone(&furnace_path);
     let furnace_clock = Arc::clone(&clock);
+    let clock_snapshot_path = Arc::clone(&clock_path);
     let furnace_world = Arc::clone(&world);
     let furnace_world_path = Arc::clone(&path);
     let furnace_hub = Arc::clone(&hub);
@@ -2846,12 +2853,21 @@ fn main() -> io::Result<()> {
     let leaf_drops_file = Arc::clone(&ground_path);
     thread::spawn(move || {
         let mut last = furnace_clock.ticks();
+        let mut last_clock_snapshot = last;
         let mut last_weather = furnace_clock.weather();
         loop {
             let now = furnace_clock.ticks();
             if now > last {
                 let steps = (now - last).min(20) as u32;
                 last = now;
+                // One small durable write per second, with no replay of
+                // elapsed wall-clock downtime after an unexpected stop.
+                if now.saturating_sub(last_clock_snapshot) >= 20 {
+                    match furnace_clock.save_ticks(&clock_snapshot_path) {
+                        Ok(()) => last_clock_snapshot = now,
+                        Err(error) => eprintln!("CLOCK SNAPSHOT ERROR: {error}"),
+                    }
+                }
                 let weather = furnace_clock.weather();
                 if weather != last_weather {
                     for body in furnace_clock.weather_packets() {
