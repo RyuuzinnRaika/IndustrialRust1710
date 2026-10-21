@@ -92,6 +92,104 @@ pub fn result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     {
         return product(61, 1, 0); // furnace
     }
+    // 1.7.10 shaped utility/transport recipes; border-trimmed just like tools.
+    if w == 3 && h == 1 {
+        if (0..3).all(|x| same_material(at(x, 0), 338)) {
+            return product(339, 3, 0); // paper
+        }
+        if (0..3).all(|x| plank(at(x, 0))) {
+            return product(126, 6, at(0, 0)?.damage & 7); // wooden slabs
+        }
+        if (0..3).all(|x| same_material(at(x, 0), 1)) {
+            return product(44, 6, 0); // stone slabs
+        }
+    }
+    if w == 1 && h == 1 && same_material(at(0, 0), 338) {
+        return product(353, 1, 0); // sugar cane -> sugar
+    }
+    if w == 2 && h == 2 {
+        if same_material(at(0, 0), 265)
+            && at(1, 0).is_none()
+            && at(0, 1).is_none()
+            && same_material(at(1, 1), 265)
+            || at(0, 0).is_none()
+                && same_material(at(1, 0), 265)
+                && same_material(at(0, 1), 265)
+                && at(1, 1).is_none()
+        {
+            return product(359, 1, 0); // shears (either diagonal)
+        }
+    }
+    if w == 3 && h == 2 {
+        if (0..3).all(|x| same_material(at(x, 0), 35))
+            && (0..3).all(|x| plank(at(x, 1)))
+        {
+            return product(355, 1, 0); // bed
+        }
+        if (0..2).all(|y| (0..3).all(|x| plank(at(x, y)))) {
+            return product(324, 1, 0); // wooden door in 1.7.10
+        }
+        if (0..2).all(|y| (0..3).all(|x| stick(at(x, y)))) {
+            return product(85, 2, 0); // old fence recipe
+        }
+        if (0..2).all(|y| (0..3).all(|x| same_material(at(x, y), 20))) {
+            return product(102, 16, 0); // glass panes
+        }
+        if (0..2).all(|y| (0..3).all(|x| same_material(at(x, y), 265))) {
+            return product(101, 16, 0); // iron bars
+        }
+    }
+    if w == 3 && h == 3 {
+        if at(1, 0).is_none()
+            && plank(at(0, 0)) && plank(at(2, 0))
+            && plank(at(0, 1)) && plank(at(2, 1))
+            && at(1, 1).is_none()
+            && (0..3).all(|x| plank(at(x, 2))) {
+            return product(333, 1, 0); // boat
+        }
+        if (0..3).all(|y| (0..3).all(|x| {
+            if x == 0 || x == 2 {
+                stick(at(x, y))
+            } else if y == 0 || y == 2 {
+                at(x, y).is_none()
+            } else {
+                stick(at(x, y))
+            }
+        })) {
+            return product(65, 3, 0); // ladders
+        }
+        if (0..3).all(|y| (0..3).all(|x| {
+            if x == 0 || x == 2 {
+                same_material(at(x, y), 265)
+            } else if y == 1 {
+                stick(at(x, y))
+            } else {
+                at(x, y).is_none()
+            }
+        })) {
+            return product(66, 16, 0); // rails
+        }
+        if (0..3).all(|y| (0..3).all(|x| {
+            if x == 0 || x == 2 {
+                same_material(at(x, y), 266)
+            } else if y == 1 {
+                stick(at(x, y))
+            } else if y == 2 {
+                same_material(at(x, y), 331)
+            } else {
+                at(x, y).is_none()
+            }
+        })) {
+            return product(27, 6, 0); // powered rails
+        }
+    }
+    if w == 3 && h == 2 && same_material(at(0, 0), 265)
+        && at(1, 0).is_none() && same_material(at(2, 0), 265)
+        && at(0, 1).is_none() && same_material(at(1, 1), 265)
+        && at(2, 1).is_none()
+    {
+        return product(325, 1, 0); // bucket
+    }
     if width == 3 {
         for (material, pickaxe, axe, shovel, sword, hoe) in [
             (5, 270, 271, 269, 268, 290),
@@ -153,6 +251,30 @@ mod tests {
     use super::*;
     fn item(id: i16) -> Option<Stack> {
         product(id, 1, 0)
+    }
+    #[test]
+    fn utility_recipes_and_invalid_shapes() {
+        let shaped = |items: &[i16], width: usize| {
+            let grid: Vec<_> = items.iter().map(|&id| if id == 0 { None } else { item(id) }).collect();
+            result(&grid, width)
+        };
+        assert_eq!(shaped(&[35,35,35,5,5,5,0,0,0],3), product(355,1,0));
+        assert_eq!(shaped(&[265,0,265,0,265,0,0,0,0],3), product(325,1,0));
+        assert_eq!(shaped(&[338,338,338,0,0,0,0,0,0],3), product(339,3,0));
+        assert_eq!(shaped(&[338,0,0,0],2), product(353,1,0));
+        assert_eq!(shaped(&[265,0,0,265],2), product(359,1,0));
+        assert_eq!(shaped(&[0,265,265,0],2), product(359,1,0));
+        assert_eq!(shaped(&[5,0,5,5,0,5,5,5,5],3), product(333,1,0));
+        assert_eq!(shaped(&[280,0,280,280,280,280,280,0,280],3), product(65,3,0));
+        assert_eq!(shaped(&[265,0,265,265,280,265,265,0,265],3), product(66,16,0));
+        assert_eq!(shaped(&[266,0,266,266,280,266,266,331,266],3), product(27,6,0));
+        assert_eq!(shaped(&[5,5,5,5,5,5,0,0,0],3), product(324,1,0));
+        assert_eq!(shaped(&[280,280,280,280,280,280,0,0,0],3), product(85,2,0));
+        assert_eq!(shaped(&[20,20,20,20,20,20,0,0,0],3), product(102,16,0));
+        assert_eq!(shaped(&[265,265,265,265,265,265,0,0,0],3), product(101,16,0));
+        assert_eq!(shaped(&[5,5,5,0,0,0,0,0,0],3), product(126,6,0));
+        assert_eq!(shaped(&[1,1,1,0,0,0,0,0,0],3), product(44,6,0));
+        assert_eq!(shaped(&[35,35,35,5,5,4,0,0,0],3), None);
     }
     #[test]
     fn early_game_recipes_are_bounded_and_shape_checked() {
