@@ -277,12 +277,14 @@ mod tests {
     #[test]
     fn weights_mspt_by_actual_sample_count_and_guards_bad_telemetry() {
         let mut summary = Summary::default();
-        let sample = |players, mean, count, p95, p99| json!({
-            "schema_version":1,"target_tps":20,
-            "window_seconds":10.0,"processed_ticks":200,"missed_ticks":0,
-            "players":players,"mspt_p95":p95,"mspt_p99":p99,
-            "mspt_mean":mean,"mspt_samples":count
-        });
+        let sample = |players, mean, count, p95, p99| {
+            json!({
+                "schema_version":1,"target_tps":20,
+                "window_seconds":10.0,"processed_ticks":200,"missed_ticks":0,
+                "players":players,"mspt_p95":p95,"mspt_p99":p99,
+                "mspt_mean":mean,"mspt_samples":count
+            })
+        };
         summary.add(&sample(1, 5.0, 10, 10.0, 12.0)).unwrap();
         summary.add(&sample(2, 15.0, 30, 17.0, 20.0)).unwrap();
         assert_eq!(summary.mspt_samples, 40);
