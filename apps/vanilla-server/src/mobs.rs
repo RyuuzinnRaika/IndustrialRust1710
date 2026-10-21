@@ -468,6 +468,28 @@ impl Mobs {
         }
         Some(result)
     }
+    /// Animal interaction result; caller must persist its inventory changes and
+    /// any ground drops before publishing the entity metadata packet.
+    pub fn animal_interact(&mut self, id: i32, at: PlayerPosition, held: Option<Stack>)
+        -> Option<(Option<Event>, Option<(Stack,(i32,i32,i32))>, bool)>
+    {
+        let mob = self.entities.get_mut(&id)?;
+        if !mob.nearby(at,3.0) || mob.baby { return None; }
+        let stack = held?;
+        match (mob.kind, stack.id) {
+            (Kind::Cow, 325) if stack.count == 1 => Some((None,None,true)),
+            (Kind::Sheep, 359) if !mob.sheared => {
+                mob.sheared = true;
+                let mut body = mob.id.to_be_bytes().to_vec();
+                body.extend_from_slice(&[16 << 3,16,0x7f]);
+                let pos = (mob.position.x.floor() as i32,
+                    mob.position.y.floor() as i32,mob.position.z.floor() as i32);
+                Some((Some(Event{id:0x1c,body}),
+                    Some((Stack{id:35,count:1,damage:0},pos)),false))
+            }
+            _ => None,
+        }
+    }
     /// Animal breeding consumes feed only if a nearby same-kind partner exists.
     pub fn feed(
         &mut self,
@@ -610,6 +632,12 @@ impl Mobs {
             let mut dead = Vec::new();
             for mob in self.entities.values_mut() {
                 // Passive lifecycle is simulated only on the server.
+                if mob.kind == Kind::Sheep && mob.sheared && now.is_multiple_of(6000) {
+                    mob.sheared = false;
+                    let mut body = mob.id.to_be_bytes().to_vec();
+                    body.extend_from_slice(&[16 << 3,0,0x7f]);
+                    events.push(Event {id:0x1c,body});
+                }
                 if mob.kind == Kind::Chicken && !mob.baby {
                     if mob.egg_timer > 0 { mob.egg_timer -= 1; }
                     if mob.egg_timer == 0 {
