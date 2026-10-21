@@ -98,7 +98,11 @@ pub(crate) fn parse_chunk(nbt: &[u8], cx: i32, cz: i32) -> io::Result<ChunkRoot>
         return Err(invalid("legacy chunk has too many sections"));
     }
     if parsed.level.biomes.as_ref().is_some_and(|a| a.len() != 256)
-        || parsed.level.height_map.as_ref().is_some_and(|a| a.len() != 256)
+        || parsed
+            .level
+            .height_map
+            .as_ref()
+            .is_some_and(|a| a.len() != 256)
     {
         return Err(invalid("invalid legacy chunk biomes or heightmap"));
     }
