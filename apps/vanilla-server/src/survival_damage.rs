@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn drowned_player_loses_air_before_health() {
         let mut world=World::new();
-        world.import_block(0,65,0,9<<4).unwrap();
+        world.import_block(0,66,0,9<<4).unwrap();
         let mut hazard=Hazards::new();
         let mut damage=0.0;
         for t in 1..=320 {
