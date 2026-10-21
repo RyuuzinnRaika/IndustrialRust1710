@@ -566,6 +566,9 @@ fn play(
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
     loop {
+        if !hub.is_healthy(entity_id) {
+            return Err(io::Error::other("outbound packet overflow or session removed"));
+        }
         while let Ok(event) = events.try_recv() {
             if event.id == CHUNK_RELIGHT_EVENT {
                 if event.body.len() == 8 {
@@ -2584,8 +2587,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     for other in &previous {
         let list = multiplayer::list_entry(&other.name, true)?;
         send(&mut s, list.id, &list.body)?;
-        let spawn = multiplayer::spawn(other)?;
-        send(&mut s, spawn.id, &spawn.body)?;
+        if multiplayer::visible(&player_state, &other.position) {
+            let spawn = multiplayer::spawn(other)?;
+            send(&mut s, spawn.id, &spawn.body)?;
+        }
     }
     // Send existing persisted items to newly joining clients. They are
     // independent of the player's chunk updates in this bounded prototype.
