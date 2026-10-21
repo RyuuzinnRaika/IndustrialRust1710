@@ -1629,6 +1629,96 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
 mod tests {
     use super::*;
     #[test]
+    fn mob_snapshot_roundtrips_ids_health_ages_and_world_identity() {
+        let world = World::natural(98765);
+        let path = std::env::temp_dir().join(format!("industrialrust-mobs-{}-persist.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        let at = PlayerPosition { x: 4.5, y: 65.0, z: 4.5 };
+        let event = mobs.insert(Kind::Villager, at, false);
+        let id = mobs.next_id - 1;
+        assert_eq!(event.id, 0x0f);
+        if let Some(mob) = mobs.entities.get_mut(&id) {
+            mob.health = 13;
+            mob.age_ticks = 74;
+            mob.profession = 3;
+        }
+        mobs.insert_sized(Kind::Slime, at, false, 4);
+        mobs.save(&world).unwrap();
+        let loaded = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        assert_eq!(loaded.entities.get(&id).unwrap().health, 13);
+        assert_eq!(loaded.entities.get(&id).unwrap().age_ticks, 74);
+        assert_eq!(loaded.entities.get(&id).unwrap().profession, 3);
+        assert!(loaded.next_id > id);
+        assert_eq!(loaded.spawn_events().filter(|event| event.id == 0x0f).count(), loaded.entities.len());
+        assert!(Mobs::load_or_new(&World::natural(11), true, 2, &path).is_err());
+        std::fs::write(&path, b"{garbled").unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mob_cap_uses_unique_17_by_17_chunks_not_player_count() {
+        let a = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        let b = PlayerPosition { x: 16.5, ..a };
+        assert_eq!(natural_mob_cap(&[a], 70), 70);
+        assert_eq!(natural_mob_cap(&[a, a], 70), 70);
+        assert!(natural_mob_cap(&[a,b], 70) > 70);
+        assert_eq!(natural_mob_cap(&[], 70), 0);
+    }
+
+    #[test]
+    fn villager_emits_authoritative_profession_offer() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        mobs.insert(Kind::Villager, at, false);
+        mobs.entities.get_mut(&0).unwrap().profession = 0;
+        let emerald = Some(Stack { id: 388, count: 1, damage: 0 });
+        assert_eq!(mobs.village_offer(0, at, emerald).unwrap().id, 297);
+        assert!(mobs.village_offer(0, at, Some(Stack { id: 1, count: 1, damage: 0 })).is_none());
+        assert!(mobs.village_offer(0, PlayerPosition { x: 50.0, ..at }, emerald).is_none());
+    }
+
+    #[test]
+    fn special_mobs_launch_bounded_distinct_projectile_objects() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        for kind in [Kind::Witch, Kind::Blaze, Kind::Ghast, Kind::Wither] {
+            mobs.insert(kind, at, false);
+        }
+        let target = PlayerPosition { x: 6.5, ..at };
+        let packets = mobs.tick(80, &World::new(), &[target]);
+        for kind in [
+            ProjectileKind::WitchPotion, ProjectileKind::BlazeFireball,
+            ProjectileKind::GhastFireball, ProjectileKind::WitherSkull,
+        ] {
+            assert!(mobs.arrows.values().any(|a| a.kind == kind));
+            assert!(packets.iter().any(|packet| packet.id == 0x0e && packet.body.contains(&kind.protocol())));
+        }
+    }
+
+    #[test]
+    fn end_dragon_boss_reappears_neither_after_death_nor_after_reload() {
+        let world = World::expanded(42, crate::dimensions::Dimension::End);
+        let path = std::env::temp_dir().join(format!("industrialrust-mobs-{}-dragon.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        let target = PlayerPosition { x: 0.5, y: 95.0, z: 0.5 };
+        mobs.tick(1, &world, &[target]);
+        let (id,pos) = mobs.entities.values().find(|m| m.kind == Kind::EnderDragon)
+            .map(|mob| (mob.id, mob.position)).unwrap();
+        mobs.entities.get_mut(&id).unwrap().health = 1;
+        let defeated = mobs.player_attack(id, pos, None, 100).unwrap();
+        assert_eq!(defeated.experience, 12_000);
+        assert!(mobs.dragon_defeated);
+        mobs.save(&world).unwrap();
+        let mut restored = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        restored.tick(101, &world, &[target]);
+        assert!(!restored.entities.values().any(|mob| mob.kind == Kind::EnderDragon));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn special_mob_ids_health_and_metadata_are_protocol5() {
         assert_eq!(Kind::Enderman.protocol(), 58);
         assert_eq!(Kind::Slime.protocol(), 55);
