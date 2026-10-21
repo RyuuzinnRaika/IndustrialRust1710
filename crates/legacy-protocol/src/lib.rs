@@ -282,7 +282,6 @@ mod tests {
         c.finish().unwrap();
     }
 
-
     #[test]
     fn max_size_frame_followed_by_small_frame_does_not_false_overflow() {
         let first = vec![0x5a; MAX_FRAME_BYTES];
