@@ -1409,6 +1409,14 @@ fn play(
                         accepted = true;
                         let inv_changed = candidate != *inventory;
                         let furnace_changed = next != previous;
+                        let smelt_xp = if direction == ChestDirection::OutOfChest {
+                            previous.slots[2].map_or(0, |old| {
+                                let still_in_output = next.slots[2]
+                                    .filter(|item| item.id == old.id && item.damage == old.damage)
+                                    .map_or(0, |item| item.count);
+                                experience::smelting_reward(old.id, old.count.saturating_sub(still_in_output))
+                            })
+                        } else { 0 };
                         // Source-first, analogous to the chest transactions:
                         // preserves at-most-once credit during crashes.
                         if direction == ChestDirection::IntoChest {
@@ -1427,6 +1435,14 @@ fn play(
                                 candidate.save(inventory_path)?;
                                 *inventory = candidate;
                             }
+                        }
+                        if smelt_xp > 0 {
+                            let mut credited = experience.clone();
+                            credited.add(u32::from(smelt_xp));
+                            credited.save(xp_path)?;
+                            *experience = credited;
+                            let packet = experience.packet();
+                            send(s, packet.id, &packet.body)?;
                         }
                     }
                     last_furnace_view = machines.get(pos);
