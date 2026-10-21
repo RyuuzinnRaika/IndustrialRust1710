@@ -207,7 +207,7 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
             (170, 296, 9),
         ] {
             if single.id == block {
-                return product(ingredient, count, 0);
+                return product(ingredient, count, if block == 22 { 4 } else { 0 });
             }
         }
         if single.id == 338 {
@@ -233,7 +233,10 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
         return product(102, 16, 0);
     }
     if matches(&[&[-1, -1, -1]]) {
-        return product(126, 6, 0);
+        let variant = at(0, 0)?.damage;
+        if (0..3).all(|x| at(x, 0).is_some_and(|item| item.damage == variant)) {
+            return product(126, 6, variant & 7);
+        }
     }
     if matches(&[&[4, 4, 4]]) {
         return product(44, 6, 3);
@@ -254,10 +257,10 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
         return product(72, 1, 0);
     }
     if matches(&[&[265, 265], &[265, 265], &[265, 265]]) {
-        return product(330, 3, 0);
+        return product(330, 1, 0);
     }
     if matches(&[&[-1, -1], &[-1, -1], &[-1, -1]]) {
-        return product(324, 3, 0);
+        return product(324, 1, 0);
     }
     if matches(&[&[-1, -1, -1], &[-1, -1, -1], &[0, 280, 0]]) {
         return product(323, 3, 0);
@@ -265,7 +268,8 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[280, 0, 280], &[280, 280, 280], &[280, 0, 280]]) {
         return product(65, 3, 0);
     }
-    if matches(&[&[280, -1, 280], &[280, -1, 280]]) {
+    // Before Java 1.8, wooden fences consume six sticks (not planks).
+    if matches(&[&[280, 280, 280], &[280, 280, 280]]) {
         return product(85, 2, 0);
     }
     if matches(&[&[-1, 0, -1], &[-1, -1, -1]]) {
@@ -281,14 +285,29 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[0, 265], &[265, 0]]) {
         return product(359, 1, 0);
     }
-    if matches(&[&[331, 331], &[331, 331]]) {
+    // Storage blocks must debit all nine source items.
+    if matches(&[
+        &[331, 331, 331],
+        &[331, 331, 331],
+        &[331, 331, 331],
+    ]) {
         return product(152, 1, 0);
+    }
+    if matches(&[
+        &[351, 351, 351],
+        &[351, 351, 351],
+        &[351, 351, 351],
+    ]) && grid.iter().flatten().all(|item| item.damage == 4)
+    {
+        return product(22, 1, 0);
     }
 
     if matches(&[&[296, 296, 296], &[296, 296, 296], &[296, 296, 296]]) {
         return product(170, 1, 0);
     }
-    if matches(&[&[263, 263, 263], &[263, 263, 263], &[263, 263, 263]]) {
+    if matches(&[&[263, 263, 263], &[263, 263, 263], &[263, 263, 263]])
+        && grid.iter().flatten().all(|item| item.damage == 0)
+    {
         return product(173, 1, 0);
     }
     for (item, block) in [(265, 42), (266, 41), (264, 57), (388, 133)] {
@@ -330,7 +349,8 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[0, 280, 287], &[280, 0, 287], &[0, 280, 287]]) {
         return product(261, 1, 0);
     }
-    if matches(&[&[265, 331, 265], &[265, 280, 265], &[265, 331, 265]]) {
+    // Six gold ingots, one stick and one redstone dust: powered rails.
+    if matches(&[&[266, 0, 266], &[266, 280, 266], &[266, 331, 266]]) {
         return product(27, 6, 0);
     }
     if matches(&[&[265, 0, 265], &[265, 280, 265], &[265, 0, 265]]) {
@@ -482,4 +502,63 @@ mod tests {
             product(278, 1, 0)
         );
     }
+    #[test]
+    fn java_1710_recipes_conserve_items_and_reject_modern_patterns() {
+        let iron_door = [
+            item(265), item(265), None,
+            item(265), item(265), None,
+            item(265), item(265), None,
+        ];
+        assert_eq!(result(&iron_door, 3), product(330, 1, 0));
+        let wood_door = [
+            item(5), item(5), None,
+            item(5), item(5), None,
+            item(5), item(5), None,
+        ];
+        assert_eq!(result(&wood_door, 3), product(324, 1, 0));
+        assert_eq!(result(&[item(331); 4], 2), None);
+        assert_eq!(result(&[item(331); 9], 3), product(152, 1, 0));
+        assert_eq!(result(&[item(263); 9], 3), product(173, 1, 0));
+        assert_eq!(result(&[product(263, 1, 1); 9], 3), None);
+        assert_eq!(result(&[item(22), None, None, None], 2), product(351, 9, 4));
+        assert_eq!(result(&[product(351, 1, 4); 9], 3), product(22, 1, 0));
+        assert_eq!(result(&[item(351); 9], 3), None);
+
+        let old_fence = [
+            item(280), item(280), item(280),
+            item(280), item(280), item(280),
+            None, None, None,
+        ];
+        assert_eq!(result(&old_fence, 3), product(85, 2, 0));
+        let modern_fence = [
+            item(280), item(5), item(280),
+            item(280), item(5), item(280),
+            None, None, None,
+        ];
+        assert_eq!(result(&modern_fence, 3), None);
+
+        let powered_rail = [
+            item(266), None, item(266),
+            item(266), item(280), item(266),
+            item(266), item(331), item(266),
+        ];
+        assert_eq!(result(&powered_rail, 3), product(27, 6, 0));
+        let iron_rail = [
+            item(265), None, item(265),
+            item(265), item(280), item(265),
+            item(265), item(331), item(265),
+        ];
+        assert_eq!(result(&iron_rail, 3), None);
+        assert_eq!(
+            result(&[product(5, 1, 2); 3 * 1].iter().copied().chain([None; 6]).collect::<Vec<_>>(), 3),
+            product(126, 6, 2),
+        );
+        let mixed_slabs = [
+            product(5, 1, 2), product(5, 1, 3), product(5, 1, 2),
+            None, None, None,
+            None, None, None,
+        ];
+        assert_eq!(result(&mixed_slabs, 3), None);
+    }
+
 }
