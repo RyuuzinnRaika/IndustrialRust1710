@@ -31,8 +31,6 @@ use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use experience::Experience;
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use ground_items::GroundItems;
 use hoppers::{Hoppers, Position as HopperPosition};
