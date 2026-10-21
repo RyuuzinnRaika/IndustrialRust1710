@@ -2287,6 +2287,9 @@ fn play(
                         hub,
                         location,
                     )?;
+                    // XP orbs belong at the *death* position, not the newly
+                    // selected bed/world spawn used later in this transaction.
+                    let death_position = *player;
                     let origin = {
                         let fallback = safe_spawn(world)?;
                         if let Some((x, y, z)) = inventory.bed_spawn() {
@@ -2325,7 +2328,7 @@ fn play(
                     if let Some(orb) = mobs
                         .lock()
                         .map_err(|_| bad("mob mutex poisoned"))?
-                        .spawn_xp(*player, drop_amount)
+                        .spawn_xp(death_position, drop_amount)
                     {
                         hub.broadcast(orb);
                     }
