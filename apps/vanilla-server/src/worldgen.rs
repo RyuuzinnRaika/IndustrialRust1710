@@ -151,6 +151,32 @@ pub fn climate(id: u8) -> (f32, f32) {
         _ => (0.8, 0.4),
     }
 }
+/// Small seeded lake basins with smooth shorelines and negative-coordinate
+/// handling. Check adjacent feature cells so lakes are seamless at their edges.
+fn lake_cut(seed: u64, x: i32, z: i32) -> f64 {
+    let mut cut: f64 = 0.0;
+    for gx in x.div_euclid(128) - 1..=x.div_euclid(128) + 1 {
+        for gz in z.div_euclid(128) - 1..=z.div_euclid(128) + 1 {
+            if hash(seed ^ 0x1a6e, gx, 0, gz) % 3 != 0 {
+                continue;
+            }
+            let cx = gx * 128 + 16 + (hash(seed, gx, 10, gz) % 96) as i32;
+            let cz = gz * 128 + 16 + (hash(seed, gx, 11, gz) % 96) as i32;
+            let center = 67.0 + n2(seed ^ 0xc001, cx, cz, 320) * 32.0
+                + n2(seed ^ 0xabcd, cx, cz, 145).max(0.0) * 19.0;
+            if !(58.0..=76.0).contains(&center) {
+                continue;
+            }
+            let radius = 10.0 + (hash(seed, gx, 12, gz) % 6) as f64;
+            let dx = (x - cx) as f64;
+            let dz = (z - cz) as f64;
+            let dist = (dx * dx + dz * dz).sqrt();
+            let ratio = (1.0 - dist / radius).max(0.0);
+            cut = cut.max(ratio * 17.0);
+        }
+    }
+    cut
+}
 pub fn height(seed: u64, x: i32, z: i32) -> i32 {
     let continent = n2(seed ^ 0xc001, x, z, 320);
     let ridge = n2(seed ^ 0xabcd, x, z, 145);
@@ -159,7 +185,9 @@ pub fn height(seed: u64, x: i32, z: i32) -> i32 {
     // All terms vary continuously in world coordinates; no chunk-edge cuts.
     let land = 67.0 + continent * 32.0 + ridge.max(0.0) * 19.0 + detail * 5.0;
     let cut = (1.0 - river.abs() / 0.07).clamp(0.0, 1.0) * 9.0;
-    (land - cut).round().clamp(28.0, 125.0) as i32
+    (land - cut - lake_cut(seed, x, z))
+        .round()
+        .clamp(28.0, 125.0) as i32
 }
 fn sand_biome(id: u8) -> bool {
     matches!(id, 0 | 2 | 16 | 17 | 24 | 26 | 37)
@@ -435,13 +463,13 @@ fn aboveground(seed: u64, x: i32, y: i32, z: i32, top: i32, id: u8) -> u16 {
     if y <= top {
         return AIR;
     }
+    let choice = hash(seed ^ 0x771e, x, 0, z);
+    if desert_biome(id) && choice % 121 == 0 && y <= top + 3 {
+        return b(81);
+    }
     if y == top + 1 {
-        let choice = hash(seed ^ 0x771e, x, 0, z);
-        if desert_biome(id) && choice % 121 == 0 {
-            return b(81);
-        }
         if matches!(id, 6 | 21) && choice % 48 == 0 {
-            return b(39);
+            return b(if choice & 1 == 0 { 39 } else { 40 });
         }
         if matches!(id, 1 | 4 | 5 | 12 | 27 | 30 | 35) {
             if choice % 29 == 0 {
