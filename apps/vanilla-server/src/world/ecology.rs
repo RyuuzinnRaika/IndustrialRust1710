@@ -83,13 +83,29 @@ impl World {
         }
         false
     }
+    /// A leaf survives only if a log can be reached through at most four
+    /// face-adjacent leaves. Nearby but disconnected logs do not prevent decay.
     fn leaf_connected(&self, x: i32, y: i32, z: i32) -> bool {
-        for dx in -4..=4 {
-            for dz in -4..=4 {
-                for dy in -4..=4 {
-                    if matches!(self.get(x + dx, y + dy, z + dz) >> 4, 17 | 162) {
-                        return true;
+        use std::collections::{BTreeSet, VecDeque};
+        let mut seen = BTreeSet::new();
+        let mut queue = VecDeque::from([(x, y, z, 0u8)]);
+        seen.insert((x, y, z));
+        while let Some((px, py, pz, depth)) = queue.pop_front() {
+            for (dx, dy, dz) in [
+                (1, 0, 0),
+                (-1, 0, 0),
+                (0, 1, 0),
+                (0, -1, 0),
+                (0, 0, 1),
+                (0, 0, -1),
+            ] {
+                let next = (px + dx, py + dy, pz + dz);
+                match self.get(next.0, next.1, next.2) >> 4 {
+                    17 | 162 => return true,
+                    18 if depth < 3 && seen.insert(next) => {
+                        queue.push_back((next.0, next.1, next.2, depth + 1));
                     }
+                    _ => {}
                 }
             }
         }
@@ -218,5 +234,40 @@ impl World {
             }
         }
         changes
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn leaf_decay_requires_a_contiguous_four_block_path_to_a_log() {
+        let mut connected = World::new();
+        for x in 0..4 {
+            connected.import_block(x, 65, 0, 18 << 4).unwrap();
+        }
+        connected.import_block(4, 65, 0, 17 << 4).unwrap();
+        assert!(connected.leaf_connected(0, 65, 0));
+
+        let mut disconnected = World::new();
+        disconnected.import_block(0, 65, 0, 18 << 4).unwrap();
+        disconnected.import_block(2, 65, 0, 17 << 4).unwrap();
+        assert!(!disconnected.leaf_connected(0, 65, 0));
+
+        let mut too_far = World::new();
+        for x in 0..5 {
+            too_far.import_block(x, 65, 0, 18 << 4).unwrap();
+        }
+        too_far.import_block(5, 65, 0, 17 << 4).unwrap();
+        assert!(!too_far.leaf_connected(0, 65, 0));
+    }
+
+    #[test]
+    fn farmland_hydration_uses_water_within_four_horizontal_blocks() {
+        let mut w = World::new();
+        w.import_block(4, 64, 0, 8 << 4).unwrap();
+        assert!(w.wet_farmland(0, 64, 0));
+        assert!(!w.wet_farmland(-1, 64, 0));
     }
 }

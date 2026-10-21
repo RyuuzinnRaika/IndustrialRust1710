@@ -30,14 +30,52 @@ impl World {
         let min_z = chunk_z * 16;
         let mut sky = vec![0u8; 16 * 256 * 16];
         let mut block = vec![0u8; 16 * 256 * 16];
-        for z in min_z..min_z + 16 {
-            for x in min_x..min_x + 16 {
-                let mut sun = 15u8;
+        // Seed direct skylight from top-facing columns, including a one-block
+        // halo. A lit neighboring column may brighten a roofed chunk edge.
+        let mut sky_queue = VecDeque::<(i32, i32, i32, u8)>::new();
+        for z in min_z - 1..min_z + 17 {
+            for x in min_x - 1..min_x + 17 {
+                let mut exposed = true;
                 for y in (0..256).rev() {
                     if !transparent(self.get(x, y, z) >> 4) {
-                        sun = 0;
+                        exposed = false;
                     }
-                    sky[index(x, y, z, min_x, min_z)] = sun;
+                    if exposed {
+                        sky_queue.push_back((x, y, z, 15));
+                        if (min_x..min_x + 16).contains(&x)
+                            && (min_z..min_z + 16).contains(&z)
+                        {
+                            sky[index(x, y, z, min_x, min_z)] = 15;
+                        }
+                    }
+                }
+            }
+        }
+        // Only darkness inside the destination chunk is updated. Decaying
+        // levels are propagated through all six faces, never through solids.
+        while let Some((x, y, z, level)) = sky_queue.pop_front() {
+            if level <= 1 {
+                continue;
+            }
+            for (nx, ny, nz) in [
+                (x + 1, y, z),
+                (x - 1, y, z),
+                (x, y + 1, z),
+                (x, y - 1, z),
+                (x, y, z + 1),
+                (x, y, z - 1),
+            ] {
+                if !(min_x..min_x + 16).contains(&nx)
+                    || !(min_z..min_z + 16).contains(&nz)
+                    || !(0..256).contains(&ny)
+                {
+                    continue;
+                }
+                let slot = index(nx, ny, nz, min_x, min_z);
+                let next = level - 1;
+                if next > sky[slot] && transparent(self.get(nx, ny, nz) >> 4) {
+                    sky[slot] = next;
+                    sky_queue.push_back((nx, ny, nz, next));
                 }
             }
         }
@@ -90,5 +128,31 @@ impl World {
             }
         }
         (block, sky)
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn skylight_flows_sideways_under_a_one_block_overhang() {
+        let mut world = World::new();
+        world.import_block(1, 70, 1, 1 << 4).unwrap();
+        let (_, sky) = world.light_arrays(0, 0);
+        let under_roof = index(1, 69, 1, 0, 0);
+        assert_eq!(sky[under_roof], 14);
+        assert_eq!(sky[index(0, 69, 1, 0, 0)], 15);
+    }
+
+    #[test]
+    fn torch_light_levels_are_recalculated_after_placement_and_removal() {
+        let mut world = World::new();
+        let (empty, _) = world.light_arrays(0, 0);
+        assert_eq!(empty[index(1, 64, 1, 0, 0)], 0);
+        world.import_block(1, 64, 1, 50 << 4).unwrap();
+        let (lit, _) = world.light_arrays(0, 0);
+        assert_eq!(lit[index(1, 64, 1, 0, 0)], 14);
+        assert_eq!(lit[index(2, 64, 1, 0, 0)], 13);
     }
 }

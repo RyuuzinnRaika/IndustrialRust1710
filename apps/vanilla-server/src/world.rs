@@ -533,16 +533,41 @@ impl World {
         if !changes.is_empty() {
             // Decaying oak leaves may yield a sapling or apple. Stage these
             // before mutation, but expose them only after a successful save.
-            let leaf_drops: Vec<WorldDrop> = changes
+            let detached_drops: Vec<WorldDrop> = changes
                 .iter()
                 .filter_map(|(&(x, y, z), &next)| {
                     let old = self.get(x, i32::from(y), z);
-                    if next != 0 || old >> 4 != 18 {
+                    if next != 0 || old == 0 {
                         return None;
                     }
                     let pos = (x, i32::from(y), z);
-                    crate::survival::additional_drop(old, pos, self.fluid_phase)
-                        .map(|stack| WorldDrop { pos, stack })
+                    let id = old >> 4;
+                    let item_id = match id {
+                        6 => 6,
+                        50 => 50,
+                        55 => 331,
+                        59 => if old & 7 == 7 { 296 } else { 295 },
+                        66 => 66,
+                        70 | 72 | 77 | 143 => id as i16,
+                        75 | 76 => 76,
+                        93 | 94 => 356,
+                        141 => 391,
+                        142 => 392,
+                        64 if old & 8 == 0 => 324,
+                        71 if old & 8 == 0 => 330,
+                        96 => 96,
+                        18 => {
+                            return crate::survival::additional_drop(old, pos, self.fluid_phase)
+                                .map(|stack| WorldDrop { pos, stack });
+                        }
+                        _ => return None,
+                    };
+                    let stack = crate::inventory::Stack {
+                        id: item_id,
+                        count: 1,
+                        damage: if id == 6 { (old & 7) as i16 } else { 0 },
+                    };
+                    Some(WorldDrop { pos, stack })
                 })
                 .take(256)
                 .collect();
@@ -571,7 +596,7 @@ impl World {
                 }
                 return Err(error);
             }
-            self.pending_drops.extend(leaf_drops);
+            self.pending_drops.extend(detached_drops);
         }
 
         for pos in wet {
@@ -888,6 +913,26 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unsupported_torch_detaches_into_an_item_after_commit() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-attachment-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path, 1, 64, 1, (50 << 4) | 5)
+            .unwrap();
+        w.update_and_save(&path, 1, 63, 1, 0).unwrap();
+        let changed = w.block_tick(&path, 64).unwrap();
+        assert!(changed.contains(&(1, 64, 1)));
+        assert_eq!(w.get(1, 64, 1), 0);
+        assert!(w.drain_drops().iter().any(|drop| drop.stack.id == 50));
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(1, 64, 1), 0);
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn sand_gravel_fall_one_cell_per_tick_and_restore_after_reload() {
         let path = std::env::temp_dir().join(format!(
