@@ -1,5 +1,7 @@
 //! IRW4 dimension identities, disjoint files and safe coordinate conversion.
 //! Minecraft 1.7.10 dimension IDs: Nether=-1, Overworld=0, End=1.
+// These APIs are preparatory until the multi-world session router is connected.
+#![allow(dead_code)]
 use crate::world::{World, WORLD_LIMIT};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -110,9 +112,7 @@ pub fn destination(
         (Dimension::Nether, Dimension::Overworld) => 8.0,
         _ => 1.0,
     };
-    let (x, y, z) = if target == Dimension::End {
-        (0.5, 80.0, 0.5)
-    } else if source == Dimension::End {
+    let (x, y, z) = if target == Dimension::End || source == Dimension::End {
         (0.5, 80.0, 0.5)
     } else {
         (x * scale, y.clamp(32.0, 120.0), z * scale)
