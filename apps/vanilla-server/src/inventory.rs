@@ -576,39 +576,42 @@ impl Inventory {
         self.click_window(0, slot, button, mode)
     }
 
-    fn chest_stack(&self, chest: &[Option<Stack>; 27], slot: i16) -> Option<Stack> {
-        if slot < 27 {
+    fn chest_stack(&self, chest: &[Option<Stack>], slot: i16) -> Option<Stack> {
+        let n = chest.len() as i16;
+        if slot < n {
             chest[slot as usize]
         } else {
-            self.slots[(slot - 18) as usize]
+            self.slots[(slot - n + 9) as usize]
         }
     }
     fn set_chest_stack(
         &mut self,
-        chest: &mut [Option<Stack>; 27],
+        chest: &mut [Option<Stack>],
         slot: i16,
         stack: Option<Stack>,
     ) {
-        if slot < 27 {
+        let n = chest.len() as i16;
+        if slot < n {
             chest[slot as usize] = stack;
         } else {
-            self.slots[(slot - 18) as usize] = stack;
+            self.slots[(slot - n + 9) as usize] = stack;
         }
     }
-    /// Single-chest 0..26 and player inventory 27..62.
+    /// Single/double chest storage (27 or 54 slots) followed by 36 player slots.
     /// Rejection is None; directional writes must commit the *source* first
     /// to avoid item duplication across the non-atomic inventory/chest files.
     pub fn chest_click(
         &mut self,
-        chest: &mut [Option<Stack>; 27],
+        chest: &mut [Option<Stack>],
         slot: i16,
         button: i8,
         mode: i8,
     ) -> Option<ChestDirection> {
-        if !(0..63).contains(&slot) {
+        let n = chest.len() as i16;
+        if !matches!(n, 27 | 54) || !(0..n + 36).contains(&slot) {
             return None;
         }
-        let storage = slot < 27;
+        let storage = slot < n;
         let direction = if storage {
             if self.cursor.is_some() {
                 ChestDirection::IntoChest
@@ -680,7 +683,7 @@ impl Inventory {
                 let Some(mut moving) = self.chest_stack(chest, slot) else {
                     return Some(direction);
                 };
-                let targets = if storage { 27..63 } else { 0..27 };
+                let targets = if storage { n..n + 36 } else { 0..n };
                 for target in targets.clone() {
                     if let Some(mut existing) = self.chest_stack(chest, target) {
                         if existing.id == moving.id
@@ -714,7 +717,7 @@ impl Inventory {
                 })
             }
             2 if !storage && (0..=8).contains(&button) => {
-                let target = 54 + i16::from(button);
+                let target = n + 27 + i16::from(button);
                 let a = self.chest_stack(chest, slot);
                 let b = self.chest_stack(chest, target);
                 self.set_chest_stack(chest, slot, b);
@@ -724,10 +727,11 @@ impl Inventory {
             _ => None,
         }
     }
-    pub fn chest_window_items(&self, window: u8, chest: &[Option<Stack>; 27]) -> Vec<u8> {
+    pub fn chest_window_items(&self, window: u8, chest: &[Option<Stack>]) -> Vec<u8> {
         let mut out = vec![window];
-        out.extend_from_slice(&63i16.to_be_bytes());
-        for slot in 0..63 {
+        let n = chest.len() as i16;
+        out.extend_from_slice(&(n + 36).to_be_bytes());
+        for slot in 0..n + 36 {
             Self::encode_slot(&mut out, self.chest_stack(chest, slot));
         }
         out
