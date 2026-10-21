@@ -40,25 +40,25 @@ impl Vitals {
     /// Limited 1.7.10 food set. Saturation modifier is the vanilla-like multiplier.
     fn nutrition(stack: Stack) -> Option<(i32, f32)> {
         match (stack.id, stack.damage) {
-            (260, _) => Some((4, 0.3)), // apple
-            (297, _) => Some((5, 0.6)), // bread
-            (319, _) => Some((3, 0.3)), // raw pork
-            (320, _) => Some((8, 0.8)), // cooked pork
+            (260, _) => Some((4, 0.3)),     // apple
+            (297, _) => Some((5, 0.6)),     // bread
+            (319, _) => Some((3, 0.3)),     // raw pork
+            (320, _) => Some((8, 0.8)),     // cooked pork
             (349, 0 | 1) => Some((2, 0.1)), // cod / salmon
             (349, 2 | 3) => Some((1, 0.1)), // clownfish / pufferfish (effects TODO)
-            (350, 0) => Some((5, 0.6)), // cooked cod
-            (350, 1) => Some((6, 0.8)), // cooked salmon
-            (357, _) => Some((2, 0.1)), // cookie
-            (360, _) => Some((2, 0.3)), // melon
-            (363, _) => Some((3, 0.3)), // raw beef
-            (364, _) => Some((8, 0.8)), // steak
-            (365, _) => Some((2, 0.3)), // raw chicken
-            (366, _) => Some((6, 0.6)), // cooked chicken
-            (391, _) => Some((3, 0.6)), // carrot
-            (392, _) => Some((1, 0.3)), // potato
-            (393, _) => Some((5, 0.6)), // baked potato
-            (400, _) => Some((8, 0.3)),
-            (396, _) => Some((6, 1.2)), // golden carrot // pumpkin pie
+            (350, 0) => Some((5, 0.6)),     // cooked cod
+            (350, 1) => Some((6, 0.8)),     // cooked salmon
+            (357, _) => Some((2, 0.1)),     // cookie
+            (360, _) => Some((2, 0.3)),     // melon
+            (363, _) => Some((3, 0.3)),     // raw beef
+            (364, _) => Some((8, 0.8)),     // steak
+            (365, _) => Some((2, 0.3)),     // raw chicken
+            (366, _) => Some((6, 0.6)),     // cooked chicken
+            (391, _) => Some((3, 0.6)),     // carrot
+            (392, _) => Some((1, 0.3)),     // potato
+            (393, _) => Some((5, 0.6)),     // baked potato
+            (400, _) => Some((8, 0.3)), // pumpkin pie
+            (396, _) => Some((6, 1.2)), // golden carrot
             _ => None,
         }
     }
@@ -145,20 +145,39 @@ mod tests {
 
     #[test]
     fn golden_carrot_and_fish_metadata_follow_legacy_food_values() {
-        let mut v = Vitals { food: 10, saturation: 0.0, ..Vitals::default() };
-        assert!(v.eat(Stack { id: 396, count: 1, damage: 0 }));
+        let mut v = Vitals {
+            food: 10,
+            saturation: 0.0,
+            ..Vitals::default()
+        };
+        assert!(v.eat(Stack {
+            id: 396,
+            count: 1,
+            damage: 0
+        }));
         assert_eq!(v.food, 16);
         assert!((v.saturation - 14.4).abs() < 0.001);
-        let salmon = Stack { id: 350, count: 1, damage: 1 };
+        let salmon = Stack {
+            id: 350,
+            count: 1,
+            damage: 1,
+        };
         assert!(v.eat(salmon));
         assert_eq!(v.food, 20);
-        assert!(!Vitals::default().can_eat(Stack { id: 350, count: 1, damage: 2 }));
+        assert!(!Vitals { food: 10, ..Vitals::default() }.can_eat(Stack {
+            id: 350,
+            count: 1,
+            damage: 2
+        }));
     }
 
     #[test]
     fn regeneration_exhaustion_drains_saturation_without_waiting_for_movement() {
         let mut v = Vitals {
-            health: 19.0, food: 20, saturation: 1.0, exhaustion: 3.5,
+            health: 19.0,
+            food: 20,
+            saturation: 1.0,
+            exhaustion: 3.5,
             food_timer: 79,
         };
         assert!(v.tick(1));
