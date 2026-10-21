@@ -546,7 +546,10 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
         b == [0, 0, 36, 0, 3, 1, 0, 0, 255, 255]
     });
     until_packet(&mut client, 0x0d, |b| {
-        b.len() == 8 && b[..4] == drop_id.to_be_bytes()
+        let mut raw = b;
+        read_varint(&mut raw).ok() == Some(drop_id as u32)
+            && read_varint(&mut raw).is_ok()
+            && raw.is_empty()
     });
     until_packet(&mut client, 0x13, |b| {
         let mut raw = b;
