@@ -1739,8 +1739,16 @@ mod tests {
     fn chest_swaps_unlike_items_without_duplication() {
         let mut inv = Inventory::default();
         let mut chest = [None; 27];
-        let stone = Stack { id: 1, count: 2, damage: 0 };
-        let dirt = Stack { id: 3, count: 2, damage: 0 };
+        let stone = Stack {
+            id: 1,
+            count: 2,
+            damage: 0,
+        };
+        let dirt = Stack {
+            id: 3,
+            count: 2,
+            damage: 0,
+        };
         chest[0] = Some(stone);
         inv.creative_set(36, Some(dirt)).unwrap();
         assert!(inv.chest_click(&mut chest, 54, 0, 0).is_some());
