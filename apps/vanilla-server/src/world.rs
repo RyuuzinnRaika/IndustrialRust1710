@@ -1081,4 +1081,56 @@ mod tests {
         assert_eq!(World::load(&path).unwrap().get(0,64,0),(59 << 4)|7);
         fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn piston_pushes_dust_powered_block_and_doors_have_both_halves() {
+        let path = std::env::temp_dir().join(format!("ir1710-device-{}.irw",std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path,-1,64,0,(69 << 4)|8).unwrap();
+        w.update_and_save(&path,0,64,0,55 << 4).unwrap();
+        w.update_and_save(&path,1,64,0,(33 << 4)|5).unwrap();
+        w.update_and_save(&path,2,64,0,1 << 4).unwrap();
+        for _ in 0..6 { w.block_tick(&path,64).unwrap(); }
+        assert_eq!(w.get(1,64,0),(33 << 4)|13);
+        assert_eq!(w.get(2,64,0),(34 << 4)|5);
+        assert_eq!(w.get(3,64,0),1 << 4);
+        w.update_and_save(&path,-1,64,0,69 << 4).unwrap();
+        for _ in 0..35 {w.block_tick(&path,64).unwrap();}
+        assert_eq!(w.get(1,64,0),(33 << 4)|5);
+        assert_eq!(w.get(2,64,0),0);
+        assert_eq!(w.get(3,64,0),1 << 4);
+        assert!(w.place_door(&path,5,64,0,64,2).unwrap());
+        assert_eq!(w.get(5,65,0),(64 << 4)|8);
+        assert_eq!(w.interact_device(&path,5,65,0).unwrap(),vec![(5,64,0)]);
+        assert_ne!(w.get(5,64,0) & 4,0);
+        w.update_and_save(&path,5,64,0,0).unwrap();
+        w.block_tick(&path,64).unwrap();
+        assert_eq!(w.get(5,65,0),0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn irw3_biomes_are_opt_in_and_old_generation_is_unchanged() {
+        let path = std::env::temp_dir().join(format!("ir1710-biomes-{}.irw",std::process::id()));
+        let _ = fs::remove_file(&path);
+        let old = World::natural(42);
+        let new = World::with_biomes(42);
+        assert!(!old.is_biome_world() && new.is_biome_world());
+        assert_eq!(old.get(0,crate::terrain::surface(42,0,0),0),2 << 4);
+        let mut seen = std::collections::BTreeSet::new();
+        for x in (-1500..=1500).step_by(100) {
+            for z in (-1500..=1500).step_by(100) {
+                seen.insert(crate::terrain::biome(42,x,z));
+            }
+        }
+        assert_eq!(seen,[0u8,1,2,3,4].into_iter().collect());
+        new.save_new(&path).unwrap();
+        assert_eq!(&fs::read(&path).unwrap()[..4],b"IRW3");
+        let reloaded = World::load(&path).unwrap();
+        assert!(reloaded.is_biome_world());
+        assert_eq!(reloaded.natural_seed(),Some(42));
+        assert_eq!(old.get(20,60,20),World::natural(42).get(20,60,20));
+        fs::remove_file(path).unwrap();
+    }
 }
