@@ -441,8 +441,8 @@ struct ActiveEffect {
     expires_at: u64,
     next_periodic: u64,
 }
-fn potion_effect_packet(entity: i32, kind:u8, amplifier:u8, duration:u16)->Vec<u8> {
-    let mut packet=entity.to_be_bytes().to_vec();
+fn potion_effect_packet(entity: i32, kind: u8, amplifier: u8, duration: u16) -> Vec<u8> {
+    let mut packet = entity.to_be_bytes().to_vec();
     packet.push(kind);
     packet.push(amplifier);
     packet.extend_from_slice(&(duration as i16).to_be_bytes());
@@ -554,16 +554,20 @@ fn play(
             }
         }
         if let Some(pos) = active_brewer {
-            let guard=brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
-            let current=guard.get(pos);
+            let guard = brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
+            let current = guard.get(pos);
             if current != last_brewer_view {
-                let changed_slots=current.slots!=last_brewer_view.slots;
-                last_brewer_view=current;
+                let changed_slots = current.slots != last_brewer_view.slots;
+                last_brewer_view = current;
                 drop(guard);
                 if changed_slots {
-                    send(s,0x30,&inventory.chest_window_items(active_window,&current.slots))?;
+                    send(
+                        s,
+                        0x30,
+                        &inventory.chest_window_items(active_window, &current.slots),
+                    )?;
                 }
-                send(s,0x31,&current.property(active_window))?;
+                send(s, 0x31, &current.property(active_window))?;
             }
         }
         if let Some(pos) = active_hopper {
@@ -696,27 +700,31 @@ fn play(
             }
         }
         if survival && now_tick > last_effect_tick {
-            last_effect_tick=now_tick;
-            let old_health=vitals.health;
+            last_effect_tick = now_tick;
+            let old_health = vitals.health;
             for effect in &mut active_effects {
-                if now_tick>=effect.next_periodic && now_tick<effect.expires_at {
-                    let amount=f32::from(effect.amplifier)+1.0;
-                    if effect.kind==10 { vitals.health=(vitals.health+amount).min(20.0); }
-                    if effect.kind==19 { vitals.health=(vitals.health-amount).max(1.0); }
-                    effect.next_periodic=now_tick+if effect.kind==10 {50} else {25};
+                if now_tick >= effect.next_periodic && now_tick < effect.expires_at {
+                    let amount = f32::from(effect.amplifier) + 1.0;
+                    if effect.kind == 10 {
+                        vitals.health = (vitals.health + amount).min(20.0);
+                    }
+                    if effect.kind == 19 {
+                        vitals.health = (vitals.health - amount).max(1.0);
+                    }
+                    effect.next_periodic = now_tick + if effect.kind == 10 { 50 } else { 25 };
                 }
             }
             for effect in &active_effects {
-                if now_tick>=effect.expires_at {
-                    let mut removed=entity_id.to_be_bytes().to_vec();
+                if now_tick >= effect.expires_at {
+                    let mut removed = entity_id.to_be_bytes().to_vec();
                     removed.push(effect.kind);
-                    send(s,0x1e,&removed)?;
+                    send(s, 0x1e, &removed)?;
                 }
             }
-            active_effects.retain(|effect|now_tick<effect.expires_at);
-            if vitals.health!=old_health {
-                player.save_state(player_path,*vitals)?;
-                send(s,0x06,&health_packet(*vitals))?;
+            active_effects.retain(|effect| now_tick < effect.expires_at);
+            if vitals.health != old_health {
+                player.save_state(player_path, *vitals)?;
+                send(s, 0x06, &health_packet(*vitals))?;
             }
         }
         // Food and drink consumption both finish after 32 server ticks.
@@ -724,30 +732,44 @@ fn play(
             if let Some((began, stack)) = eating {
                 if now_tick.saturating_sub(began) >= 32 {
                     eating = None;
-                    if inventory.held()==Some(stack) && stack.id==373 {
-                        if let Some((kind, amplifier, duration))=brewing::effect(stack) {
-                            let mut remaining=inventory.clone();
-                            if remaining.consume_held() && remaining.receive_stack(Stack {
-                                id:374,count:1,damage:0
-                            }).is_some() {
+                    if inventory.held() == Some(stack) && stack.id == 373 {
+                        if let Some((kind, amplifier, duration)) = brewing::effect(stack) {
+                            let mut remaining = inventory.clone();
+                            if remaining.consume_held()
+                                && remaining
+                                    .receive_stack(Stack {
+                                        id: 374,
+                                        count: 1,
+                                        damage: 0,
+                                    })
+                                    .is_some()
+                            {
                                 // Inventory debit is durable before temporary status or HP gain.
                                 remaining.save(inventory_path)?;
-                                *inventory=remaining;
-                                if kind==6 {
-                                    vitals.health=(vitals.health+4.0*f32::from(amplifier+1)).min(20.0);
-                                } else if kind==7 {
-                                    vitals.health=(vitals.health-6.0*f32::from(amplifier+1)).max(0.0);
+                                *inventory = remaining;
+                                if kind == 6 {
+                                    vitals.health =
+                                        (vitals.health + 4.0 * f32::from(amplifier + 1)).min(20.0);
+                                } else if kind == 7 {
+                                    vitals.health =
+                                        (vitals.health - 6.0 * f32::from(amplifier + 1)).max(0.0);
                                 } else {
-                                    active_effects.retain(|effect|effect.kind!=kind);
+                                    active_effects.retain(|effect| effect.kind != kind);
                                     active_effects.push(ActiveEffect {
-                                        kind,amplifier,expires_at:now_tick+u64::from(duration),
-                                        next_periodic:now_tick+if kind==10 {50} else {25},
+                                        kind,
+                                        amplifier,
+                                        expires_at: now_tick + u64::from(duration),
+                                        next_periodic: now_tick + if kind == 10 { 50 } else { 25 },
                                     });
                                 }
-                                player.save_state(player_path,*vitals)?;
-                                send(s,0x30,&inventory.window_items())?;
-                                send(s,0x06,&health_packet(*vitals))?;
-                                send(s,0x1d,&potion_effect_packet(entity_id,kind,amplifier,duration))?;
+                                player.save_state(player_path, *vitals)?;
+                                send(s, 0x30, &inventory.window_items())?;
+                                send(s, 0x06, &health_packet(*vitals))?;
+                                send(
+                                    s,
+                                    0x1d,
+                                    &potion_effect_packet(entity_id, kind, amplifier, duration),
+                                )?;
                             }
                         }
                     } else if inventory.held() == Some(stack) && vitals.can_eat(stack) {
@@ -1033,9 +1055,11 @@ fn play(
                                                 .lock()
                                                 .map_err(|_| bad("hopper lock poisoned"))?
                                                 .has_contents(target))
-                                        || (block == 117 && brewers.lock()
-                                            .map_err(|_| bad("brewer lock poisoned"))?
-                                            .is_nonempty(target));
+                                        || (block == 117
+                                            && brewers
+                                                .lock()
+                                                .map_err(|_| bad("brewer lock poisoned"))?
+                                                .is_nonempty(target));
                                     if !occupied {
                                         let mut ground = ground_items.lock().map_err(|_| {
                                             io::Error::other("ground items lock poisoned")
@@ -1130,9 +1154,11 @@ fn play(
                                         .lock()
                                         .map_err(|_| bad("hopper lock poisoned"))?
                                         .has_contents((x, y, z)))
-                                || (block == 117 && brewers.lock()
-                                    .map_err(|_| bad("brewer lock poisoned"))?
-                                    .is_nonempty((x, y, z)));
+                                || (block == 117
+                                    && brewers
+                                        .lock()
+                                        .map_err(|_| bad("brewer lock poisoned"))?
+                                        .is_nonempty((x, y, z)));
                             if occupied {
                                 false
                             } else {
@@ -1163,7 +1189,9 @@ fn play(
                 if survival && x == -1 && y == 255 && z == -1 && face == -1 {
                     if let Some(stack) = inventory.held() {
                         if inventory.can_place(held)
-                            && (vitals.can_eat(stack) || (stack.id==373 && brewing::effect(stack).is_some())) {
+                            && (vitals.can_eat(stack)
+                                || (stack.id == 373 && brewing::effect(stack).is_some()))
+                        {
                             eating = Some((now_tick, stack));
                         }
                     }
@@ -1363,29 +1391,43 @@ fn play(
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     continue;
                 }
-                if (0..=5).contains(&face) && world::in_bounds(x,y,z)
-                    && near(location,x,y,z)
-                    && world.lock().map_err(|_| bad("world mutex poisoned"))?.get(x,y,z) >> 4 == 117
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 117
                 {
-                    let pos=(x,y,z);
-                    active_window=next_window;
-                    next_window=if next_window>=100 {1} else {next_window+1};
-                    active_brewer=Some(pos);
-                    active_chest=None;
-                    active_chest_partner=None;
-                    active_furnace=None;
-                    active_hopper=None;
-                    let guard=brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
-                    last_brewer_view=guard.get(pos);
+                    let pos = (x, y, z);
+                    active_window = next_window;
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
+                    active_brewer = Some(pos);
+                    active_chest = None;
+                    active_chest_partner = None;
+                    active_furnace = None;
+                    active_hopper = None;
+                    let guard = brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
+                    last_brewer_view = guard.get(pos);
                     drop(guard);
-                    let mut opened=vec![active_window];
-                    write_string("minecraft:brewing_stand",&mut opened)?;
-                    write_string(&json!({"text":"Brewing Stand"}).to_string(),&mut opened)?;
+                    let mut opened = vec![active_window];
+                    write_string("minecraft:brewing_stand", &mut opened)?;
+                    write_string(&json!({"text":"Brewing Stand"}).to_string(), &mut opened)?;
                     opened.push(4);
-                    send(s,0x2d,&opened)?;
-                    send(s,0x30,&inventory.chest_window_items(active_window,&last_brewer_view.slots))?;
-                    send(s,0x31,&last_brewer_view.property(active_window))?;
-                    send(s,0x2f,&inventory.cursor_packet())?;
+                    send(s, 0x2d, &opened)?;
+                    send(
+                        s,
+                        0x30,
+                        &inventory.chest_window_items(active_window, &last_brewer_view.slots),
+                    )?;
+                    send(s, 0x31, &last_brewer_view.property(active_window))?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
                     continue;
                 }
                 if (0..=5).contains(&face)
@@ -1695,43 +1737,48 @@ fn play(
                     );
                     drop(storage);
                 } else if let Some(pos) = active_brewer {
-                    let still_open={
-                        let w=world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                        w.get(pos.0,pos.1,pos.2)>>4==117
-                            && near(location,pos.0,pos.1,pos.2)
+                    let still_open = {
+                        let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        w.get(pos.0, pos.1, pos.2) >> 4 == 117
+                            && near(location, pos.0, pos.1, pos.2)
                     };
-                    let mut storage=brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
-                    let original=storage.get(pos);
-                    let mut changed=original.slots;
-                    let mut candidate=inventory.clone();
-                    let change=if still_open && requested_window {
-                        candidate.chest_click(&mut changed,slot,button,mode)
-                    } else {None};
-                    let mut next=original;
-                    next.slots=changed;
+                    let mut storage = brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
+                    let original = storage.get(pos);
+                    let mut changed = original.slots;
+                    let mut candidate = inventory.clone();
+                    let change = if still_open && requested_window {
+                        candidate.chest_click(&mut changed, slot, button, mode)
+                    } else {
+                        None
+                    };
+                    let mut next = original;
+                    next.slots = changed;
                     if change.is_some() && next.valid() {
-                        accepted=true;
-                        let inv_changed=candidate != *inventory;
-                        let brewer_changed=next != original;
+                        accepted = true;
+                        let inv_changed = candidate != *inventory;
+                        let brewer_changed = next != original;
                         if inv_changed && brewer_changed {
-                            let staged=storage.staged_update(pos,next)?;
+                            let staged = storage.staged_update(pos, next)?;
                             journal::commit(
                                 &world_path.with_extension("pending-txn.json"),
-                                &[(inventory_path,candidate.encoded()?),
-                                  (brewer_path,staged.encoded()?)],
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (brewer_path, staged.encoded()?),
+                                ],
                             )?;
-                            *inventory=candidate;
-                            *storage=staged;
+                            *inventory = candidate;
+                            *storage = staged;
                         } else if brewer_changed {
-                            let staged=storage.staged_update(pos,next)?;
-                            storage.commit_staged(brewer_path,staged)?;
+                            let staged = storage.staged_update(pos, next)?;
+                            storage.commit_staged(brewer_path, staged)?;
                         } else if inv_changed {
                             candidate.save(inventory_path)?;
-                            *inventory=candidate;
+                            *inventory = candidate;
                         }
                     }
-                    last_brewer_view=storage.get(pos);
-                    response_items=inventory.chest_window_items(active_window,&last_brewer_view.slots);
+                    last_brewer_view = storage.get(pos);
+                    response_items =
+                        inventory.chest_window_items(active_window, &last_brewer_view.slots);
                     drop(storage);
                 } else if let Some(pos) = active_hopper {
                     let still_open = {
@@ -2478,19 +2525,21 @@ fn main() -> io::Result<()> {
         }
     });
     // Fuel-free 1.7.10 brewing progresses at the shared monotonic 20Hz rate.
-    let brewer_worker=Arc::clone(&brewers);
-    let brewer_file=Arc::clone(&brewer_path);
-    let brewer_clock=Arc::clone(&clock);
+    let brewer_worker = Arc::clone(&brewers);
+    let brewer_file = Arc::clone(&brewer_path);
+    let brewer_clock = Arc::clone(&clock);
     thread::spawn(move || {
-        let mut last=brewer_clock.ticks();
+        let mut last = brewer_clock.ticks();
         loop {
-            let now=brewer_clock.ticks();
-            if now>last {
-                let steps=(now-last).min(20) as u32;
-                last=now;
-                let result=brewer_worker.lock().map_err(|_| bad("brewer lock poisoned"))
-                    .and_then(|mut stands|stands.advance(&brewer_file,steps));
-                if let Err(error)=result {
+            let now = brewer_clock.ticks();
+            if now > last {
+                let steps = (now - last).min(20) as u32;
+                last = now;
+                let result = brewer_worker
+                    .lock()
+                    .map_err(|_| bad("brewer lock poisoned"))
+                    .and_then(|mut stands| stands.advance(&brewer_file, steps));
+                if let Err(error) = result {
                     eprintln!("BREWING TICK STORAGE ERROR: {error}");
                     break;
                 }

@@ -412,8 +412,8 @@ impl Inventory {
     /// are never trusted.
     fn drag_click(&mut self, window: u8, slot: i16, button: i8) -> bool {
         let kind = match button {
-            0 | 1 | 2 => 0,
-            4 | 5 | 6 => 4,
+            0..=2 => 0,
+            4..=6 => 4,
             _ => return false,
         };
         match button {

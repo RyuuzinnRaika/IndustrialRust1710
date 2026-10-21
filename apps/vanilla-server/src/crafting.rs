@@ -362,7 +362,10 @@ mod tests {
             result(&[item(5), None, item(5), None], 2),
             product(280, 4, 0)
         );
-        assert_eq!(result(&[item(5), item(5), None, None], 2), product(72, 1, 0));
+        assert_eq!(
+            result(&[item(5), item(5), None, None], 2),
+            product(72, 1, 0)
+        );
         assert_eq!(
             result(
                 &[
