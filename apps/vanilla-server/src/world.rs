@@ -348,7 +348,7 @@ impl World {
             }
             let id = self.get(nx, ny, nz) >> 4;
             let pos = (nx, ny as u8, nz);
-            if matches!(id, 8 | 9 | 10 | 11) {
+            if matches!(id, 8..=11) {
                 self.pending_fluid.insert(pos);
             }
             if id == 55 {
@@ -486,7 +486,7 @@ impl World {
                     }
                 }
                 let solid_below =
-                    y > 0 && !matches!(self.get(x, y - 1, z) >> 4, 0 | 8 | 9 | 10 | 11);
+                    y > 0 && !matches!(self.get(x, y - 1, z) >> 4, 0 | 8..=11);
                 if id == 8 && source_neighbors >= 2 && solid_below {
                     next = 0;
                 }
@@ -818,7 +818,7 @@ impl World {
             if matches!(block >> 4, 12 | 13) {
                 world.pending_gravity.insert((x, y, z));
             }
-            if matches!(block >> 4, 8 | 9 | 10 | 11) {
+            if matches!(block >> 4, 8..=11) {
                 world.pending_fluid.insert((x, y, z));
             }
             if block >> 4 == 55 {
