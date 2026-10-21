@@ -39,6 +39,30 @@ impl World {
                 solid(support)
             }
             55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 => solid(below),
+            77 | 143 => {
+                let neighbor = match block & 7 {
+                    1 => self.get(x-1,y,z) >> 4,
+                    2 => self.get(x+1,y,z) >> 4,
+                    3 => self.get(x,y,z-1) >> 4,
+                    4 => self.get(x,y,z+1) >> 4,
+                    _ => below,
+                };
+                solid(neighbor)
+            }
+            64 | 71 => {
+                if block & 8 != 0 {
+                    self.get(x,y-1,z) >> 4 == id
+                } else { solid(below) }
+            }
+            96 => {
+                let neighbor = match block & 3 {
+                    0 => self.get(x,y,z+1) >> 4,
+                    1 => self.get(x,y,z-1) >> 4,
+                    2 => self.get(x+1,y,z) >> 4,
+                    _ => self.get(x-1,y,z) >> 4,
+                };
+                solid(neighbor)
+            }
             _ => true,
         }
     }
@@ -103,7 +127,7 @@ impl World {
         for &(x,y,z) in self.pending_support.iter().take(budget) {
             let block = self.get(x,i32::from(y),z);
             let id = block >> 4;
-            if matches!(id, 6 | 50 | 55 | 59 | 66 | 70 | 72 | 75 | 76 | 93 | 94 | 141 | 142)
+            if matches!(id, 6 | 50 | 55 | 59 | 66 | 70 | 72 | 75 | 76 | 93 | 94 | 141 | 142 | 64 | 71 | 77 | 143 | 96)
                 && !self.can_support(x,i32::from(y),z,block) {
                 changes.insert((x,y,z),0);
             }
