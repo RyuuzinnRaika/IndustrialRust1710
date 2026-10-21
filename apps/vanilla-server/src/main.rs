@@ -445,6 +445,7 @@ fn play(
     let mut last_pickup = Instant::now();
     let mut last_xp_pickup = Instant::now();
     let mut eating: Option<(u64, Stack)> = None;
+    let mut bow_drawing: Option<u64> = None;
     loop {
         while let Ok(event) = events.try_recv() {
             send(s, event.id, &event.body)?;
@@ -875,6 +876,20 @@ fn play(
                 if survival {
                     if action == 5 {
                         eating = None; // Release Use Item.
+                        if let Some(start)=bow_drawing.take() {
+                            let mut candidate=inventory.clone();
+                            if let Some(arrow_slot)=candidate.use_bow() {
+                                let mut mob_state=mobs.lock().map_err(|_|bad("mob mutex poisoned"))?;
+                                if let Some(projectile)=mob_state.player_shoot(entity_id,*player,
+                                   yaw,pitch,now_tick.saturating_sub(start)) {
+                                    candidate.save(inventory_path)?;
+                                    *inventory=candidate;
+                                    send(s,0x2f,&inventory.set_slot(arrow_slot)?)?;
+                                    send(s,0x2f,&inventory.set_slot(inventory.held_slot())?)?;
+                                    hub.broadcast(projectile);
+                                }
+                            }
+                        }
                     }
                     let target = (x, y, z);
                     match action {
@@ -1055,8 +1070,10 @@ fn play(
                 // Only an authenticated, selected inventory stack can be used.
                 if survival && x == -1 && y == 255 && z == -1 && face == -1 {
                     if let Some(stack) = inventory.held() {
-                        if inventory.can_place(held) && vitals.can_eat(stack) {
-                            eating = Some((now_tick, stack));
+                        if inventory.can_place(held) && stack.id==261 {
+                            bow_drawing=Some(now_tick);
+                        } else if inventory.can_place(held) && vitals.can_eat(stack) {
+                            eating=Some((now_tick,stack));
                         }
                     }
                     continue;
@@ -1461,6 +1478,7 @@ fn play(
                     ambient = Ambient::new(now_tick);
                     idle_gravity = IdleGravity::new(now_tick);
                     eating = None;
+                    bow_drawing = None;
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = 0i32.to_be_bytes().to_vec();
                     respawn.extend_from_slice(&[1, 0]); // normal difficulty, survival
