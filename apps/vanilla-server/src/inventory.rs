@@ -1402,31 +1402,61 @@ mod tests {
     fn brewing_gui_rejects_invalid_bottle_reagent_and_shift_moves() {
         let mut inv = Inventory::default();
         let mut slots = [None; 4];
-        let diamond = Stack { id: 264, count: 1, damage: 0 };
-        let water = Stack { id: 373, count: 1, damage: 0 };
+        let diamond = Stack {
+            id: 264,
+            count: 1,
+            damage: 0,
+        };
+        let water = Stack {
+            id: 373,
+            count: 1,
+            damage: 0,
+        };
         inv.cursor = Some(diamond);
         assert_eq!(inv.chest_click_window(1, &mut slots, 0, 0, 0), None);
         assert_eq!(inv.cursor, Some(diamond));
         assert_eq!(slots, [None; 4]);
+
         inv.cursor = Some(water);
-        assert_eq!(inv.chest_click_window(1, &mut slots, 0, 0, 0), Some(ChestDirection::IntoChest));
+        assert_eq!(
+            inv.chest_click_window(1, &mut slots, 0, 0, 0),
+            Some(ChestDirection::IntoChest)
+        );
         assert_eq!(slots[0], Some(water));
-        inv.creative_set(9, Some(Stack { id: 4, count: 32, damage: 0 })).unwrap();
+
+        inv.creative_set(
+            9,
+            Some(Stack {
+                id: 4,
+                count: 32,
+                damage: 0,
+            }),
+        )
+        .unwrap();
         assert!(inv.chest_click_window(1, &mut slots, 4, 0, 1).is_some());
         assert_eq!(inv.slots[9].unwrap().count, 32);
-        assert_eq!(slots[1..], [None; 3]);
-        inv.cursor = Some(Stack { id: 4, count: 3, damage: 0 });
+        assert!(slots[1..].iter().all(Option::is_none));
+
+        inv.cursor = Some(Stack {
+            id: 4,
+            count: 3,
+            damage: 0,
+        });
         assert!(inv.chest_click_window(1, &mut slots, -999, 0, 5).is_some());
         assert!(inv.chest_click_window(1, &mut slots, 1, 1, 5).is_some());
         assert!(inv.chest_click_window(1, &mut slots, -999, 2, 5).is_some());
-        assert_eq!(slots[1..], [None; 3]);
+        assert!(slots[1..].iter().all(Option::is_none));
         assert_eq!(inv.cursor.unwrap().count, 3);
     }
 
     #[test]
     fn shift_click_never_stacks_lava_buckets_in_furnace() {
         let mut inv = Inventory::default();
-        let bucket = Stack { id: 327, count: 1, damage: 0 };
+        let bucket = Stack {
+            id: 327,
+            count: 1,
+            damage: 0,
+        };
         let mut furnace = crate::furnaces::Furnace::default();
         furnace.slots[1] = Some(bucket);
         inv.creative_set(36, Some(bucket)).unwrap();
