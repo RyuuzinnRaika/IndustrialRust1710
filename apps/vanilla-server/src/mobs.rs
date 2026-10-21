@@ -1259,7 +1259,9 @@ mod tests {
     }
     #[test]
     fn flat_world_has_no_mobs_and_bow_shot_is_bounded() {
-        assert!(Mobs::new_with_difficulty(&World::new(), true, 1).entities.is_empty());
+        assert!(Mobs::new_with_difficulty(&World::new(), true, 1)
+            .entities
+            .is_empty());
         let mut mobs = Mobs::default();
         assert!(mobs
             .fire_arrow(None, PlayerPosition::default(), 0.0, 0.0, 3.0, 4)
