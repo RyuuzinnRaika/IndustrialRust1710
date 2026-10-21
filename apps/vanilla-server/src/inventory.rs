@@ -687,7 +687,7 @@ impl Inventory {
         mode: i8,
     ) -> Option<ChestDirection> {
         let n = chest.len() as i16;
-        if !matches!(n, 27 | 54) || !(0..n + 36).contains(&slot) {
+        if !matches!(n, 5 | 27 | 54) || !(0..n + 36).contains(&slot) {
             return None;
         }
         let storage = slot < n;
