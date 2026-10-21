@@ -38,8 +38,7 @@ impl TickTelemetry {
             // The sample bound applies even if the process runs for days.
             if self.samples_ms.len() < MAX_SAMPLES {
                 self.samples_ms.extend(
-                    std::iter::repeat(per_tick)
-                        .take(ticks as usize)
+                    std::iter::repeat_n(per_tick, ticks as usize)
                         .take(MAX_SAMPLES - self.samples_ms.len()),
                 );
             }
