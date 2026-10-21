@@ -19,6 +19,11 @@ fn chance(phase: u64, x: i32, y: i32, z: i32, divisor: u64) -> bool {
     v = v.wrapping_mul(0x94d049bb133111eb);
     (v ^ (v >> 31)).is_multiple_of(divisor)
 }
+/// Limited 1.7.10 combustible blocks. Fire never overwrites tile-entity
+/// inventories or unbreakable terrain.
+fn flammable(id: u16) -> bool {
+    matches!(id, 5 | 17 | 18 | 35 | 47 | 53 | 58 | 85 | 107 | 125 | 126 | 162 | 170)
+}
 fn plantable(id: u16) -> bool {
     matches!(id, 2 | 3 | 60)
 }
@@ -200,6 +205,39 @@ impl World {
                 continue;
             }
             match id {
+                51 => {
+                    // Water immediately extinguishes the fire. Each scheduled
+                    // candidate is bounded by the existing ecology tick budget.
+                    let neighbors = [
+                        (x + 1, height, z), (x - 1, height, z),
+                        (x, height + 1, z), (x, height - 1, z),
+                        (x, height, z + 1), (x, height, z - 1),
+                    ];
+                    if neighbors.iter().any(|&(nx, ny, nz)| {
+                        matches!(self.get(nx, ny, nz) >> 4, 8 | 9)
+                    }) {
+                        changes.insert((x, y, z), 0);
+                        continue;
+                    }
+                    // Fire spreads into adjacent flammable cells; it cannot
+                    // consume chests/furnaces and produces no duplicated drops.
+                    for &(nx, ny, nz) in &neighbors {
+                        if !in_bounds(nx, ny, nz) {
+                            continue;
+                        }
+                        let next = self.get(nx, ny, nz);
+                        if flammable(next >> 4)
+                            && chance(self.fluid_phase, nx, ny, nz, 3)
+                        {
+                            changes.insert((nx, ny as u8, nz), 51 << 4);
+                        }
+                    }
+                    // Bounded lifetime; supports repeated regeneration from
+                    // neighboring burning blocks, not endless isolated fire.
+                    if chance(self.fluid_phase, x, height, z, 4) {
+                        changes.insert((x, y, z), 0);
+                    }
+                }
                 60 => {
                     let moisture = block & 7;
                     if self.wet_farmland(x, height, z) {
@@ -240,6 +278,29 @@ impl World {
 #[cfg(test)]
 mod regression_tests {
     use super::*;
+
+    #[test]
+    fn fire_extinguishes_when_adjacent_to_water() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 51 << 4).unwrap();
+        world.import_block(1, 64, 0, 8 << 4).unwrap();
+        world.pending_ecology.insert((0, 64, 0));
+        world.fluid_phase = 20;
+        assert_eq!(world.ecology_changes(32).get(&(0, 64, 0)), Some(&0));
+    }
+
+    #[test]
+    fn fire_never_ignites_chests_or_stone() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 51 << 4).unwrap();
+        world.import_block(1, 64, 0, 54 << 4).unwrap();
+        world.import_block(-1, 64, 0, 1 << 4).unwrap();
+        world.pending_ecology.insert((0, 64, 0));
+        world.fluid_phase = 20;
+        let changes = world.ecology_changes(32);
+        assert!(!changes.contains_key(&(1, 64, 0)));
+        assert!(!changes.contains_key(&(-1, 64, 0)));
+    }
 
     #[test]
     fn leaf_decay_requires_a_contiguous_four_block_path_to_a_log() {
