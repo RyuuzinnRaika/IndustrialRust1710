@@ -143,12 +143,16 @@ impl GroundItems {
         }
         Ok(state)
     }
-    fn save(&self, path: &Path) -> io::Result<()> {
+    pub fn encoded(&self) -> io::Result<Vec<u8>> {
         self.validate()?;
-        let data = serde_json::to_vec(self).map_err(|_| invalid("encode ground-item JSON"))?;
-        if data.len() as u64 > MAX_BYTES {
+        let bytes = serde_json::to_vec(self).map_err(|_| invalid("encode ground-item JSON"))?;
+        if bytes.len() as u64 > MAX_BYTES {
             return Err(invalid("ground-item save exceeds cap"));
         }
+        Ok(bytes)
+    }
+    fn save(&self, path: &Path) -> io::Result<()> {
+        let data = self.encoded()?;
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
@@ -203,17 +207,15 @@ impl GroundItems {
             && i64::from(self.next_id) + count as i64 <= i64::from(i32::MAX)
     }
 
-    pub fn put_many(
-        &mut self,
-        path: &Path,
+    /// Create an unsaved, validated snapshot for atomic inventory + ground
+    /// transactions. This method must not publish any state before journal::commit.
+    pub fn stage_put_many(
+        &self,
         stacks: &[Stack],
         block: (i32, i32, i32),
-    ) -> io::Result<Vec<GroundItem>> {
+    ) -> io::Result<(Self, Vec<GroundItem>)> {
         if !self.has_capacity_for(stacks.len()) || stacks.iter().any(|stack| !stack.is_valid()) {
             return Err(invalid("death-drop capacity or stack invalid"));
-        }
-        if stacks.is_empty() {
-            return Ok(Vec::new());
         }
         let mut candidate = self.clone();
         let mut inserted = Vec::with_capacity(stacks.len());
@@ -232,6 +234,31 @@ impl GroundItems {
             candidate.eligible_after.insert(item.id, when_ready);
             inserted.push(item);
         }
+        candidate.encoded()?;
+        Ok((candidate, inserted))
+    }
+
+    /// Snapshot an item removal. The caller commits it together with the
+    /// receiver's inventory before publishing either in-memory state.
+    pub fn stage_take(&self, id: i32) -> io::Result<Option<(Self, GroundItem)>> {
+        let Some(item) = self.entries.get(&id).cloned() else {
+            return Ok(None);
+        };
+        let mut candidate = self.clone();
+        candidate.entries.remove(&id);
+        candidate.eligible_after.remove(&id);
+        candidate.encoded()?;
+        Ok(Some((candidate, item)))
+    }
+
+    #[cfg(test)]
+    pub fn put_many(
+        &mut self,
+        path: &Path,
+        stacks: &[Stack],
+        block: (i32, i32, i32),
+    ) -> io::Result<Vec<GroundItem>> {
+        let (candidate, inserted) = self.stage_put_many(stacks, block)?;
         candidate.save(path)?;
         *self = candidate;
         Ok(inserted)
@@ -248,7 +275,8 @@ impl GroundItems {
             })
             .cloned()
     }
-    /// Mutate the ground-file first: an interrupted pickup cannot clone items.
+    /// Legacy independent-file path retained for existing unit tests.
+    #[cfg(test)]
     pub fn take(&mut self, path: &Path, id: i32) -> io::Result<Option<GroundItem>> {
         let Some(item) = self.entries.remove(&id) else {
             return Ok(None);
@@ -264,6 +292,66 @@ impl GroundItems {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inventory_and_ground_moves_use_one_recoverable_journal() {
+        use crate::inventory::Inventory;
+        use crate::journal;
+
+        let dir =
+            std::env::temp_dir().join(format!("ir1710-ground-journal-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("players")).unwrap();
+        let inventory_file = dir.join("players/rust.inventory.json");
+        let ground_file = dir.join("flat.drops.json");
+        let pending_file = dir.join("flat.pending-txn.json");
+        let stack = Stack {
+            id: 4,
+            count: 7,
+            damage: 0,
+        };
+        let mut source = Inventory::default();
+        assert!(source.creative_set(36, Some(stack)).unwrap());
+        source.save(&inventory_file).unwrap();
+
+        let empty_ground = GroundItems::default();
+        let (staged_ground, spawned) = empty_ground.stage_put_many(&[stack], (0, 65, 0)).unwrap();
+        let mut debited = source.clone();
+        debited.clear_possessions();
+        journal::commit(
+            &pending_file,
+            &[
+                (&inventory_file, debited.encoded().unwrap()),
+                (&ground_file, staged_ground.encoded().unwrap()),
+            ],
+        )
+        .unwrap();
+        assert!(!pending_file.exists());
+        assert!(Inventory::load(&inventory_file)
+            .unwrap()
+            .possessions()
+            .is_empty());
+        let loaded_ground = GroundItems::load(&ground_file).unwrap();
+        assert_eq!(loaded_ground.items().next().unwrap().stack, stack);
+
+        let (taken_ground, claimed) = loaded_ground.stage_take(spawned[0].id).unwrap().unwrap();
+        let mut credited = debited.clone();
+        assert!(credited.receive_stack(claimed.stack).is_some());
+        journal::commit(
+            &pending_file,
+            &[
+                (&ground_file, taken_ground.encoded().unwrap()),
+                (&inventory_file, credited.encoded().unwrap()),
+            ],
+        )
+        .unwrap();
+        journal::recover(&pending_file).unwrap();
+        let final_inventory = Inventory::load(&inventory_file).unwrap();
+        assert_eq!(final_inventory.possessions(), vec![stack]);
+        assert_eq!(GroundItems::load(&ground_file).unwrap().items().count(), 0);
+        assert!(taken_ground.stage_take(spawned[0].id).unwrap().is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn batch_death_drop_is_atomic_and_preserves_stacks() {
         let dir = std::env::temp_dir().join(format!("ir1710-drops-batch-{}", std::process::id()));
