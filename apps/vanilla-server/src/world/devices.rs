@@ -287,6 +287,7 @@ impl World {
             }
             return Err(error);
         }
+        self.mark_lighting_changed(x, z, 0, id << 4);
         self.wake_block_updates(x, y, z);
         self.wake_block_updates(x, y + 1, z);
         Ok(true)

@@ -16,6 +16,12 @@ fn emission(id: u16) -> u8 {
         _ => 0,
     }
 }
+/// Observable transparency and emitted light independent of block metadata.
+pub(super) fn lighting_signature(block: u16) -> (bool, u8) {
+    let id = block >> 4;
+    (transparent(id), emission(id))
+}
+
 fn index(x: i32, y: i32, z: i32, min_x: i32, min_z: i32) -> usize {
     (y as usize * 256) + ((z - min_z) as usize * 16) + (x - min_x) as usize
 }
