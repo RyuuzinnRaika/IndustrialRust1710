@@ -121,8 +121,9 @@ fn inventory_window_fixtures_preserve_protocol5_slot_and_frame_layout() {
     // Clientbound S2F: window 0, hotbar index 36, cobblestone x64,
     // damage 2, NBT=-1. Packet length is an exact one-byte VarInt.
     const SET_SLOT: &[u8] = &[11, 0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 255, 255];
+    let mut set_slot = SET_SLOT;
     assert_eq!(
-        read_frame(&mut SET_SLOT).unwrap(),
+        read_frame(&mut set_slot).unwrap(),
         [0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 255, 255]
     );
     // S30: window 0, two entries: empty and 1 x stone, no NBT.
