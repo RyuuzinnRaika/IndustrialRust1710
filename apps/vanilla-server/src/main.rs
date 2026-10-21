@@ -1008,6 +1008,33 @@ fn play(
                             send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
                             hub.broadcast(event);
                         }
+                    } else if let Some((metadata, item, milk)) =
+                        creatures.animal_interact(target_id, *player, inventory.held())
+                    {
+                        if milk {
+                            let mut candidate = inventory.clone();
+                            if candidate.exchange_single_held(325, 335) {
+                                candidate.save(inventory_path)?;
+                                *inventory = candidate;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                            }
+                        } else {
+                            if let Some((stack, at)) = item {
+                                let mut ground = ground_items.lock()
+                                    .map_err(|_| bad("ground items mutex poisoned"))?;
+                                if !ground.is_full() {
+                                    let spawned = ground.put(ground_path, stack, at)?;
+                                    for event in spawned.spawn() { hub.broadcast(event); }
+                                }
+                            }
+                            let mut candidate = inventory.clone();
+                            if candidate.wear_held_tool() {
+                                candidate.save(inventory_path)?;
+                                *inventory = candidate;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                            }
+                            if let Some(event) = metadata { hub.broadcast(event); }
+                        }
                     }
                 }
                 if survival && vitals.health > 0.0 && action == 1 {
