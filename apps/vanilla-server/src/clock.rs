@@ -74,12 +74,18 @@ impl Clock {
             Err(e) => return Err(e),
         };
         if bytes.len() != 20 || &bytes[..4] != SNAPSHOT_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad clock header"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad clock header",
+            ));
         }
         let ticks = u64::from_be_bytes(bytes[4..12].try_into().unwrap());
         let inverted = u64::from_be_bytes(bytes[12..20].try_into().unwrap());
         if inverted != !ticks {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "corrupt clock ticks"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "corrupt clock ticks",
+            ));
         }
         Ok(ticks)
     }
@@ -119,8 +125,8 @@ mod tests {
     use super::*;
     #[test]
     fn clock_roundtrip_preserves_day_and_thunder_phase_and_rejects_corruption() {
-        let path = std::env::temp_dir()
-            .join(format!("ir1710-clock-snapshot-{}.bin", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-clock-snapshot-{}.bin", std::process::id()));
         let _ = fs::remove_file(&path);
         assert_eq!(Clock::load_ticks(&path).unwrap(), 0);
         let initial = 24_000 * 3 + 37;
@@ -139,7 +145,10 @@ mod tests {
         let mut damaged = fs::read(&path).unwrap();
         damaged[8] ^= 1;
         fs::write(&path, damaged).unwrap();
-        assert_eq!(Clock::load_ticks(&path).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            Clock::load_ticks(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         fs::remove_file(path).unwrap();
     }
 
