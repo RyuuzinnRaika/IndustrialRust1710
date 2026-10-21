@@ -50,8 +50,43 @@ pub struct Stack {
     pub damage: i16,
 }
 impl Stack {
+    /// Legacy Java 1.7.10 stack limits. Tool, armor, potion and container
+    /// items must not silently merge into a 64-stack in any window.
+    pub fn max_count(self) -> u8 {
+        match self.id {
+            323 | 325 | 332 | 344 | 368 | 381 => 16,
+            256..=259
+            | 261
+            | 267..=279
+            | 282..=286
+            | 290..=294
+            | 298..=317
+            | 326..=329
+            | 333
+            | 335
+            | 342
+            | 343
+            | 346
+            | 354
+            | 355
+            | 358
+            | 359
+            | 373
+            | 386
+            | 387
+            | 398
+            | 403
+            | 407
+            | 408
+            | 417..=419
+            | 2256..=2267 => 1,
+            _ => 64,
+        }
+    }
     pub fn is_valid(self) -> bool {
-        (1..=4095).contains(&self.id) && (1..=64).contains(&self.count) && self.damage >= 0
+        (1..=4095).contains(&self.id)
+            && (1..=self.max_count()).contains(&self.count)
+            && self.damage >= 0
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -87,16 +122,7 @@ impl Default for Inventory {
 impl Inventory {
     /// Equipment slots are 5=helmet, 6=chest, 7=leggings, 8=boots in window zero.
     fn armor_compatible(slot: usize, stack: Stack) -> bool {
-        if stack.count != 1 {
-            return false;
-        }
-        match slot {
-            5 => matches!(stack.id, 298 | 302 | 306 | 310 | 314),
-            6 => matches!(stack.id, 299 | 303 | 307 | 311 | 315),
-            7 => matches!(stack.id, 300 | 304 | 308 | 312 | 316),
-            8 => matches!(stack.id, 301 | 305 | 309 | 313 | 317),
-            _ => false,
-        }
+        armor_accepts(slot as i16, stack)
     }
     pub fn armor_points(&self) -> u8 {
         self.slots[5..9]
@@ -249,8 +275,11 @@ impl Inventory {
         let mut changed = Vec::new();
         for slot in (36..45).chain(9..36) {
             if let Some(current) = next.slots[slot].as_mut() {
-                if current.id == item.id && current.damage == item.damage && current.count < 64 {
-                    let add = (64 - current.count).min(remaining);
+                if current.id == item.id
+                    && current.damage == item.damage
+                    && current.count < current.max_count()
+                {
+                    let add = (current.max_count() - current.count).min(remaining);
                     current.count += add;
                     remaining -= add;
                     changed.push(slot as i16);
@@ -391,13 +420,27 @@ impl Inventory {
         }
     }
     fn spend_ingredients(&mut self, window: u8) {
-        // Called only after verifying a recipe and a destination with capacity.
+        // Only after a recipe output has a durable destination.
+        // In 1.7.10 crafting a cake consumes milk but leaves empty buckets
+        // in the three original grid slots. No extra inventory space needed.
+        let cake = self
+            .crafting_result(window)
+            .is_some_and(|output| output.id == 354);
         let size = if window == 0 { 4 } else { 9 };
         for index in 0..size {
             let slot = index + 1;
             if let Some(mut stack) = self.lookup(window, slot as i16) {
                 stack.count -= 1;
-                self.assign(window, slot as i16, (stack.count != 0).then_some(stack));
+                let next = if cake && stack.id == 335 {
+                    Some(Stack {
+                        id: 325,
+                        count: 1,
+                        damage: 0,
+                    })
+                } else {
+                    (stack.count != 0).then_some(stack)
+                };
+                self.assign(window, slot as i16, next);
             }
         }
     }
@@ -407,8 +450,11 @@ impl Inventory {
         let end = if window == 0 { 45 } else { 46 };
         for slot in begin..end {
             if let Some(mut stack) = self.lookup(window, slot) {
-                if stack.id == moving.id && stack.damage == moving.damage && stack.count < 64 {
-                    let count = (64 - stack.count).min(moving.count);
+                if stack.id == moving.id
+                    && stack.damage == moving.damage
+                    && stack.count < moving.max_count()
+                {
+                    let count = (moving.max_count() - stack.count).min(moving.count);
                     stack.count += count;
                     moving.count -= count;
                     self.assign(window, slot, Some(stack));
@@ -431,14 +477,26 @@ impl Inventory {
             return true;
         };
         if shift {
-            // This state is cloned by the session before persistence. Requiring
-            // full capacity prevents losing ingredients when output cannot fit.
-            let mut candidate = self.clone();
-            if candidate.move_to_player(window, output).is_some() {
-                return true;
+            // Craft repeatedly until ingredients or destination space run out.
+            // Keep each iteration atomic: a partly fitting result must never
+            // consume a recipe or create an item. The caller journals the batch.
+            let mut batch = self.clone();
+            let mut changed = false;
+            for _ in 0..64 {
+                let Some(product) = batch.crafting_result(window) else {
+                    break;
+                };
+                let mut next = batch.clone();
+                if next.move_to_player(window, product).is_some() {
+                    break;
+                }
+                next.spend_ingredients(window);
+                batch = next;
+                changed = true;
             }
-            candidate.spend_ingredients(window);
-            *self = candidate;
+            if changed {
+                *self = batch;
+            }
             return true;
         }
         let carried = match self.cursor {
@@ -446,7 +504,8 @@ impl Inventory {
             Some(mut old)
                 if old.id == output.id
                     && old.damage == output.damage
-                    && u16::from(old.count) + u16::from(output.count) <= 64 =>
+                    && u16::from(old.count) + u16::from(output.count)
+                        <= u16::from(output.max_count()) =>
             {
                 old.count += output.count;
                 Some(old)
@@ -513,7 +572,7 @@ impl Inventory {
                         }
                     }
                     let current = existing.map_or(0, |s| s.count);
-                    let adding = each.min(64 - current).min(held.count);
+                    let adding = each.min(held.max_count() - current).min(held.count);
                     if adding == 0 {
                         continue;
                     }
@@ -554,7 +613,7 @@ impl Inventory {
             if other.id != carried.id || other.damage != carried.damage {
                 continue;
             }
-            let count = (64 - carried.count).min(other.count);
+            let count = (carried.max_count() - carried.count).min(other.count);
             if count == 0 {
                 break;
             }
@@ -610,7 +669,7 @@ impl Inventory {
                     (Some(mut target), Some(mut hand), 0)
                         if target.id == hand.id && target.damage == hand.damage =>
                     {
-                        let n = (64 - target.count).min(hand.count);
+                        let n = (target.max_count() - target.count).min(hand.count);
                         target.count += n;
                         hand.count -= n;
                         (Some(target), (hand.count != 0).then_some(hand))
@@ -633,7 +692,7 @@ impl Inventory {
                     (Some(mut target), Some(mut hand), 1)
                         if target.id == hand.id
                             && target.damage == hand.damage
-                            && target.count < 64 =>
+                            && target.count < target.max_count() =>
                     {
                         target.count += 1;
                         hand.count -= 1;
@@ -681,9 +740,9 @@ impl Inventory {
                     if let Some(mut existing) = self.lookup(window, target) {
                         if existing.id == moving.id
                             && existing.damage == moving.damage
-                            && existing.count < 64
+                            && existing.count < existing.max_count()
                         {
-                            let amount = (64 - existing.count).min(moving.count);
+                            let amount = (existing.max_count() - existing.count).min(moving.count);
                             existing.count += amount;
                             moving.count -= amount;
                             self.assign(window, target, Some(existing));
@@ -800,7 +859,7 @@ impl Inventory {
                         continue;
                     }
                     let count = existing.map_or(0, |other| other.count);
-                    let transfer = each.min(64 - count).min(cursor.count);
+                    let transfer = each.min(cursor.max_count() - count).min(cursor.count);
                     if transfer == 0 {
                         continue;
                     }
@@ -855,7 +914,7 @@ impl Inventory {
             if existing.id != carried.id || existing.damage != carried.damage {
                 continue;
             }
-            let amount = (64 - carried.count).min(existing.count);
+            let amount = (carried.max_count() - carried.count).min(existing.count);
             if amount == 0 {
                 break;
             }
@@ -927,7 +986,7 @@ impl Inventory {
                     (Some(mut target), Some(mut hand), 0)
                         if target.id == hand.id && target.damage == hand.damage =>
                     {
-                        let count = (64 - target.count).min(hand.count);
+                        let count = (target.max_count() - target.count).min(hand.count);
                         target.count += count;
                         hand.count -= count;
                         (Some(target), (hand.count != 0).then_some(hand))
@@ -952,7 +1011,7 @@ impl Inventory {
                     (Some(mut target), Some(mut hand), 1)
                         if target.id == hand.id
                             && target.damage == hand.damage
-                            && target.count < 64 =>
+                            && target.count < target.max_count() =>
                     {
                         target.count += 1;
                         hand.count -= 1;
@@ -974,9 +1033,9 @@ impl Inventory {
                     if let Some(mut existing) = self.chest_stack(chest, target) {
                         if existing.id == moving.id
                             && existing.damage == moving.damage
-                            && existing.count < 64
+                            && existing.count < existing.max_count()
                         {
-                            let count = (64 - existing.count).min(moving.count);
+                            let count = (existing.max_count() - existing.count).min(moving.count);
                             existing.count += count;
                             moving.count -= count;
                             self.set_chest_stack(chest, target, Some(existing));
@@ -1132,7 +1191,8 @@ impl Inventory {
                     Some(mut current)
                         if current.id == output.id
                             && current.damage == output.damage
-                            && u16::from(current.count) + u16::from(output.count) <= 64 =>
+                            && u16::from(current.count) + u16::from(output.count)
+                                <= u16::from(output.max_count()) =>
                     {
                         current.count += output.count;
                         Some(current)
@@ -1166,7 +1226,7 @@ impl Inventory {
                 (item, None, 0) => (None, item),
                 (None, item, 0) => (item, None),
                 (Some(mut item), Some(mut cursor), 0) => {
-                    let amount = (64 - item.count).min(cursor.count);
+                    let amount = (item.max_count() - item.count).min(cursor.count);
                     item.count += amount;
                     cursor.count -= amount;
                     (Some(item), (cursor.count != 0).then_some(cursor))
@@ -1191,7 +1251,7 @@ impl Inventory {
                     )
                 }
                 (Some(mut item), Some(mut cursor), 1) => {
-                    let amount = u8::from(item.count < 64);
+                    let amount = u8::from(item.count < item.max_count());
                     item.count += amount;
                     cursor.count -= amount;
                     (Some(item), (cursor.count != 0).then_some(cursor))
@@ -1272,6 +1332,69 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_item_caps_apply_in_player_chest_and_hopper_windows() {
+        let potion = Stack {
+            id: 373,
+            count: 1,
+            damage: 8194,
+        };
+        assert_eq!(potion.max_count(), 1);
+        assert!(!(Stack { count: 2, ..potion }).is_valid());
+        assert_eq!(
+            Stack {
+                id: 332,
+                count: 16,
+                damage: 0
+            }
+            .max_count(),
+            16
+        );
+        assert!(!(Stack {
+            id: 332,
+            count: 17,
+            damage: 0
+        })
+        .is_valid());
+
+        let mut inv = Inventory::default();
+        inv.creative_set(36, Some(potion)).unwrap();
+        inv.creative_set(37, Some(potion)).unwrap();
+        assert!(inv.click_window(0, 36, 0, 0));
+        assert!(inv.click_window(0, 37, 0, 0));
+        assert_eq!(inv.slots[37], Some(potion));
+        assert_eq!(inv.cursor, Some(potion));
+        assert!(inv.click_window(0, 38, 0, 0));
+        assert_eq!(inv.slots[38], Some(potion));
+
+        let mut chest = [None; 27];
+        chest[0] = Some(potion);
+        inv.cursor = Some(potion);
+        assert!(inv.chest_click(&mut chest, 0, 0, 0).is_some());
+        assert_eq!(chest[0], Some(potion));
+        assert_eq!(inv.cursor, Some(potion));
+    }
+
+    #[test]
+    fn shift_crafting_consumes_each_iteration_and_stops_at_capacity() {
+        let mut inv = Inventory::default();
+        // 2x2 player grid ingredients are only set through server-owned clicks.
+        inv.creative_set(
+            36,
+            Some(Stack {
+                id: 17,
+                count: 3,
+                damage: 0,
+            }),
+        )
+        .unwrap();
+        assert!(inv.click_window(0, 36, 0, 0));
+        assert!(inv.click_window(0, 1, 0, 0));
+        assert!(inv.click_window(0, 0, 0, 1));
+        assert!(inv.crafting_result(0).is_none());
+        assert_eq!(inv.slots[9].unwrap().count, 12);
+        assert_eq!(inv.slots[1], None);
+    }
     #[test]
     fn armor_equipping_reduces_damage_and_is_included_in_death_drops() {
         let mut inv = super::Inventory::default();

@@ -60,7 +60,9 @@ fn move_one(src: &mut [Option<Stack>], dst: &mut [Option<Stack>]) -> bool {
         let target_index = dst
             .iter()
             .position(|target| {
-                target.is_some_and(|s| s.id == stack.id && s.damage == stack.damage && s.count < 64)
+                target.is_some_and(|s| {
+                    s.id == stack.id && s.damage == stack.damage && s.count < s.max_count()
+                })
             })
             .or_else(|| dst.iter().position(Option::is_none));
         let Some(index) = target_index else { continue };
@@ -288,6 +290,30 @@ impl Hoppers {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hopper_never_merges_unstackable_potions_or_mints_items() {
+        let potion = Stack {
+            id: 373,
+            count: 1,
+            damage: 8194,
+        };
+        let mut source = [Some(potion)];
+        let mut target = [Some(potion); 5];
+        assert!(!move_one(&mut source, &mut target));
+        assert_eq!(source[0], Some(potion));
+        target[4] = None;
+        assert!(move_one(&mut source, &mut target));
+        assert_eq!(source[0], None);
+        assert_eq!(target[4], Some(potion));
+        assert_eq!(
+            target
+                .iter()
+                .flatten()
+                .map(|item| u32::from(item.count))
+                .sum::<u32>(),
+            5
+        );
+    }
     use super::*;
     #[test]
     fn transfer_one_respects_stack_boundaries_and_item_conservation() {
