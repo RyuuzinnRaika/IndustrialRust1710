@@ -236,7 +236,7 @@ fn join(
     join.extend_from_slice(&[
         u8::from(!survival),
         dimension_id as u8,
-        1,
+        2, // Java 1.7.10 Normal difficulty is protocol value 2
         MAX_PLAYERS as u8,
     ]);
     write_string("default", &mut join)?;
@@ -484,6 +484,18 @@ struct ActiveEffect {
 }
 /// Legacy status effects tick faster at higher amplifiers. A Potion II must
 /// never heal or poison at the level-I interval.
+/// Non-cryptographic server-side roll for probabilistic food effects.
+/// Clients never provide this number or choose the inflicted effects.
+fn food_effect_roll(now_tick: u64, entity_id: i32) -> u8 {
+    let mut x = now_tick ^ (entity_id as u32 as u64).wrapping_mul(0x9e3779b97f4a7c15);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d049bb133111eb);
+    x ^= x >> 31;
+    (x % 100) as u8
+}
+
 fn periodic_effect_interval(kind: u8, amplifier: u8) -> u64 {
     let base = match kind {
         10 => 50_u64, // regeneration
@@ -908,7 +920,13 @@ fn play(
         if survival && vitals.health > 0.0 && now_tick > last_effect_tick {
             last_effect_tick = now_tick;
             let old_health = vitals.health;
+            let old_food = vitals.food;
+            let old_saturation = vitals.saturation;
+            let old_exhaustion = vitals.exhaustion;
             for effect in &mut active_effects {
+                if effect.kind == 17 && now_tick < effect.expires_at {
+                    vitals.apply_hunger_effect_tick(effect.amplifier);
+                }
                 if now_tick >= effect.next_periodic && now_tick < effect.expires_at {
                     let amount = f32::from(effect.amplifier) + 1.0;
                     if effect.kind == 10 {
@@ -929,9 +947,18 @@ fn play(
                 }
             }
             active_effects.retain(|effect| now_tick < effect.expires_at);
-            if vitals.health != old_health {
+            let visible_changed = vitals.health != old_health
+                || vitals.food != old_food
+                || vitals.saturation != old_saturation;
+            // Persist hidden exhaustion at most once per second to avoid
+            // 20 sync writes/sec/player while a Hunger effect is active.
+            if visible_changed
+                || (vitals.exhaustion != old_exhaustion && now_tick.is_multiple_of(20))
+            {
                 player.save_state(player_path, *vitals)?;
-                send(s, 0x06, &health_packet(*vitals))?;
+                if visible_changed {
+                    send(s, 0x06, &health_packet(*vitals))?;
+                }
             }
         }
         // Food and drink consumption both finish after 32 server ticks.
@@ -981,6 +1008,30 @@ fn play(
                                 )?;
                             }
                         }
+                    } else if inventory.held() == Some(stack) && stack.id == 335 {
+                        // In 1.7.10 drinking milk clears all effects even when
+                        // the player is at full hunger. Charge the milk and
+                        // return one empty bucket before removing any effects.
+                        let mut remaining = inventory.clone();
+                        if remaining.consume_held()
+                            && remaining
+                                .receive_stack(Stack {
+                                    id: 325,
+                                    count: 1,
+                                    damage: 0,
+                                })
+                                .is_some()
+                        {
+                            remaining.save(inventory_path)?;
+                            *inventory = remaining;
+                            for effect in active_effects.drain(..) {
+                                let mut removed = entity_id.to_be_bytes().to_vec();
+                                removed.push(effect.kind);
+                                send(s, 0x1e, &removed)?;
+                            }
+                            send(s, 0x30, &inventory.window_items())?;
+                            send(s, 0x2f, &inventory.cursor_packet())?;
+                        }
                     } else if inventory.held() == Some(stack) && vitals.can_eat(stack) {
                         let mut remaining = inventory.clone();
                         if remaining.consume_held() {
@@ -1004,6 +1055,47 @@ fn play(
                                     player.save_state(player_path, after)?;
                                     *inventory = remaining;
                                     *vitals = after;
+                                    for effect in vitals::food_side_effects(
+                                        stack,
+                                        food_effect_roll(now_tick, entity_id),
+                                    ) {
+                                        let expires_at = now_tick
+                                            .saturating_add(u64::from(effect.duration_ticks));
+                                        // Weaker/shorter food effects cannot erase an
+                                        // existing stronger or longer potion effect.
+                                        let replace = active_effects
+                                            .iter()
+                                            .find(|old| old.kind == effect.kind)
+                                            .is_none_or(|old| {
+                                                effect.amplifier > old.amplifier
+                                                    || (effect.amplifier == old.amplifier
+                                                        && expires_at > old.expires_at)
+                                            });
+                                        if replace {
+                                            active_effects.retain(|old| old.kind != effect.kind);
+                                            active_effects.push(ActiveEffect {
+                                                kind: effect.kind,
+                                                amplifier: effect.amplifier,
+                                                expires_at,
+                                                next_periodic: now_tick.saturating_add(
+                                                    periodic_effect_interval(
+                                                        effect.kind,
+                                                        effect.amplifier,
+                                                    ),
+                                                ),
+                                            });
+                                            send(
+                                                s,
+                                                0x1d,
+                                                &potion_effect_packet(
+                                                    entity_id,
+                                                    effect.kind,
+                                                    effect.amplifier,
+                                                    effect.duration_ticks,
+                                                ),
+                                            )?;
+                                        }
+                                    }
                                     if stack.id == 282 {
                                         send(s, 0x30, &inventory.window_items())?;
                                     } else {
@@ -1562,6 +1654,8 @@ fn play(
                                 bow_start = Some(now_tick);
                             } else if vitals.can_eat(stack)
                                 || (stack.id == 373 && brewing::effect(stack).is_some())
+                                || stack.id == 335
+                            // milk is drinkable at full hunger
                             {
                                 eating = Some((now_tick, stack));
                             }
@@ -2487,7 +2581,7 @@ fn play(
                     }
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = 0i32.to_be_bytes().to_vec();
-                    respawn.extend_from_slice(&[1, 0]); // normal difficulty, survival
+                    respawn.extend_from_slice(&[2, 0]); // normal difficulty, survival
                     write_string("default", &mut respawn)?;
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks on respawn
