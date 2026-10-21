@@ -332,8 +332,14 @@ impl Inventory {
     pub fn exchange_single_held(&mut self, expected: i16, result: i16) -> bool {
         let slot = &mut self.slots[36 + self.selected as usize];
         match slot {
-            Some(stack) if stack.id == expected && stack.count == 1 =>
-                { *slot = Some(Stack {id: result, count:1, damage:0}); true }
+            Some(stack) if stack.id == expected && stack.count == 1 => {
+                *slot = Some(Stack {
+                    id: result,
+                    count: 1,
+                    damage: 0,
+                });
+                true
+            }
             _ => false,
         }
     }
