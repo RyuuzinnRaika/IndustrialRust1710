@@ -127,9 +127,7 @@ fn inventory_window_fixtures_preserve_protocol5_slot_and_frame_layout() {
         [0x2f, 0, 0, 36, 0, 4, 64, 0, 2, 255, 255]
     );
     // S30: window 0, two entries: empty and 1 x stone, no NBT.
-    const WINDOW_ITEMS: &[u8] = &[
-        13, 0x30, 0, 0, 2, 255, 255, 0, 1, 32, 0, 0, 255, 255,
-    ];
+    const WINDOW_ITEMS: &[u8] = &[13, 0x30, 0, 0, 2, 255, 255, 0, 1, 32, 0, 0, 255, 255];
     let mut packet = WINDOW_ITEMS;
     let raw = read_frame(&mut packet).unwrap();
     assert_eq!(raw[0], 0x30);
