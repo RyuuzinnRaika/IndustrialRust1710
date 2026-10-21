@@ -19,17 +19,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Temporary rustfmt export for B13-B22 PR
-        run: |
-          cargo fmt --all
-          for f in apps/vanilla-server/src/*.rs; do
-            if ! git diff --quiet -- "$f"; then
-              echo "BEGIN_FORMAT:$f"
-              base64 -w0 "$f"
-              echo
-              echo "END_FORMAT:$f"
-            fi
-          done
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Native Minecraft Protocol 5 tests (real TCP and Anvil roundtrip)
