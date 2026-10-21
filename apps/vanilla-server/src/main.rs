@@ -952,7 +952,9 @@ fn play(
                 || vitals.saturation != old_saturation;
             // Persist hidden exhaustion at most once per second to avoid
             // 20 sync writes/sec/player while a Hunger effect is active.
-            if visible_changed || (vitals.exhaustion != old_exhaustion && now_tick.is_multiple_of(20)) {
+            if visible_changed
+                || (vitals.exhaustion != old_exhaustion && now_tick.is_multiple_of(20))
+            {
                 player.save_state(player_path, *vitals)?;
                 if visible_changed {
                     send(s, 0x06, &health_packet(*vitals))?;
