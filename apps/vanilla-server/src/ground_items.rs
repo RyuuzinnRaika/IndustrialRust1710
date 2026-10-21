@@ -316,12 +316,18 @@ mod tests {
         assert_eq!(object.body.len(), 24);
         assert_eq!(metadata.id, 0x1c);
         let mut metadata_data = metadata.body.as_slice();
-        assert_eq!(legacy_protocol::read_varint(&mut metadata_data).unwrap(), item.id as u32);
+        assert_eq!(
+            legacy_protocol::read_varint(&mut metadata_data).unwrap(),
+            item.id as u32
+        );
         assert_eq!(metadata_data, &[0xaa, 0, 3, 1, 0, 0, 255, 255, 127]);
         let [collect, destroy] = item.collected(42);
         assert_eq!(collect.id, 0x0d);
         let mut collect_data = collect.body.as_slice();
-        assert_eq!(legacy_protocol::read_varint(&mut collect_data).unwrap(), item.id as u32);
+        assert_eq!(
+            legacy_protocol::read_varint(&mut collect_data).unwrap(),
+            item.id as u32
+        );
         assert_eq!(legacy_protocol::read_varint(&mut collect_data).unwrap(), 42);
         assert!(collect_data.is_empty());
         assert_eq!(destroy.id, 0x13);
