@@ -1124,6 +1124,23 @@ fn play(
                 input.finish()?;
                 if message == "/help" {
                     as_chat(s, "Commands: /help, /save, /list. Survival includes mobs, XP, ranged combat, hazards, armor and crafting.")?;
+                } else if let Some(name) = message.strip_prefix("/summon ") {
+                    // Never expose a server-mutation test command to remote
+                    // whitelist users (offline names are not authenticated).
+                    if !s.peer_addr()?.ip().is_loopback() {
+                        as_chat(s, "Summon is restricted to local test clients.")?;
+                    } else {
+                        let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        let event = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?
+                            .summon(name.trim(), &w, *player);
+                        drop(w);
+                        if let Some(event) = event {
+                            hub.broadcast(event);
+                            as_chat(s, "Server-owned mob spawned.")?;
+                        } else {
+                            as_chat(s, "Cannot summon that mob at this position.")?;
+                        }
+                    }
                 } else if message == "/list" {
                     as_chat(
                         s,
