@@ -936,6 +936,7 @@ fn play(
                             let result = attempt
                                 .and_then(|m| m.finish(target, w.get(x, y, z), inventory.held()));
                             let mut changed = false;
+                            let mut xp_reward: u16 = 0;
                             if world::in_bounds(x, y, z) && near(location, x, y, z) {
                                 if let Some(result) = result {
                                     let block = w.get(x, y, z) >> 4;
@@ -997,6 +998,11 @@ fn play(
                                                         }
                                                     }
                                                     changed = true;
+                                                    // Ore XP is awarded only after a real
+                                                    // committed Survival block removal.
+                                                    xp_reward=match block {
+                                                        16=>1,21|73|74=>3,56|129=>5,_=>0
+                                                    };
                                                 }
                                                 Ok(false) => {
                                                     if wore {
@@ -1017,6 +1023,11 @@ fn play(
                             let event = block_change_event(&w, x, y, z);
                             if changed {
                                 hub.broadcast(event);
+                                if xp_reward>0 {
+                                    let at=PlayerPosition{x:x as f64+0.5,y:y as f64+0.5,z:z as f64+0.5};
+                                    if let Some(packet)=orbs.lock().map_err(|_|bad("orb mutex poisoned"))?
+                                        .spawn(at,xp_reward,now_tick) {hub.broadcast(packet);}
+                                }
                             } else {
                                 send(s, event.id, &event.body)?;
                             }
