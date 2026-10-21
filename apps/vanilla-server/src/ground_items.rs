@@ -297,10 +297,8 @@ mod tests {
         use crate::inventory::Inventory;
         use crate::journal;
 
-        let dir = std::env::temp_dir().join(format!(
-            "ir1710-ground-journal-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ir1710-ground-journal-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("players")).unwrap();
         let inventory_file = dir.join("players/rust.inventory.json");
@@ -328,14 +326,14 @@ mod tests {
         )
         .unwrap();
         assert!(!pending_file.exists());
-        assert!(Inventory::load(&inventory_file).unwrap().possessions().is_empty());
+        assert!(Inventory::load(&inventory_file)
+            .unwrap()
+            .possessions()
+            .is_empty());
         let loaded_ground = GroundItems::load(&ground_file).unwrap();
         assert_eq!(loaded_ground.items().next().unwrap().stack, stack);
 
-        let (taken_ground, claimed) = loaded_ground
-            .stage_take(spawned[0].id)
-            .unwrap()
-            .unwrap();
+        let (taken_ground, claimed) = loaded_ground.stage_take(spawned[0].id).unwrap().unwrap();
         let mut credited = debited.clone();
         assert!(credited.receive_stack(claimed.stack).is_some());
         journal::commit(
