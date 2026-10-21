@@ -432,6 +432,22 @@ fn stage_chest_window(
     }
 }
 
+/// The client receives all potion-effect packets; health-bearing effects are
+/// also enforced server-side rather than trusting client-reported HP.
+#[derive(Clone, Copy)]
+struct ActiveEffect {
+    kind: u8,
+    amplifier: u8,
+    expires_at: u64,
+    next_periodic: u64,
+}
+fn potion_effect_packet(entity: i32, kind:u8, amplifier:u8, duration:u16)->Vec<u8> {
+    let mut packet=entity.to_be_bytes().to_vec();
+    packet.push(kind);
+    packet.push(amplifier);
+    packet.extend_from_slice(&(duration as i16).to_be_bytes());
+    packet
+}
 struct PlayerSession<'a> {
     position: &'a mut PlayerPosition,
     vitals: &'a mut Vitals,
@@ -517,6 +533,8 @@ fn play(
     let mut next_window: u8 = 1;
     let mut last_pickup = Instant::now();
     let mut eating: Option<(u64, Stack)> = None;
+    let mut active_effects: Vec<ActiveEffect> = Vec::new();
+    let mut last_effect_tick = clock.ticks();
     loop {
         while let Ok(event) = events.try_recv() {
             send(s, event.id, &event.body)?;
@@ -677,13 +695,62 @@ fn play(
                 *vitals = next;
             }
         }
-        // A food right-click starts a 32 tick use animation. The server owns
-        // completion, selection, consumption, and the resulting food values.
+        if survival && now_tick > last_effect_tick {
+            last_effect_tick=now_tick;
+            let old_health=vitals.health;
+            for effect in &mut active_effects {
+                if now_tick>=effect.next_periodic && now_tick<effect.expires_at {
+                    let amount=f32::from(effect.amplifier)+1.0;
+                    if effect.kind==10 { vitals.health=(vitals.health+amount).min(20.0); }
+                    if effect.kind==19 { vitals.health=(vitals.health-amount).max(1.0); }
+                    effect.next_periodic=now_tick+if effect.kind==10 {50} else {25};
+                }
+            }
+            for effect in &active_effects {
+                if now_tick>=effect.expires_at {
+                    let mut removed=entity_id.to_be_bytes().to_vec();
+                    removed.push(effect.kind);
+                    send(s,0x1e,&removed)?;
+                }
+            }
+            active_effects.retain(|effect|now_tick<effect.expires_at);
+            if vitals.health!=old_health {
+                player.save_state(player_path,*vitals)?;
+                send(s,0x06,&health_packet(*vitals))?;
+            }
+        }
+        // Food and drink consumption both finish after 32 server ticks.
         if survival && vitals.health > 0.0 {
             if let Some((began, stack)) = eating {
                 if now_tick.saturating_sub(began) >= 32 {
                     eating = None;
-                    if inventory.held() == Some(stack) && vitals.can_eat(stack) {
+                    if inventory.held()==Some(stack) && stack.id==373 {
+                        if let Some((kind, amplifier, duration))=brewing::effect(stack) {
+                            let mut remaining=inventory.clone();
+                            if remaining.consume_held() && remaining.receive_stack(Stack {
+                                id:374,count:1,damage:0
+                            }).is_some() {
+                                // Inventory debit is durable before temporary status or HP gain.
+                                remaining.save(inventory_path)?;
+                                *inventory=remaining;
+                                if kind==6 {
+                                    vitals.health=(vitals.health+4.0*f32::from(amplifier+1)).min(20.0);
+                                } else if kind==7 {
+                                    vitals.health=(vitals.health-6.0*f32::from(amplifier+1)).max(0.0);
+                                } else {
+                                    active_effects.retain(|effect|effect.kind!=kind);
+                                    active_effects.push(ActiveEffect {
+                                        kind,amplifier,expires_at:now_tick+u64::from(duration),
+                                        next_periodic:now_tick+if kind==10 {50} else {25},
+                                    });
+                                }
+                                player.save_state(player_path,*vitals)?;
+                                send(s,0x30,&inventory.window_items())?;
+                                send(s,0x06,&health_packet(*vitals))?;
+                                send(s,0x1d,&potion_effect_packet(entity_id,kind,amplifier,duration))?;
+                            }
+                        }
+                    } else if inventory.held() == Some(stack) && vitals.can_eat(stack) {
                         let mut remaining = inventory.clone();
                         if remaining.consume_held() {
                             let mut after = *vitals;
@@ -1095,7 +1162,8 @@ fn play(
                 // Only an authenticated, selected inventory stack can be used.
                 if survival && x == -1 && y == 255 && z == -1 && face == -1 {
                     if let Some(stack) = inventory.held() {
-                        if inventory.can_place(held) && vitals.can_eat(stack) {
+                        if inventory.can_place(held)
+                            && (vitals.can_eat(stack) || (stack.id==373 && brewing::effect(stack).is_some())) {
                             eating = Some((now_tick, stack));
                         }
                     }
