@@ -64,6 +64,8 @@ pub struct Inventory {
     workbench: [Option<Stack>; 9],
     #[serde(skip)]
     drag: Drag,
+    #[serde(default)]
+    bed_spawn: Option<[i32; 3]>,
 }
 impl Default for Inventory {
     fn default() -> Self {
@@ -74,6 +76,7 @@ impl Default for Inventory {
             cursor: None,
             workbench: [None; 9],
             drag: Drag::default(),
+            bed_spawn: None,
         }
     }
 }
@@ -85,6 +88,7 @@ impl Inventory {
         if self.version != VERSION
             || self.selected > 8
             || self.slots.len() != SLOT_COUNT
+            || self.bed_spawn.is_some_and(|[x,y,z]| !crate::world::in_bounds(x,y,z))
             || self.slots[0].is_some()
             || self.slots[5..9].iter().enumerate().any(|(n, item)| item.is_some_and(|stack| !armor_accepts((n + 5) as i16, stack)))
             || self
@@ -139,6 +143,14 @@ impl Inventory {
         drop(output);
         // Atomic on supported filesystems; never delete original before renaming.
         fs::rename(&temp, path)
+    }
+    pub fn bed_spawn(&self) -> Option<(i32,i32,i32)> {
+        self.bed_spawn.map(|[x,y,z]| (x,y,z))
+    }
+    pub fn set_bed_spawn(&mut self, x: i32, y: i32, z: i32) -> io::Result<()> {
+        if !crate::world::in_bounds(x,y,z) { return Err(invalid("invalid bed spawn")); }
+        self.bed_spawn = Some([x,y,z]);
+        Ok(())
     }
     pub fn selected(&self) -> u8 {
         self.selected
