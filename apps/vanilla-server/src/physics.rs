@@ -68,9 +68,19 @@ fn shapes(id: u16, meta: u16) -> Vec<Shape> {
             if meta & 4 != 0 {
                 Vec::new() // An opened fence gate has no collision volume.
             } else if meta & 1 == 0 {
-                vec![Shape { z0: 0.375, z1: 0.625, y1: 1.5, ..FULL }]
+                vec![Shape {
+                    z0: 0.375,
+                    z1: 0.625,
+                    y1: 1.5,
+                    ..FULL
+                }]
             } else {
-                vec![Shape { x0: 0.375, x1: 0.625, y1: 1.5, ..FULL }]
+                vec![Shape {
+                    x0: 0.375,
+                    x1: 0.625,
+                    y1: 1.5,
+                    ..FULL
+                }]
             }
         }
         96 => {
@@ -100,7 +110,7 @@ fn shapes(id: u16, meta: u16) -> Vec<Shape> {
                 _ => Shape { x1: 0.1875, ..FULL },
             };
             vec![thin]
-        },
+        }
         60 => vec![Shape { y1: 0.9375, ..FULL }],
         43 | 125 | 181 => vec![FULL],
         _ => {

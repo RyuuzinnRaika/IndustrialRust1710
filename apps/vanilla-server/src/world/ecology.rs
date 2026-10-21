@@ -23,7 +23,10 @@ fn plantable(id: u16) -> bool {
     matches!(id, 2 | 3 | 60)
 }
 fn flammable(id: u16) -> bool {
-    matches!(id, 5 | 6 | 17 | 18 | 35 | 47 | 53 | 58 | 85 | 86 | 103 | 107 | 125 | 126 | 162)
+    matches!(
+        id,
+        5 | 6 | 17 | 18 | 35 | 47 | 53 | 58 | 85 | 86 | 103 | 107 | 125 | 126 | 162
+    )
 }
 
 impl World {
@@ -42,7 +45,9 @@ impl World {
                         .all(|&(dx, dz)| !solid(self.get(x + dx, y, z + dz) >> 4))
             }
             83 => {
-                if below == 83 { return true; }
+                if below == 83 {
+                    return true;
+                }
                 matches!(below, 2 | 3 | 12)
                     && [(1, 0), (-1, 0), (0, 1), (0, -1)]
                         .iter()
@@ -50,11 +55,14 @@ impl World {
             }
             127 => {
                 let (dx, dz) = match block & 3 {
-                    0 => (0, 1), 1 => (-1, 0), 2 => (0, -1), _ => (1, 0),
+                    0 => (0, 1),
+                    1 => (-1, 0),
+                    2 => (0, -1),
+                    _ => (1, 0),
                 };
                 let support = self.get(x + dx, y, z + dz);
                 support >> 4 == 17 && support & 3 == 3
-            },
+            }
             50 | 75 | 76 => {
                 let support = match block & 7 {
                     1 => self.get(x - 1, y, z) >> 4,
@@ -282,7 +290,10 @@ impl World {
                     } else {
                         let fruit = if id == 104 { 86 } else { 103 };
                         let neighbors = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-                        if !neighbors.iter().any(|&(dx, dz)| self.get(x + dx, height, z + dz) >> 4 == fruit) {
+                        if !neighbors
+                            .iter()
+                            .any(|&(dx, dz)| self.get(x + dx, height, z + dz) >> 4 == fruit)
+                        {
                             let index = (self.fluid_phase / 20) as usize % neighbors.len();
                             let (dx, dz) = neighbors[index];
                             let (nx, nz) = (x + dx, z + dz);
@@ -303,11 +314,20 @@ impl World {
                     } else {
                         let age = block & 15;
                         let mut fuel = false;
-                        for (dx, dy, dz) in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                        for (dx, dy, dz) in [
+                            (1, 0, 0),
+                            (-1, 0, 0),
+                            (0, 1, 0),
+                            (0, -1, 0),
+                            (0, 0, 1),
+                            (0, 0, -1),
+                        ] {
                             let nx = x + dx;
                             let ny = height + dy;
                             let nz = z + dz;
-                            if !in_bounds(nx, ny, nz) { continue; }
+                            if !in_bounds(nx, ny, nz) {
+                                continue;
+                            }
                             if flammable(self.get(nx, ny, nz) >> 4) {
                                 fuel = true;
                                 if chance(self.fluid_phase, nx, ny, nz, 5) {

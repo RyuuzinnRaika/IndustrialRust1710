@@ -1831,18 +1831,18 @@ fn play(
                                 379 => 117,
                                 326 => 8,
                                 327 => 10,
-                                295 => 59,  // wheat seeds
-                                391 => 141, // carrot
-                                392 => 142, // potato
-                                356 => 93,  // repeater
-                                404 => 149, // comparator
-                                338 => 83,  // sugar cane
-                                361 => 104, // pumpkin seeds
-                                362 => 105, // melon seeds
-                                372 => 115, // Nether wart
+                                295 => 59,                       // wheat seeds
+                                391 => 141,                      // carrot
+                                392 => 142,                      // potato
+                                356 => 93,                       // repeater
+                                404 => 149,                      // comparator
+                                338 => 83,                       // sugar cane
+                                361 => 104,                      // pumpkin seeds
+                                362 => 105,                      // melon seeds
+                                372 => 115,                      // Nether wart
                                 351 if stack.damage == 3 => 127, // cocoa beans
-                                324 => 64,  // wooden door
-                                330 => 71,  // iron door
+                                324 => 64,                       // wooden door
+                                330 => 71,                       // iron door
                                 _ => stack.id as u16,
                             };
                             let invalid_chest_merge =
@@ -1870,15 +1870,28 @@ fn play(
                                 ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
                             } else if block_id == 127 {
                                 // Cocoa attaches to the side of a jungle log.
-                                match face { 2 => 0, 3 => 2, 4 => 3, 5 => 1, _ => 0 }
-                            } else if matches!(block_id, 53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164) {
+                                match face {
+                                    2 => 0,
+                                    3 => 2,
+                                    4 => 3,
+                                    5 => 1,
+                                    _ => 0,
+                                }
+                            } else if matches!(
+                                block_id,
+                                53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164
+                            ) {
                                 // 1.7.10 stair orientation and inverted-half bit.
                                 let direction = ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3;
                                 direction | if face == 0 { 4 } else { 0 }
                             } else if block_id == 107 {
-                                ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
-                                ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
-                            } else if matches!(block_id, 59 | 141 | 142 | 104 | 105 | 81 | 83 | 115 | 8 | 10) {
+                                ((yaw.rem_euclid(360.0) / 90.0).round() as u16)
+                                    & 3((yaw.rem_euclid(360.0) / 90.0).round() as u16)
+                                    & 3
+                            } else if matches!(
+                                block_id,
+                                59 | 141 | 142 | 104 | 105 | 81 | 83 | 115 | 8 | 10
+                            ) {
                                 0
                             } else {
                                 stack.damage as u16 & 15

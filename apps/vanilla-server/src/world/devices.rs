@@ -78,12 +78,28 @@ impl World {
         let block = self.get(x, y, z);
         match block >> 4 {
             55 => (block & 15) as u8,
-            69 | 77 | 143 => if block & 8 != 0 { 15 } else { 0 },
-            70 | 72 => if block & 1 != 0 { 15 } else { 0 },
+            69 | 77 | 143 => {
+                if block & 8 != 0 {
+                    15
+                } else {
+                    0
+                }
+            }
+            70 | 72 => {
+                if block & 1 != 0 {
+                    15
+                } else {
+                    0
+                }
+            }
             76 | 152 => 15,
             94 => {
                 let (dx, dz) = repeater_direction(block);
-                if to == (x + dx, y, z + dz) { 15 } else { 0 }
+                if to == (x + dx, y, z + dz) {
+                    15
+                } else {
+                    0
+                }
             }
             150 => {
                 let (dx, dz) = repeater_direction(block);
@@ -92,7 +108,9 @@ impl World {
                         .get(&(x, y as u8, z))
                         .copied()
                         .unwrap_or(0)
-                } else { 0 }
+                } else {
+                    0
+                }
             }
             _ => 0,
         }
@@ -297,7 +315,8 @@ impl World {
                     if desired == output {
                         self.pending_comparators.remove(&pos);
                     } else {
-                        let entry = self.pending_comparators
+                        let entry = self
+                            .pending_comparators
                             .entry(pos)
                             .or_insert((self.fluid_phase + 2, desired));
                         if entry.1 != desired {
@@ -309,7 +328,10 @@ impl World {
                             self.comparator_ready.insert(pos, desired);
                             let active = desired != 0;
                             if active != (current >> 4 == 150) {
-                                changes.insert(pos, ((if active {150u16} else {149u16}) << 4) | (current & 15));
+                                changes.insert(
+                                    pos,
+                                    ((if active { 150u16 } else { 149u16 }) << 4) | (current & 15),
+                                );
                             }
                             self.pending_comparators.remove(&pos);
                         }
@@ -349,8 +371,9 @@ impl World {
             96 => old ^ 4,
             93 | 94 => (old & !12) | (((((old & 12) >> 2) + 1) & 3) << 2),
             149 | 150 => old ^ 4, // Toggle comparator compare/subtract mode.
-            107 => old ^ 4, // Fence gate: open/closed.
-            71 => { // Iron doors are powered only, not hand-operated.
+            107 => old ^ 4,       // Fence gate: open/closed.
+            71 => {
+                // Iron doors are powered only, not hand-operated.
                 return Ok(Vec::new());
             }
             64 => {
