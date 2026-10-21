@@ -878,7 +878,7 @@ fn play(
         }
         // A food right-click starts a 32 tick use animation. The server owns
         // completion, selection, consumption, and the resulting food values.
-        if survival && now_tick > last_effect_tick {
+        if survival && vitals.health > 0.0 && now_tick > last_effect_tick {
             last_effect_tick = now_tick;
             let old_health = vitals.health;
             for effect in &mut active_effects {
@@ -2374,6 +2374,11 @@ fn play(
                     idle_gravity = IdleGravity::new(now_tick);
                     eating = None;
                     bow_start = None;
+                    // Death clears every temporary potion effect; stale
+                    // regeneration must never resurrect a dead player before
+                    // the server has committed death drops and respawn.
+                    active_effects.clear();
+                    last_effect_tick = now_tick;
                     hazards = Hazards::new();
                     last_hazards_tick = now_tick;
                     // In vanilla, death loses XP and may leave up to 100 XP in orbs.
