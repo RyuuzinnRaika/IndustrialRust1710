@@ -2972,7 +2972,7 @@ fn main() -> io::Result<()> {
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-        Mobs::new_with_difficulty(&guard, survival, difficulty)
+        Mobs::load_or_new(&guard, survival, difficulty, &world_path.with_extension("mobs.json"))?
     }));
     let ground_path = Arc::new(GroundItems::location(&world_path));
     let ground_items = Arc::new(Mutex::new(if survival {
