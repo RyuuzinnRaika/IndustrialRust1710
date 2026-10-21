@@ -230,6 +230,7 @@ impl Mob {
 #[derive(Clone, Copy, Debug)]
 struct Arrow {
     id: i32,
+    object_type: u8,
     position: PlayerPosition,
     velocity: [f64; 3],
     shooter: Option<i32>,
@@ -240,7 +241,7 @@ impl Arrow {
     fn spawn(self) -> Event {
         let mut body = Vec::new();
         write_varint(self.id as u32, &mut body);
-        body.push(60); // Protocol 5 arrow object
+        body.push(self.object_type); // Protocol 5 projectile object
         for p in [self.position.x, self.position.y, self.position.z] {
             body.extend_from_slice(&((p * 32.0).floor() as i32).to_be_bytes());
         }
@@ -618,6 +619,7 @@ impl Mobs {
         self.next_id += 1;
         let arrow = Arrow {
             id,
+            object_type: 60,
             position: PlayerPosition {
                 y: at.y + 1.3,
                 ..at
@@ -630,6 +632,23 @@ impl Mobs {
         let event = arrow.spawn();
         self.arrows.insert(id, arrow);
         Some(event)
+    }
+    /// Reuses authoritative physics and shooter identity for all mob
+    /// projectiles. Type 60=arrow, 63=fireball, 64=small fireball,
+    /// 66=Wither skull, 73=splash potion (Protocol 5 object registry).
+    fn fire_mob_projectile(
+        &mut self, shooter: i32, at: PlayerPosition, target: PlayerPosition,
+        object_type: u8, speed: f64, damage: u8,
+    ) -> Option<Event> {
+        if !matches!(object_type, 60 | 63 | 64 | 66 | 73) { return None; }
+        let dx = target.x - at.x;
+        let dz = target.z - at.z;
+        let yaw = (-dx).atan2(dz).to_degrees() as f32;
+        let pitch = -(target.y + 1.0 - at.y).atan2(dx.hypot(dz)).to_degrees() as f32;
+        self.fire_arrow(Some(shooter), at, yaw, pitch, speed, damage)?;
+        let arrow = self.arrows.get_mut(&(self.next_id - 1))?;
+        arrow.object_type = object_type;
+        Some(arrow.spawn())
     }
     /// Natural spawning is gated by authoritative world lighting, biome,
     /// collision, difficulty and category caps. Never spawn inside 24 blocks
