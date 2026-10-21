@@ -404,14 +404,32 @@ impl Mobs {
     }
     /// Developer-only summon entry point. The caller is responsible for
     /// allowing this only from a trusted local client.
-    pub fn summon(&mut self, kind_name: &str, world: &World, near: PlayerPosition) -> Option<Event> {
+    pub fn summon(
+        &mut self,
+        kind_name: &str,
+        world: &World,
+        near: PlayerPosition,
+    ) -> Option<Event> {
         let kind = Kind::from_name(kind_name)?;
-        if self.entities.len() >= HOSTILE_CAP + PASSIVE_CAP + 40 { return None; }
-        let p = PlayerPosition {x:near.x+2.0,y:near.y,z:near.z+0.5};
-        if !p.is_valid() || physics::collides(world,&p) { return None; }
-        if !matches!(kind,Kind::EnderDragon|Kind::Wither|Kind::Ghast|Kind::Blaze)
-            && !physics::supported(world,&p) { return None; }
-        Some(self.insert(kind,p,false))
+        if self.entities.len() >= HOSTILE_CAP + PASSIVE_CAP + 40 {
+            return None;
+        }
+        let p = PlayerPosition {
+            x: near.x + 2.0,
+            y: near.y,
+            z: near.z + 0.5,
+        };
+        if !p.is_valid() || physics::collides(world, &p) {
+            return None;
+        }
+        if !matches!(
+            kind,
+            Kind::EnderDragon | Kind::Wither | Kind::Ghast | Kind::Blaze
+        ) && !physics::supported(world, &p)
+        {
+            return None;
+        }
+        Some(self.insert(kind, p, false))
     }
     /// Split only large Slimes/Magma Cubes. Child sizes are sent in Spawn
     /// Mob metadata, avoiding the original single-entity HP illusion.
@@ -423,12 +441,14 @@ impl Mobs {
             return Vec::new();
         }
         let mut events = Vec::new();
-        for (dx, dz) in [(-0.4,-0.4), (0.4,-0.4), (-0.4,0.4), (0.4,0.4)] {
+        for (dx, dz) in [(-0.4, -0.4), (0.4, -0.4), (-0.4, 0.4), (0.4, 0.4)] {
             let at = PlayerPosition {
-                x: dead.position.x+dx, y:dead.position.y, z:dead.position.z+dz,
+                x: dead.position.x + dx,
+                y: dead.position.y,
+                z: dead.position.z + dz,
             };
             self.insert(dead.kind, at, false);
-            let id = self.next_id-1;
+            let id = self.next_id - 1;
             if let Some(child) = self.entities.get_mut(&id) {
                 child.split_size = dead.split_size / 2;
                 child.health = (dead.kind.health() / 2).max(1);
@@ -620,11 +640,15 @@ impl Mobs {
         held: Option<Stack>,
     ) -> Option<AnimalInteraction> {
         let mob = self.entities.get_mut(&id)?;
-        if !mob.nearby(at, 3.0) || mob.baby { return None; }
+        if !mob.nearby(at, 3.0) || mob.baby {
+            return None;
+        }
         let stack = held?;
         match (mob.kind, stack.id) {
             (Kind::Cow, 325) if stack.count == 1 => Some(AnimalInteraction {
-                metadata: None, item: None, milk: true,
+                metadata: None,
+                item: None,
+                milk: true,
             }),
             (Kind::Sheep, 359) if !mob.sheared => {
                 mob.sheared = true;
@@ -637,7 +661,14 @@ impl Mobs {
                 );
                 Some(AnimalInteraction {
                     metadata: Some(Event { id: 0x1c, body }),
-                    item: Some((Stack { id: 35, count: 1, damage: 0 }, pos)),
+                    item: Some((
+                        Stack {
+                            id: 35,
+                            count: 1,
+                            damage: 0,
+                        },
+                        pos,
+                    )),
                     milk: false,
                 })
             }
@@ -718,10 +749,17 @@ impl Mobs {
     /// projectiles. Type 60=arrow, 63=fireball, 64=small fireball,
     /// 66=Wither skull, 73=splash potion (Protocol 5 object registry).
     fn fire_mob_projectile(
-        &mut self, shooter: i32, at: PlayerPosition, target: PlayerPosition,
-        object_type: u8, speed: f64, damage: u8,
+        &mut self,
+        shooter: i32,
+        at: PlayerPosition,
+        target: PlayerPosition,
+        object_type: u8,
+        speed: f64,
+        damage: u8,
     ) -> Option<Event> {
-        if !matches!(object_type, 60 | 63 | 64 | 66 | 73) { return None; }
+        if !matches!(object_type, 60 | 63 | 64 | 66 | 73) {
+            return None;
+        }
         let dx = target.x - at.x;
         let dz = target.z - at.z;
         let yaw = (-dx).atan2(dz).to_degrees() as f32;
@@ -764,9 +802,7 @@ impl Mobs {
             // the surface scan silently replace a failed cave probe.
             let y = if index % 2 == 0 {
                 surface_y
-            } else if let Some(y) =
-                cave_spawn_y(world, x, z, surface_y, hash(seed ^ 0x53a9c37d))
-            {
+            } else if let Some(y) = cave_spawn_y(world, x, z, surface_y, hash(seed ^ 0x53a9c37d)) {
                 y
             } else {
                 continue;
@@ -982,25 +1018,27 @@ impl Mobs {
                     }
                 }
                 let ranged = match mob.kind {
-                    Kind::Skeleton if (5.0..16.0).contains(&d) =>
-                        Some((60, 1.5, 3u8, 40u64)),
-                    Kind::Witch if d < 12.0 =>
-                        Some((73, 0.75, 3, 60)),
-                    Kind::Ghast if d < 48.0 =>
-                        Some((63, 0.85, 6, 55)),
-                    Kind::Blaze if d < 18.0 =>
-                        Some((64, 1.0, 5, 45)),
-                    Kind::Wither if d < 32.0 =>
-                        Some((66, 1.0, 8, 40)),
+                    Kind::Skeleton if (5.0..16.0).contains(&d) => Some((60, 1.5, 3u8, 40u64)),
+                    Kind::Witch if d < 12.0 => Some((73, 0.75, 3, 60)),
+                    Kind::Ghast if d < 48.0 => Some((63, 0.85, 6, 55)),
+                    Kind::Blaze if d < 18.0 => Some((64, 1.0, 5, 45)),
+                    Kind::Wither if d < 32.0 => Some((66, 1.0, 8, 40)),
                     _ => None,
                 };
                 if let Some((object_type, speed, damage, delay)) = ranged {
                     if now.saturating_sub(mob.bite_tick) >= delay
                         && mob_rules::visible(
                             world,
-                            PlayerPosition { y: mob.position.y + 1.5, ..mob.position },
-                            PlayerPosition { y: target.y + 1.5, ..target },
-                            64.0)
+                            PlayerPosition {
+                                y: mob.position.y + 1.5,
+                                ..mob.position
+                            },
+                            PlayerPosition {
+                                y: target.y + 1.5,
+                                ..target
+                            },
+                            64.0,
+                        )
                     {
                         mob.bite_tick = now;
                         shots.push((mob.id, mob.position, target, object_type, speed, damage));
@@ -1150,9 +1188,9 @@ impl Mobs {
                 }
             }
             for (id, at, target, object_type, speed, damage) in shots {
-                if let Some(packet) = self.fire_mob_projectile(
-                    id, at, target, object_type, speed, damage
-                ) {
+                if let Some(packet) =
+                    self.fire_mob_projectile(id, at, target, object_type, speed, damage)
+                {
                     events.push(packet);
                 }
             }
