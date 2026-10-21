@@ -144,6 +144,48 @@ pub fn block(seed: u64, x: i32, y: i32, z: i32) -> u16 {
     }
 }
 
+/// Opt-in, versioned biomes. Legacy `block` and `surface` are unchanged,
+/// so IRW2 worlds retain exactly the same terrain for the same seed.
+pub fn biome(seed: u64, x: i32, z: i32) -> u8 {
+    let wet = noise2(seed ^ 0x81ab, x, z, 180);
+    let temperature = noise2(seed ^ 0x932c, x, z, 210);
+    if wet < -0.32 { 0 } // ocean
+    else if temperature > 0.32 && wet < 0.12 { 2 } // desert
+    else if temperature < -0.35 { 3 } // mountains
+    else if wet > 0.20 { 4 } // forest
+    else { 1 } // plains
+}
+
+pub fn biome_surface(seed: u64, x: i32, z: i32) -> i32 {
+    let base = surface(seed, x, z);
+    match biome(seed,x,z) {
+        0 => base.min(57),
+        3 => (base + 8).min(98),
+        _ => base,
+    }
+}
+
+/// IRW3 generator: plains, forest, desert, mountains and sea. Only this
+/// explicitly selected format changes the base terrain algorithm.
+pub fn biome_block(seed: u64, x: i32, y: i32, z: i32) -> u16 {
+    if !(0..=255).contains(&y) { return 0; }
+    let kind = biome(seed,x,z);
+    let top = biome_surface(seed,x,z);
+    if y == 0 { return BEDROCK; }
+    if y > top {
+        if kind == 0 && y <= 62 { return 9 << 4; }
+        // Existing cross-chunk trees use their legacy surface in forests.
+        return if kind == 4 || kind == 1 { block(seed,x,y,z) } else { 0 };
+    }
+    if y == top {
+        return if kind == 2 || kind == 0 { 12 << 4 } else { GRASS };
+    }
+    if y >= top - 3 {
+        return if kind == 2 || kind == 0 { 12 << 4 } else { DIRT };
+    }
+    block(seed,x,y,z)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
