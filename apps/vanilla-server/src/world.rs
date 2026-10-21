@@ -414,7 +414,7 @@ impl World {
             ) {
                 self.pending_support.insert(pos);
             }
-            if matches!(id, 29 | 33 | 93 | 94 | 149 | 150) {
+            if matches!(id, 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157) {
                 self.pending_devices.insert(pos);
             } else {
                 self.pending_devices.remove(&pos);
@@ -934,7 +934,7 @@ impl World {
             ) {
                 world.pending_support.insert((x, y, z));
             }
-            if matches!(block >> 4, 29 | 33 | 93 | 94 | 149 | 150) {
+            if matches!(block >> 4, 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157) {
                 world.pending_devices.insert((x, y, z));
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
