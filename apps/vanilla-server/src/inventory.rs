@@ -1446,7 +1446,7 @@ mod tests {
         assert_eq!(&inv.set_slot(36).unwrap(), &[0, 0, 36, 255, 255]);
         assert!(!inv.creative_set(-1, None).unwrap());
         assert!(!inv.creative_set(45, None).unwrap());
-        assert!(!inv.creative_set(5, None).unwrap());
+        assert!(inv.creative_set(5, None).unwrap()); // armor slot is now valid
         assert!(inv.select(9).is_err());
         assert!(inv
             .creative_set(
