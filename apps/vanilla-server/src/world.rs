@@ -559,12 +559,12 @@ impl World {
                         continue;
                     }
                     let power = self.get(nx, check_y, nz);
-                    let signal = match power >> 4 {
-                        69 if power & 8 != 0 => 15,
-                        76 => 15,
-                        55 => (power & 15).saturating_sub(1),
-                        94 => 15, // powered repeater
-                        _ => 0,
+                    let signal = if power >> 4 == 55 {
+                        (power & 15).saturating_sub(1)
+                    } else if self.power_into((nx, check_y, nz), (x, y, z)) {
+                        15
+                    } else {
+                        0
                     };
                     strongest = strongest.max(signal);
                 }
