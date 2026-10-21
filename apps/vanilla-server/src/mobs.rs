@@ -202,6 +202,7 @@ struct Arrow {
     position: PlayerPosition,
     velocity: [f64; 3],
     shooter: Option<i32>,
+    hostile: bool,
     age: u16,
     damage: u8,
 }
@@ -689,8 +690,10 @@ impl Mobs {
         let vy = -p.sin() * speed;
         let id = self.next_id;
         self.next_id += 1;
+        let hostile = shooter.is_some_and(|id| self.entities.contains_key(&id));
         let arrow = Arrow {
             id,
+            hostile,
             position: PlayerPosition {
                 y: at.y + 1.3,
                 ..at
@@ -1140,37 +1143,58 @@ impl Mobs {
         let mut arrow_hits = Vec::new();
         for arrow in self.arrows.values_mut() {
             arrow.age += 1;
+            let previous = arrow.position;
             let next = PlayerPosition {
-                x: arrow.position.x + arrow.velocity[0],
-                y: arrow.position.y + arrow.velocity[1],
-                z: arrow.position.z + arrow.velocity[2],
+                x: previous.x + arrow.velocity[0],
+                y: previous.y + arrow.velocity[1],
+                z: previous.z + arrow.velocity[2],
             };
             arrow.velocity[0] *= 0.99;
             arrow.velocity[1] = arrow.velocity[1] * 0.99 - 0.05;
             arrow.velocity[2] *= 0.99;
-            if arrow.age >= 100 || !next.is_valid() || physics::collides(world, &next) {
+            if arrow.age >= 100 || !next.is_valid() {
+                removed.push(arrow.id);
+                continue;
+            }
+            // Segment sweep, rather than only testing the endpoint. A fast
+            // skeleton arrow must not tunnel through a wall or a player.
+            let length = distance_3d(previous, next);
+            let steps = (length * 4.0).ceil().clamp(1.0, 32.0) as usize;
+            let mut impacted = false;
+            for step in 1..=steps {
+                let t = step as f64 / steps as f64;
+                let sample = PlayerPosition {
+                    x: previous.x + (next.x - previous.x) * t,
+                    y: previous.y + (next.y - previous.y) * t,
+                    z: previous.z + (next.z - previous.z) * t,
+                };
+                if !sample.is_valid() || physics::collides(world, &sample) {
+                    impacted = true;
+                    break;
+                }
+                if arrow.hostile {
+                    if let Some(hit) = players.iter().find(|p| {
+                        (p.x - sample.x).hypot(p.z - sample.z) < 0.85
+                            && (p.y + 0.9 - sample.y).abs() < 1.3
+                    }) {
+                        self.pending_hits.push((*hit, arrow.damage, now));
+                        impacted = true;
+                        break;
+                    }
+                } else if let Some(mob) = self.entities.values()
+                    .find(|mob| mob.id != arrow.shooter.unwrap_or(-1)
+                        && mob.nearby(sample, 0.9))
+                {
+                    arrow_hits.push((mob.id, arrow.damage));
+                    impacted = true;
+                    break;
+                }
+            }
+            if impacted {
                 removed.push(arrow.id);
                 continue;
             }
             arrow.position = next;
-            if arrow
-                .shooter
-                .is_some_and(|id| self.entities.contains_key(&id))
-            {
-                if let Some(hit) = players.iter().find(|p| {
-                    (p.x - next.x).hypot(p.z - next.z) < 0.85 && (p.y + 0.9 - next.y).abs() < 1.3
-                }) {
-                    self.pending_hits.push((*hit, arrow.damage, now));
-                    removed.push(arrow.id);
-                    continue;
-                }
-            } else {
-                if let Some(mob) = self.entities.values().find(|m| m.nearby(next, 0.9)) {
-                    arrow_hits.push((mob.id, arrow.damage));
-                    removed.push(arrow.id);
-                    continue;
-                }
-            }
             events.push(multiplayer::teleport(arrow.id, &next, 0.0, 0.0));
         }
         for (id, damage) in arrow_hits {
