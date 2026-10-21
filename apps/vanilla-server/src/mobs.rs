@@ -239,6 +239,36 @@ fn sky_exposed(world: &World, p: PlayerPosition) -> bool {
     let z = p.z.floor() as i32;
     ((p.y as i32 + 2)..=255).all(|y| world.get(x, y, z) == 0)
 }
+/// Sample nine rays across a target's body. Solid blocks attenuate the
+/// exposure before damage is distributed to players and mobs.
+fn blast_exposure(world: &World, from: PlayerPosition, to: PlayerPosition) -> f64 {
+    let mut clear = 0u8;
+    for ox in [-0.3, 0.0, 0.3] {
+        for height in [0.1, 0.9, 1.6] {
+            let target = PlayerPosition { x: to.x + ox, y: to.y + height, z: to.z };
+            let span = distance_3d(from, target);
+            let steps = (span * 3.0).ceil().max(1.0) as usize;
+            let blocked = (1..steps).any(|n| {
+                let t = n as f64 / steps as f64;
+                let (x, y, z) = (
+                    (from.x + (target.x-from.x)*t).floor() as i32,
+                    (from.y + (target.y-from.y)*t).floor() as i32,
+                    (from.z + (target.z-from.z)*t).floor() as i32,
+                );
+                !matches!(world.get(x,y,z) >> 4, 0 | 6 | 8..=11 | 18 | 30 | 31 | 37..=40 | 50 | 55 | 59 | 63 | 65 | 66 | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 83 | 90 | 106 | 111)
+            });
+            if !blocked { clear += 1; }
+        }
+    }
+    f64::from(clear) / 9.0
+}
+fn blast_damage(world: &World, blast: &Explosion, target: PlayerPosition) -> u8 {
+    let dist = distance_3d(blast.position, target);
+    if dist >= blast.radius * 2.0 { return 0; }
+    let impact = (1.0 - dist / (blast.radius * 2.0))
+        * blast_exposure(world, blast.position, target);
+    ((impact * impact + impact) * 7.0 * blast.radius + 1.0).floor().clamp(0.0, 255.0) as u8
+}
 fn damage_held(held: Option<Stack>) -> i16 {
     match held.map(|s| s.id) {
         Some(268) | Some(283) => 4,
@@ -362,30 +392,49 @@ impl Mobs {
     pub fn take_explosions(&mut self) -> Vec<Explosion> {
         std::mem::take(&mut self.explosions)
     }
-    /// Each explosion is a world-wide event. Queue damage for every player
-    /// in range rather than applying it only in the session that drains it.
-    /// Keying by entity ID allows two players at exactly the same position
-    /// to receive damage independently, once each.
+    /// An explosion damages every nearby participant once, with wall
+    /// occlusion, and damages server-owned mobs before clients are notified.
     pub fn queue_explosion_hits(
         &mut self,
+        world: &World,
         explosions: &[Explosion],
         participants: &[(i32, PlayerPosition)],
-    ) {
+    ) -> Vec<Event> {
+        let mut events = Vec::new();
         for explosion in explosions {
             for &(id, player) in participants {
-                let dx = explosion.position.x - player.x;
-                let dy = explosion.position.y - player.y;
-                let dz = explosion.position.z - player.z;
-                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                if dist >= explosion.radius * 2.0 {
-                    continue;
-                }
-                let fraction = 1.0 - dist / (explosion.radius * 2.0);
-                let raw = (fraction * fraction * 14.0 + 1.0).ceil() as u8;
+                let raw = blast_damage(world, explosion, player);
+                if raw == 0 { continue; }
                 let entry = self.pending_blast_damage.entry(id).or_default();
-                *entry = entry.saturating_add(raw).min(20);
+                *entry = entry.saturating_add(raw).min(40);
+            }
+            let affected: Vec<_> = self.entities.values()
+                .filter_map(|mob| {
+                    let raw = blast_damage(world, explosion, mob.position);
+                    (raw > 0).then_some((mob.id, raw))
+                }).collect();
+            let mut dead = Vec::new();
+            for (id, raw) in affected {
+                if let Some(mob) = self.entities.get_mut(&id) {
+                    mob.health -= i16::from(raw);
+                    events.push(mob.status(if mob.health <= 0 { 3 } else { 2 }));
+                    if mob.health <= 0 {
+                        dead.push(id);
+                    }
+                }
+            }
+            for id in dead {
+                if let Some(mob) = self.entities.remove(&id) {
+                    self.pending_drops.push((mob.kind.drop(), (
+                        mob.position.x.floor() as i32,
+                        mob.position.y.floor() as i32,
+                        mob.position.z.floor() as i32,
+                    )));
+                    events.push(multiplayer::destroy(id));
+                }
             }
         }
+        events
     }
     /// Attack a mob with authoritative held equipment, reach and cooldown.
     pub fn player_attack(
@@ -903,7 +952,7 @@ mod tests {
             position: nearby,
             radius: 3.0,
         }];
-        mobs.queue_explosion_hits(&explosions, &[(1, nearby), (2, nearby), (3, far)]);
+        mobs.queue_explosion_hits(&World::new(), &explosions, &[(1, nearby), (2, nearby), (3, far)]);
         let first = mobs.hurt_player(1, nearby, 10);
         let second = mobs.hurt_player(2, nearby, 10);
         assert!(first > 0);
