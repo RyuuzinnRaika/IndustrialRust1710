@@ -23,6 +23,7 @@ impl Ambient {
             suffocate_timer: 0,
         }
     }
+    #[cfg(test)]
     pub fn air(&self) -> i32 {
         self.air
     }
