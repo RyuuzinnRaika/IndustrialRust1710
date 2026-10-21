@@ -370,10 +370,12 @@ impl Mobs {
         Some(result)
     }
     /// Animal breeding consumes feed only if a nearby same-kind partner exists.
-    pub fn feed(&mut self, id: i32, held: Option<Stack>, tick: u64) -> Option<Event> {
+    pub fn feed(&mut self, id: i32, player: PlayerPosition, held: Option<Stack>, tick: u64) -> Option<Event> {
         let first = *self.entities.get(&id)?;
         let food = held?.id;
-        if !first.kind.passive()
+        if !first.nearby(player,3.0) ||
+            self.entities.values().filter(|m|m.kind.passive()).count()>=PASSIVE_CAP ||
+            !first.kind.passive()
             || first.baby
             || !first.kind.breeding_food(food)
             || (first.breed_tick != 0 && tick.saturating_sub(first.breed_tick) < 600)
@@ -782,9 +784,9 @@ mod tests {
         let at=PlayerPosition::default();
         mobs.insert(Kind::Cow,at,false);
         mobs.insert(Kind::Cow,PlayerPosition{x:at.x+1.0,..at},false);
-        assert!(mobs.feed(0,Some(Stack{id:296,count:1,damage:0}),100).is_some());
+        assert!(mobs.feed(0,at,Some(Stack{id:296,count:1,damage:0}),100).is_some());
         assert!(mobs.entities.values().any(|m|m.baby));
-        assert!(mobs.feed(1,Some(Stack{id:296,count:1,damage:0}),101).is_none());
+        assert!(mobs.feed(1,at,Some(Stack{id:296,count:1,damage:0}),101).is_none());
     }
     #[test]
     fn flat_world_has_no_mobs_and_bow_shot_is_bounded() {
