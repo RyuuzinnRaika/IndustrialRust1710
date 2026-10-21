@@ -153,7 +153,7 @@ impl Chests {
         }
         let mut staged = self.clone();
         staged.generated_claimed.insert(key.clone());
-        if !staged.entries.contains_key(&key) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = staged.entries.entry(key) {
             let mut slots = [None; CHEST_SLOTS];
             for (index, (id, count)) in loot.into_iter().enumerate() {
                 let stack = Stack {
@@ -166,7 +166,7 @@ impl Chests {
                 }
                 slots[index * 5 + 2] = Some(stack);
             }
-            staged.entries.insert(key, slots);
+            entry.insert(slots);
         }
         staged.revision = self.revision.wrapping_add(1);
         staged.save(path)?;
