@@ -56,8 +56,7 @@ fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
         || name.ends_with(".hoppers.json")
         || name.ends_with(".brewers.json")
         || name.ends_with(".drops.json")
-        || (rel.components().count() == 1 && name.ends_with(".irw"))
-    )
+        || (rel.components().count() == 1 && name.ends_with(".irw")))
     {
         return Err(invalid("journal target type not allowed"));
     }
@@ -347,11 +346,15 @@ mod tests {
         let inv = home.join("players/alex.inventory.json");
         let chest = home.join("flat.chests.json");
         let journal = home.join("flat.pending-txn.json");
-        commit(&journal, &[
-            (&world, b"IRW1-new".to_vec()),
-            (&inv, b"inventory-new".to_vec()),
-            (&chest, b"chests-new".to_vec()),
-        ]).unwrap();
+        commit(
+            &journal,
+            &[
+                (&world, b"IRW1-new".to_vec()),
+                (&inv, b"inventory-new".to_vec()),
+                (&chest, b"chests-new".to_vec()),
+            ],
+        )
+        .unwrap();
         assert_eq!(fs::read(&world).unwrap(), b"IRW1-new");
         assert_eq!(fs::read(&inv).unwrap(), b"inventory-new");
         assert_eq!(fs::read(&chest).unwrap(), b"chests-new");
@@ -372,10 +375,10 @@ mod tests {
         symlink(&outside, &target).unwrap();
         let second = home.join("flat.chests.json");
         let journal = home.join("flat.pending-txn.json");
-        let result = commit(&journal, &[
-            (&target, b"overwrite".to_vec()),
-            (&second, b"new".to_vec()),
-        ]);
+        let result = commit(
+            &journal,
+            &[(&target, b"overwrite".to_vec()), (&second, b"new".to_vec())],
+        );
         assert!(result.is_err());
         assert_eq!(fs::read(&outside).unwrap(), b"original");
         assert!(!journal.exists());
