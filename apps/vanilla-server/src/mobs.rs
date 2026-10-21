@@ -183,6 +183,7 @@ pub struct Mobs {
     arrows: BTreeMap<i32, Arrow>,
     orbs: BTreeMap<i32, (PlayerPosition, u16)>,
     pending_hits: Vec<(PlayerPosition, u8, u64)>,
+    pending_blast_damage: BTreeMap<i32, u8>,
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
     explosions: Vec<Explosion>,
     last_tick: u64,
@@ -324,6 +325,31 @@ impl Mobs {
     }
     pub fn take_explosions(&mut self) -> Vec<Explosion> {
         std::mem::take(&mut self.explosions)
+    }
+    /// Each explosion is a world-wide event. Queue damage for every player
+    /// in range rather than applying it only in the session that drains it.
+    /// Keying by entity ID allows two players at exactly the same position
+    /// to receive damage independently, once each.
+    pub fn queue_explosion_hits(
+        &mut self,
+        explosions: &[Explosion],
+        participants: &[(i32, PlayerPosition)],
+    ) {
+        for explosion in explosions {
+            for &(id, player) in participants {
+                let dx = explosion.position.x - player.x;
+                let dy = explosion.position.y - player.y;
+                let dz = explosion.position.z - player.z;
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                if dist >= explosion.radius * 2.0 {
+                    continue;
+                }
+                let fraction = 1.0 - dist / (explosion.radius * 2.0);
+                let raw = (fraction * fraction * 14.0 + 1.0).ceil() as u8;
+                let entry = self.pending_blast_damage.entry(id).or_default();
+                *entry = entry.saturating_add(raw).min(20);
+            }
+        }
     }
     /// Attack a mob with authoritative held equipment, reach and cooldown.
     pub fn player_attack(
@@ -715,8 +741,8 @@ impl Mobs {
             events.push(multiplayer::destroy(id));
         }
     }
-    pub fn hurt_player(&mut self, player: PlayerPosition, tick: u64) -> u8 {
-        let mut amount = 0u8;
+    pub fn hurt_player(&mut self, player_id: i32, player: PlayerPosition, tick: u64) -> u8 {
+        let mut amount = self.pending_blast_damage.remove(&player_id).unwrap_or(0);
         self.pending_hits.retain(|(p, d, t)| {
             if tick.saturating_sub(*t) < 30 && (p.x - player.x).hypot(p.z - player.z) < 0.75 {
                 amount = amount.saturating_add(*d);
@@ -749,6 +775,22 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explosion_damages_all_nearby_players_once_even_when_overlapping() {
+        let mut mobs = Mobs::default();
+        let nearby = PlayerPosition { x: 1.0, y: 65.0, z: 1.0 };
+        let far = PlayerPosition { x: 100.0, y: 65.0, z: 100.0 };
+        let explosions = [Explosion { position: nearby, radius: 3.0 }];
+        mobs.queue_explosion_hits(&explosions, &[(1, nearby), (2, nearby), (3, far)]);
+        let first = mobs.hurt_player(1, nearby, 10);
+        let second = mobs.hurt_player(2, nearby, 10);
+        assert!(first > 0);
+        assert_eq!(first, second);
+        assert_eq!(mobs.hurt_player(1, nearby, 10), 0);
+        assert_eq!(mobs.hurt_player(2, nearby, 10), 0);
+        assert_eq!(mobs.hurt_player(3, far, 10), 0);
+    }
+
     #[test]
     fn natural_mobs_spawn_in_protocol5() {
         let world = World::natural(42);
