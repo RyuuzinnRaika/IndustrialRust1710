@@ -315,4 +315,32 @@ mod regression_tests {
         assert!(w.wet_farmland(0, 64, 0));
         assert!(!w.wet_farmland(-1, 64, 0));
     }
+    #[test]
+    fn sugar_cane_requires_water_next_to_root_soil() {
+        let mut w=World::new();
+        w.import_block(0,63,0,12<<4).unwrap();
+        assert!(!w.can_support(0,64,0,83<<4));
+        w.import_block(1,63,0,8<<4).unwrap();
+        assert!(w.can_support(0,64,0,83<<4));
+        w.import_block(0,64,0,83<<4).unwrap();
+        assert!(w.can_support(0,65,0,83<<4));
+    }
+
+    #[test]
+    fn cactus_needs_sand_and_clear_sides() {
+        let mut w=World::new();
+        w.import_block(0,63,0,12<<4).unwrap();
+        assert!(w.can_support(0,64,0,81<<4));
+        w.import_block(1,64,0,1<<4).unwrap();
+        assert!(!w.can_support(0,64,0,81<<4));
+    }
+
+    #[test]
+    fn nether_wart_only_grows_on_soul_sand() {
+        let mut w=World::new();
+        assert!(!w.can_support(0,64,0,115<<4));
+        w.import_block(0,63,0,88<<4).unwrap();
+        assert!(w.can_support(0,64,0,115<<4));
+    }
+
 }
