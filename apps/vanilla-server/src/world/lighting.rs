@@ -30,27 +30,52 @@ impl World {
         let min_z = chunk_z * 16;
         let mut sky = vec![0u8; 16 * 256 * 16];
         let mut block = vec![0u8; 16 * 256 * 16];
-        // Seed direct skylight from top-facing columns, including a one-block
-        // halo. A lit neighboring column may brighten a roofed chunk edge.
-        let mut sky_queue = VecDeque::<(i32, i32, i32, u8)>::new();
+        // Direct skylight needs only a one-cell halo to illuminate the
+        // chunk boundary. Cache transparency while scanning each column,
+        // so a later spread never resamples expensive generated terrain.
+        let mut direct = vec![0u8; 18 * 18 * 256];
+        let mut passable = vec![false; 16 * 256 * 16];
+        let direct_index = |x: i32, y: i32, z: i32| -> usize {
+            ((y as usize * 18 + (z - min_z + 1) as usize) * 18)
+                + (x - min_x + 1) as usize
+        };
         for z in min_z - 1..min_z + 17 {
             for x in min_x - 1..min_x + 17 {
-                let mut exposed = true;
+                let mut sun = 15u8;
                 for y in (0..256).rev() {
-                    if !transparent(self.get(x, y, z) >> 4) {
-                        exposed = false;
+                    let air = transparent(self.get(x, y, z) >> 4);
+                    if !air {
+                        sun = 0;
                     }
-                    if exposed {
-                        sky_queue.push_back((x, y, z, 15));
-                        if (min_x..min_x + 16).contains(&x) && (min_z..min_z + 16).contains(&z) {
-                            sky[index(x, y, z, min_x, min_z)] = 15;
-                        }
+                    direct[direct_index(x, y, z)] = sun;
+                    if (min_x..min_x + 16).contains(&x) && (min_z..min_z + 16).contains(&z) {
+                        let slot = index(x, y, z, min_x, min_z);
+                        sky[slot] = sun;
+                        passable[slot] = air;
                     }
                 }
             }
         }
-        // Only darkness inside the destination chunk is updated. Decaying
-        // levels are propagated through all six faces, never through solids.
+        // Seed only shadow cells touching direct sunlight; avoid queuing
+        // tens of thousands of already-lit sky cells on every chunk packet.
+        let mut sky_queue = VecDeque::<(i32, i32, i32, u8)>::new();
+        for y in 0..256 {
+            for z in min_z..min_z + 16 {
+                for x in min_x..min_x + 16 {
+                    let slot = index(x, y, z, min_x, min_z);
+                    if sky[slot] != 0 || !passable[slot] {
+                        continue;
+                    }
+                    if [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .iter()
+                        .any(|&(dx, dz)| direct[direct_index(x + dx, y, z + dz)] == 15)
+                    {
+                        sky[slot] = 14;
+                        sky_queue.push_back((x, y, z, 14));
+                    }
+                }
+            }
+        }
         while let Some((x, y, z, level)) = sky_queue.pop_front() {
             if level <= 1 {
                 continue;
@@ -71,7 +96,7 @@ impl World {
                 }
                 let slot = index(nx, ny, nz, min_x, min_z);
                 let next = level - 1;
-                if next > sky[slot] && transparent(self.get(nx, ny, nz) >> 4) {
+                if next > sky[slot] && passable[slot] {
                     sky[slot] = next;
                     sky_queue.push_back((nx, ny, nz, next));
                 }
