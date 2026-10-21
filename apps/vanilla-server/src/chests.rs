@@ -151,6 +151,7 @@ impl Chests {
     }
     /// Commit an individual chest atomically *within the chest file*.
     /// Caller must hold the shared mutex for the entire transaction.
+    #[cfg(test)]
     pub fn update(
         &mut self,
         path: &Path,
