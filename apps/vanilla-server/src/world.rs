@@ -1485,10 +1485,7 @@ mod group_b_regression_tests {
     use super::*;
 
     fn temp(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "ir1710-b-{name}-{}.irw",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("ir1710-b-{name}-{}.irw", std::process::id()))
     }
 
     #[test]
@@ -1496,9 +1493,7 @@ mod group_b_regression_tests {
         let path = temp("flow-level8");
         let _ = std::fs::remove_file(&path);
         let mut world = World::new();
-        world
-            .update_and_save(&path, 0, 75, 0, 8 << 4)
-            .unwrap();
+        world.update_and_save(&path, 0, 75, 0, 8 << 4).unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(0, 74, 0), (8 << 4) | 8);
         let mut reloaded = World::load(&path).unwrap();

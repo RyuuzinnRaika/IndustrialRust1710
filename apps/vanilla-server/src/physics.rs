@@ -606,7 +606,11 @@ mod group_b_collision_tests {
     #[test]
     fn open_fence_gate_allows_passage_and_closed_gate_blocks_passage() {
         let mut world = World::new();
-        let position = PlayerPosition { x: 0.5, y: 64.0, z: 0.5 };
+        let position = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
         world.import_block(0, 64, 0, 107 << 4).unwrap();
         assert!(collides(&world, &position));
         world.import_block(0, 64, 0, (107 << 4) | 4).unwrap();
@@ -617,8 +621,22 @@ mod group_b_collision_tests {
     fn trapdoor_uses_metadata_dependent_horizontal_volume() {
         let mut world = World::new();
         world.import_block(0, 64, 0, 96 << 4).unwrap();
-        assert!(collides(&world, &PlayerPosition { x: 0.5, y: 64.0, z: 0.5 }));
+        assert!(collides(
+            &world,
+            &PlayerPosition {
+                x: 0.5,
+                y: 64.0,
+                z: 0.5
+            }
+        ));
         world.import_block(0, 64, 0, (96 << 4) | 4).unwrap();
-        assert!(!collides(&world, &PlayerPosition { x: 0.5, y: 64.0, z: 0.5 }));
+        assert!(!collides(
+            &world,
+            &PlayerPosition {
+                x: 0.5,
+                y: 64.0,
+                z: 0.5
+            }
+        ));
     }
 }
