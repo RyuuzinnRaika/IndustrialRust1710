@@ -58,7 +58,7 @@ pub fn effect(potion:Stack)->Option<(u8,u8,u16)> {
     let upgraded=data & 0x20 !=0;
     let (effect,base_duration)=match base {
         1=>(10,900),2=>(1,3600),3=>(12,3600),4=>(19,900),
-        5=>(6,1),6=>(14,3600),7=>(16,3600),8=>(18,1800),
+        5=>(6,1),6=>(16,3600),14=>(14,3600),8=>(18,1800),
         9=>(5,3600),10=>(2,1800),12=>(7,1),_=>return None
     };
     let duration=if extended {base_duration*2} else if upgraded && base_duration>1 {
