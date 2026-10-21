@@ -732,9 +732,9 @@ impl Inventory {
                 let mut changed_storage = false;
                 for position in slots {
                     let existing = self.chest_stack(chest, position);
-                    if existing.is_some_and(|other| {
-                        other.id != cursor.id || other.damage != cursor.damage
-                    }) {
+                    if existing
+                        .is_some_and(|other| other.id != cursor.id || other.damage != cursor.damage)
+                    {
                         continue;
                     }
                     let count = existing.map_or(0, |other| other.count);
@@ -799,11 +799,7 @@ impl Inventory {
             }
             carried.count += amount;
             existing.count -= amount;
-            self.set_chest_stack(
-                chest,
-                position,
-                (existing.count != 0).then_some(existing),
-            );
+            self.set_chest_stack(chest, position, (existing.count != 0).then_some(existing));
             changed_storage |= position < size;
         }
         self.cursor = Some(carried);
