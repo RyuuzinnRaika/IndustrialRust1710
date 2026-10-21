@@ -1135,8 +1135,9 @@ mod tests {
         mobs.insert(Kind::CaveSpider, at, false);
         assert_eq!(mobs.hurt_player(10, at, 20), 2);
         assert_eq!(mobs.hurt_player(11, at, 21), 0);
-        assert_eq!(mobs.hurt_player(10, at, 46), 1);
-        assert_eq!(mobs.hurt_player(11, at, 46), 0);
+        let away = PlayerPosition { x: at.x + 30.0, ..at };
+        assert_eq!(mobs.hurt_player(10, away, 46), 1);
+        assert_eq!(mobs.hurt_player(11, away, 46), 0);
     }
 
     #[test]
