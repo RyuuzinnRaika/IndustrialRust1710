@@ -38,6 +38,10 @@ pub struct World {
     pending_ecology: BTreeSet<Position>,
     pending_devices: BTreeSet<Position>,
     pending_repeaters: BTreeMap<Position, (u64, bool)>,
+    // Comparator analog output (0..15) is not encoded in block metadata.
+    // Reconstructed by queued evaluation after loading IRW snapshots.
+    comparator_outputs: BTreeMap<Position, u8>,
+    pending_comparators: BTreeMap<Position, (u64, u8)>,
     pending_buttons: BTreeMap<Position, u64>,
     pending_drops: Vec<WorldDrop>,
     // Sparse pending client-facing lighting invalidations, not part of IRW files.
@@ -401,11 +405,13 @@ impl World {
             ) {
                 self.pending_support.insert(pos);
             }
-            if matches!(id, 29 | 33 | 93 | 94) {
+            if matches!(id, 29 | 33 | 93 | 94 | 149 | 150) {
                 self.pending_devices.insert(pos);
             } else {
                 self.pending_devices.remove(&pos);
                 self.pending_repeaters.remove(&pos);
+                self.pending_comparators.remove(&pos);
+                self.comparator_outputs.remove(&pos);
             }
         }
     }
@@ -907,7 +913,7 @@ impl World {
             ) {
                 world.pending_support.insert((x, y, z));
             }
-            if matches!(block >> 4, 29 | 33 | 93 | 94) {
+            if matches!(block >> 4, 29 | 33 | 93 | 94 | 149 | 150) {
                 world.pending_devices.insert((x, y, z));
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
