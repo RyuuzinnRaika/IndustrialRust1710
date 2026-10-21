@@ -157,6 +157,19 @@ impl World {
         }
         (block, sky)
     }
+
+    /// Exact chunk lighting value shared by spawning and client chunk packets.
+    /// Coordinates use Euclidean division so negative chunks map correctly.
+    pub fn light_at(&self, x: i32, y: i32, z: i32) -> (u8, u8) {
+        if !super::in_bounds(x, y, z) {
+            return (0, 0);
+        }
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let (block, sky) = self.light_arrays(cx, cz);
+        let slot = index(x, y, z, cx * 16, cz * 16);
+        (block[slot], sky[slot])
+    }
 }
 
 #[cfg(test)]
