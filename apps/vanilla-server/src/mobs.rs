@@ -453,35 +453,62 @@ fn damage_held(held: Option<Stack>) -> i16 {
 impl Mobs {
     /// Crash-resilient, bounded entity snapshot scoped to this exact world.
     /// An absent snapshot is a fresh world; a malformed one aborts startup.
-    pub fn load_or_new(world: &World, enabled: bool, difficulty: u8, path: &Path) -> io::Result<Self> {
+    pub fn load_or_new(
+        world: &World,
+        enabled: bool,
+        difficulty: u8,
+        path: &Path,
+    ) -> io::Result<Self> {
         let mut state = if path.exists() {
             let bytes = fs::read(path)?;
             if bytes.len() > 2 * 1024 * 1024 {
                 return Err(invalid("mob snapshot too large"));
             }
-            let saved: MobSnapshot = serde_json::from_slice(&bytes)
-                .map_err(|_| invalid("invalid mob snapshot"))?;
-            if saved.format != 1 || saved.seed != world.natural_seed()
-                || saved.dimension != world.dimension() {
+            let saved: MobSnapshot =
+                serde_json::from_slice(&bytes).map_err(|_| invalid("invalid mob snapshot"))?;
+            if saved.format != 1
+                || saved.seed != world.natural_seed()
+                || saved.dimension != world.dimension()
+            {
                 return Err(invalid("mob snapshot belongs to a different world"));
             }
             let value = saved.state;
-            let max_id = value.entities.keys().chain(value.arrows.keys())
-                .chain(value.orbs.keys()).copied().max().unwrap_or(BASE_ID - 1);
-            if value.next_id <= max_id || value.next_id < BASE_ID
+            let max_id = value
+                .entities
+                .keys()
+                .chain(value.arrows.keys())
+                .chain(value.orbs.keys())
+                .copied()
+                .max()
+                .unwrap_or(BASE_ID - 1);
+            if value.next_id <= max_id
+                || value.next_id < BASE_ID
                 || value.next_id >= i32::MAX - 1024
-                || value.entities.len() > 128 || value.arrows.len() > ARROW_CAP
+                || value.entities.len() > 128
+                || value.arrows.len() > ARROW_CAP
                 || value.orbs.len() > 256
                 || value.entities.iter().any(|(&id, mob)| {
-                    id < BASE_ID || id != mob.id || !mob.position.is_valid()
-                        || mob.health <= 0 || mob.health > 300
+                    id < BASE_ID
+                        || id != mob.id
+                        || !mob.position.is_valid()
+                        || mob.health <= 0
+                        || mob.health > 300
                         || (mob.kind.splitting() && !matches!(mob.size, 1 | 2 | 4))
                 })
                 || value.arrows.iter().any(|(&id, arrow)| {
-                    id < BASE_ID || id != arrow.id || !arrow.position.is_valid()
-                        || !arrow.velocity.iter().all(|v| v.is_finite() && v.abs() <= 8.0)
+                    id < BASE_ID
+                        || id != arrow.id
+                        || !arrow.position.is_valid()
+                        || !arrow
+                            .velocity
+                            .iter()
+                            .all(|v| v.is_finite() && v.abs() <= 8.0)
                 })
-                || value.orbs.values().any(|(pos, amount, _)| !pos.is_valid() || *amount == 0) {
+                || value
+                    .orbs
+                    .values()
+                    .any(|(pos, amount, _)| !pos.is_valid() || *amount == 0)
+            {
                 return Err(invalid("invalid mob identity, position or bounds"));
             }
             value
@@ -495,7 +522,9 @@ impl Mobs {
     }
     /// Atomic replacement; the old snapshot survives failed serialization or write.
     pub fn save(&self, world: &World) -> io::Result<()> {
-        let Some(path) = &self.storage else { return Ok(()); };
+        let Some(path) = &self.storage else {
+            return Ok(());
+        };
         let snapshot = serde_json::json!({
             "format": 1,
             "seed": world.natural_seed(),
@@ -504,8 +533,12 @@ impl Mobs {
         });
         let data = serde_json::to_vec(&snapshot)
             .map_err(|_| invalid("mob snapshot serialization failed"))?;
-        if data.len() > 2 * 1024 * 1024 { return Err(invalid("mob snapshot too large")); }
-        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        if data.len() > 2 * 1024 * 1024 {
+            return Err(invalid("mob snapshot too large"));
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let tmp = path.with_extension("mobs.tmp");
         let mut file = File::create(&tmp)?;
         file.write_all(&data)?;
@@ -558,22 +591,40 @@ impl Mobs {
     }
     /// Construct a server-owned boss. External summoning rules must validate
     /// soul sand/skulls or End progression before calling this method.
-    pub fn summon_boss(&mut self, world: &World, kind: u8, position: PlayerPosition) -> Option<Event> {
-        let creature = match kind { 63 => Kind::EnderDragon, 64 => Kind::Wither, _ => return None };
-        if !position.is_valid() || !self.enabled || self.difficulty == Some(0)
+    pub fn summon_boss(
+        &mut self,
+        world: &World,
+        kind: u8,
+        position: PlayerPosition,
+    ) -> Option<Event> {
+        let creature = match kind {
+            63 => Kind::EnderDragon,
+            64 => Kind::Wither,
+            _ => return None,
+        };
+        if !position.is_valid()
+            || !self.enabled
+            || self.difficulty == Some(0)
             || self.entities.values().any(|entity| entity.kind == creature)
-            || (creature == Kind::EnderDragon &&
-                (world.dimension() != crate::dimensions::Dimension::End || self.dragon_defeated)) {
+            || (creature == Kind::EnderDragon
+                && (world.dimension() != crate::dimensions::Dimension::End || self.dragon_defeated))
+        {
             return None;
         }
         Some(self.insert(creature, position, false))
     }
     /// A bounded, server-authoritative emerald trade (GUI protocol pending).
     /// Item transfer must be committed atomically by the calling session.
-    pub fn village_offer(&self, id: i32, player: PlayerPosition, held: Option<Stack>) -> Option<Stack> {
+    pub fn village_offer(
+        &self,
+        id: i32,
+        player: PlayerPosition,
+        held: Option<Stack>,
+    ) -> Option<Stack> {
         let villager = self.entities.get(&id)?;
-        if villager.kind != Kind::Villager || !villager.nearby(player, 3.0)
-            || held?.id != 388 { return None; }
+        if villager.kind != Kind::Villager || !villager.nearby(player, 3.0) || held?.id != 388 {
+            return None;
+        }
         let product = match villager.profession {
             0 => (297, 6), // farmer: bread
             1 => (340, 1), // librarian: book
@@ -581,7 +632,11 @@ impl Mobs {
             3 => (265, 2), // blacksmith: iron ingot
             _ => (320, 4), // butcher: cooked pork
         };
-        Some(Stack { id: product.0, count: product.1, damage: 0 })
+        Some(Stack {
+            id: product.0,
+            count: product.1,
+            damage: 0,
+        })
     }
     /// Split a defeated large slime/magma cube; every child receives an
     /// independent authoritative ID and an ordinary Protocol 5 spawn packet.
@@ -781,12 +836,16 @@ impl Mobs {
                     _ if mob.kind.passive() => 2,
                     _ => 5,
                 }
-            } else { 0 },
+            } else {
+                0
+            },
         };
         let mut result = result;
         if killed {
             if let Some(parent) = self.entities.remove(&id) {
-                if parent.kind == Kind::EnderDragon { self.dragon_defeated = true; }
+                if parent.kind == Kind::EnderDragon {
+                    self.dragon_defeated = true;
+                }
                 result.events.extend(self.split(parent));
             }
         } else if matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman) {
@@ -1007,7 +1066,8 @@ impl Mobs {
             let open = sky_exposed(world, position);
             let (block_light, sky_light) = world.light_at(x, y, z);
             let overworld = dimension == crate::dimensions::Dimension::Overworld;
-            let is_passive = overworld && grass && open && now.is_multiple_of(400) && (seed & 1 == 0);
+            let is_passive =
+                overworld && grass && open && now.is_multiple_of(400) && (seed & 1 == 0);
             if overworld && !spawn_light_ok(block_light, sky_light, now, is_passive) {
                 continue;
             }
@@ -1098,13 +1158,27 @@ impl Mobs {
                 }
             });
         }
-        if self.enabled && world.dimension() == crate::dimensions::Dimension::End
-            && !self.dragon_defeated && !players.is_empty()
-            && !self.entities.values().any(|mob| mob.kind == Kind::EnderDragon) {
+        if self.enabled
+            && world.dimension() == crate::dimensions::Dimension::End
+            && !self.dragon_defeated
+            && !players.is_empty()
+            && !self
+                .entities
+                .values()
+                .any(|mob| mob.kind == Kind::EnderDragon)
+        {
             // The End has exactly one natural dragon until its defeat is saved.
-            if let Some(spawn) = self.summon_boss(world, 63, PlayerPosition {
-                x: 0.5, y: 95.0, z: 0.5,
-            }) { events.push(spawn); }
+            if let Some(spawn) = self.summon_boss(
+                world,
+                63,
+                PlayerPosition {
+                    x: 0.5,
+                    y: 95.0,
+                    z: 0.5,
+                },
+            ) {
+                events.push(spawn);
+            }
         }
         self.spawn_natural(now, world, players, &mut events);
         for _ in 0..steps {
@@ -1188,7 +1262,8 @@ impl Mobs {
                     // Server-owned orbit while the fight is active.
                     let angle = now as f64 * 0.015;
                     let next = PlayerPosition {
-                        x: angle.cos() * 24.0, y: 95.0 + (angle * 0.5).sin() * 8.0,
+                        x: angle.cos() * 24.0,
+                        y: 95.0 + (angle * 0.5).sin() * 8.0,
                         z: angle.sin() * 24.0,
                     };
                     if next.is_valid() {
@@ -1265,9 +1340,9 @@ impl Mobs {
                     {
                         mob.bite_tick = now;
                         let yaw = (-(target.x - mob.position.x))
-                            .atan2(target.z - mob.position.z).to_degrees() as f32;
-                        let pitch = -(target.y + 1.0 - mob.position.y)
-                            .atan2(d).to_degrees() as f32;
+                            .atan2(target.z - mob.position.z)
+                            .to_degrees() as f32;
+                        let pitch = -(target.y + 1.0 - mob.position.y).atan2(d).to_degrees() as f32;
                         shots.push((mob.id, mob.position, yaw, pitch, kind));
                     }
                 }
@@ -1405,7 +1480,9 @@ impl Mobs {
                 } else {
                     self.fire_special(id, at, yaw, pitch, kind)
                 };
-                if let Some(packet) = event { events.push(packet); }
+                if let Some(packet) = event {
+                    events.push(packet);
+                }
             }
             self.tick_arrows(world, players, now, &mut events);
         }
@@ -1458,8 +1535,14 @@ impl Mobs {
                     z: previous.z + (next.z - previous.z) * t,
                 };
                 if !sample.is_valid() || physics::collides(world, &sample) {
-                    if matches!(arrow.kind, ProjectileKind::GhastFireball | ProjectileKind::WitherSkull) {
-                        self.explosions.push(Explosion { position: sample, radius: 1.0 });
+                    if matches!(
+                        arrow.kind,
+                        ProjectileKind::GhastFireball | ProjectileKind::WitherSkull
+                    ) {
+                        self.explosions.push(Explosion {
+                            position: sample,
+                            radius: 1.0,
+                        });
                     }
                     impacted = true;
                     break;
@@ -1478,7 +1561,10 @@ impl Mobs {
                                 self.pending_effects.push((*hit, 20, 100, now));
                             }
                             ProjectileKind::GhastFireball => {
-                                self.explosions.push(Explosion { position: sample, radius: 1.0 });
+                                self.explosions.push(Explosion {
+                                    position: sample,
+                                    radius: 1.0,
+                                });
                             }
                             _ => {}
                         }
@@ -1527,14 +1613,20 @@ impl Mobs {
     /// Apply a hostile potion effect to the correct player, not all peers.
     /// Caller broadcasts the generated Protocol 5 entity-effect packet.
     pub fn take_player_effects(
-        &mut self, player_id: i32, player: PlayerPosition, tick: u64
+        &mut self,
+        player_id: i32,
+        player: PlayerPosition,
+        tick: u64,
     ) -> Vec<Event> {
         let mut packets = Vec::new();
         let mut remaining = Vec::new();
         for (at, effect, duration, created) in std::mem::take(&mut self.pending_effects) {
-            if tick.saturating_sub(created) >= 30 { continue; }
+            if tick.saturating_sub(created) >= 30 {
+                continue;
+            }
             if distance_3d(at, player) < 0.85 {
-                self.active_effects.insert(player_id, (effect, tick + u64::from(duration), tick));
+                self.active_effects
+                    .insert(player_id, (effect, tick + u64::from(duration), tick));
                 let mut body = player_id.to_be_bytes().to_vec();
                 body.push(effect);
                 body.push(0); // amplifier 0
@@ -1551,7 +1643,11 @@ impl Mobs {
         self.hurt_player_with_health(player_id, player, tick, 20.0)
     }
     pub fn hurt_player_with_health(
-        &mut self, player_id: i32, player: PlayerPosition, tick: u64, health: f32
+        &mut self,
+        player_id: i32,
+        player: PlayerPosition,
+        tick: u64,
+        health: f32,
     ) -> u8 {
         let mut amount = self.pending_blast_damage.remove(&player_id).unwrap_or(0);
         self.pending_hits.retain(|(p, d, t)| {
@@ -1631,10 +1727,17 @@ mod tests {
     #[test]
     fn mob_snapshot_roundtrips_ids_health_ages_and_world_identity() {
         let world = World::natural(98765);
-        let path = std::env::temp_dir().join(format!("industrialrust-mobs-{}-persist.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust-mobs-{}-persist.json",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
-        let at = PlayerPosition { x: 4.5, y: 65.0, z: 4.5 };
+        let at = PlayerPosition {
+            x: 4.5,
+            y: 65.0,
+            z: 4.5,
+        };
         let event = mobs.insert(Kind::Villager, at, false);
         let id = mobs.next_id - 1;
         assert_eq!(event.id, 0x0f);
@@ -1650,7 +1753,13 @@ mod tests {
         assert_eq!(loaded.entities.get(&id).unwrap().age_ticks, 74);
         assert_eq!(loaded.entities.get(&id).unwrap().profession, 3);
         assert!(loaded.next_id > id);
-        assert_eq!(loaded.spawn_events().filter(|event| event.id == 0x0f).count(), loaded.entities.len());
+        assert_eq!(
+            loaded
+                .spawn_events()
+                .filter(|event| event.id == 0x0f)
+                .count(),
+            loaded.entities.len()
+        );
         assert!(Mobs::load_or_new(&World::natural(11), true, 2, &path).is_err());
         std::fs::write(&path, b"{garbled").unwrap();
         assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
@@ -1659,54 +1768,97 @@ mod tests {
 
     #[test]
     fn mob_cap_uses_unique_17_by_17_chunks_not_player_count() {
-        let a = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        let a = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
         let b = PlayerPosition { x: 16.5, ..a };
         assert_eq!(natural_mob_cap(&[a], 70), 70);
         assert_eq!(natural_mob_cap(&[a, a], 70), 70);
-        assert!(natural_mob_cap(&[a,b], 70) > 70);
+        assert!(natural_mob_cap(&[a, b], 70) > 70);
         assert_eq!(natural_mob_cap(&[], 70), 0);
     }
 
     #[test]
     fn villager_emits_authoritative_profession_offer() {
         let mut mobs = Mobs::default();
-        let at = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
         mobs.insert(Kind::Villager, at, false);
         mobs.entities.get_mut(&0).unwrap().profession = 0;
-        let emerald = Some(Stack { id: 388, count: 1, damage: 0 });
+        let emerald = Some(Stack {
+            id: 388,
+            count: 1,
+            damage: 0,
+        });
         assert_eq!(mobs.village_offer(0, at, emerald).unwrap().id, 297);
-        assert!(mobs.village_offer(0, at, Some(Stack { id: 1, count: 1, damage: 0 })).is_none());
-        assert!(mobs.village_offer(0, PlayerPosition { x: 50.0, ..at }, emerald).is_none());
+        assert!(mobs
+            .village_offer(
+                0,
+                at,
+                Some(Stack {
+                    id: 1,
+                    count: 1,
+                    damage: 0
+                })
+            )
+            .is_none());
+        assert!(mobs
+            .village_offer(0, PlayerPosition { x: 50.0, ..at }, emerald)
+            .is_none());
     }
 
     #[test]
     fn special_mobs_launch_bounded_distinct_projectile_objects() {
         let mut mobs = Mobs::default();
-        let at = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
         for kind in [Kind::Witch, Kind::Blaze, Kind::Ghast, Kind::Wither] {
             mobs.insert(kind, at, false);
         }
         let target = PlayerPosition { x: 6.5, ..at };
         let packets = mobs.tick(80, &World::new(), &[target]);
         for kind in [
-            ProjectileKind::WitchPotion, ProjectileKind::BlazeFireball,
-            ProjectileKind::GhastFireball, ProjectileKind::WitherSkull,
+            ProjectileKind::WitchPotion,
+            ProjectileKind::BlazeFireball,
+            ProjectileKind::GhastFireball,
+            ProjectileKind::WitherSkull,
         ] {
             assert!(mobs.arrows.values().any(|a| a.kind == kind));
-            assert!(packets.iter().any(|packet| packet.id == 0x0e && packet.body.contains(&kind.protocol())));
+            assert!(packets
+                .iter()
+                .any(|packet| packet.id == 0x0e && packet.body.contains(&kind.protocol())));
         }
     }
 
     #[test]
     fn end_dragon_boss_reappears_neither_after_death_nor_after_reload() {
         let world = World::expanded(42, crate::dimensions::Dimension::End);
-        let path = std::env::temp_dir().join(format!("industrialrust-mobs-{}-dragon.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust-mobs-{}-dragon.json",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
-        let target = PlayerPosition { x: 0.5, y: 95.0, z: 0.5 };
+        let target = PlayerPosition {
+            x: 0.5,
+            y: 95.0,
+            z: 0.5,
+        };
         mobs.tick(1, &world, &[target]);
-        let (id,pos) = mobs.entities.values().find(|m| m.kind == Kind::EnderDragon)
-            .map(|mob| (mob.id, mob.position)).unwrap();
+        let (id, pos) = mobs
+            .entities
+            .values()
+            .find(|m| m.kind == Kind::EnderDragon)
+            .map(|mob| (mob.id, mob.position))
+            .unwrap();
         mobs.entities.get_mut(&id).unwrap().health = 1;
         let defeated = mobs.player_attack(id, pos, None, 100).unwrap();
         assert_eq!(defeated.experience, 12_000);
@@ -1714,7 +1866,10 @@ mod tests {
         mobs.save(&world).unwrap();
         let mut restored = Mobs::load_or_new(&world, true, 2, &path).unwrap();
         restored.tick(101, &world, &[target]);
-        assert!(!restored.entities.values().any(|mob| mob.kind == Kind::EnderDragon));
+        assert!(!restored
+            .entities
+            .values()
+            .any(|mob| mob.kind == Kind::EnderDragon));
         let _ = std::fs::remove_file(path);
     }
 
