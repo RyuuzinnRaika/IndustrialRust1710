@@ -174,10 +174,10 @@ impl Orbs {
     pub fn nearby(&mut self, position: PlayerPosition, now: u64) -> Option<(i32, u16)> {
         // Expiration is handled by expire(), which broadcasts destroy events.
         // Do not remove silently or remote clients will retain ghost orbs.
-        let _ = now;
         self.items
             .values()
             .find(|orb| {
+                if now.saturating_sub(orb.created) >= 6000 { return false; }
                 let d = (position.x - orb.position.x).powi(2)
                     + (position.y - orb.position.y).powi(2)
                     + (position.z - orb.position.z).powi(2);
