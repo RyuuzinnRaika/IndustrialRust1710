@@ -7,6 +7,7 @@ use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::{Duration, Instant};
 
 const QUEUE_CAPACITY: usize = 32;
 const WORKERS: usize = 2;
@@ -74,7 +75,13 @@ fn sender() -> &'static SyncSender<Job> {
     })
 }
 
-pub fn submit(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChunk> {
+fn submit_with_wait(
+    x: i32,
+    z: i32,
+    mask: u16,
+    raw: Vec<u8>,
+    max_wait: Duration,
+) -> io::Result<PendingChunk> {
     if raw.len() > MAX_RAW_CHUNK_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -82,24 +89,45 @@ pub fn submit(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChun
         ));
     }
     let (tx, rx) = mpsc::sync_channel(1);
-    // A full shared queue must never block a player's packet sender.
-    // Failure is explicit so callers cannot silently drop world state.
-    match sender().try_send(Job {
+    // Keep the original raw snapshot owned by the rejected job, avoiding a
+    // new world lock or large allocation on every retry.
+    let mut job = Job {
         x,
         z,
         mask,
         raw,
         reply: tx,
-    }) {
-        Ok(()) => Ok(PendingChunk(rx)),
-        Err(TrySendError::Full(_)) => Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "chunk compression queue saturated",
-        )),
-        Err(TrySendError::Disconnected(_)) => {
-            Err(io::Error::other("chunk compression queue closed"))
+    };
+    let started = Instant::now();
+    loop {
+        match sender().try_send(job) {
+            Ok(()) => return Ok(PendingChunk(rx)),
+            Err(TrySendError::Full(rejected)) => {
+                if started.elapsed() >= max_wait {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "chunk compression queue saturated",
+                    ));
+                }
+                job = rejected;
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(io::Error::other("chunk compression queue closed"));
+            }
         }
     }
+}
+
+/// Nonblocking submission for callers that cannot tolerate any backpressure.
+pub fn submit(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChunk> {
+    submit_with_wait(x, z, mask, raw, Duration::ZERO)
+}
+
+/// Only for independent connection threads: allow brief, bounded congestion
+/// recovery without ever sleeping under the world simulation mutex.
+pub fn submit_session(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChunk> {
+    submit_with_wait(x, z, mask, raw, Duration::from_millis(100))
 }
 
 #[cfg(test)]
@@ -122,6 +150,16 @@ mod tests {
             .read_to_end(&mut decoded)
             .unwrap();
         assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn session_backpressure_keeps_protocol5_chunk_bytes() {
+        let result = submit_session(3, -5, 0x18, vec![0x42; 1024])
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert_eq!(&result[..4], &3i32.to_be_bytes());
+        assert_eq!(&result[4..8], &(-5i32).to_be_bytes());
     }
 
     #[test]

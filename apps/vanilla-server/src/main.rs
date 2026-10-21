@@ -303,7 +303,9 @@ fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipel
         .lock()
         .map_err(|_| bad("world mutex poisoned"))?
         .chunk_data(cx, cz);
-    chunk_pipeline::submit(cx, cz, mask, data)
+    // Session-only bounded retries handle short encoder queue bursts.
+    // No world mutex is held while waiting for the queue to drain.
+    chunk_pipeline::submit_session(cx, cz, mask, data)
 }
 fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
     send(s, 0x21, &queue_chunk(world, cx, cz)?.finish()?)
