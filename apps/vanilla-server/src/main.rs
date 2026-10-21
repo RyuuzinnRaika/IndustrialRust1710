@@ -1210,10 +1210,12 @@ fn play(
                 if survival {
                     let old_food = vitals.food;
                     let old_saturation = vitals.saturation;
-                    vitals.travel_with_sprint(
-                        (x - player.x).hypot(z - player.z),
-                        sprinting && vitals.food > 6,
-                    );
+                    let distance = (x - player.x).hypot(z - player.z);
+                    if sprinting && vitals.food > 6 {
+                        vitals.travel_with_sprint(distance, true);
+                    } else {
+                        vitals.travel(distance);
+                    }
                     if vitals.food != old_food || vitals.saturation != old_saturation {
                         player.save_state(player_path, *vitals)?;
                         send(s, 0x06, &health_packet(*vitals))?;
