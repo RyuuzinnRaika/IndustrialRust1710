@@ -96,6 +96,7 @@ mod tests {
         let mut world = World::new();
         world.import_block(1, 65, 0, 1 << 4).unwrap();
         world.import_block(1, 66, 0, 1 << 4).unwrap();
+        world.import_block(1, 67, 0, 1 << 4).unwrap();
         let from = PlayerPosition { x: 0.5, y: 65.5, z: 0.5 };
         let to = PlayerPosition { x: 2.5, y: 65.5, z: 0.5 };
         assert!(!visible(&world, from, to));
