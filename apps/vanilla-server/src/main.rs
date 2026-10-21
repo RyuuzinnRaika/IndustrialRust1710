@@ -221,9 +221,17 @@ fn join(
     // difficulty u8, maxPlayers u8, levelType string.
     let mut join = Vec::new();
     join.extend_from_slice(&entity_id.to_be_bytes());
-    let dimension_id = world.lock().map_err(|_| bad("world mutex poisoned"))?
-        .extended_identity().map_or(0, |(_, dim)| dim.protocol_id());
-    join.extend_from_slice(&[u8::from(!survival), dimension_id as u8, 1, MAX_PLAYERS as u8]);
+    let dimension_id = world
+        .lock()
+        .map_err(|_| bad("world mutex poisoned"))?
+        .extended_identity()
+        .map_or(0, |(_, dim)| dim.protocol_id());
+    join.extend_from_slice(&[
+        u8::from(!survival),
+        dimension_id as u8,
+        1,
+        MAX_PLAYERS as u8,
+    ]);
     write_string("default", &mut join)?;
     send(s, 0x01, &join)?;
 
@@ -2712,11 +2720,19 @@ fn main() -> io::Result<()> {
                 );
             }
             "--expanded-seed" => {
-                expanded_seed = Some(args.next().ok_or_else(|| bad("missing --expanded-seed value"))?
-                    .parse().map_err(|_| bad("invalid expanded seed"))?);
+                expanded_seed = Some(
+                    args.next()
+                        .ok_or_else(|| bad("missing --expanded-seed value"))?
+                        .parse()
+                        .map_err(|_| bad("invalid expanded seed"))?,
+                );
             }
             "--dimension" => {
-                expanded_dimension = match args.next().ok_or_else(|| bad("missing --dimension value"))?.as_str() {
+                expanded_dimension = match args
+                    .next()
+                    .ok_or_else(|| bad("missing --dimension value"))?
+                    .as_str()
+                {
                     "overworld" => dimensions::Dimension::Overworld,
                     "nether" => dimensions::Dimension::Nether,
                     "end" => dimensions::Dimension::End,
@@ -2742,7 +2758,15 @@ fn main() -> io::Result<()> {
         && (!survival
             || anvil_export_path.is_some()
             || anvil_import_path.is_some()
-            || [requested_seed.is_some(), biome_seed.is_some(), expanded_seed.is_some()].into_iter().filter(|present| *present).count() != 1)
+            || [
+                requested_seed.is_some(),
+                biome_seed.is_some(),
+                expanded_seed.is_some(),
+            ]
+            .into_iter()
+            .filter(|present| *present)
+            .count()
+                != 1)
     {
         return Err(bad(
             "specify exactly one seed type with --survival, without import/export",
@@ -2802,18 +2826,26 @@ fn main() -> io::Result<()> {
     let loaded_world = if world_path.exists() {
         let existing = World::load(&world_path)?;
         if let Some(seed) = requested_seed {
-            if existing.natural_seed() != Some(seed) || existing.is_biome_world() || existing.extended_identity().is_some() {
+            if existing.natural_seed() != Some(seed)
+                || existing.is_biome_world()
+                || existing.extended_identity().is_some()
+            {
                 return Err(bad("existing world has different generation type or seed"));
             }
         }
         if let Some(seed) = biome_seed {
-            if existing.natural_seed() != Some(seed) || !existing.is_biome_world() || existing.extended_identity().is_some() {
+            if existing.natural_seed() != Some(seed)
+                || !existing.is_biome_world()
+                || existing.extended_identity().is_some()
+            {
                 return Err(bad("existing world is not a matching IRW3 biome world"));
             }
         }
         if let Some(seed) = expanded_seed {
             if existing.extended_identity() != Some((seed, expanded_dimension)) {
-                return Err(bad("existing world is not a matching IRW4 seed and dimension"));
+                return Err(bad(
+                    "existing world is not a matching IRW4 seed and dimension",
+                ));
             }
         }
         existing
