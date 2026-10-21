@@ -236,6 +236,20 @@ fn support_top(world: &World, position: &PlayerPosition) -> Option<f64> {
 pub fn supported(world: &World, position: &PlayerPosition) -> bool {
     support_top(world, position).is_some()
 }
+/// Fluid surfaces are not solids; swimming cancels accumulated fall distance.
+pub fn in_water(world: &World, position: &PlayerPosition) -> bool {
+    let x = position.x.floor() as i32;
+    let z = position.z.floor() as i32;
+    [position.y, position.y + 1.0].iter().any(|height| {
+        matches!(world.get(x, height.floor() as i32, z) >> 4, 8 | 9)
+    })
+}
+pub fn on_ladder(world: &World, position: &PlayerPosition) -> bool {
+    let x=position.x.floor() as i32;
+    let z=position.z.floor() as i32;
+    matches!(world.get(x,position.y.floor() as i32,z)>>4,65)
+        || matches!(world.get(x,(position.y+1.0).floor() as i32,z)>>4,65)
+}
 /// Sweep both horizontal and vertical segments to prevent endpoint tunnelling.
 pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPosition) -> bool {
     if !next.is_valid() || collides(world, next) {
@@ -247,6 +261,20 @@ pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPos
     let horizontal = dx.hypot(dz);
     if horizontal > 64.0 || dy.abs() > 128.0 {
         return false;
+    }
+    // Client stepping onto a slab or stair first raises the feet, then moves
+    // sideways. A naive linear sweep would falsely intersect its lower half.
+    if dy > 0.0 && dy <= 0.6 && horizontal <= 1.5 {
+        let risen=PlayerPosition{y:next.y,..*previous};
+        if !collides(world,&risen) {
+            let steps=(horizontal/0.2).ceil() as usize;
+            if (1..steps).all(|i|{
+                let t=i as f64/steps as f64;
+                !collides(world,&PlayerPosition{
+                    x:risen.x+dx*t,y:risen.y,z:risen.z+dz*t
+                })
+            }) {return true;}
+        }
     }
     let steps = (horizontal.max(dy.abs()) / 0.2).ceil().clamp(1.0, 640.0) as usize;
     for i in 1..steps {
@@ -348,8 +376,14 @@ impl IdleGravity {
                 self.vertical_velocity = 0.0;
                 break;
             }
-            self.vertical_velocity =
-                ((self.vertical_velocity - GRAVITY_ACCELERATION) * AIR_DRAG).max(TERMINAL_VELOCITY);
+            if in_water(world,&next) {
+                self.vertical_velocity=((self.vertical_velocity-0.02)*0.8).max(-0.08);
+            }else if on_ladder(world,&next) {
+                self.vertical_velocity=(self.vertical_velocity-0.08).max(-0.15);
+            }else {
+                self.vertical_velocity=
+                    ((self.vertical_velocity-GRAVITY_ACCELERATION)*AIR_DRAG).max(TERMINAL_VELOCITY);
+            }
             let y = resolve_descent(world, &next, next.y + self.vertical_velocity);
             if (next.y - y).abs() < EPS {
                 self.vertical_velocity = 0.0;
@@ -374,6 +408,10 @@ pub struct FallTracker {
     falling: f64,
 }
 impl FallTracker {
+    pub fn reset(&mut self,y:f64) {
+        self.last_y=y;
+        self.falling=0.0;
+    }
     pub fn new(y: f64) -> Self {
         Self {
             last_y: y,
@@ -406,6 +444,20 @@ mod tests {
         PlayerPosition { x, y, z }
     }
 
+    #[test]
+    fn slab_supports_partial_player_height_and_water_cancels_fall() {
+        let mut world=World::new();
+        world.import_block(2,64,0,44<<4).unwrap();
+        let on_slab=at(2.5,64.5,0.5);
+        assert!(supported(&world,&on_slab));
+        assert!(!collides(&world,&on_slab));
+        assert!(collides(&world,&at(2.5,64.0,0.5)));
+        world.import_block(0,64,1,9<<4).unwrap();
+        assert!(in_water(&world,&at(0.5,64.0,1.5)));
+        let mut tracker=FallTracker::new(70.0);
+        tracker.reset(64.0);
+        assert_eq!(tracker.update(64.0,true),0);
+    }
     #[test]
     fn rejects_full_block_intersections_and_tunnelling() {
         let mut world = World::new();
