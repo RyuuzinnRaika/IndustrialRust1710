@@ -21,8 +21,8 @@ mod physics;
 mod player;
 mod survival;
 mod survival_damage;
-mod terrain;
 mod telemetry;
+mod terrain;
 mod vitals;
 mod whitelist;
 mod world;
@@ -570,7 +570,9 @@ fn play(
     let mut last_effect_tick = clock.ticks();
     loop {
         if !hub.is_healthy(entity_id) {
-            return Err(io::Error::other("outbound packet overflow or session removed"));
+            return Err(io::Error::other(
+                "outbound packet overflow or session removed",
+            ));
         }
         while let Ok(event) = events.try_recv() {
             if event.id == CHUNK_RELIGHT_EVENT {
@@ -2861,9 +2863,8 @@ fn main() -> io::Result<()> {
     let leaf_drops = Arc::clone(&ground_items);
     let leaf_drops_file = Arc::clone(&ground_path);
     thread::spawn(move || {
-        let mut telemetry = telemetry::TickTelemetry::new(
-            furnace_world_path.with_extension("metrics.jsonl"),
-        );
+        let mut telemetry =
+            telemetry::TickTelemetry::new(furnace_world_path.with_extension("metrics.jsonl"));
         let mut last = furnace_clock.ticks();
         let mut last_clock_snapshot = last;
         let mut last_weather = furnace_clock.weather();
@@ -3156,11 +3157,21 @@ mod tests {
     }
     #[test]
     fn protocol5_slot_nbt_length_is_validated() {
-        let empty = [-1i16; 1].into_iter().flat_map(i16::to_be_bytes).collect::<Vec<_>>();
+        let empty = [-1i16; 1]
+            .into_iter()
+            .flat_map(i16::to_be_bytes)
+            .collect::<Vec<_>>();
         assert!(Input(&empty).slot().unwrap().is_none());
         // Item id=1, count=1, damage=0, NBT=-1 (no tag).
         let mut none = Input(&[0, 1, 1, 0, 0, 255, 255]);
-        assert_eq!(none.slot().unwrap(), Some(Stack { id: 1, count: 1, damage: 0 }));
+        assert_eq!(
+            none.slot().unwrap(),
+            Some(Stack {
+                id: 1,
+                count: 1,
+                damage: 0
+            })
+        );
         none.finish().unwrap();
         // An NBT-bearing client item must not be accepted as a bare stack.
         assert!(Input(&[0, 1, 1, 0, 0, 0, 3, 0, 0, 0]).slot().is_err());
