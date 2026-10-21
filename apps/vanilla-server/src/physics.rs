@@ -252,7 +252,6 @@ pub fn collides(world: &World, position: &PlayerPosition) -> bool {
     (min_x..=max_x).any(|x| {
         (min_z..=max_z).any(|z| {
             (min_y..=max_y).any(|y| {
-                let state = world.get(x, y, z);
                 shapes_at(world, x, y, z)
                     .into_iter()
                     .any(|shape| contact(world, position, x, y, z, shape))
@@ -267,7 +266,6 @@ fn support_top(world: &World, position: &PlayerPosition) -> Option<f64> {
     for x in min_x..=max_x {
         for z in min_z..=max_z {
             for y in (target.floor() as i32 - 2)..=(target.floor() as i32) {
-                let state = world.get(x, y, z);
                 for shape in shapes_at(world, x, y, z) {
                     let top = y as f64 + shape.y1;
                     if top <= target + GROUND_TOLERANCE
@@ -375,7 +373,6 @@ fn resolve_descent(world: &World, position: &PlayerPosition, wanted_y: f64) -> f
     for x in min_x..=max_x {
         for z in min_z..=max_z {
             for y in (wanted.floor() as i32 - 2).max(0)..=(position.y.floor() as i32).min(255) {
-                let state = world.get(x, y, z);
                 for shape in shapes_at(world, x, y, z) {
                     let top = y as f64 + shape.y1;
                     if top >= best - EPS
