@@ -373,6 +373,30 @@ impl Mobs {
             && !physics::supported(world,&p) { return None; }
         Some(self.insert(kind,p,false))
     }
+    /// Split only large Slimes/Magma Cubes. Child sizes are sent in Spawn
+    /// Mob metadata, avoiding the original single-entity HP illusion.
+    fn split_children(&mut self, dead: Mob) -> Vec<Event> {
+        if !matches!(dead.kind, Kind::Slime | Kind::MagmaCube)
+            || dead.split_size <= 1
+            || self.entities.len() + 4 > HOSTILE_CAP + PASSIVE_CAP + 40
+        {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        for (dx, dz) in [(-0.4,-0.4), (0.4,-0.4), (-0.4,0.4), (0.4,0.4)] {
+            let at = PlayerPosition {
+                x: dead.position.x+dx, y:dead.position.y, z:dead.position.z+dz,
+            };
+            self.insert(dead.kind, at, false);
+            let id = self.next_id-1;
+            if let Some(child) = self.entities.get_mut(&id) {
+                child.split_size = dead.split_size / 2;
+                child.health = (dead.kind.health() / 2).max(1);
+                events.push(child.spawn());
+            }
+        }
+        events
+    }
     /// Natural Survival only, preserving flat E2E world behaviour.
     pub fn new(world: &World, enabled: bool) -> Self {
         let mut state = Self {
@@ -512,13 +536,15 @@ impl Mobs {
         mob.hit_tick = tick;
         mob.health -= damage_held(held);
         let killed = mob.health <= 0;
-        let result = Attack {
+        let mut result = Attack {
             events: if killed {
                 vec![mob.status(3), multiplayer::destroy(id)]
             } else {
                 vec![mob.status(2)]
             },
-            drop: killed.then_some((
+            drop: (killed && mob.kind != Kind::Villager
+                && !(matches!(mob.kind, Kind::Slime | Kind::MagmaCube)
+                    && mob.split_size > 1)).then_some((
                 mob.kind.drop(),
                 (
                     mob.position.x.floor() as i32,
@@ -527,17 +553,20 @@ impl Mobs {
                 ),
             )),
             experience: if killed {
-                if mob.kind.passive() {
-                    2
-                } else {
-                    5
+                match mob.kind {
+                    Kind::EnderDragon => 12000,
+                    Kind::Wither => 50,
+                    _ if mob.kind.passive() => 2,
+                    _ => 5,
                 }
             } else {
                 0
             },
         };
         if killed {
-            self.entities.remove(&id);
+            if let Some(dead) = self.entities.remove(&id) {
+                result.events.extend(self.split_children(dead));
+            }
         }
         Some(result)
     }
