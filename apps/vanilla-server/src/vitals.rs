@@ -57,8 +57,8 @@ impl Vitals {
             (391, _) => Some((3, 0.6)),     // carrot
             (392, _) => Some((1, 0.3)),     // potato
             (393, _) => Some((5, 0.6)),     // baked potato
-            (400, _) => Some((8, 0.3)), // pumpkin pie
-            (396, _) => Some((6, 1.2)), // golden carrot
+            (400, _) => Some((8, 0.3)),     // pumpkin pie
+            (396, _) => Some((6, 1.2)),     // golden carrot
             _ => None,
         }
     }
@@ -164,10 +164,14 @@ mod tests {
         };
         assert!(v.eat(salmon));
         assert_eq!(v.food, 20);
-        assert!(!Vitals { food: 10, ..Vitals::default() }.can_eat(Stack {
+        let hungry = Vitals {
+            food: 10,
+            ..Vitals::default()
+        };
+        assert!(!hungry.can_eat(Stack {
             id: 350,
             count: 1,
-            damage: 2
+            damage: 2,
         }));
     }
 
