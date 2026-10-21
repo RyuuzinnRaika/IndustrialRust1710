@@ -1465,6 +1465,8 @@ fn play(
                             } else if vitals.can_eat(stack)
                                 || (stack.id == 373 && brewing::effect(stack).is_some())
                             {
+                                eating = Some((now_tick, stack));
+                            }
                         }
                     }
                     continue;
