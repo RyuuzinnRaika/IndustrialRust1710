@@ -308,7 +308,6 @@ mod tests {
         validate_tiles(&[value], None).unwrap();
     }
 
-
     #[test]
     fn tile_position_and_vanilla_container_slot_bounds() {
         fn tile(id: &str, x: i32, z: i32, slot: i8) -> Value {
