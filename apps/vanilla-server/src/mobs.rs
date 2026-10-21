@@ -600,7 +600,7 @@ impl Mobs {
                         z:mob.position.z+dz/len*0.6,..mob.position};
                     let wall=world.get(front.x.floor() as i32,front.y.floor() as i32,
                         front.z.floor() as i32)>>4;
-                    if wall!=0 && !matches!(wall,8|9|10|11) {
+                    if wall!=0 && !matches!(wall,8..=11) {
                         let climbed=PlayerPosition{y:mob.position.y+0.2,..mob.position};
                         if climbed.is_valid() && !physics::collides(world,&climbed) {
                             mob.position=climbed;
