@@ -361,6 +361,43 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
     let dz = player.2 - (z as f64 + 0.5);
     dx * dx + dy * dy + dz * dz <= 64.0
 }
+/// Double chests are two adjacent, independently persisted 27-slot halves.
+/// Canonical ordering is shared by all viewers regardless of clicked side.
+fn chest_neighbor(world: &World, pos: ChestPosition) -> Option<ChestPosition> {
+    let (x,y,z) = pos;
+    [(x-1,y,z),(x+1,y,z),(x,y,z-1),(x,y,z+1)]
+        .into_iter().find(|&(x,y,z)| world.get(x,y,z) >> 4 == 54)
+}
+fn can_place_chest(world: &World, pos: ChestPosition) -> bool {
+    let (x,y,z)=pos;
+    let neighbors: Vec<_> = [(x-1,y,z),(x+1,y,z),(x,y,z-1),(x,y,z+1)]
+        .into_iter().filter(|&(x,y,z)| world.get(x,y,z) >> 4 == 54).collect();
+    if neighbors.len() > 1 { return false; }
+    neighbors.first().is_none_or(|&neighbor| chest_neighbor(world,neighbor).is_none())
+}
+fn chest_window_state(storage: &Chests, pos: ChestPosition, partner: Option<ChestPosition>) -> Vec<Option<Stack>> {
+    let mut data = Vec::with_capacity(if partner.is_some() {54} else {27});
+    if let Some(other) = partner {
+        let (first,second) = if pos < other {(pos,other)} else {(other,pos)};
+        data.extend_from_slice(&storage.slots(first));
+        data.extend_from_slice(&storage.slots(second));
+    } else {
+        data.extend_from_slice(&storage.slots(pos));
+    }
+    data
+}
+fn stage_chest_window(storage: &Chests, pos: ChestPosition, partner: Option<ChestPosition>, slots: &[Option<Stack>]) -> io::Result<Chests> {
+    if slots.len() != if partner.is_some() {54} else {27} { return Err(bad("wrong chest slot count")); }
+    let mut first = [None;27];
+    first.copy_from_slice(&slots[..27]);
+    if let Some(other) = partner {
+        let mut second = [None;27];
+        second.copy_from_slice(&slots[27..]);
+        let (left,right) = if pos < other {(pos,other)} else {(other,pos)};
+        storage.staged_update(left,first)?.staged_update(right,second)
+    } else { storage.staged_update(pos,first) }
+}
+
 struct PlayerSession<'a> {
     position: &'a mut PlayerPosition,
     vitals: &'a mut Vitals,
@@ -427,6 +464,7 @@ fn play(
     let mut mining: Option<MiningProgress> = None;
     let mut active_window: u8 = 0;
     let mut active_chest: Option<ChestPosition> = None;
+    let mut active_chest_partner: Option<ChestPosition> = None;
     let mut active_furnace: Option<FurnacePosition> = None;
     let mut last_furnace_view = Furnace::default();
     let mut observed_chest_revision: u64 = 0;
@@ -442,7 +480,7 @@ fn play(
         if let Some(pos) = active_chest {
             let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
             if guard.revision() != observed_chest_revision {
-                let data = inventory.chest_window_items(active_window, &guard.slots(pos));
+                let data = inventory.chest_window_items(active_window, &chest_window_state(&guard, pos, active_chest_partner));
                 observed_chest_revision = guard.revision();
                 drop(guard);
                 send(s, 0x30, &data)?;
@@ -1008,6 +1046,7 @@ fn play(
                         next_window + 1
                     };
                     active_chest = None;
+                    active_chest_partner = None;
                     active_furnace = Some(pos);
                     let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
                     last_furnace_view = guard.get(pos);
@@ -1046,6 +1085,9 @@ fn play(
                     };
                     let pos = (x, y, z);
                     active_chest = Some(pos);
+                    active_chest_partner = world.lock()
+                        .map_err(|_| bad("world mutex poisoned"))
+                        .map(|w| chest_neighbor(&w, pos))?;
                     active_furnace = None;
                     let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
                     let items = inventory.chest_window_items(active_window, &guard.slots(pos));
@@ -1054,7 +1096,7 @@ fn play(
                     let mut opened = vec![active_window];
                     write_string("minecraft:chest", &mut opened)?;
                     write_string(&json!({"text":"Chest"}).to_string(), &mut opened)?;
-                    opened.push(27); // 3 rows of nine, excluding player inventory
+                    opened.push(if active_chest_partner.is_some() {54} else {27});
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &items)?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
@@ -1074,6 +1116,7 @@ fn play(
                     // Window 0 is always the player's personal 2x2 grid.
                     active_window = next_window;
                     active_chest = None;
+                    active_chest_partner = None;
                     active_furnace = None;
                     next_window = if next_window >= 100 {
                         1
@@ -1111,13 +1154,11 @@ fn play(
                                 327 => 10,
                                 _ => stack.id as u16,
                             };
-                            let adjacent_chest = block_id == 54
-                                && [(nx + 1, nz), (nx - 1, nz), (nx, nz + 1), (nx, nz - 1)]
-                                    .iter()
-                                    .any(|&(cx, cz)| w.get(cx, ny, cz) >> 4 == 54);
+                            let invalid_chest_merge = block_id == 54
+                                && !can_place_chest(&w, (nx,ny,nz));
                             if (world::is_placeable(block_id) || block_id == 61)
                                 && block_id != 7
-                                && !adjacent_chest
+                                && !invalid_chest_merge
                                 && w.get(x, y, z) != 0
                                 && w.get(nx, ny, nz) == 0
                                 && near(location, nx, ny, nz)
@@ -1269,10 +1310,13 @@ fn play(
                         .get(pos.0, pos.1, pos.2)
                         >> 4
                         == 54
-                        && near(location, pos.0, pos.1, pos.2);
+                        && near(location, pos.0, pos.1, pos.2)
+                        && active_chest_partner.is_none_or(|partner| {
+                            world.lock().is_ok_and(|w| w.get(partner.0,partner.1,partner.2) >> 4 == 54)
+                        });
                     let mut storage = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
-                    let original = storage.slots(pos);
-                    let mut changed_slots = original;
+                    let original = chest_window_state(&storage, pos, active_chest_partner);
+                    let mut changed_slots = original.clone();
                     let mut candidate = inventory.clone();
                     let change = if still_open && requested_window {
                         candidate.chest_click(&mut changed_slots, slot, button, mode)
@@ -1284,7 +1328,7 @@ fn play(
                         let inventory_changed = candidate != *inventory;
                         let storage_changed = original != changed_slots;
                         if inventory_changed && storage_changed {
-                            let staged = storage.staged_update(pos, changed_slots)?;
+                            let staged = stage_chest_window(&storage, pos, active_chest_partner, &changed_slots)?;
                             journal::commit(
                                 &chest_path.with_extension("pending-txn.json"),
                                 &[(inventory_path, candidate.encoded()?),
@@ -1293,7 +1337,8 @@ fn play(
                             *inventory = candidate;
                             *storage = staged;
                         } else if storage_changed {
-                            storage.update(chest_path, pos, changed_slots)?;
+                            let staged = stage_chest_window(&storage, pos, active_chest_partner, &changed_slots)?;
+                            storage.commit_staged(chest_path, staged)?;
                         } else if inventory_changed {
                             candidate.save(inventory_path)?;
                             *inventory = candidate;
@@ -1341,6 +1386,7 @@ fn play(
                     // deleting them if a player closes the crafting window.
                     active_window = 0;
                     active_chest = None;
+                    active_chest_partner = None;
                     active_furnace = None;
                     send(s, 0x30, &inventory.window_items())?;
                 }
