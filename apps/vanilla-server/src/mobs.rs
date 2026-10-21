@@ -1639,6 +1639,7 @@ impl Mobs {
         self.pending_effects = remaining;
         packets
     }
+    #[cfg(test)]
     pub fn hurt_player(&mut self, player_id: i32, player: PlayerPosition, tick: u64) -> u8 {
         self.hurt_player_with_health(player_id, player, tick, 20.0)
     }
