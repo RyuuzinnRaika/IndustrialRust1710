@@ -4,7 +4,7 @@
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::io::{self, Write};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
@@ -26,6 +26,21 @@ struct Job {
 pub struct PendingChunk(Receiver<io::Result<Vec<u8>>>);
 
 impl PendingChunk {
+    /// Poll completion without blocking a session or world tick thread.
+    ///
+    /// A caller may periodically poll while doing other work. After Ready,
+    /// this handle is consumed and must not be polled or finished again.
+    /// Unlike finish(), Pending never blocks on CPU-heavy zlib work.
+    pub fn poll(&self) -> io::Result<Option<Vec<u8>>> {
+        match self.0.try_recv() {
+            Ok(result) => result.map(Some),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                Err(io::Error::other("chunk encoder stopped"))
+            }
+        }
+    }
+
     pub fn finish(self) -> io::Result<Vec<u8>> {
         self.0
             .recv()
@@ -110,6 +125,28 @@ mod tests {
         assert_eq!(&packet[8..13], &[1, 0, 24, 0, 0]);
         let size = i32::from_be_bytes(packet[13..17].try_into().unwrap()) as usize;
         assert_eq!(size, packet.len() - 17);
+        let mut decoded = Vec::new();
+        ZlibDecoder::new(&packet[17..])
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn chunk_completion_poll_is_nonblocking_and_yields_valid_data() {
+        use std::time::{Duration, Instant};
+        let raw = vec![3u8; 20_736];
+        let pending = submit(0, 0, 0x18, raw.clone()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let packet = loop {
+            if let Some(packet) = pending.poll().unwrap() {
+                break packet;
+            }
+            assert!(Instant::now() < deadline, "chunk worker did not finish");
+            std::thread::yield_now();
+        };
+        let size = i32::from_be_bytes(packet[13..17].try_into().unwrap()) as usize;
+        assert_eq!(packet.len(), 17 + size);
         let mut decoded = Vec::new();
         ZlibDecoder::new(&packet[17..])
             .read_to_end(&mut decoded)
