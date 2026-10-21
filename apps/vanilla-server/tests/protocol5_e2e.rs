@@ -407,8 +407,7 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     send_position(&mut bob, 4.5, 65.0, 4.5);
     until_packet(&mut alice, 0x18, |b| {
         let mut raw = b;
-        read_varint(&mut raw).ok() == Some(bob_id as u32)
-            && raw.len() == 15 // three i32 positions, yaw, pitch, onGround
+        read_varint(&mut raw).ok() == Some(bob_id as u32) && raw.len() == 15 // three i32 positions, yaw, pitch, onGround
     });
     alice
         .write_all(&frame(1, &mc_string("hello from Rust")))
