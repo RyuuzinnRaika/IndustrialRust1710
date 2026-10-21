@@ -44,6 +44,25 @@ impl Clock {
     pub fn day_time(&self) -> i64 {
         ((6000 + self.ticks() % 24000) % 24000) as i64
     }
+    /// Deterministic 1.7.10-style weather episodes on the 20TPS world clock.
+    /// No real-time catch-up takes place during a server shutdown.
+    pub fn weather(&self) -> (bool, bool) {
+        let day = self.ticks() / 24_000;
+        (matches!(day % 7, 2 | 3), day % 7 == 3)
+    }
+    pub fn weather_packets(&self) -> Vec<Vec<u8>> {
+        let (rain, thunder) = self.weather();
+        let mut packets = vec![vec![if rain { 1 } else { 2 }, 0, 0, 0, 0]];
+        for (reason, amount) in [
+            (7u8, if rain { 1.0f32 } else { 0.0 }),
+            (8u8, if thunder { 1.0f32 } else { 0.0 }),
+        ] {
+            let mut body = vec![reason];
+            body.extend_from_slice(&amount.to_be_bytes());
+            packets.push(body);
+        }
+        packets
+    }
     #[cfg(test)]
     pub fn stop(&self) {
         self.running.store(false, Ordering::Release);

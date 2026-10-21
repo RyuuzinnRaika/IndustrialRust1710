@@ -120,11 +120,25 @@ fn rule(block: u16) -> Option<BlockRule> {
             true,
             item(id as i16, damage),
         ),
-        18 => (0.2, None, 0, false, None), // leaves: decay/sapling drops deferred
-        50 => (0.0, None, 0, false, item(50, 0)), // torch
+        6 => (0.0, None, 0, false, item(6, damage & 7)),
+        18 => (0.2, None, 0, false, None), // leaf drops handled separately
+        59 => (
+            0.0,
+            None,
+            0,
+            false,
+            item(if damage == 7 { 296 } else { 295 }, 0),
+        ),
+        60 => (0.6, Some(ToolKind::Shovel), 0, false, item(3, 0)),
+        141 => (0.0, None, 0, false, item(391, 0)),
+        142 => (0.0, None, 0, false, item(392, 0)),
+        66 => (0.7, Some(ToolKind::Pickaxe), 0, false, item(66, 0)),
+        70 | 72 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(id as i16, 0)),
+        93 | 94 => (0.0, None, 0, false, item(356, 0)),
+        50 => (0.0, None, 0, false, item(50, 0)),  // torch
         55 => (0.0, None, 0, false, item(331, 0)), // redstone dust
-        69 => (0.5, None, 0, false, item(69, 0)), // lever
-        76 => (0.0, None, 0, false, item(76, 0)), // redstone torch
+        69 => (0.5, None, 0, false, item(69, 0)),  // lever
+        76 => (0.0, None, 0, false, item(76, 0)),  // redstone torch
         5 => (2.0, Some(ToolKind::Axe), 0, false, item(5, damage)),
         17 | 162 => (2.0, Some(ToolKind::Axe), 0, false, item(id as i16, damage)),
         54 => (2.5, Some(ToolKind::Axe), 0, false, item(54, 0)),
@@ -145,6 +159,34 @@ fn rule(block: u16) -> Option<BlockRule> {
         drop,
     })
 }
+/// Deterministic, bounded bonus drops for manual harvesting. The primary
+/// BlockDrop remains compatible with existing mining/inventory accounting.
+pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<Stack> {
+    let (x, y, z) = pos;
+    let mut roll = tick
+        ^ (x as i64 as u64).wrapping_mul(0x9e3779b185ebca87)
+        ^ (y as i64 as u64).wrapping_mul(0xc2b2ae3d27d4eb4f)
+        ^ (z as i64 as u64).wrapping_mul(0x165667b19e3779f9);
+    roll ^= roll >> 30;
+    roll = roll.wrapping_mul(0xbf58476d1ce4e5b9);
+    roll ^= roll >> 27;
+    roll = roll.wrapping_mul(0x94d049bb133111eb);
+    roll ^= roll >> 31;
+    let (id, count) = match block >> 4 {
+        18 if roll.is_multiple_of(200) => (260, 1), // apple
+        18 if roll.is_multiple_of(20) => (6, 1),    // sapling
+        59 if block & 7 == 7 => (295, 1 + (roll % 3) as u8),
+        141 if block & 7 == 7 => (391, 1 + (roll % 3) as u8),
+        142 if block & 7 == 7 => (392, 1 + (roll % 3) as u8),
+        _ => return None,
+    };
+    Some(Stack {
+        id,
+        count,
+        damage: 0,
+    })
+}
+
 /// Server-authoritative minimum for breaking a known block; tick quantized,
 /// 30 game ticks × hardness / speed if harvestable, otherwise 100 × hardness.
 /// Not all environmental penalties of vanilla 1.7.10 are modeled.
