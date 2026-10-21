@@ -546,7 +546,13 @@ impl World {
                         6 => 6,
                         50 => 50,
                         55 => 331,
-                        59 => if old & 7 == 7 { 296 } else { 295 },
+                        59 => {
+                            if old & 7 == 7 {
+                                296
+                            } else {
+                                295
+                            }
+                        },
                         66 => 66,
                         70 | 72 | 77 | 143 => id as i16,
                         75 | 76 => 76,
@@ -915,14 +921,11 @@ mod tests {
     use super::*;
     #[test]
     fn unsupported_torch_detaches_into_an_item_after_commit() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-attachment-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-attachment-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
-        w.update_and_save(&path, 1, 64, 1, (50 << 4) | 5)
-            .unwrap();
+        w.update_and_save(&path, 1, 64, 1, (50 << 4) | 5).unwrap();
         w.update_and_save(&path, 1, 63, 1, 0).unwrap();
         let changed = w.block_tick(&path, 64).unwrap();
         assert!(changed.contains(&(1, 64, 1)));

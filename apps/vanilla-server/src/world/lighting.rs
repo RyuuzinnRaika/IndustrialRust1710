@@ -42,9 +42,7 @@ impl World {
                     }
                     if exposed {
                         sky_queue.push_back((x, y, z, 15));
-                        if (min_x..min_x + 16).contains(&x)
-                            && (min_z..min_z + 16).contains(&z)
-                        {
+                        if (min_x..min_x + 16).contains(&x) && (min_z..min_z + 16).contains(&z) {
                             sky[index(x, y, z, min_x, min_z)] = 15;
                         }
                     }
