@@ -22,7 +22,7 @@ jobs:
       - name: Format candidate sources and expose for review
         run: |
           cargo fmt --all
-          for f in apps/vanilla-server/src/{mobs,physics,inventory,main,navigation,survival_damage,experience}.rs; do
+          for f in apps/vanilla-server/src/{mobs,physics,inventory,main,navigation,survival_damage,experience,crafting}.rs; do
             echo "===IR_FORMAT_BEGIN:$f==="
             base64 "$f"
             echo "===IR_FORMAT_END:$f==="
