@@ -1078,7 +1078,7 @@ fn play(
                         candidate.save(inventory_path)?;
                         *inventory = candidate;
                         let mut packet = Vec::new();
-                        write_varint(entity_id as u32, &mut packet);
+                        packet.extend_from_slice(&entity_id.to_be_bytes());
                         packet.extend_from_slice(&x.to_be_bytes());
                         packet.push(y as u8);
                         packet.extend_from_slice(&z.to_be_bytes());
