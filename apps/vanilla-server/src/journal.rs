@@ -314,10 +314,7 @@ mod tests {
     }
     #[test]
     fn world_inventory_chest_crash_replay_and_parent_fsync() {
-        let home = std::env::temp_dir().join(format!(
-            "ir-journal-world-{}",
-            std::process::id()
-        ));
+        let home = std::env::temp_dir().join(format!("ir-journal-world-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(home.join("players")).unwrap();
         let world = home.join("flat.irw");
