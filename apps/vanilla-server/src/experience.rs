@@ -175,6 +175,17 @@ impl Orbs {
         Some(vec![Event { id: 0x0d, body }, multiplayer::destroy(id)])
     }
 }
+/// Approximate unenchanted 1.7.10 furnace XP by output item count.
+/// Integer awards are used until fractional batch accounting is persisted.
+pub fn smelting_reward(output_id: i16, quantity: u8) -> u16 {
+    let per_item: f32 = match output_id {
+        265 => 0.7, 266 => 1.0, 20 | 1 | 263 => 0.1,
+        320 | 364 | 366 | 350 | 393 => 0.35,
+        336 => 0.3, 348 => 0.2, 264 => 1.0,
+        _ => 0.0,
+    };
+    (per_item * f32::from(quantity)).round() as u16
+}
 #[cfg(test)]
 mod tests {
     use super::*;
