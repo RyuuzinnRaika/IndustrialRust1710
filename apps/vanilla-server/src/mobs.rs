@@ -113,6 +113,7 @@ impl Explosion {
 pub struct Mobs {
     entities:BTreeMap<i32,Mob>,
     arrows:BTreeMap<i32,Arrow>,
+    orbs:BTreeMap<i32,(PlayerPosition,u16)>,
     pending_hits:Vec<(PlayerPosition,u8,u64)>,
     pending_drops:Vec<(Stack,(i32,i32,i32))>,
     explosions:Vec<Explosion>,
@@ -166,6 +167,38 @@ impl Mobs {
     pub fn spawn_events(&self)->impl Iterator<Item=Event>+'_ {
         self.entities.values().copied().map(Mob::spawn)
             .chain(self.arrows.values().copied().map(Arrow::spawn))
+            .chain(self.orbs.iter().map(|(&id,&(at,amount))|{
+                let mut body=Vec::new();
+                write_varint(id as u32,&mut body);
+                for value in [at.x,at.y,at.z] {
+                    body.extend_from_slice(&((value*32.0).floor() as i32).to_be_bytes());
+                }
+                body.extend_from_slice(&(amount as i16).to_be_bytes());
+                Event{id:0x11,body}
+            }))
+    }
+    /// Spawn a server-owned XP orb. No immediate XP award occurs.
+    pub fn spawn_xp(&mut self,at:PlayerPosition,amount:u16)->Option<Event> {
+        if amount==0||self.orbs.len()>=256 {return None;}
+        let id=self.next_id;self.next_id+=1;
+        self.orbs.insert(id,(at,amount));
+        let mut body=Vec::new();
+        write_varint(id as u32,&mut body);
+        for value in [at.x,at.y,at.z] {
+            body.extend_from_slice(&((value*32.0).floor() as i32).to_be_bytes());
+        }
+        body.extend_from_slice(&(amount as i16).to_be_bytes());
+        Some(Event{id:0x11,body})
+    }
+    pub fn collect_xp(&mut self,player:PlayerPosition,collector:i32)->Option<(u32,Vec<Event>)> {
+        let (&id,&(_,amount))=self.orbs.iter().find(|(_, (at,_))| {
+            let d=(at.x-player.x).powi(2)+(at.y-player.y).powi(2)+(at.z-player.z).powi(2);
+            d<=2.25
+        })?;
+        self.orbs.remove(&id);
+        let mut body=id.to_be_bytes().to_vec();
+        body.extend_from_slice(&collector.to_be_bytes());
+        Some((u32::from(amount),vec![Event{id:0x0d,body},multiplayer::destroy(id)]))
     }
     pub fn take_drops(&mut self)->Vec<(Stack,(i32,i32,i32))> {
         std::mem::take(&mut self.pending_drops)
