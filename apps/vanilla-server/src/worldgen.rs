@@ -201,11 +201,10 @@ fn stone_biome(id: u8) -> bool {
     matches!(id, 3 | 13 | 25)
 }
 
-/// Ore parameters correspond to 1.7.10 categories (attempts per chunk,
-/// maximum Y, and typical vein size). The stateless sampler approximates the
-/// density and clustering; it is not Vanilla's chunk-seeded placement order.
+/// Minecraft 1.7.10-inspired distribution targets. Ore placement is
+/// stateless rather than Java's population RNG, so it is not byte-for-byte
+/// vanilla generation. Each 4x4x4 cell is a possible compact vein.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // Published generation tuning metadata; sampler integration follows.
 pub struct OreSpec {
     pub id: u16,
     pub min_y: i32,
@@ -213,88 +212,72 @@ pub struct OreSpec {
     pub attempts_per_chunk: u8,
     pub vein_size: u8,
 }
-#[allow(dead_code)]
 pub const ORES: [OreSpec; 7] = [
-    OreSpec {
-        id: 16,
-        min_y: 1,
-        max_y: 128,
-        attempts_per_chunk: 20,
-        vein_size: 16,
-    },
-    OreSpec {
-        id: 15,
-        min_y: 1,
-        max_y: 64,
-        attempts_per_chunk: 20,
-        vein_size: 8,
-    },
-    OreSpec {
-        id: 14,
-        min_y: 1,
-        max_y: 32,
-        attempts_per_chunk: 2,
-        vein_size: 8,
-    },
-    OreSpec {
-        id: 73,
-        min_y: 1,
-        max_y: 16,
-        attempts_per_chunk: 8,
-        vein_size: 7,
-    },
-    OreSpec {
-        id: 56,
-        min_y: 1,
-        max_y: 16,
-        attempts_per_chunk: 1,
-        vein_size: 7,
-    },
-    OreSpec {
-        id: 21,
-        min_y: 12,
-        max_y: 32,
-        attempts_per_chunk: 1,
-        vein_size: 6,
-    },
-    OreSpec {
-        id: 129,
-        min_y: 4,
-        max_y: 32,
-        attempts_per_chunk: 1,
-        vein_size: 5,
-    },
+    OreSpec { id: 16, min_y: 1, max_y: 128, attempts_per_chunk: 20, vein_size: 16 },
+    OreSpec { id: 15, min_y: 1, max_y: 64, attempts_per_chunk: 20, vein_size: 8 },
+    OreSpec { id: 14, min_y: 1, max_y: 32, attempts_per_chunk: 2, vein_size: 8 },
+    OreSpec { id: 73, min_y: 1, max_y: 16, attempts_per_chunk: 8, vein_size: 7 },
+    OreSpec { id: 56, min_y: 1, max_y: 16, attempts_per_chunk: 1, vein_size: 7 },
+    OreSpec { id: 21, min_y: 12, max_y: 32, attempts_per_chunk: 1, vein_size: 6 },
+    OreSpec { id: 129, min_y: 4, max_y: 32, attempts_per_chunk: 1, vein_size: 5 },
 ];
-fn ore(seed: u64, x: i32, y: i32, z: i32, is_hills: bool) -> u16 {
-    // Four-block cells keep adjacent ore blocks in coherent clusters.
-    let cell_x = x.div_euclid(4);
-    let cell_y = y.div_euclid(4);
-    let cell_z = z.div_euclid(4);
-    let chance = hash(seed ^ 0x0e0e, cell_x, cell_y, cell_z) % 8192;
-    let ore = if is_hills && chance < 18 && y < 33 {
-        129
-    } else if y <= 16 && chance < 13 {
-        56
-    } else if y <= 16 && chance < 70 {
-        73
-    } else if (12..=32).contains(&y) && chance < 82 {
-        21
-    } else if y <= 32 && chance < 115 {
-        14
-    } else if y <= 64 && chance < 515 {
-        15
-    } else if y <= 128 && chance < 1150 {
-        16
-    } else {
-        1
-    };
-    // Each 4x4x4 vein has an irregular edge, but is order-independent.
-    let trim = hash(seed ^ 0xbadc, x, y, z) % 7;
-    if ore != 1 && trim == 0 {
-        b(1)
-    } else {
-        b(ore)
+
+/// A fixed-size, contiguous, center-first vein. The inner 2x2x2 cube
+/// supplies the first eight positions; the next 24 positions are its six
+/// faces, rotated per cell. Exactly min(vein_size, 32) cells are selected.
+/// No per-chunk RNG state is needed, even for negative world coordinates.
+fn in_vein(shape: u64, x: i32, y: i32, z: i32, size: u8) -> bool {
+    let (lx, ly, lz) = (x.rem_euclid(4), y.rem_euclid(4), z.rem_euclid(4));
+    let inner = |n| (1..=2).contains(&n);
+    if inner(lx) && inner(ly) && inner(lz) {
+        let index = ((lx - 1) * 4 + (ly - 1) * 2 + lz - 1) as u64;
+        return (index + shape % 8) % 8 < u64::from(size.min(8));
     }
+    if size <= 8 {
+        return false;
+    }
+    let face = if lx == 0 && inner(ly) && inner(lz) {
+        Some((0, ly, lz))
+    } else if lx == 3 && inner(ly) && inner(lz) {
+        Some((1, ly, lz))
+    } else if ly == 0 && inner(lx) && inner(lz) {
+        Some((2, lx, lz))
+    } else if ly == 3 && inner(lx) && inner(lz) {
+        Some((3, lx, lz))
+    } else if lz == 0 && inner(lx) && inner(ly) {
+        Some((4, lx, ly))
+    } else if lz == 3 && inner(lx) && inner(ly) {
+        Some((5, lx, ly))
+    } else {
+        None
+    };
+    if let Some((face_id, a, b)) = face {
+        let index = (face_id * 4 + (a - 1) * 2 + b - 1) as u64;
+        (index + shape % 24) % 24 < u64::from(size.saturating_sub(8).min(24))
+    } else {
+        false
+    }
+}
+
+fn ore(seed: u64, x: i32, y: i32, z: i32, is_hills: bool) -> u16 {
+    let (cx, cy, cz) = (x.div_euclid(4), y.div_euclid(4), z.div_euclid(4));
+    // A 16x16 chunk contains four 4x4 cells per horizontal axis, so
+    // over H vertical layers there are 4*H candidate cells. Use the
+    // configured attempts/chunk as the expected vein count at each ore Y.
+    // Rarer ores take precedence when two veins overlap.
+    for spec in ORES.iter().rev() {
+        if !(spec.min_y..=spec.max_y).contains(&y) || (spec.id == 129 && !is_hills) {
+            continue;
+        }
+        let vertical_range = (spec.max_y - spec.min_y + 1) as u64;
+        let threshold = u64::from(spec.attempts_per_chunk) * 1_000_000 / (4 * vertical_range);
+        let salt = u64::from(spec.id).wrapping_mul(0x9e3779b185ebca87);
+        let chance = hash(seed ^ salt ^ 0x0e0e, cx, cy, cz);
+        if chance % 1_000_000 < threshold && in_vein(chance >> 20, x, y, z, spec.vein_size) {
+            return b(spec.id);
+        }
+    }
+    b(1)
 }
 fn cave(seed: u64, x: i32, y: i32, z: i32) -> bool {
     if !(7..=110).contains(&y) {
@@ -672,6 +655,40 @@ pub fn biome_for_dimension(seed: u64, dim: Dimension, x: i32, z: i32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ore_tuning_is_used_and_veins_are_bounded_and_repeatable() {
+        // 4x4x4 cell boundaries, including negative positions, are stable.
+        for seed in [0, 42, 983] {
+            for cx in -2..=2 {
+                for cy in 1..=8 {
+                    let mut counts = [0u8; 7];
+                    for x in cx * 4..cx * 4 + 4 {
+                        for y in cy * 4..cy * 4 + 4 {
+                            for z in -4..0 {
+                                let id = ore(seed, x, y, z, true) >> 4;
+                                assert_eq!(ore(seed, x, y, z, true) >> 4, id);
+                                if let Some((index, _)) =
+                                    ORES.iter().enumerate().find(|(_, spec)| spec.id == id)
+                                {
+                                    counts[index] += 1;
+                                } else {
+                                    assert_eq!(id, 1);
+                                }
+                                if id == 129 {
+                                    assert_ne!(ore(seed, x, y, z, false) >> 4, 129);
+                                }
+                            }
+                        }
+                    }
+                    for (index, spec) in ORES.iter().enumerate() {
+                        assert!(counts[index] <= spec.vein_size);
+                    }
+                }
+            }
+        }
+        assert!(ORES.iter().all(|spec| spec.min_y <= spec.max_y
+            && spec.vein_size > 0 && spec.vein_size <= 32));
+    }
     #[test]
     fn cross_chunk_border_is_seed_and_order_independent() {
         for d in [Dimension::Overworld, Dimension::Nether, Dimension::End] {
