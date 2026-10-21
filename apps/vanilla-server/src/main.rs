@@ -1583,7 +1583,11 @@ fn play(
                     {
                         send(s, mob.id, &mob.body)?;
                     }
-                    for orb in orbs.lock().map_err(|_| bad("orb mutex poisoned"))?.spawn_events() {
+                    for orb in orbs
+                        .lock()
+                        .map_err(|_| bad("orb mutex poisoned"))?
+                        .spawn_events()
+                    {
                         send(s, orb.id, &orb.body)?;
                     }
                     send(s, 0x06, &health_packet(*vitals))?;
@@ -1831,7 +1835,11 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         {
             send(&mut s, mob.id, &mob.body)?;
         }
-        for orb in orbs.lock().map_err(|_| bad("orb mutex poisoned"))?.spawn_events() {
+        for orb in orbs
+            .lock()
+            .map_err(|_| bad("orb mutex poisoned"))?
+            .spawn_events()
+        {
             send(&mut s, orb.id, &orb.body)?;
         }
     }
