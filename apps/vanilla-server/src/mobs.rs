@@ -1415,7 +1415,7 @@ mod tests {
         mobs.insert(Kind::Zombie, pos, false);
         mobs.tick(30, &World::new(), &[pos]);
         assert_eq!(mobs.entities.get(&3).unwrap().health, 13);
-        assert_eq!(mobs.hurt_player(999, pos, 31), 3);
+        assert_eq!(mobs.hurt_player(999, pos, 31), 2); // Easy halves melee damage
     }
 
     #[test]
