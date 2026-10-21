@@ -13,6 +13,8 @@ mod mobs;
 mod multiplayer;
 mod physics;
 mod player;
+#[allow(dead_code)] // Journal API staged for integration with cross-file inventory operations.
+mod recovery_journal;
 mod survival;
 mod terrain;
 mod vitals;
