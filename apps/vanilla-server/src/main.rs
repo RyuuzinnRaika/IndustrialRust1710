@@ -50,6 +50,8 @@ use whitelist::Whitelist;
 use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
 
 const MAX_CONNECTIONS: usize = 32;
+// Internal to Hub; no such packet ID is ever sent on the Protocol 5 wire.
+const CHUNK_RELIGHT_EVENT: u32 = u32::MAX;
 fn bad(reason: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, reason)
 }
@@ -344,6 +346,16 @@ fn send_player_position(s: &mut TcpStream, location: &PlayerPosition) -> io::Res
     bytes.push(0);
     send(s, 0x08, &bytes)
 }
+fn chunk_relight_event(cx: i32, cz: i32) -> Event {
+    let mut body = Vec::with_capacity(8);
+    body.extend_from_slice(&cx.to_be_bytes());
+    body.extend_from_slice(&cz.to_be_bytes());
+    Event {
+        id: CHUNK_RELIGHT_EVENT,
+        body,
+    }
+}
+
 fn block_change_event(world: &World, x: i32, y: i32, z: i32) -> Event {
     let block = world.get(x, y, z);
     let mut data = Vec::new();
@@ -413,6 +425,8 @@ fn play(
     let mut fall = FallTracker::new(player.y);
     let mut idle_gravity = IdleGravity::new(clock.ticks());
     let mut loaded_chunks = view_chunks(chunk_center(player));
+    let mut pending_chunk_relights = BTreeSet::new();
+    let mut last_chunk_relight = Instant::now() - Duration::from_millis(200);
     let mut yaw: f32 = 0.0;
     let mut pitch: f32 = 0.0;
     let mut last_movement_broadcast = Instant::now() - Duration::from_millis(50);
@@ -437,7 +451,27 @@ fn play(
     let mut eating: Option<(u64, Stack)> = None;
     loop {
         while let Ok(event) = events.try_recv() {
+            if event.id == CHUNK_RELIGHT_EVENT {
+                if event.body.len() == 8 {
+                    let cx = i32::from_be_bytes(event.body[0..4].try_into().unwrap());
+                    let cz = i32::from_be_bytes(event.body[4..8].try_into().unwrap());
+                    if loaded_chunks.contains(&(cx, cz)) {
+                        pending_chunk_relights.insert((cx, cz));
+                    }
+                }
+                continue;
+            }
             send(s, event.id, &event.body)?;
+        }
+        // Full chunk resend re-synchronizes both sky and block light; limit
+        // each peer to one per 200 ms and drop refreshes for unloaded chunks.
+        if last_chunk_relight.elapsed() >= Duration::from_millis(200) {
+            if let Some(chunk) = pending_chunk_relights.pop_first() {
+                if loaded_chunks.contains(&chunk) {
+                    send_chunk(s, world, chunk.0, chunk.1)?;
+                }
+                last_chunk_relight = Instant::now();
+            }
         }
         // Poll the single shared chest revision to synchronize viewers.
         // Do not send a chest's window-id to unrelated players.
@@ -2094,6 +2128,9 @@ fn main() -> io::Result<()> {
                             return;
                         }
                     }
+                }
+                for (cx, cz) in gravity_world.drain_light_chunks(32) {
+                    furnace_hub.broadcast(chunk_relight_event(cx, cz));
                 }
             }
             thread::sleep(Duration::from_millis(10));

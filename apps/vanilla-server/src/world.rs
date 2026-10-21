@@ -40,6 +40,8 @@ pub struct World {
     pending_repeaters: BTreeMap<Position, (u64, bool)>,
     pending_buttons: BTreeMap<Position, u64>,
     pending_drops: Vec<WorldDrop>,
+    // Sparse pending client-facing lighting invalidations, not part of IRW files.
+    pending_light_chunks: BTreeSet<(i32, i32)>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
     fluid_phase: u64,
 }
@@ -134,6 +136,46 @@ impl World {
     pub fn drain_drops(&mut self) -> Vec<WorldDrop> {
         std::mem::take(&mut self.pending_drops)
     }
+
+    /// Bounded per-worker budget; remaining light updates survive the next tick.
+    pub fn drain_light_chunks(&mut self, budget: usize) -> Vec<(i32, i32)> {
+        let chunks: Vec<_> = self
+            .pending_light_chunks
+            .iter()
+            .take(budget)
+            .copied()
+            .collect();
+        for chunk in &chunks {
+            self.pending_light_chunks.remove(chunk);
+        }
+        chunks
+    }
+
+    /// Only refresh when opacity or emission changes, not merely metadata.
+    /// The 15-block Manhattan halo includes chunk boundaries and corners.
+    fn mark_lighting_changed(&mut self, x: i32, z: i32, old: u16, new: u16) {
+        if lighting::lighting_signature(old) == lighting::lighting_signature(new) {
+            return;
+        }
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        for chunk_x in cx - 1..=cx + 1 {
+            for chunk_z in cz - 1..=cz + 1 {
+                if !(MIN_CHUNK..=MAX_CHUNK).contains(&chunk_x)
+                    || !(MIN_CHUNK..=MAX_CHUNK).contains(&chunk_z)
+                {
+                    continue;
+                }
+                let min_x = chunk_x * 16;
+                let min_z = chunk_z * 16;
+                let dx = (min_x - x).max(x - (min_x + 15)).max(0);
+                let dz = (min_z - z).max(z - (min_z + 15)).max(0);
+                if dx + dz <= 15 {
+                    self.pending_light_chunks.insert((chunk_x, chunk_z));
+                }
+            }
+        }
+    }
+
     pub fn edited_chunks(&self) -> BTreeSet<(i32, i32)> {
         self.edits
             .keys()
@@ -269,6 +311,8 @@ impl World {
         // Wake moving blocks for the next tick, and the block above their
         // former location, which may now have become unsupported.
         for movement in &moved {
+            self.mark_lighting_changed(movement.from.0, movement.from.2, 12 << 4, 0);
+            self.mark_lighting_changed(movement.to.0, movement.to.2, 0, 12 << 4);
             self.wake_gravity(movement.to.0, movement.to.1, movement.to.2);
             self.wake_gravity(movement.from.0, movement.from.1, movement.from.2);
             self.wake_block_updates(movement.to.0, movement.to.1, movement.to.2);
@@ -533,18 +577,57 @@ impl World {
         if !changes.is_empty() {
             // Decaying oak leaves may yield a sapling or apple. Stage these
             // before mutation, but expose them only after a successful save.
-            let leaf_drops: Vec<WorldDrop> = changes
+            let detached_drops: Vec<WorldDrop> = changes
                 .iter()
                 .filter_map(|(&(x, y, z), &next)| {
                     let old = self.get(x, i32::from(y), z);
-                    if next != 0 || old >> 4 != 18 {
+                    if next != 0 || old == 0 {
                         return None;
                     }
                     let pos = (x, i32::from(y), z);
-                    crate::survival::additional_drop(old, pos, self.fluid_phase)
-                        .map(|stack| WorldDrop { pos, stack })
+                    let id = old >> 4;
+                    let item_id = match id {
+                        6 => 6,
+                        50 => 50,
+                        55 => 331,
+                        59 => {
+                            if old & 7 == 7 {
+                                296
+                            } else {
+                                295
+                            }
+                        }
+                        66 => 66,
+                        70 | 72 | 77 | 143 => id as i16,
+                        75 | 76 => 76,
+                        93 | 94 => 356,
+                        141 => 391,
+                        142 => 392,
+                        64 if old & 8 == 0 => 324,
+                        71 if old & 8 == 0 => 330,
+                        96 => 96,
+                        18 => {
+                            return crate::survival::additional_drop(old, pos, self.fluid_phase)
+                                .map(|stack| WorldDrop { pos, stack });
+                        }
+                        _ => return None,
+                    };
+                    let stack = crate::inventory::Stack {
+                        id: item_id,
+                        count: 1,
+                        damage: if id == 6 { (old & 7) as i16 } else { 0 },
+                    };
+                    Some(WorldDrop { pos, stack })
                 })
                 .take(256)
+                .collect();
+            let dirty_light: Vec<_> = changes
+                .iter()
+                .filter_map(|(&(x, y, z), &new)| {
+                    let old = self.get(x, i32::from(y), z);
+                    (lighting::lighting_signature(old) != lighting::lighting_signature(new))
+                        .then_some((x, z, old, new))
+                })
                 .collect();
             let undo: Vec<(Position, Option<u16>)> = changes
                 .keys()
@@ -571,7 +654,10 @@ impl World {
                 }
                 return Err(error);
             }
-            self.pending_drops.extend(leaf_drops);
+            self.pending_drops.extend(detached_drops);
+            for (x, z, old, new) in dirty_light {
+                self.mark_lighting_changed(x, z, old, new);
+            }
         }
 
         for pos in wet {
@@ -636,6 +722,7 @@ impl World {
             }
             return Err(e);
         }
+        self.mark_lighting_changed(x, z, previous, block);
         self.wake_gravity(x, y, z);
         self.wake_block_updates(x, y, z);
         if matches!(previous >> 4, 17 | 162) || matches!(block >> 4, 17 | 162) {
@@ -888,6 +975,50 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unsupported_torch_detaches_into_an_item_after_commit() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-attachment-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path, 1, 64, 1, (50 << 4) | 5).unwrap();
+        w.update_and_save(&path, 1, 63, 1, 0).unwrap();
+        let changed = w.block_tick(&path, 64).unwrap();
+        assert!(changed.contains(&(1, 64, 1)));
+        assert_eq!(w.get(1, 64, 1), 0);
+        assert!(w.drain_drops().iter().any(|drop| drop.stack.id == 50));
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(1, 64, 1), 0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn light_refreshes_are_bounded_to_chunks_and_only_follow_committed_edits() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-light-dirty-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path, 15, 64, 15, 50 << 4).unwrap();
+        let first = w.drain_light_chunks(1);
+        assert_eq!(first, vec![(0, 0)]);
+        let remaining = w.drain_light_chunks(32);
+        assert!(remaining.contains(&(1, 1)));
+        assert!(!remaining.contains(&(2, 2)));
+        assert!(w.drain_light_chunks(1).is_empty());
+        // Metadata-only updates cannot change the light field.
+        w.update_and_save(&path, 15, 64, 15, (50 << 4) | 5).unwrap();
+        assert!(w.drain_light_chunks(32).is_empty());
+        // A failed save neither mutates the block nor queues a relight.
+        let failure_path = path.join("invalid.irw");
+        assert!(w.update_and_save(&failure_path, 15, 64, 15, 0).is_err());
+        assert!(w.drain_light_chunks(32).is_empty());
+        w.update_and_save(&path, 15, 64, 15, 0).unwrap();
+        assert!(!w.drain_light_chunks(32).is_empty());
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(15, 64, 15), 0);
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn sand_gravel_fall_one_cell_per_tick_and_restore_after_reload() {
         let path = std::env::temp_dir().join(format!(
