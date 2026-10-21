@@ -3,6 +3,7 @@
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
 mod anvil_export;
 mod anvil_import;
+mod backup_world;
 mod brewing;
 mod chests;
 mod chunk_pipeline;
@@ -2681,7 +2682,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
 fn main() -> io::Result<()> {
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
-    let properties = if std::env::args().any(|arg| arg == "--help") {
+    let properties = if std::env::args().any(|arg| arg == "--help" || arg == "--backup-world") {
         None
     } else {
         server_config::ServerProperties::load_optional(Path::new("server.properties"))?
@@ -2696,6 +2697,8 @@ fn main() -> io::Result<()> {
         .unwrap_or_else(|| PathBuf::from("world/flat.irw"));
     let mut anvil_export_path: Option<PathBuf> = None;
     let mut anvil_import_path: Option<PathBuf> = None;
+    let mut backup_destination: Option<PathBuf> = None;
+    let mut explicit_world = false;
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
     let mut survival = properties.as_ref().is_some_and(|config| config.survival);
@@ -2707,7 +2710,7 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -2724,7 +2727,8 @@ fn main() -> io::Result<()> {
                 world_path = args
                     .next()
                     .ok_or_else(|| bad("missing --world value"))?
-                    .into()
+                    .into();
+                explicit_world = true;
             }
             "--whitelist" => {
                 whitelist_path = args
@@ -2783,6 +2787,12 @@ fn main() -> io::Result<()> {
                         .ok_or_else(|| bad("missing --import-anvil directory"))?,
                 ));
             }
+            "--backup-world" => {
+                backup_destination = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| bad("missing --backup-world directory"))?,
+                ));
+            }
             _ => return Err(bad("unknown command-line argument")),
         }
     }
@@ -2811,6 +2821,35 @@ fn main() -> io::Result<()> {
         return Err(bad(
             "--export-anvil and --import-anvil are mutually exclusive",
         ));
+    }
+    if let Some(destination) = backup_destination {
+        if !explicit_world
+            || anvil_import_path.is_some()
+            || anvil_export_path.is_some()
+            || requested_seed.is_some()
+            || biome_seed.is_some()
+            || expanded_seed.is_some()
+        {
+            return Err(bad(
+                "--backup-world requires --world FILE and no import/export/seed",
+            ));
+        }
+        let dir = world_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| bad("--backup-world requires a world subdirectory"))?;
+        if !world_path.is_file() && !dir.join("level.dat").is_file() {
+            return Err(bad("backup source has no IRW file or vanilla level.dat"));
+        }
+        let mut lock = session_lock::WorldSessionLock::acquire(dir)?;
+        let stats = backup_world::create(dir, &destination, &mut lock)?;
+        println!(
+            "World backup complete: {} files ({} bytes) at {}",
+            stats.files,
+            stats.bytes,
+            destination.display()
+        );
+        return Ok(());
     }
     if let Some(source) = anvil_import_path {
         // Only import our own exported flat-world snapshots; never overwrite
