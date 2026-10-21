@@ -61,24 +61,45 @@ impl Default for Inventory {
 impl Inventory {
     /// Armor order in Protocol 5 window 0: helmet, chestplate, leggings, boots.
     fn armor_for_slot(stack: Stack, index: usize) -> bool {
-        stack.count == 1 && match index {
-            0 => matches!(stack.id, 298 | 302 | 306 | 310 | 314),
-            1 => matches!(stack.id, 299 | 303 | 307 | 311 | 315),
-            2 => matches!(stack.id, 300 | 304 | 308 | 312 | 316),
-            3 => matches!(stack.id, 301 | 305 | 309 | 313 | 317),
-            _ => false,
-        }
+        stack.count == 1
+            && match index {
+                0 => matches!(stack.id, 298 | 302 | 306 | 310 | 314),
+                1 => matches!(stack.id, 299 | 303 | 307 | 311 | 315),
+                2 => matches!(stack.id, 300 | 304 | 308 | 312 | 316),
+                3 => matches!(stack.id, 301 | 305 | 309 | 313 | 317),
+                _ => false,
+            }
     }
     /// Total pre-enchantment armor points, capped at 20.
     pub fn armor_points(&self) -> u8 {
-        self.slots[5..9].iter().flatten().map(|stack| match stack.id {
-            298 => 1, 299 => 3, 300 => 2, 301 => 1,
-            302 => 2, 303 => 5, 304 => 4, 305 => 1,
-            306 => 2, 307 => 6, 308 => 5, 309 => 2,
-            310 => 3, 311 => 8, 312 => 6, 313 => 3,
-            314 => 2, 315 => 5, 316 => 3, 317 => 1,
-            _ => 0,
-        }).sum::<u8>().min(20)
+        self.slots[5..9]
+            .iter()
+            .flatten()
+            .map(|stack| match stack.id {
+                298 => 1,
+                299 => 3,
+                300 => 2,
+                301 => 1,
+                302 => 2,
+                303 => 5,
+                304 => 4,
+                305 => 1,
+                306 => 2,
+                307 => 6,
+                308 => 5,
+                309 => 2,
+                310 => 3,
+                311 => 8,
+                312 => 6,
+                313 => 3,
+                314 => 2,
+                315 => 5,
+                316 => 3,
+                317 => 1,
+                _ => 0,
+            })
+            .sum::<u8>()
+            .min(20)
     }
     pub fn location(player_path: &Path) -> PathBuf {
         player_path.with_extension("inventory.json")
@@ -88,9 +109,10 @@ impl Inventory {
             || self.selected > 8
             || self.slots.len() != SLOT_COUNT
             || self.slots[0].is_some()
-            || self.slots[5..9].iter().enumerate().any(|(i, equipped)| {
-                equipped.is_some_and(|stack| !Self::armor_for_slot(stack, i))
-            })
+            || self.slots[5..9]
+                .iter()
+                .enumerate()
+                .any(|(i, equipped)| equipped.is_some_and(|stack| !Self::armor_for_slot(stack, i)))
             || self
                 .workbench
                 .iter()
@@ -244,17 +266,20 @@ impl Inventory {
     }
     /// Consume one arrow and one bow durability, returning the changed arrow
     /// slot. This can only be called after the server verified a charged bow.
-    pub fn use_bow(&mut self)->Option<i16> {
-        let held_idx=36+self.selected as usize;
-        let bow=self.slots[held_idx]?;
-        if bow.id!=261||bow.count!=1||bow.damage>=384 {return None;}
-        let arrow_idx=(9..45).find(|&i|self.slots[i].is_some_and(|s|s.id==262&&s.count>0))?;
-        let mut arrow=self.slots[arrow_idx]?;
-        arrow.count-=1;
-        self.slots[arrow_idx]=(arrow.count>0).then_some(arrow);
-        let mut next=bow;
-        next.damage+=1;
-        self.slots[held_idx]=(next.damage<384).then_some(next);
+    pub fn use_bow(&mut self) -> Option<i16> {
+        let held_idx = 36 + self.selected as usize;
+        let bow = self.slots[held_idx]?;
+        if bow.id != 261 || bow.count != 1 || bow.damage >= 384 {
+            return None;
+        }
+        let arrow_idx =
+            (9..45).find(|&i| self.slots[i].is_some_and(|s| s.id == 262 && s.count > 0))?;
+        let mut arrow = self.slots[arrow_idx]?;
+        arrow.count -= 1;
+        self.slots[arrow_idx] = (arrow.count > 0).then_some(arrow);
+        let mut next = bow;
+        next.damage += 1;
+        self.slots[held_idx] = (next.damage < 384).then_some(next);
         Some(arrow_idx as i16)
     }
     /// Damage one server-held, unenchanted tool on a committed block break.
@@ -447,8 +472,10 @@ impl Inventory {
                     (target, hand, 1) => (hand, target),
                     _ => unreachable!("validated button"),
                 };
-                if window == 0 && (5..=8).contains(&slot) &&
-                    new_slot.is_some_and(|item| !Self::armor_for_slot(item, slot as usize - 5)) {
+                if window == 0
+                    && (5..=8).contains(&slot)
+                    && new_slot.is_some_and(|item| !Self::armor_for_slot(item, slot as usize - 5))
+                {
                     return false;
                 }
                 self.assign(window, slot, new_slot);
@@ -501,8 +528,10 @@ impl Inventory {
                 let other = if window == 0 { 36 } else { 37 } + i16::from(button);
                 let old = self.lookup(window, slot);
                 let held = self.lookup(window, other);
-                if window == 0 && (5..=8).contains(&slot) &&
-                    held.is_some_and(|item| !Self::armor_for_slot(item, slot as usize - 5)) {
+                if window == 0
+                    && (5..=8).contains(&slot)
+                    && held.is_some_and(|item| !Self::armor_for_slot(item, slot as usize - 5))
+                {
                     return false;
                 }
                 self.assign(window, slot, held);
