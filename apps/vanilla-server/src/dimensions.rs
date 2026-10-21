@@ -125,6 +125,56 @@ pub fn destination(
         z: z.clamp(-limit, limit),
     })
 }
+/// Finds a standable arrival close to a portal's coordinate anchor without
+/// assuming that the anchor itself is air. Search is finite, deterministic,
+/// and limited to the destination World; it never creates chunks or writes
+/// blocks. A caller must refuse teleportation when no safe space exists.
+pub fn safe_arrival(world: &World, anchor: PortalDestination) -> Option<PortalDestination> {
+    if !anchor.valid() {
+        return None;
+    }
+    let (cx, cz) = (anchor.x.floor() as i32, anchor.z.floor() as i32);
+    let desired_y = anchor.y.floor() as i32;
+    for radius in 0i32..=8 {
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                if dx.abs().max(dz.abs()) != radius {
+                    continue;
+                }
+                let (x, z) = (cx + dx, cz + dz);
+                for offset in 0..=112 {
+                    for y in [desired_y - offset, desired_y + offset] {
+                        if !(2..=254).contains(&y) || !crate::world::in_bounds(x, y, z) {
+                            continue;
+                        }
+                        // Conservative, full-footprint ground: never accept
+                        // fluids, fire, plants, portals or non-solid tile entities.
+                        let ground = world.get(x, y - 1, z) >> 4;
+                        if !matches!(
+                            ground,
+                            1 | 2 | 3 | 4 | 5 | 7 | 12 | 13 | 24 | 49 | 87 | 88 | 89 | 112 | 121
+                        ) {
+                            continue;
+                        }
+                        if world.get(x, y, z) != 0 || world.get(x, y + 1, z) != 0 {
+                            continue;
+                        }
+                        let chosen = PortalDestination {
+                            dimension: anchor.dimension,
+                            x: f64::from(x) + 0.5,
+                            y: f64::from(y),
+                            z: f64::from(z) + 0.5,
+                        };
+                        if chosen.valid() {
+                            return Some(chosen);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
 /// Durable travel checkpoint for the session/router layer. The session must
 /// save player inventory/vitals and send S07 Respawn before changing worlds.
 /// The checkpoint never replaces a player.dat (it is supplemental).
@@ -222,6 +272,36 @@ mod tests {
             .load_or_create(Dimension::Nether)
             .is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn safe_portal_arrival_requires_real_floor_and_headroom() {
+        let flat = World::new();
+        let anchor = PortalDestination {
+            dimension: Dimension::Overworld,
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        assert_eq!(safe_arrival(&flat, anchor).unwrap().y, 64.0);
+        let end = World::expanded(42, Dimension::End);
+        let anchor = PortalDestination {
+            dimension: Dimension::End,
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        let destination = safe_arrival(&end, anchor).unwrap();
+        let y = destination.y as i32;
+        let x = destination.x.floor() as i32;
+        let z = destination.z.floor() as i32;
+        assert_ne!(end.get(x, y - 1, z), 0);
+        assert_eq!(end.get(x, y, z), 0);
+        assert_eq!(end.get(x, y + 1, z), 0);
+        assert!(safe_arrival(
+            &flat,
+            PortalDestination { x: f64::NAN, ..anchor }
+        )
+        .is_none());
     }
     #[test]
     fn checkpoint_roundtrip() {
