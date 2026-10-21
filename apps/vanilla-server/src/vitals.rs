@@ -4,8 +4,8 @@
 use crate::inventory::Stack;
 
 /// Vanilla 1.7.10 armor formula (damage after pre-enchantment protection).
-pub fn armored_damage(amount:f32,armor_points:u8)->f32 {
-    amount * (25.0-f32::from(armor_points.min(20))) / 25.0
+pub fn armored_damage(amount: f32, armor_points: u8) -> f32 {
+    amount * (25.0 - f32::from(armor_points.min(20))) / 25.0
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vitals {
@@ -130,9 +130,9 @@ impl Vitals {
 mod tests {
     #[test]
     fn armor_reduction_is_bounded() {
-        assert_eq!(super::armored_damage(5.0,0),5.0);
-        assert_eq!(super::armored_damage(5.0,20),1.0);
-        assert_eq!(super::armored_damage(5.0,99),1.0);
+        assert_eq!(super::armored_damage(5.0, 0), 5.0);
+        assert_eq!(super::armored_damage(5.0, 20), 1.0);
+        assert_eq!(super::armored_damage(5.0, 99), 1.0);
     }
 
     use super::*;
