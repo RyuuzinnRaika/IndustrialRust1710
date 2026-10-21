@@ -1468,6 +1468,28 @@ mod tests {
     }
 
     #[test]
+    fn stew_consumption_replaces_one_bowl_without_creating_extra_items() {
+        let mut inventory = Inventory::default();
+        let stew = Stack {
+            id: 282,
+            count: 1,
+            damage: 0,
+        };
+        let bowl = Stack {
+            id: 281,
+            count: 1,
+            damage: 0,
+        };
+        inventory.creative_set(36, Some(stew)).unwrap();
+        assert!(inventory.consume_held());
+        assert_eq!(inventory.held(), None);
+        assert!(inventory.receive_stack(bowl).is_some());
+        assert_eq!(inventory.held(), Some(bowl));
+        assert!(inventory.encoded().is_ok());
+        assert!(!inventory.consume_item(282));
+    }
+
+    #[test]
     fn armor_uses_legacy_durability_and_breaks_on_combat_damage() {
         let mut inv = Inventory::default();
         let helmet = Stack {
