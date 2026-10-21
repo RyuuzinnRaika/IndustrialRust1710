@@ -757,6 +757,19 @@ fn play(
                     }
                 }
                 idle_gravity.observe_client(now_tick);
+                if survival {
+                    let fx = x.floor() as i32;
+                    let fz = z.floor() as i32;
+                    let fy = y.floor() as i32 - 1;
+                    // A fall of at least one block onto farmland tramples it.
+                    if fy >= 0 && player.y - y >= 1.0 {
+                        let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        if soil.get(fx,fy,fz) >> 4 == 60
+                            && soil.update_and_save(world_path,fx,fy,fz,3 << 4)? {
+                            hub.broadcast(block_change_event(&soil,fx,fy,fz));
+                        }
+                    }
+                }
                 location = (x, y, z);
                 *player = candidate;
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(&candidate))?;
@@ -975,6 +988,28 @@ fn play(
                     }
                     continue;
                 }
+                // Hoe -> farmland. In Survival, commit tool wear first;
+                // no item is consumed for tilling soil.
+                if face == 1 && world::in_bounds(x,y,z) && near(location,x,y,z)
+                    && inventory.can_place(held)
+                    && inventory.held().is_some_and(|stack| matches!(stack.id, 290..=294))
+                {
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    if matches!(w.get(x,y,z) >> 4, 2 | 3) && w.get(x,y+1,z) == 0 {
+                        let mut after = inventory.clone();
+                        if !survival || after.wear_held_tool() {
+                            if survival { after.save(inventory_path)?; }
+                            if w.update_and_save(world_path,x,y,z,60 << 4)? {
+                                if survival {
+                                    *inventory = after;
+                                    send(s,0x2f,&inventory.set_slot(inventory.held_slot())?)?;
+                                }
+                                hub.broadcast(block_change_event(&w,x,y,z));
+                            }
+                        }
+                        continue;
+                    }
+                }
                 // Server-authoritative lever use: toggle powered flag,
                 // then let queued redstone-wire updates propagate per tick.
                 if (0..=5).contains(&face) && world::in_bounds(x, y, z) && near(location, x, y, z) {
@@ -1108,13 +1143,24 @@ fn play(
                                 331 => 55,
                                 326 => 8,
                                 327 => 10,
+                                295 => 59, // wheat seeds
+                                391 => 141, // carrot
+                                392 => 142, // potato
                                 _ => stack.id as u16,
                             };
                             let adjacent_chest = block_id == 54
                                 && [(nx + 1, nz), (nx - 1, nz), (nx, nz + 1), (nx, nz - 1)]
                                     .iter()
                                     .any(|&(cx, cz)| w.get(cx, ny, cz) >> 4 == 54);
+                            let metadata = if block_id == 50 {
+                                match face { 1 => 5, 2 => 3, 3 => 4, 4 => 1, 5 => 2, _ => 5 }
+                            } else if matches!(block_id,59 | 141 | 142 | 8 | 10) {
+                                0
+                            } else {
+                                stack.damage as u16 & 15
+                            };
                             if (world::is_placeable(block_id) || block_id == 61)
+                                && w.can_support(nx,ny,nz,(block_id << 4) | metadata)
                                 && block_id != 7
                                 && !adjacent_chest
                                 && w.get(x, y, z) != 0
@@ -1144,7 +1190,7 @@ fn play(
                                             nx,
                                             ny,
                                             nz,
-                                            (block_id << 4) | (stack.damage as u16 & 15),
+                                            (block_id << 4) | metadata,
                                         ) {
                                             Ok(true) => {
                                                 *inventory = remaining;
@@ -1166,7 +1212,7 @@ fn play(
                                         nx,
                                         ny,
                                         nz,
-                                        (block_id << 4) | (stack.damage as u16 & 15),
+                                        (block_id << 4) | metadata,
                                     )?;
                                 }
                             }
