@@ -21,6 +21,7 @@ mod physics;
 mod player;
 mod survival;
 mod survival_damage;
+mod spawn_rules;
 mod telemetry;
 mod terrain;
 mod vitals;
