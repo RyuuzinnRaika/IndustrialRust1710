@@ -90,6 +90,8 @@ struct Mob {
     baby: bool,
     age_ticks: u32,
     waypoint: Option<PlayerPosition>,
+    sheared: bool,
+    next_egg_tick: u64,
 }
 impl Mob {
     fn spawn(self) -> Event {
@@ -107,6 +109,10 @@ impl Mob {
         if self.baby {
             body.push((12 << 3) | 2); // metadata index 12, type 2 (int)
             body.extend_from_slice(&(-24000i32).to_be_bytes());
+        }
+        if self.kind == Kind::Sheep {
+            body.push(16); // sheep colour + sheared bit (byte metadata)
+            body.push(if self.sheared { 0x10 } else { 0 });
         }
         body.push(0x7f);
         Event { id: 0x0f, body }
@@ -200,6 +206,34 @@ fn hash(mut x: u64) -> u64 {
 fn distance(a: PlayerPosition, b: PlayerPosition) -> f64 {
     (a.x - b.x).hypot(a.z - b.z)
 }
+fn distance_3d(a: PlayerPosition, b: PlayerPosition) -> f64 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
+}
+fn can_see(world: &World, source: PlayerPosition, target: PlayerPosition) -> bool {
+    let start = PlayerPosition { y: source.y + 1.3, ..source };
+    let end = PlayerPosition { y: target.y + 1.2, ..target };
+    let span = distance_3d(start, end);
+    let steps = (span * 4.0).ceil() as usize;
+    if steps == 0 { return true; }
+    if steps > 128 { return false; }
+    (1..steps).all(|step| {
+        let t = step as f64 / steps as f64;
+        let (x, y, z) = (
+            (start.x + (end.x - start.x) * t).floor() as i32,
+            (start.y + (end.y - start.y) * t).floor() as i32,
+            (start.z + (end.z - start.z) * t).floor() as i32,
+        );
+        !matches!(world.get(x,y,z) >> 4, 1..=5 | 7 | 12..=17 | 20 | 24 | 35 | 41..=49 | 54 | 56 | 57 | 98 | 155)
+    })
+}
+fn sunlight(now: u64) -> bool {
+    (0..=12000).contains(&(now % 24000))
+}
+fn spawn_light_ok(block: u8, sky: u8, now: u64, passive: bool) -> bool {
+    let effective_sky = sky.saturating_sub(if sunlight(now) { 0 } else { 11 });
+    if passive { block.max(effective_sky) >= 9 }
+    else { block < 8 && effective_sky < 8 }
+}
 fn sky_exposed(world: &World, p: PlayerPosition) -> bool {
     let x = p.x.floor() as i32;
     let z = p.z.floor() as i32;
@@ -230,6 +264,8 @@ impl Mobs {
             baby,
             age_ticks: 0,
             waypoint: None,
+            sheared: false,
+            next_egg_tick: self.last_tick + 6000 + u64::from(id.unsigned_abs() % 6000),
         };
         let event = mob.spawn();
         self.entities.insert(id, mob);
@@ -395,6 +431,19 @@ impl Mobs {
         }
         Some(result)
     }
+    /// Sheep shearing is server-authoritative and changes the shared entity metadata.
+    pub fn shear(&mut self, id: i32, at: PlayerPosition, held: Option<Stack>) -> Option<(Stack, Event)> {
+        let mob = self.entities.get_mut(&id)?;
+        if mob.kind != Kind::Sheep || mob.sheared || mob.baby || held?.id != 359
+            || !mob.nearby(at, 3.0) {
+            return None;
+        }
+        mob.sheared = true;
+        let mut body = id.to_be_bytes().to_vec();
+        body.extend_from_slice(&[16, 0x10, 0x7f]);
+        Some((Stack { id: 35, count: 2, damage: 0 }, Event { id: 0x1c, body }))
+    }
+
     /// Animal breeding consumes feed only if a nearby same-kind partner exists.
     pub fn feed(
         &mut self,
@@ -464,6 +513,9 @@ impl Mobs {
         self.arrows.insert(id, arrow);
         Some(event)
     }
+    /// Spawn attempts use dimension, biome, true 3D player distance, support,
+    /// and the world's propagated sky and block light. The modest caps are
+    /// intentionally server-specific until per-chunk vanilla caps are supported.
     fn spawn_natural(
         &mut self,
         now: u64,
@@ -474,36 +526,49 @@ impl Mobs {
         if !self.enabled || players.is_empty() || !now.is_multiple_of(80) {
             return;
         }
-        let passive = self.entities.values().filter(|m| m.kind.passive()).count();
+        let passive = self.entities.values().filter(|mob| mob.kind.passive()).count();
         let hostile = self.entities.len() - passive;
         for index in 0..4u64 {
             let seed = hash(
                 now ^ index.wrapping_mul(0x9e3779b97f4a7c15) ^ world.natural_seed().unwrap_or(0),
             );
             let player = players[(seed as usize) % players.len()];
-            let distance = 24 + (seed % 25) as i32;
-            let x = player.x.floor() as i32 + if seed & 1 == 0 { distance } else { -distance };
-            let z = player.z.floor() as i32 + (((seed >> 8) % 49) as i32 - 24);
-            let Some(terrain) = world.natural_seed() else {
-                return;
+            let radius = 24 + (seed % 65) as i32;
+            let x = player.x.floor() as i32 + if seed & 1 == 0 { radius } else { -radius };
+            let z = player.z.floor() as i32 + (((seed >> 8) % 65) as i32 - 32);
+            let Some(height) = world.surface_height_at(x, z) else {
+                continue; // Other dimensions need their own placement routines.
             };
-            let p = PlayerPosition {
-                x: x as f64 + 0.5,
-                y: (crate::terrain::surface(terrain, x, z) + 1) as f64,
-                z: z as f64 + 0.5,
-            };
-            if !p.is_valid()
-                || distance_to_players(p, players) < 24.0
-                || !physics::supported(world, &p)
-                || physics::collides(world, &p)
-            {
-                continue;
+            // Underground probes seek a two-block-tall air pocket above solid
+            // ground. Never create arbitrary mobs inside rock or liquids.
+            let mut y = height + 1;
+            if seed & 3 == 0 && height > 18 {
+                let mut probe = 12 + ((seed >> 17) % (height - 13) as u64) as i32;
+                for _ in 0..20 {
+                    if world.get(x, probe - 1, z) != 0
+                        && world.get(x, probe, z) == 0
+                        && world.get(x, probe + 1, z) == 0
+                    {
+                        y = probe;
+                        break;
+                    }
+                    probe = if probe + 1 < height { probe + 1 } else { 12 };
+                }
             }
-            let open = sky_exposed(world, p);
-            let is_night = (now % 24000) >= 13000 && (now % 24000) <= 23000;
-            let grass = world.get(x, p.y as i32 - 1, z) >> 4 == 2;
-            let kind = if open && !is_night && grass {
-                if passive >= PASSIVE_CAP {
+            let position = PlayerPosition { x: x as f64 + 0.5, y: y as f64, z: z as f64 + 0.5 };
+            if !position.is_valid()
+                || !(24.0..=128.0).contains(&distance_to_players(position, players))
+                || !physics::supported(world, &position)
+                || physics::collides(world, &position)
+            { continue; }
+            let biome = world.biome_at(x, z);
+            let grass = world.get(x, y - 1, z) >> 4 == 2;
+            let open = sky_exposed(world, position);
+            let (block_light, sky_light) = world.light_at(x, y, z);
+            let is_passive = grass && open && sunlight(now) && (seed & 1 == 0);
+            if !spawn_light_ok(block_light, sky_light, now, is_passive) { continue; }
+            let kind = if is_passive {
+                if passive >= PASSIVE_CAP || matches!(biome, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24) {
                     continue;
                 }
                 match seed % 4 {
@@ -513,9 +578,7 @@ impl Mobs {
                     _ => Kind::Chicken,
                 }
             } else {
-                if hostile >= HOSTILE_CAP || (open && !is_night) {
-                    continue;
-                }
+                if hostile >= HOSTILE_CAP { continue; }
                 match seed % 4 {
                     0 => Kind::Zombie,
                     1 => Kind::Skeleton,
@@ -523,8 +586,8 @@ impl Mobs {
                     _ => Kind::Spider,
                 }
             };
-            events.push(self.insert(kind, p, false));
-            break; // One per spawn cycle bounds packet and CPU cost.
+            events.push(self.insert(kind, position, false));
+            break; // Bound per-cycle packets and CPU.
         }
     }
     /// Tick at most four elapsed 20Hz steps; caller owns broadcast fan-out.
@@ -560,9 +623,34 @@ impl Mobs {
                         events.push(Event { id: 0x1c, body });
                     }
                 }
-                if !players.is_empty() && distance_to_players(mob.position, players) > 128.0 {
+                let nearest_distance = distance_to_players(mob.position, players);
+                if !mob.kind.passive() && nearest_distance > 128.0 {
                     dead.push(mob.id);
                     continue;
+                }
+                if !mob.kind.passive() && nearest_distance > 32.0
+                    && now.saturating_sub(mob.hit_tick) > 600
+                    && hash(now ^ mob.id as u64) % 800 == 0
+                {
+                    dead.push(mob.id);
+                    continue;
+                }
+                if matches!(mob.kind, Kind::Zombie | Kind::Skeleton)
+                    && sunlight(now) && sky_exposed(world, mob.position)
+                    && now.is_multiple_of(20)
+                {
+                    mob.health -= 1;
+                    if mob.health <= 0 {
+                        self.pending_drops.push((mob.kind.drop(), (mob.position.x.floor() as i32, mob.position.y.floor() as i32, mob.position.z.floor() as i32)));
+                        events.push(mob.status(3));
+                        dead.push(mob.id);
+                        continue;
+                    }
+                    events.push(mob.status(2));
+                }
+                if mob.kind == Kind::Chicken && !mob.baby && now >= mob.next_egg_tick {
+                    mob.next_egg_tick = now + 6000 + hash(now ^ mob.id as u64) % 6000;
+                    self.pending_drops.push((Stack { id: 344, count: 1, damage: 0 }, (mob.position.x.floor() as i32, mob.position.y.floor() as i32, mob.position.z.floor() as i32)));
                 }
                 let nearest = players
                     .iter()
@@ -574,6 +662,11 @@ impl Mobs {
                 let Some(target) = nearest else {
                     continue;
                 };
+                if mob.kind == Kind::Spider && sunlight(now) && sky_exposed(world, mob.position)
+                    && distance(target, mob.position) > 3.0
+                {
+                    continue; // Daylight spiders are neutral until provoked.
+                }
                 let d = distance(target, mob.position);
                 if mob.kind == Kind::Creeper {
                     if d < 3.0 {
@@ -590,7 +683,9 @@ impl Mobs {
                         continue;
                     }
                 }
-                if mob.kind == Kind::Skeleton && d < 16.0 && now.saturating_sub(mob.bite_tick) >= 40
+                if mob.kind == Kind::Skeleton && d < 16.0
+                    && can_see(world, mob.position, target)
+                    && now.saturating_sub(mob.bite_tick) >= 40
                 {
                     mob.bite_tick = now;
                     let yaw = (-(target.x - mob.position.x))
@@ -599,7 +694,13 @@ impl Mobs {
                     let pitch = -(target.y + 1.0 - mob.position.y).atan2(d).to_degrees() as f32;
                     shots.push((mob.id, mob.position, yaw, pitch));
                 }
-                let destination = if mob.kind.passive() {
+                let destination = if mob.kind == Kind::Skeleton && d < 7.0 {
+                    PlayerPosition {
+                        x: mob.position.x + (mob.position.x - target.x),
+                        z: mob.position.z + (mob.position.z - target.z),
+                        ..mob.position
+                    }
+                } else if mob.kind.passive() {
                     if !(now / 80 + mob.id as u64).is_multiple_of(4) {
                         continue;
                     }
@@ -779,7 +880,7 @@ impl Mobs {
 fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
     players
         .iter()
-        .map(|other| distance(p, *other))
+        .map(|other| distance_3d(p, *other))
         .fold(f64::INFINITY, f64::min)
 }
 #[cfg(test)]
