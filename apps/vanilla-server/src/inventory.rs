@@ -54,10 +54,10 @@ impl Stack {
     /// items must not silently merge into a 64-stack in any window.
     pub fn max_count(self) -> u8 {
         match self.id {
-            323 | 325 | 332 | 344 | 368 => 16,
-            256..=259 | 261 | 267..=279 | 283..=286 | 290..=294
+            323 | 325 | 332 | 344 | 368 | 381 => 16,
+            256..=259 | 261 | 267..=279 | 282..=286 | 290..=294
             | 298..=317 | 326..=329 | 333 | 335 | 342 | 343
-            | 346 | 354 | 355 | 358 | 359 | 373 | 387 | 403
+            | 346 | 354 | 355 | 358 | 359 | 373 | 386 | 387 | 398 | 403
             | 407 | 408 | 417..=419 | 2256..=2267 => 1,
             _ => 64,
         }
@@ -982,7 +982,7 @@ impl Inventory {
                     (Some(mut target), Some(mut hand), 1)
                         if target.id == hand.id
                             && target.damage == hand.damage
-                            && target.count < 64 =>
+                            && target.count < target.max_count() =>
                     {
                         target.count += 1;
                         hand.count -= 1;
@@ -1162,7 +1162,7 @@ impl Inventory {
                     Some(mut current)
                         if current.id == output.id
                             && current.damage == output.damage
-                            && u16::from(current.count) + u16::from(output.count) <= 64 =>
+                            && u16::from(current.count) + u16::from(output.count) <= u16::from(output.max_count()) =>
                     {
                         current.count += output.count;
                         Some(current)
