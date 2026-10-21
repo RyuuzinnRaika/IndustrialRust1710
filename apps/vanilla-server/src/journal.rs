@@ -247,16 +247,18 @@ mod tests {
     }
     #[test]
     fn duplicate_targets_cannot_strand_a_committed_journal() {
-        let home = std::env::temp_dir().join(format!(
-            "ir-journal-duplicate-{}", std::process::id()
-        ));
+        let home =
+            std::env::temp_dir().join(format!("ir-journal-duplicate-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(home.join("players")).unwrap();
         let journal = home.join("world.pending-txn.json");
         let target = home.join("players/test.inventory.json");
         let error = commit(
             &journal,
-            &[(target.as_path(), b"first".to_vec()), (target.as_path(), b"second".to_vec())],
+            &[
+                (target.as_path(), b"first".to_vec()),
+                (target.as_path(), b"second".to_vec()),
+            ],
         )
         .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
@@ -267,9 +269,7 @@ mod tests {
 
     #[test]
     fn three_participant_crash_recovery_replays_all_and_is_idempotent() {
-        let home = std::env::temp_dir().join(format!(
-            "ir-journal-three-{}", std::process::id()
-        ));
+        let home = std::env::temp_dir().join(format!("ir-journal-three-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(home.join("players")).unwrap();
         let a = home.join("players/test.inventory.json");
