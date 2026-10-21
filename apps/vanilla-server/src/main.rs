@@ -7,6 +7,7 @@ mod brewing;
 mod chests;
 mod clock;
 mod crafting;
+mod dimensions;
 mod experience;
 mod furnaces;
 mod ground_items;
@@ -24,6 +25,7 @@ mod terrain;
 mod vitals;
 mod whitelist;
 mod world;
+mod worldgen;
 
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
@@ -219,7 +221,9 @@ fn join(
     // difficulty u8, maxPlayers u8, levelType string.
     let mut join = Vec::new();
     join.extend_from_slice(&entity_id.to_be_bytes());
-    join.extend_from_slice(&[u8::from(!survival), 0, 1, MAX_PLAYERS as u8]);
+    let dimension_id = world.lock().map_err(|_| bad("world mutex poisoned"))?
+        .extended_identity().map_or(0, |(_, dim)| dim.protocol_id());
+    join.extend_from_slice(&[u8::from(!survival), dimension_id as u8, 1, MAX_PLAYERS as u8]);
     write_string("default", &mut join)?;
     send(s, 0x01, &join)?;
 
@@ -2658,11 +2662,13 @@ fn main() -> io::Result<()> {
     let mut survival = false;
     let mut requested_seed: Option<u64> = None;
     let mut biome_seed: Option<u64> = None;
+    let mut expanded_seed: Option<u64> = None;
+    let mut expanded_dimension = dimensions::Dimension::Overworld;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--terrain-seed U64] [--biome-seed U64]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -2705,6 +2711,18 @@ fn main() -> io::Result<()> {
                         .map_err(|_| bad("invalid biome seed"))?,
                 );
             }
+            "--expanded-seed" => {
+                expanded_seed = Some(args.next().ok_or_else(|| bad("missing --expanded-seed value"))?
+                    .parse().map_err(|_| bad("invalid expanded seed"))?);
+            }
+            "--dimension" => {
+                expanded_dimension = match args.next().ok_or_else(|| bad("missing --dimension value"))?.as_str() {
+                    "overworld" => dimensions::Dimension::Overworld,
+                    "nether" => dimensions::Dimension::Nether,
+                    "end" => dimensions::Dimension::End,
+                    _ => return Err(bad("invalid --dimension (overworld/nether/end)")),
+                };
+            }
             "--export-anvil" => {
                 anvil_export_path = Some(PathBuf::from(
                     args.next()
@@ -2720,15 +2738,18 @@ fn main() -> io::Result<()> {
             _ => return Err(bad("unknown command-line argument")),
         }
     }
-    if (requested_seed.is_some() || biome_seed.is_some())
+    if (requested_seed.is_some() || biome_seed.is_some() || expanded_seed.is_some())
         && (!survival
             || anvil_export_path.is_some()
             || anvil_import_path.is_some()
-            || (requested_seed.is_some() && biome_seed.is_some()))
+            || [requested_seed.is_some(), biome_seed.is_some(), expanded_seed.is_some()].into_iter().filter(|present| *present).count() != 1)
     {
         return Err(bad(
             "specify exactly one seed type with --survival, without import/export",
         ));
+    }
+    if expanded_dimension != dimensions::Dimension::Overworld && expanded_seed.is_none() {
+        return Err(bad("--dimension requires --expanded-seed"));
     }
     if anvil_export_path.is_some() && anvil_import_path.is_some() {
         return Err(bad(
@@ -2781,16 +2802,25 @@ fn main() -> io::Result<()> {
     let loaded_world = if world_path.exists() {
         let existing = World::load(&world_path)?;
         if let Some(seed) = requested_seed {
-            if existing.natural_seed() != Some(seed) || existing.is_biome_world() {
+            if existing.natural_seed() != Some(seed) || existing.is_biome_world() || existing.extended_identity().is_some() {
                 return Err(bad("existing world has different generation type or seed"));
             }
         }
         if let Some(seed) = biome_seed {
-            if existing.natural_seed() != Some(seed) || !existing.is_biome_world() {
+            if existing.natural_seed() != Some(seed) || !existing.is_biome_world() || existing.extended_identity().is_some() {
                 return Err(bad("existing world is not a matching IRW3 biome world"));
             }
         }
+        if let Some(seed) = expanded_seed {
+            if existing.extended_identity() != Some((seed, expanded_dimension)) {
+                return Err(bad("existing world is not a matching IRW4 seed and dimension"));
+            }
+        }
         existing
+    } else if let Some(seed) = expanded_seed {
+        let initial = World::expanded(seed, expanded_dimension);
+        initial.save_new(&world_path)?;
+        initial
     } else if let Some(seed) = biome_seed {
         let initial = World::with_biomes(seed);
         initial.save_new(&world_path)?;
