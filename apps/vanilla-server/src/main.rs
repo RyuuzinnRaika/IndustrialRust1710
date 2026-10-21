@@ -761,13 +761,22 @@ fn play(
                             if w.update_and_save(world_path, x, y, z, 0)? {
                                 hub.broadcast(block_change_event(&w, x, y, z));
                                 let item_id = match block {
-                                    1 => 4, 2 => 3, 16 => 263, 56 => 264, 73 => 331,
+                                    1 => 4,
+                                    2 => 3,
+                                    16 => 263,
+                                    56 => 264,
+                                    73 => 331,
                                     _ => block as i16,
                                 };
                                 if item_id > 0 && drops.len() < 128 {
-                                    drops.push((inventory::Stack {
-                                        id: item_id, count: 1, damage: 0,
-                                    }, (x, y, z)));
+                                    drops.push((
+                                        inventory::Stack {
+                                            id: item_id,
+                                            count: 1,
+                                            damage: 0,
+                                        },
+                                        (x, y, z),
+                                    ));
                                 }
                                 destroyed += 1;
                                 if destroyed >= 64 {
