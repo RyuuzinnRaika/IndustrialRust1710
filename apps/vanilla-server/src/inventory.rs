@@ -241,7 +241,7 @@ impl Inventory {
     /// Snapshot all droppable player possessions before clearing them.
     /// Does not include the virtual crafting result or empty armor slots.
     pub fn possessions(&self) -> Vec<Stack> {
-        self.slots[1..5]
+        self.slots[1..9]
             .iter()
             .chain(self.slots[9..45].iter())
             .chain(self.workbench.iter())
@@ -252,7 +252,7 @@ impl Inventory {
     }
     /// Clear only possessions; used after ground-drop capacity is checked.
     pub fn clear_possessions(&mut self) {
-        for slot in &mut self.slots[1..5] {
+        for slot in &mut self.slots[1..9] {
             *slot = None;
         }
         for slot in &mut self.slots[9..45] {
