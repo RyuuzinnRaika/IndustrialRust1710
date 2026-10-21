@@ -53,7 +53,8 @@ fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
     if !(name.ends_with(".inventory.json")
         || name.ends_with(".chests.json")
         || name.ends_with(".furnaces.json")
-        || name.ends_with(".hoppers.json"))
+        || name.ends_with(".hoppers.json")
+        || name.ends_with(".brewers.json"))
     {
         return Err(invalid("journal target type not allowed"));
     }
