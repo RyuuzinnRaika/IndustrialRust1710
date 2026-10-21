@@ -4,7 +4,7 @@
 use crate::session_lock::WorldSessionLock;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct BackupStats {
