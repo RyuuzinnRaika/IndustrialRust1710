@@ -327,6 +327,16 @@ impl Inventory {
     /// Damage one server-held, unenchanted tool on a committed block break.
     /// Returns true only if a real tool was damaged or broke. Hand mining
     /// and ordinary blocks/items do not acquire arbitrary damage metadata.
+    /// Single-stack exchange for using an empty bucket on a cow.
+    /// Multiple empty buckets remain unchanged rather than duplicating milk.
+    pub fn exchange_single_held(&mut self, expected: i16, result: i16) -> bool {
+        let slot = &mut self.slots[36 + self.selected as usize];
+        match slot {
+            Some(stack) if stack.id == expected && stack.count == 1 =>
+                { *slot = Some(Stack {id: result, count:1, damage:0}); true }
+            _ => false,
+        }
+    }
     pub fn wear_held_tool(&mut self) -> bool {
         let slot = &mut self.slots[36 + self.selected as usize];
         let Some(mut value) = *slot else {
