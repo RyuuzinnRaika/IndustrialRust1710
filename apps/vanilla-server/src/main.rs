@@ -1493,23 +1493,23 @@ fn play(
                         let mut after = inventory.clone();
                         if !survival || after.wear_held_tool() {
                             if let Some(next) = w.staged_updates(&[(x, y, z, 60 << 4)])? {
-                            if survival {
-                                journal::commit(
-                                    &world_path.with_extension("pending-txn.json"),
-                                    &[
-                                        (world_path, next.encoded()?),
-                                        (inventory_path, after.encoded()?),
-                                    ],
-                                )?;
-                                *inventory = after;
-                            } else {
-                                next.save(world_path)?;
-                            }
-                            *w = next;
-                            if survival {
-                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                            }
-                            hub.broadcast(block_change_event(&w, x, y, z));
+                                if survival {
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &[
+                                            (world_path, next.encoded()?),
+                                            (inventory_path, after.encoded()?),
+                                        ],
+                                    )?;
+                                    *inventory = after;
+                                } else {
+                                    next.save(world_path)?;
+                                }
+                                *w = next;
+                                if survival {
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                }
+                                hub.broadcast(block_change_event(&w, x, y, z));
                             }
                         }
                         continue;
