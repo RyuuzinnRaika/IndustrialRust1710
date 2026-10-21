@@ -63,11 +63,7 @@ impl World {
     /// Whether a source powers a specific neighboring destination.
     /// Powered repeaters only output toward their face, never into their
     /// own input or perpendicular dust/pistons.
-    pub(super) fn power_into(
-        &self,
-        from: (i32, i32, i32),
-        to: (i32, i32, i32),
-    ) -> bool {
+    pub(super) fn power_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> bool {
         let (x, y, z) = from;
         let block = self.get(x, y, z);
         match block >> 4 {
@@ -84,9 +80,9 @@ impl World {
     }
 
     fn powered_near(&self, x: i32, y: i32, z: i32) -> bool {
-        NEIGHBORS.iter().any(|&(dx, dy, dz)| {
-            self.power_into((x + dx, y + dy, z + dz), (x, y, z))
-        })
+        NEIGHBORS
+            .iter()
+            .any(|&(dx, dy, dz)| self.power_into((x + dx, y + dy, z + dz), (x, y, z)))
     }
 
     /// An actively powered repeater facing perpendicular into either side
@@ -377,10 +373,8 @@ mod redstone_regression_tests {
 
     #[test]
     fn repeater_has_two_tick_minimum_delay_and_blocks_side_output() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-redstone-facing-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-redstone-facing-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
         w.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
