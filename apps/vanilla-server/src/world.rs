@@ -1189,12 +1189,12 @@ mod tests {
         w.update_and_save(&path, 5, 66, 5, 8 << 4).unwrap();
         let first = w.block_tick(&path, 64).unwrap();
         assert!(first.contains(&(5, 65, 5)));
-        assert_eq!(w.get(5, 65, 5), (8 << 4) | 1);
+        assert_eq!(w.get(5, 65, 5), (8 << 4) | 8);
         assert_eq!(w.get(6, 65, 5), 0);
-        // Water flows down y=64 before spreading over the grass at y=63.
+        // Falling level-8 water reaches y=64 before spreading at level 1.
         assert!(w.block_tick(&path, 64).unwrap().contains(&(5, 64, 5)));
         assert!(w.block_tick(&path, 64).unwrap().contains(&(6, 64, 5)));
-        assert_eq!(w.get(6, 64, 5), (8 << 4) | 3);
+        assert_eq!(w.get(6, 64, 5), (8 << 4) | 1);
         // Lever -> one wire -> adjacent wire, with 15 and then 14.
         w.update_and_save(&path, 0, 64, 0, (69 << 4) | 8).unwrap();
         w.update_and_save(&path, 1, 64, 0, 55 << 4).unwrap();
