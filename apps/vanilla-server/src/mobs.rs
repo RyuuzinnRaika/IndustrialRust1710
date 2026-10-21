@@ -355,7 +355,7 @@ impl Mobs {
             profession: (id.unsigned_abs() % 5) as u8,
             angry: !matches!(
                 kind,
-                Kind::Spider | Kind::CaveSpider | Kind::ZombiePigman | Kind::IronGolem
+                Kind::Spider | Kind::CaveSpider | Kind::ZombiePigman | Kind::IronGolem | Kind::Enderman
             ),
         };
         let event = mob.spawn();
@@ -534,6 +534,7 @@ impl Mobs {
             return None;
         }
         mob.hit_tick = tick;
+        if matches!(mob.kind, Kind::ZombiePigman | Kind::Enderman) { mob.angry = true; }
         mob.health -= damage_held(held);
         let killed = mob.health <= 0;
         let mut result = Attack {
@@ -972,8 +973,12 @@ impl Mobs {
                 if d < if mob.kind.passive() { 1.0 } else { 1.5 } {
                     continue;
                 }
+                let flying = matches!(mob.kind,
+                    Kind::Ghast | Kind::Blaze | Kind::Wither | Kind::EnderDragon);
                 if now.is_multiple_of(20) || mob.waypoint.is_none() {
-                    mob.waypoint = navigation::next_step(world, mob.position, destination, 64);
+                    mob.waypoint = if flying { Some(destination) } else {
+                        navigation::next_step(world, mob.position, destination, 64)
+                    };
                 }
                 if mob
                     .waypoint
@@ -988,14 +993,16 @@ impl Mobs {
                 if len < 1e-6 {
                     continue;
                 }
-                let speed = if mob.kind.passive() { 0.065 } else { 0.11 };
+                let speed = if mob.kind.passive() { 0.065 } else if flying { 0.18 } else { 0.11 };
                 let candidate = PlayerPosition {
                     x: mob.position.x + dx / len * speed,
                     z: mob.position.z + dz / len * speed,
-                    y: mob.position.y,
+                    y: if flying {
+                        mob.position.y + (target.y + 2.0 - mob.position.y).clamp(-speed,speed)
+                    } else { mob.position.y },
                 };
                 if physics::valid_movement(world, &mob.position, &candidate)
-                    && physics::supported(world, &candidate)
+                    && (flying || physics::supported(world, &candidate))
                 {
                     mob.position = candidate;
                     events.push(multiplayer::teleport(mob.id, &candidate, 0.0, 0.0));
