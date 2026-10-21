@@ -15,6 +15,7 @@ mod furnaces;
 mod ground_items;
 mod hoppers;
 mod inventory;
+mod items_1710;
 mod journal;
 mod legacy_inventory_nbt;
 mod legacy_nbt;
