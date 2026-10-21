@@ -258,9 +258,33 @@ impl Mobs {
             .map(Mob::spawn)
             .chain(self.arrows.values().copied().map(Arrow::spawn))
     }
+    /// Surface skylight proxy, with an actual unbroken vertical column.
+    /// Does not replace vanilla propagated skylight through translucent blocks.
     fn sky_open(world: &World, x: i32, y: i32, z: i32) -> bool {
-        // Until skylight arrays are implemented this only checks an open shaft.
-        ((y + 1)..=(y + 16).min(255)).all(|height| world.get(x, height, z) >> 4 == 0)
+        ((y + 1)..=255).all(|height| {
+            matches!(world.get(x, height, z) >> 4, 0 | 8 | 9 | 18 | 20 | 65 | 78)
+        })
+    }
+    /// Bounded block-light proxy near common 1.7.10 light emitters.
+    /// Conservative: reduces undesired spawning around torches, furnaces and lava.
+    fn lit_by_block(world: &World, x: i32, y: i32, z: i32) -> bool {
+        for dx in -7_i32..=7 {
+            for dz in -7_i32..=7 {
+                for dy in -3_i32..=3 {
+                    let distance = dx.abs() + dz.abs() + dy.abs();
+                    if distance >= 14 { continue; }
+                    let light = match world.get(x + dx, y + dy, z + dz) >> 4 {
+                        50 | 76 | 62 => 14,
+                        89 | 91 | 10 | 11 => 15,
+                        51 | 90 => 11,
+                        74 => 9,
+                        _ => 0,
+                    };
+                    if light > distance + 7 { return true; }
+                }
+            }
+        }
+        false
     }
     fn spawn_near(
         &mut self,
@@ -295,13 +319,21 @@ impl Mobs {
             let Some(seed) = world.natural_seed() else {
                 continue;
             };
-            let y = terrain::surface(seed, x, z) + 1;
+            let surface = terrain::surface(seed, x, z) + 1;
+            // Roughly half of the hostile attempts probe caves below the surface.
+            // All attempts still enforce AABB, floor, proximity and light checks.
+            let y = if attempt % 3 == 1 {
+                surface - 2 - (self.rng() % 30) as i32
+            } else {
+                surface
+            };
+            if y < 2 || y >= 254 { continue; }
             let at = PlayerPosition {
                 x: x as f64 + 0.5,
                 y: y as f64,
                 z: z as f64 + 0.5,
             };
-            if y >= 254 || !physics::supported(world, &at) || physics::collides(world, &at) {
+            if !physics::supported(world, &at) || physics::collides(world, &at) {
                 continue;
             }
             if players
@@ -317,14 +349,8 @@ impl Mobs {
             let daytime = (0..12000).contains(&(day_time.rem_euclid(24000)));
             let passive = attempt % 3 == 0;
             if passive {
-                if passive_count
-                    + self
-                        .entities
-                        .values()
-                        .filter(|m| !m.species.hostile())
-                        .count()
-                    - passive_count
-                    >= MAX_PASSIVE
+                if self.entities.values().filter(|m| !m.species.hostile()).count() >= MAX_PASSIVE
+                    || y != surface
                     || world.get(x, y - 1, z) >> 4 != 2
                     || !open
                     || !daytime
@@ -346,6 +372,7 @@ impl Mobs {
                     .count()
                     >= MAX_HOSTILE
                     || (open && daytime)
+                    || Self::lit_by_block(world, x, y, z)
                 {
                     continue;
                 }
@@ -833,6 +860,26 @@ mod tests {
             .id,
             367
         );
+    }
+    #[test]
+    fn natural_spawns_respect_torches_and_real_sky_visibility() {
+        let mut world = World::new();
+        assert!(Mobs::sky_open(&world, 2, 65, 2));
+        world.import_block(2, 100, 2, 1 << 4).unwrap();
+        assert!(!Mobs::sky_open(&world, 2, 65, 2));
+        assert!(!Mobs::lit_by_block(&world, 2, 65, 2));
+        world.import_block(3, 66, 2, 50 << 4).unwrap();
+        assert!(Mobs::lit_by_block(&world, 2, 65, 2));
+    }
+    #[test]
+    fn each_player_gets_independent_hit_tracking() {
+        let mut mobs = Mobs::default();
+        let pos = PlayerPosition::default();
+        mobs.hits.push(PendingHit {center:pos, radius:3.0, damage:4,
+            expires:100, victims:Vec::new()});
+        assert_eq!(mobs.damage_player(1, pos, 95), 4);
+        assert_eq!(mobs.damage_player(2, pos, 95), 4);
+        assert_eq!(mobs.damage_player(1, pos, 95), 0);
     }
     #[test]
     fn cap_safeguards_and_flat_worlds() {
