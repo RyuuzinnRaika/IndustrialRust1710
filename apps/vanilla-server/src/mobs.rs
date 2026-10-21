@@ -190,6 +190,8 @@ impl Mob {
             body.extend_from_slice(&0i16.to_be_bytes());
         }
         body.extend_from_slice(&[0, 0]); // flags byte
+        body.push((6 << 3) | 3); // living-entity health (float)
+        body.extend_from_slice(&(f32::from(self.health.max(0))).to_be_bytes());
         if matches!(self.kind, Kind::Slime | Kind::MagmaCube) {
             body.push(16 << 3); // slime size metadata (byte)
             body.push(self.split_size);
@@ -214,6 +216,15 @@ impl Mob {
         }
         body.push(0x7f);
         Event { id: 0x0f, body }
+    }
+    /// Protocol 5 entity metadata: index 6 is the current living health.
+    /// Broadcast to every observer following a non-lethal attack.
+    fn health_metadata(self) -> Event {
+        let mut body = self.id.to_be_bytes().to_vec();
+        body.push((6 << 3) | 3);
+        body.extend_from_slice(&f32::from(self.health.max(0)).to_be_bytes());
+        body.push(0x7f);
+        Event { id: 0x1c, body }
     }
     fn status(self, value: u8) -> Event {
         let mut body = self.id.to_be_bytes().to_vec();
@@ -296,6 +307,8 @@ pub struct Mobs {
     pending_hits: Vec<(i32, u8, u64)>,
     participants: Vec<(i32, PlayerPosition)>,
     pending_poison: BTreeMap<i32, u16>,
+    // Per (mob, player), never one global cooldown shared between players.
+    melee_hits: BTreeMap<(i32, i32), u64>,
     pending_blast_damage: BTreeMap<i32, u8>,
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
     explosions: Vec<Explosion>,
@@ -541,7 +554,7 @@ impl Mobs {
             events: if killed {
                 vec![mob.status(3), multiplayer::destroy(id)]
             } else {
-                vec![mob.status(2)]
+                vec![mob.status(2), mob.health_metadata()]
             },
             drop: (killed && mob.kind != Kind::Villager
                 && !(matches!(mob.kind, Kind::Slime | Kind::MagmaCube)
@@ -793,6 +806,8 @@ impl Mobs {
         let mut events = Vec::new();
         self.pending_hits
             .retain(|(_, _, t)| now.saturating_sub(*t) < 30);
+        self.melee_hits
+            .retain(|_, last| now.saturating_sub(*last) < ATTACK_INTERVAL);
         self.spawn_natural(now, world, players, &mut events);
         for _ in 0..steps {
             let mut shots = Vec::new();
@@ -862,6 +877,7 @@ impl Mobs {
                             continue;
                         }
                         events.push(mob.status(2));
+                        events.push(mob.health_metadata());
                     }
                 }
                 if mob.baby {
@@ -1070,6 +1086,9 @@ impl Mobs {
                         enemy.health -= 8;
                         let dead = *enemy;
                         events.push(enemy.status(if enemy.health <= 0 { 3 } else { 2 }));
+                        if enemy.health > 0 {
+                            events.push(enemy.health_metadata());
+                        }
                         if enemy.health <= 0 {
                             if dead.kind != Kind::Villager
                                 && !(matches!(dead.kind, Kind::Slime | Kind::MagmaCube)
@@ -1125,6 +1144,9 @@ impl Mobs {
                 mob.health -= i16::from(damage);
                 let dead = *mob;
                 events.push(mob.status(if mob.health <= 0 { 3 } else { 2 }));
+                if mob.health > 0 {
+                    events.push(mob.health_metadata());
+                }
                 if mob.health <= 0 {
                     if dead.kind != Kind::Villager
                         && !(matches!(dead.kind, Kind::Slime | Kind::MagmaCube) && dead.split_size > 1) {
@@ -1218,6 +1240,7 @@ impl Mobs {
                     events.extend(self.split_children(dead));
                 } else {
                     events.push(mob.status(2));
+                    events.push(mob.health_metadata());
                 }
             }
         }
@@ -1236,23 +1259,30 @@ impl Mobs {
                 tick.saturating_sub(*t) < 30
             }
         });
-        for mob in self.entities.values_mut() {
+        for mob in self.entities.values() {
+            let key = (mob.id, player_id);
             if !mob.kind.passive()
                 && mob.angry
                 && mob.kind != Kind::Skeleton
-                && !matches!(mob.kind,
-                    Kind::Creeper | Kind::Witch | Kind::Ghast | Kind::Blaze | Kind::Wither)
+                && !matches!(
+                    mob.kind,
+                    Kind::Creeper | Kind::Witch | Kind::Ghast | Kind::Blaze | Kind::Wither
+                )
                 && mob.nearby(player, 1.6)
-                && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
+                && self
+                    .melee_hits
+                    .get(&key)
+                    .is_none_or(|last| tick.saturating_sub(*last) >= ATTACK_INTERVAL)
             {
-                mob.bite_tick = tick;
+                self.melee_hits.insert(key, tick);
                 amount = amount.saturating_add(if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     2
-                } else { 3 });
+                } else {
+                    3
+                });
                 if mob.kind == Kind::CaveSpider {
                     self.pending_poison.insert(player_id, 140);
                 }
-                break;
             }
         }
         amount
@@ -1422,6 +1452,34 @@ mod tests {
         assert_eq!(mobs.entities.len(),4);
         assert!(mobs.entities.values().all(|m|m.split_size==1));
     }
+    #[test]
+    fn overlapping_players_take_independent_melee_damage_on_same_tick() {
+        let mut mobs = Mobs::default();
+        let position = PlayerPosition::default();
+        mobs.insert(Kind::Zombie, position, false);
+        assert_eq!(mobs.hurt_player(11, position, 40), 3);
+        assert_eq!(mobs.hurt_player(12, position, 40), 3);
+        assert_eq!(mobs.hurt_player(11, position, 40), 0);
+        assert_eq!(mobs.hurt_player(12, position, 59), 0);
+        assert_eq!(mobs.hurt_player(12, position, 60), 3);
+    }
+
+    #[test]
+    fn mob_health_is_in_spawn_and_broadcast_after_nonlethal_hit() {
+        let mut mobs = Mobs::default();
+        let position = PlayerPosition::default();
+        mobs.insert(Kind::Zombie, position, false);
+        let mob_id = *mobs.entities.keys().next().unwrap();
+        let spawn = mobs.entities[&mob_id].spawn();
+        assert!(spawn.body.windows(5).any(|b| b == [51, 0x41, 0xa0, 0, 0]));
+        let result = mobs.player_attack(mob_id, position, None, 40).unwrap();
+        let health = result.events.iter().find(|e| e.id == 0x1c).unwrap();
+        assert_eq!(&health.body[0..4], &mob_id.to_be_bytes());
+        assert_eq!(health.body[4], 51);
+        assert_eq!(&health.body[5..9], &19f32.to_be_bytes());
+        assert_eq!(health.body[9], 0x7f);
+    }
+
     #[test]
     fn cave_spider_poison_is_specific_to_entity_id() {
         let mut mobs=Mobs::default();
