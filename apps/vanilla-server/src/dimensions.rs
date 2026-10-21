@@ -14,12 +14,23 @@ pub enum Dimension {
     End = 1,
 }
 impl Dimension {
-    pub fn protocol_id(self) -> i8 { self as i8 }
+    pub fn protocol_id(self) -> i8 {
+        self as i8
+    }
     pub fn from_protocol(value: i8) -> Option<Self> {
-        match value { -1 => Some(Self::Nether), 0 => Some(Self::Overworld), 1 => Some(Self::End), _ => None }
+        match value {
+            -1 => Some(Self::Nether),
+            0 => Some(Self::Overworld),
+            1 => Some(Self::End),
+            _ => None,
+        }
     }
     pub fn name(self) -> &'static str {
-        match self { Self::Overworld => "overworld", Self::Nether => "nether", Self::End => "end" }
+        match self {
+            Self::Overworld => "overworld",
+            Self::Nether => "nether",
+            Self::End => "end",
+        }
     }
 }
 /// Preserves the three 1.7.10 worlds under a directory tree. A different
@@ -31,7 +42,10 @@ pub struct DimensionManager {
 }
 impl DimensionManager {
     pub fn new(root: impl AsRef<Path>, seed: u64) -> Self {
-        Self { root: root.as_ref().to_path_buf(), seed }
+        Self {
+            root: root.as_ref().to_path_buf(),
+            seed,
+        }
     }
     pub fn path(&self, dimension: Dimension) -> PathBuf {
         match dimension {
@@ -45,7 +59,10 @@ impl DimensionManager {
         if path.exists() {
             let loaded = World::load(&path)?;
             if loaded.extended_identity() != Some((self.seed, dimension)) {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "IRW4 dimension identity/seed mismatch"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "IRW4 dimension identity/seed mismatch",
+                ));
             }
             Ok(loaded)
         } else {
@@ -66,7 +83,9 @@ pub struct PortalDestination {
 impl PortalDestination {
     pub fn valid(self) -> bool {
         let limit = WORLD_LIMIT as f64;
-        self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.z.is_finite()
             && (-limit..limit).contains(&self.x)
             && (-limit..limit).contains(&self.z)
             && (1.0..255.0).contains(&self.y)
@@ -76,9 +95,13 @@ impl PortalDestination {
 /// The End uses its own spawn platform, never an arbitrary scaled position.
 /// This chooses the search anchor; finding/building a safe portal frame is a
 /// separate gameplay operation.
-pub fn destination(source: Dimension, target: Dimension, x: f64, y: f64, z: f64)
-    -> Option<PortalDestination>
-{
+pub fn destination(
+    source: Dimension,
+    target: Dimension,
+    x: f64,
+    y: f64,
+    z: f64,
+) -> Option<PortalDestination> {
     if !x.is_finite() || !y.is_finite() || !z.is_finite() || !(0.0..256.0).contains(&y) {
         return None;
     }
@@ -113,7 +136,10 @@ pub struct TravelCheckpoint {
 }
 impl TravelCheckpoint {
     pub fn new(destination: PortalDestination) -> Option<Self> {
-        destination.valid().then_some(Self { version: 1, destination })
+        destination.valid().then_some(Self {
+            version: 1,
+            destination,
+        })
     }
     pub fn load(path: &Path) -> io::Result<Option<Self>> {
         let bytes = match fs::read(path) {
@@ -121,17 +147,28 @@ impl TravelCheckpoint {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        if bytes.len() > 1024 { return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized travel checkpoint")); }
+        if bytes.len() > 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "oversized travel checkpoint",
+            ));
+        }
         let checkpoint: Self = serde_json::from_slice(&bytes)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid travel checkpoint"))?;
         if checkpoint.version != 1 || !checkpoint.destination.valid() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid travel checkpoint identity"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid travel checkpoint identity",
+            ));
         }
         Ok(Some(checkpoint))
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if self.version != 1 || !self.destination.valid() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid travel destination"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid travel destination",
+            ));
         }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
@@ -155,21 +192,35 @@ mod tests {
         let reverse = destination(p.dimension, Dimension::Overworld, p.x, p.y, p.z).unwrap();
         assert_eq!(reverse.x, 160.0);
         assert_eq!(reverse.z, -80.0);
-        assert!(destination(Dimension::Nether, Dimension::Overworld, f64::NAN, 70.0, 0.0).is_none());
-        assert!(destination(Dimension::Nether, Dimension::Overworld, 1e8, 70.0, 0.0).unwrap().valid());
+        assert!(
+            destination(Dimension::Nether, Dimension::Overworld, f64::NAN, 70.0, 0.0).is_none()
+        );
+        assert!(
+            destination(Dimension::Nether, Dimension::Overworld, 1e8, 70.0, 0.0)
+                .unwrap()
+                .valid()
+        );
     }
     #[test]
     fn world_identification_prevents_dimension_cross_load() {
-        let root = std::env::temp_dir().join(format!("ir1710-dims-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-dims-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = fs::remove_dir_all(&root);
         let manager = DimensionManager::new(&root, 42);
         for d in [Dimension::Overworld, Dimension::Nether, Dimension::End] {
             let mut world = manager.load_or_create(d).unwrap();
             assert_eq!(world.extended_identity(), Some((42, d)));
-            world.update_and_save(&manager.path(d), 1, 74, 1, 1 << 4).unwrap();
+            world
+                .update_and_save(&manager.path(d), 1, 74, 1, 1 << 4)
+                .unwrap();
             assert_eq!(manager.load_or_create(d).unwrap().get(1, 74, 1), 1 << 4);
         }
-        assert!(DimensionManager::new(&root, 43).load_or_create(Dimension::Nether).is_err());
+        assert!(DimensionManager::new(&root, 43)
+            .load_or_create(Dimension::Nether)
+            .is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -178,7 +229,10 @@ mod tests {
         let dest = destination(Dimension::Overworld, Dimension::Nether, -80.0, 64.0, 80.0).unwrap();
         let check = TravelCheckpoint::new(dest).unwrap();
         check.save(&file).unwrap();
-        assert_eq!(TravelCheckpoint::load(&file).unwrap().unwrap().destination, dest);
+        assert_eq!(
+            TravelCheckpoint::load(&file).unwrap().unwrap().destination,
+            dest
+        );
         fs::remove_file(file).unwrap();
     }
 }
