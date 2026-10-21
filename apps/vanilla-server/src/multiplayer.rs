@@ -12,6 +12,8 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
 pub const MAX_PLAYERS: usize = 8;
+/// Internal mailbox operation, never serialized as a network packet.
+pub const ADMIN_TELEPORT_EVENT: u32 = u32::MAX - 1;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -148,6 +150,26 @@ impl Hub {
     pub fn names(&self) -> io::Result<Vec<String>> {
         let inner = self.0.lock().map_err(|_| poisoned())?;
         Ok(inner.players.values().map(|p| p.name.clone()).collect())
+    }
+    /// Queue a privileged teleport to be applied by the owning session thread.
+    /// Updating Hub coordinates alone would not update the player's saved state.
+    pub fn request_admin_teleport(&self, name: &str, position: PlayerPosition) -> io::Result<bool> {
+        if !position.is_valid() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid teleport coordinates"));
+        }
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(name)) else {
+            return Ok(false);
+        };
+        let mut body = Vec::with_capacity(24);
+        for coord in [position.x, position.y, position.z] {
+            body.extend_from_slice(&coord.to_be_bytes());
+        }
+        peer.tx.try_send(Event { id: ADMIN_TELEPORT_EVENT, body }).map_err(|_| {
+            peer.overloaded.store(true, Ordering::Release);
+            io::Error::other("target session mailbox unavailable")
+        })?;
+        Ok(true)
     }
     pub fn positions(&self) -> io::Result<Vec<PlayerPosition>> {
         let inner = self.0.lock().map_err(|_| poisoned())?;
@@ -505,6 +527,19 @@ mod tests {
         assert_eq!(spawn(&hub.0.lock().unwrap().players[&id]).unwrap().id, 0x0c);
         hub.remove(id);
         assert_eq!(hub.count().unwrap(), 0);
+    }
+    #[test]
+    fn privileged_teleport_is_session_owned_and_rejects_invalid_inputs() {
+        let hub = Hub::default();
+        let (_id, rx, _) = hub.add("Alex".into(), "uuid-a".into(), PlayerPosition::default()).unwrap();
+        let target = PlayerPosition { x: -15.5, y: 70.0, z: 19.25 };
+        assert!(hub.request_admin_teleport("aLeX", target).unwrap());
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(event.body.len(), 24);
+        assert_eq!(f64::from_be_bytes(event.body[0..8].try_into().unwrap()), -15.5);
+        assert!(!hub.request_admin_teleport("not-online", target).unwrap());
+        assert!(hub.request_admin_teleport("Alex", PlayerPosition { x: f64::NAN, ..target }).is_err());
     }
     #[test]
     fn duplicate_denied_case_insensitively() {

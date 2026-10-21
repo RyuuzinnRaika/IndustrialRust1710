@@ -40,7 +40,7 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use mobs::Mobs;
-use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
+use multiplayer::{Event, Hub, JoinError, ADMIN_TELEPORT_EVENT, MAX_PLAYERS};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use serde_json::json;
@@ -581,6 +581,36 @@ fn play(
             ));
         }
         while let Ok(event) = events.try_recv() {
+            if event.id == ADMIN_TELEPORT_EVENT {
+                if event.body.len() != 24 {
+                    return Err(bad("invalid internal teleport payload"));
+                }
+                let target = PlayerPosition {
+                    x: f64::from_be_bytes(event.body[0..8].try_into().unwrap()),
+                    y: f64::from_be_bytes(event.body[8..16].try_into().unwrap()),
+                    z: f64::from_be_bytes(event.body[16..24].try_into().unwrap()),
+                };
+                if !target.is_valid() {
+                    return Err(bad("invalid internal teleport coordinates"));
+                }
+                // The session is the sole owner of its authoritative position.
+                // Save before notifying clients; a failed save must not acknowledge teleport.
+                target.save_state(player_path, *vitals)?;
+                *player = target;
+                location = (target.x, target.y, target.z);
+                fall = FallTracker::new(target.y);
+                idle_gravity = IdleGravity::new(clock.ticks());
+                mining = None;
+                eating = None;
+                bow_start = None;
+                yaw = 0.0;
+                pitch = 0.0;
+                sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                send_player_position(s, player)?;
+                hub.move_player(entity_id, *player, yaw, pitch);
+                last_movement_broadcast = Instant::now();
+                continue;
+            }
             if event.id == CHUNK_RELIGHT_EVENT {
                 if event.body.len() == 8 {
                     let cx = i32::from_be_bytes(event.body[0..4].try_into().unwrap());
@@ -2655,7 +2685,12 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
 }
 /// Local server console only. Never grant these operations to unauthenticated
 /// offline-mode player names or an in-game chat packet.
-fn start_admin_console(hub: Arc<Hub>, clock: Arc<Clock>, whitelist_file: Arc<PathBuf>) {
+fn start_admin_console(
+    hub: Arc<Hub>,
+    clock: Arc<Clock>,
+    clock_file: Arc<PathBuf>,
+    whitelist_file: Arc<PathBuf>,
+) {
     let _console = thread::spawn(move || {
         let input = io::stdin();
         for next in input.lock().lines() {
@@ -2667,7 +2702,7 @@ fn start_admin_console(hub: Arc<Hub>, clock: Arc<Clock>, whitelist_file: Arc<Pat
             let result = match parts.as_slice() {
                 [] => continue,
                 ["/help"] | ["help"] => {
-                    println!("Admin console: /list, /time query daytime, /weather query, /whitelist list|add NAME|remove NAME");
+                    println!("Admin console: /list, /tp NAME X Y Z, /time query daytime|set TICKS, /weather query|set auto|clear|rain|thunder, /whitelist list|add NAME|remove NAME");
                     Ok(())
                 }
                 ["/list"] | ["list"] => hub.names().map(|names| {
@@ -2677,11 +2712,41 @@ fn start_admin_console(hub: Arc<Hub>, clock: Arc<Clock>, whitelist_file: Arc<Pat
                     println!("Daytime: {}", clock.day_time());
                     Ok(())
                 }
+                ["/time", "set", value] => (|| -> io::Result<()> {
+                    let value = value.parse::<u64>().map_err(|_| bad("invalid time value"))?;
+                    clock.set_day_time(value)?;
+                    clock.save_ticks(&clock_file)?;
+                    let mut packet = Vec::with_capacity(16);
+                    packet.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
+                    packet.extend_from_slice(&clock.day_time().to_be_bytes());
+                    hub.broadcast(Event { id: 0x03, body: packet });
+                    println!("Daytime set to {}", clock.day_time());
+                    Ok(())
+                })(),
                 ["/weather", "query"] => {
                     let (rain, thunder) = clock.weather();
                     println!("Weather: rain={rain} thunder={thunder}");
                     Ok(())
                 }
+                ["/weather", "set", kind] => (|| -> io::Result<()> {
+                    clock.set_weather(kind)?;
+                    clock.save_ticks(&clock_file)?;
+                    for body in clock.weather_packets() {
+                        hub.broadcast(Event { id: 0x2b, body });
+                    }
+                    println!("Weather set to {kind}");
+                    Ok(())
+                })(),
+                ["/tp", name, x, y, z] => (|| -> io::Result<()> {
+                    let parse = |value: &str| value.parse::<f64>()
+                        .map_err(|_| bad("invalid teleport number"));
+                    let position = PlayerPosition { x: parse(x)?, y: parse(y)?, z: parse(z)? };
+                    if !hub.request_admin_teleport(name, position)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target player not online"));
+                    }
+                    println!("Teleport queued for {name}");
+                    Ok(())
+                })(),
                 ["/whitelist", "list"] => Whitelist::load(&whitelist_file).map(|list| {
                     println!("Whitelisted name count: {}", list.len());
                 }),
@@ -2867,8 +2932,8 @@ fn main() -> io::Result<()> {
         initial
     };
     let clock_path = Arc::new(world_path.with_extension("clock"));
-    let restored_ticks = Clock::load_ticks(&clock_path)?;
-    let (clock, _clock_thread) = Clock::start_at(restored_ticks);
+    let restored_clock = Clock::load_state(&clock_path)?;
+    let (clock, _clock_thread) = Clock::start_from(restored_clock);
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -2910,6 +2975,7 @@ fn main() -> io::Result<()> {
     start_admin_console(
         Arc::clone(&hub),
         Arc::clone(&clock),
+        Arc::clone(&clock_path),
         Arc::clone(&allow_path),
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
