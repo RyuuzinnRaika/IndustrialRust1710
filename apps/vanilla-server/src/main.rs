@@ -6,14 +6,17 @@ mod anvil_import;
 mod chests;
 mod clock;
 mod crafting;
+mod experience;
 mod furnaces;
 mod ground_items;
 mod inventory;
 mod mobs;
 mod multiplayer;
+mod navigation;
 mod physics;
 mod player;
 mod survival;
+mod survival_damage;
 mod terrain;
 mod vitals;
 mod whitelist;
@@ -21,6 +24,7 @@ mod world;
 
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
+use experience::Experience;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
@@ -45,6 +49,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use survival::MiningProgress;
+use survival_damage::Hazards;
 use vitals::Vitals;
 use whitelist::Whitelist;
 use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
@@ -250,7 +255,7 @@ fn join(
     as_chat(
         s,
         if survival {
-            "Rust survival: mining, crafting, basic collision, fall damage; no mobs or full physics."
+            "Rust survival: mobs, ranged combat, XP, hazards, crafting, collision."
         } else {
             "Rust vanilla prototype: creative flat world. /help for commands."
         },
@@ -378,6 +383,8 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
 struct PlayerSession<'a> {
     position: &'a mut PlayerPosition,
     vitals: &'a mut Vitals,
+    experience: &'a mut Experience,
+    experience_path: &'a Path,
     save_path: &'a Path,
     inventory: &'a mut Inventory,
     inventory_path: &'a Path,
@@ -405,6 +412,8 @@ fn play(
     let PlayerSession {
         position: player,
         vitals,
+        experience,
+        experience_path,
         save_path: player_path,
         inventory,
         inventory_path,
@@ -449,6 +458,9 @@ fn play(
     let mut next_window: u8 = 1;
     let mut last_pickup = Instant::now();
     let mut eating: Option<(u64, Stack)> = None;
+    let mut bow_start: Option<u64> = None;
+    let mut hazards = Hazards::new();
+    let mut last_hazards_tick = clock.ticks();
     loop {
         while let Ok(event) = events.try_recv() {
             if event.id == CHUNK_RELIGHT_EVENT {
@@ -546,20 +558,86 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
+        // XP orbs belong to the world and are collected by proximity, not by client inventory claims.
+        if survival && vitals.health > 0.0 {
+            let collected = mobs
+                .lock()
+                .map_err(|_| bad("mob mutex poisoned"))?
+                .collect_xp(*player, entity_id);
+            if let Some((amount, packets)) = collected {
+                if experience.grant(amount) {
+                    experience.save(experience_path)?;
+                    send(s, 0x1f, &experience.packet())?;
+                }
+                for packet in packets {
+                    hub.broadcast(packet);
+                }
+            }
+        }
         // The first active session advances the shared mob simulation.
         if survival && vitals.health > 0.0 {
+            let participants = hub.participants()?;
             let players = hub.positions()?;
-            let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
             let updates = creatures.tick(now_tick, &w, &players);
-            let hurt = creatures.hurt_player(*player, now_tick);
+            let explosions = creatures.take_explosions();
+            creatures.queue_explosion_hits(&explosions, &participants);
+            let hurt = creatures.hurt_player(entity_id, *player, now_tick);
+            let drops = creatures.take_drops();
             drop(creatures);
+            let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
+            for explosion in explosions {
+                hub.broadcast(explosion.packet());
+                // One blast removes at most 64 non-tile blocks, protecting persisted containers.
+                let mut destroyed = 0;
+                let (cx, cy, cz) = (
+                    explosion.position.x.floor() as i32,
+                    explosion.position.y.floor() as i32,
+                    explosion.position.z.floor() as i32,
+                );
+                'blast: for y in (cy - 3).max(1)..=(cy + 3).min(254) {
+                    for x in cx - 3..=cx + 3 {
+                        for z in cz - 3..=cz + 3 {
+                            let d = ((x - cx).pow(2) + (y - cy).pow(2) + (z - cz).pow(2)) as f64;
+                            if d > explosion.radius * explosion.radius {
+                                continue;
+                            }
+                            let block = w.get(x, y, z) >> 4;
+                            if matches!(block, 0 | 7 | 49 | 54 | 61 | 62) {
+                                continue;
+                            }
+                            if w.update_and_save(world_path, x, y, z, 0)? {
+                                hub.broadcast(block_change_event(&w, x, y, z));
+                                destroyed += 1;
+                                if destroyed >= 64 {
+                                    break 'blast;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             drop(w);
             for update in updates {
                 hub.broadcast(update);
             }
-            if hurt {
-                vitals.health = (vitals.health - 2.0).max(0.0);
+            if !drops.is_empty() {
+                let mut ground = ground_items
+                    .lock()
+                    .map_err(|_| bad("ground items mutex poisoned"))?;
+                for (stack, at) in drops {
+                    if ground.is_full() {
+                        break;
+                    }
+                    let item = ground.put(ground_path, stack, at)?;
+                    for event in item.spawn() {
+                        hub.broadcast(event);
+                    }
+                }
+            }
+            if damage > 0.0 {
+                vitals.health = (vitals.health - damage.ceil()).max(0.0);
                 player.save_state(player_path, *vitals)?;
                 send(s, 0x06, &health_packet(*vitals))?;
             }
@@ -572,9 +650,18 @@ fn play(
             let grounded = simulated
                 .as_ref()
                 .is_some_and(|candidate| physics::supported(&gravity_world, candidate));
+            let wet = simulated.as_ref().is_some_and(|candidate| {
+                physics::in_water(&gravity_world, candidate)
+                    || physics::on_ladder(&gravity_world, candidate)
+            });
             drop(gravity_world);
             if let Some(candidate) = simulated {
-                let damage = fall.update(candidate.y, grounded);
+                let damage = if wet {
+                    fall.reset(candidate.y);
+                    0
+                } else {
+                    fall.update(candidate.y, grounded)
+                };
                 let mut next_vitals = *vitals;
                 next_vitals.health = (next_vitals.health - f32::from(damage)).max(0.0);
                 // Save accepted position and HP before sending an update.
@@ -602,6 +689,21 @@ fn play(
                 send(s, 0x06, &health_packet(*vitals))?;
             } else {
                 *vitals = next;
+            }
+        }
+        if survival && vitals.health > 0.0 && now_tick > last_hazards_tick {
+            let mut total = 0.0f32;
+            let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            let steps = (now_tick - last_hazards_tick).min(4);
+            for t in last_hazards_tick + 1..=last_hazards_tick + steps {
+                total += hazards.tick(&w, *player, t, inventory);
+            }
+            last_hazards_tick = now_tick;
+            drop(w);
+            if total > 0.0 {
+                vitals.health = (vitals.health - total).max(0.0);
+                player.save_state(player_path, *vitals)?;
+                send(s, 0x06, &health_packet(*vitals))?;
             }
         }
         // A food right-click starts a 32 tick use animation. The server owns
@@ -673,6 +775,20 @@ fn play(
                 let target_id = input.varint()?;
                 let action = input.varint()?;
                 input.finish()?;
+                if survival && vitals.health > 0.0 && action == 0 {
+                    let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    if let Some(event) =
+                        creatures.feed(target_id, *player, inventory.held(), now_tick)
+                    {
+                        let mut candidate = inventory.clone();
+                        if candidate.consume_held() {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
+                            send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                            hub.broadcast(event);
+                        }
+                    }
+                }
                 if survival && vitals.health > 0.0 && action == 1 {
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
                     let result =
@@ -684,6 +800,23 @@ fn play(
                             next_inventory.save(inventory_path)?;
                             *inventory = next_inventory;
                             send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                        }
+                        if hit.experience > 0 {
+                            let at = hit
+                                .drop
+                                .map(|(_, at)| PlayerPosition {
+                                    x: at.0 as f64 + 0.5,
+                                    y: at.1 as f64,
+                                    z: at.2 as f64 + 0.5,
+                                })
+                                .unwrap_or(*player);
+                            if let Some(orb) = mobs
+                                .lock()
+                                .map_err(|_| bad("mob mutex poisoned"))?
+                                .spawn_xp(at, hit.experience as u16)
+                            {
+                                hub.broadcast(orb);
+                            }
                         }
                         if let Some((stack, at)) = hit.drop {
                             let mut ground = ground_items
@@ -714,7 +847,7 @@ fn play(
                 let message = input.string(100)?;
                 input.finish()?;
                 if message == "/help" {
-                    as_chat(s, "Commands: /help, /save, /list. Survival supports crafting, inventory, basic collision and fall damage; mobs remain unsupported.")?;
+                    as_chat(s, "Commands: /help, /save, /list. Survival includes mobs, XP, ranged combat, hazards, armor and crafting.")?;
                 } else if message == "/list" {
                     as_chat(
                         s,
@@ -776,8 +909,15 @@ fn play(
                         continue;
                     }
                     let landed = physics::supported(&collision_world, &candidate);
+                    let safe_fall = physics::in_water(&collision_world, &candidate)
+                        || physics::on_ladder(&collision_world, &candidate);
                     drop(collision_world);
-                    let damage = fall.update(y, landed);
+                    let damage = if safe_fall {
+                        fall.reset(y);
+                        0
+                    } else {
+                        fall.update(y, landed)
+                    };
                     if damage != 0 {
                         vitals.health = (vitals.health - f32::from(damage)).max(0.0);
                         player.save_state(player_path, *vitals)?;
@@ -851,6 +991,31 @@ fn play(
                 if survival {
                     if action == 5 {
                         eating = None; // Release Use Item.
+                        if let Some(start) = bow_start.take() {
+                            let duration = now_tick.saturating_sub(start) as f64 / 20.0;
+                            let charge = ((duration * duration + duration * 2.0) / 3.0).min(1.0);
+                            if charge >= 0.1 && inventory.held().is_some_and(|item| item.id == 261)
+                            {
+                                let mut candidate = inventory.clone();
+                                if candidate.consume_item(262) {
+                                    let mut creatures =
+                                        mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                                    if let Some(arrow) = creatures.fire_arrow(
+                                        Some(entity_id),
+                                        *player,
+                                        yaw,
+                                        pitch,
+                                        charge * 3.0,
+                                        (charge * 2.0).ceil() as u8 + 1,
+                                    ) {
+                                        candidate.save(inventory_path)?;
+                                        *inventory = candidate;
+                                        send(s, 0x30, &inventory.window_items())?;
+                                        hub.broadcast(arrow);
+                                    }
+                                }
+                            }
+                        }
                     }
                     let target = (x, y, z);
                     match action {
@@ -977,6 +1142,24 @@ fn play(
                                                         }
                                                     }
                                                     changed = true;
+                                                    let reward = match block {
+                                                        16 => 2,
+                                                        21 => 4,
+                                                        56 => 5,
+                                                        73 | 74 => 3,
+                                                        129 => 5,
+                                                        153 => 3,
+                                                        _ => 0,
+                                                    };
+                                                    if reward > 0 {
+                                                        if let Some(orb) = mobs
+                                                            .lock()
+                                                            .map_err(|_| bad("mob mutex poisoned"))?
+                                                            .spawn_xp(*player, reward)
+                                                        {
+                                                            hub.broadcast(orb);
+                                                        }
+                                                    }
                                                 }
                                                 Ok(false) => {
                                                     if wore {
@@ -1050,8 +1233,12 @@ fn play(
                 // Only an authenticated, selected inventory stack can be used.
                 if survival && x == -1 && y == 255 && z == -1 && face == -1 {
                     if let Some(stack) = inventory.held() {
-                        if inventory.can_place(held) && vitals.can_eat(stack) {
-                            eating = Some((now_tick, stack));
+                        if inventory.can_place(held) {
+                            if stack.id == 261 {
+                                bow_start = Some(now_tick);
+                            } else if vitals.can_eat(stack) {
+                                eating = Some((now_tick, stack));
+                            }
                         }
                     }
                     continue;
@@ -1428,6 +1615,34 @@ fn play(
                     last_furnace_view = machines.get(pos);
                     response_items =
                         inventory.furnace_window_items(active_window, &last_furnace_view);
+                    // Smelt XP is created only after an actual server-owned output withdrawal.
+                    if accepted
+                        && slot == 2
+                        && previous.slots[2].is_some()
+                        && last_furnace_view.slots[2].is_none()
+                    {
+                        let output = previous.slots[2].unwrap();
+                        let per_item: u16 = match output.id {
+                            265 | 266 | 320 | 364 | 366 | 393 | 336 | 172 | 405 => 1,
+                            263 if output.damage == 1 => 1,
+                            _ => 0,
+                        };
+                        let earned = per_item.saturating_mul(u16::from(output.count));
+                        if earned > 0 {
+                            let orb_at = PlayerPosition {
+                                x: pos.0 as f64 + 0.5,
+                                y: pos.1 as f64 + 1.0,
+                                z: pos.2 as f64 + 0.5,
+                            };
+                            if let Some(orb) = mobs
+                                .lock()
+                                .map_err(|_| bad("mob mutex poisoned"))?
+                                .spawn_xp(orb_at, earned)
+                            {
+                                hub.broadcast(orb);
+                            }
+                        }
+                    }
                     drop(machines);
                 } else if let Some(pos) = active_chest {
                     let still_open = world
@@ -1537,6 +1752,21 @@ fn play(
                     fall = FallTracker::new(origin.y);
                     idle_gravity = IdleGravity::new(now_tick);
                     eating = None;
+                    bow_start = None;
+                    hazards = Hazards::new();
+                    last_hazards_tick = now_tick;
+                    // In vanilla, death loses XP and may leave up to 100 XP in orbs.
+                    let drop_amount =
+                        (u32::from(experience.level_and_fraction().0) * 7).min(100) as u16;
+                    *experience = Experience::default();
+                    experience.save(experience_path)?;
+                    if let Some(orb) = mobs
+                        .lock()
+                        .map_err(|_| bad("mob mutex poisoned"))?
+                        .spawn_xp(*player, drop_amount)
+                    {
+                        hub.broadcast(orb);
+                    }
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = 0i32.to_be_bytes().to_vec();
                     respawn.extend_from_slice(&[1, 0]); // normal difficulty, survival
@@ -1552,6 +1782,7 @@ fn play(
                         send(s, mob.id, &mob.body)?;
                     }
                     send(s, 0x06, &health_packet(*vitals))?;
+                    send(s, 0x1f, &experience.packet())?;
                     send(s, 0x30, &inventory.window_items())?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     send_player_position(s, player)?;
@@ -1729,6 +1960,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             return Ok(());
         }
     };
+    let experience_file = player_file.with_extension("experience.json");
+    let mut experience_state = Experience::load(&experience_file)?;
     let uuid = offline_uuid(&name);
     let (entity_id, events, previous) = match hub.add(name.clone(), uuid.clone(), player_state) {
         Ok(result) => result,
@@ -1762,6 +1995,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             survival,
         },
     )?;
+    if survival {
+        send(&mut s, 0x1f, &experience_state.packet())?;
+    }
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
     send(&mut s, self_list.id, &self_list.body)?;
@@ -1801,6 +2037,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         PlayerSession {
             position: &mut player_state,
             vitals: &mut player_vitals,
+            experience: &mut experience_state,
+            experience_path: &experience_file,
             save_path: &player_file,
             inventory: &mut inventory_state,
             inventory_path: &inventory_file,
@@ -1820,9 +2058,11 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     // Save even on a clean disconnect, timeout, or access revocation.
     let player_saved = player_state.save_state(&player_file, player_vitals);
     let inventory_saved = inventory_state.save(&inventory_file);
+    let experience_saved = experience_state.save(&experience_file);
     println!("left: {name}");
     player_saved?;
     inventory_saved?;
+    experience_saved?;
     result
 }
 fn main() -> io::Result<()> {

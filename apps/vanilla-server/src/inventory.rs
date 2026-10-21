@@ -59,6 +59,55 @@ impl Default for Inventory {
     }
 }
 impl Inventory {
+    /// Equipment slots are 5=helmet, 6=chest, 7=leggings, 8=boots in window zero.
+    fn armor_compatible(slot: usize, stack: Stack) -> bool {
+        if stack.count != 1 {
+            return false;
+        }
+        match slot {
+            5 => matches!(stack.id, 298 | 302 | 306 | 310 | 314),
+            6 => matches!(stack.id, 299 | 303 | 307 | 311 | 315),
+            7 => matches!(stack.id, 300 | 304 | 308 | 312 | 316),
+            8 => matches!(stack.id, 301 | 305 | 309 | 313 | 317),
+            _ => false,
+        }
+    }
+    pub fn armor_points(&self) -> u8 {
+        self.slots[5..9]
+            .iter()
+            .flatten()
+            .map(|stack| match stack.id {
+                298 | 301 => 1,
+                299 => 3,
+                300 => 2,
+                302 | 306 | 314 => 2,
+                303 | 307 => 5,
+                304 | 308 => 4,
+                305 | 309 | 317 => 1,
+                310 => 3,
+                311 => 8,
+                312 => 6,
+                313 => 3,
+                315 => 5,
+                316 => 3,
+                _ => 0,
+            })
+            .sum::<u8>()
+            .min(20)
+    }
+    /// Consume one item by ID from Survival player slots without trusting client claims.
+    pub fn consume_item(&mut self, id: i16) -> bool {
+        for index in (36..45).chain(9..36) {
+            if let Some(mut stack) = self.slots[index] {
+                if stack.id == id {
+                    stack.count -= 1;
+                    self.slots[index] = (stack.count > 0).then_some(stack);
+                    return true;
+                }
+            }
+        }
+        false
+    }
     pub fn location(player_path: &Path) -> PathBuf {
         player_path.with_extension("inventory.json")
     }
@@ -67,7 +116,10 @@ impl Inventory {
             || self.selected > 8
             || self.slots.len() != SLOT_COUNT
             || self.slots[0].is_some()
-            || self.slots[5..9].iter().any(Option::is_some)
+            || self.slots[5..9]
+                .iter()
+                .enumerate()
+                .any(|(index, stack)| stack.is_some_and(|s| !Self::armor_compatible(index + 5, s)))
             || self
                 .workbench
                 .iter()
@@ -189,7 +241,7 @@ impl Inventory {
     /// Snapshot all droppable player possessions before clearing them.
     /// Does not include the virtual crafting result or empty armor slots.
     pub fn possessions(&self) -> Vec<Stack> {
-        self.slots[1..5]
+        self.slots[1..9]
             .iter()
             .chain(self.slots[9..45].iter())
             .chain(self.workbench.iter())
@@ -200,7 +252,7 @@ impl Inventory {
     }
     /// Clear only possessions; used after ground-drop capacity is checked.
     pub fn clear_possessions(&mut self) {
-        for slot in &mut self.slots[1..5] {
+        for slot in &mut self.slots[1..9] {
             *slot = None;
         }
         for slot in &mut self.slots[9..45] {
@@ -259,7 +311,7 @@ impl Inventory {
     /// Slot zero is *virtual* (the derived crafting output) and cannot be set.
     fn slot_index(window: u8, slot: i16) -> Option<(bool, usize)> {
         match (window, slot) {
-            (0, 1..=4) => Some((false, slot as usize)),
+            (0, 1..=8) => Some((false, slot as usize)),
             (0, 9..=44) => Some((false, slot as usize)),
             (1..=u8::MAX, 1..=9) => Some((true, (slot - 1) as usize)),
             (1..=u8::MAX, 10..=45) => Some((false, (slot - 1) as usize)),
@@ -370,6 +422,19 @@ impl Inventory {
         }
         if Self::slot_index(window, slot).is_none() {
             return false;
+        }
+        if window == 0 && (5..=8).contains(&slot) {
+            let candidate = if mode == 2 {
+                let other = 36 + i16::from(button);
+                self.lookup(0, other)
+            } else if mode == 0 {
+                self.cursor
+            } else {
+                None
+            };
+            if candidate.is_some_and(|stack| !Self::armor_compatible(slot as usize, stack)) {
+                return false;
+            }
         }
         match mode {
             0 if button == 0 || button == 1 => {
@@ -870,6 +935,32 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn armor_equipping_reduces_damage_and_is_included_in_death_drops() {
+        let mut inv = super::Inventory::default();
+        let helm = super::Stack {
+            id: 306,
+            count: 1,
+            damage: 0,
+        };
+        assert!(inv.receive_stack(helm).is_some());
+        assert!(inv.click_window(0, 36, 0, 0));
+        assert!(inv.click_window(0, 5, 0, 0));
+        assert_eq!(inv.armor_points(), 2);
+        assert!(inv.possessions().contains(&helm));
+        let stone = super::Stack {
+            id: 1,
+            count: 1,
+            damage: 0,
+        };
+        assert!(inv.receive_stack(stone).is_some());
+        assert!(inv.click_window(0, 36, 0, 0));
+        assert!(!inv.click_window(0, 6, 0, 0)); // helmet cannot be an arbitrary chest piece
+        inv.clear_possessions();
+        assert_eq!(inv.armor_points(), 0);
+        assert!(!inv.possessions().contains(&helm));
+    }
+
     #[test]
     fn death_collects_hotbar_backpack_cursor_and_crafting_without_duplicate() {
         let mut inventory = super::Inventory::default();
