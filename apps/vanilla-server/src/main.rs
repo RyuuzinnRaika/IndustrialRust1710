@@ -901,8 +901,8 @@ fn play(
                     if effect.kind == 19 {
                         vitals.health = (vitals.health - amount).max(1.0);
                     }
-                    effect.next_periodic =
-                        now_tick.saturating_add(periodic_effect_interval(effect.kind, effect.amplifier));
+                    effect.next_periodic = now_tick
+                        .saturating_add(periodic_effect_interval(effect.kind, effect.amplifier));
                 }
             }
             for effect in &active_effects {
@@ -950,8 +950,9 @@ fn play(
                                         kind,
                                         amplifier,
                                         expires_at: now_tick + u64::from(duration),
-                                        next_periodic: now_tick
-                                            .saturating_add(periodic_effect_interval(kind, amplifier)),
+                                        next_periodic: now_tick.saturating_add(
+                                            periodic_effect_interval(kind, amplifier),
+                                        ),
                                     });
                                 }
                                 player.save_state(player_path, *vitals)?;
