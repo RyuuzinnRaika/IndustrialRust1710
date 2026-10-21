@@ -27,6 +27,17 @@ fn index(x: i32, y: i32, z: i32, min_x: i32, min_z: i32) -> usize {
 }
 
 impl World {
+    /// Exact (sky, block) light at one spawn position, from the same engine
+    /// used to serialize Protocol 5 chunk lighting.
+    pub fn light_at(&self, x: i32, y: i32, z: i32) -> (u8, u8) {
+        if !(0..=255).contains(&y) { return (0, 0); }
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let (block, sky) = self.light_arrays(cx, cz);
+        let index = ((y as usize * 16 + z.rem_euclid(16) as usize) * 16
+            + x.rem_euclid(16) as usize);
+        (sky[index], block[index])
+    }
     /// Returns separate 16x256x16 block-light and sky-light nibble values.
     /// Direct sky columns are computed top-down. Artificial block light
     /// travels through air/transparent blocks for at most 15 blocks and may
