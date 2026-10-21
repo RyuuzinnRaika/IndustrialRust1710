@@ -1043,7 +1043,11 @@ fn play(
                     } else if let Some(result) =
                         creatures.animal_interact(target_id, *player, inventory.held())
                     {
-                        let mobs::AnimalInteraction { metadata, item, milk } = result;
+                        let mobs::AnimalInteraction {
+                            metadata,
+                            item,
+                            milk,
+                        } = result;
                         if milk {
                             let mut candidate = inventory.clone();
                             if candidate.exchange_single_held(325, 335) {
@@ -1141,8 +1145,11 @@ fn play(
                         as_chat(s, "Summon is restricted to local test clients.")?;
                     } else {
                         let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                        let event = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?
-                            .summon(name.trim(), &w, *player);
+                        let event = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?.summon(
+                            name.trim(),
+                            &w,
+                            *player,
+                        );
                         drop(w);
                         if let Some(event) = event {
                             hub.broadcast(event);
