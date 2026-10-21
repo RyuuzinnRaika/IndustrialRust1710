@@ -1038,6 +1038,20 @@ fn play(
                             continue;
                         }
                     }
+                    // Server-controlled villager barter, never trust a client
+                    // supplied output stack. Clone first to ensure we can fit
+                    // the reward without deleting the emerald on a full bag.
+                    if let Some(output) = creatures.village_offer(
+                        target_id, *player, inventory.held()
+                    ) {
+                        let mut candidate = inventory.clone();
+                        if candidate.consume_held() && candidate.receive_stack(output).is_some() {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
+                            send(s, 0x30, &inventory.window_items())?;
+                            continue;
+                        }
+                    }
                     if let Some(event) =
                         creatures.feed(target_id, *player, inventory.held(), now_tick)
                     {
