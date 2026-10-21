@@ -275,6 +275,8 @@ impl World {
     }
 
     /// Place both halves of a door in one save; failures roll back both cells.
+    // Legacy helper retained only for unit tests; runtime uses staged+journaled saves.
+    #[cfg(test)]
     pub fn place_door(
         &mut self,
         path: &Path,
