@@ -81,6 +81,7 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 10 // flowing lava
             | 6 // saplings
             | 18 // leaves
+            | 51 // bounded fire propagation
             | 59 // wheat
             | 60 // farmland (via hoe)
             | 66 // rails
@@ -393,7 +394,7 @@ impl World {
             if id == 55 {
                 self.pending_circuit.insert(pos);
             }
-            if matches!(id, 6 | 18 | 59 | 60 | 141 | 142) {
+            if matches!(id, 6 | 18 | 51 | 59 | 60 | 141 | 142) {
                 self.pending_ecology.insert(pos);
             } else {
                 self.pending_ecology.remove(&pos);
@@ -907,7 +908,7 @@ impl World {
             if block >> 4 == 55 {
                 world.pending_circuit.insert((x, y, z));
             }
-            if matches!(block >> 4, 6 | 18 | 59 | 60 | 141 | 142) {
+            if matches!(block >> 4, 6 | 18 | 51 | 59 | 60 | 141 | 142) {
                 world.pending_ecology.insert((x, y, z));
             }
             if matches!(
