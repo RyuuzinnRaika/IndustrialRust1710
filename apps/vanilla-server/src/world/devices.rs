@@ -91,12 +91,15 @@ fn rails_connected(
     to_meta: u16,
 ) -> bool {
     // At a slope boundary, the endpoints describe the neighboring track cell.
-    rail_endpoints(from.0, from.1, from.2, from_meta)
-        .iter()
-        .any(|&p| p == to)
-        && rail_endpoints(to.0, to.1, to.2, to_meta)
-            .iter()
-            .any(|&p| p == from)
+    let from_ends = rail_endpoints(from.0, from.1, from.2, from_meta);
+    let to_ends = rail_endpoints(to.0, to.1, to.2, to_meta);
+    from_ends.iter().any(|&(fx, fy, fz)| {
+        fx == to.0
+            && fz == to.2
+            && to_ends.iter().any(|&(tx, ty, tz)| {
+                tx == from.0 && tz == from.2 && fy == ty
+            })
+    })
 }
 
 impl World {
