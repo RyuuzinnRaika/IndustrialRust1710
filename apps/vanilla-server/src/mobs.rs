@@ -182,7 +182,7 @@ struct PendingHit {
     radius: f64,
     damage: u8,
     expires: u64,
-    victims: Vec<PlayerPosition>,
+    victims: Vec<i32>,
 }
 #[derive(Debug)]
 pub struct Mobs {
@@ -190,6 +190,7 @@ pub struct Mobs {
     arrows: BTreeMap<i32, Arrow>,
     hits: Vec<PendingHit>,
     drops: Vec<(Stack, (i32, i32, i32), u16)>,
+    melee_cooldowns: BTreeMap<(i32, i32), u64>,
     explosions: Vec<(i32, i32, i32)>,
     next_id: i32,
     random: u64,
@@ -203,6 +204,7 @@ impl Default for Mobs {
             arrows: BTreeMap::new(),
             hits: Vec::new(),
             drops: Vec::new(),
+            melee_cooldowns: BTreeMap::new(),
             explosions: Vec::new(),
             next_id: BASE_ID,
             random: 1,
@@ -491,6 +493,7 @@ impl Mobs {
                 }
             }
             for id in remove {
+                self.melee_cooldowns.retain(|(entity, _), _| *entity != id);
                 if self.entities.remove(&id).is_some() {
                     events.push(multiplayer::destroy(id));
                 }
@@ -708,17 +711,14 @@ impl Mobs {
         }
         Some(outcome)
     }
-    pub fn damage_player(&mut self, player: PlayerPosition, tick: u64) -> u8 {
+    pub fn damage_player(&mut self, player_id: i32, player: PlayerPosition, tick: u64) -> u8 {
         let mut amount = 0_u8;
         for hit in &mut self.hits {
             if tick <= hit.expires
                 && distance_squared(player, hit.center) <= hit.radius * hit.radius
-                && !hit
-                    .victims
-                    .iter()
-                    .any(|p| distance_squared(*p, player) < 0.01)
+                && !hit.victims.contains(&player_id)
             {
-                hit.victims.push(player);
+                hit.victims.push(player_id);
                 amount = amount.saturating_add(hit.damage);
             }
         }
@@ -726,10 +726,11 @@ impl Mobs {
             if mob.species != Species::Zombie && mob.species != Species::Spider {
                 continue;
             }
+            let key = (mob.id, player_id);
             if mob.nearby(player, 1.6)
-                && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= 20)
+                && self.melee_cooldowns.get(&key).is_none_or(|last| tick.saturating_sub(*last) >= 20)
             {
-                mob.bite_tick = tick;
+                self.melee_cooldowns.insert(key, tick);
                 amount = amount.saturating_add(if mob.species == Species::Spider { 2 } else { 3 });
             }
         }
