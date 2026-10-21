@@ -1260,6 +1260,95 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
 mod tests {
     use super::*;
     #[test]
+    fn special_mob_ids_health_and_metadata_are_protocol5() {
+        assert_eq!(Kind::Enderman.protocol(), 58);
+        assert_eq!(Kind::Slime.protocol(), 55);
+        assert_eq!(Kind::Witch.protocol(), 66);
+        assert_eq!(Kind::Ghast.protocol(), 56);
+        assert_eq!(Kind::Blaze.protocol(), 61);
+        assert_eq!(Kind::ZombiePigman.protocol(), 57);
+        assert_eq!(Kind::MagmaCube.protocol(), 62);
+        assert_eq!(Kind::Villager.protocol(), 120);
+        assert_eq!(Kind::IronGolem.protocol(), 99);
+        assert_eq!(Kind::EnderDragon.protocol(), 63);
+        assert_eq!(Kind::Wither.protocol(), 64);
+        assert_eq!(Kind::IronGolem.health(), 100);
+        assert_eq!(Kind::Wither.health(), 300);
+        let mut mobs = Mobs::default();
+        let pos = PlayerPosition::default();
+        let size = mobs.insert_sized(Kind::Slime, pos, false, 4);
+        assert!(size.body.windows(2).any(|bytes| bytes == [16, 4]));
+        assert_eq!(mobs.entities.get(&0).unwrap().health, 16);
+        let baby = mobs.insert(Kind::Zombie, pos, true);
+        assert!(baby.body.windows(5).any(|bytes| bytes == [76, 255, 255, 162, 64]));
+        let villager = mobs.insert(Kind::Villager, pos, false);
+        assert!(villager.body.windows(5).any(|bytes| bytes == [80, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn defeated_large_slimes_split_with_unique_shared_ids_and_no_air_drop() {
+        let mut mobs = Mobs::default();
+        let pos = PlayerPosition::default();
+        mobs.insert_sized(Kind::Slime, pos, false, 4);
+        mobs.entities.get_mut(&0).unwrap().health = 1;
+        let attack = mobs.player_attack(0, pos, None, 20).unwrap();
+        assert!(attack.drop.is_none());
+        assert!(attack.events.iter().any(|event| event.id == 0x13));
+        let children: Vec<_> = mobs.entities.values().copied().collect();
+        assert!((2..=4).contains(&children.len()));
+        assert!(children.iter().all(|child| child.kind == Kind::Slime
+            && child.size == 2 && child.health == 4 && child.id != 0));
+        let id = children[0].id;
+        mobs.entities.get_mut(&id).unwrap().health = 1;
+        let result = mobs.player_attack(id, pos, None, 30).unwrap();
+        assert!(result.drop.is_none());
+        assert!(mobs.entities.values().any(|mob| mob.size == 1));
+        let unique: std::collections::BTreeSet<_> = mobs.entities.keys().copied().collect();
+        assert_eq!(unique.len(), mobs.entities.len());
+        assert_eq!(mobs.spawn_events().filter(|packet| packet.id == 0x0f).count(), mobs.entities.len());
+    }
+
+    #[test]
+    fn neutral_pigmen_retaliate_only_when_attacked() {
+        let mut mobs = Mobs::default();
+        let pos = PlayerPosition::default();
+        let spawn = mobs.insert(Kind::ZombiePigman, pos, false);
+        assert_eq!(spawn.id, 0x0f);
+        assert_eq!(mobs.hurt_player(900, pos, 10), 0);
+        mobs.player_attack(0, pos, None, 20).unwrap();
+        assert!(mobs.hurt_player(900, pos, 21) > 0);
+        assert_eq!(mobs.hurt_player(900, pos, 1220), 0);
+    }
+
+    #[test]
+    fn iron_golem_protects_villagers_and_survives_peaceful() {
+        let mut mobs = Mobs::default();
+        let pos = PlayerPosition::default();
+        mobs.difficulty = Some(0);
+        mobs.insert(Kind::Villager, pos, false);
+        mobs.insert(Kind::IronGolem, pos, false);
+        mobs.insert(Kind::Zombie, pos, false);
+        let packets = mobs.tick(10, &World::new(), &[pos]);
+        assert!(packets.iter().any(|event| event.id == 0x13));
+        assert_eq!(mobs.entities.len(), 2);
+        mobs.difficulty = Some(1);
+        mobs.insert(Kind::Zombie, pos, false);
+        mobs.tick(30, &World::new(), &[pos]);
+        assert_eq!(mobs.entities.get(&3).unwrap().health, 13);
+        assert_eq!(mobs.hurt_player(999, pos, 31), 3);
+    }
+
+    #[test]
+    fn skeleton_arrow_remains_hostile_after_shooter_dies() {
+        let mut mobs = Mobs::default();
+        let pos = PlayerPosition::default();
+        mobs.insert(Kind::Skeleton, pos, false);
+        mobs.fire_arrow(Some(0), pos, 0.0, 0.0, 2.0, 3).unwrap();
+        assert!(mobs.arrows.values().next().unwrap().hostile);
+        mobs.entities.remove(&0);
+        assert!(mobs.arrows.values().next().unwrap().hostile);
+    }
+    #[test]
     fn explosion_damages_all_nearby_players_once_even_when_overlapping() {
         let mut mobs = Mobs::default();
         let nearby = PlayerPosition {
