@@ -1047,8 +1047,7 @@ fn survival_shovel_mining_wears_out_last_use_and_persists_dirt_drop() {
     until_packet(&mut client, 0x2f, |p| p == [0, 0, 36, 255, 255]);
     let metadata = until_packet(&mut client, 0x1c, |p| {
         let mut raw = p;
-        read_varint(&mut raw).is_ok()
-            && raw == [0xaa, 0, 3, 1, 0, 0, 255, 255, 127]
+        read_varint(&mut raw).is_ok() && raw == [0xaa, 0, 3, 1, 0, 0, 255, 255, 127]
     });
     let mut metadata_data = metadata.as_slice();
     read_varint(&mut metadata_data).unwrap();
