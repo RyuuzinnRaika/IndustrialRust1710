@@ -166,6 +166,10 @@ impl Mob {
             body.push(16); // DataWatcher byte index 16: slime/magma cube size
             body.push(self.size);
         }
+        if self.kind == Kind::Villager {
+            body.push((2 << 5) | 16); // profession integer: farmer (0)
+            body.extend_from_slice(&0i32.to_be_bytes());
+        }
         if self.kind == Kind::Sheep {
             body.push(16); // sheep colour + sheared bit (byte metadata)
             body.push(if self.sheared { 0x10 } else { 0 });
@@ -858,7 +862,7 @@ impl Mobs {
             .retain(|(_, _, t)| now.saturating_sub(*t) < 30);
         if self.difficulty == Some(0) {
             self.entities.retain(|id, mob| {
-                if mob.kind.passive() {
+                if mob.kind.peaceful_safe() {
                     true
                 } else {
                     events.push(multiplayer::destroy(*id));
@@ -944,10 +948,34 @@ impl Mobs {
                     continue; // Daylight spiders are neutral until provoked.
                 }
                 let d = distance(target, mob.position);
+                if mob.kind == Kind::IronGolem {
+                    continue; // Guardian targeting is handled separately below.
+                }
                 if matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman)
                     && now >= mob.anger_until
                 {
                     continue; // Neutral until attacked; anger expires after 60 seconds.
+                }
+                if mob.kind == Kind::Enderman && now.is_multiple_of(40) {
+                    // A bounded teleport attempt; never move through a wall or
+                    // into an unloaded/invalid coordinate. Shared server event.
+                    for attempt in 0..8u64 {
+                        let h = hash(now ^ mob.id as u64 ^ (attempt << 24));
+                        let new_pos = PlayerPosition {
+                            x: mob.position.x + ((h & 15) as f64 - 7.5),
+                            y: mob.position.y,
+                            z: mob.position.z + (((h >> 8) & 15) as f64 - 7.5),
+                        };
+                        if new_pos.is_valid()
+                            && !physics::collides(world, &new_pos)
+                            && physics::supported(world, &new_pos)
+                        {
+                            mob.position = new_pos;
+                            mob.waypoint = None;
+                            events.push(multiplayer::teleport(mob.id, &new_pos, 0.0, 0.0));
+                            break;
+                        }
+                    }
                 }
                 if mob.kind == Kind::Creeper {
                     if d < 3.0 {
@@ -1051,6 +1079,38 @@ impl Mobs {
                     }
                 }
             }
+            // Iron golems target nearby hostile mobs, never players or villagers.
+            // Resolve after the iteration to avoid mutable aliasing and keep
+            // each hit authoritative for all connected clients.
+            let guardians: Vec<Mob> = self.entities.values()
+                .filter(|m| m.kind == Kind::IronGolem
+                    && (m.bite_tick == 0 || now.saturating_sub(m.bite_tick) >= 20))
+                .copied().collect();
+            for guardian in guardians {
+                let victim = self.entities.values()
+                    .filter(|other| other.kind.hostile_to_players()
+                        && other.nearby(guardian.position, 3.0))
+                    .min_by(|a, b| distance(a.position, guardian.position)
+                        .total_cmp(&distance(b.position, guardian.position)))
+                    .map(|mob| mob.id);
+                if let Some(victim) = victim {
+                    if let Some(golem) = self.entities.get_mut(&guardian.id) {
+                        golem.bite_tick = now;
+                    }
+                    if let Some(enemy) = self.entities.get_mut(&victim) {
+                        enemy.health -= 7;
+                        events.push(enemy.status(if enemy.health <= 0 { 3 } else { 2 }));
+                        if enemy.health <= 0 {
+                            if let Some(drop) = enemy.death_drop() {
+                                self.pending_drops.push(drop);
+                            }
+                            dead.push(victim);
+                        }
+                    }
+                }
+            }
+            dead.sort_unstable();
+            dead.dedup();
             for id in dead {
                 if let Some(parent) = self.entities.remove(&id) {
                     events.push(multiplayer::destroy(id));
