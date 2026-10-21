@@ -416,6 +416,9 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[1, 1], &[1, 1]]) {
         return product(98, 4, 0);
     }
+    if matches(&[&[335, 335, 335], &[353, 344, 353], &[296, 296, 296]]) {
+        return product(354, 1, 0); // cake; milk buckets are returned to the grid
+    }
     // Workstations, containers and redstone machines from Java 1.7.10.
     if matches(&[&[0, 369, 0], &[4, 4, 4]]) {
         return product(117, 1, 0); // brewing stand
