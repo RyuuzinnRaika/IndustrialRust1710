@@ -1006,6 +1006,30 @@ fn play(
                                 )?;
                             }
                         }
+                    } else if inventory.held() == Some(stack) && stack.id == 335 {
+                        // In 1.7.10 drinking milk clears all effects even when
+                        // the player is at full hunger. Charge the milk and
+                        // return one empty bucket before removing any effects.
+                        let mut remaining = inventory.clone();
+                        if remaining.consume_held()
+                            && remaining
+                                .receive_stack(Stack {
+                                    id: 325,
+                                    count: 1,
+                                    damage: 0,
+                                })
+                                .is_some()
+                        {
+                            remaining.save(inventory_path)?;
+                            *inventory = remaining;
+                            for effect in active_effects.drain(..) {
+                                let mut removed = entity_id.to_be_bytes().to_vec();
+                                removed.push(effect.kind);
+                                send(s, 0x1e, &removed)?;
+                            }
+                            send(s, 0x30, &inventory.window_items())?;
+                            send(s, 0x2f, &inventory.cursor_packet())?;
+                        }
                     } else if inventory.held() == Some(stack) && vitals.can_eat(stack) {
                         let mut remaining = inventory.clone();
                         if remaining.consume_held() {
@@ -1627,6 +1651,7 @@ fn play(
                                 bow_start = Some(now_tick);
                             } else if vitals.can_eat(stack)
                                 || (stack.id == 373 && brewing::effect(stack).is_some())
+                                || stack.id == 335 // milk is drinkable at full hunger
                             {
                                 eating = Some((now_tick, stack));
                             }
