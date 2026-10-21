@@ -31,6 +31,7 @@ pub struct Clock {
 impl Clock {
     /// Start the monotonic server ticker from an already validated snapshot.
     /// Server downtime deliberately does not advance in-game time.
+    #[cfg(test)]
     pub fn start_at(initial_ticks: u64) -> (Arc<Self>, JoinHandle<()>) {
         Self::start_from(ClockSnapshot {
             ticks: initial_ticks,
