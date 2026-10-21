@@ -24,6 +24,18 @@ enum Kind {
     Skeleton,
     Creeper,
     Spider,
+    CaveSpider,
+    Enderman,
+    Slime,
+    Witch,
+    Ghast,
+    Blaze,
+    ZombiePigman,
+    MagmaCube,
+    Villager,
+    IronGolem,
+    EnderDragon,
+    Wither,
 }
 impl Kind {
     fn protocol(self) -> u8 {
@@ -36,22 +48,53 @@ impl Kind {
             Self::Skeleton => 51,
             Self::Creeper => 50,
             Self::Spider => 52,
+            Self::CaveSpider => 59,
+            Self::Enderman => 58,
+            Self::Slime => 55,
+            Self::Witch => 66,
+            Self::Ghast => 56,
+            Self::Blaze => 61,
+            Self::ZombiePigman => 57,
+            Self::MagmaCube => 62,
+            Self::Villager => 120,
+            Self::IronGolem => 99,
+            Self::EnderDragon => 63,
+            Self::Wither => 64,
         }
     }
     fn passive(self) -> bool {
-        matches!(self, Self::Cow | Self::Pig | Self::Sheep | Self::Chicken)
+        matches!(self, Self::Cow | Self::Pig | Self::Sheep | Self::Chicken | Self::Villager)
+    }
+    fn peaceful_safe(self) -> bool {
+        self.passive() || matches!(self, Self::IronGolem)
+    }
+    fn splitting(self) -> bool {
+        matches!(self, Self::Slime | Self::MagmaCube)
+    }
+    fn hostile_to_players(self) -> bool {
+        !self.peaceful_safe() && !matches!(self, Self::ZombiePigman | Self::Enderman)
     }
     fn health(self) -> i16 {
         match self {
             Self::Chicken => 4,
             Self::Sheep | Self::Pig | Self::Cow => 10,
             Self::Spider => 16,
+            Self::CaveSpider => 12,
+            Self::Enderman => 40,
+            Self::Slime | Self::MagmaCube => 1,
+            Self::Witch => 26,
+            Self::Ghast => 10,
+            Self::Blaze | Self::ZombiePigman => 20,
+            Self::Villager => 20,
+            Self::IronGolem => 100,
+            Self::EnderDragon => 200,
+            Self::Wither => 300,
             Self::Creeper => 20,
             Self::Skeleton => 20,
             Self::Zombie => 20,
         }
     }
-    fn drop(self) -> Stack {
+    fn drop(self, size: u8) -> Option<Stack> {
         let id = match self {
             Self::Zombie => 367,
             Self::Cow => 363,
@@ -60,13 +103,20 @@ impl Kind {
             Self::Chicken => 365,
             Self::Skeleton => 352,
             Self::Creeper => 289,
-            Self::Spider => 287,
+            Self::Spider | Self::CaveSpider => 287,
+            Self::Enderman => 368,
+            Self::Slime if size > 1 => return None,
+            Self::Slime => 341,
+            Self::Witch => 331,
+            Self::Ghast => 370,
+            Self::Blaze => 369,
+            Self::ZombiePigman => 367,
+            Self::MagmaCube if size > 1 => return None,
+            Self::MagmaCube => 378,
+            Self::IronGolem => 265,
+            Self::Villager | Self::EnderDragon | Self::Wither => return None,
         };
-        Stack {
-            id,
-            count: 1,
-            damage: 0,
-        }
+        Some(Stack { id, count: 1, damage: 0 })
     }
     fn breeding_food(self, held: i16) -> bool {
         match self {
@@ -92,6 +142,8 @@ struct Mob {
     waypoint: Option<PlayerPosition>,
     sheared: bool,
     next_egg_tick: u64,
+    size: u8,
+    anger_until: u64,
 }
 impl Mob {
     fn spawn(self) -> Event {
@@ -107,8 +159,12 @@ impl Mob {
         }
         body.extend_from_slice(&[0, 0]); // flags byte
         if self.baby {
-            body.push((12 << 3) | 2); // metadata index 12, type 2 (int)
+            body.push((2 << 5) | 12); // metadata index 12, type 2 (int)
             body.extend_from_slice(&(-24000i32).to_be_bytes());
+        }
+        if self.kind.splitting() {
+            body.push(16); // DataWatcher byte index 16: slime/magma cube size
+            body.push(self.size);
         }
         if self.kind == Kind::Sheep {
             body.push(16); // sheep colour + sheared bit (byte metadata)
@@ -304,13 +360,17 @@ fn damage_held(held: Option<Stack>) -> i16 {
 }
 impl Mobs {
     fn insert(&mut self, kind: Kind, position: PlayerPosition, baby: bool) -> Event {
+        self.insert_sized(kind, position, baby, 1)
+    }
+    fn insert_sized(&mut self, kind: Kind, position: PlayerPosition, baby: bool, size: u8) -> Event {
+        let size = if kind.splitting() { size.clamp(1, 4) } else { 1 };
         let id = self.next_id;
         self.next_id += 1;
         let mob = Mob {
             id,
             kind,
             position,
-            health: kind.health(),
+            health: if kind.splitting() { i16::from(size) * i16::from(size) } else { kind.health() },
             hit_tick: 0,
             bite_tick: 0,
             fuse: 0,
@@ -320,6 +380,8 @@ impl Mobs {
             waypoint: None,
             sheared: false,
             next_egg_tick: self.last_tick + 6000 + u64::from(id.unsigned_abs() % 6000),
+            size,
+            anger_until: 0,
         };
         let event = mob.spawn();
         self.entities.insert(id, mob);
@@ -404,8 +466,9 @@ impl Mobs {
             d <= 2.25
         })?;
         self.orbs.remove(&id);
-        let mut body = id.to_be_bytes().to_vec();
-        body.extend_from_slice(&collector.to_be_bytes());
+        let mut body = Vec::new();
+        write_varint(id as u32, &mut body);
+        write_varint(collector as u32, &mut body);
         Some((
             u32::from(amount),
             vec![Event { id: 0x0d, body }, multiplayer::destroy(id)],
@@ -456,7 +519,7 @@ impl Mobs {
             for id in dead {
                 if let Some(mob) = self.entities.remove(&id) {
                     self.pending_drops.push((
-                        mob.kind.drop(),
+                        mob.kind.drop(mob.size).unwrap_or(Stack { id: 0, count: 0, damage: 0 }),
                         (
                             mob.position.x.floor() as i32,
                             mob.position.y.floor() as i32,
@@ -491,7 +554,7 @@ impl Mobs {
                 vec![mob.status(2)]
             },
             drop: killed.then_some((
-                mob.kind.drop(),
+                mob.kind.drop(mob.size).unwrap_or(Stack { id: 0, count: 0, damage: 0 }),
                 (
                     mob.position.x.floor() as i32,
                     mob.position.y.floor() as i32,
@@ -771,7 +834,7 @@ impl Mobs {
                     mob.health -= 1;
                     if mob.health <= 0 {
                         self.pending_drops.push((
-                            mob.kind.drop(),
+                            mob.kind.drop(mob.size).unwrap_or(Stack { id: 0, count: 0, damage: 0 }),
                             (
                                 mob.position.x.floor() as i32,
                                 mob.position.y.floor() as i32,
@@ -982,7 +1045,7 @@ impl Mobs {
                 mob.health -= i16::from(damage);
                 if mob.health <= 0 {
                     self.pending_drops.push((
-                        mob.kind.drop(),
+                        mob.kind.drop(mob.size).unwrap_or(Stack { id: 0, count: 0, damage: 0 }),
                         (
                             mob.position.x.floor() as i32,
                             mob.position.y.floor() as i32,
