@@ -549,10 +549,12 @@ mod tests {
             item(265), item(331), item(265),
         ];
         assert_eq!(result(&iron_rail, 3), None);
-        assert_eq!(
-            result(&[product(5, 1, 2); 3 * 1].iter().copied().chain([None; 6]).collect::<Vec<_>>(), 3),
-            product(126, 6, 2),
-        );
+        let birch_slabs = [
+            product(5, 1, 2), product(5, 1, 2), product(5, 1, 2),
+            None, None, None,
+            None, None, None,
+        ];
+        assert_eq!(result(&birch_slabs, 3), product(126, 6, 2));
         let mixed_slabs = [
             product(5, 1, 2), product(5, 1, 3), product(5, 1, 2),
             None, None, None,
