@@ -305,6 +305,35 @@ mod regression_tests {
     use super::*;
 
     #[test]
+    fn special_plants_validate_their_own_soil_and_neighbors() {
+        let mut w = World::new();
+        w.import_block(0, 63, 0, 12 << 4).unwrap();
+        w.import_block(1, 63, 0, 8 << 4).unwrap();
+        assert!(w.can_support(0, 64, 0, 83 << 4));
+        assert!(w.can_support(0, 64, 0, 81 << 4));
+        w.import_block(1, 64, 0, 1 << 4).unwrap();
+        assert!(!w.can_support(0, 64, 0, 81 << 4));
+        w.import_block(0, 63, 0, 88 << 4).unwrap();
+        assert!(w.can_support(0, 64, 0, 115 << 4));
+        assert!(!w.can_support(0, 64, 0, 83 << 4));
+    }
+
+    #[test]
+    fn special_plant_growth_is_persisted_through_world_ticks() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-special-plants-{}.irw", std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path, 0, 63, 0, 88 << 4).unwrap();
+        w.update_and_save(&path, 0, 64, 0, 115 << 4).unwrap();
+        for _ in 0..500 { w.block_tick(&path, 64).unwrap(); }
+        assert_eq!(w.get(0, 64, 0), (115 << 4) | 3);
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), (115 << 4) | 3);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn leaf_decay_requires_a_contiguous_four_block_path_to_a_log() {
         let mut connected = World::new();
         for x in 0..4 {
