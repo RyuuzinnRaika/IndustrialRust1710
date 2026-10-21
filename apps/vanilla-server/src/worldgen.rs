@@ -135,6 +135,7 @@ pub fn biome(seed: u64, x: i32, z: i32) -> u8 {
     }
 }
 /// Temperature and precipitation used by client-side sky/precipitation logic.
+#[allow(dead_code)] // Reserved for future precipitation/weather integration.
 pub fn climate(id: u8) -> (f32, f32) {
     match id {
         0 | 24 => (0.5, 0.5),
@@ -157,7 +158,7 @@ fn lake_cut(seed: u64, x: i32, z: i32) -> f64 {
     let mut cut: f64 = 0.0;
     for gx in x.div_euclid(128) - 1..=x.div_euclid(128) + 1 {
         for gz in z.div_euclid(128) - 1..=z.div_euclid(128) + 1 {
-            if hash(seed ^ 0x1a6e, gx, 0, gz) % 3 != 0 {
+            if !hash(seed ^ 0x1a6e, gx, 0, gz).is_multiple_of(3) {
                 continue;
             }
             let cx = gx * 128 + 16 + (hash(seed, gx, 10, gz) % 96) as i32;
@@ -204,6 +205,7 @@ fn stone_biome(id: u8) -> bool {
 /// maximum Y, and typical vein size). The stateless sampler approximates the
 /// density and clustering; it is not Vanilla's chunk-seeded placement order.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // Published generation tuning metadata; sampler integration follows.
 pub struct OreSpec {
     pub id: u16,
     pub min_y: i32,
@@ -211,6 +213,7 @@ pub struct OreSpec {
     pub attempts_per_chunk: u8,
     pub vein_size: u8,
 }
+#[allow(dead_code)]
 pub const ORES: [OreSpec; 7] = [
     OreSpec {
         id: 16,
@@ -294,7 +297,7 @@ fn ore(seed: u64, x: i32, y: i32, z: i32, is_hills: bool) -> u16 {
     }
 }
 fn cave(seed: u64, x: i32, y: i32, z: i32) -> bool {
-    if y < 7 || y > 110 {
+    if !(7..=110).contains(&y) {
         return false;
     }
     let winding = n3(seed ^ 0xca7e, x, y, z, 17);
@@ -310,7 +313,7 @@ fn ravine(seed: u64, x: i32, y: i32, z: i32) -> bool {
     // regions so cliffs do not terminate at chunk/region boundaries.
     for rx in x.div_euclid(128) - 1..=x.div_euclid(128) + 1 {
         for rz in z.div_euclid(128) - 1..=z.div_euclid(128) + 1 {
-            if hash(seed ^ 0x5a7e, rx, 0, rz) % 5 != 0 {
+            if !hash(seed ^ 0x5a7e, rx, 0, rz).is_multiple_of(5) {
                 continue;
             }
             let cx = rx * 128 + (hash(seed, rx, 2, rz) % 128) as i32;
@@ -350,7 +353,7 @@ fn dungeon(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
         return None;
     }
     if y == cy || y == cy + 4 || (x - cx).abs() == 3 || (z - cz).abs() == 3 {
-        return Some(b(if hash(seed, x, y, z) % 4 == 0 { 48 } else { 4 }));
+        return Some(b(if hash(seed, x, y, z).is_multiple_of(4) { 48 } else { 4 }));
     }
     if y == cy + 1 && x == cx && z == cz {
         return Some(b(52));
@@ -382,7 +385,7 @@ pub fn dungeon_loot(seed: u64, x: i32, y: i32, z: i32) -> Option<[(i16, u8); 3]>
 fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
     let gx = x.div_euclid(192);
     let gz = z.div_euclid(192);
-    if hash(seed ^ 0x711a, gx, 0, gz) % 4 != 0 {
+    if !hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4) {
         return None;
     }
     let cx = gx * 192 + 48;
@@ -465,18 +468,18 @@ fn aboveground(seed: u64, x: i32, y: i32, z: i32, top: i32, id: u8) -> u16 {
         return AIR;
     }
     let choice = hash(seed ^ 0x771e, x, 0, z);
-    if desert_biome(id) && choice % 121 == 0 && y <= top + 3 {
+    if desert_biome(id) && choice.is_multiple_of(121) && y <= top + 3 {
         return b(81);
     }
     if y == top + 1 {
-        if matches!(id, 6 | 21) && choice % 48 == 0 {
+        if matches!(id, 6 | 21) && choice.is_multiple_of(48) {
             return b(if choice & 1 == 0 { 39 } else { 40 });
         }
         if matches!(id, 1 | 4 | 5 | 12 | 27 | 30 | 35) {
-            if choice % 29 == 0 {
+            if choice.is_multiple_of(29) {
                 return state(38, (choice % 9) as u16);
             }
-            if choice % 5 == 0 {
+            if choice.is_multiple_of(5) {
                 return state(31, 1);
             }
         }
@@ -497,7 +500,7 @@ fn aboveground(seed: u64, x: i32, y: i32, z: i32, top: i32, id: u8) -> u16 {
                 18 => 44,
                 _ => continue,
             };
-            if hash(seed ^ 0x7eed, tx, 0, tz) % frequency != 0 {
+            if !hash(seed ^ 0x7eed, tx, 0, tz).is_multiple_of(frequency) {
                 continue;
             }
             let root = height(seed, tx, tz);
@@ -540,7 +543,7 @@ fn overworld(seed: u64, x: i32, y: i32, z: i32) -> u16 {
     if y > top {
         return aboveground(seed, x, y, z, top, kind);
     }
-    if y < 5 && hash(seed, x, y, z) % 4 == 0 {
+    if y < 5 && hash(seed, x, y, z).is_multiple_of(4) {
         return b(7);
     }
     if y < top - 4 {
@@ -569,7 +572,7 @@ fn overworld(seed: u64, x: i32, y: i32, z: i32) -> u16 {
     }
 }
 fn nether(seed: u64, x: i32, y: i32, z: i32) -> u16 {
-    if y <= 4 || y >= 124 && y < 128 {
+    if y <= 4 || (124..128).contains(&y) {
         return b(7);
     }
     if y >= 128 {
@@ -594,8 +597,7 @@ fn nether(seed: u64, x: i32, y: i32, z: i32) -> u16 {
             x.div_euclid(3),
             y.div_euclid(3),
             z.div_euclid(3),
-        ) % 89
-            == 0
+        ).is_multiple_of(89)
     {
         block = b(89);
     }
