@@ -444,6 +444,14 @@ impl World {
                         }
                     }
                 }
+                23 | 158 => {
+                    // The 1.7.10 dispenser/dropper triggered bit is metadata
+                    // bit 3. Fire only on a rising edge, never every tick.
+                    let powered = self.powered_near(x, y, z);
+                    if powered != (current & 8 != 0) {
+                        changes.insert((x, y as u8, z), current ^ 8);
+                    }
+                }
                 27 | 157 => {
                     let powered = self.rail_powered(x, y, z, current >> 4);
                     if powered != (current & 8 != 0) {
