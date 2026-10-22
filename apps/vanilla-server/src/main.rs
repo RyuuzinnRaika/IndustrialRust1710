@@ -4098,10 +4098,8 @@ mod h_special_item_transaction_tests {
 
     #[test]
     fn cauldron_and_inventory_commit_as_one_recoverable_action() {
-        let root = std::env::temp_dir().join(format!(
-            "ir1710-h-transaction-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ir1710-h-transaction-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let world_path = root.join("world.irw");
         let inventory_path = root.join("player.inventory");
@@ -4141,10 +4139,8 @@ mod h_special_item_transaction_tests {
 
     #[test]
     fn bonemeal_noop_does_not_debit_items_or_write_a_world() {
-        let root = std::env::temp_dir().join(format!(
-            "ir1710-h-bonemeal-noop-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ir1710-h-bonemeal-noop-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let world_path = root.join("world.irw");
         let inventory_path = root.join("player.inventory");
@@ -4176,7 +4172,14 @@ mod h_special_item_transaction_tests {
         .unwrap();
         assert!(changed.is_empty());
         assert_eq!(inventory.held().unwrap().count, 2);
-        assert_eq!(Inventory::load(&inventory_path).unwrap().held().unwrap().count, 2);
+        assert_eq!(
+            Inventory::load(&inventory_path)
+                .unwrap()
+                .held()
+                .unwrap()
+                .count,
+            2
+        );
         assert_eq!(World::load(&world_path).unwrap().get(1, 65, 1), 1 << 4);
         std::fs::remove_dir_all(root).unwrap();
     }
