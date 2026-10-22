@@ -935,6 +935,12 @@ impl Mobs {
             ..Self::default()
         }
     }
+    /// Snapshot only living server-authoritative Mob positions for block
+    /// contact sensors. Does not expose client-provided movement or mutate AI.
+    pub fn contact_positions(&self) -> Vec<PlayerPosition> {
+        self.entities.values().map(|mob| mob.position).collect()
+    }
+
     pub fn spawn_events(&self) -> impl Iterator<Item = Event> + '_ {
         self.entities
             .values()
