@@ -95,6 +95,7 @@ pub fn valid_damage(id: i16, damage: i16) -> bool {
         349 => damage <= 3,             // raw fish variants
         351 => damage <= 15,            // dye / ink variants
         358 | 373 | 383 => true,        // filled map, potion bitflags, spawn eggs
+        386 | 387 => true,              // private book-NBT reference in internal Stack.damage
         397 => damage <= 4,             // heads, including player head
         _ => damage == 0,
     }
