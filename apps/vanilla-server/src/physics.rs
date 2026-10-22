@@ -203,6 +203,11 @@ fn shapes(id: u16, meta: u16) -> Vec<Shape> {
     }
 }
 fn shapes_at(world: &World, x: i32, y: i32, z: i32) -> Vec<Shape> {
+    // During a piston transition, conservatively treat every swept cell
+    // as solid even if its final static block has already moved away.
+    if world.piston_sweep_at(x, y, z) {
+        return vec![FULL];
+    }
     let state = world.get(x, y, z);
     let id = state >> 4;
     let mut metadata = state & 15;
