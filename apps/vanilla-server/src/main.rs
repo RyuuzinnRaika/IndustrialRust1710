@@ -6368,7 +6368,9 @@ fn main() -> io::Result<()> {
         let mut active = Vec::new();
         for worker in client_threads.drain(..) {
             if worker.is_finished() {
-                worker.join().map_err(|_| io::Error::other("client thread panicked"))?;
+                worker
+                    .join()
+                    .map_err(|_| io::Error::other("client thread panicked"))?;
             } else {
                 active.push(worker);
             }
@@ -6477,43 +6479,133 @@ fn main() -> io::Result<()> {
     // their disconnect paths persist position, inventory and player state.
     drop(listener);
     for worker in client_threads {
-        worker.join().map_err(|_| io::Error::other("client worker panicked during shutdown"))?;
+        worker
+            .join()
+            .map_err(|_| io::Error::other("client worker panicked during shutdown"))?;
     }
-    tick_thread.join().map_err(|_| io::Error::other("tick worker panicked during shutdown"))?;
-    hopper_thread.join().map_err(|_| io::Error::other("hopper worker panicked during shutdown"))?;
-    brewing_thread.join().map_err(|_| io::Error::other("brewing worker panicked during shutdown"))?;
-    projectile_thread.join().map_err(|_| io::Error::other("projectile worker panicked during shutdown"))?;
+    tick_thread
+        .join()
+        .map_err(|_| io::Error::other("tick worker panicked during shutdown"))?;
+    hopper_thread
+        .join()
+        .map_err(|_| io::Error::other("hopper worker panicked during shutdown"))?;
+    brewing_thread
+        .join()
+        .map_err(|_| io::Error::other("brewing worker panicked during shutdown"))?;
+    projectile_thread
+        .join()
+        .map_err(|_| io::Error::other("projectile worker panicked during shutdown"))?;
     clock.stop();
-    clock_thread.join().map_err(|_| io::Error::other("clock worker panicked during shutdown"))?;
-    console_thread.join().map_err(|_| io::Error::other("console worker panicked during shutdown"))?;
-    session_guard.lock().map_err(|_| bad("session lock mutex poisoned"))?.verify()?;
+    clock_thread
+        .join()
+        .map_err(|_| io::Error::other("clock worker panicked during shutdown"))?;
+    console_thread
+        .join()
+        .map_err(|_| io::Error::other("console worker panicked during shutdown"))?;
+    session_guard
+        .lock()
+        .map_err(|_| bad("session lock mutex poisoned"))?
+        .verify()?;
     {
         let world_guard = world.lock().map_err(|_| bad("world lock poisoned"))?;
         world_guard.save(&path)?;
-        mobs.lock().map_err(|_| bad("mob lock poisoned"))?.save(&world_guard)?;
+        mobs.lock()
+            .map_err(|_| bad("mob lock poisoned"))?
+            .save(&world_guard)?;
     }
     // Serialize disjoint files only after gameplay workers and sessions stopped.
     // Existing journal protocol ensures each small group is crash-recoverable.
     let journal_path = path.with_extension("pending-txn.json");
-    journal::commit(&journal_path, &[
-        (chest_path.as_ref().as_path(), chests.lock().map_err(|_| bad("chests lock poisoned"))?.encoded()?),
-        (furnace_path.as_ref().as_path(), furnaces.lock().map_err(|_| bad("furnaces lock poisoned"))?.encoded()?),
-        (hopper_path.as_ref().as_path(), hoppers.lock().map_err(|_| bad("hoppers lock poisoned"))?.encoded()?),
-    ])?;
-    journal::commit(&journal_path, &[
-        (brewer_path.as_ref().as_path(), brewers.lock().map_err(|_| bad("brewers lock poisoned"))?.encoded()?),
-        (ground_path.as_ref().as_path(), ground_items.lock().map_err(|_| bad("ground lock poisoned"))?.encoded()?),
-        (device_path.as_ref().as_path(), devices.lock().map_err(|_| bad("devices lock poisoned"))?.encoded()?),
-    ])?;
-    journal::commit(&journal_path, &[
-        (decoration_path.as_ref().as_path(), decorations.lock().map_err(|_| bad("decorations lock poisoned"))?.encoded()?),
-        (map_path.as_ref().as_path(), maps.lock().map_err(|_| bad("maps lock poisoned"))?.encoded()?),
-        (hanging_path.as_ref().as_path(), hangings.lock().map_err(|_| bad("hangings lock poisoned"))?.encoded()?),
-    ])?;
-    world_rules.lock().map_err(|_| bad("rules lock poisoned"))?.save(&rules_path)?;
-    shared_scoreboard.lock().map_err(|_| bad("scoreboard lock poisoned"))?.save(&scoreboard_path)?;
+    journal::commit(
+        &journal_path,
+        &[
+            (
+                chest_path.as_ref().as_path(),
+                chests
+                    .lock()
+                    .map_err(|_| bad("chests lock poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                furnace_path.as_ref().as_path(),
+                furnaces
+                    .lock()
+                    .map_err(|_| bad("furnaces lock poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                hopper_path.as_ref().as_path(),
+                hoppers
+                    .lock()
+                    .map_err(|_| bad("hoppers lock poisoned"))?
+                    .encoded()?,
+            ),
+        ],
+    )?;
+    journal::commit(
+        &journal_path,
+        &[
+            (
+                brewer_path.as_ref().as_path(),
+                brewers
+                    .lock()
+                    .map_err(|_| bad("brewers lock poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                ground_path.as_ref().as_path(),
+                ground_items
+                    .lock()
+                    .map_err(|_| bad("ground lock poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                device_path.as_ref().as_path(),
+                devices
+                    .lock()
+                    .map_err(|_| bad("devices lock poisoned"))?
+                    .encoded()?,
+            ),
+        ],
+    )?;
+    journal::commit(
+        &journal_path,
+        &[
+            (
+                decoration_path.as_ref().as_path(),
+                decorations
+                    .lock()
+                    .map_err(|_| bad("decorations lock poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                map_path.as_ref().as_path(),
+                maps.lock()
+                    .map_err(|_| bad("maps lock poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                hanging_path.as_ref().as_path(),
+                hangings
+                    .lock()
+                    .map_err(|_| bad("hangings lock poisoned"))?
+                    .encoded()?,
+            ),
+        ],
+    )?;
+    world_rules
+        .lock()
+        .map_err(|_| bad("rules lock poisoned"))?
+        .save(&rules_path)?;
+    shared_scoreboard
+        .lock()
+        .map_err(|_| bad("scoreboard lock poisoned"))?
+        .save(&scoreboard_path)?;
     clock.save_ticks(&clock_path)?;
-    session_guard.lock().map_err(|_| bad("session lock mutex poisoned"))?.verify()?;
+    session_guard
+        .lock()
+        .map_err(|_| bad("session lock mutex poisoned"))?
+        .verify()?;
     println!("Server safely stopped; player sessions, workers and persistent state flushed.");
     Ok(())
 }
