@@ -839,7 +839,9 @@ impl World {
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
             }
-        } else if tnt_changed || (!self.primed_tnt.is_empty() && self.fluid_phase.is_multiple_of(20)) {
+        } else if tnt_changed
+            || (!self.primed_tnt.is_empty() && self.fluid_phase.is_multiple_of(20))
+        {
             // Persist the fuse once per second even without terrain edits;
             // also durably remove TNT that exploded in otherwise empty air.
             // This uses the existing 20TPS block_tick, never a second loop.
@@ -1075,14 +1077,18 @@ impl World {
                 if entity_id < 10_000_001 || !in_bounds(x, y, z) || remaining == 0 {
                     return Err(invalid("invalid primed TNT entity"));
                 }
-                if world.primed_tnt.insert(
-                    entity_id,
-                    special::PrimedTnt {
+                if world
+                    .primed_tnt
+                    .insert(
                         entity_id,
-                        pos: (x, y, z),
-                        explode_at: u64::from(remaining),
-                    },
-                ).is_some() {
+                        special::PrimedTnt {
+                            entity_id,
+                            pos: (x, y, z),
+                            explode_at: u64::from(remaining),
+                        },
+                    )
+                    .is_some()
+                {
                     return Err(invalid("duplicate primed TNT entity"));
                 }
                 world.next_tnt_id = world.next_tnt_id.max(entity_id);
