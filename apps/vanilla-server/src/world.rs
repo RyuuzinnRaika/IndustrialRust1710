@@ -49,6 +49,8 @@ pub struct World {
     pending_drops: Vec<WorldDrop>,
     // Fired devices are published only after the block snapshot is durable.
     pending_device_activations: Vec<(i32, i32, i32)>,
+    // Protocol 5 piston animation is published only after the world save.
+    pending_piston_actions: Vec<PistonAction>,
     // Sparse pending client-facing lighting invalidations, not part of IRW files.
     pending_light_chunks: BTreeSet<(i32, i32)>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
@@ -63,6 +65,15 @@ pub struct World {
 pub struct WorldDrop {
     pub pos: (i32, i32, i32),
     pub stack: crate::inventory::Stack,
+}
+
+/// A committed piston base transition for Protocol 5 block-action packets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PistonAction {
+    pub pos: (i32, i32, i32),
+    pub block_id: u16,
+    pub facing: u8,
+    pub extending: bool,
 }
 
 /// A gravity block moved exactly one vertical cell during one 20Hz world tick.
@@ -165,6 +176,10 @@ impl World {
 
     pub fn drain_device_activations(&mut self) -> Vec<(i32, i32, i32)> {
         std::mem::take(&mut self.pending_device_activations)
+    }
+
+    pub fn drain_piston_actions(&mut self) -> Vec<PistonAction> {
+        std::mem::take(&mut self.pending_piston_actions)
     }
 
     /// Bounded per-worker budget; remaining light updates survive the next tick.
@@ -770,6 +785,21 @@ impl World {
                         .then_some((x, z, old, new))
                 })
                 .collect();
+            let piston_actions: Vec<_> = changes
+                .iter()
+                .filter_map(|(&(x, y, z), &new)| {
+                    let old = self.get(x, i32::from(y), z);
+                    (matches!(old >> 4, 29 | 33)
+                        && old >> 4 == new >> 4
+                        && (old ^ new) & 8 != 0)
+                        .then_some(PistonAction {
+                            pos: (x, i32::from(y), z),
+                            block_id: old >> 4,
+                            facing: (old & 7) as u8,
+                            extending: new & 8 != 0,
+                        })
+                })
+                .collect();
             let fired_devices: Vec<_> = changes
                 .iter()
                 .filter_map(|(&(x, y, z), &new)| {
@@ -809,6 +839,7 @@ impl World {
             }
             self.pending_drops.extend(detached_drops);
             self.pending_device_activations.extend(fired_devices);
+            self.pending_piston_actions.extend(piston_actions);
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
             }
@@ -1612,6 +1643,28 @@ mod tests {
         world.update_and_save(&path, -1, 65, 0, 152 << 4).unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.drain_device_activations(), vec![(0, 65, 0)]);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn piston_action_is_published_once_after_durable_world_commit() {
+        let path = std::env::temp_dir()
+            .join(format!("ir1710-piston-action-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 1, 64, 0, (33 << 4) | 5).unwrap();
+        world.update_and_save(&path, 0, 64, 0, 152 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.drain_piston_actions(), vec![PistonAction {
+            pos: (1, 64, 0), block_id: 33, facing: 5, extending: true,
+        }]);
+        world.block_tick(&path, 64).unwrap();
+        assert!(world.drain_piston_actions().is_empty());
+        world.update_and_save(&path, 0, 64, 0, 0).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.drain_piston_actions(), vec![PistonAction {
+            pos: (1, 64, 0), block_id: 33, facing: 5, extending: false,
+        }]);
         fs::remove_file(path).unwrap();
     }
 
