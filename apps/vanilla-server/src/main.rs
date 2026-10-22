@@ -865,7 +865,7 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
-        if now_tick > last_map_tick && now_tick % 4 == 0 {
+        if now_tick > last_map_tick && now_tick.is_multiple_of(4) {
             last_map_tick = now_tick;
             if let Some(Stack {
                 id: 358, damage, ..
@@ -876,8 +876,7 @@ fn play(
                     map_path,
                     &terrain,
                     damage,
-                    player.x.floor() as i32,
-                    player.z.floor() as i32,
+                    (player.x.floor() as i32, player.z.floor() as i32),
                     yaw,
                     now_tick / 4,
                 )?;
