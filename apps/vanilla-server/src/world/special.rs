@@ -274,7 +274,7 @@ impl World {
     pub(super) fn daylight_strength(&self) -> u16 {
         let angle = (self.day_time.rem_euclid(24_000) as f64 / 24_000.0)
             * std::f64::consts::TAU;
-        let day = ((angle.cos() + 0.15) * 15.0).round().clamp(0.0, 15.0) as u16;
+        let day = ((angle.sin() + 0.15) * 15.0).round().clamp(0.0, 15.0) as u16;
         day.saturating_sub(if self.raining { 3 } else { 0 })
     }
 
