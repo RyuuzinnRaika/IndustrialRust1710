@@ -4,6 +4,7 @@
 mod anvil_export;
 mod anvil_import;
 mod backup_world;
+mod books;
 mod brewing;
 mod chests;
 mod chunk_pipeline;
