@@ -5179,7 +5179,10 @@ fn main() -> io::Result<()> {
             return Err(bad("usage: --verify-world WORLD_DIR_OR_IRW_FILE"));
         }
         let summary = verify_world::inspect(Path::new(&raw_args[1]))?;
-        println!("World verified (read-only): {} ({} files)", summary.description, summary.files);
+        println!(
+            "World verified (read-only): {} ({} files)",
+            summary.description, summary.files
+        );
         return Ok(());
     }
     if raw_args.iter().any(|arg| arg == "--prepare-anvil-copy") {
@@ -5187,27 +5190,41 @@ fn main() -> io::Result<()> {
             return Err(bad("usage: --prepare-anvil-copy SOURCE_DIR NEW_DEST_DIR"));
         }
         let stats = migration_staging::prepare_anvil_copy(
-            Path::new(&raw_args[1]), Path::new(&raw_args[2])
+            Path::new(&raw_args[1]),
+            Path::new(&raw_args[2]),
         )?;
-        println!("Verified working copy: {} files ({} bytes); no conversion performed",
-            stats.files, stats.bytes);
+        println!(
+            "Verified working copy: {} files ({} bytes); no conversion performed",
+            stats.files, stats.bytes
+        );
         return Ok(());
     }
     if raw_args.iter().any(|arg| arg == "--check-config") {
         if !(raw_args.len() == 1 && raw_args[0] == "--check-config"
-            || raw_args.len() == 2 && raw_args[0] == "--check-config") {
+            || raw_args.len() == 2 && raw_args[0] == "--check-config")
+        {
             return Err(bad("usage: --check-config [server.properties]"));
         }
-        let config_file = raw_args.get(1).map(String::as_str).unwrap_or("server.properties");
+        let config_file = raw_args
+            .get(1)
+            .map(String::as_str)
+            .unwrap_or("server.properties");
         let props = server_config::ServerProperties::load_optional(Path::new(config_file))?
             .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "server.properties not found"))?;
         server_config::verify_legacy_storage(&props.world_path)?;
         if !props.bind.ip().is_loopback() && !props.online_mode {
-            return Err(io::Error::new(ErrorKind::PermissionDenied,
-                "offline-mode on a LAN/public address needs manual security review"));
+            return Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "offline-mode on a LAN/public address needs manual security review",
+            ));
         }
-        println!("Configuration accepted: bind={}, world={}, difficulty={}, seed={:?} (read-only)",
-            props.bind, props.world_path.display(), props.difficulty, props.level_seed);
+        println!(
+            "Configuration accepted: bind={}, world={}, difficulty={}, seed={:?} (read-only)",
+            props.bind,
+            props.world_path.display(),
+            props.difficulty,
+            props.level_seed
+        );
         return Ok(());
     }
     // Reading configuration never converts, modifies, or replaces a native
@@ -5394,11 +5411,15 @@ fn main() -> io::Result<()> {
                 ));
             }
             "--backup-rotate" => {
-                let root = PathBuf::from(args.next()
-                    .ok_or_else(|| bad("missing --backup-rotate directory"))?);
-                let keep = args.next()
+                let root = PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| bad("missing --backup-rotate directory"))?,
+                );
+                let keep = args
+                    .next()
                     .ok_or_else(|| bad("missing --backup-rotate retention"))?
-                    .parse::<usize>().map_err(|_| bad("invalid backup retention"))?;
+                    .parse::<usize>()
+                    .map_err(|_| bad("invalid backup retention"))?;
                 backup_rotation = Some((root, keep));
             }
             "--backup-world" => {
@@ -5411,10 +5432,14 @@ fn main() -> io::Result<()> {
         }
     }
     // Rotation must be a standalone offline command with an explicit world path.
-    if backup_rotation.is_some() &&
-       !(raw_args.len() == 5 && raw_args.iter().any(|arg| arg == "--world")
-                              && raw_args.iter().any(|arg| arg == "--backup-rotate")) {
-        return Err(bad("--backup-rotate requires only --world FILE --backup-rotate ROOT KEEP"));
+    if backup_rotation.is_some()
+        && !(raw_args.len() == 5
+            && raw_args.iter().any(|arg| arg == "--world")
+            && raw_args.iter().any(|arg| arg == "--backup-rotate"))
+    {
+        return Err(bad(
+            "--backup-rotate requires only --world FILE --backup-rotate ROOT KEEP",
+        ));
     }
     if hardcore && (!survival || difficulty != 3) {
         return Err(bad("hardcore requires survival mode and difficulty 3"));
@@ -5543,20 +5568,33 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
     if let Some((root, keep)) = backup_rotation {
-        if !explicit_world || backup_destination.is_some()
-           || anvil_import_path.is_some() || anvil_export_path.is_some()
-           || requested_seed.is_some() || biome_seed.is_some() || expanded_seed.is_some() {
-            return Err(bad("--backup-rotate requires only --world with no other file operations"));
+        if !explicit_world
+            || backup_destination.is_some()
+            || anvil_import_path.is_some()
+            || anvil_export_path.is_some()
+            || requested_seed.is_some()
+            || biome_seed.is_some()
+            || expanded_seed.is_some()
+        {
+            return Err(bad(
+                "--backup-rotate requires only --world with no other file operations",
+            ));
         }
-        let parent = world_path.parent().filter(|p| !p.as_os_str().is_empty())
+        let parent = world_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
             .ok_or_else(|| bad("world file needs a parent directory"))?;
         if !world_path.is_file() && !parent.join("level.dat").is_file() {
             return Err(bad("offline backup source missing"));
         }
         let mut lock = session_lock::WorldSessionLock::acquire(parent)?;
         let (destination, stats) = backup_rotation::rotate(&world_path, &root, keep, &mut lock)?;
-        println!("Rotated backup: {} files ({} bytes) at {}",
-                 stats.files, stats.bytes, destination.display());
+        println!(
+            "Rotated backup: {} files ({} bytes) at {}",
+            stats.files,
+            stats.bytes,
+            destination.display()
+        );
         return Ok(());
     }
     if let Some(destination) = backup_destination {
