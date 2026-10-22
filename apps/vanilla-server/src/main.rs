@@ -5718,6 +5718,7 @@ fn main() -> io::Result<()> {
         let rules = Arc::clone(&world_rules);
         let board = Arc::clone(&shared_scoreboard);
         let board_path = Arc::clone(&scoreboard_path);
+        let peer_difficulty = Arc::clone(&shared_difficulty);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -5748,7 +5749,7 @@ fn main() -> io::Result<()> {
                     brewer_path: brewer_file,
                     survival,
                     hardcore,
-                    difficulty: Arc::clone(&shared_difficulty),
+                    difficulty: peer_difficulty,
                     game_rules: rules,
                     scoreboard: board,
                     scoreboard_path: board_path,
