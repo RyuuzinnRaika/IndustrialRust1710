@@ -5,7 +5,7 @@ use crate::multiplayer::Event;
 use crate::world::{self, World};
 use legacy_protocol::{write_string, write_varint};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -94,8 +94,16 @@ pub struct Hanging {
     kind: Kind,
 }
 impl Hanging {
+    fn chunk(&self) -> (i32, i32) {
+        (self.at[0].div_euclid(16), self.at[2].div_euclid(16))
+    }
     pub fn near(&self, (x, y, z): Position) -> bool {
-        (self.at[0] - x).abs() <= 6 && (self.at[1] - y).abs() <= 6 && (self.at[2] - z).abs() <= 6
+        // Compare as i64: untrusted player coordinates may be far outside the
+        // bounded world; subtraction and abs must not overflow an i32.
+        [x, y, z]
+            .into_iter()
+            .enumerate()
+            .all(|(i, coordinate)| (i64::from(self.at[i]) - i64::from(coordinate)).abs() <= 6)
     }
     pub fn is_frame(&self) -> bool {
         matches!(self.kind, Kind::Frame { .. })
@@ -290,12 +298,24 @@ impl Hangings {
     pub fn get(&self, id: i32) -> Option<&Hanging> {
         self.entities.get(&id)
     }
-    pub fn spawn_events(&self) -> io::Result<Vec<Event>> {
+    /// Spawn only entities in newly loaded chunks. Replaying every hanging
+    /// entity at login or never replaying on a chunk transition is incorrect:
+    /// the client forgets entities when their chunks are unloaded.
+    pub fn spawn_events_in(&self, chunks: &BTreeSet<(i32, i32)>) -> io::Result<Vec<Event>> {
         let mut out = Vec::new();
         for entity in self.entities.values() {
-            out.extend(entity.spawn()?);
+            if chunks.contains(&entity.chunk()) {
+                out.extend(entity.spawn()?);
+            }
         }
         Ok(out)
+    }
+    pub fn destroy_events_in(&self, chunks: &BTreeSet<(i32, i32)>) -> Vec<Event> {
+        self.entities
+            .values()
+            .filter(|entity| chunks.contains(&entity.chunk()))
+            .map(Hanging::destroy)
+            .collect()
     }
     fn painting_fits(world: &World, anchor: Position, face: i8, width: i32, height: i32) -> bool {
         let (rx, rz) = horizontal_right(face);
@@ -446,6 +466,33 @@ mod tests {
         let (_, removed) = state.stage_remove(frame.id).unwrap().unwrap();
         assert_eq!(removed.drops().len(), 2);
         assert_eq!(removed.drops()[1].count, 1);
+    }
+    #[test]
+    fn crossing_chunk_boundary_replays_only_newly_visible_entities() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 1 << 4).unwrap();
+        world.import_block(16, 64, 0, 1 << 4).unwrap();
+        let (first, first_frame) = Hangings::default()
+            .stage_place(&world, (0, 64, 0), 3, 389)
+            .unwrap()
+            .unwrap();
+        let (both, second_frame) = first
+            .stage_place(&world, (16, 64, 0), 3, 389)
+            .unwrap()
+            .unwrap();
+        let west = BTreeSet::from([(0, 0)]);
+        let east = BTreeSet::from([(1, 0)]);
+        let west_spawns = both.spawn_events_in(&west).unwrap();
+        let east_spawns = both.spawn_events_in(&east).unwrap();
+        assert_eq!(west_spawns.len(), 2); // frame object + metadata
+        assert_eq!(east_spawns.len(), 2);
+        assert_ne!(first_frame.id, second_frame.id);
+        assert_eq!(west_spawns[0].id, 0x0e);
+        assert_eq!(east_spawns[0].id, 0x0e);
+        assert_eq!(both.destroy_events_in(&west).len(), 1);
+        assert!(both.spawn_events_in(&BTreeSet::new()).unwrap().is_empty());
+        assert!(first_frame.near((0, 64, 1)));
+        assert!(!first_frame.near((i32::MIN, i32::MAX, i32::MIN)));
     }
     #[test]
     fn rejects_invalid_attachment_and_duplicate() {
