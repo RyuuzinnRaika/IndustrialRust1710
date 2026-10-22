@@ -28,6 +28,33 @@ fn checked_directory(path: &Path, required: bool) -> io::Result<bool> {
     }
 }
 
+/// Validate all 1024 entries before trusting any allocation. Checking only
+/// the requested chunk misses a second entry aliasing the same disk sectors,
+/// which could otherwise return another chunk's NBT as a legitimate result.
+fn validate_locations(locations: &[u8; SECTOR_BYTES], sectors: usize) -> io::Result<()> {
+    let mut occupied = vec![false; sectors];
+    occupied[0] = true; // Location table
+    occupied[1] = true; // Timestamp table
+    for entry in locations.as_chunks::<4>().0 {
+        let offset =
+            (usize::from(entry[0]) << 16) | (usize::from(entry[1]) << 8) | usize::from(entry[2]);
+        let count = usize::from(entry[3]);
+        if offset == 0 && count == 0 {
+            continue;
+        }
+        if offset < 2 || count == 0 || offset.checked_add(count).is_none_or(|end| end > sectors) {
+            return Err(invalid("invalid Anvil location-table sector bounds"));
+        }
+        for sector in &mut occupied[offset..offset + count] {
+            if *sector {
+                return Err(invalid("overlapping Anvil chunk allocations"));
+            }
+            *sector = true;
+        }
+    }
+    Ok(())
+}
+
 fn read_chunk_file(path: &Path, cx: i32, cz: i32) -> io::Result<Option<ChunkRoot>> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -44,6 +71,7 @@ fn read_chunk_file(path: &Path, cx: i32, cz: i32) -> io::Result<Option<ChunkRoot
     let mut file = File::open(path)?;
     let mut locations = [0u8; SECTOR_BYTES];
     file.read_exact(&mut locations)?;
+    validate_locations(&locations, meta.len() as usize / SECTOR_BYTES)?;
     let local_x = cx.rem_euclid(32) as usize;
     let local_z = cz.rem_euclid(32) as usize;
     let idx = (local_z * 32 + local_x) * 4;
@@ -206,6 +234,24 @@ mod tests {
         assert_eq!(cache.entries.len(), 2);
         assert!(!cache.entries.contains_key(&(Dimension::Overworld, 0, 0)));
         assert!(ReadOnlyChunkCache::open(&world, 0).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refuses_overlapping_region_allocations_before_reading_chunk() {
+        let root = setup("overlap");
+        let world = root.join("world");
+        let file = world.join("region/r.0.0.mca");
+        let mut bytes = fs::read(&file).unwrap();
+        // A second chunk claiming the first chunk's sectors must make *all*
+        // reads of the region fail, even if the selected entry was unmodified.
+        let first = bytes[..4].to_vec();
+        assert_ne!(first, [0, 0, 0, 0]);
+        bytes[4..8].copy_from_slice(&first);
+        fs::write(&file, &bytes).unwrap();
+        let mut cache = ReadOnlyChunkCache::open(&world, 2).unwrap();
+        assert!(cache.get(Dimension::Overworld, 0, 0).is_err());
+        assert_eq!(fs::read(&file).unwrap(), bytes);
         fs::remove_dir_all(root).unwrap();
     }
 
