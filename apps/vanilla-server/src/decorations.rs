@@ -143,9 +143,6 @@ impl Decorations {
         }
         result
     }
-    pub fn sign(&self, position: Position) -> Option<&[String; 4]> {
-        self.signs.get(&key(position))
-    }
     pub fn set_sign(
         &mut self,
         path: &Path,
@@ -406,13 +403,11 @@ mod tests {
         store.next_note(&path, (4, 64, -2)).unwrap();
         store.set_record(&path, (5, 64, -2), Some(2256)).unwrap();
         let restored = Decorations::load(&path).unwrap();
-        assert_eq!(restored.sign((3, 64, -2)).unwrap()[0], "A");
+        assert_eq!(restored.signs.get(&key((3, 64, -2))).unwrap()[0], "A");
         assert_eq!(restored.note((4, 64, -2)), 1);
         assert_eq!(restored.record((5, 64, -2)), Some(2256));
         store.remove(&path, (3, 64, -2)).unwrap();
-        assert!(Decorations::load(&path)
-            .unwrap()
-            .sign((3, 64, -2))
+        assert!(Decorations::load(&path).unwrap().signs.get(&key((3, 64, -2)))
             .is_none());
         let _ = fs::remove_file(&path);
     }
