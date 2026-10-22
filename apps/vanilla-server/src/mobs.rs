@@ -3008,7 +3008,10 @@ mod tests {
             },
             true,
         );
-        mobs.entities.get_mut(&original_villager_id).unwrap().profession = 4;
+        mobs.entities
+            .get_mut(&original_villager_id)
+            .unwrap()
+            .profession = 4;
         let mut events = Vec::new();
         for tick in (20..=140).step_by(20) {
             mobs.zombies_attack_villagers(tick, &world, &[], &mut events);
