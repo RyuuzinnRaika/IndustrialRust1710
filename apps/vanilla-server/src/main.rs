@@ -3570,7 +3570,11 @@ fn main() -> io::Result<()> {
     let connections = Arc::new(AtomicUsize::new(0));
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
-    start_clock_console(Arc::clone(&hub), Arc::clone(&clock), Arc::clone(&clock_path));
+    start_clock_console(
+        Arc::clone(&hub),
+        Arc::clone(&clock),
+        Arc::clone(&clock_path),
+    );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
     // wall-clock downtime after the process was stopped.
