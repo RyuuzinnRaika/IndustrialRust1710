@@ -70,8 +70,7 @@ pub fn prepare_anvil_copy(source: &Path, destination: &Path) -> io::Result<CopyS
     let parent = destination.parent().filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let canonical_parent = fs::canonicalize(parent)?;
-    if canonical_parent.starts_with(&canonical_source) ||
-        canonical_source.starts_with(&canonical_parent) {
+    if canonical_parent.starts_with(&canonical_source) {
         return Err(invalid("destination must not overlap source tree"));
     }
     match fs::symlink_metadata(destination) {
