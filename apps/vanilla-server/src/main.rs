@@ -6010,6 +6010,8 @@ fn main() -> io::Result<()> {
     let wire_mobs = Arc::clone(&mobs);
     let ejection_devices = Arc::clone(&devices);
     let ejection_file = Arc::clone(&device_path);
+    let ejection_chests = Arc::clone(&chests);
+    let ejection_chest_file = Arc::clone(&chest_path);
     thread::spawn(move || {
         let mut telemetry =
             telemetry::TickTelemetry::new(furnace_world_path.with_extension("metrics.jsonl"));
@@ -6146,13 +6148,6 @@ fn main() -> io::Result<()> {
                                     Ok(value) => value,
                                     Err(_) => return,
                                 };
-                                let mut ground = match leaf_drops.lock() {
-                                    Ok(value) => value,
-                                    Err(_) => return,
-                                };
-                                if ground.is_full() {
-                                    continue;
-                                }
                                 let seed = now
                                     ^ (pos.0 as u64).wrapping_mul(31)
                                     ^ (pos.2 as u64).wrapping_mul(131);
@@ -6165,6 +6160,52 @@ fn main() -> io::Result<()> {
                                 }) else {
                                     continue;
                                 };
+                                // A 1.7.10 dropper sends one item directly into
+                                // a chest it faces. If the chest is full, do
+                                // not consume or create a ground item.
+                                if state >> 4 == 158
+                                    && gravity_world.get(dest.0, dest.1, dest.2) >> 4 == 54
+                                {
+                                    let mut chests = match ejection_chests.lock() {
+                                        Ok(value) => value,
+                                        Err(_) => return,
+                                    };
+                                    let mut slots = chests.slots(dest);
+                                    if dispensers::insert_one(&mut slots, stack) {
+                                        let next_chest = match chests.staged_update(dest, slots) {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                eprintln!("DROPPER CHEST TRANSFER ERROR: {error}");
+                                                return;
+                                            }
+                                        };
+                                        let result = (|| -> io::Result<()> {
+                                            journal::commit(
+                                                &furnace_world_path
+                                                    .with_extension("pending-txn.json"),
+                                                &[
+                                                    (&*ejection_file, updated.encoded()?),
+                                                    (&*ejection_chest_file, next_chest.encoded()?),
+                                                ],
+                                            )?;
+                                            Ok(())
+                                        })();
+                                        if let Err(error) = result {
+                                            eprintln!("DROPPER TRANSFER JOURNAL ERROR: {error}");
+                                            return;
+                                        }
+                                        *storage = updated;
+                                        *chests = next_chest;
+                                    }
+                                    continue;
+                                }
+                                let mut ground = match leaf_drops.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                if ground.is_full() {
+                                    continue;
+                                }
                                 let (next_ground, spawned) =
                                     match ground.stage_put_many(&[stack], dest) {
                                         Ok(result) => result,
