@@ -9,9 +9,9 @@ use std::path::Path;
 /// Primed TNT is an entity and can no longer be mined as a TNT block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PrimedTnt {
-    entity_id: i32,
-    pos: (i32, i32, i32),
-    explode_at: u64,
+    pub(super) entity_id: i32,
+    pub(super) pos: (i32, i32, i32),
+    pub(super) explode_at: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,16 +51,19 @@ impl World {
         });
     }
 
-    /// Direct flint/redstone ignition commits removal before entity spawn.
+    /// Test-only direct ignition uses the same atomic block/entity staging
+    /// as a player's flint-and-steel action, including persisted fuse state.
     #[cfg(test)]
     pub fn ignite_tnt(&mut self, path: &Path, x: i32, y: i32, z: i32) -> io::Result<bool> {
-        if self.get(x, y, z) >> 4 != 46 {
+        let held = Stack { id: 259, count: 1, damage: 0 };
+        let Some((staged, changed, _, _)) = self.stage_special_item(x, y, z, held)? else {
+            return Ok(false);
+        };
+        if changed.is_empty() {
             return Ok(false);
         }
-        if !self.update_and_save(path, x, y, z, 0)? {
-            return Ok(false);
-        }
-        self.spawn_primed_tnt(x, y, z, 80);
+        staged.save(path)?;
+        *self = staged;
         Ok(true)
     }
 
@@ -769,6 +772,56 @@ mod tests {
             .drain_tnt_events()
             .iter()
             .any(|event| { matches!(event, TntEvent::Explode { .. }) }));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn tnt_restart_retains_fuse_and_reemits_spawn() {
+        let path = file("tnt-restart");
+        let mut w = World::new();
+        w.update_and_save(&path, 2, 128, 2, 46 << 4).unwrap();
+        assert!(w.ignite_tnt(&path, 2, 128, 2).unwrap());
+        assert!(w.drain_tnt_events().iter().any(|event| {
+            matches!(event, TntEvent::Spawn { .. })
+        }));
+        for _ in 0..40 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        let mut recovered = World::load(&path).unwrap();
+        assert_eq!(recovered.primed_tnt.len(), 1);
+        assert!(recovered.drain_tnt_events().iter().any(|event| {
+            matches!(event, TntEvent::Spawn { .. })
+        }));
+        for _ in 0..39 {
+            recovered.block_tick(&path, 64).unwrap();
+            assert!(!recovered.drain_tnt_events().iter().any(|event| {
+                matches!(event, TntEvent::Explode { .. })
+            }));
+        }
+        recovered.block_tick(&path, 64).unwrap();
+        assert_eq!(recovered.primed_tnt.len(), 0);
+        assert_eq!(
+            recovered.drain_tnt_events().iter().filter(|event| {
+                matches!(event, TntEvent::Explode { .. })
+            }).count(),
+            1
+        );
+        // Even in empty air, the expired entity was removed durably.
+        let again = World::load(&path).unwrap();
+        assert!(again.primed_tnt.is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn malformed_tnt_trailer_fails_closed() {
+        let path = file("tnt-corrupt");
+        let mut world = World::new();
+        world.import_block(1, 128, 1, 46 << 4).unwrap();
+        assert!(world.ignite_tnt(&path, 1, 128, 1).unwrap());
+        let mut raw = fs::read(&path).unwrap();
+        raw.push(255);
+        fs::write(&path, raw).unwrap();
+        assert!(World::load(&path).is_err());
         fs::remove_file(path).ok();
     }
 
