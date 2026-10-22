@@ -2002,11 +2002,8 @@ impl Mobs {
                 }
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     let p = mob.position;
-                    let (block, sky) = world.light_at(
-                        p.x.floor() as i32,
-                        p.y.floor() as i32,
-                        p.z.floor() as i32,
-                    );
+                    let (block, sky) =
+                        world.light_at(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
                     mob.bright_spider = spider_bright_light(block, sky, now);
                 }
                 let nearest = players
