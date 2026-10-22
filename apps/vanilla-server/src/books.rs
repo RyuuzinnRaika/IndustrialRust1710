@@ -322,8 +322,7 @@ mod tests {
     }
     #[test]
     fn edit_sign_and_reconnect_restore_book_nbt() {
-        let home =
-            std::env::temp_dir().join(format!("ir-book-edit-sign-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("ir-book-edit-sign-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&home).unwrap();
         let world = home.join("world.irw");
@@ -364,7 +363,10 @@ mod tests {
         let edited = inventory.held().unwrap();
         assert_eq!(edited.id, 386);
         assert!(edited.damage > 0);
-        assert_eq!(Inventory::load(&inventory_file).unwrap().held(), Some(edited));
+        assert_eq!(
+            Inventory::load(&inventory_file).unwrap().held(),
+            Some(edited)
+        );
 
         let signed_nbt = compressed_nbt(&Book {
             pages: vec!["First page".to_owned()],
@@ -390,7 +392,10 @@ mod tests {
         let signed = inventory.held().unwrap();
         assert_eq!(signed.id, 387);
         assert_eq!(signed.damage, edited.damage);
-        assert_eq!(Inventory::load(&inventory_file).unwrap().held(), Some(signed));
+        assert_eq!(
+            Inventory::load(&inventory_file).unwrap().held(),
+            Some(signed)
+        );
         let stored = Store::load(&world.with_extension("books.json")).unwrap();
         let record = stored.books.get(&(signed.damage as u16)).unwrap();
         assert!(record.signed);
