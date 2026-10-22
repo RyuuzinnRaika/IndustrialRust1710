@@ -3,8 +3,8 @@
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
 mod anvil_export;
 mod anvil_import;
-mod backup_world;
 mod backup_rotation;
+mod backup_world;
 mod brewing;
 mod chests;
 mod chunk_pipeline;
@@ -3391,8 +3391,11 @@ fn main() -> io::Result<()> {
             }
             "--backup-rotate" => {
                 let root = PathBuf::from(args.next().ok_or_else(|| bad("missing backup root"))?);
-                let keep = args.next().ok_or_else(|| bad("missing retention count"))?
-                    .parse::<usize>().map_err(|_| bad("invalid retention count"))?;
+                let keep = args
+                    .next()
+                    .ok_or_else(|| bad("missing retention count"))?
+                    .parse::<usize>()
+                    .map_err(|_| bad("invalid retention count"))?;
                 backup_rotation = Some((root, keep));
             }
             "--backup-world" => {
@@ -3532,19 +3535,33 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
     if let Some((root, keep)) = backup_rotation {
-        if !explicit_world || backup_destination.is_some() || anvil_import_path.is_some()
-            || anvil_export_path.is_some() || requested_seed.is_some()
-            || biome_seed.is_some() || expanded_seed.is_some() {
-            return Err(bad("--backup-rotate requires only --world with no other file operation or seed"));
+        if !explicit_world
+            || backup_destination.is_some()
+            || anvil_import_path.is_some()
+            || anvil_export_path.is_some()
+            || requested_seed.is_some()
+            || biome_seed.is_some()
+            || expanded_seed.is_some()
+        {
+            return Err(bad(
+                "--backup-rotate requires only --world with no other file operation or seed",
+            ));
         }
-        let dir = world_path.parent().filter(|p| !p.as_os_str().is_empty())
+        let dir = world_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
             .ok_or_else(|| bad("world file must be in a directory"))?;
         if !world_path.is_file() && !dir.join("level.dat").is_file() {
             return Err(bad("offline backup source missing"));
         }
         let mut lock = session_lock::WorldSessionLock::acquire(dir)?;
         let (dest, stats) = backup_rotation::rotate(&world_path, &root, keep, &mut lock)?;
-        println!("Verified backup: {} files / {} bytes at {}", stats.files, stats.bytes, dest.display());
+        println!(
+            "Verified backup: {} files / {} bytes at {}",
+            stats.files,
+            stats.bytes,
+            dest.display()
+        );
         return Ok(());
     }
     if let Some(destination) = backup_destination {

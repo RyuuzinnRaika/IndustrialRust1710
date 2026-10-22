@@ -1,6 +1,6 @@
 //! Deterministic J98 smoke fuzzing for malformed Protocol 5 frames.
 //! Run full coverage guided fuzzing separately; no Minecraft binary required.
-use legacy_protocol::{read_frame, packet_id_and_body, BufferedFrameReader, MAX_FRAME_BYTES};
+use legacy_protocol::{packet_id_and_body, read_frame, BufferedFrameReader, MAX_FRAME_BYTES};
 use std::io::Cursor;
 
 #[test]
@@ -33,7 +33,10 @@ fn malformed_frame_inputs_do_not_panic_or_bypass_frame_budget() {
                 }
             }
         });
-        assert!(result.is_ok(), "frame decoder panicked for deterministic seed {seed:x}");
+        assert!(
+            result.is_ok(),
+            "frame decoder panicked for deterministic seed {seed:x}"
+        );
     }
 }
 

@@ -6,20 +6,31 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MARKER: &[u8] = b"IndustrialRust1710 verified offline backup v1\n";
-fn invalid(msg: &'static str) -> io::Error { io::Error::new(ErrorKind::InvalidInput, msg) }
+fn invalid(msg: &'static str) -> io::Error {
+    io::Error::new(ErrorKind::InvalidInput, msg)
+}
 
 /// World must be STOPPED. Create-only snapshot, independently validate it,
 /// then prune oldest backups bearing exactly the marker written by this tool.
-pub fn rotate(world_file: &Path, root: &Path, keep: usize, lock: &mut WorldSessionLock)
-    -> io::Result<(PathBuf, backup_world::BackupStats)>
-{
-    if !(1..=100).contains(&keep) { return Err(invalid("retention must be 1..=100")); }
-    let source = world_file.parent().filter(|p| !p.as_os_str().is_empty())
+pub fn rotate(
+    world_file: &Path,
+    root: &Path,
+    keep: usize,
+    lock: &mut WorldSessionLock,
+) -> io::Result<(PathBuf, backup_world::BackupStats)> {
+    if !(1..=100).contains(&keep) {
+        return Err(invalid("retention must be 1..=100"));
+    }
+    let source = world_file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .ok_or_else(|| invalid("world path has no parent"))?;
     if !fs::symlink_metadata(source)?.file_type().is_dir() {
         return Err(invalid("world directory must be real"));
     }
-    if !root.exists() { fs::create_dir_all(root)?; }
+    if !root.exists() {
+        fs::create_dir_all(root)?;
+    }
     if !fs::symlink_metadata(root)?.file_type().is_dir() {
         return Err(invalid("backup root must be real"));
     }
@@ -28,27 +39,38 @@ pub fn rotate(world_file: &Path, root: &Path, keep: usize, lock: &mut WorldSessi
     if backup_root.starts_with(&source) || source.starts_with(&backup_root) {
         return Err(invalid("backup root overlaps source"));
     }
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|_| invalid("clock before epoch"))?.as_millis();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| invalid("clock before epoch"))?
+        .as_millis();
     let destination = root.join(format!("backup-{stamp}-{}", std::process::id()));
     let stats = backup_world::create(&source, &destination, lock)?;
     let named_world = destination.join(
-        world_file.file_name().ok_or_else(|| invalid("world file has no basename"))?
+        world_file
+            .file_name()
+            .ok_or_else(|| invalid("world file has no basename"))?,
     );
-    if named_world.is_file() { verify_world::inspect(&named_world)?; }
-    else { verify_world::inspect(&destination)?; }
+    if named_world.is_file() {
+        verify_world::inspect(&named_world)?;
+    } else {
+        verify_world::inspect(&destination)?;
+    }
     let marker = destination.join(".industrial1710-backup");
     fs::write(&marker, MARKER)?;
     File::open(&marker)?.sync_all()?;
     let mut owned = Vec::new();
     for entry in fs::read_dir(root)? {
         let entry = entry?;
-        if !entry.file_name().to_string_lossy().starts_with("backup-") ||
-            !entry.file_type()?.is_dir() { continue; }
+        if !entry.file_name().to_string_lossy().starts_with("backup-")
+            || !entry.file_type()?.is_dir()
+        {
+            continue;
+        }
         let dir = entry.path();
         let marker = dir.join(".industrial1710-backup");
         if fs::symlink_metadata(&marker).is_ok_and(|meta| meta.file_type().is_file())
-            && fs::read(&marker)? == MARKER {
+            && fs::read(&marker)? == MARKER
+        {
             owned.push(dir);
         }
     }
@@ -58,8 +80,11 @@ pub fn rotate(world_file: &Path, root: &Path, keep: usize, lock: &mut WorldSessi
         // Revalidate immediately before removal; never follow marked symlinks.
         if old != destination
             && fs::symlink_metadata(&old)?.file_type().is_dir()
-            && fs::symlink_metadata(old.join(".industrial1710-backup"))?.file_type().is_file()
-            && fs::read(old.join(".industrial1710-backup"))? == MARKER {
+            && fs::symlink_metadata(old.join(".industrial1710-backup"))?
+                .file_type()
+                .is_file()
+            && fs::read(old.join(".industrial1710-backup"))? == MARKER
+        {
             fs::remove_dir_all(&old)?;
         }
     }
