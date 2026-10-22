@@ -268,6 +268,11 @@ impl Inventory {
         Ok(())
     }
     pub fn creative_set(&mut self, slot: i16, stack: Option<Stack>) -> io::Result<bool> {
+        // Book NBT references are server-owned; Creative cannot forge a
+        // reference to an existing player's book via C10 Set Creative Slot.
+        if stack.is_some_and(|item| matches!(item.id, 386 | 387) && item.damage != 0) {
+            return Ok(false);
+        }
         if stack.is_some_and(|item| !item.is_valid()) {
             return Err(invalid("invalid Creative item"));
         }
@@ -491,6 +496,23 @@ impl Inventory {
     }
     pub fn held(&self) -> Option<Stack> {
         self.slots[36 + self.selected as usize]
+    }
+    /// Replace only a still-held writable book after a journaled MC|BEdit or
+    /// MC|BSign. The caller commits the inventory and world book data together.
+    pub fn replace_held_book(&mut self, expected: Stack, id: i16, damage: i16) -> bool {
+        if !matches!(id, 386 | 387) || damage <= 0 {
+            return false;
+        }
+        let slot = &mut self.slots[36 + self.selected as usize];
+        if *slot != Some(expected) || expected.id != 386 || expected.count != 1 {
+            return false;
+        }
+        *slot = Some(Stack {
+            id,
+            count: 1,
+            damage,
+        });
+        true
     }
     pub fn can_place(&self, claimed: Option<Stack>) -> bool {
         match (self.held(), claimed) {
@@ -1430,7 +1452,12 @@ impl Inventory {
                 out.extend_from_slice(&value.id.to_be_bytes());
                 out.push(value.count);
                 out.extend_from_slice(&value.damage.to_be_bytes());
-                out.extend_from_slice(&(-1i16).to_be_bytes()); // no NBT payload
+                if let Some(nbt) = crate::books::wire_nbt(value) {
+                    out.extend_from_slice(&(nbt.len() as i16).to_be_bytes());
+                    out.extend_from_slice(&nbt);
+                } else {
+                    out.extend_from_slice(&(-1i16).to_be_bytes());
+                }
             }
         }
     }
