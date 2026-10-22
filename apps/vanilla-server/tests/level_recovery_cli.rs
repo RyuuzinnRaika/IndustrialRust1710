@@ -36,10 +36,8 @@ fn directory(tag: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let result = std::env::temp_dir().join(format!(
-        "ir1710-fs05-{tag}-{}-{nanos}",
-        std::process::id()
-    ));
+    let result =
+        std::env::temp_dir().join(format!("ir1710-fs05-{tag}-{}-{nanos}", std::process::id()));
     fs::create_dir(&result).unwrap();
     result
 }
