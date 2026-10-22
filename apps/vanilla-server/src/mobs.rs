@@ -954,7 +954,7 @@ impl Mobs {
         world: &mut World,
         world_path: &Path,
         tick: u64,
-    ) -> io::Result<Vec<(Event, (i32, i32, i32))>> {
+    ) -> io::Result<Vec<(Option<Event>, (i32, i32, i32))>> {
         if tick <= self.last_graze_tick || !tick.is_multiple_of(2) {
             return Ok(Vec::new());
         }
@@ -988,11 +988,11 @@ impl Mobs {
                     mob.sheared = false;
                     let mut body = mob.id.to_be_bytes().to_vec();
                     body.extend_from_slice(&[16, 0, 0x7f]);
-                    events.push((Event { id: 0x1c, body }, (x, y, z)));
+                    events.push((Some(Event { id: 0x1c, body }), (x, y, z)));
                 } else {
                     // A grass change still needs a block packet, even when
                     // the sheep already has its wool.
-                    events.push((Event { id: 0, body: Vec::new() }, (x, y, z)));
+                    events.push((None, (x, y, z)));
                 }
             }
         }
@@ -2029,9 +2029,10 @@ mod tests {
         assert!(mobs.entities.get(&id).unwrap().sheared);
         let changes = mobs.graze(&mut world, &path, successful_tick).unwrap();
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].0.id, 0x1c);
-        assert_eq!(&changes[0].0.body[..4], &id.to_be_bytes());
-        assert_eq!(&changes[0].0.body[4..], &[16, 0, 0x7f]);
+        let metadata = changes[0].0.as_ref().unwrap();
+        assert_eq!(metadata.id, 0x1c);
+        assert_eq!(&metadata.body[..4], &id.to_be_bytes());
+        assert_eq!(&metadata.body[4..], &[16, 0, 0x7f]);
         assert!(!mobs.entities.get(&id).unwrap().sheared);
         assert_eq!(world.get(0, 64, 0) >> 4, 3);
         assert!(mobs.graze(&mut world, &path, successful_tick).unwrap().is_empty());
