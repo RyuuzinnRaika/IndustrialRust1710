@@ -158,8 +158,7 @@ impl Maps {
         path: &Path,
         world: &World,
         id: i16,
-        x: i32,
-        z: i32,
+        (x, z): (i32, i32),
         yaw: f32,
         sequence: u64,
     ) -> io::Result<Option<Vec<u8>>> {
@@ -242,7 +241,7 @@ mod tests {
         let (_, second) = maps.stage_new(0, 0).unwrap().unwrap();
         assert_eq!(second, 1);
         let packet = maps
-            .refresh(&path, &World::new(), id, 0, 0, 0.0, 0)
+            .refresh(&path, &World::new(), id, (0, 0), 0.0, 0)
             .unwrap()
             .unwrap();
         assert_eq!(packet[0..3], [0, 3, 1]); // MapID, scale, marker count
