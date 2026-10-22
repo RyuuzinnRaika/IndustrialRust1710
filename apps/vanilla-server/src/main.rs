@@ -1324,7 +1324,7 @@ fn play(
                 // insertions, rotations, destruction and resulting item drops.
                 let mut hanging_state =
                     hangings.lock().map_err(|_| bad("hanging lock poisoned"))?;
-                if let Some(entity) = hanging_state.get(target_id as i32).cloned() {
+                if let Some(entity) = hanging_state.get(target_id).cloned() {
                     let at = (
                         player.x.floor() as i32,
                         player.y.floor() as i32,
@@ -1335,7 +1335,7 @@ fn play(
                     }
                     if action == 1 {
                         if let Some((next, removed)) =
-                            hanging_state.stage_remove(target_id as i32)?
+                            hanging_state.stage_remove(target_id)?
                         {
                             if survival {
                                 let drops = removed.drops();
@@ -1370,7 +1370,7 @@ fn play(
                         }
                     } else if action == 0 && entity.is_frame() {
                         if let Some((next, debit, event)) =
-                            hanging_state.stage_frame_use(target_id as i32, inventory.held())?
+                            hanging_state.stage_frame_use(target_id, inventory.held())?
                         {
                             if debit && survival {
                                 let mut candidate = inventory.clone();
