@@ -10,6 +10,7 @@ mod chunk_pipeline;
 mod clock;
 mod crafting;
 mod dimensions;
+mod decorations;
 #[allow(dead_code)] // B13 staged storage: Protocol 5 activation integration pending.
 mod dispensers;
 mod experience;
@@ -43,6 +44,7 @@ mod worldgen;
 
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
+use decorations::Decorations;
 use clock::Clock;
 use experience::Experience;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
@@ -369,6 +371,17 @@ fn send_chunk_batch(
 fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
     send(s, 0x21, &queue_chunk(world, cx, cz)?.finish()?)
 }
+fn send_visible_signs(
+    s: &mut TcpStream,
+    decorations: &Mutex<Decorations>,
+    chunks: &BTreeSet<(i32, i32)>,
+) -> io::Result<()> {
+    let packets = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?.sign_packets_in(chunks)?;
+    for body in packets {
+        send(s, 0x33, &body)?;
+    }
+    Ok(())
+}
 fn unload_chunk(s: &mut TcpStream, cx: i32, cz: i32) -> io::Result<()> {
     // Protocol 5: full column with zero section bitmap and no data.
     let mut packet = Vec::with_capacity(17);
@@ -577,6 +590,8 @@ struct PlayerSession<'a> {
     hopper_path: &'a Path,
     brewers: &'a Mutex<Brewers>,
     brewer_path: &'a Path,
+    decorations: &'a Mutex<Decorations>,
+    decoration_path: &'a Path,
     survival: bool,
     difficulty: u8,
     hub: &'a Hub,
@@ -611,6 +626,8 @@ fn play(
         hopper_path,
         brewers,
         brewer_path,
+        decorations,
+        decoration_path,
         survival,
         difficulty,
         hub,
@@ -638,6 +655,8 @@ fn play(
     // Keep fragmented TCP frames across short receive timeouts.
     let mut packet_reader = BufferedFrameReader::new();
     let mut mining: Option<MiningProgress> = None;
+    // Only the same player who placed a sign may submit the next C12 edit.
+    let mut pending_sign: Option<(i32, i32, i32)> = None;
     let mut active_window: u8 = 0;
     let mut active_chest: Option<ChestPosition> = None;
     let mut active_chest_partner: Option<ChestPosition> = None;
@@ -2839,6 +2858,8 @@ struct ServerContext {
     hopper_path: Arc<PathBuf>,
     brewers: Arc<Mutex<Brewers>>,
     brewer_path: Arc<PathBuf>,
+    decorations: Arc<Mutex<Decorations>>,
+    decoration_path: Arc<PathBuf>,
     survival: bool,
     difficulty: u8,
 }
@@ -2860,6 +2881,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         hopper_path,
         brewers,
         brewer_path,
+        decorations,
+        decoration_path,
         survival,
         difficulty,
     } = context;
@@ -2983,6 +3006,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     if survival {
         send(&mut s, 0x1f, &experience_state.packet())?;
     }
+    // Chunks do not embed tile entities: replay persisted sign text after joining.
+    send_visible_signs(&mut s, &decorations, &view_chunks(chunk_center(&player_state)))?;
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
     send(&mut s, self_list.id, &self_list.body)?;
@@ -3040,6 +3065,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             hopper_path: &hopper_path,
             brewers: &brewers,
             brewer_path: &brewer_path,
+            decorations: &decorations,
+            decoration_path: &decoration_path,
             survival,
             difficulty,
             hub: &hub,
@@ -3579,6 +3606,8 @@ fn main() -> io::Result<()> {
         initial.save_new(&world_path)?;
         initial
     };
+    let decoration_path = Arc::new(Decorations::location(&world_path));
+    let decorations = Arc::new(Mutex::new(Decorations::load(&decoration_path)?));
     let clock_path = Arc::new(world_path.with_extension("clock"));
     let restored_clock = Clock::load_state(&clock_path)?;
     let (clock, _clock_thread) = Clock::start_from(restored_clock);
@@ -3875,6 +3904,8 @@ fn main() -> io::Result<()> {
         let hopper_file = Arc::clone(&hopper_path);
         let brewer_storage = Arc::clone(&brewers);
         let brewer_file = Arc::clone(&brewer_path);
+        let decoration_state = Arc::clone(&decorations);
+        let decoration_file = Arc::clone(&decoration_path);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -3896,6 +3927,8 @@ fn main() -> io::Result<()> {
                     hopper_path: hopper_file,
                     brewers: brewer_storage,
                     brewer_path: brewer_file,
+                    decorations: decoration_state,
+                    decoration_path: decoration_file,
                     survival,
                     difficulty,
                 },
