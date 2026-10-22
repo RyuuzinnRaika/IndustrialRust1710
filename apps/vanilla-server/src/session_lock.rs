@@ -17,6 +17,12 @@ pub struct WorldSessionLock {
 }
 
 impl WorldSessionLock {
+    /// The verified world directory; callers must still call verify() before
+    /// publishing any world files. Never accept an unrelated Anvil path.
+    pub(crate) fn world_dir(&self) -> &Path {
+        self.path.parent().expect("session.lock has a parent")
+    }
+
     pub fn acquire(world_dir: &Path) -> io::Result<Self> {
         match fs::symlink_metadata(world_dir) {
             Ok(metadata) if !metadata.file_type().is_dir() => {
