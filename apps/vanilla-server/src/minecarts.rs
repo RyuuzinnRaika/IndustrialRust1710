@@ -224,7 +224,8 @@ impl Minecarts {
         let mut events = Vec::new();
         // Use a bounded snapshot, updated after each cart moves, so no two
         // server-authoritative carts can occupy the same physical volume.
-        let mut occupied: BTreeMap<_, _> = self.carts
+        let mut occupied: BTreeMap<_, _> = self
+            .carts
             .iter()
             .map(|(&id, cart)| (id, cart.position))
             .collect();
@@ -397,8 +398,16 @@ mod tests {
             world.import_block(x, 65, 0, (27 << 4) | 9).unwrap();
         }
         let mut carts = Minecarts::default();
-        let left = PlayerPosition { x: 0.5, y: 65.5, z: 0.5 };
-        let right = PlayerPosition { x: 2.5, y: 65.5, z: 0.5 };
+        let left = PlayerPosition {
+            x: 0.5,
+            y: 65.5,
+            z: 0.5,
+        };
+        let right = PlayerPosition {
+            x: 2.5,
+            y: 65.5,
+            z: 0.5,
+        };
         carts.place(&world, left, 0).unwrap();
         carts.place(&world, right, 0).unwrap();
         carts.carts.get_mut(&FIRST_ID).unwrap().speed = 0.4;
