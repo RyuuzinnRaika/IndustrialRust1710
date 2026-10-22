@@ -1,6 +1,6 @@
 //! Bounded per-IP pre-login admission; no new thread is spawned on rejection.
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -103,7 +103,6 @@ mod tests {
         assert!(limiter.acquire("::ffff:192.0.2.1".parse().unwrap()).is_none());
         drop(permits);
         assert!(limiter.acquire(ip).is_some());
-        let _unused_v6 = Ipv6Addr::LOCALHOST;
     }
     #[test]
     fn spam_and_controls_are_rejected() {
@@ -111,6 +110,6 @@ mod tests {
         assert!(guard.check("hello").is_ok());
         assert!(guard.check("hello").is_err());
         assert!(guard.check("bad\u{202E}text").is_err());
-        assert_eq!(guard.check("more"), Err(true));
+        assert_eq!(guard.check("bad\nline"), Err(true));
     }
 }
