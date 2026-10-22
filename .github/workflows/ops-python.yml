@@ -1,0 +1,14 @@
+name: J91 J92 operational helper tests
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python maintenance and restore-drill unit tests
+        run: python3 -m unittest discover -s tools -p 'test_*.py' -v
