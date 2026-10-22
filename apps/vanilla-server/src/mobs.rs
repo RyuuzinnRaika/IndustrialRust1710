@@ -3014,10 +3014,7 @@ mod tests {
         assert!(mobs.arrows.is_empty());
         assert_eq!(mobs.orbs.len(), 1);
         assert_eq!(mobs.orbs.values().next().unwrap().1, 2);
-        assert_eq!(
-            events.iter().filter(|event| event.id == 0x11).count(),
-            1
-        );
+        assert_eq!(events.iter().filter(|event| event.id == 0x11).count(), 1);
     }
 
     #[test]
