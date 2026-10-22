@@ -1162,10 +1162,7 @@ impl Mobs {
                 continue;
             }
             // A paired world transaction never publishes half a door.
-            if world.update_many_and_save(
-                world_path,
-                &[(x, y, z, 0), (x, y + 1, z, 0)],
-            )? {
+            if world.update_many_and_save(world_path, &[(x, y, z, 0), (x, y + 1, z, 0)])? {
                 broken.extend([(x, y, z), (x, y + 1, z)]);
                 self.pending_drops.push((
                     Stack {
@@ -3091,7 +3088,10 @@ mod tests {
             z: 0.5,
         };
         let target = PlayerPosition { x: 4.5, ..from };
-        assert_eq!(closed_wooden_door_on_path(&world, from, target), Some([1, 64, 0]));
+        assert_eq!(
+            closed_wooden_door_on_path(&world, from, target),
+            Some([1, 64, 0])
+        );
         let mut mobs = Mobs {
             difficulty: Some(3),
             ..Mobs::default()
@@ -3160,7 +3160,9 @@ mod tests {
             .is_empty());
         assert_eq!(world.get(1, 64, 0) >> 4, 64);
         // An opened door is not a valid breaking target.
-        world.update_and_save(&path, 1, 64, 0, (64 << 4) | 4).unwrap();
+        world
+            .update_and_save(&path, 1, 64, 0, (64 << 4) | 4)
+            .unwrap();
         assert_eq!(closed_wooden_door_on_path(&world, from, target), None);
         mobs.break_wooden_doors(&mut world, &path, 600, &[target])
             .unwrap();
