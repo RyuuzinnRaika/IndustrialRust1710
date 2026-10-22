@@ -25,7 +25,8 @@ impl Whitelist {
     /// Minecraft-like whitelist.json: [{"name":"PlayerName","uuid":"optional"}].
     /// The optional UUID is metadata only. Never treat it as verified in offline mode.
     pub fn load(path: &Path) -> io::Result<Self> {
-        let meta = fs::metadata(path)?;
+        // Do not follow a symlink to an arbitrary file when reloading admission.
+        let meta = fs::symlink_metadata(path)?;
         if !meta.is_file() || meta.len() > MAX_WHITELIST_BYTES {
             return Err(invalid(
                 "whitelist must be a regular file of at most 64 KiB",
@@ -146,5 +147,21 @@ mod tests {
         fs::write(&path, "broken JSON").unwrap();
         assert!(Whitelist::load(&path).is_err());
         fs::remove_file(path).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_whitelist_even_if_target_is_valid() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!(
+            "ir1710-whitelist-link-{}-{:?}", std::process::id(), std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let target = base.join("real.json");
+        let link = base.join("whitelist.json");
+        fs::write(&target, r#"[{"name":"Allowed"}]"#).unwrap();
+        symlink(&target, &link).unwrap();
+        assert!(Whitelist::load(&link).is_err());
+        fs::remove_dir_all(base).unwrap();
     }
 }

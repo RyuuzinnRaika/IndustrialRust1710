@@ -21,6 +21,7 @@ mod inventory;
 mod items_1710;
 mod journal;
 mod legacy_chunk_store;
+mod legacy_entity_nbt;
 mod legacy_inventory_nbt;
 mod legacy_nbt;
 mod legacy_region;
@@ -358,16 +359,19 @@ fn send_chunk_batch(
     coords: impl IntoIterator<Item = (i32, i32)>,
 ) -> io::Result<()> {
     let mut pending = Vec::with_capacity(chunk_pipeline::SESSION_BATCH_LIMIT);
+    let mut deadline = Instant::now() + chunk_pipeline::BATCH_DEADLINE;
     for (cx, cz) in coords {
         pending.push(queue_chunk(world, cx, cz)?);
         if pending.len() == chunk_pipeline::SESSION_BATCH_LIMIT {
             for chunk in pending.drain(..) {
-                send(s, 0x21, &chunk.finish()?)?;
+                send(s, 0x21, &chunk.finish_before(deadline)?)?;
             }
+            // Reset only after the bounded batch has drained, not for each chunk.
+            deadline = Instant::now() + chunk_pipeline::BATCH_DEADLINE;
         }
     }
     for chunk in pending {
-        send(s, 0x21, &chunk.finish()?)?;
+        send(s, 0x21, &chunk.finish_before(deadline)?)?;
     }
     Ok(())
 }
@@ -870,6 +874,14 @@ fn play(
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
             let mut updates = creatures.tick(now_tick, &w, &players);
+            // Persist sheep grazing before propagating wool-regrowth metadata.
+            let mut grazed_blocks = Vec::new();
+            for (metadata, at) in creatures.graze(&mut w, world_path, now_tick)? {
+                if let Some(packet) = metadata {
+                    updates.push(packet);
+                }
+                grazed_blocks.push(at);
+            }
             let explosions = creatures.take_explosions();
             updates.extend(creatures.queue_explosion_hits(&w, &explosions, &participants));
             updates.extend(creatures.take_player_effects(entity_id, *player, now_tick));
@@ -877,6 +889,9 @@ fn play(
                 creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
             let drops = creatures.take_drops();
             drop(creatures);
+            for (x, y, z) in grazed_blocks {
+                hub.broadcast(block_change_event(&w, x, y, z));
+            }
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
             for explosion in explosions {
                 hub.broadcast_in_view(explosion.position, explosion.packet());
