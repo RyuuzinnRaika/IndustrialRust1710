@@ -168,7 +168,10 @@ fn valid_uuid(uuid: &str) -> bool {
         })
 }
 fn entry_uuid_matches(entry: &NamedEntry, uuid: &str) -> bool {
-    entry.uuid.as_deref().is_some_and(|id| id.eq_ignore_ascii_case(uuid))
+    entry
+        .uuid
+        .as_deref()
+        .is_some_and(|id| id.eq_ignore_ascii_case(uuid))
 }
 fn canonical_ip(ip: IpAddr) -> IpAddr {
     match ip {
@@ -537,9 +540,17 @@ mod tests {
             reloaded.banned_identity("NewName", Some(uuid), ip).unwrap(),
             Some("account ban".into())
         );
-        assert!(reloaded.banned_identity("NewName", None, ip).unwrap().is_none());
-        reloaded.set_player_ban_verified("OldName", Some(uuid), None, false).unwrap();
-        assert!(reloaded.banned_identity("NewName", Some(uuid), ip).unwrap().is_none());
+        assert!(reloaded
+            .banned_identity("NewName", None, ip)
+            .unwrap()
+            .is_none());
+        reloaded
+            .set_player_ban_verified("OldName", Some(uuid), None, false)
+            .unwrap();
+        assert!(reloaded
+            .banned_identity("NewName", Some(uuid), ip)
+            .unwrap()
+            .is_none());
         fs::remove_dir_all(root).unwrap();
     }
 

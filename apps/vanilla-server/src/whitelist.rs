@@ -153,7 +153,9 @@ mod tests {
     fn rejects_symlink_whitelist_even_if_target_is_valid() {
         use std::os::unix::fs::symlink;
         let base = std::env::temp_dir().join(format!(
-            "ir1710-whitelist-link-{}-{:?}", std::process::id(), std::thread::current().id()
+            "ir1710-whitelist-link-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
         ));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
