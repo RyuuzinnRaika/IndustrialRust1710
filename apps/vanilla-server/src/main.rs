@@ -7,6 +7,8 @@ mod brewing;
 mod chests;
 mod clock;
 mod crafting;
+#[allow(dead_code)] // B13 storage staged for future transaction/wire integration.
+mod dispensers;
 mod experience;
 mod furnaces;
 mod ground_items;
