@@ -1,0 +1,31 @@
+[package]
+name = "industrialrust1710-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+legacy-protocol = { path = "../crates/legacy-protocol" }
+fastnbt = "=2.6.3"
+flate2 = "1"
+serde = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "protocol5_frames"
+path = "fuzz_targets/protocol5_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "anvil_nbt"
+path = "fuzz_targets/anvil_nbt.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
