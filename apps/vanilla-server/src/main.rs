@@ -2892,7 +2892,7 @@ struct ServerContext {
     survival: bool,
     difficulty: u8,
 }
-fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
+fn handle(mut s: TcpStream, context: ServerContext, login_permit: security_limits::Permit) -> io::Result<()> {
     let ServerContext {
         hub,
         world,
@@ -3027,6 +3027,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         hub: Arc::clone(&hub),
         entity_id,
     };
+    // Once Hub admits a named player, the connection is no longer an
+    // unauthenticated pending-login slot. The global MAX_CONNECTIONS and
+    // Hub MAX_PLAYERS limits still apply throughout the Play session.
+    drop(login_permit);
     let mut success = Vec::new();
     write_string(&uuid, &mut success)?;
     write_string(&name, &mut success)?;
@@ -4070,7 +4074,6 @@ fn main() -> io::Result<()> {
         let brewer_file = Arc::clone(&brewer_path);
         thread::spawn(move || {
             let _connection = admission;
-            let _ip_permit = ip_permit;
             if let Err(e) = handle(
                 stream,
                 ServerContext {
@@ -4094,6 +4097,7 @@ fn main() -> io::Result<()> {
                     survival,
                     difficulty,
                 },
+                ip_permit,
             ) {
                 if e.kind() != ErrorKind::UnexpectedEof {
                     eprintln!("client disconnected: {e}");
