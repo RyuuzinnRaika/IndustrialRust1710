@@ -6,11 +6,12 @@
 use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct WorldSessionLock {
     file: File,
+    path: PathBuf,
     started_ms: i64,
 }
 
@@ -48,7 +49,7 @@ impl WorldSessionLock {
             .write(true)
             .create(true)
             .truncate(false) // Never alter the file before acquiring its lock.
-            .open(lock_file)?;
+            .open(&lock_file)?;
         FileExt::try_lock_exclusive(&file)?;
         let duration = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -59,12 +60,57 @@ impl WorldSessionLock {
         file.write_all(&started_ms.to_be_bytes())?;
         file.set_len(8)?;
         file.sync_all()?;
-        Ok(Self { file, started_ms })
+        Ok(Self {
+            file,
+            path: lock_file,
+            started_ms,
+        })
     }
 
     /// Catch an overwritten 1.7.10 timestamp when this method is invoked.
     /// Future storage integration must invoke it on every save boundary.
     pub fn verify(&mut self) -> io::Result<()> {
+        // An advisory OS lock only protects the original file handle. A
+        // second process can replace the directory entry and leave that
+        // original inode locked but no longer visible from the world folder.
+        let named = fs::symlink_metadata(&self.path)?;
+        if !named.file_type().is_file() || named.len() != 8 {
+            return Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "Minecraft session.lock was replaced or is not a regular 8-byte file",
+            ));
+        }
+        let mut visible = File::open(&self.path)?;
+        let opened = visible.metadata()?;
+        if opened.len() != 8 {
+            return Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "Minecraft session.lock changed while checking it",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let locked = self.file.metadata()?;
+            if named.dev() != locked.dev()
+                || named.ino() != locked.ino()
+                || opened.dev() != locked.dev()
+                || opened.ino() != locked.ino()
+            {
+                return Err(io::Error::new(
+                    ErrorKind::PermissionDenied,
+                    "Minecraft session.lock was replaced while the world was open",
+                ));
+            }
+        }
+        let mut visible_marker = [0u8; 8];
+        visible.read_exact(&mut visible_marker)?;
+        if i64::from_be_bytes(visible_marker) != self.started_ms {
+            return Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "Minecraft session.lock on disk no longer matches the active session",
+            ));
+        }
         self.file.seek(SeekFrom::Start(0))?;
         let mut marker = [0u8; 8];
         self.file.read_exact(&mut marker)?;
@@ -109,6 +155,26 @@ mod tests {
         let mut next = WorldSessionLock::acquire(&root).unwrap();
         next.verify().unwrap();
         drop(next);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_replaced_lock_file_even_when_timestamp_matches() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-session-replacement-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let mut guard = WorldSessionLock::acquire(&root).unwrap();
+        let lock_path = root.join("session.lock");
+        // A Java-style replacement of the directory entry leaves the Rust
+        // process with a lock on the old inode. The marker can even match.
+        fs::rename(&lock_path, root.join("old-session.lock")).unwrap();
+        fs::write(&lock_path, guard.started_ms.to_be_bytes()).unwrap();
+        assert!(guard.verify().is_err());
+        drop(guard);
         fs::remove_dir_all(root).unwrap();
     }
 
