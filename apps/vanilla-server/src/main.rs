@@ -32,6 +32,8 @@ mod multiplayer;
 mod navigation;
 mod physics;
 mod player;
+#[allow(dead_code)] // Scoreboard protocol sync pending.
+mod scoreboard;
 mod server_config;
 mod session_lock;
 mod survival;
