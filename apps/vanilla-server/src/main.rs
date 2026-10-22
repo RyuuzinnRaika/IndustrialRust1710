@@ -16,6 +16,7 @@ mod dispensers;
 mod experience;
 mod furnaces;
 mod ground_items;
+mod hanging;
 mod hoppers;
 mod inventory;
 mod items_1710;
@@ -50,6 +51,7 @@ use decorations::Decorations;
 use experience::Experience;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use ground_items::GroundItems;
+use hanging::Hangings;
 use hoppers::{Hoppers, Position as HopperPosition};
 use inventory::{Inventory, Stack};
 use legacy_protocol::{
@@ -607,6 +609,8 @@ struct PlayerSession<'a> {
     decoration_path: &'a Path,
     maps: &'a Mutex<Maps>,
     map_path: &'a Path,
+    hangings: &'a Mutex<Hangings>,
+    hanging_path: &'a Path,
     survival: bool,
     difficulty: u8,
     hub: &'a Hub,
@@ -645,6 +649,8 @@ fn play(
         decoration_path,
         maps,
         map_path,
+        hangings,
+        hanging_path,
         survival,
         difficulty,
         hub,
@@ -3175,6 +3181,8 @@ struct ServerContext {
     decoration_path: Arc<PathBuf>,
     maps: Arc<Mutex<Maps>>,
     map_path: Arc<PathBuf>,
+    hangings: Arc<Mutex<Hangings>>,
+    hanging_path: Arc<PathBuf>,
     survival: bool,
     difficulty: u8,
 }
@@ -3200,6 +3208,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         decoration_path,
         maps,
         map_path,
+        hangings,
+        hanging_path,
         survival,
         difficulty,
     } = context;
@@ -3329,6 +3339,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         &decorations,
         &view_chunks(chunk_center(&player_state)),
     )?;
+    for event in hangings.lock().map_err(|_| bad("hanging lock poisoned"))?.spawn_events()? {
+        send(&mut s, event.id, &event.body)?;
+    }
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
     send(&mut s, self_list.id, &self_list.body)?;
@@ -3390,6 +3403,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             decoration_path: &decoration_path,
             maps: &maps,
             map_path: &map_path,
+            hangings: &hangings,
+            hanging_path: &hanging_path,
             survival,
             difficulty,
             hub: &hub,
@@ -3929,6 +3944,8 @@ fn main() -> io::Result<()> {
         initial.save_new(&world_path)?;
         initial
     };
+    let hanging_path = Arc::new(Hangings::location(&world_path));
+    let hangings = Arc::new(Mutex::new(Hangings::load(&hanging_path)?));
     let map_path = Arc::new(Maps::location(&world_path));
     let maps = Arc::new(Mutex::new(Maps::load(&map_path)?));
     let decoration_path = Arc::new(Decorations::location(&world_path));
@@ -4233,6 +4250,8 @@ fn main() -> io::Result<()> {
         let decoration_file = Arc::clone(&decoration_path);
         let map_state = Arc::clone(&maps);
         let map_file = Arc::clone(&map_path);
+        let hanging_state = Arc::clone(&hangings);
+        let hanging_file = Arc::clone(&hanging_path);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -4258,6 +4277,8 @@ fn main() -> io::Result<()> {
                     decoration_path: decoration_file,
                     maps: map_state,
                     map_path: map_file,
+                    hangings: hanging_state,
+                    hanging_path: hanging_file,
                     survival,
                     difficulty,
                 },
