@@ -834,6 +834,16 @@ fn play(
                         for slot in slots {
                             send(s, 0x2f, &inventory.set_slot(slot)?)?;
                         }
+                        // A grant is sent only after the inventory and ground
+                        // item transaction commits successfully.
+                        if let Some(key) = Achievements::collected_item_trigger(item.stack.id) {
+                            let mut next_achievements = achievements.clone();
+                            if let Some(packet) = next_achievements.award(key)? {
+                                next_achievements.save(achievements_path)?;
+                                *achievements = next_achievements;
+                                send(s, packet.id, &packet.body)?;
+                            }
+                        }
                     }
                 }
             }
