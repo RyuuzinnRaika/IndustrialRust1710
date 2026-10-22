@@ -1,0 +1,72 @@
+name: Windows and Linux release artifacts
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+jobs:
+  release:
+    name: release-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build production binaries from committed Cargo.lock
+        shell: bash
+        run: cargo build --release --locked -p vanilla-server -p legacy-status-server
+      - name: Smoke-test executable on the target operating system
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Windows" ]]; then ext=.exe; else ext=; fi
+          "target/release/vanilla-server${ext}" --help > server-help.txt
+          grep -q "Usage: vanilla-server" server-help.txt
+      - name: Assemble auditable distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ext=.exe
+          else
+            ext=
+          fi
+          cp "target/release/vanilla-server${ext}" dist/
+          cp "target/release/legacy-status-server${ext}" dist/
+          cp Cargo.lock dist/Cargo.lock
+          {
+            echo "Repository: ${{ github.repository }}"
+            echo "Commit: $(git rev-parse HEAD)"
+            echo "Ref: ${{ github.ref }}"
+            echo "Runner OS: ${{ runner.os }}"
+            echo "Runner arch: ${{ runner.arch }}"
+            echo "Cargo: $(cargo --version)"
+            echo "Rust: $(rustc --version)"
+            echo "Host: $(rustc -vV | grep '^host:')"
+            echo "Cargo.lock SHA256: $(sha256sum Cargo.lock | cut -d' ' -f1)"
+            echo "Dependencies (exactly as locked): dist/Cargo.lock"
+            echo "Source repository: https://github.com/${{ github.repository }}"
+          } > dist/BUILD-MANIFEST.txt
+          (cd dist && sha256sum vanilla-server${ext} legacy-status-server${ext} Cargo.lock BUILD-MANIFEST.txt > SHA256SUMS)
+      - name: Verify artifacts match checksums
+        shell: bash
+        run: cd dist && sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: industrialrust1710-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
