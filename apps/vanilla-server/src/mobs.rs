@@ -968,10 +968,7 @@ impl Mobs {
                 continue;
             }
             let chance = if mob.baby { 25 } else { 500 };
-            if hash(tick ^ (mob.id as u64).wrapping_mul(0x9e3779b97f4a7c15))
-                % chance
-                != 0
-            {
+            if hash(tick ^ (mob.id as u64).wrapping_mul(0x9e3779b97f4a7c15)) % chance != 0 {
                 continue;
             }
             let (x, y, z) = (
@@ -2002,10 +1999,7 @@ mod tests {
     fn sheared_sheep_regrows_only_after_persisted_grass_consumption() {
         let mut world = World::new();
         world.import_block(0, 64, 0, 2 << 4).unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-grazing-{}.irw",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("ir1710-grazing-{}.irw", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut mobs = Mobs::default();
         let id = mobs.next_id;
@@ -2021,9 +2015,7 @@ mod tests {
         mobs.entities.get_mut(&id).unwrap().sheared = true;
         let successful_tick = (2..50000u64)
             .step_by(2)
-            .find(|tick| {
-                hash(*tick ^ (id as u64).wrapping_mul(0x9e3779b97f4a7c15)) % 500 == 0
-            })
+            .find(|tick| hash(*tick ^ (id as u64).wrapping_mul(0x9e3779b97f4a7c15)) % 500 == 0)
             .unwrap();
         // Before grazing, the wool stays sheared.
         assert!(mobs.entities.get(&id).unwrap().sheared);
@@ -2035,7 +2027,10 @@ mod tests {
         assert_eq!(&metadata.body[4..], &[16, 0, 0x7f]);
         assert!(!mobs.entities.get(&id).unwrap().sheared);
         assert_eq!(world.get(0, 64, 0) >> 4, 3);
-        assert!(mobs.graze(&mut world, &path, successful_tick).unwrap().is_empty());
+        assert!(mobs
+            .graze(&mut world, &path, successful_tick)
+            .unwrap()
+            .is_empty());
         assert_eq!(World::load(&path).unwrap().get(0, 64, 0) >> 4, 3);
         let _ = std::fs::remove_file(path);
     }
