@@ -44,7 +44,11 @@ fn position(key: &str) -> io::Result<Position> {
             .parse::<i32>()
             .map_err(|_| invalid("native tile coordinate invalid"))
     };
-    let xyz = (parse(fields.next())?, parse(fields.next())?, parse(fields.next())?);
+    let xyz = (
+        parse(fields.next())?,
+        parse(fields.next())?,
+        parse(fields.next())?,
+    );
     if fields.next().is_some() || format!("{},{},{}", xyz.0, xyz.1, xyz.2) != key {
         return Err(invalid("noncanonical native tile coordinate"));
     }
@@ -96,8 +100,8 @@ fn push_tile(
         extra,
     };
     let nbt = fastnbt::to_bytes(&tile).map_err(|_| invalid("cannot encode native tile NBT"))?;
-    let value = fastnbt::from_bytes::<Value>(&nbt)
-        .map_err(|_| invalid("cannot decode native tile NBT"))?;
+    let value =
+        fastnbt::from_bytes::<Value>(&nbt).map_err(|_| invalid("cannot decode native tile NBT"))?;
     columns
         .entry((pos.0.div_euclid(16), pos.2.div_euclid(16)))
         .or_default()
@@ -111,7 +115,15 @@ pub(crate) fn load(world: &World, world_path: &Path) -> io::Result<TileColumns> 
     let mut columns = TileColumns::new();
     let chests = Chests::load(&Chests::location(world_path))?;
     for (key, slots) in entries::<[Option<Stack>; CHEST_SLOTS]>(chests.encoded()?)? {
-        push_tile(world, &mut columns, position(&key)?, &[54, 146], "Chest", &slots, BTreeMap::new())?;
+        push_tile(
+            world,
+            &mut columns,
+            position(&key)?,
+            &[54, 146],
+            "Chest",
+            &slots,
+            BTreeMap::new(),
+        )?;
     }
 
     let furnaces = Furnaces::load(&Furnaces::location(world_path))?;
@@ -119,12 +131,28 @@ pub(crate) fn load(world: &World, world_path: &Path) -> io::Result<TileColumns> 
         let mut extra = BTreeMap::new();
         extra.insert("BurnTime".into(), Value::Short(furnace.burn_left as i16));
         extra.insert("CookTime".into(), Value::Short(furnace.cook as i16));
-        push_tile(world, &mut columns, position(&key)?, &[61, 62], "Furnace", &furnace.slots, extra)?;
+        push_tile(
+            world,
+            &mut columns,
+            position(&key)?,
+            &[61, 62],
+            "Furnace",
+            &furnace.slots,
+            extra,
+        )?;
     }
 
     let hoppers = Hoppers::load(&Hoppers::location(world_path))?;
     for (key, slots) in entries::<[Option<Stack>; HOPPER_SLOTS]>(hoppers.encoded()?)? {
-        push_tile(world, &mut columns, position(&key)?, &[154], "Hopper", &slots, BTreeMap::new())?;
+        push_tile(
+            world,
+            &mut columns,
+            position(&key)?,
+            &[154],
+            "Hopper",
+            &slots,
+            BTreeMap::new(),
+        )?;
     }
 
     let brewers = Brewers::load(&Brewers::location(world_path))?;
@@ -132,7 +160,15 @@ pub(crate) fn load(world: &World, world_path: &Path) -> io::Result<TileColumns> 
         let mut extra = BTreeMap::new();
         extra.insert("BrewTime".into(), Value::Short(stand.brew_time as i16));
         // Vanilla 1.7.10 registers the brewing-stand TileEntity as "Cauldron".
-        push_tile(world, &mut columns, position(&key)?, &[117], "Cauldron", &stand.slots, extra)?;
+        push_tile(
+            world,
+            &mut columns,
+            position(&key)?,
+            &[117],
+            "Cauldron",
+            &stand.slots,
+            extra,
+        )?;
     }
 
     for (&chunk, values) in &columns {
