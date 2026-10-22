@@ -4974,6 +4974,7 @@ struct ConsoleGameData {
     mobs: Arc<Mutex<Mobs>>,
     hardcore: bool,
 }
+#[allow(clippy::too_many_arguments)] // Console worker coordinates the explicit shutdown flag.
 fn start_clock_console(
     hub: Arc<Hub>,
     clock: Arc<Clock>,
