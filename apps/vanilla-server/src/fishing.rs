@@ -36,7 +36,7 @@ impl Bobber {
         Event { id: 0x0e, body }
     }
 }
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Fishing {
     next: i32,
     floats: BTreeMap<i32, Bobber>,
