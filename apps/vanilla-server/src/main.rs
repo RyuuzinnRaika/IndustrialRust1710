@@ -4,6 +4,7 @@
 mod anvil_export;
 mod anvil_import;
 mod backup_world;
+mod books;
 mod brewing;
 mod chests;
 mod chunk_pipeline;
@@ -137,8 +138,13 @@ impl<'a> Input<'a> {
         let count = self.u8()?;
         let damage = self.i16()?;
         let nbt_length = self.i16()?;
+        // Use-Item sends the held Slot. Book data is not trusted here: C17
+        // carries edits and the server-held book record determines its content.
         if nbt_length != -1 {
-            return Err(bad("NBT item stacks are not supported yet"));
+            if !matches!(id, 386 | 387) || nbt_length < 0 {
+                return Err(bad("unsupported item NBT"));
+            }
+            self.take(nbt_length as usize)?;
         }
         let stack = Stack { id, count, damage };
         if !stack.is_valid() {
@@ -3213,8 +3219,27 @@ fn play(
                     hub.move_player(entity_id, *player, yaw, pitch);
                 }
             }
+            23 => {
+                // Protocol 5 C17 Custom Payload: String channel, Short length,
+                // bytes. Client NBT is untrusted; books::process validates
+                // held item identity, compressed NBT and page/title bounds.
+                let channel = input.string(20)?;
+                let length = input.i16()?;
+                if length < 0 { return Err(bad("negative plugin payload size")); }
+                let payload = input.take(length as usize)?;
+                input.finish()?;
+                if matches!(channel.as_str(), "MC|BEdit" | "MC|BSign")
+                    && books::process(
+                        &channel, payload, inventory, inventory_path,
+                        world_path, name,
+                    )?
+                {
+                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                    send(s, 0x30, &inventory.window_items())?;
+                }
+            }
             // Other packets are not trusted inventory or world mutations.
-            10..=12 | 17..=21 | 23 => {}
+            10..=12 | 17..=21 => {}
             _ => return Err(bad("invalid play packet ID")),
         }
     }
@@ -4023,6 +4048,7 @@ fn main() -> io::Result<()> {
     // Accept older independent log locations for one-time migration.
     journal::recover(&Chests::location(&world_path).with_extension("pending-txn.json"))?;
     journal::recover(&Furnaces::location(&world_path).with_extension("pending-txn.json"))?;
+    books::initialize(&world_path)?;
     let loaded_world = if world_path.exists() {
         let existing = World::load(&world_path)?;
         if let Some(seed) = requested_seed {
