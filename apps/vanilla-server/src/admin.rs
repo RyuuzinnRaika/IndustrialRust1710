@@ -26,7 +26,11 @@ pub struct NamedEntry {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<u8>,
-    #[serde(default, rename = "bypassesPlayerLimit", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "bypassesPlayerLimit",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub bypasses_player_limit: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<String>,
@@ -59,17 +63,26 @@ pub struct PlayerPermission {
     #[serde(default = "allowed")]
     pub interact: bool,
 }
-fn allowed() -> bool { true }
+fn allowed() -> bool {
+    true
+}
 impl Default for PlayerPermission {
     fn default() -> Self {
-        Self { name: String::new(), chat: true, build: true, interact: true }
+        Self {
+            name: String::new(),
+            chat: true,
+            build: true,
+            interact: true,
+        }
     }
 }
 
 fn regular_file(path: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if !meta.file_type().is_file() || meta.len() > MAX_DB_BYTES {
-        return Err(invalid("administration database must be a regular bounded file"));
+        return Err(invalid(
+            "administration database must be a regular bounded file",
+        ));
     }
     Ok(())
 }
@@ -94,17 +107,24 @@ fn persist_array<T: Serialize>(path: &Path, data: &[T]) -> io::Result<()> {
     regular_file(path)?;
     // Never follow an existing symlink or overwrite an existing temp name.
     let candidate = path.with_extension(format!("{}.tmp", std::process::id()));
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&candidate)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&candidate)?;
     let written = (|| -> io::Result<()> {
         file.write_all(&bytes)?;
         file.sync_all()?;
         fs::rename(&candidate, path)?;
         if let Some(parent) = path.parent() {
-            if let Ok(dir) = fs::File::open(parent) { dir.sync_all()?; }
+            if let Ok(dir) = fs::File::open(parent) {
+                dir.sync_all()?;
+            }
         }
         Ok(())
     })();
-    if written.is_err() { let _ = fs::remove_file(candidate); }
+    if written.is_err() {
+        let _ = fs::remove_file(candidate);
+    }
     written
 }
 fn ensure_array(path: &Path) -> io::Result<()> {
@@ -135,7 +155,10 @@ fn validate_named(items: &[NamedEntry]) -> io::Result<()> {
 }
 fn canonical_ip(ip: IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V6(ipv6) => ipv6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(ipv6)),
+        IpAddr::V6(ipv6) => ipv6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ipv6)),
         other => other,
     }
 }
@@ -169,7 +192,12 @@ impl Administration {
     pub fn new(root: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&root)?;
         let store = Self { root };
-        for name in ["ops.json", "banned-players.json", "banned-ips.json", "player-permissions.json"] {
+        for name in [
+            "ops.json",
+            "banned-players.json",
+            "banned-ips.json",
+            "player-permissions.json",
+        ] {
             ensure_array(&store.file(name))?;
         }
         store.ops()?;
@@ -178,7 +206,9 @@ impl Administration {
         store.permissions()?;
         Ok(store)
     }
-    fn file(&self, name: &str) -> PathBuf { self.root.join(name) }
+    fn file(&self, name: &str) -> PathBuf {
+        self.root.join(name)
+    }
     fn ops(&self) -> io::Result<Vec<NamedEntry>> {
         let data = read_array(&self.file("ops.json"))?;
         validate_named(&data)?;
@@ -213,46 +243,85 @@ impl Administration {
         let by_name = self.banned_players()?;
         let by_ip = self.banned_ips()?;
         if let Some(entry) = by_name.iter().find(|e| e.name.eq_ignore_ascii_case(name)) {
-            return Ok(Some(entry.reason.clone().unwrap_or_else(|| "Player is banned".into())));
+            return Ok(Some(
+                entry
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "Player is banned".into()),
+            ));
         }
-        if let Some(entry) = by_ip.iter().find(|e|
-            e.ip.parse::<IpAddr>().is_ok_and(|ip| canonical_ip(ip) == canonical_ip(address)))
-        {
-            return Ok(Some(entry.reason.clone().unwrap_or_else(|| "IP address is banned".into())));
+        if let Some(entry) = by_ip.iter().find(|e| {
+            e.ip.parse::<IpAddr>()
+                .is_ok_and(|ip| canonical_ip(ip) == canonical_ip(address))
+        }) {
+            return Ok(Some(
+                entry
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "IP address is banned".into()),
+            ));
         }
         Ok(None)
     }
     pub fn ip_banned(&self, address: IpAddr) -> io::Result<bool> {
-        Ok(self.banned_ips()?.iter().any(|e|
-            e.ip.parse::<IpAddr>().is_ok_and(|ip| canonical_ip(ip) == canonical_ip(address))))
+        Ok(self.banned_ips()?.iter().any(|e| {
+            e.ip.parse::<IpAddr>()
+                .is_ok_and(|ip| canonical_ip(ip) == canonical_ip(address))
+        }))
     }
     pub fn permission(&self, name: &str) -> io::Result<PlayerPermission> {
-        Ok(self.permissions()?.into_iter()
+        Ok(self
+            .permissions()?
+            .into_iter()
             .find(|p| p.name.eq_ignore_ascii_case(name))
-            .unwrap_or_else(|| PlayerPermission { name: name.into(), ..PlayerPermission::default() }))
+            .unwrap_or_else(|| PlayerPermission {
+                name: name.into(),
+                ..PlayerPermission::default()
+            }))
     }
     pub fn set_op(&self, name: &str, enabled: bool) -> io::Result<()> {
-        if !valid_name(name) { return Err(invalid("invalid OP username")); }
+        if !valid_name(name) {
+            return Err(invalid("invalid OP username"));
+        }
         let mut ops = self.ops()?;
         ops.retain(|e| !e.name.eq_ignore_ascii_case(name));
         if enabled {
             ops.push(NamedEntry {
-                name: name.into(), uuid: None, reason: None, level: Some(4),
-                bypasses_player_limit: Some(false), created: None, source: None, expires: None,
+                name: name.into(),
+                uuid: None,
+                reason: None,
+                level: Some(4),
+                bypasses_player_limit: Some(false),
+                created: None,
+                source: None,
+                expires: None,
             });
         }
         persist_array(&self.file("ops.json"), &ops)
     }
-    pub fn set_player_ban(&self, name: &str, reason: Option<&str>, enabled: bool) -> io::Result<()> {
-        if !valid_name(name) || reason.is_some_and(|r| r.len() > 256 || r.chars().any(char::is_control)) {
+    pub fn set_player_ban(
+        &self,
+        name: &str,
+        reason: Option<&str>,
+        enabled: bool,
+    ) -> io::Result<()> {
+        if !valid_name(name)
+            || reason.is_some_and(|r| r.len() > 256 || r.chars().any(char::is_control))
+        {
             return Err(invalid("invalid player BAN"));
         }
         let mut bans = self.banned_players()?;
         bans.retain(|e| !e.name.eq_ignore_ascii_case(name));
         if enabled {
             bans.push(NamedEntry {
-                name: name.into(), uuid: None, reason: reason.map(str::to_owned), level: None,
-                bypasses_player_limit: None, created: None, source: Some("Server".into()), expires: None,
+                name: name.into(),
+                uuid: None,
+                reason: reason.map(str::to_owned),
+                level: None,
+                bypasses_player_limit: None,
+                created: None,
+                source: Some("Server".into()),
+                expires: None,
             });
         }
         persist_array(&self.file("banned-players.json"), &bans)
@@ -263,18 +332,34 @@ impl Administration {
             return Err(invalid("invalid IP BAN reason"));
         }
         let mut bans = self.banned_ips()?;
-        bans.retain(|e| e.ip.parse::<IpAddr>().is_ok_and(|b| canonical_ip(b) != canonical_ip(ip)));
+        bans.retain(|e| {
+            e.ip.parse::<IpAddr>()
+                .is_ok_and(|b| canonical_ip(b) != canonical_ip(ip))
+        });
         if enabled {
-            bans.push(IpEntry { ip: canonical_ip(ip).to_string(), reason: reason.map(str::to_owned),
-                created: None, source: Some("Server".into()), expires: None });
+            bans.push(IpEntry {
+                ip: canonical_ip(ip).to_string(),
+                reason: reason.map(str::to_owned),
+                created: None,
+                source: Some("Server".into()),
+                expires: None,
+            });
         }
         persist_array(&self.file("banned-ips.json"), &bans)
     }
     pub fn set_permission(&self, name: &str, mode: &str, enabled: bool) -> io::Result<()> {
-        if !valid_name(name) { return Err(invalid("invalid player name")); }
+        if !valid_name(name) {
+            return Err(invalid("invalid player name"));
+        }
         let mut permissions = self.permissions()?;
-        let mut user = permissions.iter().find(|p| p.name.eq_ignore_ascii_case(name))
-            .cloned().unwrap_or_else(|| PlayerPermission { name: name.into(), ..PlayerPermission::default() });
+        let mut user = permissions
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+            .cloned()
+            .unwrap_or_else(|| PlayerPermission {
+                name: name.into(),
+                ..PlayerPermission::default()
+            });
         match mode {
             "chat" => user.chat = enabled,
             "build" => user.build = enabled,
@@ -291,13 +376,18 @@ impl Administration {
         }
         let path = self.file("admin-audit.jsonl");
         match fs::symlink_metadata(&path) {
-            Ok(meta) if !meta.file_type().is_file() => return Err(invalid("audit log must be a regular file")),
+            Ok(meta) if !meta.file_type().is_file() => {
+                return Err(invalid("audit log must be a regular file"))
+            }
             Err(e) if e.kind() != ErrorKind::NotFound => return Err(e),
             _ => {}
         }
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map_err(io::Error::other)?.as_secs();
-        let record = json!({"unix_seconds":stamp,"actor":actor,"action":operation,"result":outcome});
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_secs();
+        let record =
+            json!({"unix_seconds":stamp,"actor":actor,"action":operation,"result":outcome});
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         writeln!(file, "{record}")?;
         file.sync_data()
@@ -313,20 +403,36 @@ mod tests {
             canonical_ip("::ffff:192.0.2.1".parse::<IpAddr>().unwrap()),
             "192.0.2.1".parse::<IpAddr>().unwrap()
         );
-        let root = std::env::temp_dir().join(format!("ir1710-security-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-security-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = fs::remove_dir_all(&root);
         let store = Administration::new(root.clone()).unwrap();
         store.set_op("Operator", true).unwrap();
         assert!(!store.is_operator("Operator", None).unwrap());
         assert!(!store.is_operator("Operator", None).unwrap());
-        store.set_player_ban("Spammer", Some("abuse"), true).unwrap();
-        assert_eq!(store.banned("spammer", "127.0.0.1".parse().unwrap()).unwrap(), Some("abuse".into()));
+        store
+            .set_player_ban("Spammer", Some("abuse"), true)
+            .unwrap();
+        assert_eq!(
+            store
+                .banned("spammer", "127.0.0.1".parse().unwrap())
+                .unwrap(),
+            Some("abuse".into())
+        );
         store.set_ip_ban("::ffff:192.0.2.1", None, true).unwrap();
         assert!(store.ip_banned("192.0.2.1".parse().unwrap()).unwrap());
         store.set_ip_ban("192.0.2.1", None, false).unwrap();
-        assert!(!store.ip_banned("::ffff:192.0.2.1".parse().unwrap()).unwrap());
+        assert!(!store
+            .ip_banned("::ffff:192.0.2.1".parse().unwrap())
+            .unwrap());
         store.set_player_ban("Spammer", None, false).unwrap();
-        assert!(store.banned("spammer", "127.0.0.1".parse().unwrap()).unwrap().is_none());
+        assert!(store
+            .banned("spammer", "127.0.0.1".parse().unwrap())
+            .unwrap()
+            .is_none());
         store.set_permission("Visitor", "build", false).unwrap();
         assert!(!store.permission("visitor").unwrap().build);
         store.audit("CONSOLE", "/ban Spammer", "success").unwrap();
@@ -334,10 +440,18 @@ mod tests {
     }
     #[test]
     fn malformed_and_duplicate_bans_rejected() {
-        let root = std::env::temp_dir().join(format!("ir1710-admin-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-admin-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = fs::remove_dir_all(&root);
         let store = Administration::new(root.clone()).unwrap();
-        fs::write(root.join("banned-ips.json"), r#"[{"ip":"192.0.2.1"},{"ip":"::ffff:192.0.2.1"}]"#).unwrap();
+        fs::write(
+            root.join("banned-ips.json"),
+            r#"[{"ip":"192.0.2.1"},{"ip":"::ffff:192.0.2.1"}]"#,
+        )
+        .unwrap();
         assert!(store.ip_banned("192.0.2.1".parse().unwrap()).is_err());
         fs::write(root.join("banned-ips.json"), "broken").unwrap();
         assert!(store.banned("Alice", "127.0.0.1".parse().unwrap()).is_err());
