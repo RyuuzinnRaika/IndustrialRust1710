@@ -971,8 +971,7 @@ impl Mobs {
                 continue;
             }
             let chance = if mob.baby { 25 } else { 500 };
-            if !hash(tick ^ (mob.id as u64).wrapping_mul(0x9e3779b97f4a7c15))
-                .is_multiple_of(chance)
+            if !hash(tick ^ (mob.id as u64).wrapping_mul(0x9e3779b97f4a7c15)).is_multiple_of(chance)
             {
                 continue;
             }
