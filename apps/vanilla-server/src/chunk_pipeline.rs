@@ -4,7 +4,7 @@
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::io::{self, Write};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,6 +13,9 @@ const QUEUE_CAPACITY: usize = 32;
 /// Per-session bounded batch to prevent one login from filling the shared queue.
 pub const SESSION_BATCH_LIMIT: usize = 8;
 const SUBMIT_TIMEOUT: Duration = Duration::from_millis(100);
+/// Cap wall-clock time spent on a batch of compressed chunks for one client.
+/// The session is disconnected on expiry, instead of hanging on a dead worker.
+pub const BATCH_DEADLINE: Duration = Duration::from_secs(15);
 const WORKERS: usize = 2;
 const MAX_RAW_CHUNK_BYTES: usize = 16 * 10_240 + 256;
 static WORK: OnceLock<SyncSender<Job>> = OnceLock::new();
@@ -43,13 +46,28 @@ impl PendingChunk {
         }
     }
 
-    pub fn finish(self) -> io::Result<Vec<u8>> {
+    /// Wait only until the caller's absolute deadline. All chunks in a
+    /// session batch share the same deadline, so a stalled worker cannot
+    /// multiply the timeout by the number of queued chunks.
+    pub fn finish_before(self, deadline: Instant) -> io::Result<Vec<u8>> {
         if let Some(packet) = self.poll()? {
             return Ok(packet);
         }
-        self.0
-            .recv()
-            .map_err(|_| io::Error::other("chunk encoder stopped"))?
+        match self
+            .0
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "chunk compression deadline exceeded",
+            )),
+            Err(RecvTimeoutError::Disconnected) => Err(io::Error::other("chunk encoder stopped")),
+        }
+    }
+
+    pub fn finish(self) -> io::Result<Vec<u8>> {
+        self.finish_before(Instant::now() + BATCH_DEADLINE)
     }
 }
 
@@ -181,6 +199,32 @@ mod tests {
             .read_to_end(&mut decoded)
             .unwrap();
         assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn stalled_encoder_cannot_block_session_past_deadline() {
+        // Retain the reply sender without sending: a crashed or wedged worker
+        // must never leave the client thread blocked forever.
+        let (reply, receiver) = mpsc::sync_channel(1);
+        let started = Instant::now();
+        let error = PendingChunk(receiver)
+            .finish_before(started + Duration::from_millis(15))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(reply);
+    }
+
+    #[test]
+    fn stopped_encoder_disconnects_without_waiting_for_deadline() {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        drop(reply);
+        let started = Instant::now();
+        let error = PendingChunk(receiver)
+            .finish_before(started + Duration::from_secs(10))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
