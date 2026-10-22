@@ -1909,7 +1909,7 @@ fn play(
                             if survival && vitals.health > 0.0 && vitals.food < 20 {
                                 let bites = block & 7;
                                 if bites <= 5 {
-                                    let next = if bites == 5 { 0 } else { (92 << 4) | bites + 1 };
+                                    let next = if bites == 5 { 0 } else { (92 << 4) | (bites + 1) };
                                     if w.update_and_save(world_path, x, y, z, next)? {
                                         vitals.food = (vitals.food + 2).min(20);
                                         vitals.saturation =
