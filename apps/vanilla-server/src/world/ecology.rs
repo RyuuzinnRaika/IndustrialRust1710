@@ -36,6 +36,17 @@ impl World {
         let below = self.get(x, y - 1, z) >> 4;
         match id {
             6 => plantable(below),
+            25 | 63 | 84 | 92 | 140 => solid(below),
+            68 => {
+                let neighbor = match block & 7 {
+                    2 => self.get(x, y, z + 1) >> 4,
+                    3 => self.get(x, y, z - 1) >> 4,
+                    4 => self.get(x + 1, y, z) >> 4,
+                    5 => self.get(x - 1, y, z) >> 4,
+                    _ => 0,
+                };
+                solid(neighbor)
+            },
             59 | 141 | 142 | 104 | 105 => below == 60,
             115 => below == 88, // Nether wart grows on soul sand.
             81 => {
