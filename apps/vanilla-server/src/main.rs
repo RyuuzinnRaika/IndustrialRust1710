@@ -28,6 +28,7 @@ mod legacy_world_inspect;
 mod level_dat;
 mod mobs;
 mod multiplayer;
+mod native_tile_export;
 mod navigation;
 mod physics;
 mod player;
@@ -3565,8 +3566,27 @@ fn main() -> io::Result<()> {
                 "source IRW1 world does not exist",
             ));
         }
+        // An offline export cannot mix an IRW snapshot with live inventory
+        // updates. Hold the same world lock as the native game server.
+        let world_directory = world_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut export_lock = session_lock::WorldSessionLock::acquire(world_directory)?;
+        export_lock.verify()?;
+        for journal in [
+            world_path.with_extension("pending-txn.json"),
+            Chests::location(&world_path).with_extension("pending-txn.json"),
+            Furnaces::location(&world_path).with_extension("pending-txn.json"),
+        ] {
+            if journal.exists() {
+                return Err(bad(
+                    "pending save journal: start server recovery before Anvil export",
+                ));
+            }
+        }
         let world = World::load(&world_path)?;
-        let count = anvil_export::export(&world, &destination)?;
+        let count = anvil_export::export_with_storage(&world, &destination, &world_path)?;
         println!(
             "Anvil 1.7.10 snapshot exported: {count} chunks to {}",
             destination.display()

@@ -155,7 +155,7 @@ impl TileEntity {
             "Trap" | "Dispenser" | "Dropper" => Some(9),
             "Furnace" => Some(3),
             "Hopper" => Some(5),
-            "BrewingStand" => Some(4),
+            "BrewingStand" | "Cauldron" => Some(4),
             _ => None,
         };
         if let Some(items) = &self.items {
