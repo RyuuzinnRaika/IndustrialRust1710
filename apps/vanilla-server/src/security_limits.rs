@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_ACTIVE_PER_IP: usize = 4;
-const MAX_CONNECTS_PER_MINUTE: usize = 24;
+const MAX_LOGINS_PER_MINUTE: usize = 24;
 const MAX_TRACKED_IPS: usize = 4096;
 const WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 struct Bucket {
     active: usize,
-    attempts: VecDeque<Instant>,
+    login_attempts: VecDeque<Instant>,
 }
 #[derive(Default)]
 pub struct ConnectionLimiter {
@@ -39,27 +39,51 @@ impl ConnectionLimiter {
         let mut buckets = self.buckets.lock().ok()?;
         buckets.retain(|_, bucket| {
             while bucket
-                .attempts
+                .login_attempts
                 .front()
                 .is_some_and(|stamp| now.duration_since(*stamp) >= WINDOW)
             {
-                bucket.attempts.pop_front();
+                bucket.login_attempts.pop_front();
             }
-            bucket.active > 0 || !bucket.attempts.is_empty()
+            bucket.active > 0 || !bucket.login_attempts.is_empty()
         });
         if !buckets.contains_key(&ip) && buckets.len() >= MAX_TRACKED_IPS {
             return None;
         }
         let bucket = buckets.entry(ip).or_default();
-        if bucket.active >= MAX_ACTIVE_PER_IP || bucket.attempts.len() >= MAX_CONNECTS_PER_MINUTE {
+        if bucket.active >= MAX_ACTIVE_PER_IP {
             return None;
         }
         bucket.active += 1;
-        bucket.attempts.push_back(now);
         Some(Permit {
             guard: Arc::clone(self),
             address: ip,
         })
+    }
+}
+impl Permit {
+    /// Charge only an actual Login-state handshake, not a status query.
+    /// Status connections still occupy the bounded unauthenticated slot.
+    pub fn login_attempt(&self) -> bool {
+        let now = Instant::now();
+        let Ok(mut buckets) = self.guard.buckets.lock() else {
+            return false;
+        };
+        let Some(bucket) = buckets.get_mut(&self.address) else {
+            return false;
+        };
+        while bucket
+            .login_attempts
+            .front()
+            .is_some_and(|stamp| now.duration_since(*stamp) >= WINDOW)
+        {
+            bucket.login_attempts.pop_front();
+        }
+        if bucket.login_attempts.len() >= MAX_LOGINS_PER_MINUTE {
+            return false;
+        }
+        bucket.login_attempts.push_back(now);
+        true
     }
 }
 impl Drop for Permit {
@@ -123,6 +147,30 @@ mod tests {
         drop(permits);
         assert!(limiter.acquire(ip).is_some());
     }
+    #[test]
+    fn status_connections_do_not_exhaust_login_rate_limit() {
+        let limiter = Arc::new(ConnectionLimiter::default());
+        let ip: IpAddr = "192.0.2.42".parse().unwrap();
+        // Repeated lightweight status pings should remain possible.
+        for _ in 0..(MAX_LOGINS_PER_MINUTE * 3) {
+            let status = limiter.acquire(ip).unwrap();
+            drop(status);
+        }
+        for _ in 0..MAX_LOGINS_PER_MINUTE {
+            let login = limiter.acquire(ip).unwrap();
+            assert!(login.login_attempt());
+            drop(login);
+        }
+        let blocked = limiter.acquire(ip).unwrap();
+        assert!(!blocked.login_attempt());
+        drop(blocked);
+        // A different IP has an independent budget.
+        assert!(limiter
+            .acquire("192.0.2.43".parse().unwrap())
+            .unwrap()
+            .login_attempt());
+    }
+
     #[test]
     fn spam_and_controls_are_rejected() {
         let mut guard = ChatLimiter::default();

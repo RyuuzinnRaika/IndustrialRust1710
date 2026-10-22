@@ -2991,6 +2991,12 @@ fn handle(
     if next != 2 {
         return Err(bad("unsupported handshake state"));
     }
+    // Rate-limit login attempts, not harmless server-list status handshakes.
+    // The pending unauthenticated connection itself remains slot-limited.
+    if !login_permit.login_attempt() {
+        login_disconnect(&mut s, "Too many login attempts. Please try again later.")?;
+        return Ok(());
+    }
     if version != PROTOCOL_VERSION {
         login_disconnect(
             &mut s,
