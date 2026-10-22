@@ -62,9 +62,7 @@ impl PendingChunk {
                 io::ErrorKind::TimedOut,
                 "chunk compression deadline exceeded",
             )),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(io::Error::other("chunk encoder stopped"))
-            }
+            Err(RecvTimeoutError::Disconnected) => Err(io::Error::other("chunk encoder stopped")),
         }
     }
 
