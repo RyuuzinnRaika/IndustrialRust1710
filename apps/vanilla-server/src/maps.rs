@@ -87,7 +87,8 @@ impl Maps {
             return Err(invalid("map capacity or version invalid"));
         }
         for (id, map) in &self.entries {
-            if *id < 0 || map.colors.len() != PIXELS
+            if *id < 0
+                || map.colors.len() != PIXELS
                 || !world::in_bounds(map.center_x, 64, map.center_z)
             {
                 return Err(invalid("invalid saved map"));
@@ -152,8 +153,16 @@ impl Maps {
     }
     /// Persist before emitting an authoritative client map update.
     /// One 16-pixel stripe every four ticks bounds CPU and I/O load.
-    pub fn refresh(&mut self, path: &Path, world: &World, id: i16,
-        x: i32, z: i32, yaw: f32, sequence: u64) -> io::Result<Option<Vec<u8>>> {
+    pub fn refresh(
+        &mut self,
+        path: &Path,
+        world: &World,
+        id: i16,
+        x: i32,
+        z: i32,
+        yaw: f32,
+        sequence: u64,
+    ) -> io::Result<Option<Vec<u8>>> {
         if id < 0 {
             return Ok(None);
         }
@@ -165,7 +174,10 @@ impl Maps {
             next.entries.insert(id, MapData::centered(x, z));
             next.next_id = next.next_id.max(id + 1);
         }
-        let map = next.entries.get_mut(&id).ok_or_else(|| invalid("missing allocated map"))?;
+        let map = next
+            .entries
+            .get_mut(&id)
+            .ok_or_else(|| invalid("missing allocated map"))?;
         let (px, pz) = map.coordinate(x, z);
         let start_col = (px - 8).clamp(0, 112);
         let start_row = (pz - 8).clamp(0, 112);
@@ -201,18 +213,22 @@ fn terrain_color(world: &World, x: i32, z: i32) -> u8 {
     }
     let palette = match id {
         2 | 18 | 31 | 175 => 5, // grass/foliage
-        3 | 60 | 110 => 13, // dirt
-        8 | 9 => 12, // water
-        12 | 24 => 2, // sand
-        17 | 5 | 162 => 13, // wood
-        79 | 174 => 9, // ice
-        80 => 8, // snow
-        35 => 3, // wool
-        49 | 87 => 11, // dark stone
+        3 | 60 | 110 => 13,     // dirt
+        8 | 9 => 12,            // water
+        12 | 24 => 2,           // sand
+        17 | 5 | 162 => 13,     // wood
+        79 | 174 => 9,          // ice
+        80 => 8,                // snow
+        35 => 3,                // wool
+        49 | 87 => 11,          // dark stone
         0 => 0,
         _ => 11, // stone/manmade
     };
-    if palette == 0 { 0 } else { palette * 4 + 2 }
+    if palette == 0 {
+        0
+    } else {
+        palette * 4 + 2
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -225,9 +241,21 @@ mod tests {
         assert_eq!(id, 0);
         let (_, second) = maps.stage_new(0, 0).unwrap().unwrap();
         assert_eq!(second, 1);
-        let packet = maps.refresh(&path, &World::new(), id, 0, 0, 0.0, 0).unwrap().unwrap();
+        let packet = maps
+            .refresh(&path, &World::new(), id, 0, 0, 0.0, 0)
+            .unwrap()
+            .unwrap();
         assert_eq!(packet[0..3], [0, 3, 1]); // MapID, scale, marker count
-        assert_eq!(Maps::load(&path).unwrap().entries.get(&id).unwrap().colors.len(), PIXELS);
+        assert_eq!(
+            Maps::load(&path)
+                .unwrap()
+                .entries
+                .get(&id)
+                .unwrap()
+                .colors
+                .len(),
+            PIXELS
+        );
         let _ = fs::remove_file(path);
     }
     #[test]
