@@ -104,12 +104,7 @@ struct LevelInfo {
     initialized: i8,
 }
 
-fn nbt_for_chunk(
-    world: &World,
-    cx: i32,
-    cz: i32,
-    tiles: &[fastnbt::Value],
-) -> io::Result<Vec<u8>> {
+fn nbt_for_chunk(world: &World, cx: i32, cz: i32, tiles: &[fastnbt::Value]) -> io::Result<Vec<u8>> {
     let mut sections = Vec::new();
     let base_x = cx * 16;
     let base_z = cz * 16;
@@ -220,7 +215,12 @@ fn write_snapshot(
             .open(filename)?;
         let mut region = Region::create(file).map_err(wrap)?;
         for (cx, cz) in columns {
-            let bytes = nbt_for_chunk(world, cx, cz, tiles.get(&(cx, cz)).map_or(&[], Vec::as_slice))?;
+            let bytes = nbt_for_chunk(
+                world,
+                cx,
+                cz,
+                tiles.get(&(cx, cz)).map_or(&[], Vec::as_slice),
+            )?;
             region
                 .write_chunk(
                     cx.rem_euclid(32) as usize,
@@ -380,7 +380,9 @@ mod tests {
         let dest = base.join("snapshot");
         let mut world = World::new();
         for (x, block) in [(1, 54u16), (2, 61), (3, 154), (4, 117)] {
-            world.update_and_save(&source, x, 64, 1, block << 4).unwrap();
+            world
+                .update_and_save(&source, x, 64, 1, block << 4)
+                .unwrap();
         }
         let stack = Stack {
             id: 4,
@@ -389,7 +391,9 @@ mod tests {
         };
         let mut chest_slots = [None; CHEST_SLOTS];
         chest_slots[26] = Some(stack);
-        let chests = Chests::default().staged_update((1, 64, 1), chest_slots).unwrap();
+        let chests = Chests::default()
+            .staged_update((1, 64, 1), chest_slots)
+            .unwrap();
         fs::write(Chests::location(&source), chests.encoded().unwrap()).unwrap();
 
         let furnace = Furnace {
@@ -398,19 +402,25 @@ mod tests {
             burn_total: 100,
             cook: 10,
         };
-        let furnaces = Furnaces::default().staged_update((2, 64, 1), furnace).unwrap();
+        let furnaces = Furnaces::default()
+            .staged_update((2, 64, 1), furnace)
+            .unwrap();
         fs::write(Furnaces::location(&source), furnaces.encoded().unwrap()).unwrap();
 
         let mut hopper_slots = [None; HOPPER_SLOTS];
         hopper_slots[4] = Some(stack);
-        let hoppers = Hoppers::default().staged_update((3, 64, 1), hopper_slots).unwrap();
+        let hoppers = Hoppers::default()
+            .staged_update((3, 64, 1), hopper_slots)
+            .unwrap();
         fs::write(Hoppers::location(&source), hoppers.encoded().unwrap()).unwrap();
 
         let brewer = Brewer {
             slots: [Some(stack), None, None, None],
             brew_time: 5,
         };
-        let brewers = Brewers::default().staged_update((4, 64, 1), brewer).unwrap();
+        let brewers = Brewers::default()
+            .staged_update((4, 64, 1), brewer)
+            .unwrap();
         fs::write(Brewers::location(&source), brewers.encoded().unwrap()).unwrap();
 
         let world_before = fs::read(&source).unwrap();
@@ -422,7 +432,8 @@ mod tests {
         let parsed = crate::legacy_nbt::parse_chunk(&raw, 0, 0).unwrap();
         let mut tiles = BTreeMap::new();
         for value in &parsed.level.tile_entities {
-            let decoded: TileEntity = fastnbt::from_bytes(&fastnbt::to_bytes(value).unwrap()).unwrap();
+            let decoded: TileEntity =
+                fastnbt::from_bytes(&fastnbt::to_bytes(value).unwrap()).unwrap();
             tiles.insert(decoded.x, decoded);
         }
         assert_eq!(tiles.len(), 4);
@@ -462,7 +473,11 @@ mod tests {
         let world = World::new();
         world.save(&source).unwrap();
         let mut slots = [None; CHEST_SLOTS];
-        slots[0] = Some(Stack { id: 4, count: 1, damage: 0 });
+        slots[0] = Some(Stack {
+            id: 4,
+            count: 1,
+            damage: 0,
+        });
         let state = Chests::default().staged_update((1, 64, 1), slots).unwrap();
         fs::write(Chests::location(&source), state.encoded().unwrap()).unwrap();
         assert!(export_with_storage(&world, &dest, &source).is_err());
