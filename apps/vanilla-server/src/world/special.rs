@@ -811,7 +811,10 @@ mod tests {
         w.import_block(10, 64, 0, (6 << 4) | 5).unwrap();
         assert!(w.bonemeal_changes(10, 64, 0).is_empty());
         let (_, changed, _, _) = w.stage_special_item(10, 64, 0, meal).unwrap().unwrap();
-        assert!(changed.is_empty(), "unsupported dark oak cannot debit bone meal");
+        assert!(
+            changed.is_empty(),
+            "unsupported dark oak cannot debit bone meal"
+        );
     }
 
     #[test]
