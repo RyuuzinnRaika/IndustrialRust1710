@@ -597,70 +597,43 @@ fn use_special_item(
     let Some(held) = inventory.held() else {
         return Ok(None);
     };
-    let target = w.get(x, y, z) >> 4;
-    let cauldron = w.cauldron_exchange(x, y, z, held);
-    let action = if cauldron.is_some() {
-        1
-    } else if target == 120 && held.id == 381 {
-        2
-    } else if held.id == 351 && held.damage == 15 {
-        3
-    } else if target == 46 && held.id == 259 {
-        4
-    } else {
+    let Some((staged_world, changed, replacement, wears_tool)) =
+        w.stage_special_item(x, y, z, held)?
+    else {
         return Ok(None);
     };
-    let mut candidate = inventory.clone();
+    // Invalid uses and blocked tree generation never debit or damage an item.
+    if changed.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
     if survival {
-        let spent = match cauldron {
-            Some((_, replacement)) => candidate.exchange_one_held(replacement),
-            None if action == 4 => candidate.wear_flint_steel(),
-            None => candidate.consume_held(),
+        let mut staged_inventory = inventory.clone();
+        let spent = if let Some(result) = replacement {
+            staged_inventory.exchange_one_held(result)
+        } else if wears_tool {
+            staged_inventory.wear_flint_steel()
+        } else {
+            staged_inventory.consume_held()
         };
         if !spent {
             return Ok(Some(Vec::new()));
         }
-        // Never grant a free block while persistence is uncertain.
-        candidate.save(inventory_path)?;
+        // Existing E45 redo journal atomically publishes both durable files.
+        // Do not swap either live state until the journal completes.
+        journal::commit(
+            &world_path.with_extension("pending-txn.json"),
+            &[
+                (world_path, staged_world.encoded()?),
+                (inventory_path, staged_inventory.encoded()?),
+            ],
+        )?;
+        *inventory = staged_inventory;
+    } else {
+        staged_world.save(world_path)?;
     }
-    let result = match action {
-        1 => {
-            let (block, _) = cauldron.expect("cauldron action must have a replacement");
-            w.update_and_save(world_path, x, y, z, block)
-                .map(|changed| if changed { vec![(x, y, z)] } else { Vec::new() })
-        }
-        2 => w.insert_end_eye(world_path, x, y, z),
-        3 => w.apply_bonemeal(world_path, x, y, z),
-        _ => w.ignite_tnt(world_path, x, y, z).map(|changed| {
-            if changed {
-                vec![(x, y, z)]
-            } else {
-                Vec::new()
-            }
-        }),
-    };
-    match result {
-        Ok(changed) if !changed.is_empty() => {
-            if survival {
-                *inventory = candidate;
-            }
-            Ok(Some(changed))
-        }
-        Ok(_) => {
-            if survival {
-                inventory.save(inventory_path)?;
-            }
-            Ok(Some(Vec::new()))
-        }
-        Err(error) => {
-            if survival {
-                inventory.save(inventory_path)?;
-            }
-            Err(error)
-        }
-    }
+    *w = staged_world;
+    Ok(Some(changed))
 }
-
 fn play(
     s: &mut TcpStream,
     world: &Mutex<World>,
