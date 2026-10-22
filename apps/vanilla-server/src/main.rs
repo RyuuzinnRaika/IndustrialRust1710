@@ -14,6 +14,7 @@ mod dimensions;
 mod dispensers;
 mod experience;
 mod furnaces;
+mod game_rules;
 mod ground_items;
 mod hoppers;
 mod inventory;
@@ -46,6 +47,7 @@ use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use experience::Experience;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
+use game_rules::GameRules;
 use ground_items::GroundItems;
 use hoppers::{Hoppers, Position as HopperPosition};
 use inventory::{Inventory, Stack};
@@ -234,6 +236,7 @@ struct InitialPlayer<'a> {
     inventory: &'a Inventory,
     vitals: Vitals,
     survival: bool,
+    hardcore: bool,
     difficulty: u8,
 }
 fn join(
@@ -248,6 +251,7 @@ fn join(
         inventory,
         vitals,
         survival,
+        hardcore,
         difficulty,
     } = initial;
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
@@ -260,7 +264,7 @@ fn join(
         .extended_identity()
         .map_or(0, |(_, dim)| dim.protocol_id());
     join.extend_from_slice(&[
-        u8::from(!survival),
+        u8::from(!survival) | if hardcore { 0x08 } else { 0 },
         dimension_id as u8,
         difficulty, // explicitly configured difficulty
         MAX_PLAYERS as u8,
@@ -578,7 +582,9 @@ struct PlayerSession<'a> {
     brewers: &'a Mutex<Brewers>,
     brewer_path: &'a Path,
     survival: bool,
+    hardcore: bool,
     difficulty: u8,
+    game_rules: &'a Mutex<GameRules>,
     hub: &'a Hub,
     entity_id: i32,
     events: &'a Receiver<Event>,
@@ -612,7 +618,9 @@ fn play(
         brewers,
         brewer_path,
         survival,
+        hardcore,
         difficulty,
+        game_rules,
         hub,
         entity_id,
         events,
@@ -1180,7 +1188,10 @@ fn play(
         }
         if survival && vitals.health <= 0.0 {
             eating = None;
-            commit_death_drops(
+            let keep_inventory = game_rules
+                .lock().map_err(|_| bad("game rules mutex poisoned"))?.keep_inventory();
+            if !keep_inventory {
+                commit_death_drops(
                 inventory,
                 inventory_path,
                 ground_items,
@@ -1189,6 +1200,13 @@ fn play(
                 hub,
                 location,
             )?;
+            }
+            if hardcore {
+                // Persist the dead state before ending the connection. Future
+                // logins reject this player even after server restart.
+                player.save_state(player_path, *vitals)?;
+                return Ok(());
+            }
         }
         if now_tick.saturating_sub(last_time_tick) >= 20 {
             let mut time = Vec::with_capacity(16);
@@ -2672,7 +2690,14 @@ fn play(
                 let action = input.i8()?;
                 input.finish()?;
                 if survival && action == 0 && vitals.health <= 0.0 {
-                    commit_death_drops(
+                    if hardcore {
+                        player.save_state(player_path, *vitals)?;
+                        return Ok(());
+                    }
+                    let keep_inventory = game_rules.lock()
+                        .map_err(|_| bad("game rules mutex poisoned"))?.keep_inventory();
+                    if !keep_inventory {
+                        commit_death_drops(
                         inventory,
                         inventory_path,
                         ground_items,
@@ -2681,6 +2706,7 @@ fn play(
                         hub,
                         location,
                     )?;
+                    }
                     // Preserve the death site before changing the saved player
                     // position. XP orbs belong beside the dropped inventory,
                     // never at a distant bed or fallback world spawn.
@@ -2721,16 +2747,18 @@ fn play(
                     hazards = Hazards::new();
                     last_hazards_tick = now_tick;
                     // In vanilla, death loses XP and may leave up to 100 XP in orbs.
-                    let drop_amount =
-                        (u32::from(experience.level_and_fraction().0) * 7).min(100) as u16;
-                    *experience = Experience::default();
-                    experience.save(experience_path)?;
-                    if let Some(orb) = mobs
-                        .lock()
-                        .map_err(|_| bad("mob mutex poisoned"))?
-                        .spawn_xp(death_position, drop_amount)
-                    {
-                        hub.broadcast(orb);
+                    if !keep_inventory {
+                        let drop_amount =
+                            (u32::from(experience.level_and_fraction().0) * 7).min(100) as u16;
+                        *experience = Experience::default();
+                        experience.save(experience_path)?;
+                        if let Some(orb) = mobs
+                            .lock()
+                            .map_err(|_| bad("mob mutex poisoned"))?
+                            .spawn_xp(death_position, drop_amount)
+                        {
+                            hub.broadcast(orb);
+                        }
                     }
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = 0i32.to_be_bytes().to_vec();
@@ -2840,7 +2868,9 @@ struct ServerContext {
     brewers: Arc<Mutex<Brewers>>,
     brewer_path: Arc<PathBuf>,
     survival: bool,
+    hardcore: bool,
     difficulty: u8,
+    game_rules: Arc<Mutex<GameRules>>,
 }
 fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     let ServerContext {
@@ -2861,7 +2891,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         brewers,
         brewer_path,
         survival,
+        hardcore,
         difficulty,
+        game_rules,
     } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -2923,6 +2955,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             return Ok(());
         }
     };
+    if hardcore && player_vitals.health <= 0.0 {
+        login_disconnect(&mut s, "Hardcore death: rejoining this world is not permitted.")?;
+        return Ok(());
+    }
     if !player_file.exists() && !player_file.with_extension("json").exists() {
         player_state = safe_spawn(&world)?;
     }
@@ -2977,6 +3013,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             inventory: &inventory_state,
             vitals: player_vitals,
             survival,
+            hardcore,
             difficulty,
         },
     )?;
@@ -3041,7 +3078,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             brewers: &brewers,
             brewer_path: &brewer_path,
             survival,
+            hardcore,
             difficulty,
+            game_rules: &game_rules,
             hub: &hub,
             entity_id,
             events: &events,
@@ -3068,7 +3107,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
 }
 /// Commands are accepted only from the operating-system console, never from
 /// unauthenticated offline-mode players or Protocol 5 chat messages.
-fn start_clock_console(hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf>) {
+fn start_clock_console(
+    hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf>,
+    rules: Arc<Mutex<GameRules>>, rules_path: Arc<PathBuf>,
+) {
     thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
@@ -3077,6 +3119,29 @@ fn start_clock_console(hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf
             };
             let args: Vec<_> = line.split_whitespace().collect();
             let result = match args.as_slice() {
+                ["/gamerule", key] => (|| -> io::Result<()> {
+                    let rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
+                    let value = rules.get(key).ok_or_else(|| bad("unsupported game rule"))?;
+                    println!("{key} = {value}");
+                    Ok(())
+                })(),
+                ["/gamerule", key, value] => (|| -> io::Result<()> {
+                    let value = match *value {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err(bad("gamerule value must be true or false")),
+                    };
+                    let mut rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
+                    let mut candidate = *rules;
+                    candidate.set(key, value)?;
+                    candidate.save(&rules_path)?;
+                    *rules = candidate;
+                    if *key == "doDaylightCycle" {
+                        clock.set_daylight_cycle(value);
+                    }
+                    println!("{key} = {value}");
+                    Ok(())
+                })(),
                 ["/time", "query", "daytime"] => {
                     println!("Daytime: {}", clock.day_time());
                     Ok(())
@@ -3170,6 +3235,7 @@ fn main() -> io::Result<()> {
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
     let mut survival = properties.as_ref().is_some_and(|config| config.survival);
+    let hardcore = properties.as_ref().is_some_and(|config| config.hardcore);
     let mut difficulty = properties.as_ref().map_or(2, |config| config.difficulty);
     let mut requested_seed: Option<u64> = None;
     let mut biome_seed: Option<u64> = None;
@@ -3321,6 +3387,9 @@ fn main() -> io::Result<()> {
             }
             _ => return Err(bad("unknown command-line argument")),
         }
+    }
+    if hardcore && (!survival || difficulty != 3) {
+        return Err(bad("hardcore requires survival mode and difficulty 3"));
     }
     if (requested_seed.is_some() || biome_seed.is_some() || expanded_seed.is_some())
         && (!survival
@@ -3582,6 +3651,11 @@ fn main() -> io::Result<()> {
     let clock_path = Arc::new(world_path.with_extension("clock"));
     let restored_clock = Clock::load_state(&clock_path)?;
     let (clock, _clock_thread) = Clock::start_from(restored_clock);
+    let rules_path = Arc::new(GameRules::location(&world_path));
+    let world_rules = Arc::new(Mutex::new(GameRules::load(&rules_path)?));
+    clock.set_daylight_cycle(
+        world_rules.lock().map_err(|_| bad("game rules mutex poisoned"))?.daylight_cycle(),
+    );
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -3620,6 +3694,8 @@ fn main() -> io::Result<()> {
         Arc::clone(&hub),
         Arc::clone(&clock),
         Arc::clone(&clock_path),
+        Arc::clone(&world_rules),
+        Arc::clone(&rules_path),
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
@@ -3875,6 +3951,7 @@ fn main() -> io::Result<()> {
         let hopper_file = Arc::clone(&hopper_path);
         let brewer_storage = Arc::clone(&brewers);
         let brewer_file = Arc::clone(&brewer_path);
+        let rules = Arc::clone(&world_rules);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -3897,7 +3974,9 @@ fn main() -> io::Result<()> {
                     brewers: brewer_storage,
                     brewer_path: brewer_file,
                     survival,
+                    hardcore,
                     difficulty,
+                    game_rules: rules,
                 },
             ) {
                 if e.kind() != ErrorKind::UnexpectedEof {
