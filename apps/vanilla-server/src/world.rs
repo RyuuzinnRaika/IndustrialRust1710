@@ -789,9 +789,7 @@ impl World {
                 .iter()
                 .filter_map(|(&(x, y, z), &new)| {
                     let old = self.get(x, i32::from(y), z);
-                    (matches!(old >> 4, 29 | 33)
-                        && old >> 4 == new >> 4
-                        && (old ^ new) & 8 != 0)
+                    (matches!(old >> 4, 29 | 33) && old >> 4 == new >> 4 && (old ^ new) & 8 != 0)
                         .then_some(PistonAction {
                             pos: (x, i32::from(y), z),
                             block_id: old >> 4,
@@ -1648,23 +1646,37 @@ mod tests {
 
     #[test]
     fn piston_action_is_published_once_after_durable_world_commit() {
-        let path = std::env::temp_dir()
-            .join(format!("ir1710-piston-action-{}.irw", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-piston-action-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
-        world.update_and_save(&path, 1, 64, 0, (33 << 4) | 5).unwrap();
+        world
+            .update_and_save(&path, 1, 64, 0, (33 << 4) | 5)
+            .unwrap();
         world.update_and_save(&path, 0, 64, 0, 152 << 4).unwrap();
         world.block_tick(&path, 64).unwrap();
-        assert_eq!(world.drain_piston_actions(), vec![PistonAction {
-            pos: (1, 64, 0), block_id: 33, facing: 5, extending: true,
-        }]);
+        assert_eq!(
+            world.drain_piston_actions(),
+            vec![PistonAction {
+                pos: (1, 64, 0),
+                block_id: 33,
+                facing: 5,
+                extending: true,
+            }]
+        );
         world.block_tick(&path, 64).unwrap();
         assert!(world.drain_piston_actions().is_empty());
         world.update_and_save(&path, 0, 64, 0, 0).unwrap();
         world.block_tick(&path, 64).unwrap();
-        assert_eq!(world.drain_piston_actions(), vec![PistonAction {
-            pos: (1, 64, 0), block_id: 33, facing: 5, extending: false,
-        }]);
+        assert_eq!(
+            world.drain_piston_actions(),
+            vec![PistonAction {
+                pos: (1, 64, 0),
+                block_id: 33,
+                facing: 5,
+                extending: false,
+            }]
+        );
         fs::remove_file(path).unwrap();
     }
 
