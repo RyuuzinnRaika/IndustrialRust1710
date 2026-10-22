@@ -39,6 +39,7 @@ mod survival;
 mod survival_damage;
 mod telemetry;
 mod terrain;
+mod throwables;
 mod vitals;
 mod whitelist;
 mod world;
@@ -75,6 +76,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use survival::MiningProgress;
 use survival_damage::Hazards;
+use throwables::Throwables;
 use vitals::Vitals;
 use whitelist::Whitelist;
 use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
@@ -579,6 +581,7 @@ struct PlayerSession<'a> {
     ground_items: &'a Mutex<GroundItems>,
     ground_path: &'a Path,
     mobs: &'a Mutex<Mobs>,
+    throwables: &'a Mutex<Throwables>,
     chests: &'a Mutex<Chests>,
     chest_path: &'a Path,
     furnaces: &'a Mutex<Furnaces>,
@@ -619,6 +622,7 @@ fn play(
         ground_items,
         ground_path,
         mobs,
+        throwables,
         chests,
         chest_path,
         furnaces,
@@ -1829,6 +1833,30 @@ fn play(
                         if inventory.can_place(held) {
                             if stack.id == 261 {
                                 bow_start = Some(now_tick);
+                            } else if throwables::Kind::from_item(stack.id).is_some() {
+                                let mut state = throwables.lock()
+                                    .map_err(|_| bad("throwables lock poisoned"))?;
+                                // Under the bounded lock the item is paid for
+                                // before the newly spawned entity is public.
+                                let mut next = inventory.clone();
+                                if next.consume_held() {
+                                    // Do not persist a debit if launch cannot succeed.
+                                    // A valid living player can always launch from
+                                    // a valid nearby eye position unless at capacity.
+                                    if state.snapshot(*player).len() < 128 {
+                                        if let Some(event) = state.launch(
+                                            stack.id, entity_id, name, *player, yaw, pitch
+                                        ) {
+                                            if let Err(error) = next.save(inventory_path) {
+                                                return Err(error);
+                                            }
+                                            *inventory = next;
+                                            drop(state);
+                                            send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                            hub.broadcast_in_view(*player, event);
+                                        }
+                                    }
+                                }
                             } else if vitals.can_eat(stack)
                                 || (stack.id == 373 && brewing::effect(stack).is_some())
                                 || stack.id == 335
@@ -2905,6 +2933,7 @@ struct ServerContext {
     ground_items: Arc<Mutex<GroundItems>>,
     ground_path: Arc<PathBuf>,
     mobs: Arc<Mutex<Mobs>>,
+    throwables: Arc<Mutex<Throwables>>,
     chests: Arc<Mutex<Chests>>,
     chest_path: Arc<PathBuf>,
     furnaces: Arc<Mutex<Furnaces>>,
@@ -2930,6 +2959,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         ground_items,
         ground_path,
         mobs,
+        throwables,
         chests,
         chest_path,
         furnaces,
@@ -3114,6 +3144,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         {
             send(&mut s, mob.id, &mob.body)?;
         }
+        for object in throwables.lock()
+            .map_err(|_| bad("throwables mutex poisoned"))?.snapshot(player_state) {
+            send(&mut s, object.id, &object.body)?;
+        }
     }
     let result = play(
         &mut s,
@@ -3135,6 +3169,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             ground_items: &ground_items,
             ground_path: &ground_path,
             mobs: &mobs,
+            throwables: &throwables,
             chests: &chests,
             chest_path: &chest_path,
             furnaces: &furnaces,
@@ -3787,6 +3822,7 @@ fn main() -> io::Result<()> {
             &world_path.with_extension("mobs.json"),
         )?
     }));
+    let throwables = Arc::new(Mutex::new(Throwables::default()));
     let ground_path = Arc::new(GroundItems::location(&world_path));
     let ground_items = Arc::new(Mutex::new(if survival {
         GroundItems::load(&ground_path)?
@@ -4051,6 +4087,56 @@ fn main() -> io::Result<()> {
             thread::sleep(Duration::from_millis(10));
         }
     });
+    // Ephemeral thrown entities have a separate bounded, shared 20TPS
+    // physics loop and do not block Mob AI session locks during fan-out.
+    let projectile_state = Arc::clone(&throwables);
+    let projectile_world = Arc::clone(&world);
+    let projectile_clock = Arc::clone(&clock);
+    let projectile_hub = Arc::clone(&hub);
+    let projectile_mobs = Arc::clone(&mobs);
+    thread::spawn(move || {
+        let mut last = projectile_clock.ticks();
+        loop {
+            let now = projectile_clock.ticks();
+            if now > last {
+                let begin = last.saturating_add(1);
+                last = now;
+                let world = match projectile_world.lock() {
+                    Ok(world) => world,
+                    Err(_) => return,
+                };
+                let mut objects = match projectile_state.lock() {
+                    Ok(objects) => objects,
+                    Err(_) => return,
+                };
+                let mut actions = throwables::TickResult::default();
+                for tick in begin.max(now.saturating_sub(19))..=now {
+                    let step = objects.tick(&world, tick);
+                    actions.events.extend(step.events);
+                    actions.pearl_teleports.extend(step.pearl_teleports);
+                    actions.egg_hatches.extend(step.egg_hatches);
+                }
+                drop(objects);
+                for at in actions.egg_hatches {
+                    if let Ok(mut mobs) = projectile_mobs.lock() {
+                        if let Some(entity) = mobs.hatch_egg(&world, at) {
+                            projectile_hub.broadcast_in_view(at, entity);
+                        }
+                    }
+                }
+                drop(world);
+                for (at, packet) in actions.events {
+                    projectile_hub.broadcast_in_view(at, packet);
+                }
+                for (owner, destination) in actions.pearl_teleports {
+                    if let Err(error) = projectile_hub.request_admin_teleport(&owner, destination) {
+                        eprintln!("ENDER PEARL TELEPORT ERROR: {error}");
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
     for accepted in listener.incoming() {
         let stream = accepted?;
         if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
@@ -4066,6 +4152,7 @@ fn main() -> io::Result<()> {
         let drops = Arc::clone(&ground_items);
         let drops_path = Arc::clone(&ground_path);
         let mob_state = Arc::clone(&mobs);
+        let thrown_state = Arc::clone(&throwables);
         let storage = Arc::clone(&chests);
         let storage_path = Arc::clone(&chest_path);
         let machine_storage = Arc::clone(&furnaces);
@@ -4090,6 +4177,7 @@ fn main() -> io::Result<()> {
                     ground_items: drops,
                     ground_path: drops_path,
                     mobs: mob_state,
+                    throwables: thrown_state,
                     chests: storage,
                     chest_path: storage_path,
                     furnaces: machine_storage,
