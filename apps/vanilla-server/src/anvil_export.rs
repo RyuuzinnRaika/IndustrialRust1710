@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Seek, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_EXPORT_CHUNKS: usize = 256;
 
@@ -187,20 +188,11 @@ fn export_level_dat(directory: &Path) -> io::Result<()> {
     file.sync_all()
 }
 
-/// Exports only spawn 5x5 and changed chunk columns, never an unbounded map.
-/// Fails if the destination already exists; never overwrite a Minecraft save.
-pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
-    let mut chunks: BTreeSet<(i32, i32)> = world.edited_chunks();
-    for z in -VIEW_DISTANCE..=VIEW_DISTANCE {
-        for x in -VIEW_DISTANCE..=VIEW_DISTANCE {
-            chunks.insert((x, z));
-        }
-    }
-    if chunks.len() > MAX_EXPORT_CHUNKS {
-        return Err(invalid("Anvil snapshot exceeds 256 chunk limit"));
-    }
-    fs::create_dir(dest)?; // No replacing an existing world directory.
-    let regions_dir = dest.join("region");
+/// Writes into a private sibling directory and publishes it only once the
+/// region files and level.dat are fully synchronized. The active IRW source
+/// is never modified; this is still an offline snapshot, not live Anvil IO.
+fn write_snapshot(world: &World, stage: &Path, chunks: &BTreeSet<(i32, i32)>) -> io::Result<()> {
+    let regions_dir = stage.join("region");
     fs::create_dir(&regions_dir)?;
     let mut regions: BTreeMap<(i32, i32), Vec<(i32, i32)>> = BTreeMap::new();
     for &(cx, cz) in &chunks {
@@ -232,8 +224,80 @@ pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
         file.set_len(len)?;
         file.sync_all()?;
     }
-    export_level_dat(dest)?;
-    Ok(chunks.len())
+    export_level_dat(stage)?;
+    #[cfg(unix)]
+    {
+        // File sync alone does not persist the new region directory entries
+        // across a power failure.
+        File::open(&regions_dir)?.sync_all()?;
+        File::open(stage)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Exports only spawn 5x5 and changed chunk columns, never an unbounded map.
+/// The destination must not exist. Failed serialization cleans up the private
+/// staging tree rather than exposing a partially written Minecraft world.
+pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
+    let mut chunks: BTreeSet<(i32, i32)> = world.edited_chunks();
+    for z in -VIEW_DISTANCE..=VIEW_DISTANCE {
+        for x in -VIEW_DISTANCE..=VIEW_DISTANCE {
+            chunks.insert((x, z));
+        }
+    }
+    if chunks.len() > MAX_EXPORT_CHUNKS {
+        return Err(invalid("Anvil snapshot exceeds 256 chunk limit"));
+    }
+    match fs::symlink_metadata(dest) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "destination Minecraft world already exists",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let parent = dest
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let basename = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| invalid("Anvil destination must have a name"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(wrap)?
+        .as_nanos();
+    let stage = parent.join(format!(".{basename}.ir-export-{}-{nonce}", std::process::id()));
+    fs::create_dir(&stage)?;
+    let result = (|| {
+        write_snapshot(world, &stage, &chunks)?;
+        // Do not rename over a world that appeared during export. The check
+        // prevents accidental overwrite during normal operation; concurrent
+        // uncooperative directory creation still requires external locking.
+        match fs::symlink_metadata(dest) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "destination Minecraft world appeared during export",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        fs::rename(&stage, dest)?;
+        #[cfg(unix)]
+        File::open(parent)?.sync_all()?;
+        Ok(chunks.len())
+    })();
+    if result.is_err() {
+        // A crash may leave a hidden staging directory. Such directories are
+        // never loaded as worlds, and ordinary errors clean up immediately.
+        let _ = fs::remove_dir_all(&stage);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -265,6 +329,25 @@ mod tests {
         blocks: ByteArray,
         #[serde(rename = "Data")]
         metadata: ByteArray,
+    }
+
+    #[test]
+    fn export_refuses_existing_world_without_touching_its_contents() {
+        let base = std::env::temp_dir().join(format!(
+            "industrial-anvil-no-overwrite-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir(&base).unwrap();
+        let output = base.join("minecraft");
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("sentinel"), b"must-remain").unwrap();
+        let error = export(&World::new(), &output).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(output.join("sentinel")).unwrap(), b"must-remain");
+        assert_eq!(fs::read_dir(&base).unwrap().count(), 1);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
