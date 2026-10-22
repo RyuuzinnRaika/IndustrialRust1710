@@ -424,6 +424,10 @@ pub struct Mobs {
     last_tick: u64,
     #[serde(default)]
     last_graze_tick: u64,
+    /// Next eligible spawn tick per spawner coordinate. Persist across restarts
+    /// so reconnecting players cannot reset a dungeon's spawn cooldown.
+    #[serde(default)]
+    spawner_next_tick: BTreeMap<String, u64>,
     #[serde(skip)]
     last_leash_tick: u64,
     // Runtime-only flag. Default false (not paused) on new/load.
@@ -698,6 +702,17 @@ impl Mobs {
                 || value.arrows.keys().any(|id| value.orbs.contains_key(id))
                 || value.arrows.len() > ARROW_CAP
                 || value.orbs.len() > 256
+                || value.spawner_next_tick.len() > 512
+                || value.spawner_next_tick.keys().any(|key| {
+                    let coords: Vec<_> = key.split(',').map(str::parse::<i32>).collect();
+                    coords.len() != 3
+                        || coords.iter().any(Result::is_err)
+                        || !crate::world::in_bounds(
+                            coords[0].as_ref().copied().unwrap_or(0),
+                            coords[1].as_ref().copied().unwrap_or(-1),
+                            coords[2].as_ref().copied().unwrap_or(0),
+                        )
+                })
                 || value.entities.iter().any(|(&id, mob)| {
                     id < BASE_ID
                         || mob.tame_progress > 20
@@ -1974,6 +1989,99 @@ impl Mobs {
             break; // Bound per-cycle packets and CPU.
         }
     }
+    /// Minecraft 1.7.10-style dungeon spawner activation. Check at most once
+    /// per second: the block must still exist, a player must be nearby, no
+    /// more than six matching mobs may inhabit the local spawner area and no
+    /// more than the global entity cap may exist. A failed attempt still
+    /// advances the persisted cooldown; time is the restored server tick.
+    fn spawn_from_spawners(
+        &mut self,
+        now: u64,
+        world: &World,
+        players: &[PlayerPosition],
+        events: &mut Vec<Event>,
+    ) {
+        if !self.enabled || self.difficulty == Some(0) || !now.is_multiple_of(20) {
+            return;
+        }
+        for (x, y, z) in world.nearby_spawners(players) {
+            if self.entities.len() >= MAX_LOADED_MOBS {
+                break;
+            }
+            let key = format!("{x},{y},{z}");
+            if self
+                .spawner_next_tick
+                .get(&key)
+                .is_some_and(|tick| *tick > now)
+            {
+                continue;
+            }
+            // Keep this persisted table bounded even when players explore
+            // more than 512 distinct dungeons. Evict an old cooldown rather
+            // than permanently disabling every newly discovered spawner.
+            if self.spawner_next_tick.len() >= 512 && !self.spawner_next_tick.contains_key(&key) {
+                if let Some(oldest) = self
+                    .spawner_next_tick
+                    .iter()
+                    .min_by_key(|(_, tick)| *tick)
+                    .map(|(key, _)| key.clone())
+                {
+                    self.spawner_next_tick.remove(&oldest);
+                }
+            }
+            let salt = (x as i64 as u64).wrapping_mul(0x9e3779b185ebca87)
+                ^ (y as i64 as u64).wrapping_mul(0xc2b2ae3d27d4eb4f)
+                ^ (z as i64 as u64).wrapping_mul(0x165667b19e3779f9);
+            // No TileEntity spawner type is stored yet: deterministic IRW4
+            // dungeon spawners choose from the vanilla zombie/skeleton/spider
+            // pool. A subsequent TileEntity format can override this safely.
+            let kind = match hash(salt) % 4 {
+                0 | 1 => Kind::Zombie,
+                2 => Kind::Skeleton,
+                _ => Kind::Spider,
+            };
+            let nearby_mobs = self
+                .entities
+                .values()
+                .filter(|mob| {
+                    mob.kind == kind
+                        && (mob.position.x - (f64::from(x) + 0.5)).abs() <= 8.0
+                        && (mob.position.y - f64::from(y)).abs() <= 4.0
+                        && (mob.position.z - (f64::from(z) + 0.5)).abs() <= 8.0
+                })
+                .count();
+            if nearby_mobs < 6 {
+                for attempt in 0..4 {
+                    let roll = hash(salt ^ now ^ (attempt as u64).wrapping_mul(0x94d049bb133111eb));
+                    let sx = x + (roll % 9) as i32 - 4;
+                    let sz = z + ((roll >> 8) % 9) as i32 - 4;
+                    let sy = y + ((roll >> 16) % 3) as i32 - 1;
+                    let position = PlayerPosition {
+                        x: f64::from(sx) + 0.5,
+                        y: f64::from(sy),
+                        z: f64::from(sz) + 0.5,
+                    };
+                    if !position.is_valid()
+                        || !matches!(
+                            world.get(sx, sy - 1, sz) >> 4,
+                            1..=5 | 7 | 12 | 13 | 24 | 48 | 49 | 87 | 88 | 89 | 112 | 121
+                        )
+                        || world.get(sx, sy, sz) != 0
+                        || world.get(sx, sy + 1, sz) != 0
+                        || physics::collides(world, &position)
+                    {
+                        continue;
+                    }
+                    events.push(self.insert(kind, position, false));
+                    break; // One new mob per spawner/second, bounded packet fan-out.
+                }
+            }
+            self.spawner_next_tick.insert(
+                key,
+                now.saturating_add(200 + hash(salt ^ now ^ 0x5a0f) % 600),
+            );
+        }
+    }
     /// The world GameRule controls only natural spawning, never existing mob AI.
     pub fn set_natural_spawning(&mut self, allowed: bool) {
         self.natural_spawning_paused = !allowed;
@@ -2034,6 +2142,7 @@ impl Mobs {
             }
         }
         self.spawn_natural(now, world, players, &mut events);
+        self.spawn_from_spawners(now, world, players, &mut events);
         for _ in 0..steps {
             let mut shots = Vec::new();
             let mut dead = Vec::new();
@@ -2931,6 +3040,46 @@ mod tests {
         assert_eq!(mobs.untie_fence([0, 64, 0]).len(), 2);
     }
 
+    #[test]
+    fn dungeon_spawner_creates_bounded_mobs_and_remembers_cooldown() {
+        let seed = 42;
+        let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+        let (x, y, z) = crate::worldgen::dungeon_spawner_in_cell(seed, 0, 0);
+        // A controlled platform supplies four valid spawn attempts without
+        // changing the generated spawner itself.
+        for dx in -4..=4 {
+            for dz in -4..=4 {
+                for (height, block) in [(y - 1, 1 << 4), (y, 0), (y + 1, 0)] {
+                    world.import_block(x + dx, height, z + dz, block).unwrap();
+                }
+            }
+        }
+        world.import_block(x, y, z, 52 << 4).unwrap();
+        let player = PlayerPosition {
+            x: f64::from(x) + 0.5,
+            y: f64::from(y) + 2.0,
+            z: f64::from(z) + 0.5,
+        };
+        let mut mobs = Mobs::new_with_difficulty(&world, true, 2);
+        // Simulate a heavily explored server: old cooldown slots must not
+        // permanently suppress active spawners after reaching the size cap.
+        for i in 0..512 {
+            mobs.spawner_next_tick.insert(format!("{i},64,{i}"), 0);
+        }
+        let mut events = Vec::new();
+        mobs.spawn_from_spawners(20, &world, &[player], &mut events);
+        assert_eq!(events.len(), 1);
+        assert_eq!(mobs.spawner_next_tick.len(), 512);
+        assert!(mobs.spawner_next_tick.contains_key(&format!("{x},{y},{z}")));
+        let mut second = Vec::new();
+        mobs.spawn_from_spawners(40, &world, &[player], &mut second);
+        assert!(second.is_empty());
+        let restored: Mobs = serde_json::from_slice(&serde_json::to_vec(&mobs).unwrap()).unwrap();
+        assert_eq!(restored.spawner_next_tick, mobs.spawner_next_tick);
+        world.import_block(x, y, z, 0).unwrap();
+        mobs.spawn_from_spawners(10_000, &world, &[player], &mut second);
+        assert!(second.is_empty());
+    }
     #[test]
     fn living_health_metadata_is_shared_on_spawn_and_after_damage() {
         let mut mobs = Mobs::default();
