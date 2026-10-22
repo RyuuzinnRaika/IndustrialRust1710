@@ -114,6 +114,7 @@ impl Achievements {
         self.unlocked.insert(key.to_owned());
         Ok(Some(event))
     }
+    #[cfg(test)]
     pub fn has(&self, key: &str) -> bool {
         self.unlocked.contains(key)
     }
