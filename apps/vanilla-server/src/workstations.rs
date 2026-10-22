@@ -80,13 +80,17 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
     }
     let material = match left.id {
         256..=258 | 267 | 292 | 302..=309 => 265, // iron and chain
-        268..=271 | 290 => 5, // wood
-        272..=275 | 291 => 4, // cobblestone
-        276..=279 | 293 | 310..=313 => 264, // diamond
-        283..=286 | 294 | 314..=317 => 266, // gold
+        268..=271 | 290 => 5,                     // wood
+        272..=275 | 291 => 4,                     // cobblestone
+        276..=279 | 293 | 310..=313 => 264,       // diamond
+        283..=286 | 294 | 314..=317 => 266,       // gold
         _ => -1,
     };
-    let material = if (298..=301).contains(&left.id) { 334 } else { material };
+    let material = if (298..=301).contains(&left.id) {
+        334
+    } else {
+        material
+    };
     if right.id == material && material > 0 {
         let per_unit = (max / 4).max(1);
         let units = u16::from(right.count).min(4);
@@ -97,20 +101,30 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
             return None;
         }
         let restored = (i32::from(per_unit) * i32::from(consumed)).min(i32::from(left.damage));
-        let result = Stack { damage: left.damage - restored as i16, ..left };
-        return Some(Repair { result, consumed, levels: u16::from(consumed) });
+        let result = Stack {
+            damage: left.damage - restored as i16,
+            ..left
+        };
+        return Some(Repair {
+            result,
+            consumed,
+            levels: u16::from(consumed),
+        });
     }
     if right.id == left.id && right.count == 1 {
         let left_remaining = i32::from(max - left.damage);
         let right_remaining = i32::from(max - right.damage);
-        let combined = (left_remaining + right_remaining + i32::from(max) * 12 / 100)
-            .min(i32::from(max));
+        let combined =
+            (left_remaining + right_remaining + i32::from(max) * 12 / 100).min(i32::from(max));
         let new_damage = (i32::from(max) - combined) as i16;
         if new_damage >= left.damage {
             return None;
         }
         return Some(Repair {
-            result: Stack { damage: new_damage, ..left },
+            result: Stack {
+                damage: new_damage,
+                ..left
+            },
             consumed: 1,
             levels: 2,
         });
@@ -121,23 +135,35 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn stack(id: i16, count: u8, damage: i16) -> Stack { Stack { id, count, damage } }
+    fn stack(id: i16, count: u8, damage: i16) -> Stack {
+        Stack { id, count, damage }
+    }
     #[test]
     fn bookshelf_gap_and_cap_are_server_calculated() {
         let mut solid = |x: i32, y: i32, z: i32| {
-            if x == 2 && z == 0 && y == 0 { 47 } else { 0 }
+            if x == 2 && z == 0 && y == 0 {
+                47
+            } else {
+                0
+            }
         };
         assert_eq!(bookshelf_count(&mut solid), 1);
         let obstructed = |x: i32, y: i32, z: i32| {
-            if x == 1 && y == 0 && z == 0 { 1 }
-            else if x == 2 && y == 0 && z == 0 { 47 }
-            else { 0 }
+            if x == 1 && y == 0 && z == 0 {
+                1
+            } else if x == 2 && y == 0 && z == 0 {
+                47
+            } else {
+                0
+            }
         };
         assert_eq!(bookshelf_count(obstructed), 0);
         let all = |x: i32, _y: i32, z: i32| {
             if (x.abs() == 2 || z.abs() == 2) && (x.abs() <= 2 && z.abs() <= 2) {
                 47
-            } else { 0 }
+            } else {
+                0
+            }
         };
         assert_eq!(bookshelf_count(all), 15);
     }
