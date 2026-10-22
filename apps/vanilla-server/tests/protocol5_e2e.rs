@@ -297,7 +297,7 @@ fn send_fragments(s: &mut TcpStream, packet: &[u8], pieces: &[usize]) {
 
 #[test]
 fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
-    let server = NativeServer::start();
+    let mut server = NativeServer::start();
     let status = server.status();
     assert_eq!(status["version"]["protocol"], 5);
     assert_eq!(status["players"]["max"], 8);
