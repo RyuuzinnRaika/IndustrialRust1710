@@ -17,8 +17,10 @@ const MAX_STEPS: u64 = 4;
 const ATTACK_INTERVAL: u64 = 20;
 const VANILLA_HOSTILE_CAP: usize = 70;
 const VANILLA_PASSIVE_CAP: usize = 10;
-const HOSTILE_CAP: usize = 70;
-const PASSIVE_CAP: usize = 32; // Include manually bred animals without culling.
+// A bounded resource guard, not a per-server cap of 70: the natural mob cap
+// scales with the *union* of player-centred 17x17 chunk areas.
+const MAX_NATURAL_PER_CATEGORY: usize = 512;
+const MAX_LOADED_MOBS: usize = 1024;
 const ARROW_CAP: usize = 128;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 enum Kind {
@@ -82,6 +84,11 @@ impl Kind {
     }
     fn peaceful_safe(self) -> bool {
         self.passive() || matches!(self, Self::IronGolem)
+    }
+    /// Bosses and constructed guardians are persistent; they must never be
+    /// culled by the ordinary hostile 32/128-block distance despawn rules.
+    fn despawnable(self) -> bool {
+        !self.peaceful_safe() && !matches!(self, Self::EnderDragon | Self::Wither)
     }
     fn splitting(self) -> bool {
         matches!(self, Self::Slime | Self::MagmaCube)
@@ -267,6 +274,11 @@ impl Mob {
         Event { id: 0x1a, body }
     }
     fn death_drop(self) -> Option<(Stack, (i32, i32, i32))> {
+        // Baby farm animals produce neither adult meat nor wool. Sheared
+        // sheep cannot drop a second wool block on death.
+        if (self.baby && self.kind.passive()) || (self.kind == Kind::Sheep && self.sheared) {
+            return None;
+        }
         self.kind.drop(self.size).map(|stack| {
             (
                 stack,
@@ -277,6 +289,18 @@ impl Mob {
                 ),
             )
         })
+    }
+    fn experience_on_player_kill(self) -> u16 {
+        if self.baby && self.kind.passive() {
+            0
+        } else {
+            match self.kind {
+                Kind::EnderDragon => 12_000,
+                Kind::Wither => 50,
+                _ if self.kind.passive() => 2,
+                _ => 5,
+            }
+        }
     }
     fn nearby(self, position: PlayerPosition, radius: f64) -> bool {
         let dx = self.position.x - position.x;
@@ -640,7 +664,13 @@ impl Mobs {
             if value.next_id <= max_id
                 || value.next_id < BASE_ID
                 || value.next_id >= 1_000_000
-                || value.entities.len() > 128
+                || value.entities.len() > MAX_LOADED_MOBS
+                // All three entity categories share a single Protocol 5 ID
+                // space. Reject corrupt snapshots that reuse an ID.
+                || value.entities.keys().any(|id| {
+                    value.arrows.contains_key(id) || value.orbs.contains_key(id)
+                })
+                || value.arrows.keys().any(|id| value.orbs.contains_key(id))
                 || value.arrows.len() > ARROW_CAP
                 || value.orbs.len() > 256
                 || value.entities.iter().any(|(&id, mob)| {
@@ -658,6 +688,7 @@ impl Mobs {
                     id < BASE_ID
                         || id != arrow.id
                         || !arrow.position.is_valid()
+                        || arrow.age >= 100
                         || !arrow
                             .velocity
                             .iter()
@@ -665,8 +696,10 @@ impl Mobs {
                 })
                 || value
                     .orbs
-                    .values()
-                    .any(|(pos, amount, _)| !pos.is_valid() || *amount == 0)
+                    .iter()
+                    .any(|(&id, (pos, amount, _))| {
+                        id < BASE_ID || !pos.is_valid() || *amount == 0
+                    })
             {
                 return Err(invalid("invalid mob identity, position or bounds"));
             }
@@ -1080,12 +1113,7 @@ impl Mobs {
             },
             drop: if killed { mob.death_drop() } else { None },
             experience: if killed {
-                match mob.kind {
-                    Kind::EnderDragon => 12_000,
-                    Kind::Wither => 50,
-                    _ if mob.kind.passive() => 2,
-                    _ => 5,
-                }
+                u32::from(mob.experience_on_player_kill())
             } else {
                 0
             },
@@ -1561,7 +1589,9 @@ impl Mobs {
         let first = *self.entities.get(&id)?;
         let food = held?.id;
         if !first.nearby(player, 3.0)
-            || self.entities.values().filter(|m| m.kind.passive()).count() >= PASSIVE_CAP
+            || self.entities.len() >= MAX_LOADED_MOBS
+            || self.entities.values().filter(|m| m.kind.passive()).count()
+                >= MAX_NATURAL_PER_CATEGORY
             || !first.kind.passive()
             || first.baby
             || !first.kind.breeding_food(food)
@@ -1644,8 +1674,8 @@ impl Mobs {
         Some(projectile.spawn())
     }
     /// Spawn attempts use dimension, biome, true 3D player distance, support,
-    /// and the world's propagated sky and block light. The modest caps are
-    /// intentionally server-specific until per-chunk vanilla caps are supported.
+    /// and the world's propagated sky and block light. Runtime safety limits
+    /// are separate from the vanilla per-eligible-chunk cap calculation.
     fn spawn_natural(
         &mut self,
         now: u64,
@@ -1656,6 +1686,7 @@ impl Mobs {
         if !self.enabled
             || self.natural_spawning_paused
             || players.is_empty()
+            || self.entities.len() >= MAX_LOADED_MOBS
             || !now.is_multiple_of(20)
         {
             return;
@@ -1670,8 +1701,8 @@ impl Mobs {
             .values()
             .filter(|m| !m.kind.peaceful_safe())
             .count();
-        let hostile_cap = natural_mob_cap(players, VANILLA_HOSTILE_CAP).min(HOSTILE_CAP);
-        let passive_cap = natural_mob_cap(players, VANILLA_PASSIVE_CAP).min(PASSIVE_CAP);
+        let hostile_cap = natural_spawn_capacity(players, VANILLA_HOSTILE_CAP);
+        let passive_cap = natural_spawn_capacity(players, VANILLA_PASSIVE_CAP);
         let dimension = world.dimension();
         for index in 0..4u64 {
             let seed = hash(
@@ -1912,11 +1943,11 @@ impl Mobs {
                     continue; // Mounted or leashed animals never wander independently.
                 }
                 let nearest_distance = distance_to_players(mob.position, players);
-                if !mob.kind.passive() && nearest_distance > 128.0 {
+                if mob.kind.despawnable() && nearest_distance > 128.0 {
                     dead.push(mob.id);
                     continue;
                 }
-                if !mob.kind.passive()
+                if mob.kind.despawnable()
                     && nearest_distance > 32.0
                     && now.saturating_sub(mob.hit_tick) > 600
                     && hash(now ^ mob.id as u64).is_multiple_of(800)
@@ -2268,7 +2299,7 @@ impl Mobs {
         let mut removed = Vec::new();
         let mut arrow_hits = Vec::new();
         for arrow in self.arrows.values_mut() {
-            arrow.age += 1;
+            arrow.age = arrow.age.saturating_add(1);
             let previous = arrow.position;
             let next = PlayerPosition {
                 x: previous.x + arrow.velocity[0],
@@ -2336,7 +2367,11 @@ impl Mobs {
                     .values()
                     .find(|mob| mob.id != arrow.shooter.unwrap_or(-1) && mob.nearby(sample, 0.9))
                 {
-                    arrow_hits.push((mob.id, arrow.damage));
+                    arrow_hits.push((
+                        mob.id,
+                        arrow.damage,
+                        !arrow.hostile && arrow.shooter.is_some(),
+                    ));
                     impacted = true;
                     break;
                 }
@@ -2348,22 +2383,34 @@ impl Mobs {
             arrow.position = next;
             events.push(multiplayer::teleport(arrow.id, &next, 0.0, 0.0));
         }
-        for (id, damage) in arrow_hits {
+        let mut earned_xp = Vec::new();
+        for (id, damage, player_shot) in arrow_hits {
             if let Some(mob) = self.entities.get_mut(&id) {
                 mob.health -= i16::from(damage);
                 if mob.health <= 0 {
                     if let Some(drop) = mob.death_drop() {
                         self.pending_drops.push(drop);
                     }
+                    if player_shot {
+                        earned_xp.push((mob.position, mob.experience_on_player_kill()));
+                    }
                     events.push(mob.status(3));
                     events.push(multiplayer::destroy(id));
                     if let Some(parent) = self.entities.remove(&id) {
+                        if parent.kind == Kind::EnderDragon {
+                            self.dragon_defeated = true;
+                        }
                         events.extend(self.split(parent));
                     }
                 } else {
                     events.push(mob.status(2));
                     events.push(mob.health_metadata());
                 }
+            }
+        }
+        for (at, amount) in earned_xp {
+            if let Some(event) = self.spawn_xp(at, amount) {
+                events.push(event);
             }
         }
         for id in removed {
@@ -2492,6 +2539,10 @@ impl Mobs {
 }
 /// Unique 17x17 eligible chunk union. Vanilla's mob cap scales with this
 /// area, not with raw online player count or the protocol render distance.
+fn natural_spawn_capacity(players: &[PlayerPosition], base: usize) -> usize {
+    natural_mob_cap(players, base).min(MAX_NATURAL_PER_CATEGORY)
+}
+
 fn natural_mob_cap(players: &[PlayerPosition], base: usize) -> usize {
     let mut chunks = std::collections::BTreeSet::new();
     for player in players {
@@ -2879,6 +2930,28 @@ mod tests {
     }
 
     #[test]
+    fn snapshots_reject_duplicate_entity_ids_across_mobs_and_xp() {
+        let world = World::natural(9981);
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust-mobs-{}-duplicate-entity.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        mobs.insert(Kind::Cow, at, false);
+        let id = mobs.next_id - 1;
+        mobs.orbs.insert(id, (at, 5, 0));
+        mobs.save(&world).unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn mob_cap_uses_unique_17_by_17_chunks_not_player_count() {
         let a = PlayerPosition {
             x: 0.5,
@@ -2890,6 +2963,73 @@ mod tests {
         assert_eq!(natural_mob_cap(&[a, a], 70), 70);
         assert!(natural_mob_cap(&[a, b], 70) > 70);
         assert_eq!(natural_mob_cap(&[], 70), 0);
+        let distant = PlayerPosition { x: 512.5, ..a };
+        // Two disjoint 17x17 areas must allow 140 hostiles, not 70 globally.
+        assert_eq!(natural_spawn_capacity(&[a, distant], 70), 140);
+        assert_eq!(natural_spawn_capacity(&[a, distant], 10), 20);
+        assert_eq!(natural_spawn_capacity(&[a, a], 70), 70);
+    }
+
+    #[test]
+    fn baby_animals_and_sheared_sheep_do_not_drop_adult_loot_or_xp() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Cow, at, true);
+        let cow = mobs.next_id - 1;
+        mobs.entities.get_mut(&cow).unwrap().health = 1;
+        let killed = mobs.player_attack(cow, at, None, 10).unwrap();
+        assert!(killed.drop.is_none());
+        assert_eq!(killed.experience, 0);
+
+        mobs.insert(Kind::Sheep, at, false);
+        let sheep = mobs.next_id - 1;
+        mobs.entities.get_mut(&sheep).unwrap().sheared = true;
+        assert!(mobs.entities[&sheep].death_drop().is_none());
+    }
+
+    #[test]
+    fn distant_players_do_not_despawn_a_wither_or_golem() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let far = PlayerPosition { x: 512.5, ..at };
+        let mut mobs = Mobs::default();
+        for kind in [Kind::Wither, Kind::IronGolem, Kind::Zombie] {
+            mobs.insert(kind, at, false);
+        }
+        mobs.tick(1, &world, &[far]);
+        assert!(mobs.entities.values().any(|m| m.kind == Kind::Wither));
+        assert!(mobs.entities.values().any(|m| m.kind == Kind::IronGolem));
+        assert!(!mobs.entities.values().any(|m| m.kind == Kind::Zombie));
+    }
+
+    #[test]
+    fn player_bow_kill_awards_orb_once_and_despawns_the_arrow() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Cow, PlayerPosition { z: 2.5, ..at }, false);
+        let target = mobs.next_id - 1;
+        mobs.entities.get_mut(&target).unwrap().health = 1;
+        mobs.fire_arrow(Some(9_999), at, 0.0, 30.0, 2.0, 3).unwrap();
+        let mut events = Vec::new();
+        mobs.tick_arrows(&world, &[], 1, &mut events);
+        assert!(!mobs.entities.contains_key(&target));
+        assert!(mobs.arrows.is_empty());
+        assert_eq!(mobs.orbs.len(), 1);
+        assert_eq!(mobs.orbs.values().next().unwrap().1, 2);
+        assert_eq!(events.iter().filter(|event| event.id == 0x11).count(), 1);
     }
 
     #[test]
