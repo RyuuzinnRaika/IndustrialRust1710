@@ -26,8 +26,16 @@ impl World {
             if !in_bounds(x, i32::from(y), z) || value >> 4 > 255 {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "special block out of bounds"));
             }
-            if candidate.get(x, i32::from(y), z) != value {
-                candidate.import_block(x, i32::from(y), z, value)?;
+            let old = candidate.get(x, i32::from(y), z);
+            if old != value {
+                if value == candidate.base_block(x, y, z) {
+                    candidate.edits.remove(&(x, y, z));
+                    candidate.wake_gravity(x, i32::from(y), z);
+                    candidate.wake_block_updates(x, i32::from(y), z);
+                } else {
+                    candidate.import_block(x, i32::from(y), z, value)?;
+                }
+                candidate.mark_lighting_changed(x, z, old, value);
                 changed.push((x, i32::from(y), z));
             }
         }
@@ -123,7 +131,8 @@ impl World {
         for cx in x - 2..=x + 2 {
             for cz in z - 2..=z + 2 {
                 // Each possible center is at most two blocks away from the new eye.
-                if (cx - x).abs() + (cz - z).abs() != 2 {
+                if !(((cx - x).abs() == 2 && (cz - z).abs() <= 1)
+                    || ((cz - z).abs() == 2 && (cx - x).abs() <= 1)) {
                     continue;
                 }
                 let mut ring = true;
