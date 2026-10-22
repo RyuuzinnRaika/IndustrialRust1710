@@ -3175,6 +3175,25 @@ fn start_clock_console(hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf
 }
 
 fn main() -> io::Result<()> {
+    // Explicit, offline-only create-if-missing recovery. No network listener,
+    // no server.properties parsing, and no silent replacement of a live world.
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if raw_args
+        .first()
+        .is_some_and(|arg| arg == "--recover-level-dat")
+    {
+        if raw_args.len() != 2 {
+            return Err(bad("usage: --recover-level-dat STOPPED_WORLD_DIR"));
+        }
+        let world_directory = Path::new(&raw_args[1]);
+        let mut lock = session_lock::WorldSessionLock::acquire(world_directory)?;
+        level_dat::restore_missing_level(world_directory, &mut lock)?;
+        println!(
+            "Recovered a missing level.dat from validated level.dat_old in {}",
+            world_directory.display()
+        );
+        return Ok(());
+    }
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
     let properties = if std::env::args().any(|arg| {
@@ -3219,7 +3238,7 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--recover-level-dat STOPPED_WORLD_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
