@@ -35,7 +35,8 @@ impl World {
         let id = block >> 4;
         let below = self.get(x, y - 1, z) >> 4;
         match id {
-            6 => plantable(below),
+            6 | 31 | 37 | 38 => plantable(below),
+            32 => matches!(below, 12 | 159 | 172), // dead bush on sand/terracotta
             25 | 63 | 84 | 92 | 140 => solid(below),
             68 => {
                 let neighbor = match block & 7 {
@@ -291,7 +292,11 @@ impl World {
             let id = block >> 4;
             if matches!(
                 id,
-                6 | 50
+                6 | 31
+                    | 32
+                    | 37
+                    | 38
+                    | 50
                     | 55
                     | 59
                     | 81
