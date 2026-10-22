@@ -47,9 +47,7 @@ impl Summary {
                 .as_u64()
                 .ok_or_else(|| invalid("missing integer metric"))
         };
-        if !matches!(value["schema_version"].as_u64(), Some(1 | 2))
-            || value["target_tps"] != 20
-        {
+        if !matches!(value["schema_version"].as_u64(), Some(1 | 2)) || value["target_tps"] != 20 {
             return Err(invalid("unsupported telemetry schema"));
         }
         let seconds = number("window_seconds")?;
@@ -285,22 +283,26 @@ mod tests {
     #[test]
     fn accepts_current_v2_world_worker_schema_and_buckets_peak_load() {
         let mut summary = Summary::default();
-        summary.add(&json!({
-            "schema_version": 2, "target_tps": 20, "window_seconds": 10.0,
-            "processed_ticks": 198, "missed_ticks": 2, "players": 1,
-            "players_min": 1, "players_peak": 4, "players_mean": 2.5,
-            "mspt_mean": 7.0, "mspt_p95": 10.0, "mspt_p99": 12.0,
-            "mspt_samples": 198, "process_rss_bytes": 1_048_576
-        })).unwrap();
+        summary
+            .add(&json!({
+                "schema_version": 2, "target_tps": 20, "window_seconds": 10.0,
+                "processed_ticks": 198, "missed_ticks": 2, "players": 1,
+                "players_min": 1, "players_peak": 4, "players_mean": 2.5,
+                "mspt_mean": 7.0, "mspt_p95": 10.0, "mspt_p99": 12.0,
+                "mspt_samples": 198, "process_rss_bytes": 1_048_576
+            }))
+            .unwrap();
         assert_eq!(summary.peak_players, 4);
         assert_eq!(summary.tps(), 19.8);
         assert_eq!(summary.report()["by_player_count"][0]["players"], 4);
         assert_eq!(summary.report()["mspt_mean_weighted"], 7.0);
-        assert!(summary.add(&json!({
-            "schema_version": 2, "target_tps": 20, "window_seconds": 10.0,
-            "processed_ticks": 0, "missed_ticks": 0, "players": 0,
-            "mspt_p95": 0.0, "mspt_p99": 0.0
-        })).is_err()); // samples required in v2
+        assert!(summary
+            .add(&json!({
+                "schema_version": 2, "target_tps": 20, "window_seconds": 10.0,
+                "processed_ticks": 0, "missed_ticks": 0, "players": 0,
+                "mspt_p95": 0.0, "mspt_p99": 0.0
+            }))
+            .is_err()); // samples required in v2
     }
 
     #[test]
