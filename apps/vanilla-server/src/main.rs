@@ -2016,6 +2016,37 @@ fn play(
                     }
                     continue;
                 }
+                // Item frames and paintings are hanging entities, not blocks.
+                if (2..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && inventory.can_place(held)
+                    && inventory.held().is_some_and(|stack| matches!(stack.id, 321 | 389))
+                {
+                    let stack = inventory.held().ok_or_else(|| bad("missing hanging item"))?;
+                    let terrain = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let mut hanging_state = hangings.lock().map_err(|_| bad("hanging lock poisoned"))?;
+                    if let Some((next, placed)) = hanging_state.stage_place(&terrain, (x, y, z), face, stack.id)? {
+                        if survival {
+                            let mut candidate = inventory.clone();
+                            if candidate.consume_held() {
+                                journal::commit(
+                                    &world_path.with_extension("pending-txn.json"),
+                                    &[(inventory_path, candidate.encoded()?), (hanging_path, next.encoded()?)],
+                                )?;
+                                *inventory = candidate;
+                                *hanging_state = next;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                for event in placed.spawn()? { hub.broadcast(event); }
+                            }
+                        } else {
+                            next.save(hanging_path)?;
+                            *hanging_state = next;
+                            for event in placed.spawn()? { hub.broadcast(event); }
+                        }
+                    }
+                    continue;
+                }
                 // World-owned decoration interactions precede ordinary item placement.
                 if (0..=5).contains(&face) && world::in_bounds(x, y, z) && near(location, x, y, z) {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
