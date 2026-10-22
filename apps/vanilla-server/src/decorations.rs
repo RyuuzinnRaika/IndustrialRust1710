@@ -202,17 +202,6 @@ impl Decorations {
         next.encoded()?;
         Ok(next)
     }
-    pub fn set_record(
-        &mut self,
-        path: &Path,
-        position: Position,
-        item: Option<i16>,
-    ) -> io::Result<()> {
-        let next = self.stage_record(position, item)?;
-        next.save(path)?;
-        *self = next;
-        Ok(())
-    }
     pub fn pot(&self, position: Position) -> Option<Stack> {
         self.pots.get(&key(position)).copied()
     }
@@ -419,7 +408,8 @@ mod tests {
             )
             .unwrap();
         store.next_note(&path, (4, 64, -2)).unwrap();
-        store.set_record(&path, (5, 64, -2), Some(2256)).unwrap();
+        store = store.stage_record((5, 64, -2), Some(2256)).unwrap();
+        store.save(&path).unwrap();
         let restored = Decorations::load(&path).unwrap();
         assert_eq!(restored.signs.get(&key((3, 64, -2))).unwrap()[0], "A");
         assert_eq!(restored.note((4, 64, -2)), 1);
