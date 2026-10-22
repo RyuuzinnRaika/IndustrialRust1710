@@ -380,6 +380,9 @@ pub struct Mobs {
     last_tick: u64,
     #[serde(skip)]
     last_leash_tick: u64,
+    // Runtime-only flag. Default false (not paused) on new/load.
+    #[serde(skip)]
+    natural_spawning_paused: bool,
     next_id: i32,
     dragon_defeated: bool,
     enabled: bool,
@@ -1329,7 +1332,11 @@ impl Mobs {
         players: &[PlayerPosition],
         events: &mut Vec<Event>,
     ) {
-        if !self.enabled || players.is_empty() || !now.is_multiple_of(20) {
+        if !self.enabled
+            || self.natural_spawning_paused
+            || players.is_empty()
+            || !now.is_multiple_of(20)
+        {
             return;
         }
         let passive = self
@@ -1475,6 +1482,10 @@ impl Mobs {
             events.push(self.insert_sized(kind, position, baby, size));
             break; // Bound per-cycle packets and CPU.
         }
+    }
+    /// The world GameRule controls only natural spawning, never existing mob AI.
+    pub fn set_natural_spawning(&mut self, allowed: bool) {
+        self.natural_spawning_paused = !allowed;
     }
     /// Tick at most four elapsed 20Hz steps; caller owns broadcast fan-out.
     pub fn tick(&mut self, now: u64, world: &World, players: &[PlayerPosition]) -> Vec<Event> {
