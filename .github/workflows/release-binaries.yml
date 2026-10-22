@@ -1,0 +1,74 @@
+name: Release binaries (Windows and Linux)
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+            executable: vanilla-server
+            checker: vanilla-check-config
+            status: legacy-status-server
+          - os: windows-latest
+            label: windows-x86_64
+            executable: vanilla-server.exe
+            checker: vanilla-check-config.exe
+            status: legacy-status-server.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Verify formatting
+        run: cargo fmt --all -- --check
+      - name: Run workspace tests
+        run: cargo test --workspace --all-targets --locked
+      - name: Build release executables
+        run: cargo build --release --locked -p vanilla-server --bins -p legacy-status-server
+      - name: Collect executable hashes and build metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $names = @("${{ matrix.executable }}", "${{ matrix.checker }}", "${{ matrix.status }}")
+          foreach ($name in $names) {
+            Copy-Item "target/release/$name" "dist/$name"
+          }
+          $commit = git rev-parse HEAD
+          $rust = (rustc --version)
+          $cargo = (cargo --version)
+          $manifest = @(
+            "commit=$commit"
+            "rustc=$rust"
+            "cargo=$cargo"
+            "runner=${{ matrix.os }}"
+            "lockfile_sha256=$((Get-FileHash Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant())"
+          )
+          foreach ($name in $names) {
+            $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+            $manifest += "$hash  $name"
+          }
+          $manifest | Set-Content -Path dist/BUILD-MANIFEST.txt -Encoding utf8
+          Copy-Item Cargo.lock dist/Cargo.lock
+      - name: Upload verified binaries and manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: industrialrust1710-${{ matrix.label }}-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
