@@ -34,8 +34,14 @@ pub fn write(path: &Path, value: u8, max: u8) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let temp = path.with_extension("admin.tmp");
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)?;
-    if let Err(error) = file.write_all(&[b'0' + value]).and_then(|_| file.sync_all()) {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    if let Err(error) = file
+        .write_all(&[b'0' + value])
+        .and_then(|_| file.sync_all())
+    {
         drop(file);
         let _ = fs::remove_file(temp);
         return Err(error);
@@ -56,7 +62,10 @@ pub fn parse_gamemode(value: &str) -> io::Result<u8> {
     match value {
         "0" | "survival" => Ok(0),
         "1" | "creative" => Ok(1),
-        _ => Err(io::Error::new(ErrorKind::InvalidInput, "gamemode must be survival/creative (0/1)")),
+        _ => Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "gamemode must be survival/creative (0/1)",
+        )),
     }
 }
 
@@ -66,7 +75,10 @@ pub fn parse_difficulty(value: &str) -> io::Result<u8> {
         "1" | "easy" => Ok(1),
         "2" | "normal" => Ok(2),
         "3" | "hard" => Ok(3),
-        _ => Err(io::Error::new(ErrorKind::InvalidInput, "difficulty must be peaceful/easy/normal/hard (0..3)")),
+        _ => Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "difficulty must be peaceful/easy/normal/hard (0..3)",
+        )),
     }
 }
 
@@ -92,7 +104,11 @@ mod tests {
 
     #[test]
     fn persists_bounded_overrides_and_rejects_corruption() {
-        let path = std::env::temp_dir().join(format!("e49-{}-{:?}.gamemode", std::process::id(), std::thread::current().id()));
+        let path = std::env::temp_dir().join(format!(
+            "e49-{}-{:?}.gamemode",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let _ = fs::remove_file(&path);
         assert_eq!(read(&path, 1).unwrap(), None);
         write(&path, 1, 1).unwrap();
