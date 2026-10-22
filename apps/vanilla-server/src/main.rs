@@ -3781,6 +3781,10 @@ fn start_clock_console(
     rules_path: Arc<PathBuf>,
     scoreboard: Arc<Mutex<Scoreboard>>,
     scoreboard_path: Arc<PathBuf>,
+    difficulty_state: Arc<AtomicU8>,
+    difficulty_path: Arc<PathBuf>,
+    mobs: Arc<Mutex<Mobs>>,
+    hardcore: bool,
 ) {
     thread::spawn(move || {
         let stdin = io::stdin();
@@ -3790,6 +3794,35 @@ fn start_clock_console(
             };
             let args: Vec<_> = line.split_whitespace().collect();
             let result = match args.as_slice() {
+                ["/gamemode", requested, target] => (|| -> io::Result<()> {
+                    if hardcore {
+                        return Err(bad("gamemode changes are forbidden in hardcore"));
+                    }
+                    let mode = admin_state::parse_gamemode(requested)?;
+                    if !hub.request_admin_gamemode(target, mode)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target player not online"));
+                    }
+                    println!("Gamemode change queued for {target}: {mode}");
+                    Ok(())
+                })(),
+                ["/difficulty", "query"] => {
+                    println!("Difficulty: {}", difficulty_state.load(Ordering::Acquire));
+                    Ok(())
+                }
+                ["/difficulty", requested] => (|| -> io::Result<()> {
+                    let next = admin_state::parse_difficulty(requested)?;
+                    if hardcore && next != 3 {
+                        return Err(bad("hardcore difficulty must remain hard (3)"));
+                    }
+                    // Do not publish the change until its restart override is
+                    // durable and the mob state is ready to observe it.
+                    let mut state = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    admin_state::write(&difficulty_path, next, 3)?;
+                    state.set_difficulty(next);
+                    difficulty_state.store(next, Ordering::Release);
+                    println!("Difficulty set to {next} (new joins/respawns see updated setting)");
+                    Ok(())
+                })(),
                 ["/gamerule", key] => (|| -> io::Result<()> {
                     let rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
                     let value = rules.get(key).ok_or_else(|| bad("unsupported game rule"))?;
@@ -4420,6 +4453,12 @@ fn main() -> io::Result<()> {
     let clock_path = Arc::new(world_path.with_extension("clock"));
     let restored_clock = Clock::load_state(&clock_path)?;
     let (clock, _clock_thread) = Clock::start_from(restored_clock);
+    let difficulty_path = Arc::new(world_path.with_extension("difficulty"));
+    let difficulty = admin_state::read(&difficulty_path, 3)?.unwrap_or(difficulty);
+    if hardcore && difficulty != 3 {
+        return Err(bad("hardcore difficulty override must remain 3"));
+    }
+    let shared_difficulty = Arc::new(AtomicU8::new(difficulty));
     let rules_path = Arc::new(GameRules::location(&world_path));
     let world_rules = Arc::new(Mutex::new(GameRules::load(&rules_path)?));
     let scoreboard_path = Arc::new(Scoreboard::location(&world_path));
@@ -4477,6 +4516,10 @@ fn main() -> io::Result<()> {
         Arc::clone(&rules_path),
         Arc::clone(&shared_scoreboard),
         Arc::clone(&scoreboard_path),
+        Arc::clone(&shared_difficulty),
+        Arc::clone(&difficulty_path),
+        Arc::clone(&mobs),
+        hardcore,
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
@@ -4920,7 +4963,7 @@ fn main() -> io::Result<()> {
                     brewer_path: brewer_file,
                     survival,
                     hardcore,
-                    difficulty,
+                    difficulty: Arc::clone(&shared_difficulty),
                     game_rules: rules,
                     scoreboard: board,
                     scoreboard_path: board_path,
