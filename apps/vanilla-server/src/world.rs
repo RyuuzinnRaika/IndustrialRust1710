@@ -737,6 +737,15 @@ impl World {
                 _ => continue,
             };
             let mut level = block & 15;
+            // One level per horizontal step in the Nether; two for lava
+            // elsewhere, and one for water in every dimension.
+            let horizontal_cost: u16 = if id == 10
+                && self.dimension() != crate::dimensions::Dimension::Nether
+            {
+                2
+            } else {
+                1
+            };
             let adjacent = [
                 (x - 1, y, z),
                 (x + 1, y, z),
@@ -778,15 +787,6 @@ impl World {
                 // Falling fluids use metadata level 8, not level 1. They
                 // remain falling while fed vertically from their source.
                 let mut next = if fed_from_above { 8 } else { 9 };
-                // Nether lava spreads eight horizontal cells (cost 1 per
-                // step), while Overworld/End lava travels only four (cost 2).
-                let horizontal_cost: u16 = if id == 10
-                    && self.dimension() != crate::dimensions::Dimension::Nether
-                {
-                    2
-                } else {
-                    1
-                };
                 let sides = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)];
                 let mut source_neighbors = 0;
                 for (nx, nz) in sides {
@@ -830,7 +830,7 @@ impl World {
                 in_bounds(down.0, down.1, down.2) && self.get(down.0, down.1, down.2) == 0;
             let targets: Vec<(i32, i32, i32)> = if falling {
                 vec![down]
-            } else if (level & 7) + if id == 10 && self.dimension() != crate::dimensions::Dimension::Nether { 2 } else { 1 } > 7 {
+            } else if (level & 7) + horizontal_cost > 7 {
                 Vec::new()
             } else {
                 vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
@@ -843,7 +843,7 @@ impl World {
                 let next_level = if falling {
                     8
                 } else {
-                    (level & 7) + if id == 10 && self.dimension() != crate::dimensions::Dimension::Nether { 2 } else { 1 }
+                    (level & 7) + horizontal_cost
                 };
                 let desired = (id << 4) | next_level;
                 if existing == 0 || (existing >> 4 == id && existing & 15 > next_level) {
