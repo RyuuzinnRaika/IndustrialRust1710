@@ -3525,7 +3525,9 @@ fn main() -> io::Result<()> {
             Furnaces::location(&world_path).with_extension("pending-txn.json"),
         ] {
             if journal.exists() {
-                return Err(bad("pending save journal: start server recovery before Anvil export"));
+                return Err(bad(
+                    "pending save journal: start server recovery before Anvil export",
+                ));
             }
         }
         let world = World::load(&world_path)?;
