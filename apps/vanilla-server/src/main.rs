@@ -4102,7 +4102,7 @@ mod h_special_item_transaction_tests {
             std::env::temp_dir().join(format!("ir1710-h-transaction-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let world_path = root.join("world.irw");
-        let inventory_path = root.join("player.inventory");
+        let inventory_path = root.join("player.inventory.json");
         let mut world = World::new();
         let mut inventory = Inventory::default();
         world
@@ -4143,7 +4143,7 @@ mod h_special_item_transaction_tests {
             std::env::temp_dir().join(format!("ir1710-h-bonemeal-noop-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let world_path = root.join("world.irw");
-        let inventory_path = root.join("player.inventory");
+        let inventory_path = root.join("player.inventory.json");
         let mut world = World::new();
         let mut inventory = Inventory::default();
         world
