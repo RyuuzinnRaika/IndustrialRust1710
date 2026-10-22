@@ -770,6 +770,13 @@ impl World {
                         .then_some((x, z, old, new))
                 })
                 .collect();
+            let fired_devices: Vec<_> = changes.iter().filter_map(|(&(x, y, z), &new)| {
+                let old = self.get(x, i32::from(y), z);
+                (matches!(new >> 4, 23 | 158)
+                    && new >> 4 == old >> 4
+                    && old & 8 == 0 && new & 8 != 0)
+                    .then_some((x, i32::from(y), z))
+            }).collect();
             let undo: Vec<(Position, Option<u16>)> = changes
                 .keys()
                 .map(|&p| (p, self.edits.get(&p).copied()))
@@ -797,18 +804,7 @@ impl World {
                 return Err(error);
             }
             self.pending_drops.extend(detached_drops);
-            // Save the triggered block metadata before handing inventory
-            // ejections to the worker. On disk failure these events vanish.
-            for (&(x, y, z), &next) in &changes {
-                let previous = undo.iter()
-                    .find(|(pos, _)| *pos == (x, y, z))
-                    .map(|_| self.get(x, i32::from(y), z));
-                // The pre-commit value is captured below using metadata.
-                let _ = previous;
-                if matches!(next >> 4, 23 | 158) && next & 8 != 0 {
-                    self.pending_device_activations.push((x, i32::from(y), z));
-                }
-            }
+            self.pending_device_activations.extend(fired_devices);
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
             }
