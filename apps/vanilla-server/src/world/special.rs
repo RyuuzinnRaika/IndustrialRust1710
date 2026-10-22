@@ -55,7 +55,11 @@ impl World {
     /// as a player's flint-and-steel action, including persisted fuse state.
     #[cfg(test)]
     pub fn ignite_tnt(&mut self, path: &Path, x: i32, y: i32, z: i32) -> io::Result<bool> {
-        let held = Stack { id: 259, count: 1, damage: 0 };
+        let held = Stack {
+            id: 259,
+            count: 1,
+            damage: 0,
+        };
         let Some((staged, changed, _, _)) = self.stage_special_item(x, y, z, held)? else {
             return Ok(false);
         };
@@ -781,29 +785,34 @@ mod tests {
         let mut w = World::new();
         w.update_and_save(&path, 2, 128, 2, 46 << 4).unwrap();
         assert!(w.ignite_tnt(&path, 2, 128, 2).unwrap());
-        assert!(w.drain_tnt_events().iter().any(|event| {
-            matches!(event, TntEvent::Spawn { .. })
-        }));
+        assert!(w
+            .drain_tnt_events()
+            .iter()
+            .any(|event| { matches!(event, TntEvent::Spawn { .. }) }));
         for _ in 0..40 {
             w.block_tick(&path, 64).unwrap();
         }
         let mut recovered = World::load(&path).unwrap();
         assert_eq!(recovered.primed_tnt.len(), 1);
-        assert!(recovered.drain_tnt_events().iter().any(|event| {
-            matches!(event, TntEvent::Spawn { .. })
-        }));
+        assert!(recovered
+            .drain_tnt_events()
+            .iter()
+            .any(|event| { matches!(event, TntEvent::Spawn { .. }) }));
         for _ in 0..39 {
             recovered.block_tick(&path, 64).unwrap();
-            assert!(!recovered.drain_tnt_events().iter().any(|event| {
-                matches!(event, TntEvent::Explode { .. })
-            }));
+            assert!(!recovered
+                .drain_tnt_events()
+                .iter()
+                .any(|event| { matches!(event, TntEvent::Explode { .. }) }));
         }
         recovered.block_tick(&path, 64).unwrap();
         assert_eq!(recovered.primed_tnt.len(), 0);
         assert_eq!(
-            recovered.drain_tnt_events().iter().filter(|event| {
-                matches!(event, TntEvent::Explode { .. })
-            }).count(),
+            recovered
+                .drain_tnt_events()
+                .iter()
+                .filter(|event| { matches!(event, TntEvent::Explode { .. }) })
+                .count(),
             1
         );
         // Even in empty air, the expired entity was removed durably.
