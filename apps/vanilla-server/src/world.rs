@@ -51,6 +51,8 @@ pub struct World {
     pending_device_activations: Vec<(i32, i32, i32)>,
     // Protocol 5 piston animation is published only after the world save.
     pending_piston_actions: Vec<PistonAction>,
+    // Short-lived conservative collision of blocks swept during a push/pull.
+    piston_sweep_ghosts: BTreeMap<Position, u64>,
     // Sparse pending client-facing lighting invalidations, not part of IRW files.
     pending_light_chunks: BTreeSet<(i32, i32)>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
@@ -180,6 +182,14 @@ impl World {
 
     pub fn drain_piston_actions(&mut self) -> Vec<PistonAction> {
         std::mem::take(&mut self.pending_piston_actions)
+    }
+
+    pub fn piston_sweep_at(&self, x: i32, y: i32, z: i32) -> bool {
+        in_bounds(x, y, z)
+            && self
+                .piston_sweep_ghosts
+                .get(&(x, y as u8, z))
+                .is_some_and(|expiry| *expiry > self.fluid_phase)
     }
 
     /// Bounded per-worker budget; remaining light updates survive the next tick.
@@ -554,6 +564,8 @@ impl World {
     /// Empty fluid destinations and wire strengths are staged before mutation.
     pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
         self.fluid_phase = self.fluid_phase.wrapping_add(1);
+        self.piston_sweep_ghosts
+            .retain(|_, expiry| *expiry > self.fluid_phase);
         // Lava updates every fourth server tick, water every tick. Delayed
         // lava positions remain queued rather than getting silently dropped.
         let wet: Vec<Position> = self
@@ -798,6 +810,34 @@ impl World {
                         })
                 })
                 .collect();
+            // Conservative swept AABB coverage over three simulation ticks.
+            // This does not replace 1.7.10's moving-piston tile-entity model.
+            let mut swept = BTreeSet::new();
+            for action in &piston_actions {
+                let (dx, dy, dz) = match action.facing {
+                    0 => (0, -1, 0),
+                    1 => (0, 1, 0),
+                    2 => (0, 0, -1),
+                    3 => (0, 0, 1),
+                    4 => (-1, 0, 0),
+                    _ => (1, 0, 0),
+                };
+                for step in 1..=13 {
+                    let (x, y, z) = (
+                        action.pos.0 + dx * step,
+                        action.pos.1 + dy * step,
+                        action.pos.2 + dz * step,
+                    );
+                    if !in_bounds(x, y, z) {
+                        break;
+                    }
+                    let position = (x, y as u8, z);
+                    let before = self.get(x, y, z);
+                    if changes.get(&position).is_some_and(|&after| before != after) {
+                        swept.insert(position);
+                    }
+                }
+            }
             let fired_devices: Vec<_> = changes
                 .iter()
                 .filter_map(|(&(x, y, z), &new)| {
@@ -838,6 +878,13 @@ impl World {
             self.pending_drops.extend(detached_drops);
             self.pending_device_activations.extend(fired_devices);
             self.pending_piston_actions.extend(piston_actions);
+            for position in swept {
+                if self.piston_sweep_ghosts.len() >= 2048 {
+                    break;
+                }
+                self.piston_sweep_ghosts
+                    .insert(position, self.fluid_phase.saturating_add(3));
+            }
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
             }
@@ -1677,6 +1724,27 @@ mod tests {
                 extending: false,
             }]
         );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn piston_collision_sweep_expires_after_three_ticks() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-piston-sweep-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path, 0, 65, 0, (33 << 4) | 5).unwrap();
+        w.update_and_save(&path, 1, 65, 0, 1 << 4).unwrap();
+        w.update_and_save(&path, -1, 65, 0, 152 << 4).unwrap();
+        w.block_tick(&path, 64).unwrap();
+        assert!(w.piston_sweep_at(1, 65, 0));
+        assert!(w.piston_sweep_at(2, 65, 0));
+        for _ in 0..3 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert!(!w.piston_sweep_at(1, 65, 0));
         fs::remove_file(path).unwrap();
     }
 
