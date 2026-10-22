@@ -1415,7 +1415,13 @@ fn play(
                         as_chat(s, "Admin audit unavailable; operation refused.")?;
                         continue;
                     }
-                    let services = PlayerAdminServices { hub, world, world_path, clock, administration };
+                    let services = PlayerAdminServices {
+                        hub,
+                        world,
+                        world_path,
+                        clock,
+                        administration,
+                    };
                     let result = run_player_admin_command(
                         &message,
                         administration.operator_level(name, verified_uuid)?,
@@ -3208,7 +3214,13 @@ fn run_player_admin_command(
     services: &PlayerAdminServices<'_>,
     actor: &str,
 ) -> io::Result<String> {
-    let PlayerAdminServices { hub, world, world_path, clock, administration } = services;
+    let PlayerAdminServices {
+        hub,
+        world,
+        world_path,
+        clock,
+        administration,
+    } = services;
     let parts: Vec<&str> = message.split_whitespace().collect();
     let minimum_level = match parts.first().copied() {
         Some("/time") | Some("/weather") => 2,
@@ -3326,7 +3338,11 @@ fn start_clock_console(
     world_path: Arc<PathBuf>,
     access: ConsoleAccess,
 ) {
-    let ConsoleAccess { administration, whitelist_path, online_mode } = access;
+    let ConsoleAccess {
+        administration,
+        whitelist_path,
+        online_mode,
+    } = access;
     thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
