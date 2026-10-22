@@ -11,7 +11,7 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-const MAX_FILE: u64 = 4 * 1024 * 1024;
+const MAX_FILE: u64 = 1024 * 1024; // journal MAX_TARGET_BYTES
 const MAX_NBT: u64 = 32 * 1024;
 const MAX_PAGES: usize = 50;
 const MAX_PAGE_CHARS: usize = 256;
@@ -38,7 +38,7 @@ impl Book {
             && self
                 .pages
                 .iter()
-                .all(|page| page.chars().count() <= MAX_PAGE_CHARS)
+                .all(|page| page.chars().count() <= MAX_PAGE_CHARS && page.matches('\n').count() <= 13)
             && if signed {
                 self.title
                     .as_ref()
@@ -188,7 +188,7 @@ fn incoming(payload: &[u8], signing: bool) -> io::Result<(i16, Book)> {
         || book
             .pages
             .iter()
-            .any(|p| p.chars().count() > MAX_PAGE_CHARS)
+            .any(|p| p.chars().count() > MAX_PAGE_CHARS || p.matches('\n').count() > 13)
         || (signing
             && !book
                 .title
