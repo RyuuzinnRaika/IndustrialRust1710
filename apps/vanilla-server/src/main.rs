@@ -10,6 +10,8 @@ mod chunk_pipeline;
 mod clock;
 mod crafting;
 mod dimensions;
+#[allow(dead_code)] // B13 staged storage: Protocol 5 activation integration pending.
+mod dispensers;
 mod experience;
 mod furnaces;
 mod ground_items;
