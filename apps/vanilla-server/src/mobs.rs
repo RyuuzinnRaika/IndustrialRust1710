@@ -1913,10 +1913,18 @@ impl Mobs {
             {
                 continue;
             }
-            // Keep this persisted table bounded even on servers that place
-            // and destroy very large numbers of spawners.
+            // Keep this persisted table bounded even when players explore
+            // more than 512 distinct dungeons. Evict an old cooldown rather
+            // than permanently disabling every newly discovered spawner.
             if self.spawner_next_tick.len() >= 512 && !self.spawner_next_tick.contains_key(&key) {
-                continue;
+                if let Some(oldest) = self
+                    .spawner_next_tick
+                    .iter()
+                    .min_by_key(|(_, tick)| *tick)
+                    .map(|(key, _)| key.clone())
+                {
+                    self.spawner_next_tick.remove(&oldest);
+                }
             }
             let salt = (x as i64 as u64).wrapping_mul(0x9e3779b185ebca87)
                 ^ (y as i64 as u64).wrapping_mul(0xc2b2ae3d27d4eb4f)
@@ -2942,9 +2950,16 @@ mod tests {
             z: f64::from(z) + 0.5,
         };
         let mut mobs = Mobs::new_with_difficulty(&world, true, 2);
+        // Simulate a heavily explored server: old cooldown slots must not
+        // permanently suppress active spawners after reaching the size cap.
+        for i in 0..512 {
+            mobs.spawner_next_tick.insert(format!("{i},64,{i}"), 0);
+        }
         let mut events = Vec::new();
         mobs.spawn_from_spawners(20, &world, &[player], &mut events);
         assert_eq!(events.len(), 1);
+        assert_eq!(mobs.spawner_next_tick.len(), 512);
+        assert!(mobs.spawner_next_tick.contains_key(&format!("{x},{y},{z}")));
         let mut second = Vec::new();
         mobs.spawn_from_spawners(40, &world, &[player], &mut second);
         assert!(second.is_empty());
