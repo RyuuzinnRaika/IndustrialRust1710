@@ -73,7 +73,9 @@ impl World {
                 };
                 solid(support)
             }
-            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 | 132 | 147 | 148 | 149 | 150 | 151 => solid(below),
+            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 | 132 | 147 | 148 | 149 | 150 | 151 => {
+                solid(below)
+            }
             78 => solid(below) || below == 79,
             77 | 131 | 143 => {
                 let neighbor = match block & 7 {

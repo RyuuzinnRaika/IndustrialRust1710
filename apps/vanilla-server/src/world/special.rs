@@ -16,8 +16,14 @@ pub(super) struct PrimedTnt {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TntEvent {
-    Spawn { entity_id: i32, pos: (i32, i32, i32) },
-    Explode { entity_id: i32, pos: (i32, i32, i32) },
+    Spawn {
+        entity_id: i32,
+        pos: (i32, i32, i32),
+    },
+    Explode {
+        entity_id: i32,
+        pos: (i32, i32, i32),
+    },
 }
 
 impl World {
@@ -28,18 +34,22 @@ impl World {
             self.next_tnt_id.saturating_add(1)
         };
         let entity_id = self.next_tnt_id;
-        self.primed_tnt.insert(entity_id, PrimedTnt {
+        self.primed_tnt.insert(
+            entity_id,
+            PrimedTnt {
+                entity_id,
+                pos: (x, y, z),
+                explode_at: self.fluid_phase.saturating_add(fuse),
+            },
+        );
+        self.tnt_events.push(TntEvent::Spawn {
             entity_id,
             pos: (x, y, z),
-            explode_at: self.fluid_phase.saturating_add(fuse),
         });
-        self.tnt_events.push(TntEvent::Spawn { entity_id, pos: (x, y, z) });
     }
 
     /// Direct flint/redstone ignition commits removal before entity spawn.
-    pub fn ignite_tnt(
-        &mut self, path: &Path, x: i32, y: i32, z: i32,
-    ) -> io::Result<bool> {
+    pub fn ignite_tnt(&mut self, path: &Path, x: i32, y: i32, z: i32) -> io::Result<bool> {
         if self.get(x, y, z) >> 4 != 46 {
             return Ok(false);
         }
@@ -56,7 +66,9 @@ impl World {
     }
 
     pub(super) fn finalize_tnt(&mut self, newly_primed: &[(i32, i32, i32)]) {
-        let expired: Vec<_> = self.primed_tnt.values()
+        let expired: Vec<_> = self
+            .primed_tnt
+            .values()
             .filter(|t| t.explode_at <= self.fluid_phase)
             .take(4)
             .copied()
@@ -64,7 +76,8 @@ impl World {
         for tnt in expired {
             self.primed_tnt.remove(&tnt.entity_id);
             self.tnt_events.push(TntEvent::Explode {
-                entity_id: tnt.entity_id, pos: tnt.pos,
+                entity_id: tnt.entity_id,
+                pos: tnt.pos,
             });
         }
         for &(x, y, z) in newly_primed {
@@ -83,13 +96,19 @@ impl World {
             return Ok(Vec::new());
         }
         if changes.len() > 128 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "special block batch too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "special block batch too large",
+            ));
         }
         let mut candidate = self.clone();
         let mut changed = Vec::new();
         for (&(x, y, z), &value) in changes {
             if !in_bounds(x, i32::from(y), z) || value >> 4 > 255 {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "special block out of bounds"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "special block out of bounds",
+                ));
             }
             let old = candidate.get(x, i32::from(y), z);
             if old != value {
@@ -121,10 +140,38 @@ impl World {
         }
         let level = state & 3;
         let (next, output) = match (held.id, held.damage) {
-            (326, _) if level != 3 => (3, Stack { id: 325, count: 1, damage: 0 }),
-            (373, 0) if level < 3 => (level + 1, Stack { id: 374, count: 1, damage: 0 }),
-            (374, _) if level > 0 => (level - 1, Stack { id: 373, count: 1, damage: 0 }),
-            (325, _) if level == 3 => (0, Stack { id: 326, count: 1, damage: 0 }),
+            (326, _) if level != 3 => (
+                3,
+                Stack {
+                    id: 325,
+                    count: 1,
+                    damage: 0,
+                },
+            ),
+            (373, 0) if level < 3 => (
+                level + 1,
+                Stack {
+                    id: 374,
+                    count: 1,
+                    damage: 0,
+                },
+            ),
+            (374, _) if level > 0 => (
+                level - 1,
+                Stack {
+                    id: 373,
+                    count: 1,
+                    damage: 0,
+                },
+            ),
+            (325, _) if level == 3 => (
+                0,
+                Stack {
+                    id: 326,
+                    count: 1,
+                    damage: 0,
+                },
+            ),
             _ => return None,
         };
         Some(((118 << 4) | next, output))
@@ -185,7 +232,11 @@ impl World {
     /// Legacy portal frames have orientation in bits 0..1 and Eye in bit 2.
     /// Only a complete 3x3 ring is activated; the center is updated atomically.
     pub fn insert_end_eye(
-        &mut self, path: &Path, x: i32, y: i32, z: i32,
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        z: i32,
     ) -> io::Result<Vec<(i32, i32, i32)>> {
         let old = self.get(x, y, z);
         if old >> 4 != 120 || old & 4 != 0 {
@@ -197,7 +248,8 @@ impl World {
             for cz in z - 2..=z + 2 {
                 // Each possible center is at most two blocks away from the new eye.
                 if !(((cx - x).abs() == 2 && (cz - z).abs() <= 1)
-                    || ((cz - z).abs() == 2 && (cx - x).abs() <= 1)) {
+                    || ((cz - z).abs() == 2 && (cx - x).abs() <= 1))
+                {
                     continue;
                 }
                 let mut ring = true;
@@ -217,9 +269,9 @@ impl World {
                     }
                 }
                 if ring {
-                    let empty = (-1..=1).all(|dx| (-1..=1).all(|dz| {
-                        matches!(self.get(cx + dx, y, cz + dz) >> 4, 0 | 119)
-                    }));
+                    let empty = (-1..=1).all(|dx| {
+                        (-1..=1).all(|dz| matches!(self.get(cx + dx, y, cz + dz) >> 4, 0 | 119))
+                    });
                     if empty {
                         for dx in -1..=1 {
                             for dz in -1..=1 {
@@ -237,7 +289,11 @@ impl World {
     /// Bone meal applies vanilla-style full crop maturity, one sapling tree,
     /// or short-grass/flowers; it never overwrites an occupied build.
     pub fn apply_bonemeal(
-        &mut self, path: &Path, x: i32, y: i32, z: i32,
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        z: i32,
     ) -> io::Result<Vec<(i32, i32, i32)>> {
         if !in_bounds(x, y, z) {
             return Ok(Vec::new());
@@ -272,8 +328,7 @@ impl World {
     /// Approximate 1.7.10 daylight detector curve: noon=15, midnight=0,
     /// cloud/rain dim the sensor. This runs only on registered sensor blocks.
     pub(super) fn daylight_strength(&self) -> u16 {
-        let angle = (self.day_time.rem_euclid(24_000) as f64 / 24_000.0)
-            * std::f64::consts::TAU;
+        let angle = (self.day_time.rem_euclid(24_000) as f64 / 24_000.0) * std::f64::consts::TAU;
         let day = ((angle.sin() + 0.15) * 15.0).round().clamp(0.0, 15.0) as u16;
         day.saturating_sub(if self.raining { 3 } else { 0 })
     }
@@ -285,12 +340,22 @@ impl World {
         let len = self.pending_devices.len();
         if len > 0 {
             let start = (self.fluid_phase as usize).wrapping_mul(budget) % len;
-            for &(x, y, z) in self.pending_devices.iter().cycle().skip(start).take(budget.min(len)) {
+            for &(x, y, z) in self
+                .pending_devices
+                .iter()
+                .cycle()
+                .skip(start)
+                .take(budget.min(len))
+            {
                 let state = self.get(x, i32::from(y), z);
                 if state >> 4 == 151 {
-                    let level = if (i32::from(y) + 1..=255).all(|sy| {
-                        matches!(self.get(x, sy, z) >> 4, 0 | 20 | 95 | 102 | 160)
-                    }) { self.daylight_strength() } else { 0 };
+                    let level = if (i32::from(y) + 1..=255)
+                        .all(|sy| matches!(self.get(x, sy, z) >> 4, 0 | 20 | 95 | 102 | 160))
+                    {
+                        self.daylight_strength()
+                    } else {
+                        0
+                    };
                     if state & 15 != level {
                         changes.insert((x, y, z), (151 << 4) | level);
                     }
@@ -300,13 +365,13 @@ impl World {
         // Redstone-powered TNT becomes an entity, not an immediately
         // exploding block. Chain-primed blocks use the shorter legacy fuse.
         for &(x, y, z) in self.pending_devices.iter().take(budget) {
-            if self.get(x, i32::from(y), z) >> 4 == 46
-                && self.powered_near(x, i32::from(y), z)
-            {
+            if self.get(x, i32::from(y), z) >> 4 == 46 && self.powered_near(x, i32::from(y), z) {
                 changes.insert((x, y, z), 0);
             }
         }
-        for tnt in self.primed_tnt.values()
+        for tnt in self
+            .primed_tnt
+            .values()
             .filter(|t| t.explode_at <= self.fluid_phase)
             .take(4)
         {
@@ -314,9 +379,13 @@ impl World {
             for dx in -3i32..=3 {
                 for dy in -3i32..=3 {
                     for dz in -3i32..=3 {
-                        if dx * dx + dy * dy + dz * dz > 9 { continue; }
+                        if dx * dx + dy * dy + dz * dz > 9 {
+                            continue;
+                        }
                         let (px, py, pz) = (x + dx, y + dy, z + dz);
-                        if !in_bounds(px, py, pz) { continue; }
+                        if !in_bounds(px, py, pz) {
+                            continue;
+                        }
                         let id = self.get(px, py, pz) >> 4;
                         if id != 0 && !matches!(id, 7 | 49 | 90 | 119 | 120) {
                             changes.insert((px, py as u8, pz), 0);
@@ -331,7 +400,12 @@ impl World {
     /// A weighted pressure plate's metadata is its 0..15 analog output.
     /// Gold (147) needs one entity per level; iron (148) needs ten.
     pub fn press_weighted_plate(
-        &mut self, path: &Path, x: i32, y: i32, z: i32, count: usize,
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        z: i32,
+        count: usize,
     ) -> io::Result<bool> {
         if !in_bounds(x, y, z) {
             return Ok(false);
@@ -345,7 +419,8 @@ impl World {
         // Keep the plate awake in the existing device timer, even when the
         // strength did not change on this packet.
         if count > 0 {
-            self.pending_buttons.insert((x, y as u8, z), self.fluid_phase + 10);
+            self.pending_buttons
+                .insert((x, y as u8, z), self.fluid_phase + 10);
         }
         self.update_and_save(path, x, y, z, (state & !15) | level)
     }
@@ -353,7 +428,11 @@ impl World {
     /// Probe at player feet or shoulder height. Two hooks connected by
     /// contiguous string in one axis become powered for ten server ticks.
     pub fn touch_tripwire(
-        &mut self, path: &Path, x: i32, y: i32, z: i32,
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        z: i32,
     ) -> io::Result<Vec<(i32, i32, i32)>> {
         if !in_bounds(x, y, z) || self.get(x, y, z) >> 4 != 132 {
             return Ok(Vec::new());
@@ -378,12 +457,14 @@ impl World {
                 }
             }
             if hooks.len() == 2 {
-                let cells: Vec<_> = hooks.iter().map(|&(px, pz)| {
-                    (px, y, pz, self.get(px, y, pz) | 8)
-                }).collect();
+                let cells: Vec<_> = hooks
+                    .iter()
+                    .map(|&(px, pz)| (px, y, pz, self.get(px, y, pz) | 8))
+                    .collect();
                 let changed = self.update_many_and_save(path, &cells)?;
                 for &(px, pz) in &hooks {
-                    self.pending_buttons.insert((px, y as u8, pz), self.fluid_phase + 10);
+                    self.pending_buttons
+                        .insert((px, y as u8, pz), self.fluid_phase + 10);
                 }
                 if changed {
                     return Ok(hooks.into_iter().map(|(px, pz)| (px, y, pz)).collect());
@@ -409,7 +490,11 @@ mod tests {
         let mut w = World::new();
         let path = file("cauldron");
         w.update_and_save(&path, 1, 64, 1, 118 << 4).unwrap();
-        let bucket = Stack { id: 326, count: 1, damage: 0 };
+        let bucket = Stack {
+            id: 326,
+            count: 1,
+            damage: 0,
+        };
         let (state, returned) = w.cauldron_exchange(1, 64, 1, bucket).unwrap();
         assert_eq!(state & 15, 3);
         assert_eq!(returned.id, 325);

@@ -122,9 +122,19 @@ impl World {
                 }
             }
             70 | 72 => {
-                if block & 1 != 0 { 15 } else { 0 }
+                if block & 1 != 0 {
+                    15
+                } else {
+                    0
+                }
             }
-            131 => if block & 8 != 0 { 15 } else { 0 },
+            131 => {
+                if block & 8 != 0 {
+                    15
+                } else {
+                    0
+                }
+            }
             147 | 148 | 151 => (block & 15) as u8,
             76 | 152 => 15,
             94 => {

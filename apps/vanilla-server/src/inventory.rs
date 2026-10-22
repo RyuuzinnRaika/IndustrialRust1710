@@ -411,7 +411,9 @@ impl Inventory {
     pub fn wear_flint_steel(&mut self) -> bool {
         let slot = &mut self.slots[36 + self.selected as usize];
         let Some(mut item) = *slot else { return false };
-        if item.id != 259 || item.damage >= 64 { return false; }
+        if item.id != 259 || item.damage >= 64 {
+            return false;
+        }
         item.damage += 1;
         *slot = (item.damage < 64).then_some(item);
         true

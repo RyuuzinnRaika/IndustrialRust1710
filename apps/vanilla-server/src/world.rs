@@ -458,7 +458,22 @@ impl World {
             }
             if matches!(
                 id,
-                2 | 3 | 6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
+                2 | 3
+                    | 6
+                    | 18
+                    | 51
+                    | 59
+                    | 60
+                    | 78
+                    | 79
+                    | 81
+                    | 83
+                    | 104
+                    | 105
+                    | 115
+                    | 127
+                    | 141
+                    | 142
             ) {
                 self.pending_ecology.insert(pos);
             } else {
@@ -497,7 +512,10 @@ impl World {
             ) {
                 self.pending_support.insert(pos);
             }
-            if matches!(id, 27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157) {
+            if matches!(
+                id,
+                27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157
+            ) {
                 self.pending_devices.insert(pos);
             } else {
                 self.pending_devices.remove(&pos);
@@ -542,10 +560,16 @@ impl World {
         changes.extend(self.device_changes(budget));
         changes.extend(self.special_changes(budget));
         // Retain the old block identity until the world snapshot has committed.
-        let primed_on_commit: Vec<_> = changes.iter().filter_map(|(&(x, y, z), &new)| {
-            (new == 0 && self.get(x, i32::from(y), z) >> 4 == 46)
-                .then_some((x, i32::from(y), z))
-        }).collect();
+        let primed_on_commit: Vec<_> = changes
+            .iter()
+            .filter_map(|(&(x, y, z), &new)| {
+                (new == 0 && self.get(x, i32::from(y), z) >> 4 == 46).then_some((
+                    x,
+                    i32::from(y),
+                    z,
+                ))
+            })
+            .collect();
 
         for &(x, y, z) in &wet {
             let y = i32::from(y);
@@ -1016,7 +1040,22 @@ impl World {
             }
             if matches!(
                 block >> 4,
-                2 | 3 | 6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
+                2 | 3
+                    | 6
+                    | 18
+                    | 51
+                    | 59
+                    | 60
+                    | 78
+                    | 79
+                    | 81
+                    | 83
+                    | 104
+                    | 105
+                    | 115
+                    | 127
+                    | 141
+                    | 142
             ) {
                 world.pending_ecology.insert((x, y, z));
             }
@@ -1047,7 +1086,10 @@ impl World {
             ) {
                 world.pending_support.insert((x, y, z));
             }
-            if matches!(block >> 4, 27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157) {
+            if matches!(
+                block >> 4,
+                27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157
+            ) {
                 world.pending_devices.insert((x, y, z));
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)

@@ -586,10 +586,18 @@ struct PlayerSession<'a> {
 /// Apply server-authoritative special item uses; return None for a normal
 /// right-click, Some(changes) when this interaction was handled (including no-op).
 fn use_special_item(
-    w: &mut World, world_path: &Path, inventory: &mut Inventory,
-    inventory_path: &Path, survival: bool, x: i32, y: i32, z: i32,
+    w: &mut World,
+    world_path: &Path,
+    inventory: &mut Inventory,
+    inventory_path: &Path,
+    survival: bool,
+    x: i32,
+    y: i32,
+    z: i32,
 ) -> io::Result<Option<Vec<(i32, i32, i32)>>> {
-    let Some(held) = inventory.held() else { return Ok(None) };
+    let Some(held) = inventory.held() else {
+        return Ok(None);
+    };
     let target = w.get(x, y, z) >> 4;
     let cauldron = w.cauldron_exchange(x, y, z, held);
     let action = if cauldron.is_some() {
@@ -610,7 +618,9 @@ fn use_special_item(
             None if action == 4 => candidate.wear_flint_steel(),
             None => candidate.consume_held(),
         };
-        if !spent { return Ok(Some(Vec::new())); }
+        if !spent {
+            return Ok(Some(Vec::new()));
+        }
         // Never grant a free block while persistence is uncertain.
         candidate.save(inventory_path)?;
     }
@@ -622,20 +632,31 @@ fn use_special_item(
         }
         2 => w.insert_end_eye(world_path, x, y, z),
         3 => w.apply_bonemeal(world_path, x, y, z),
-        _ => w.ignite_tnt(world_path, x, y, z)
-            .map(|changed| if changed { vec![(x, y, z)] } else { Vec::new() }),
+        _ => w.ignite_tnt(world_path, x, y, z).map(|changed| {
+            if changed {
+                vec![(x, y, z)]
+            } else {
+                Vec::new()
+            }
+        }),
     };
     match result {
         Ok(changed) if !changed.is_empty() => {
-            if survival { *inventory = candidate; }
+            if survival {
+                *inventory = candidate;
+            }
             Ok(Some(changed))
         }
         Ok(_) => {
-            if survival { inventory.save(inventory_path)?; }
+            if survival {
+                inventory.save(inventory_path)?;
+            }
             Ok(Some(Vec::new()))
         }
         Err(error) => {
-            if survival { inventory.save(inventory_path)?; }
+            if survival {
+                inventory.save(inventory_path)?;
+            }
             Err(error)
         }
     }
@@ -1865,12 +1886,21 @@ fn play(
                 {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     if let Some(changes) = use_special_item(
-                        &mut w, world_path, inventory, inventory_path, survival, x, y, z,
+                        &mut w,
+                        world_path,
+                        inventory,
+                        inventory_path,
+                        survival,
+                        x,
+                        y,
+                        z,
                     )? {
                         for (cx, cy, cz) in changes {
                             hub.broadcast(block_change_event(&w, cx, cy, cz));
                         }
-                        if survival { send(s, 0x30, &inventory.window_items())?; }
+                        if survival {
+                            send(s, 0x30, &inventory.window_items())?;
+                        }
                         continue;
                     }
                 }
@@ -3827,25 +3857,37 @@ fn main() -> io::Result<()> {
                             // their block changes were durably committed.
                             for tnt in gravity_world.drain_tnt_events() {
                                 match tnt {
-                                    world::TntEvent::Spawn { entity_id, pos: (x, y, z) } => {
+                                    world::TntEvent::Spawn {
+                                        entity_id,
+                                        pos: (x, y, z),
+                                    } => {
                                         let mut body = entity_id.to_be_bytes().to_vec();
                                         body.push(50); // Protocol 5 Spawn Object: primed TNT
                                         for coordinate in [x, y, z] {
-                                            body.extend_from_slice(&(coordinate * 32 + 16).to_be_bytes());
+                                            body.extend_from_slice(
+                                                &(coordinate * 32 + 16).to_be_bytes(),
+                                            );
                                         }
                                         body.extend_from_slice(&[0, 0]);
                                         body.extend_from_slice(&0i32.to_be_bytes());
                                         furnace_hub.broadcast(Event { id: 0x0e, body });
                                     }
-                                    world::TntEvent::Explode { entity_id, pos: (x, y, z) } => {
+                                    world::TntEvent::Explode {
+                                        entity_id,
+                                        pos: (x, y, z),
+                                    } => {
                                         furnace_hub.broadcast(multiplayer::destroy(entity_id));
                                         let mut body = Vec::new();
                                         for coordinate in [x, y, z] {
-                                            body.extend_from_slice(&(f64::from(coordinate) + 0.5).to_be_bytes());
+                                            body.extend_from_slice(
+                                                &(f64::from(coordinate) + 0.5).to_be_bytes(),
+                                            );
                                         }
                                         body.extend_from_slice(&4f32.to_be_bytes());
                                         body.extend_from_slice(&0i32.to_be_bytes());
-                                        for _ in 0..3 { body.extend_from_slice(&0f32.to_be_bytes()); }
+                                        for _ in 0..3 {
+                                            body.extend_from_slice(&0f32.to_be_bytes());
+                                        }
                                         furnace_hub.broadcast(Event { id: 0x27, body });
                                     }
                                 }
