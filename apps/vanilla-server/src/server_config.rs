@@ -242,7 +242,11 @@ gamemode=1
         assert!(!p.survival);
         assert_eq!(p.difficulty, 1);
         assert!(!p.online_mode);
-        assert!(ServerProperties::parse(&SAFE.replace("online-mode=false", "online-mode=true")).unwrap().online_mode);
+        assert!(
+            ServerProperties::parse(&SAFE.replace("online-mode=false", "online-mode=true"))
+                .unwrap()
+                .online_mode
+        );
         for difficulty in 0..=3 {
             let text = SAFE.replace("difficulty=1", &format!("difficulty={difficulty}"));
             assert_eq!(
