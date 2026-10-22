@@ -1,0 +1,39 @@
+name: Optional bounded Protocol5 and Anvil coverage fuzz
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly
+      - name: Install fuzz runner (not scheduled to avoid consuming build quota)
+        run: cargo +nightly install cargo-fuzz --locked
+      - name: Exercise production Protocol 5 frame decoder
+        shell: bash
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          cargo +nightly fuzz run protocol5_frames -- -max_total_time=180 -max_len=65536 -rss_limit_mb=1024 -timeout=10 -print_final_stats=1
+      - name: Exercise production legacy NBT decoder
+        shell: bash
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          cargo +nightly fuzz run anvil_nbt -- -max_total_time=180 -max_len=65536 -rss_limit_mb=1024 -timeout=10 -print_final_stats=1
+      - name: Publish fuzz crash inputs only on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: industrialrust1710-fuzz-crashes-${{ github.sha }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 3
