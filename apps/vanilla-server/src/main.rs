@@ -58,8 +58,8 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use mobs::Mobs;
-use online_auth::{Connection, ServerIdentity};
 use multiplayer::{Event, Hub, JoinError, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS};
+use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use security_limits::{ChatLimiter, ConnectionLimiter};
@@ -2990,7 +2990,9 @@ fn handle(
     // Authenticate before loading or admitting a player. Online failures
     // must never be turned into offline UUIDs, even on Mojang timeout.
     let (name, uuid) = if online_mode {
-        let key = auth_key.as_ref().ok_or_else(|| bad("missing online-mode RSA identity"))?;
+        let key = auth_key
+            .as_ref()
+            .ok_or_else(|| bad("missing online-mode RSA identity"))?;
         let profile = key.authenticate(&mut s, &name)?;
         (profile.name, profile.uuid)
     } else {
@@ -3055,7 +3057,14 @@ fn handle(
     write_string(&uuid, &mut success)?;
     write_string(&name, &mut success)?;
     send(&mut s, 0x02, &success)?;
-    println!("joined: {name} ({})", if online_mode { "MOJANG VERIFIED" } else { "UNAUTHENTICATED OFFLINE MODE" });
+    println!(
+        "joined: {name} ({})",
+        if online_mode {
+            "MOJANG VERIFIED"
+        } else {
+            "UNAUTHENTICATED OFFLINE MODE"
+        }
+    );
     join(
         &mut s,
         &world,
