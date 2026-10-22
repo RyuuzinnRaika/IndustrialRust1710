@@ -335,7 +335,10 @@ impl World {
                         top = y;
                     }
                 }
-                if matches!(self.get(x, top, z) >> 4, 1 | 2 | 3 | 4 | 5 | 8 | 9 | 12 | 13 | 24 | 80) {
+                if matches!(
+                    self.get(x, top, z) >> 4,
+                    1 | 2 | 3 | 4 | 5 | 8 | 9 | 12 | 13 | 24 | 80
+                ) {
                     self.pending_weather.insert((x, top as u8, z));
                 }
             }
