@@ -1,7 +1,7 @@
 //! J96: bounded, non-destructive Anvil *working copy*, not full IRW conversion.
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const MAX_FILES: usize = 100_000;
 const MAX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
