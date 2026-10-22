@@ -1165,6 +1165,19 @@ fn play(
                 input.finish()?;
                 if survival && vitals.health > 0.0 && action == 0 {
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    // Protocol 5 Use Entity: adult cow + held empty bucket.
+                    // Inventory is cloned, exchanged and persisted before the
+                    // authoritative window refresh. On a full inventory, the
+                    // action has no effect and cannot consume a bucket.
+                    if creatures.can_milk(target_id, *player, inventory.held()) {
+                        let mut candidate = inventory.clone();
+                        if candidate.fill_milk_bucket() {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
+                            send(s, 0x30, &inventory.window_items())?;
+                        }
+                        continue;
+                    }
                     // Shears, a sheep's shared metadata, inventory durability and
                     // spawned wool are all decided by the server.
                     if inventory.held().is_some_and(|item| item.id == 359) {
