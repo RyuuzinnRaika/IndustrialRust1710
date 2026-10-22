@@ -745,6 +745,13 @@ impl World {
             }
         }
 
+        // Advance the primed entity state BEFORE the atomic IRW snapshot.
+        // On any storage failure, undo the state and newly queued packets.
+        let primed_before = self.primed_tnt.clone();
+        let tnt_events_before = self.tnt_events.len();
+        self.finalize_tnt(&primed_on_commit);
+        let tnt_changed = self.primed_tnt != primed_before;
+
         if !changes.is_empty() {
             // Decaying oak leaves may yield a sapling or apple. Stage these
             // before mutation, but expose them only after a successful save.
@@ -813,6 +820,8 @@ impl World {
                 self.save(path)
             };
             if let Err(error) = saved {
+                self.primed_tnt = primed_before;
+                self.tnt_events.truncate(tnt_events_before);
                 self.comparator_ready.clear();
                 for (pos, original) in undo {
                     match original {
@@ -830,9 +839,16 @@ impl World {
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
             }
+        } else if tnt_changed {
+            // An explosion in empty space still needs to durably remove TNT,
+            // even when not a single terrain block was modified.
+            if let Err(error) = self.save(path) {
+                self.primed_tnt = primed_before;
+                self.tnt_events.truncate(tnt_events_before);
+                return Err(error);
+            }
         }
 
-        self.finalize_tnt(&primed_on_commit);
         // Publish analog changes only after the block snapshot committed.
         // Same-output-state comparator strength changes still wake nearby dust.
         let ready = std::mem::take(&mut self.comparator_ready);
@@ -1030,10 +1046,53 @@ impl World {
             _ => return Err(invalid("unknown IRW world format")),
         };
         let count = u32::from_be_bytes(bytes[offset - 4..offset].try_into().unwrap()) as usize;
-        if count > MAX_EDITS || bytes.len() != offset + count * 11 {
+        if count > MAX_EDITS {
+            return Err(invalid("world edit count exceeds limit"));
+        }
+        let blocks_end = offset + count * 11;
+        // Optional IRW TNT1 extension: older snapshots have no trailer.
+        // Every stored fuse is relative to the next loaded world tick,
+        // preventing accidental detonation after a server restart.
+        if bytes.len() < blocks_end {
             return Err(invalid("world file length/count mismatch"));
         }
-        for entry in bytes[offset..].as_chunks::<11>().0 {
+        let trailer = &bytes[blocks_end..];
+        if !trailer.is_empty() {
+            if trailer.len() < 6 || &trailer[..4] != b"TNT1" {
+                return Err(invalid("unrecognized world entity trailer"));
+            }
+            let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
+            if primed_count > 4096 || trailer.len() != 6 + primed_count * 20 {
+                return Err(invalid("invalid primed TNT trailer length"));
+            }
+            for entry in trailer[6..].chunks_exact(20) {
+                let entity_id = i32::from_be_bytes(entry[..4].try_into().unwrap());
+                let x = i32::from_be_bytes(entry[4..8].try_into().unwrap());
+                let y = i32::from_be_bytes(entry[8..12].try_into().unwrap());
+                let z = i32::from_be_bytes(entry[12..16].try_into().unwrap());
+                let remaining = u32::from_be_bytes(entry[16..20].try_into().unwrap());
+                if entity_id < 10_000_001 || !in_bounds(x, y, z) || remaining == 0 {
+                    return Err(invalid("invalid primed TNT entity"));
+                }
+                if world.primed_tnt.insert(
+                    entity_id,
+                    special::PrimedTnt {
+                        entity_id,
+                        pos: (x, y, z),
+                        explode_at: u64::from(remaining),
+                    },
+                ).is_some() {
+                    return Err(invalid("duplicate primed TNT entity"));
+                }
+                world.next_tnt_id = world.next_tnt_id.max(entity_id);
+                // A reconnected 1.7.10 client needs to see surviving TNT.
+                world.tnt_events.push(TntEvent::Spawn {
+                    entity_id,
+                    pos: (x, y, z),
+                });
+            }
+        }
+        for entry in bytes[offset..blocks_end].as_chunks::<11>().0 {
             let x = i32::from_be_bytes(entry[0..4].try_into().unwrap());
             let y = entry[4];
             let z = i32::from_be_bytes(entry[5..9].try_into().unwrap());
@@ -1126,6 +1185,24 @@ impl World {
             f.write_all(&[y])?;
             f.write_all(&z.to_be_bytes())?;
             f.write_all(&block.to_be_bytes())?;
+        }
+        if !self.primed_tnt.is_empty() {
+            if self.primed_tnt.len() > 4096 {
+                return Err(invalid("primed TNT entity capacity exceeded"));
+            }
+            f.write_all(b"TNT1")?;
+            f.write_all(&(self.primed_tnt.len() as u16).to_be_bytes())?;
+            for tnt in self.primed_tnt.values() {
+                let remaining = tnt.explode_at.saturating_sub(self.fluid_phase);
+                if remaining == 0 || remaining > u64::from(u32::MAX) {
+                    return Err(invalid("invalid primed TNT fuse"));
+                }
+                f.write_all(&tnt.entity_id.to_be_bytes())?;
+                f.write_all(&tnt.pos.0.to_be_bytes())?;
+                f.write_all(&tnt.pos.1.to_be_bytes())?;
+                f.write_all(&tnt.pos.2.to_be_bytes())?;
+                f.write_all(&(remaining as u32).to_be_bytes())?;
+            }
         }
         Ok(())
     }
