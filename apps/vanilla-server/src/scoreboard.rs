@@ -161,6 +161,14 @@ impl Scoreboard {
         body.extend_from_slice(&value.to_be_bytes());
         Ok(event(0x3c, body))
     }
+    /// Protocol 5 score removal omits objective and value; it removes all
+    /// scores held by this name across every objective on the client.
+    fn reset_score_packet(holder: &str) -> io::Result<Event> {
+        let mut body = Vec::new();
+        string(holder, &mut body)?;
+        body.push(1);
+        Ok(event(0x3c, body))
+    }
     fn display_packet(slot: usize, objective: &str) -> io::Result<Event> {
         let mut body = vec![slot as u8];
         string(objective, &mut body)?;
@@ -225,6 +233,41 @@ impl Scoreboard {
         );
         Ok(vec![packet])
     }
+    pub fn remove_objective(&mut self, name: &str) -> io::Result<Vec<Event>> {
+        let objective = self
+            .objectives
+            .get(name)
+            .ok_or_else(|| invalid("unknown scoreboard objective"))?;
+        let remove = Self::objective_packet(name, &objective.display, 1)?;
+        let mut events = Vec::new();
+        for slot in 0..self.displays.len() {
+            if self.displays[slot].as_deref() == Some(name) {
+                events.push(Self::display_packet(slot, "")?);
+            }
+        }
+        events.push(remove);
+        self.objectives.remove(name);
+        self.scores.remove(name);
+        for slot in &mut self.displays {
+            if slot.as_deref() == Some(name) {
+                *slot = None;
+            }
+        }
+        Ok(events)
+    }
+    pub fn reset_player_scores(&mut self, holder: &str) -> io::Result<Vec<Event>> {
+        if !token(holder, 40) {
+            return Err(invalid("invalid scoreboard score holder"));
+        }
+        if !self.scores.values().any(|scores| scores.contains_key(holder)) {
+            return Err(invalid("score holder has no scores"));
+        }
+        let packet = Self::reset_score_packet(holder)?;
+        for scores in self.scores.values_mut() {
+            scores.remove(holder);
+        }
+        Ok(vec![packet])
+    }
     pub fn set_score(&mut self, holder: &str, name: &str, value: i32) -> io::Result<Vec<Event>> {
         if !token(holder, 40) || !self.objectives.contains_key(name) {
             return Err(invalid("unknown objective or player"));
@@ -262,6 +305,28 @@ impl Scoreboard {
         let packet = Self::team_packet(name, &team)?;
         self.teams.insert(name.into(), team);
         Ok(vec![packet])
+    }
+    pub fn remove_team(&mut self, name: &str) -> io::Result<Vec<Event>> {
+        if !self.teams.contains_key(name) {
+            return Err(invalid("unknown scoreboard team"));
+        }
+        let mut body = Vec::new();
+        string(name, &mut body)?;
+        body.push(1); // Remove team
+        self.teams.remove(name);
+        Ok(vec![event(0x3e, body)])
+    }
+    pub fn remove_player_from_team(&mut self, name: &str, holder: &str) -> io::Result<Vec<Event>> {
+        if !token(holder, 40) || !self.teams.get(name).is_some_and(|t| t.players.contains(holder)) {
+            return Err(invalid("unknown member of scoreboard team"));
+        }
+        let mut body = Vec::new();
+        string(name, &mut body)?;
+        body.push(4); // Remove players
+        body.extend_from_slice(&1i16.to_be_bytes());
+        string(holder, &mut body)?;
+        self.teams.get_mut(name).unwrap().players.remove(holder);
+        Ok(vec![event(0x3e, body)])
     }
     pub fn add_player_to_team(&mut self, name: &str, holder: &str) -> io::Result<Vec<Event>> {
         if !token(holder, 40) || self.teams.values().any(|t| t.players.contains(holder)) {
@@ -324,6 +389,11 @@ mod tests {
         board.add_player_to_team("blue", "Alice").unwrap();
         assert!(board.add_player_to_team("blue", "Alice").is_err());
         assert!(board.snapshot().unwrap().iter().any(|e| e.id == 0x3e));
+        assert_eq!(board.remove_player_from_team("blue", "Alice").unwrap()[0].id, 0x3e);
+        assert!(board.remove_player_from_team("blue", "Alice").is_err());
+        board.add_player_to_team("blue", "Alice").unwrap();
+        assert_eq!(board.remove_team("blue").unwrap()[0].id, 0x3e);
+        assert!(board.remove_team("blue").is_err());
         let path = std::env::temp_dir().join(format!(
             "ir1710-scoreboard-{}-{:?}.json",
             std::process::id(),
@@ -335,6 +405,18 @@ mod tests {
             Scoreboard::load(&path).unwrap().snapshot().unwrap().len(),
             board.snapshot().unwrap().len()
         );
+        let reset = board.reset_player_scores("Alice").unwrap();
+        assert_eq!(reset.len(), 1);
+        assert_eq!(reset[0].id, 0x3c);
+        // Removal is the last byte of the Protocol 5 reset-score packet.
+        assert_eq!(reset[0].body.last(), Some(&1));
+        assert!(board.reset_player_scores("Alice").is_err());
+        let removed = board.remove_objective("death").unwrap();
+        assert_eq!(removed.len(), 2); // clear sidebar before removing objective
+        assert_eq!(removed[0].id, 0x3d);
+        assert_eq!(removed[1].id, 0x3b);
+        assert!(board.remove_objective("death").is_err());
+        assert!(board.snapshot().unwrap().is_empty());
         fs::remove_file(path).unwrap();
     }
 }
