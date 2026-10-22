@@ -598,7 +598,7 @@ struct PlayerSession<'a> {
     achievements_path: &'a Path,
     save_path: &'a Path,
     inventory: &'a mut Inventory,
-    inventory_path: &'a Path,
+    inventory_path: &'a mut PathBuf,
     ground_items: &'a Mutex<GroundItems>,
     ground_path: &'a Path,
     mobs: &'a Mutex<Mobs>,
@@ -618,7 +618,7 @@ struct PlayerSession<'a> {
     brewer_path: &'a Path,
     survival: bool,
     hardcore: bool,
-    difficulty: u8,
+    difficulty: &'a AtomicU8,
     game_rules: &'a Mutex<GameRules>,
     scoreboard: &'a Mutex<Scoreboard>,
     scoreboard_path: &'a Path,
@@ -716,7 +716,7 @@ fn play(
         device_path,
         brewers,
         brewer_path,
-        survival,
+        mut survival,
         hardcore,
         difficulty,
         game_rules,
@@ -3641,7 +3641,7 @@ fn play(
                     }
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = 0i32.to_be_bytes().to_vec();
-                    respawn.extend_from_slice(&[difficulty, 0]); // configured difficulty, survival
+                    respawn.extend_from_slice(&[difficulty.load(Ordering::Acquire), 0]); // current difficulty, survival
                     write_string("default", &mut respawn)?;
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks on respawn
@@ -3755,7 +3755,7 @@ struct ServerContext {
     brewer_path: Arc<PathBuf>,
     survival: bool,
     hardcore: bool,
-    difficulty: u8,
+    difficulty: Arc<AtomicU8>,
     game_rules: Arc<Mutex<GameRules>>,
     scoreboard: Arc<Mutex<Scoreboard>>,
     scoreboard_path: Arc<PathBuf>,
@@ -3919,7 +3919,7 @@ fn handle(
     }
     // Separate survival resources from old Creative inventories to prevent
     // player-selected Creative stacks becoming free Survival items.
-    let inventory_file = if survival {
+    let mut inventory_file = if survival {
         player_file.with_extension("survival.inventory.json")
     } else {
         Inventory::location(&player_file)
@@ -3981,7 +3981,7 @@ fn handle(
             vitals: player_vitals,
             survival,
             hardcore,
-            difficulty,
+            difficulty: difficulty.load(Ordering::Acquire),
         },
     )?;
     if survival {
@@ -4068,7 +4068,7 @@ fn handle(
             achievements_path: &achievements_file,
             save_path: &player_file,
             inventory: &mut inventory_state,
-            inventory_path: &inventory_file,
+            inventory_path: &mut inventory_file,
             ground_items: &ground_items,
             ground_path: &ground_path,
             mobs: &mobs,
@@ -4088,7 +4088,7 @@ fn handle(
             brewer_path: &brewer_path,
             survival,
             hardcore,
-            difficulty,
+            difficulty: &difficulty,
             game_rules: &game_rules,
             scoreboard: &scoreboard,
             scoreboard_path: &scoreboard_path,
@@ -5060,6 +5060,12 @@ fn main() -> io::Result<()> {
     let clock_path = Arc::new(world_path.with_extension("clock"));
     let restored_clock = Clock::load_state(&clock_path)?;
     let (clock, _clock_thread) = Clock::start_from(restored_clock);
+    let difficulty_path = Arc::new(world_path.with_extension("difficulty"));
+    let difficulty = admin_state::read(&difficulty_path, 3)?.unwrap_or(difficulty);
+    if hardcore && difficulty != 3 {
+        return Err(bad("hardcore difficulty override must remain 3"));
+    }
+    let shared_difficulty = Arc::new(AtomicU8::new(difficulty));
     let rules_path = Arc::new(GameRules::location(&world_path));
     let world_rules = Arc::new(Mutex::new(GameRules::load(&rules_path)?));
     let scoreboard_path = Arc::new(Scoreboard::location(&world_path));
@@ -5639,7 +5645,7 @@ fn main() -> io::Result<()> {
                     brewer_path: brewer_file,
                     survival,
                     hardcore,
-                    difficulty,
+                    difficulty: Arc::clone(&shared_difficulty),
                     game_rules: rules,
                     scoreboard: board,
                     scoreboard_path: board_path,
