@@ -217,8 +217,7 @@ impl Mob {
         }
         if self.kind == Kind::Horse {
             body.push((2 << 5) | 16); // horse flags int
-            let flags: i32 = (if self.tamed { 2 } else { 0 })
-                | (if self.saddled { 4 } else { 0 });
+            let flags: i32 = (if self.tamed { 2 } else { 0 }) | (if self.saddled { 4 } else { 0 });
             body.extend_from_slice(&flags.to_be_bytes());
         }
         // All living mobs expose health as a float at DataWatcher index 6,
@@ -232,8 +231,7 @@ impl Mob {
         let mut body = self.id.to_be_bytes().to_vec();
         if self.kind == Kind::Horse {
             body.push((2 << 5) | 16);
-            let flags: i32 = (if self.tamed { 2 } else { 0 })
-                | (if self.saddled { 4 } else { 0 });
+            let flags: i32 = (if self.tamed { 2 } else { 0 }) | (if self.saddled { 4 } else { 0 });
             body.extend_from_slice(&flags.to_be_bytes());
         } else {
             body.push(16);
@@ -972,21 +970,31 @@ impl Mobs {
         self.entities.get(&id).is_some_and(|mob| {
             matches!(mob.kind, Kind::Pig | Kind::Horse)
                 && (mob.kind == Kind::Pig || mob.tamed)
-                && !mob.baby && !mob.saddled && mob.nearby(player, 3.0)
+                && !mob.baby
+                && !mob.saddled
+                && mob.nearby(player, 3.0)
         })
     }
     pub fn saddle(&mut self, id: i32, player: PlayerPosition) -> Option<Event> {
-        if !self.can_saddle(id, player) { return None; }
+        if !self.can_saddle(id, player) {
+            return None;
+        }
         let mob = self.entities.get_mut(&id)?;
         mob.saddled = true;
         Some(mob.mount_metadata())
     }
     pub fn use_mount(&mut self, id: i32, rider: i32, player: PlayerPosition) -> Option<Vec<Event>> {
-        if self.entities.values().any(|mob| mob.rider == Some(rider)) { return None; }
+        if self.entities.values().any(|mob| mob.rider == Some(rider)) {
+            return None;
+        }
         let mob = self.entities.get_mut(&id)?;
-        if !matches!(mob.kind, Kind::Pig | Kind::Horse) || mob.baby
-            || mob.rider.is_some() || !mob.nearby(player, 4.0)
-        { return None; }
+        if !matches!(mob.kind, Kind::Pig | Kind::Horse)
+            || mob.baby
+            || mob.rider.is_some()
+            || !mob.nearby(player, 4.0)
+        {
+            return None;
+        }
         let mut result = Vec::new();
         if mob.kind == Kind::Horse && !mob.tamed {
             mob.tame_progress = mob.tame_progress.saturating_add(1);
@@ -1003,27 +1011,51 @@ impl Mobs {
         Some(result)
     }
     pub fn rider_position(&self, rider: i32) -> Option<PlayerPosition> {
-        self.entities.values().find(|mob| mob.rider == Some(rider)).map(|mob| {
-            PlayerPosition { y: (mob.position.y + 0.8).min(255.8), ..mob.position }
-        })
+        self.entities
+            .values()
+            .find(|mob| mob.rider == Some(rider))
+            .map(|mob| PlayerPosition {
+                y: (mob.position.y + 0.8).min(255.8),
+                ..mob.position
+            })
     }
     pub fn is_riding(&self, rider: i32) -> bool {
         self.rider_position(rider).is_some()
     }
     pub fn dismount(&mut self, rider: i32) -> Option<Event> {
-        let mob = self.entities.values_mut().find(|mob| mob.rider == Some(rider))?;
+        let mob = self
+            .entities
+            .values_mut()
+            .find(|mob| mob.rider == Some(rider))?;
         mob.rider = None;
         Some(crate::vehicles::attachment(rider, -1))
     }
-    pub fn steer_rider(&mut self, rider: i32, world: &World, forward: f32, yaw: f32,
-        holding_carrot: bool, now: u64) -> Vec<Event> {
-        if !forward.is_finite() || !yaw.is_finite() { return Vec::new(); }
-        let Some(mob) = self.entities.values_mut().find(|mob| mob.rider == Some(rider)) else {
+    pub fn steer_rider(
+        &mut self,
+        rider: i32,
+        world: &World,
+        forward: f32,
+        yaw: f32,
+        holding_carrot: bool,
+        now: u64,
+    ) -> Vec<Event> {
+        if !forward.is_finite() || !yaw.is_finite() {
+            return Vec::new();
+        }
+        let Some(mob) = self
+            .entities
+            .values_mut()
+            .find(|mob| mob.rider == Some(rider))
+        else {
             return Vec::new();
         };
-        if now <= mob.last_ride_tick { return Vec::new(); }
+        if now <= mob.last_ride_tick {
+            return Vec::new();
+        }
         mob.last_ride_tick = now;
-        if !mob.saddled || (mob.kind == Kind::Pig && !holding_carrot) { return Vec::new(); }
+        if !mob.saddled || (mob.kind == Kind::Pig && !holding_carrot) {
+            return Vec::new();
+        }
         let radians = (yaw as f64).to_radians();
         let speed = if mob.kind == Kind::Horse { 0.22 } else { 0.11 };
         let step = f64::from(forward.clamp(-1.0, 1.0)) * speed;
@@ -1032,7 +1064,8 @@ impl Mobs {
             z: mob.position.z + radians.cos() * step,
             ..mob.position
         };
-        if next.is_valid() && physics::valid_movement(world, &mob.position, &next)
+        if next.is_valid()
+            && physics::valid_movement(world, &mob.position, &next)
             && physics::supported(world, &next)
         {
             mob.position = next;
@@ -1042,13 +1075,20 @@ impl Mobs {
     }
     /// Leash packet 0x1B is server-owned; a fence tie remains in the saved Mob.
     pub fn can_leash(&self, id: i32, holder: i32, player: PlayerPosition) -> bool {
-        holder > 0 && self.entities.get(&id).is_some_and(|mob| {
-            mob.kind.passive() && !mob.baby && mob.rider.is_none() && mob.leash_holder.is_none()
-                && mob.fence_anchor.is_none() && mob.nearby(player, 5.0)
-        })
+        holder > 0
+            && self.entities.get(&id).is_some_and(|mob| {
+                mob.kind.passive()
+                    && !mob.baby
+                    && mob.rider.is_none()
+                    && mob.leash_holder.is_none()
+                    && mob.fence_anchor.is_none()
+                    && mob.nearby(player, 5.0)
+            })
     }
     pub fn leash(&mut self, id: i32, holder: i32, player: PlayerPosition) -> Option<Event> {
-        if !self.can_leash(id, holder, player) { return None; }
+        if !self.can_leash(id, holder, player) {
+            return None;
+        }
         self.entities.get_mut(&id)?.leash_holder = Some(holder);
         Some(Self::leash_packet(id, holder))
     }
@@ -1059,7 +1099,9 @@ impl Mobs {
         body.push(1);
         Event { id: 0x1b, body }
     }
-    fn knot_id(mob_id: i32) -> i32 { 2_000_000 + mob_id }
+    fn knot_id(mob_id: i32) -> i32 {
+        2_000_000 + mob_id
+    }
     fn knot_spawn(mob_id: i32, anchor: [i32; 3]) -> Event {
         let mut body = Vec::new();
         write_varint(Self::knot_id(mob_id) as u32, &mut body);
@@ -1099,7 +1141,9 @@ impl Mobs {
     }
     pub fn release_player(&mut self, holder: i32) -> Vec<Event> {
         let mut result = Vec::new();
-        if let Some(detach) = self.dismount(holder) { result.push(detach); }
+        if let Some(detach) = self.dismount(holder) {
+            result.push(detach);
+        }
         for mob in self.entities.values_mut() {
             if mob.leash_holder == Some(holder) {
                 mob.leash_holder = None;
@@ -1124,8 +1168,12 @@ impl Mobs {
         result
     }
     /// Follow a verified player entity or a persisted fence anchor once per tick.
-    pub fn advance_leashes(&mut self, world: &World, now: u64,
-        players: &[(i32, PlayerPosition)]) -> Vec<Event> {
+    pub fn advance_leashes(
+        &mut self,
+        world: &World,
+        now: u64,
+        players: &[(i32, PlayerPosition)],
+    ) -> Vec<Event> {
         let mut events = Vec::new();
         for mob in self.entities.values_mut() {
             let destination = if let Some(anchor) = mob.fence_anchor {
@@ -1136,7 +1184,10 @@ impl Mobs {
                 })
             } else {
                 mob.leash_holder.and_then(|id| {
-                    players.iter().find(|(owner, _)| *owner == id).map(|(_, p)| *p)
+                    players
+                        .iter()
+                        .find(|(owner, _)| *owner == id)
+                        .map(|(_, p)| *p)
                 })
             };
             let Some(target) = destination else { continue };
@@ -1158,7 +1209,8 @@ impl Mobs {
                     z: mob.position.z + dz / gap * step,
                     ..mob.position
                 };
-                if next.is_valid() && physics::valid_movement(world, &mob.position, &next)
+                if next.is_valid()
+                    && physics::valid_movement(world, &mob.position, &next)
                     && physics::supported(world, &next)
                 {
                     mob.position = next;
