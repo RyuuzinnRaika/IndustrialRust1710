@@ -2315,7 +2315,17 @@ fn play(
                             };
                             let invalid_chest_merge =
                                 block_id == 54 && !can_place_chest(&w, (nx, ny, nz));
-                            let metadata = if matches!(block_id, 50 | 77 | 131 | 143) {
+                            let metadata = if block_id == 131 {
+                                // Hook orientation is its outward face (0=S,
+                                // 1=W, 2=N, 3=E), not the wall-torch metadata.
+                                match face {
+                                    2 => 2,
+                                    3 => 0,
+                                    4 => 1,
+                                    5 => 3,
+                                    _ => 0,
+                                }
+                            } else if matches!(block_id, 50 | 77 | 143) {
                                 match face {
                                     1 => 5,
                                     2 => 3,
@@ -2365,6 +2375,7 @@ fn play(
                             if (world::is_placeable(block_id) || block_id == 61)
                                 && w.can_support(nx, ny, nz, (block_id << 4) | metadata)
                                 && block_id != 7
+                                && (block_id != 131 || (2..=5).contains(&face))
                                 && !invalid_chest_merge
                                 && w.get(x, y, z) != 0
                                 && w.get(nx, ny, nz) == 0
