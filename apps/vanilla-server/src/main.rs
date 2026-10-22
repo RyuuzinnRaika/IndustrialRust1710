@@ -1205,28 +1205,34 @@ fn play(
                 // A death is counted exactly once in this session and the
                 // updated shared scoreboard is durable before client notify.
                 let changes = {
-                    let mut board = scoreboard.lock().map_err(|_| bad("scoreboard lock poisoned"))?;
+                    let mut board = scoreboard
+                        .lock()
+                        .map_err(|_| bad("scoreboard lock poisoned"))?;
                     let mut candidate = board.clone();
                     let changes = candidate.record_death(name)?;
                     candidate.save(scoreboard_path)?;
                     *board = candidate;
                     changes
                 };
-                for change in changes { hub.broadcast(change); }
+                for change in changes {
+                    hub.broadcast(change);
+                }
                 death_recorded = true;
             }
             let keep_inventory = game_rules
-                .lock().map_err(|_| bad("game rules mutex poisoned"))?.keep_inventory();
+                .lock()
+                .map_err(|_| bad("game rules mutex poisoned"))?
+                .keep_inventory();
             if !keep_inventory {
                 commit_death_drops(
-                inventory,
-                inventory_path,
-                ground_items,
-                ground_path,
-                world_path,
-                hub,
-                location,
-            )?;
+                    inventory,
+                    inventory_path,
+                    ground_items,
+                    ground_path,
+                    world_path,
+                    hub,
+                    location,
+                )?;
             }
             if hardcore {
                 // Persist the dead state before ending the connection. Future
@@ -2731,18 +2737,20 @@ fn play(
                         player.save_state(player_path, *vitals)?;
                         return Ok(());
                     }
-                    let keep_inventory = game_rules.lock()
-                        .map_err(|_| bad("game rules mutex poisoned"))?.keep_inventory();
+                    let keep_inventory = game_rules
+                        .lock()
+                        .map_err(|_| bad("game rules mutex poisoned"))?
+                        .keep_inventory();
                     if !keep_inventory {
                         commit_death_drops(
-                        inventory,
-                        inventory_path,
-                        ground_items,
-                        ground_path,
-                        world_path,
-                        hub,
-                        location,
-                    )?;
+                            inventory,
+                            inventory_path,
+                            ground_items,
+                            ground_path,
+                            world_path,
+                            hub,
+                            location,
+                        )?;
                     }
                     // Preserve the death site before changing the saved player
                     // position. XP orbs belong beside the dropped inventory,
@@ -2998,7 +3006,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         }
     };
     if hardcore && player_vitals.health <= 0.0 {
-        login_disconnect(&mut s, "Hardcore death: rejoining this world is not permitted.")?;
+        login_disconnect(
+            &mut s,
+            "Hardcore death: rejoining this world is not permitted.",
+        )?;
         return Ok(());
     }
     if !player_file.exists() && !player_file.with_extension("json").exists() {
@@ -3064,7 +3075,11 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     if survival {
         send(&mut s, 0x1f, &experience_state.packet())?;
     }
-    for packet in scoreboard.lock().map_err(|_| bad("scoreboard lock poisoned"))?.snapshot()? {
+    for packet in scoreboard
+        .lock()
+        .map_err(|_| bad("scoreboard lock poisoned"))?
+        .snapshot()?
+    {
         send(&mut s, packet.id, &packet.body)?;
     }
     let achievements_packet = achievements_state.snapshot()?;
@@ -3163,9 +3178,13 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
 /// Commands are accepted only from the operating-system console, never from
 /// unauthenticated offline-mode players or Protocol 5 chat messages.
 fn start_clock_console(
-    hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf>,
-    rules: Arc<Mutex<GameRules>>, rules_path: Arc<PathBuf>,
-    scoreboard: Arc<Mutex<Scoreboard>>, scoreboard_path: Arc<PathBuf>,
+    hub: Arc<Hub>,
+    clock: Arc<Clock>,
+    clock_path: Arc<PathBuf>,
+    rules: Arc<Mutex<GameRules>>,
+    rules_path: Arc<PathBuf>,
+    scoreboard: Arc<Mutex<Scoreboard>>,
+    scoreboard_path: Arc<PathBuf>,
 ) {
     thread::spawn(move || {
         let stdin = io::stdin();
@@ -3199,30 +3218,44 @@ fn start_clock_console(
                     Ok(())
                 })(),
                 ["/scoreboard", operation @ ..] => (|| -> io::Result<()> {
-                    let mut state = scoreboard.lock().map_err(|_| bad("scoreboard lock poisoned"))?;
+                    let mut state = scoreboard
+                        .lock()
+                        .map_err(|_| bad("scoreboard lock poisoned"))?;
                     let mut candidate = state.clone();
                     let changes = match operation {
-                        ["objectives", "add", name, criterion, display] =>
-                            candidate.add_objective(name, display, criterion)?,
+                        ["objectives", "add", name, criterion, display] => {
+                            candidate.add_objective(name, display, criterion)?
+                        }
                         ["objectives", "setdisplay", slot, name] => {
                             let slot = match *slot {
-                                "list" => 0, "sidebar" => 1, "belowName" => 2,
+                                "list" => 0,
+                                "sidebar" => 1,
+                                "belowName" => 2,
                                 _ => return Err(bad("invalid scoreboard display slot")),
                             };
-                            candidate.set_display(slot, if *name == "clear" { None } else { Some(name) })?
+                            candidate.set_display(
+                                slot,
+                                if *name == "clear" { None } else { Some(name) },
+                            )?
                         }
                         ["players", "set", holder, objective, value] => {
-                            let value = value.parse::<i32>().map_err(|_| bad("invalid scoreboard score"))?;
+                            let value = value
+                                .parse::<i32>()
+                                .map_err(|_| bad("invalid scoreboard score"))?;
                             candidate.set_score(holder, objective, value)?
                         }
                         ["teams", "add", name, display] => candidate.add_team(name, display)?,
-                        ["teams", "join", name, holder] => candidate.add_player_to_team(name, holder)?,
+                        ["teams", "join", name, holder] => {
+                            candidate.add_player_to_team(name, holder)?
+                        }
                         _ => return Err(bad("unsupported scoreboard console command")),
                     };
                     candidate.save(&scoreboard_path)?;
                     *state = candidate;
                     drop(state);
-                    for event in changes { hub.broadcast(event); }
+                    for event in changes {
+                        hub.broadcast(event);
+                    }
                     Ok(())
                 })(),
                 ["/time", "query", "daytime"] => {
@@ -3739,7 +3772,10 @@ fn main() -> io::Result<()> {
     let scoreboard_path = Arc::new(Scoreboard::location(&world_path));
     let shared_scoreboard = Arc::new(Mutex::new(Scoreboard::load(&scoreboard_path)?));
     clock.set_daylight_cycle(
-        world_rules.lock().map_err(|_| bad("game rules mutex poisoned"))?.daylight_cycle(),
+        world_rules
+            .lock()
+            .map_err(|_| bad("game rules mutex poisoned"))?
+            .daylight_cycle(),
     );
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
