@@ -162,7 +162,11 @@ impl Hub {
             ));
         }
         let inner = self.0.lock().map_err(|_| poisoned())?;
-        let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(name)) else {
+        let Some(peer) = inner
+            .players
+            .values()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+        else {
             return Ok(false);
         };
         peer.tx
