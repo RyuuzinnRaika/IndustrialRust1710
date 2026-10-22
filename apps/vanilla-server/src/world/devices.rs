@@ -574,7 +574,7 @@ mod redstone_regression_tests {
     fn powered_rails_follow_orientation_not_simple_adjacency() {
         let mut w = World::new();
         w.import_block(0, 65, 0, (27 << 4) | 1).unwrap(); // east/west
-        w.import_block(1, 65, 0, (27 << 4) | 0).unwrap(); // north/south
+        w.import_block(1, 65, 0, 27 << 4).unwrap(); // north/south
         w.import_block(1, 65, 1, 152 << 4).unwrap();
         // The second rail is powered, but it is perpendicular to the first.
         assert!(w.rail_powered(1, 65, 0, 27));
