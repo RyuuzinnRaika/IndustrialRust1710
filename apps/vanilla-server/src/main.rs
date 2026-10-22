@@ -2043,9 +2043,10 @@ fn play(
                                                     // Never silently discard a caught item when
                                                     // the inventory is full. Stage it as a
                                                     // real ground entity and commit both files.
-                                                    let mut ground = ground_items.lock().map_err(|_| {
-                                                        bad("ground items mutex poisoned")
-                                                    })?;
+                                                    let mut ground =
+                                                        ground_items.lock().map_err(|_| {
+                                                            bad("ground items mutex poisoned")
+                                                        })?;
                                                     if !ground.has_capacity_for(1) {
                                                         // Preserve the active bobber and rod:
                                                         // no item is created or consumed.
@@ -2059,7 +2060,8 @@ fn play(
                                                     let (staged, dropped) =
                                                         ground.stage_put_many(&[loot], at)?;
                                                     journal::commit(
-                                                        &world_path.with_extension("pending-txn.json"),
+                                                        &world_path
+                                                            .with_extension("pending-txn.json"),
                                                         &[
                                                             (inventory_path, candidate.encoded()?),
                                                             (ground_path, staged.encoded()?),
