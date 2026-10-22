@@ -25,8 +25,8 @@ mod legacy_inventory_nbt;
 mod legacy_nbt;
 mod legacy_region;
 mod legacy_world_inspect;
-mod maps;
 mod level_dat;
+mod maps;
 mod mobs;
 mod multiplayer;
 mod navigation;
@@ -52,11 +52,11 @@ use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use ground_items::GroundItems;
 use hoppers::{Hoppers, Position as HopperPosition};
 use inventory::{Inventory, Stack};
-use maps::Maps;
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
     PROTOCOL_VERSION,
 };
+use maps::Maps;
 use mobs::Mobs;
 use multiplayer::{Event, Hub, JoinError, ADMIN_TELEPORT_EVENT, MAX_PLAYERS};
 use physics::{FallTracker, IdleGravity};
@@ -861,11 +861,20 @@ fn play(
         let now_tick = clock.ticks();
         if now_tick > last_map_tick && now_tick % 4 == 0 {
             last_map_tick = now_tick;
-            if let Some(Stack { id: 358, damage, .. }) = inventory.held() {
+            if let Some(Stack {
+                id: 358, damage, ..
+            }) = inventory.held()
+            {
                 let terrain = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                let packet = maps.lock().map_err(|_| bad("map lock poisoned"))?
-                    .refresh(map_path, &terrain, damage, player.x.floor() as i32,
-                        player.z.floor() as i32, yaw, now_tick / 4)?;
+                let packet = maps.lock().map_err(|_| bad("map lock poisoned"))?.refresh(
+                    map_path,
+                    &terrain,
+                    damage,
+                    player.x.floor() as i32,
+                    player.z.floor() as i32,
+                    yaw,
+                    now_tick / 4,
+                )?;
                 if let Some(packet) = packet {
                     send(s, 0x34, &packet)?;
                 }
@@ -1903,13 +1912,25 @@ fn play(
                         let mut map_storage = maps.lock().map_err(|_| bad("map lock poisoned"))?;
                         let current_x = player.x.floor() as i32;
                         let current_z = player.z.floor() as i32;
-                        if let Some((next_maps, new_id)) = map_storage.stage_new(current_x, current_z)? {
+                        if let Some((next_maps, new_id)) =
+                            map_storage.stage_new(current_x, current_z)?
+                        {
                             let mut remaining = inventory.clone();
                             let _ = remaining.consume_held();
-                            if remaining.receive_stack(Stack { id: 358, count: 1, damage: new_id }).is_some() {
+                            if remaining
+                                .receive_stack(Stack {
+                                    id: 358,
+                                    count: 1,
+                                    damage: new_id,
+                                })
+                                .is_some()
+                            {
                                 journal::commit(
                                     &world_path.with_extension("pending-txn.json"),
-                                    &[(inventory_path, remaining.encoded()?), (map_path, next_maps.encoded()?)],
+                                    &[
+                                        (inventory_path, remaining.encoded()?),
+                                        (map_path, next_maps.encoded()?),
+                                    ],
                                 )?;
                                 *inventory = remaining;
                                 *map_storage = next_maps;
