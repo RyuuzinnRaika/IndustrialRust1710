@@ -17,6 +17,8 @@ pub const ADMIN_TELEPORT_EVENT: u32 = u32::MAX - 1;
 pub const PEARL_TELEPORT_EVENT: u32 = u32::MAX - 2;
 /// A session-owned safe Kick: the session sends Disconnect, then persists state.
 pub const ADMIN_KICK_EVENT: u32 = u32::MAX - 3;
+/// Console-only mode change, distinct from the internal Kick mailbox event.
+pub const ADMIN_GAMEMODE_EVENT: u32 = u32::MAX - 4;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
