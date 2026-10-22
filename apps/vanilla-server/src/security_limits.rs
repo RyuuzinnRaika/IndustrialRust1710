@@ -24,7 +24,10 @@ pub struct Permit {
 }
 fn canonical(ip: IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V6(addr) => addr.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(addr)),
+        IpAddr::V6(addr) => addr
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(addr)),
         other => other,
     }
 }
@@ -35,7 +38,11 @@ impl ConnectionLimiter {
         let now = Instant::now();
         let mut buckets = self.buckets.lock().ok()?;
         buckets.retain(|_, bucket| {
-            while bucket.attempts.front().is_some_and(|stamp| now.duration_since(*stamp) >= WINDOW) {
+            while bucket
+                .attempts
+                .front()
+                .is_some_and(|stamp| now.duration_since(*stamp) >= WINDOW)
+            {
                 bucket.attempts.pop_front();
             }
             bucket.active > 0 || !bucket.attempts.is_empty()
@@ -49,7 +56,10 @@ impl ConnectionLimiter {
         }
         bucket.active += 1;
         bucket.attempts.push_back(now);
-        Some(Permit { guard: Arc::clone(self), address: ip })
+        Some(Permit {
+            guard: Arc::clone(self),
+            address: ip,
+        })
     }
 }
 impl Drop for Permit {
@@ -72,13 +82,20 @@ impl ChatLimiter {
     /// Three rejected packets mean the session should be disconnected.
     pub fn check(&mut self, message: &str) -> Result<(), bool> {
         let now = Instant::now();
-        while self.sent.front().is_some_and(|stamp| now.duration_since(*stamp) >= Duration::from_secs(5)) {
+        while self
+            .sent
+            .front()
+            .is_some_and(|stamp| now.duration_since(*stamp) >= Duration::from_secs(5))
+        {
             self.sent.pop_front();
         }
-        let invalid = message.is_empty() || message.len() > 400
+        let invalid = message.is_empty()
+            || message.len() > 400
             || message.chars().count() > 100
-            || message.chars().any(|c| c.is_control() && c != '\t'
-                || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+            || message.chars().any(|c| {
+                c.is_control() && c != '\t'
+                    || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+            })
             || self.sent.len() >= 5
             || self.last_message.as_deref() == Some(message);
         if invalid {
@@ -100,7 +117,9 @@ mod tests {
         let ip: IpAddr = "192.0.2.1".parse().unwrap();
         let permits: Vec<_> = (0..4).map(|_| limiter.acquire(ip).unwrap()).collect();
         assert!(limiter.acquire(ip).is_none());
-        assert!(limiter.acquire("::ffff:192.0.2.1".parse().unwrap()).is_none());
+        assert!(limiter
+            .acquire("::ffff:192.0.2.1".parse().unwrap())
+            .is_none());
         drop(permits);
         assert!(limiter.acquire(ip).is_some());
     }
