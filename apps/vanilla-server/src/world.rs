@@ -582,7 +582,11 @@ impl World {
             }
             if matches!(
                 id,
-                6 | 31 | 32 | 37 | 38 | 50
+                6 | 31
+                    | 32
+                    | 37
+                    | 38
+                    | 50
                     | 81
                     | 83
                     | 104
@@ -1560,8 +1564,7 @@ mod tests {
     use super::*;
     #[test]
     fn flower_support_break_detaches_original_variant_after_commit() {
-        let path =
-            std::env::temp_dir().join(format!("ir1710-flower-{}.irw", std::process::id()));
+        let path = std::env::temp_dir().join(format!("ir1710-flower-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
         let flower = (38 << 4) | 5;
