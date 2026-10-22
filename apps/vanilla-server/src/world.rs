@@ -839,9 +839,10 @@ impl World {
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
             }
-        } else if tnt_changed {
-            // An explosion in empty space still needs to durably remove TNT,
-            // even when not a single terrain block was modified.
+        } else if tnt_changed || (!self.primed_tnt.is_empty() && self.fluid_phase.is_multiple_of(20)) {
+            // Persist the fuse once per second even without terrain edits;
+            // also durably remove TNT that exploded in otherwise empty air.
+            // This uses the existing 20TPS block_tick, never a second loop.
             if let Err(error) = self.save(path) {
                 self.primed_tnt = primed_before;
                 self.tnt_events.truncate(tnt_events_before);
