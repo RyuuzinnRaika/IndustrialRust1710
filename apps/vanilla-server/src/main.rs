@@ -1340,9 +1340,7 @@ fn play(
                         continue;
                     }
                     if action == 1 {
-                        if let Some((next, removed)) =
-                            hanging_state.stage_remove(target_id)?
-                        {
+                        if let Some((next, removed)) = hanging_state.stage_remove(target_id)? {
                             if survival {
                                 let drops = removed.drops();
                                 let mut ground = ground_items
@@ -3225,13 +3223,19 @@ fn play(
                 // held item identity, compressed NBT and page/title bounds.
                 let channel = input.string(20)?;
                 let length = input.i16()?;
-                if length < 0 { return Err(bad("negative plugin payload size")); }
+                if length < 0 {
+                    return Err(bad("negative plugin payload size"));
+                }
                 let payload = input.take(length as usize)?;
                 input.finish()?;
                 if matches!(channel.as_str(), "MC|BEdit" | "MC|BSign")
                     && books::process(
-                        &channel, payload, inventory, inventory_path,
-                        world_path, name,
+                        &channel,
+                        payload,
+                        inventory,
+                        inventory_path,
+                        world_path,
+                        name,
                     )?
                 {
                     send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
