@@ -315,6 +315,9 @@ impl Explosion {
         Event { id: 0x27, body }
     }
 }
+/// Optional Entity Metadata together with a changed grass block coordinate.
+pub type GrazingUpdate = (Option<Event>, (i32, i32, i32));
+
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct Mobs {
     entities: BTreeMap<i32, Mob>,
@@ -337,6 +340,10 @@ pub struct Mobs {
     #[serde(skip)]
     explosions: Vec<Explosion>,
     last_tick: u64,
+    // Persist this cursor so many player sessions cannot repeat grazing on
+    // the same tick, including immediately after a server restart.
+    #[serde(default)]
+    last_graze_tick: u64,
     next_id: i32,
     dragon_defeated: bool,
     enabled: bool,
@@ -941,6 +948,61 @@ impl Mobs {
         }
         Some(result)
     }
+    /// Grazing is server-owned and persisted before clients see sheep wool
+    /// regrowth. Each sheep has a bounded chance every other game tick:
+    /// adults 1/500, babies 1/25. Grass blocks turn into dirt on success.
+    /// At most four grazing edits run in a single global tick.
+    pub fn graze(
+        &mut self,
+        world: &mut World,
+        world_path: &Path,
+        tick: u64,
+    ) -> io::Result<Vec<GrazingUpdate>> {
+        if tick <= self.last_graze_tick || !tick.is_multiple_of(2) {
+            return Ok(Vec::new());
+        }
+        self.last_graze_tick = tick;
+        let mut events = Vec::new();
+        for mob in self.entities.values_mut() {
+            if events.len() >= 4 {
+                break;
+            }
+            if mob.kind != Kind::Sheep {
+                continue;
+            }
+            let chance = if mob.baby { 25 } else { 500 };
+            if !hash(tick ^ (mob.id as u64).wrapping_mul(0x9e3779b97f4a7c15)).is_multiple_of(chance)
+            {
+                continue;
+            }
+            let (x, y, z) = (
+                mob.position.x.floor() as i32,
+                mob.position.y.floor() as i32 - 1,
+                mob.position.z.floor() as i32,
+            );
+            if !(0..255).contains(&y) || world.get(x, y, z) >> 4 != 2 {
+                continue;
+            }
+            // Do not mutate the Mob before the world snapshot commits.
+            if world.update_and_save(world_path, x, y, z, 3 << 4)? {
+                if mob.sheared {
+                    mob.sheared = false;
+                    let mut body = mob.id.to_be_bytes().to_vec();
+                    body.extend_from_slice(&[16, 0, 0x7f]);
+                    events.push((Some(Event { id: 0x1c, body }), (x, y, z)));
+                } else {
+                    // A grass change still needs a block packet, even when
+                    // the sheep already has its wool.
+                    events.push((None, (x, y, z)));
+                }
+            }
+        }
+        if !events.is_empty() {
+            self.save(world)?;
+        }
+        Ok(events)
+    }
+
     /// Cow milking is read-only for the animal; inventory substitution and
     /// persistence belong to the authenticated player session.
     pub fn can_milk(&self, id: i32, at: PlayerPosition, held: Option<Stack>) -> bool {
@@ -1935,6 +1997,48 @@ mod tests {
         assert!(flying_step(&world, Kind::Ghast, from, target, 20).is_none());
         // A blaze has a smaller collision envelope and still moves.
         assert!(flying_step(&world, Kind::Blaze, from, target, 20).is_some());
+    }
+
+    #[test]
+    fn sheared_sheep_regrows_only_after_persisted_grass_consumption() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 2 << 4).unwrap();
+        let path = std::env::temp_dir().join(format!("ir1710-grazing-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::default();
+        let id = mobs.next_id;
+        mobs.insert(
+            Kind::Sheep,
+            PlayerPosition {
+                x: 0.5,
+                y: 65.0,
+                z: 0.5,
+            },
+            false,
+        );
+        mobs.entities.get_mut(&id).unwrap().sheared = true;
+        let successful_tick = (2..50000u64)
+            .step_by(2)
+            .find(|tick| {
+                hash(*tick ^ (id as u64).wrapping_mul(0x9e3779b97f4a7c15)).is_multiple_of(500)
+            })
+            .unwrap();
+        // Before grazing, the wool stays sheared.
+        assert!(mobs.entities.get(&id).unwrap().sheared);
+        let changes = mobs.graze(&mut world, &path, successful_tick).unwrap();
+        assert_eq!(changes.len(), 1);
+        let metadata = changes[0].0.as_ref().unwrap();
+        assert_eq!(metadata.id, 0x1c);
+        assert_eq!(&metadata.body[..4], &id.to_be_bytes());
+        assert_eq!(&metadata.body[4..], &[16, 0, 0x7f]);
+        assert!(!mobs.entities.get(&id).unwrap().sheared);
+        assert_eq!(world.get(0, 64, 0) >> 4, 3);
+        assert!(mobs
+            .graze(&mut world, &path, successful_tick)
+            .unwrap()
+            .is_empty());
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0) >> 4, 3);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
