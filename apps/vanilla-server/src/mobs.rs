@@ -276,9 +276,7 @@ impl Mob {
     fn death_drop(self) -> Option<(Stack, (i32, i32, i32))> {
         // Baby farm animals produce neither adult meat nor wool. Sheared
         // sheep cannot drop a second wool block on death.
-        if (self.baby && self.kind.passive())
-            || (self.kind == Kind::Sheep && self.sheared)
-        {
+        if (self.baby && self.kind.passive()) || (self.kind == Kind::Sheep && self.sheared) {
             return None;
         }
         self.kind.drop(self.size).map(|stack| {
@@ -1665,6 +1663,7 @@ impl Mobs {
         if !self.enabled
             || self.natural_spawning_paused
             || players.is_empty()
+            || self.entities.len() >= MAX_LOADED_MOBS
             || !now.is_multiple_of(20)
         {
             return;
@@ -2345,7 +2344,11 @@ impl Mobs {
                     .values()
                     .find(|mob| mob.id != arrow.shooter.unwrap_or(-1) && mob.nearby(sample, 0.9))
                 {
-                    arrow_hits.push((mob.id, arrow.damage, !arrow.hostile && arrow.shooter.is_some()));
+                    arrow_hits.push((
+                        mob.id,
+                        arrow.damage,
+                        !arrow.hostile && arrow.shooter.is_some(),
+                    ));
                     impacted = true;
                     break;
                 }
@@ -2924,7 +2927,11 @@ mod tests {
 
     #[test]
     fn baby_animals_and_sheared_sheep_do_not_drop_adult_loot_or_xp() {
-        let at = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
         let mut mobs = Mobs::default();
         mobs.insert(Kind::Cow, at, true);
         let cow = mobs.next_id - 1;
@@ -2942,7 +2949,11 @@ mod tests {
     #[test]
     fn distant_players_do_not_despawn_a_wither_or_golem() {
         let world = World::new();
-        let at = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
         let far = PlayerPosition { x: 512.5, ..at };
         let mut mobs = Mobs::default();
         for kind in [Kind::Wither, Kind::IronGolem, Kind::Zombie] {
@@ -2957,7 +2968,11 @@ mod tests {
     #[test]
     fn player_bow_kill_awards_orb_once_and_despawns_the_arrow() {
         let world = World::new();
-        let at = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
         let mut mobs = Mobs::default();
         mobs.insert(Kind::Cow, PlayerPosition { z: 2.5, ..at }, false);
         let target = mobs.next_id - 1;
@@ -2969,7 +2984,10 @@ mod tests {
         assert!(mobs.arrows.is_empty());
         assert_eq!(mobs.orbs.len(), 1);
         assert_eq!(mobs.orbs.values().next().unwrap().1, 2);
-        assert_eq!(events.iter().filter(|event| event.id == 0x11).count(), 1);
+        assert_eq!(
+            events.iter().filter(|event| event.id == 0x11).count(),
+            1
+        );
     }
 
     #[test]
