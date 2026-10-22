@@ -308,8 +308,21 @@ impl World {
                     }
                 }
                 51 => {
-                    // Bounded random fire tick. Do not resurrect extinguished fire.
-                    if self.raining {
+                    // Rain or directly adjacent water extinguishes fire before
+                    // any spread occurs. Reuse the scheduled ecology tick.
+                    let neighboring_water = [
+                        (x + 1, height, z),
+                        (x - 1, height, z),
+                        (x, height + 1, z),
+                        (x, height - 1, z),
+                        (x, height, z + 1),
+                        (x, height, z - 1),
+                    ]
+                    .into_iter()
+                    .any(|(nx, ny, nz)| {
+                        in_bounds(nx, ny, nz) && matches!(self.get(nx, ny, nz) >> 4, 8 | 9)
+                    });
+                    if self.raining || neighboring_water {
                         changes.insert((x, y, z), 0);
                     } else {
                         let age = block & 15;
@@ -391,6 +404,17 @@ mod regression_tests {
         }
         too_far.import_block(5, 65, 0, 17 << 4).unwrap();
         assert!(!too_far.leaf_connected(0, 65, 0));
+    }
+
+    #[test]
+    fn adjacent_water_extinguishes_fire_before_spread() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, 51 << 4).unwrap();
+        world.import_block(1, 65, 0, 9 << 4).unwrap();
+        world.import_block(-1, 65, 0, 17 << 4).unwrap();
+        let changes = world.ecology_changes(64);
+        assert_eq!(changes.get(&(0, 65, 0)), Some(&0));
+        assert!(!changes.contains_key(&(-1, 65, 0)));
     }
 
     #[test]
