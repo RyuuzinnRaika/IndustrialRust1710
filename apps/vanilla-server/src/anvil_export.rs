@@ -195,7 +195,7 @@ fn write_snapshot(world: &World, stage: &Path, chunks: &BTreeSet<(i32, i32)>) ->
     let regions_dir = stage.join("region");
     fs::create_dir(&regions_dir)?;
     let mut regions: BTreeMap<(i32, i32), Vec<(i32, i32)>> = BTreeMap::new();
-    for &(cx, cz) in &chunks {
+    for &(cx, cz) in chunks {
         regions
             .entry((cx.div_euclid(32), cz.div_euclid(32)))
             .or_default()
