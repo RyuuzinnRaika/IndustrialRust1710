@@ -857,6 +857,15 @@ impl Mobs {
         }
         Some(result)
     }
+    /// Cow milking is read-only for the animal; inventory substitution and
+    /// persistence belong to the authenticated player session.
+    pub fn can_milk(&self, id: i32, at: PlayerPosition, held: Option<Stack>) -> bool {
+        held.is_some_and(|item| item.id == 325)
+            && self
+                .entities
+                .get(&id)
+                .is_some_and(|mob| mob.kind == Kind::Cow && !mob.baby && mob.nearby(at, 3.0))
+    }
     /// Sheep shearing is server-authoritative and changes the shared entity metadata.
     pub fn shear(
         &mut self,
@@ -1775,6 +1784,32 @@ mod tests {
         assert_eq!(mobs.last_tick, 100);
         assert!(mobs.tick(101, &world, &[player]).is_empty());
         assert_eq!(mobs.last_tick, 101);
+    }
+
+    #[test]
+    fn only_nearby_adult_cows_are_milkable() {
+        let at = PlayerPosition::default();
+        let mut mobs = Mobs::default();
+        let bucket = Some(Stack {
+            id: 325,
+            count: 1,
+            damage: 0,
+        });
+        let cow = mobs.next_id;
+        mobs.insert(Kind::Cow, at, false);
+        let calf = mobs.next_id;
+        mobs.insert(Kind::Cow, at, true);
+        let pig = mobs.next_id;
+        mobs.insert(Kind::Pig, at, false);
+        assert!(mobs.can_milk(cow, at, bucket));
+        assert!(!mobs.can_milk(calf, at, bucket));
+        assert!(!mobs.can_milk(pig, at, bucket));
+        assert!(!mobs.can_milk(cow, at, None));
+        assert!(!mobs.can_milk(
+            cow,
+            PlayerPosition { x: at.x + 4.0, ..at },
+            bucket
+        ));
     }
 
     #[test]
