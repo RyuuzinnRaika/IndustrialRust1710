@@ -376,9 +376,15 @@ fn send_visible_signs(
     decorations: &Mutex<Decorations>,
     chunks: &BTreeSet<(i32, i32)>,
 ) -> io::Result<()> {
-    let packets = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?.sign_packets_in(chunks)?;
-    for body in packets {
+    let (signs, pots) = {
+        let storage = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?;
+        (storage.sign_packets_in(chunks)?, storage.pot_packets_in(chunks)?)
+    };
+    for body in signs {
         send(s, 0x33, &body)?;
+    }
+    for body in pots {
+        send(s, 0x35, &body)?;
     }
     Ok(())
 }
@@ -707,6 +713,7 @@ fn play(
                 yaw = 0.0;
                 pitch = 0.0;
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                send_visible_signs(s, decorations, &loaded_chunks)?;
                 send_player_position(s, player)?;
                 hub.move_player(entity_id, *player, yaw, pitch);
                 last_movement_broadcast = Instant::now();
