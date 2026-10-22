@@ -3331,7 +3331,6 @@ fn play(
                 {
                     let pos = (x, y, z);
                     active_window = next_window;
-                    active_anvil = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -3374,7 +3373,6 @@ fn play(
                         == 54
                 {
                     active_window = next_window;
-                    active_anvil = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -3430,7 +3428,6 @@ fn play(
                 {
                     let pos = (x, y, z);
                     active_window = next_window;
-                    active_anvil = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -3475,7 +3472,6 @@ fn play(
                     let guard = devices.lock().map_err(|_| bad("device lock poisoned"))?;
                     last_device_view = guard.slots(pos);
                     active_window = next_window;
-                    active_anvil = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -3514,7 +3510,6 @@ fn play(
                     let mut guard = hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
                     guard.register(hopper_path, pos)?;
                     active_window = next_window;
-                    active_anvil = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -3585,7 +3580,6 @@ fn play(
                     // The 1.7.10 crafting table is a non-storage window.
                     // Window 0 is always the player's personal 2x2 grid.
                     active_window = next_window;
-                    active_anvil = None;
                     active_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
