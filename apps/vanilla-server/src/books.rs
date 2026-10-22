@@ -322,8 +322,10 @@ mod tests {
     }
     #[test]
     fn rejects_missing_or_forged_book_reference() {
-        let mut store = Store::default();
-        store.next_id = 2;
+        let mut store = Store {
+            next_id: 2,
+            ..Store::default()
+        };
         store.books.insert(
             1,
             BookRecord {
