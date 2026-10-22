@@ -63,7 +63,7 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use mobs::Mobs;
-use multiplayer::{Event, Hub, JoinError, ADMIN_TELEPORT_EVENT, MAX_PLAYERS};
+use multiplayer::{Event, Hub, JoinError, ADMIN_TELEPORT_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use scoreboard::Scoreboard;
@@ -698,7 +698,7 @@ fn play(
             ));
         }
         while let Ok(event) = events.try_recv() {
-            if event.id == ADMIN_TELEPORT_EVENT {
+            if matches!(event.id, ADMIN_TELEPORT_EVENT | PEARL_TELEPORT_EVENT) {
                 if event.body.len() != 24 {
                     return Err(bad("invalid internal teleport payload"));
                 }
@@ -710,8 +710,19 @@ fn play(
                 if !target.is_valid() {
                     return Err(bad("invalid internal teleport coordinates"));
                 }
-                // Only the owning session updates player position and its save.
-                target.save_state(player_path, *vitals)?;
+                // Distinguish command teleport from a paid ender-pearl impact:
+                // the latter costs 5 health (2.5 hearts), exactly once, in
+                // the owning player session before its new location is saved.
+                let pearl_impact = event.id == PEARL_TELEPORT_EVENT;
+                if pearl_impact && vitals.health <= 0.0 {
+                    continue;
+                }
+                let mut next_vitals = *vitals;
+                if pearl_impact {
+                    next_vitals.health = (next_vitals.health - 5.0).max(0.0);
+                }
+                target.save_state(player_path, next_vitals)?;
+                *vitals = next_vitals;
                 *player = target;
                 location = (target.x, target.y, target.z);
                 fall = FallTracker::new(target.y);
@@ -723,6 +734,9 @@ fn play(
                 pitch = 0.0;
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
                 send_player_position(s, player)?;
+                if pearl_impact {
+                    send(s, 0x06, &health_packet(*vitals))?;
+                }
                 hub.move_player(entity_id, *player, yaw, pitch);
                 last_movement_broadcast = Instant::now();
                 continue;
@@ -4472,7 +4486,7 @@ fn main() -> io::Result<()> {
                     projectile_hub.broadcast_in_view(at, packet);
                 }
                 for (owner, destination) in actions.pearl_teleports {
-                    if let Err(error) = projectile_hub.request_admin_teleport(&owner, destination) {
+                    if let Err(error) = projectile_hub.request_pearl_teleport(&owner, destination) {
                         eprintln!("ENDER PEARL TELEPORT ERROR: {error}");
                     }
                 }
