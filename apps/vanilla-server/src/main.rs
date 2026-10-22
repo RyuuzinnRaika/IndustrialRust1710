@@ -1050,6 +1050,10 @@ fn play(
                 grazed_blocks.push(at);
             }
             updates.extend(creatures.advance_leashes(&w, now_tick, &participants));
+            // Publish both door halves only after the paired world write
+            // commits; all clients observe the same server-owned destruction.
+            let broken_doors =
+                creatures.break_wooden_doors(&mut w, world_path, now_tick, &players)?;
             let explosions = creatures.take_explosions();
             updates.extend(creatures.queue_explosion_hits(&w, &explosions, &participants));
             updates.extend(creatures.take_player_effects(entity_id, *player, now_tick));
@@ -1057,7 +1061,7 @@ fn play(
                 creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
             let drops = creatures.take_drops();
             drop(creatures);
-            for (x, y, z) in grazed_blocks {
+            for (x, y, z) in grazed_blocks.into_iter().chain(broken_doors) {
                 hub.broadcast(block_change_event(&w, x, y, z));
             }
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
