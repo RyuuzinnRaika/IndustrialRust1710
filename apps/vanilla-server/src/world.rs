@@ -679,7 +679,10 @@ impl World {
             .pending_fluid
             .iter()
             .filter(|&&(x, y, z)| {
+                // Nether lava flows on every scheduled server tick; in the
+                // Overworld and End we retain the slower four-tick cadence.
                 !matches!(self.get(x, i32::from(y), z) >> 4, 10 | 11)
+                    || self.dimension() == crate::dimensions::Dimension::Nether
                     || self.fluid_phase.is_multiple_of(4)
             })
             .take(budget)
@@ -775,9 +778,15 @@ impl World {
                 // Falling fluids use metadata level 8, not level 1. They
                 // remain falling while fed vertically from their source.
                 let mut next = if fed_from_above { 8 } else { 9 };
-                // Vanilla Overworld lava dissipates faster than water:
-                // one horizontal lava step costs two fluid levels.
-                let horizontal_cost: u16 = if id == 10 { 2 } else { 1 };
+                // Nether lava spreads eight horizontal cells (cost 1 per
+                // step), while Overworld/End lava travels only four (cost 2).
+                let horizontal_cost: u16 = if id == 10
+                    && self.dimension() != crate::dimensions::Dimension::Nether
+                {
+                    2
+                } else {
+                    1
+                };
                 let sides = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)];
                 let mut source_neighbors = 0;
                 for (nx, nz) in sides {
@@ -821,7 +830,7 @@ impl World {
                 in_bounds(down.0, down.1, down.2) && self.get(down.0, down.1, down.2) == 0;
             let targets: Vec<(i32, i32, i32)> = if falling {
                 vec![down]
-            } else if (level & 7) + if id == 10 { 2 } else { 1 } > 7 {
+            } else if (level & 7) + if id == 10 && self.dimension() != crate::dimensions::Dimension::Nether { 2 } else { 1 } > 7 {
                 Vec::new()
             } else {
                 vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
@@ -834,7 +843,7 @@ impl World {
                 let next_level = if falling {
                     8
                 } else {
-                    (level & 7) + if id == 10 { 2 } else { 1 }
+                    (level & 7) + if id == 10 && self.dimension() != crate::dimensions::Dimension::Nether { 2 } else { 1 }
                 };
                 let desired = (id << 4) | next_level;
                 if existing == 0 || (existing >> 4 == id && existing & 15 > next_level) {
@@ -1671,6 +1680,34 @@ mod tests {
         fs::remove_file(path).unwrap();
         assert_eq!(World::new().chunk_data(0, 0).0, 0x18);
     }
+    #[test]
+    fn nether_lava_spreads_every_tick_with_one_level_per_horizontal_step() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-nether-lava-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Nether);
+        // Carve a deterministic floor and open channel independent of the
+        // Nether generator's native terrain.
+        for x in -1..=4 {
+            for z in -1..=1 {
+                world.import_block(x, 63, z, 87 << 4).unwrap();
+                world.import_block(x, 64, z, 0).unwrap();
+            }
+        }
+        world.update_and_save(&path, 0, 64, 0, 10 << 4).unwrap();
+        world.block_tick(&path, 128).unwrap();
+        // The first tick must flow (Overworld lava waits four ticks).
+        assert_eq!(world.get(1, 64, 0), (10 << 4) | 1);
+        for _ in 0..24 {
+            world.block_tick(&path, 256).unwrap();
+        }
+        assert_eq!(world.get(2, 64, 0), (10 << 4) | 2);
+        assert_eq!(World::load(&path).unwrap().get(2, 64, 0), (10 << 4) | 2);
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn overworld_lava_attenuates_twice_as_fast_as_water() {
         let path = std::env::temp_dir().join(format!(
