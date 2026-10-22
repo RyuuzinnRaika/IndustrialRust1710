@@ -1,6 +1,8 @@
 //! Deterministic adversarial regression inputs for Protocol 5 parsers.
 //! This is a bounded smoke corpus, not a substitute for cargo-fuzz coverage.
-use legacy_protocol::{packet_id_and_body, read_frame, read_varint, BufferedFrameReader, Cursor, MAX_FRAME_BYTES};
+use legacy_protocol::{
+    packet_id_and_body, read_frame, read_varint, BufferedFrameReader, Cursor, MAX_FRAME_BYTES,
+};
 
 fn next(seed: &mut u64) -> u8 {
     *seed ^= *seed << 13;
