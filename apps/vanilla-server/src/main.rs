@@ -3680,7 +3680,18 @@ fn main() -> io::Result<()> {
             "offline-mode whitelist cannot authenticate usernames: non-loopback bind requires explicit --insecure-offline-lan"));
     }
     let list = Whitelist::load(&whitelist_path)?;
-    let administration = Arc::new(Administration::new(PathBuf::from("."))?);
+    // Absolute --world paths are isolated deployments (also used by parallel
+    // integration tests). Keep their admin files next to that world instead
+    // of sharing mutable JSON files in the build/test working directory.
+    let administration_root = if world_path.is_absolute() {
+        world_path
+            .parent()
+            .ok_or_else(|| bad("world path has no parent"))?
+            .to_path_buf()
+    } else {
+        PathBuf::from(".")
+    };
+    let administration = Arc::new(Administration::new(administration_root)?);
     println!(
         "Whitelist: {} permitted name(s) (NOT cryptographic identity authentication)",
         list.len()
