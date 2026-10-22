@@ -73,6 +73,26 @@ pub struct TickResult {
     pub egg_hatches: Vec<PlayerPosition>,
 }
 impl Throwables {
+    pub fn can_launch(
+        &self,
+        item_id: i16,
+        owner_entity: i32,
+        owner_name: &str,
+        position: PlayerPosition,
+        yaw: f32,
+        pitch: f32,
+    ) -> bool {
+        Kind::from_item(item_id).is_some()
+            && self.active.len() < CAP
+            && self.next_id.checked_add(START_ID).is_some()
+            && self.next_id.checked_add(1).is_some()
+            && owner_entity > 0
+            && crate::whitelist::valid_name(owner_name)
+            && position.is_valid()
+            && position.y + 1.3 < 256.0
+            && yaw.is_finite()
+            && pitch.is_finite()
+    }
     pub fn launch(
         &mut self,
         item_id: i16,
@@ -83,13 +103,7 @@ impl Throwables {
         pitch: f32,
     ) -> Option<Event> {
         let kind = Kind::from_item(item_id)?;
-        if self.active.len() >= CAP
-            || owner_entity <= 0
-            || !crate::whitelist::valid_name(owner_name)
-            || !position.is_valid()
-            || !yaw.is_finite()
-            || !pitch.is_finite()
-        {
+        if !self.can_launch(item_id, owner_entity, owner_name, position, yaw, pitch) {
             return None;
         }
         let at = PlayerPosition { y: position.y + 1.3, ..position };
