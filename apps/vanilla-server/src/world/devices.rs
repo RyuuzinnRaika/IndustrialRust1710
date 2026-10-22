@@ -546,12 +546,32 @@ impl World {
         {
             return Ok(false);
         }
+        // Vanilla's top-half bit 0 selects the hinge side. Prefer a hinge
+        // away from an adjacent matching door, otherwise prefer the side
+        // with more adjacent opaque blocks (at foot and head heights).
+        let (sx, sz) = match orientation & 3 {
+            0 => (0, 1),
+            1 => (-1, 0),
+            2 => (0, -1),
+            _ => (1, 0),
+        };
+        let left = (x - sx, z - sz);
+        let right = (x + sx, z + sz);
+        let adjacent_door = |(nx, nz): (i32, i32)| self.get(nx, y, nz) >> 4 == id;
+        let solid_count = |(nx, nz): (i32, i32)| {
+            [y, y + 1]
+                .iter()
+                .filter(|&&ny| full_conductor(self.get(nx, ny, nz) >> 4))
+                .count()
+        };
+        let right_hinge = (adjacent_door(left) && !adjacent_door(right))
+            || solid_count(right) > solid_count(left);
         let lower = (x, y as u8, z);
         let upper = (x, (y + 1) as u8, z);
         let old_lower = self.edits.get(&lower).copied();
         let old_upper = self.edits.get(&upper).copied();
         self.set_gravity_cell(lower, (id << 4) | (orientation & 3));
-        self.set_gravity_cell(upper, (id << 4) | 8);
+        self.set_gravity_cell(upper, (id << 4) | 8 | u16::from(right_hinge));
         let result = if self.edits.len() > super::MAX_EDITS {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -646,6 +666,28 @@ mod redstone_regression_tests {
         w.block_tick(&path, 64).unwrap();
         assert_eq!(w.get(1, 64, 0) & 15, 15);
         assert_eq!(w.get(0, 64, 1) & 15, 0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn door_hinge_uses_adjacent_walls_and_neighboring_doors() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-door-hinge-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        // Facing 0 has side cells at z=-1 and z=+1. A solid wall
+        // on the right selects top-half hinge bit 0.
+        world.import_block(0, 64, 1, 1 << 4).unwrap();
+        world.import_block(0, 65, 1, 1 << 4).unwrap();
+        assert!(world.place_door(&path, 0, 64, 0, 64, 0).unwrap());
+        assert_eq!(world.get(0, 65, 0) & 9, 9);
+        assert_eq!(World::load(&path).unwrap().get(0, 65, 0) & 9, 9);
+        fs::remove_file(&path).unwrap();
+
+        let mut paired = World::new();
+        assert!(paired.place_door(&path, 0, 64, -1, 64, 0).unwrap());
+        assert!(paired.place_door(&path, 0, 64, 0, 64, 0).unwrap());
+        assert_eq!(paired.get(0, 65, 0) & 9, 9);
         fs::remove_file(path).unwrap();
     }
 
