@@ -1054,9 +1054,7 @@ fn play(
         // A stationary player continues pressing a plate. Refresh its timer
         // at most every five existing server ticks; do not resave an unchanged
         // analog value or create a second physics/tick scheduler.
-        if vitals.health > 0.0
-            && now_tick.saturating_sub(last_plate_refresh_tick) >= 5
-        {
+        if vitals.health > 0.0 && now_tick.saturating_sub(last_plate_refresh_tick) >= 5 {
             last_plate_refresh_tick = now_tick;
             let (bx, by, bz) = (
                 player.x.floor() as i32,
