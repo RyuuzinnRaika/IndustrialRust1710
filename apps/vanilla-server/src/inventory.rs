@@ -450,7 +450,11 @@ impl Inventory {
         if *slot != Some(expected) || expected.id != 386 || expected.count != 1 {
             return false;
         }
-        *slot = Some(Stack { id, count: 1, damage });
+        *slot = Some(Stack {
+            id,
+            count: 1,
+            damage,
+        });
         true
     }
     pub fn can_place(&self, claimed: Option<Stack>) -> bool {
