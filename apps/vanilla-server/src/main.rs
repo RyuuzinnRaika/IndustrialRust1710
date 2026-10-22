@@ -736,6 +736,7 @@ fn play(
     let mut last_hazards_tick = clock.ticks();
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
+    let mut last_beacon_tick = clock.ticks();
     loop {
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
@@ -1070,6 +1071,22 @@ fn play(
                 vitals.health = (vitals.health - total).max(0.0);
                 player.save_state(player_path, *vitals)?;
                 send(s, 0x06, &health_packet(*vitals))?;
+            }
+        }
+        // Active beacons sample their pyramid on the existing 20TPS clock.
+        if survival && vitals.health > 0.0 && now_tick.saturating_sub(last_beacon_tick) >= 80 {
+            last_beacon_tick = now_tick;
+            let affected = world.lock().map_err(|_| bad("world mutex poisoned"))?
+                .beacon_in_range(player.x, player.y, player.z);
+            if affected && !active_effects.iter().any(|effect| {
+                effect.kind == 1 && effect.amplifier > 0 && effect.expires_at > now_tick
+            }) {
+                active_effects.retain(|effect| effect.kind != 1);
+                active_effects.push(ActiveEffect {
+                    kind: 1, amplifier: 0, expires_at: now_tick + 180,
+                    next_periodic: now_tick + 180,
+                });
+                send(s, 0x1d, &potion_effect_packet(entity_id, 1, 0, 180))?;
             }
         }
         // A food right-click starts a 32 tick use animation. The server owns
@@ -1555,9 +1572,23 @@ fn play(
                     let bx = x.floor() as i32;
                     let by = y.floor() as i32 - 1;
                     let bz = z.floor() as i32;
+                    // Snapshot peers outside the world lock to preserve ordering.
+                    let count = 1 + hub.participants()?.into_iter().filter(|(other_id, at)| {
+                        *other_id != entity_id
+                            && at.x.floor() as i32 == bx
+                            && at.y.floor() as i32 - 1 == by
+                            && at.z.floor() as i32 == bz
+                    }).count();
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                    if world::in_bounds(bx, by, bz) && w.press_plate(world_path, bx, by, bz)? {
-                        hub.broadcast(block_change_event(&w, bx, by, bz));
+                    if world::in_bounds(bx, by, bz) {
+                        let activated = if matches!(w.get(bx, by, bz) >> 4, 147 | 148) {
+                            w.press_weighted_plate(world_path, bx, by, bz, count)?
+                        } else {
+                            w.press_plate(world_path, bx, by, bz)?
+                        };
+                        if activated {
+                            hub.broadcast(block_change_event(&w, bx, by, bz));
+                        }
                     }
                     // Tripwire triggers are evaluated at feet and body height,
                     // never from untrusted client onGround flags.
@@ -3872,7 +3903,8 @@ fn main() -> io::Result<()> {
                                         entity_id,
                                         pos: (x, y, z),
                                     } => {
-                                        let mut body = entity_id.to_be_bytes().to_vec();
+                                        let mut body = Vec::new();
+                                        write_varint(entity_id as u32, &mut body);
                                         body.push(50); // Protocol 5 Spawn Object: primed TNT
                                         for coordinate in [x, y, z] {
                                             body.extend_from_slice(
@@ -3891,7 +3923,7 @@ fn main() -> io::Result<()> {
                                         let mut body = Vec::new();
                                         for coordinate in [x, y, z] {
                                             body.extend_from_slice(
-                                                &(f64::from(coordinate) + 0.5).to_be_bytes(),
+                                                &(coordinate as f32 + 0.5).to_be_bytes(),
                                             );
                                         }
                                         body.extend_from_slice(&4f32.to_be_bytes());
