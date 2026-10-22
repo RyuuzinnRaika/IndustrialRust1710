@@ -2944,7 +2944,7 @@ mod tests {
             false,
         );
         let other_kind = mobs.next_id;
-        mobs.insert(Kind::Zombie, at, false);
+        mobs.insert(Kind::Cow, at, false);
 
         assert!(mobs.entities.values().all(|mob| mob.anger_until == 0));
         assert!(mobs.player_attack(attacked, at, None, 20).is_some());
