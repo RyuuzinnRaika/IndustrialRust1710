@@ -1073,11 +1073,34 @@ impl Mobs {
                 }
                 result.events.extend(self.split(parent));
             }
-        } else if matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman) {
+        } else if mob.kind == Kind::ZombiePigman {
+            // Pigmen communicate retaliation to their nearby group; an
+            // unrelated Enderman never receives this anger state.
+            let position = mob.position;
+            self.alert_nearby_pigmen(position, tick);
+        } else if mob.kind == Kind::Enderman {
             mob.anger_until = tick.saturating_add(1200);
         }
         Some(result)
     }
+
+    /// A single attacked pigman warns its local herd, including itself.
+    /// Limits are bounded to an already loaded set of Mob entities.
+    fn alert_nearby_pigmen(&mut self, attacked: PlayerPosition, tick: u64) {
+        let until = tick.saturating_add(1200);
+        for peer in self.entities.values_mut() {
+            if peer.kind != Kind::ZombiePigman {
+                continue;
+            }
+            let dx = peer.position.x - attacked.x;
+            let dz = peer.position.z - attacked.z;
+            let dy = (peer.position.y - attacked.y).abs();
+            if dx * dx + dz * dz <= 32.0 * 32.0 && dy <= 16.0 {
+                peer.anger_until = peer.anger_until.max(until);
+            }
+        }
+    }
+
     /// Grazing is server-owned and persisted before clients see sheep wool
     /// regrowth. Each sheep has a bounded chance every other game tick:
     /// adults 1/500, babies 1/25. Grass blocks turn into dirt on success.
@@ -1641,8 +1664,16 @@ impl Mobs {
                 }
                 match dimension {
                     crate::dimensions::Dimension::Overworld => {
-                        if (y < 40 && (seed >> 24).is_multiple_of(16))
-                            || (biome == 6 && !sunlight(now) && (seed >> 25).is_multiple_of(12))
+                        if (is_slime_cave_location(
+                            world.natural_seed().unwrap_or(0),
+                            x,
+                            y,
+                            z,
+                        ) && (seed >> 24).is_multiple_of(16))
+                            || (biome == 6
+                                && (50..=70).contains(&y)
+                                && !sunlight(now)
+                                && (seed >> 25).is_multiple_of(12))
                         {
                             Kind::Slime
                         } else {
@@ -2387,6 +2418,40 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
         .map(|other| distance_3d(p, *other))
         .fold(f64::INFINITY, f64::min)
 }
+/// Java Edition 1.7.10 slime-chunk selection; compatible with java.util.Random.
+/// Chunk arithmetic is **signed 32-bit** (Java int), then widened to Java long
+/// with wrapping signed 64-bit addition. The RNG consumes nextInt(10).
+fn is_slime_chunk(world_seed: u64, chunk_x: i32, chunk_z: i32) -> bool {
+    let x_square = chunk_x
+        .wrapping_mul(chunk_x)
+        .wrapping_mul(0x4c1906) as i64;
+    let x_linear = chunk_x.wrapping_mul(0x5ac0db) as i64;
+    let z_square = (chunk_z.wrapping_mul(chunk_z) as i64).wrapping_mul(0x4307a7);
+    let z_linear = chunk_z.wrapping_mul(0x5f24f) as i64;
+    let mixed = (world_seed as i64)
+        .wrapping_add(x_square)
+        .wrapping_add(x_linear)
+        .wrapping_add(z_square)
+        .wrapping_add(z_linear)
+        ^ 0x3ad8025f_i64;
+    const JAVA_MASK: u64 = (1 << 48) - 1;
+    let mut rng = ((mixed as u64) ^ 0x5deece66d) & JAVA_MASK;
+    loop {
+        rng = rng.wrapping_mul(0x5deece66d).wrapping_add(0xb) & JAVA_MASK;
+        let bits = (rng >> 17) as u32; // java.util.Random.next(31)
+        let candidate = bits % 10;
+        // Java's signed-int overflow rejection path for nextInt(non-power-of-2).
+        if i64::from(bits) - i64::from(candidate) + 9 <= i64::from(i32::MAX) {
+            return candidate == 0;
+        }
+    }
+}
+
+/// Block-to-chunk coordinates must floor toward negative infinity, not zero.
+fn is_slime_cave_location(world_seed: u64, x: i32, y: i32, z: i32) -> bool {
+    y < 40 && is_slime_chunk(world_seed, x.div_euclid(16), z.div_euclid(16))
+}
+
 /// Vanilla 1.7.10 villager infection chance by world difficulty.
 fn zombie_infects_villager(difficulty: u8, roll: u64) -> bool {
     match difficulty {
@@ -2845,6 +2910,79 @@ mod tests {
                 .count(),
             mobs.entities.len()
         );
+    }
+
+    #[test]
+    fn pigman_retaliation_spreads_to_nearby_pigmen_but_not_distant_or_other_mobs() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let attacked = mobs.next_id;
+        mobs.insert(Kind::ZombiePigman, at, false);
+        let nearby = mobs.next_id;
+        mobs.insert(
+            Kind::ZombiePigman,
+            PlayerPosition { x: 31.5, ..at },
+            false,
+        );
+        let above = mobs.next_id;
+        mobs.insert(
+            Kind::ZombiePigman,
+            PlayerPosition {
+                y: at.y + 17.0,
+                ..at
+            },
+            false,
+        );
+        let distant = mobs.next_id;
+        mobs.insert(
+            Kind::ZombiePigman,
+            PlayerPosition { x: 33.5, ..at },
+            false,
+        );
+        let other_kind = mobs.next_id;
+        mobs.insert(Kind::Zombie, at, false);
+
+        assert!(mobs.entities.values().all(|mob| mob.anger_until == 0));
+        assert!(mobs.player_attack(attacked, at, None, 20).is_some());
+        assert_eq!(mobs.entities[&attacked].anger_until, 1220);
+        assert_eq!(mobs.entities[&nearby].anger_until, 1220);
+        assert_eq!(mobs.entities[&above].anger_until, 0);
+        assert_eq!(mobs.entities[&distant].anger_until, 0);
+        assert_eq!(mobs.entities[&other_kind].anger_until, 0);
+        // Another attack extends the shared timer instead of shortening it.
+        assert!(mobs.player_attack(attacked, at, None, 40).is_some());
+        assert_eq!(mobs.entities[&nearby].anger_until, 1240);
+        assert!(mobs.hurt_player(900, at, 1240) == 0);
+    }
+
+    #[test]
+    fn slime_chunks_match_java_1710_seed_and_negative_chunk_coordinates() {
+        // Golden answers computed from java.util.Random.nextInt(10), not the
+        // mob tick's hash-based spawn-attempt RNG.
+        for (seed, cx, cz, expected) in [
+            (0_u64, 0, 0, false),
+            (1, 12, -3, true),
+            (1, 100, 100, true),
+            (1, -1, -1, false),
+            (12345, -100, 300, true),
+            (12345, 12, -3, false),
+            (u64::MAX, 0, 0, false),
+        ] {
+            assert_eq!(
+                is_slime_chunk(seed, cx, cz),
+                expected,
+                "seed={seed}, chunk=({cx},{cz})"
+            );
+        }
+        // A block coordinate of -1 belongs to chunk -1, not chunk 0.
+        assert_eq!(is_slime_cave_location(1, -1, 20, -1), is_slime_chunk(1, -1, -1));
+        assert!(is_slime_cave_location(1, 12 * 16, 39, -3 * 16));
+        assert!(!is_slime_cave_location(1, 12 * 16, 40, -3 * 16));
+        assert!(!is_slime_cave_location(1, 12 * 16 + 16, 39, -3 * 16));
     }
 
     #[test]
