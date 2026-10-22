@@ -836,7 +836,7 @@ fn play(
             // causes active sessions to be disconnected (fail closed).
             let allowed = Whitelist::load(whitelist_path).is_ok_and(|list| list.allows(name))
                 && administration
-                    .banned(name, peer_ip)
+                    .banned_identity(name, verified_uuid, peer_ip)
                     .is_ok_and(|reason| reason.is_none());
             if !allowed {
                 let mut reason = Vec::new();
@@ -3046,6 +3046,16 @@ fn handle(
         let uuid = offline_uuid(&name);
         (name, uuid)
     };
+    // A ban or whitelist can change while session verification is in flight.
+    // Recheck the authenticated identity before opening any player data.
+    let still_allowed = Whitelist::load(&whitelist_path).is_ok_and(|list| list.allows(&name))
+        && administration
+            .banned_identity(&name, online_mode.then_some(uuid.as_str()), peer_ip)
+            .is_ok_and(|reason| reason.is_none());
+    if !still_allowed {
+        login_disconnect(&mut s, "Login denied: whitelist or ban updated.")?;
+        return Ok(());
+    }
     let player_file = if online_mode {
         PlayerPosition::authenticated_location(&path, &uuid)?
     } else {
@@ -3278,7 +3288,8 @@ fn run_player_admin_command(
             } else {
                 reason.join(" ")
             };
-            administration.set_player_ban(target, Some(&reason), true)?;
+            let uuid = hub.uuid_for_online_name(target)?;
+            administration.set_player_ban_verified(target, uuid.as_deref(), Some(&reason), true)?;
             let _ = hub.request_admin_kick(target, &reason);
             Ok(format!("Banned {target}"))
         }
@@ -3459,7 +3470,17 @@ fn start_clock_console(
                     } else {
                         reason.join(" ")
                     };
-                    administration.set_player_ban(name, Some(&reason), true)?;
+                    let uuid = if online_mode {
+                        hub.uuid_for_online_name(name)?
+                    } else {
+                        None
+                    };
+                    administration.set_player_ban_verified(
+                        name,
+                        uuid.as_deref(),
+                        Some(&reason),
+                        true,
+                    )?;
                     let _ = hub.request_admin_kick(name, &reason)?;
                     println!("Banned {name}");
                     Ok(())

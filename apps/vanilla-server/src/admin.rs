@@ -147,11 +147,28 @@ fn validate_named(items: &[NamedEntry]) -> io::Result<()> {
         if item.level.is_some_and(|l| !(1..=4).contains(&l)) {
             return Err(invalid("invalid OP level"));
         }
+        if item.uuid.as_deref().is_some_and(|uuid| !valid_uuid(uuid)) {
+            return Err(invalid("invalid authenticated UUID in admin database"));
+        }
         if item.reason.as_ref().is_some_and(|r| r.len() > 256) {
             return Err(invalid("BAN reason too long"));
         }
     }
     Ok(())
+}
+fn valid_uuid(uuid: &str) -> bool {
+    let bytes = uuid.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(i, byte)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+fn entry_uuid_matches(entry: &NamedEntry, uuid: &str) -> bool {
+    entry.uuid.as_deref().is_some_and(|id| id.eq_ignore_ascii_case(uuid))
 }
 fn canonical_ip(ip: IpAddr) -> IpAddr {
     match ip {
@@ -247,9 +264,22 @@ impl Administration {
         Ok(self.operator_level(name, verified_uuid)? > 0)
     }
     pub fn banned(&self, name: &str, address: IpAddr) -> io::Result<Option<String>> {
+        self.banned_identity(name, None, address)
+    }
+    /// A verified account cannot evade a UUID-linked ban by changing its name.
+    /// Offline sessions are only checked by name because their UUID is not trusted.
+    pub fn banned_identity(
+        &self,
+        name: &str,
+        verified_uuid: Option<&str>,
+        address: IpAddr,
+    ) -> io::Result<Option<String>> {
         let by_name = self.banned_players()?;
         let by_ip = self.banned_ips()?;
-        if let Some(entry) = by_name.iter().find(|e| e.name.eq_ignore_ascii_case(name)) {
+        if let Some(entry) = by_name.iter().find(|e| {
+            e.name.eq_ignore_ascii_case(name)
+                || verified_uuid.is_some_and(|uuid| entry_uuid_matches(e, uuid))
+        }) {
             return Ok(Some(
                 entry
                     .reason
@@ -298,19 +328,8 @@ impl Administration {
         if !valid_name(name) {
             return Err(invalid("invalid OP username"));
         }
-        if let Some(id) = uuid {
-            let bytes = id.as_bytes();
-            if bytes.len() != 36
-                || bytes.iter().enumerate().any(|(i, byte)| {
-                    if matches!(i, 8 | 13 | 18 | 23) {
-                        *byte != b'-'
-                    } else {
-                        !byte.is_ascii_hexdigit()
-                    }
-                })
-            {
-                return Err(invalid("invalid authenticated OP UUID"));
-            }
+        if uuid.is_some_and(|id| !valid_uuid(id)) {
+            return Err(invalid("invalid authenticated OP UUID"));
         }
         let mut ops = self.ops()?;
         ops.retain(|e| !e.name.eq_ignore_ascii_case(name));
@@ -334,17 +353,32 @@ impl Administration {
         reason: Option<&str>,
         enabled: bool,
     ) -> io::Result<()> {
+        self.set_player_ban_verified(name, None, reason, enabled)
+    }
+    /// Bind a new ban to a server-verified account UUID where available.
+    /// A console ban of an offline target remains a legacy name-only ban.
+    pub fn set_player_ban_verified(
+        &self,
+        name: &str,
+        verified_uuid: Option<&str>,
+        reason: Option<&str>,
+        enabled: bool,
+    ) -> io::Result<()> {
         if !valid_name(name)
+            || verified_uuid.is_some_and(|id| !valid_uuid(id))
             || reason.is_some_and(|r| r.len() > 256 || r.chars().any(char::is_control))
         {
             return Err(invalid("invalid player BAN"));
         }
         let mut bans = self.banned_players()?;
-        bans.retain(|e| !e.name.eq_ignore_ascii_case(name));
+        bans.retain(|e| {
+            !e.name.eq_ignore_ascii_case(name)
+                && !verified_uuid.is_some_and(|id| entry_uuid_matches(e, id))
+        });
         if enabled {
             bans.push(NamedEntry {
                 name: name.into(),
-                uuid: None,
+                uuid: verified_uuid.map(str::to_owned),
                 reason: reason.map(str::to_owned),
                 level: None,
                 bypasses_player_limit: None,
@@ -484,6 +518,31 @@ mod tests {
         store.audit("CONSOLE", "/ban Spammer", "success").unwrap();
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn verified_uuid_ban_survives_name_change_and_reload() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-uuid-ban-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = Administration::new(root.clone()).unwrap();
+        let uuid = "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca";
+        let ip: IpAddr = "192.0.2.42".parse().unwrap();
+        store
+            .set_player_ban_verified("OldName", Some(uuid), Some("account ban"), true)
+            .unwrap();
+        let reloaded = Administration::new(root.clone()).unwrap();
+        assert_eq!(
+            reloaded.banned_identity("NewName", Some(uuid), ip).unwrap(),
+            Some("account ban".into())
+        );
+        assert!(reloaded.banned_identity("NewName", None, ip).unwrap().is_none());
+        reloaded.set_player_ban_verified("OldName", Some(uuid), None, false).unwrap();
+        assert!(reloaded.banned_identity("NewName", Some(uuid), ip).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn malformed_and_duplicate_bans_rejected() {
         let root = std::env::temp_dir().join(format!(
