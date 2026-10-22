@@ -25,6 +25,7 @@ enum Kind {
     Zombie,
     Cow,
     Pig,
+    Horse,
     Sheep,
     Chicken,
     Skeleton,
@@ -53,6 +54,7 @@ impl Kind {
             Self::Zombie => 54,
             Self::Cow => 92,
             Self::Pig => 90,
+            Self::Horse => 100,
             Self::Sheep => 91,
             Self::Chicken => 93,
             Self::Skeleton => 51,
@@ -75,7 +77,7 @@ impl Kind {
     fn passive(self) -> bool {
         matches!(
             self,
-            Self::Cow | Self::Pig | Self::Sheep | Self::Chicken | Self::Villager
+            Self::Cow | Self::Pig | Self::Horse | Self::Sheep | Self::Chicken | Self::Villager
         )
     }
     fn peaceful_safe(self) -> bool {
@@ -91,6 +93,7 @@ impl Kind {
         match self {
             Self::Chicken => 4,
             Self::Sheep | Self::Pig | Self::Cow => 10,
+            Self::Horse => 30,
             Self::Spider => 16,
             Self::CaveSpider => 12,
             Self::Enderman => 40,
@@ -112,6 +115,7 @@ impl Kind {
             Self::Zombie => 367,
             Self::Cow => 363,
             Self::Pig => 319,
+            Self::Horse => 334,
             Self::Sheep => 35,
             Self::Chicken => 365,
             Self::Skeleton => 352,
@@ -139,6 +143,7 @@ impl Kind {
         match self {
             Self::Cow | Self::Sheep => held == 296,
             Self::Pig => held == 391,
+            Self::Horse => matches!(held, 260 | 296 | 353),
             Self::Chicken => matches!(held, 295 | 361 | 362),
             _ => false,
         }
@@ -162,6 +167,22 @@ struct Mob {
     profession: u8,
     size: u8,
     anger_until: u64,
+    #[serde(default)]
+    zombie_villager: bool,
+    #[serde(default)]
+    saddled: bool,
+    #[serde(default)]
+    tamed: bool,
+    #[serde(default)]
+    tame_progress: u8,
+    #[serde(default)]
+    fence_anchor: Option<[i32; 3]>,
+    #[serde(skip)]
+    rider: Option<i32>,
+    #[serde(skip)]
+    leash_holder: Option<i32>,
+    #[serde(skip)]
+    last_ride_tick: u64,
 }
 impl Mob {
     fn spawn(self) -> Event {
@@ -180,6 +201,11 @@ impl Mob {
             body.push((2 << 5) | 12); // metadata index 12, type 2 (int)
             body.extend_from_slice(&(-24000i32).to_be_bytes());
         }
+        if self.kind == Kind::Zombie && self.zombie_villager {
+            // Protocol 5 / Java 1.7.10: zombie DataWatcher byte 13
+            // distinguishes infected villagers from ordinary zombies.
+            body.extend_from_slice(&[13, 1]);
+        }
         if self.kind.splitting() {
             body.push(16); // DataWatcher byte index 16: slime/magma cube size
             body.push(self.size);
@@ -192,12 +218,34 @@ impl Mob {
             body.push(16); // sheep colour + sheared bit (byte metadata)
             body.push(if self.sheared { 0x10 } else { 0 });
         }
+        if self.kind == Kind::Pig {
+            body.push(16); // pig saddle metadata byte
+            body.push(u8::from(self.saddled));
+        }
+        if self.kind == Kind::Horse {
+            body.push((2 << 5) | 16); // horse flags int
+            let flags: i32 = (if self.tamed { 2 } else { 0 }) | (if self.saddled { 4 } else { 0 });
+            body.extend_from_slice(&flags.to_be_bytes());
+        }
         // All living mobs expose health as a float at DataWatcher index 6,
         // not only bosses. New joiners must observe the current shared HP.
         body.push((3 << 5) | 6);
         body.extend_from_slice(&f32::from(self.health).to_be_bytes());
         body.push(0x7f);
         Event { id: 0x0f, body }
+    }
+    fn mount_metadata(self) -> Event {
+        let mut body = self.id.to_be_bytes().to_vec();
+        if self.kind == Kind::Horse {
+            body.push((2 << 5) | 16);
+            let flags: i32 = (if self.tamed { 2 } else { 0 }) | (if self.saddled { 4 } else { 0 });
+            body.extend_from_slice(&flags.to_be_bytes());
+        } else {
+            body.push(16);
+            body.push(u8::from(self.saddled));
+        }
+        body.push(0x7f);
+        Event { id: 0x1c, body }
     }
     /// Protocol 5 Entity Metadata (0x1C): server-authoritative current HP.
     fn health_metadata(self) -> Event {
@@ -315,6 +363,9 @@ impl Explosion {
         Event { id: 0x27, body }
     }
 }
+/// Optional Entity Metadata together with a changed grass block coordinate.
+pub type GrazingUpdate = (Option<Event>, (i32, i32, i32));
+
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct Mobs {
     entities: BTreeMap<i32, Mob>,
@@ -337,6 +388,13 @@ pub struct Mobs {
     #[serde(skip)]
     explosions: Vec<Explosion>,
     last_tick: u64,
+    #[serde(default)]
+    last_graze_tick: u64,
+    #[serde(skip)]
+    last_leash_tick: u64,
+    // Runtime-only flag. Default false (not paused) on new/load.
+    #[serde(skip)]
+    natural_spawning_paused: bool,
     next_id: i32,
     dragon_defeated: bool,
     enabled: bool,
@@ -408,6 +466,79 @@ fn spawn_light_ok(block: u8, sky: u8, now: u64, passive: bool) -> bool {
         block < 8 && effective_sky < 8
     }
 }
+/// Ghasts are four blocks wide and tall. Reusing the player's narrow
+/// collision hull lets them clip through fortress walls, so the conservative
+/// volume test rejects solid blocks throughout their body.
+fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
+    let x = p.x.floor() as i32;
+    let y = p.y.floor() as i32;
+    let z = p.z.floor() as i32;
+    (x - 2..=x + 2).all(|bx| {
+        (y - 2..=y + 2).all(|by| {
+            (z - 2..=z + 2).all(|bz| matches!(world.get(bx, by, bz) >> 4, 0 | 6 | 8..=11))
+        })
+    })
+}
+
+/// A bounded, collision-swept aerial step. Ghasts keep their distance and
+/// circle their target while blazes try to gain altitude for ranged attacks.
+/// Flight never requires a supporting ground block.
+fn flying_step(
+    world: &World,
+    kind: Kind,
+    from: PlayerPosition,
+    target: PlayerPosition,
+    tick: u64,
+) -> Option<PlayerPosition> {
+    if !matches!(kind, Kind::Ghast | Kind::Blaze) || !from.is_valid() || !target.is_valid() {
+        return None;
+    }
+    let dx = target.x - from.x;
+    let dz = target.z - from.z;
+    let horizontal = dx.hypot(dz);
+    let (step_x, step_z) = if horizontal > 0.01 {
+        let (ux, uz) = (dx / horizontal, dz / horizontal);
+        if kind == Kind::Ghast {
+            if horizontal < 16.0 {
+                (-ux * 0.10, -uz * 0.10)
+            } else if horizontal > 28.0 {
+                (ux * 0.10, uz * 0.10)
+            } else {
+                let sign = if (tick / 80).is_multiple_of(2) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                (-uz * 0.10 * sign, ux * 0.10 * sign)
+            }
+        } else if horizontal < 5.0 {
+            (-ux * 0.10, -uz * 0.10)
+        } else if horizontal > 10.0 {
+            (ux * 0.10, uz * 0.10)
+        } else {
+            (0.0, 0.0)
+        }
+    } else {
+        (0.0, 0.0)
+    };
+    let desired_y = target.y + if kind == Kind::Ghast { 8.0 } else { 3.0 };
+    let step_y = (desired_y - from.y).clamp(-0.08, 0.08);
+    let next = PlayerPosition {
+        x: from.x + step_x,
+        y: from.y + step_y,
+        z: from.z + step_z,
+    };
+    if next.is_valid()
+        && physics::valid_movement(world, &from, &next)
+        && (kind != Kind::Ghast || ghast_has_clearance(world, next))
+        && distance_3d(from, next) > 0.0001
+    {
+        Some(next)
+    } else {
+        None
+    }
+}
+
 fn sky_exposed(world: &World, p: PlayerPosition) -> bool {
     let x = p.x.floor() as i32;
     let z = p.z.floor() as i32;
@@ -495,12 +626,15 @@ impl Mobs {
                 .unwrap_or(BASE_ID - 1);
             if value.next_id <= max_id
                 || value.next_id < BASE_ID
-                || value.next_id >= i32::MAX - 1024
+                || value.next_id >= 1_000_000
                 || value.entities.len() > 128
                 || value.arrows.len() > ARROW_CAP
                 || value.orbs.len() > 256
                 || value.entities.iter().any(|(&id, mob)| {
                     id < BASE_ID
+                        || mob.tame_progress > 20
+                        || (mob.saddled && !matches!(mob.kind, Kind::Pig | Kind::Horse))
+                        || (mob.fence_anchor.is_some() && !mob.kind.passive())
                         || id != mob.id
                         || !mob.position.is_valid()
                         || mob.health <= 0
@@ -596,10 +730,112 @@ impl Mobs {
             profession: (hash(self.last_tick ^ id as u64) % 5) as u8,
             size,
             anger_until: 0,
+            zombie_villager: false,
+            saddled: false,
+            tamed: false,
+            tame_progress: 0,
+            fence_anchor: None,
+            rider: None,
+            leash_holder: None,
+            last_ride_tick: 0,
         };
         let event = mob.spawn();
         self.entities.insert(id, mob);
         event
+    }
+    /// An egg impact may spawn one baby chicken, under the existing Mob cap.
+    pub fn hatch_egg(&mut self, world: &World, at: PlayerPosition) -> Option<Event> {
+        if self.entities.len() >= 128 || !at.is_valid() || physics::collides(world, &at) {
+            return None;
+        }
+        Some(self.insert(Kind::Chicken, at, true))
+    }
+    /// Set zombie-villager metadata before sending the authoritative spawn.
+    /// The former villager's age and profession survive for future curing.
+    fn insert_zombie_villager(
+        &mut self,
+        position: PlayerPosition,
+        baby: bool,
+        profession: u8,
+    ) -> Event {
+        let id = self.next_id;
+        let _ = self.insert(Kind::Zombie, position, baby);
+        let mob = self.entities.get_mut(&id).expect("newly inserted zombie");
+        mob.zombie_villager = true;
+        mob.profession = profession;
+        mob.spawn()
+    }
+
+    /// Resolve zombie-on-villager melee on the server. The existing mob tick
+    /// calls this once; each zombie's bite cooldown prevents duplicated hits.
+    fn zombies_attack_villagers(
+        &mut self,
+        now: u64,
+        world: &World,
+        players: &[PlayerPosition],
+        events: &mut Vec<Event>,
+    ) {
+        if self.difficulty == Some(0) {
+            return;
+        }
+        let attackers: Vec<_> = self
+            .entities
+            .values()
+            .filter(|mob| {
+                mob.kind == Kind::Zombie
+                    && mob.health > 0
+                    && (mob.bite_tick == 0 || now.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
+            })
+            .map(|mob| (mob.id, mob.position))
+            .collect();
+        for (zombie_id, origin) in attackers {
+            let victim_id = self
+                .entities
+                .values()
+                .filter(|mob| {
+                    mob.kind == Kind::Villager
+                        && mob.nearby(origin, 1.6)
+                        // A player closer than the villager takes target
+                        // priority; the zombie must not burn its bite cooldown
+                        // by attacking a collocated villager instead.
+                        && !players.iter().any(|player| {
+                            distance_3d(origin, *player)
+                                <= distance_3d(origin, mob.position)
+                        })
+                        && can_see(world, origin, mob.position)
+                })
+                .min_by(|a, b| {
+                    distance_3d(origin, a.position).total_cmp(&distance_3d(origin, b.position))
+                })
+                .map(|mob| mob.id);
+            let Some(victim_id) = victim_id else { continue };
+            if let Some(zombie) = self.entities.get_mut(&zombie_id) {
+                zombie.bite_tick = now;
+            }
+            let Some(villager) = self.entities.get_mut(&victim_id) else {
+                continue;
+            };
+            villager.health -= 3;
+            events.push(villager.status(if villager.health <= 0 { 3 } else { 2 }));
+            if villager.health > 0 {
+                events.push(villager.health_metadata());
+                continue;
+            }
+            // Old entity ID must be destroyed before any replacement is sent
+            // to multiple clients; only the shared next_id allocates new IDs.
+            let victim = self.entities.remove(&victim_id).expect("living victim");
+            events.push(multiplayer::destroy(victim_id));
+            let roll = hash(now ^ zombie_id as u64 ^ victim_id as u64);
+            if zombie_infects_villager(self.difficulty.unwrap_or(2), roll)
+                && self.entities.len() < 128
+            {
+                events.push(self.insert_zombie_villager(
+                    victim.position,
+                    victim.baby,
+                    victim.profession,
+                ));
+            }
+        }
     }
     /// Construct a server-owned boss. External summoning rules must validate
     /// soul sand/skulls or End progression before calling this method.
@@ -677,48 +913,22 @@ impl Mobs {
     }
     /// Natural Survival only, preserving flat E2E world behaviour.
     pub fn new_with_difficulty(world: &World, enabled: bool, difficulty: u8) -> Self {
-        let mut state = Self {
+        // Do not place fixed zombies/skeletons near (0,0) at world creation:
+        // that bypassed all biome, light, player-radius and world-spawn checks.
+        // Only the validated natural-spawn tick may create initial monsters.
+        Self {
             next_id: BASE_ID,
             enabled: enabled && world.is_natural(),
             difficulty: Some(difficulty.min(3)),
             ..Self::default()
-        };
-        if state.enabled {
-            for (n, (x, z)) in [(8, 9), (-8, 7), (7, -8), (-9, -7)].into_iter().enumerate() {
-                let p = PlayerPosition {
-                    x: x as f64 + 0.5,
-                    y: world.natural_seed().map_or(65.0, |seed| {
-                        crate::terrain::surface(seed, x, z) as f64 + 1.0
-                    }),
-                    z: z as f64 + 0.5,
-                };
-                if !physics::collides(world, &p)
-                    && physics::supported(world, &p)
-                    && (difficulty > 0 || n == 2)
-                {
-                    state.insert(
-                        if n == 0 {
-                            Kind::Zombie
-                        } else if n == 1 {
-                            Kind::Skeleton
-                        } else if n == 2 {
-                            Kind::Cow
-                        } else {
-                            Kind::Creeper
-                        },
-                        p,
-                        false,
-                    );
-                }
-            }
         }
-        state
     }
     pub fn spawn_events(&self) -> impl Iterator<Item = Event> + '_ {
         self.entities
             .values()
             .copied()
             .map(Mob::spawn)
+            .chain(self.tether_snapshots())
             .chain(self.arrows.values().copied().map(Arrow::spawn))
             .chain(self.orbs.iter().map(|(&id, &(at, amount, _))| {
                 let mut body = Vec::new();
@@ -868,6 +1078,61 @@ impl Mobs {
         }
         Some(result)
     }
+    /// Grazing is server-owned and persisted before clients see sheep wool
+    /// regrowth. Each sheep has a bounded chance every other game tick:
+    /// adults 1/500, babies 1/25. Grass blocks turn into dirt on success.
+    /// At most four grazing edits run in a single global tick.
+    pub fn graze(
+        &mut self,
+        world: &mut World,
+        world_path: &Path,
+        tick: u64,
+    ) -> io::Result<Vec<GrazingUpdate>> {
+        if tick <= self.last_graze_tick || !tick.is_multiple_of(2) {
+            return Ok(Vec::new());
+        }
+        self.last_graze_tick = tick;
+        let mut events = Vec::new();
+        for mob in self.entities.values_mut() {
+            if events.len() >= 4 {
+                break;
+            }
+            if mob.kind != Kind::Sheep {
+                continue;
+            }
+            let chance = if mob.baby { 25 } else { 500 };
+            if !hash(tick ^ (mob.id as u64).wrapping_mul(0x9e3779b97f4a7c15)).is_multiple_of(chance)
+            {
+                continue;
+            }
+            let (x, y, z) = (
+                mob.position.x.floor() as i32,
+                mob.position.y.floor() as i32 - 1,
+                mob.position.z.floor() as i32,
+            );
+            if !(0..255).contains(&y) || world.get(x, y, z) >> 4 != 2 {
+                continue;
+            }
+            // Do not mutate the Mob before the world snapshot commits.
+            if world.update_and_save(world_path, x, y, z, 3 << 4)? {
+                if mob.sheared {
+                    mob.sheared = false;
+                    let mut body = mob.id.to_be_bytes().to_vec();
+                    body.extend_from_slice(&[16, 0, 0x7f]);
+                    events.push((Some(Event { id: 0x1c, body }), (x, y, z)));
+                } else {
+                    // A grass change still needs a block packet, even when
+                    // the sheep already has its wool.
+                    events.push((None, (x, y, z)));
+                }
+            }
+        }
+        if !events.is_empty() {
+            self.save(world)?;
+        }
+        Ok(events)
+    }
+
     /// Cow milking is read-only for the animal; inventory substitution and
     /// persistence belong to the authenticated player session.
     pub fn can_milk(&self, id: i32, at: PlayerPosition, held: Option<Stack>) -> bool {
@@ -906,6 +1171,265 @@ impl Mobs {
         ))
     }
 
+    /// Only a nearby, eligible animal can receive a saddle (item debit is caller-owned).
+    pub fn can_saddle(&self, id: i32, player: PlayerPosition) -> bool {
+        self.entities.get(&id).is_some_and(|mob| {
+            matches!(mob.kind, Kind::Pig | Kind::Horse)
+                && (mob.kind == Kind::Pig || mob.tamed)
+                && !mob.baby
+                && !mob.saddled
+                && mob.nearby(player, 3.0)
+        })
+    }
+    pub fn saddle(&mut self, id: i32, player: PlayerPosition) -> Option<Event> {
+        if !self.can_saddle(id, player) {
+            return None;
+        }
+        let mob = self.entities.get_mut(&id)?;
+        mob.saddled = true;
+        Some(mob.mount_metadata())
+    }
+    pub fn use_mount(&mut self, id: i32, rider: i32, player: PlayerPosition) -> Option<Vec<Event>> {
+        if self.entities.values().any(|mob| mob.rider == Some(rider)) {
+            return None;
+        }
+        let mob = self.entities.get_mut(&id)?;
+        if !matches!(mob.kind, Kind::Pig | Kind::Horse)
+            || mob.baby
+            || mob.rider.is_some()
+            || !mob.nearby(player, 4.0)
+        {
+            return None;
+        }
+        let mut result = Vec::new();
+        if mob.kind == Kind::Horse && !mob.tamed {
+            mob.tame_progress = mob.tame_progress.saturating_add(1);
+            if mob.tame_progress >= 3 {
+                mob.tamed = true;
+                result.push(mob.mount_metadata());
+                result.push(mob.status(7)); // taming hearts
+            }
+        } else if !mob.saddled {
+            return None;
+        }
+        mob.rider = Some(rider);
+        result.push(crate::vehicles::attachment(rider, id));
+        Some(result)
+    }
+    pub fn rider_position(&self, rider: i32) -> Option<PlayerPosition> {
+        self.entities
+            .values()
+            .find(|mob| mob.rider == Some(rider))
+            .map(|mob| PlayerPosition {
+                y: (mob.position.y + 0.8).min(255.8),
+                ..mob.position
+            })
+    }
+    pub fn is_riding(&self, rider: i32) -> bool {
+        self.rider_position(rider).is_some()
+    }
+    pub fn dismount(&mut self, rider: i32) -> Option<Event> {
+        let mob = self
+            .entities
+            .values_mut()
+            .find(|mob| mob.rider == Some(rider))?;
+        mob.rider = None;
+        Some(crate::vehicles::attachment(rider, -1))
+    }
+    pub fn steer_rider(
+        &mut self,
+        rider: i32,
+        world: &World,
+        forward: f32,
+        yaw: f32,
+        holding_carrot: bool,
+        now: u64,
+    ) -> Vec<Event> {
+        if !forward.is_finite() || !yaw.is_finite() {
+            return Vec::new();
+        }
+        let Some(mob) = self
+            .entities
+            .values_mut()
+            .find(|mob| mob.rider == Some(rider))
+        else {
+            return Vec::new();
+        };
+        if now <= mob.last_ride_tick {
+            return Vec::new();
+        }
+        mob.last_ride_tick = now;
+        if !mob.saddled || (mob.kind == Kind::Pig && !holding_carrot) {
+            return Vec::new();
+        }
+        let radians = (yaw as f64).to_radians();
+        let speed = if mob.kind == Kind::Horse { 0.22 } else { 0.11 };
+        let step = f64::from(forward.clamp(-1.0, 1.0)) * speed;
+        let next = PlayerPosition {
+            x: mob.position.x - radians.sin() * step,
+            z: mob.position.z + radians.cos() * step,
+            ..mob.position
+        };
+        if next.is_valid()
+            && physics::valid_movement(world, &mob.position, &next)
+            && physics::supported(world, &next)
+        {
+            mob.position = next;
+            return vec![multiplayer::teleport(mob.id, &next, yaw, 0.0)];
+        }
+        Vec::new()
+    }
+    /// Leash packet 0x1B is server-owned; a fence tie remains in the saved Mob.
+    pub fn can_leash(&self, id: i32, holder: i32, player: PlayerPosition) -> bool {
+        holder > 0
+            && self.entities.get(&id).is_some_and(|mob| {
+                mob.kind.passive()
+                    && !mob.baby
+                    && mob.rider.is_none()
+                    && mob.leash_holder.is_none()
+                    && mob.fence_anchor.is_none()
+                    && mob.nearby(player, 5.0)
+            })
+    }
+    pub fn leash(&mut self, id: i32, holder: i32, player: PlayerPosition) -> Option<Event> {
+        if !self.can_leash(id, holder, player) {
+            return None;
+        }
+        self.entities.get_mut(&id)?.leash_holder = Some(holder);
+        Some(Self::leash_packet(id, holder))
+    }
+    fn leash_packet(id: i32, holder: i32) -> Event {
+        let mut body = Vec::with_capacity(9);
+        body.extend_from_slice(&id.to_be_bytes());
+        body.extend_from_slice(&holder.to_be_bytes());
+        body.push(1);
+        Event { id: 0x1b, body }
+    }
+    fn knot_id(mob_id: i32) -> i32 {
+        2_000_000 + mob_id
+    }
+    fn knot_spawn(mob_id: i32, anchor: [i32; 3]) -> Event {
+        let mut body = Vec::new();
+        write_varint(Self::knot_id(mob_id) as u32, &mut body);
+        body.push(77);
+        for value in anchor {
+            let fixed = ((f64::from(value) + 0.5) * 32.0) as i32;
+            body.extend_from_slice(&fixed.to_be_bytes());
+        }
+        body.extend_from_slice(&[0, 0]);
+        body.extend_from_slice(&0i32.to_be_bytes());
+        Event { id: 0x0e, body }
+    }
+    pub fn tie_fence(&mut self, holder: i32, anchor: [i32; 3]) -> Vec<Event> {
+        let mut events = Vec::new();
+        for mob in self.entities.values_mut() {
+            let dx = mob.position.x - f64::from(anchor[0]);
+            let dz = mob.position.z - f64::from(anchor[2]);
+            if mob.leash_holder == Some(holder) && dx.hypot(dz) <= 8.0 && events.len() < 32 {
+                mob.leash_holder = None;
+                mob.fence_anchor = Some(anchor);
+                events.push(Self::knot_spawn(mob.id, anchor));
+                events.push(Self::leash_packet(mob.id, Self::knot_id(mob.id)));
+            }
+        }
+        events
+    }
+    pub fn untie_fence(&mut self, anchor: [i32; 3]) -> Vec<Event> {
+        let mut result = Vec::new();
+        for mob in self.entities.values_mut() {
+            if mob.fence_anchor == Some(anchor) {
+                mob.fence_anchor = None;
+                result.push(Self::leash_packet(mob.id, -1));
+                result.push(multiplayer::destroy(Self::knot_id(mob.id)));
+            }
+        }
+        result
+    }
+    pub fn release_player(&mut self, holder: i32) -> Vec<Event> {
+        let mut result = Vec::new();
+        if let Some(detach) = self.dismount(holder) {
+            result.push(detach);
+        }
+        for mob in self.entities.values_mut() {
+            if mob.leash_holder == Some(holder) {
+                mob.leash_holder = None;
+                result.push(Self::leash_packet(mob.id, -1));
+            }
+        }
+        result
+    }
+    pub fn tether_snapshots(&self) -> Vec<Event> {
+        let mut result = Vec::new();
+        for mob in self.entities.values() {
+            if let Some(anchor) = mob.fence_anchor {
+                result.push(Self::knot_spawn(mob.id, anchor));
+                result.push(Self::leash_packet(mob.id, Self::knot_id(mob.id)));
+            } else if let Some(holder) = mob.leash_holder {
+                result.push(Self::leash_packet(mob.id, holder));
+            }
+            if let Some(rider) = mob.rider {
+                result.push(crate::vehicles::attachment(rider, mob.id));
+            }
+        }
+        result
+    }
+    /// Follow a verified player entity or a persisted fence anchor once per tick.
+    pub fn advance_leashes(
+        &mut self,
+        world: &World,
+        now: u64,
+        players: &[(i32, PlayerPosition)],
+    ) -> Vec<Event> {
+        if now <= self.last_leash_tick {
+            return Vec::new();
+        }
+        self.last_leash_tick = now;
+        let mut events = Vec::new();
+        for mob in self.entities.values_mut() {
+            let destination = if let Some(anchor) = mob.fence_anchor {
+                Some(PlayerPosition {
+                    x: f64::from(anchor[0]) + 0.5,
+                    y: f64::from(anchor[1]),
+                    z: f64::from(anchor[2]) + 0.5,
+                })
+            } else {
+                mob.leash_holder.and_then(|id| {
+                    players
+                        .iter()
+                        .find(|(owner, _)| *owner == id)
+                        .map(|(_, p)| *p)
+                })
+            };
+            let Some(target) = destination else { continue };
+            let dx = target.x - mob.position.x;
+            let dz = target.z - mob.position.z;
+            let gap = dx.hypot(dz);
+            if gap > 10.0 {
+                mob.leash_holder = None;
+                if mob.fence_anchor.take().is_some() {
+                    events.push(multiplayer::destroy(Self::knot_id(mob.id)));
+                }
+                events.push(Self::leash_packet(mob.id, -1));
+                continue;
+            }
+            if gap > 2.5 && gap.is_finite() && now.is_multiple_of(2) {
+                let step = 0.18;
+                let next = PlayerPosition {
+                    x: mob.position.x + dx / gap * step,
+                    z: mob.position.z + dz / gap * step,
+                    ..mob.position
+                };
+                if next.is_valid()
+                    && physics::valid_movement(world, &mob.position, &next)
+                    && physics::supported(world, &next)
+                {
+                    mob.position = next;
+                    events.push(multiplayer::teleport(mob.id, &next, 0.0, 0.0));
+                }
+            }
+        }
+        events
+    }
     /// Animal breeding consumes feed only if a nearby same-kind partner exists.
     pub fn feed(
         &mut self,
@@ -1009,7 +1533,11 @@ impl Mobs {
         players: &[PlayerPosition],
         events: &mut Vec<Event>,
     ) {
-        if !self.enabled || players.is_empty() || !now.is_multiple_of(20) {
+        if !self.enabled
+            || self.natural_spawning_paused
+            || players.is_empty()
+            || !now.is_multiple_of(20)
+        {
             return;
         }
         let passive = self
@@ -1079,7 +1607,7 @@ impl Mobs {
                 z: z as f64 + 0.5,
             };
             if !position.is_valid()
-                || !(24.0..=128.0).contains(&distance_to_players(position, players))
+                || !natural_spawn_location_ok(world, position, players)
                 || !physics::supported(world, &position)
                 || physics::collides(world, &position)
             {
@@ -1100,10 +1628,11 @@ impl Mobs {
                 {
                     continue;
                 }
-                match seed % 4 {
-                    0 => Kind::Cow,
-                    1 => Kind::Pig,
-                    2 => Kind::Sheep,
+                match seed % 8 {
+                    0 | 1 => Kind::Cow,
+                    2 => Kind::Pig,
+                    3 | 4 => Kind::Sheep,
+                    5 if matches!(biome, 1 | 3 | 4 | 18) => Kind::Horse,
                     _ => Kind::Chicken,
                 }
             } else {
@@ -1132,6 +1661,8 @@ impl Mobs {
                         let fortress = world.get(x, y - 1, z) >> 4 == 112;
                         if fortress && seed.is_multiple_of(4) {
                             Kind::Blaze
+                        } else if (seed >> 24).is_multiple_of(12) {
+                            Kind::Ghast
                         } else if (seed >> 24).is_multiple_of(8) {
                             Kind::MagmaCube
                         } else {
@@ -1150,10 +1681,31 @@ impl Mobs {
             } else {
                 1
             };
+            let spawn_position = if kind == Kind::Ghast {
+                PlayerPosition {
+                    y: position.y + 4.0,
+                    ..position
+                }
+            } else {
+                position
+            };
+            if kind == Kind::Ghast
+                && (!spawn_position.is_valid() || !ghast_has_clearance(world, spawn_position))
+            {
+                continue;
+            }
             let baby = kind == Kind::Zombie && (seed >> 21).is_multiple_of(20);
-            events.push(self.insert_sized(kind, position, baby, size));
+            if kind == Kind::Zombie && (seed >> 26).is_multiple_of(20) {
+                events.push(self.insert_zombie_villager(spawn_position, baby, 0));
+            } else {
+                events.push(self.insert_sized(kind, spawn_position, baby, size));
+            }
             break; // Bound per-cycle packets and CPU.
         }
+    }
+    /// The world GameRule controls only natural spawning, never existing mob AI.
+    pub fn set_natural_spawning(&mut self, allowed: bool) {
+        self.natural_spawning_paused = !allowed;
     }
     /// Tick at most four elapsed 20Hz steps; caller owns broadcast fan-out.
     pub fn tick(&mut self, now: u64, world: &World, players: &[PlayerPosition]) -> Vec<Event> {
@@ -1214,6 +1766,12 @@ impl Mobs {
         for _ in 0..steps {
             let mut shots = Vec::new();
             let mut dead = Vec::new();
+            let villagers: Vec<_> = self
+                .entities
+                .values()
+                .filter(|mob| mob.kind == Kind::Villager)
+                .map(|mob| mob.position)
+                .collect();
             for mob in self.entities.values_mut() {
                 if mob.baby {
                     mob.age_ticks = mob.age_ticks.saturating_add(1);
@@ -1225,6 +1783,9 @@ impl Mobs {
                         body.push(0x7f);
                         events.push(Event { id: 0x1c, body });
                     }
+                }
+                if mob.rider.is_some() || mob.leash_holder.is_some() || mob.fence_anchor.is_some() {
+                    continue; // Mounted or leashed animals never wander independently.
                 }
                 let nearest_distance = distance_to_players(mob.position, players);
                 if !mob.kind.passive() && nearest_distance > 128.0 {
@@ -1274,12 +1835,45 @@ impl Mobs {
                 let nearest = players
                     .iter()
                     .copied()
-                    .filter(|p| mob.nearby(*p, if mob.kind.passive() { 12.0 } else { 24.0 }))
+                    .filter(|p| {
+                        mob.nearby(
+                            *p,
+                            match mob.kind {
+                                Kind::Ghast => 64.0,
+                                Kind::Blaze | Kind::Wither => 48.0,
+                                _ if mob.kind.passive() => 12.0,
+                                _ => 24.0,
+                            },
+                        )
+                    })
                     .min_by(|a, b| {
                         distance(*a, mob.position).total_cmp(&distance(*b, mob.position))
                     });
-                let Some(target) = nearest else {
-                    continue;
+                let prey = (mob.kind == Kind::Zombie)
+                    .then(|| {
+                        villagers
+                            .iter()
+                            .copied()
+                            .filter(|at| {
+                                distance_3d(mob.position, *at) <= 16.0
+                                    && can_see(world, mob.position, *at)
+                            })
+                            .min_by(|a, b| {
+                                distance_3d(mob.position, *a)
+                                    .total_cmp(&distance_3d(mob.position, *b))
+                            })
+                    })
+                    .flatten();
+                let target = match (nearest, prey) {
+                    (Some(player), Some(villager))
+                        if distance_3d(mob.position, villager)
+                            < distance_3d(mob.position, player) =>
+                    {
+                        villager
+                    }
+                    (None, Some(villager)) => villager,
+                    (Some(player), _) => player,
+                    _ => continue,
                 };
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider)
                     && sunlight(now)
@@ -1377,6 +1971,13 @@ impl Mobs {
                         shots.push((mob.id, mob.position, yaw, pitch, kind));
                     }
                 }
+                if matches!(mob.kind, Kind::Ghast | Kind::Blaze) {
+                    if let Some(next) = flying_step(world, mob.kind, mob.position, target, now) {
+                        mob.position = next;
+                        events.push(multiplayer::teleport(mob.id, &next, 0.0, 0.0));
+                    }
+                    continue;
+                }
                 let destination = if mob.kind == Kind::Skeleton && d < 7.0 {
                     PlayerPosition {
                         x: mob.position.x + (mob.position.x - target.x),
@@ -1433,8 +2034,8 @@ impl Mobs {
                 {
                     mob.position = candidate;
                     events.push(multiplayer::teleport(mob.id, &candidate, 0.0, 0.0));
-                } else if mob.kind == Kind::Spider {
-                    // Climb alongside a wall, never through it.
+                } else if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
+                    // Both spider variants climb alongside a wall, never through it.
                     let front = PlayerPosition {
                         x: mob.position.x + dx / len * 0.6,
                         z: mob.position.z + dz / len * 0.6,
@@ -1457,6 +2058,7 @@ impl Mobs {
                     }
                 }
             }
+            self.zombies_attack_villagers(now, world, players, &mut events);
             // Iron golems target nearby hostile mobs, never players or villagers.
             // Resolve after the iteration to avoid mutable aliasing and keep
             // each hit authoritative for all connected clients.
@@ -1785,9 +2387,167 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
         .map(|other| distance_3d(p, *other))
         .fold(f64::INFINITY, f64::min)
 }
+/// Vanilla 1.7.10 villager infection chance by world difficulty.
+fn zombie_infects_villager(difficulty: u8, roll: u64) -> bool {
+    match difficulty {
+        3 => true,
+        2 => roll & 1 == 0,
+        _ => false,
+    }
+}
+/// Respect both the closest *online player* and Overworld world-spawn
+/// exclusion zones. This guard runs for every natural spawn candidate.
+fn natural_spawn_location_ok(
+    world: &World,
+    at: PlayerPosition,
+    players: &[PlayerPosition],
+) -> bool {
+    if !(24.0..=128.0).contains(&distance_to_players(at, players)) {
+        return false;
+    }
+    if world.dimension() == crate::dimensions::Dimension::Overworld {
+        let origin = PlayerPosition {
+            x: 0.5,
+            y: world.spawn_y(),
+            z: 0.5,
+        };
+        if distance_3d(at, origin) < 24.0 {
+            return false;
+        }
+    }
+    true
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn flying_mobs_move_without_a_ground_support_block() {
+        let world = World::new();
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        let player = PlayerPosition {
+            x: 36.5,
+            y: 75.0,
+            z: 0.5,
+        };
+        assert!(!physics::supported(&world, &from));
+        let ghast = flying_step(&world, Kind::Ghast, from, player, 100).unwrap();
+        assert!(ghast.x > from.x);
+        assert!(ghast.y > from.y);
+        let blaze = flying_step(&world, Kind::Blaze, from, player, 100).unwrap();
+        assert!(blaze.x > from.x);
+        assert!(blaze.y < from.y);
+        assert!(flying_step(&world, Kind::Zombie, from, player, 100).is_none());
+    }
+
+    #[test]
+    fn ghast_large_body_cannot_clip_through_a_block_or_ceiling() {
+        let mut world = World::new();
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        let target = PlayerPosition {
+            x: 36.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        assert!(ghast_has_clearance(&world, from));
+        world.import_block(2, 80, 0, 1 << 4).unwrap();
+        assert!(!ghast_has_clearance(&world, from));
+        assert!(flying_step(&world, Kind::Ghast, from, target, 20).is_none());
+        // A blaze has a smaller collision envelope and still moves.
+        assert!(flying_step(&world, Kind::Blaze, from, target, 20).is_some());
+    }
+
+    #[test]
+    fn sheared_sheep_regrows_only_after_persisted_grass_consumption() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 2 << 4).unwrap();
+        let path = std::env::temp_dir().join(format!("ir1710-grazing-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::default();
+        let id = mobs.next_id;
+        mobs.insert(
+            Kind::Sheep,
+            PlayerPosition {
+                x: 0.5,
+                y: 65.0,
+                z: 0.5,
+            },
+            false,
+        );
+        mobs.entities.get_mut(&id).unwrap().sheared = true;
+        let successful_tick = (2..50000u64)
+            .step_by(2)
+            .find(|tick| {
+                hash(*tick ^ (id as u64).wrapping_mul(0x9e3779b97f4a7c15)).is_multiple_of(500)
+            })
+            .unwrap();
+        // Before grazing, the wool stays sheared.
+        assert!(mobs.entities.get(&id).unwrap().sheared);
+        let changes = mobs.graze(&mut world, &path, successful_tick).unwrap();
+        assert_eq!(changes.len(), 1);
+        let metadata = changes[0].0.as_ref().unwrap();
+        assert_eq!(metadata.id, 0x1c);
+        assert_eq!(&metadata.body[..4], &id.to_be_bytes());
+        assert_eq!(&metadata.body[4..], &[16, 0, 0x7f]);
+        assert!(!mobs.entities.get(&id).unwrap().sheared);
+        assert_eq!(world.get(0, 64, 0) >> 4, 3);
+        assert!(mobs
+            .graze(&mut world, &path, successful_tick)
+            .unwrap()
+            .is_empty());
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0) >> 4, 3);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mounted_pig_requires_saddle_and_horse_tames_on_server() {
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let at = PlayerPosition::default();
+        let pig = mobs.next_id;
+        mobs.insert(Kind::Pig, at, false);
+        assert!(mobs.use_mount(pig, 2, at).is_none());
+        assert!(mobs.can_saddle(pig, at));
+        assert_eq!(mobs.saddle(pig, at).unwrap().id, 0x1c);
+        assert!(mobs.use_mount(pig, 2, at).is_some());
+        assert_eq!(mobs.dismount(2).unwrap().id, 0x1b);
+        let horse = mobs.next_id;
+        mobs.insert(Kind::Horse, at, false);
+        for _ in 0..3 {
+            assert!(mobs.use_mount(horse, 3, at).is_some());
+            mobs.dismount(3).unwrap();
+        }
+        assert!(mobs.can_saddle(horse, at));
+    }
+
+    #[test]
+    fn leash_cannot_attach_to_hostile_or_duplicate_animal() {
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let at = PlayerPosition::default();
+        let cow = mobs.next_id;
+        mobs.insert(Kind::Cow, at, false);
+        let zombie = mobs.next_id;
+        mobs.insert(Kind::Zombie, at, false);
+        assert!(!mobs.can_leash(zombie, 1, at));
+        assert_eq!(mobs.leash(cow, 1, at).unwrap().id, 0x1b);
+        assert!(!mobs.can_leash(cow, 1, at));
+        let tied = mobs.tie_fence(1, [0, 64, 0]);
+        assert_eq!(tied.len(), 2);
+        assert_eq!(mobs.untie_fence([0, 64, 0]).len(), 2);
+    }
+
     #[test]
     fn living_health_metadata_is_shared_on_spawn_and_after_damage() {
         let mut mobs = Mobs::default();
@@ -2174,10 +2934,198 @@ mod tests {
         assert_eq!(mobs.spawn_events().count(), 0);
     }
     #[test]
+    fn world_spawn_and_player_exclusion_apply_to_all_natural_candidates() {
+        let world = World::natural(42);
+        let y = world.spawn_y();
+        let player = PlayerPosition { x: 60.5, y, z: 0.5 };
+        let candidate = |x| PlayerPosition { x, y, z: 0.5 };
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(24.4),
+            &[player]
+        ));
+        assert!(natural_spawn_location_ok(
+            &world,
+            candidate(24.5),
+            &[player]
+        ));
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(36.6),
+            &[candidate(40.0)]
+        ));
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(200.5),
+            &[player]
+        ));
+        assert!(!natural_spawn_location_ok(&world, candidate(45.5), &[]));
+        assert!(Mobs::new_with_difficulty(&world, true, 0)
+            .entities
+            .is_empty());
+        assert!(Mobs::new_with_difficulty(&world, true, 3)
+            .entities
+            .is_empty());
+    }
+    #[test]
+    fn zombie_attacks_player_before_equally_close_villager() {
+        let at = PlayerPosition::default();
+        let world = World::new();
+        let mut mobs = Mobs {
+            difficulty: Some(2),
+            ..Mobs::default()
+        };
+        mobs.insert(Kind::Zombie, at, false);
+        mobs.insert(Kind::Villager, at, false);
+        let mut packets = Vec::new();
+        mobs.zombies_attack_villagers(20, &world, &[at], &mut packets);
+        assert!(packets.is_empty());
+        assert_eq!(mobs.entities.get(&1).unwrap().health, 20);
+        assert_eq!(mobs.hurt_player(900, at, 21), 3);
+    }
+    #[test]
+    fn zombie_villager_infection_survives_restart_and_new_clients() {
+        let world = World::natural(2468);
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust-mobs-{}-infected.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::load_or_new(&world, true, 3, &path).unwrap();
+        let at = PlayerPosition {
+            x: 40.5,
+            y: 200.0,
+            z: 40.5,
+        };
+        let attacker_id = mobs.next_id;
+        mobs.insert(Kind::Zombie, at, false);
+        let original_villager_id = mobs.next_id;
+        mobs.insert(
+            Kind::Villager,
+            PlayerPosition {
+                x: at.x + 1.0,
+                ..at
+            },
+            true,
+        );
+        mobs.entities
+            .get_mut(&original_villager_id)
+            .unwrap()
+            .profession = 4;
+        let mut events = Vec::new();
+        for tick in (20..=140).step_by(20) {
+            mobs.zombies_attack_villagers(tick, &world, &[], &mut events);
+        }
+
+        let infected = *mobs
+            .entities
+            .values()
+            .find(|mob| mob.zombie_villager)
+            .expect("hard difficulty should infect the villager");
+        assert_eq!(events.iter().filter(|event| event.id == 0x13).count(), 1);
+        assert_eq!(events.iter().filter(|event| event.id == 0x0f).count(), 1);
+        assert!(!mobs.entities.contains_key(&original_villager_id));
+        assert!(infected.id > original_villager_id);
+        assert!(infected.baby);
+        assert_eq!(infected.profession, 4);
+        mobs.save(&world).unwrap();
+
+        let restored = Mobs::load_or_new(&world, true, 3, &path).unwrap();
+        assert_eq!(restored.entities.len(), 2);
+        assert!(restored.entities.contains_key(&attacker_id));
+        assert!(!restored.entities.contains_key(&original_villager_id));
+        let rejoined = *restored.entities.get(&infected.id).unwrap();
+        assert_eq!(rejoined.kind, Kind::Zombie);
+        assert!(rejoined.zombie_villager);
+        assert_eq!(rejoined.profession, 4);
+        assert!(rejoined.baby);
+        assert_eq!(rejoined.health, infected.health);
+        assert_eq!(restored.next_id, infected.id + 1);
+        // An observer connecting only after restart sees the infected flag
+        // and the same unique ID through the authoritative spawn snapshot.
+        let snapshot = restored
+            .spawn_events()
+            .find(|event| event.id == 0x0f && event.body.windows(2).any(|w| w == [13, 1]))
+            .expect("new client must receive zombie-villager metadata");
+        let mut expected_id = Vec::new();
+        write_varint(infected.id as u32, &mut expected_id);
+        assert!(snapshot.body.starts_with(&expected_id));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn zombie_villager_metadata_and_infection_follow_difficulty() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let world = World::new();
+        for (difficulty, convert) in [(1, false), (3, true)] {
+            let mut mobs = Mobs {
+                difficulty: Some(difficulty),
+                ..Mobs::default()
+            };
+            let zombie_id = mobs.next_id;
+            mobs.insert(Kind::Zombie, at, false);
+            let villager_id = mobs.next_id;
+            mobs.insert(
+                Kind::Villager,
+                PlayerPosition {
+                    x: at.x + 1.0,
+                    ..at
+                },
+                false,
+            );
+            mobs.entities.get_mut(&villager_id).unwrap().profession = 2;
+            let mut all_events = Vec::new();
+            for tick in (20..=140).step_by(20) {
+                mobs.zombies_attack_villagers(tick, &world, &[], &mut all_events);
+            }
+            assert!(!mobs.entities.contains_key(&villager_id));
+            assert!(all_events.iter().any(|event| event.id == 0x13));
+            let infected: Vec<_> = mobs
+                .entities
+                .values()
+                .filter(|mob| mob.zombie_villager)
+                .collect();
+            assert_eq!(infected.len(), usize::from(convert));
+            assert!(mobs.entities.contains_key(&zombie_id));
+            if convert {
+                let infected = infected[0];
+                assert!(infected.id != villager_id && infected.id != zombie_id);
+                assert_eq!(infected.profession, 2);
+                assert!(infected
+                    .spawn()
+                    .body
+                    .windows(2)
+                    .any(|entry| entry == [13, 1]));
+            }
+        }
+        let mut previous = Mobs::default();
+        previous.insert(Kind::Zombie, at, false);
+        let mut legacy = serde_json::to_value(previous.entities.get(&0).unwrap()).unwrap();
+        let _ = legacy.as_object_mut().unwrap().remove("zombie_villager");
+        let old: Mob = serde_json::from_value(legacy).unwrap();
+        assert!(!old.zombie_villager);
+        assert!(!zombie_infects_villager(1, 0));
+        assert!(zombie_infects_villager(2, 0));
+        assert!(!zombie_infects_villager(2, 1));
+        assert!(zombie_infects_villager(3, 1));
+    }
+    #[test]
     fn natural_mobs_spawn_in_protocol5() {
         let world = World::natural(42);
         let mut mobs = Mobs::new_with_difficulty(&world, true, 1);
-        assert!(!mobs.entities.is_empty());
+        // Starting a new world never sidesteps the spawn eligibility checks.
+        assert!(mobs.entities.is_empty());
+        assert_eq!(mobs.next_id, BASE_ID);
+        let position = PlayerPosition {
+            x: 32.5,
+            y: world.spawn_y(),
+            z: 32.5,
+        };
+        mobs.insert(Kind::Zombie, position, false);
         let zombie = *mobs.entities.values().next().unwrap();
         assert_eq!(zombie.kind, Kind::Zombie);
         let packet = zombie.spawn();

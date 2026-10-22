@@ -33,6 +33,17 @@ fn repeater_direction(meta: u16) -> (i32, i32) {
     }
 }
 
+/// Full opaque cubes can pass weak current after a *strong* input.
+fn full_conductor(id: u16) -> bool {
+    matches!(
+        id,
+        1..=5 | 7 | 12..=17 | 19 | 22..=25 | 41..=43 | 45..=49
+            | 56..=58 | 61 | 62 | 73 | 74 | 80 | 82 | 86..=89
+            | 98..=100 | 103 | 110 | 112 | 121 | 129 | 133
+            | 137 | 152 | 155 | 159 | 173
+    )
+}
+
 fn movable(block: u16) -> bool {
     !matches!(
         block >> 4,
@@ -107,6 +118,53 @@ fn rails_connected(
 }
 
 impl World {
+    /// Strict strong-power path. Never recursively query a conductor: this
+    /// keeps the signal graph bounded even for rings of solid blocks.
+    fn strong_signal_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
+        let (x, y, z) = from;
+        let block = self.get(x, y, z);
+        match block >> 4 {
+            152 => 15,
+            76 if to == (x, y + 1, z) => 15,
+            94 => {
+                let (dx, dz) = repeater_direction(block);
+                if to == (x + dx, y, z + dz) {
+                    15
+                } else {
+                    0
+                }
+            }
+            150 => {
+                let (dx, dz) = repeater_direction(block);
+                if to == (x + dx, y, z + dz) {
+                    self.comparator_outputs
+                        .get(&(x, y as u8, z))
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            }
+            // Buttons and levers strongly power the block they are attached to.
+            69 | 77 | 143 if block & 8 != 0 => {
+                let attached = match block & 7 {
+                    1 => (x - 1, y, z),
+                    2 => (x + 1, y, z),
+                    3 => (x, y, z - 1),
+                    4 => (x, y, z + 1),
+                    5 | 6 => (x, y - 1, z),
+                    _ => (x, y + 1, z),
+                };
+                if to == attached {
+                    15
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
     /// Directional analog redstone strength; repeaters/comparators have a
     /// single output face. Dust propagates its stored 0..15 strength.
     pub(super) fn signal_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
@@ -156,6 +214,14 @@ impl World {
                     0
                 }
             }
+            id if full_conductor(id) => NEIGHBORS
+                .iter()
+                .filter_map(|&(dx, dy, dz)| {
+                    let neighbor = (x + dx, y + dy, z + dz);
+                    (neighbor != to).then(|| self.strong_signal_into(neighbor, from))
+                })
+                .max()
+                .unwrap_or(0),
             _ => 0,
         }
     }
@@ -386,6 +452,14 @@ impl World {
                             }
                             self.pending_comparators.remove(&pos);
                         }
+                    }
+                }
+                23 | 158 => {
+                    // The 1.7.10 dispenser/dropper triggered bit is metadata
+                    // bit 3. Fire only on a rising edge, never every tick.
+                    let powered = self.powered_near(x, y, z);
+                    if powered != (current & 8 != 0) {
+                        changes.insert((x, y as u8, z), current ^ 8);
                     }
                 }
                 27 | 157 => {

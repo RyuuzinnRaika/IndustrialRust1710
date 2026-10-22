@@ -51,6 +51,8 @@ pub struct World {
     comparator_ready: BTreeMap<Position, u8>,
     pending_buttons: BTreeMap<Position, u64>,
     pending_drops: Vec<WorldDrop>,
+    // Fired devices are published only after the block snapshot is durable.
+    pending_device_activations: Vec<(i32, i32, i32)>,
     // Sparse pending client-facing lighting invalidations, not part of IRW files.
     pending_light_chunks: BTreeSet<(i32, i32)>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
@@ -116,6 +118,7 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 78 | 79 // snow layer and ice
             | 70 | 72 | 147 | 148 // pressure plates
             | 77 | 143 // buttons
+            | 23 | 158 // dispenser/dropper
             | 29 | 33 // pistons
             | 64 | 71 // doors
             | 96 // trapdoors
@@ -176,6 +179,10 @@ impl World {
     /// Tracks which chunk columns contain changes, without allocating a full world.
     pub fn drain_drops(&mut self) -> Vec<WorldDrop> {
         std::mem::take(&mut self.pending_drops)
+    }
+
+    pub fn drain_device_activations(&mut self) -> Vec<(i32, i32, i32)> {
+        std::mem::take(&mut self.pending_device_activations)
     }
 
     /// Bounded per-worker budget; remaining light updates survive the next tick.
@@ -542,7 +549,7 @@ impl World {
             }
             if matches!(
                 id,
-                27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157
+                23 | 27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157 | 158
             ) {
                 self.pending_devices.insert(pos);
             } else {
@@ -550,6 +557,35 @@ impl World {
                 self.pending_repeaters.remove(&pos);
                 self.pending_comparators.remove(&pos);
                 self.comparator_outputs.remove(&pos);
+            }
+        }
+        // A strong input may power a solid neighbor, then weakly feed dust
+        // or a device one additional block away. Wake only redstone at this
+        // distance, not fluid/ecology: O(36) fixed neighborhood probes.
+        const FACES: [(i32, i32, i32); 6] = [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ];
+        for (dx, dy, dz) in FACES {
+            for (ex, ey, ez) in FACES {
+                let (nx, ny, nz) = (x + dx + ex, y + dy + ey, z + dz + ez);
+                if !in_bounds(nx, ny, nz) {
+                    continue;
+                }
+                let pos = (nx, ny as u8, nz);
+                match self.get(nx, ny, nz) >> 4 {
+                    55 => {
+                        self.pending_circuit.insert(pos);
+                    }
+                    27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 => {
+                        self.pending_devices.insert(pos);
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -843,6 +879,17 @@ impl World {
                         .then_some((x, z, old, new))
                 })
                 .collect();
+            let fired_devices: Vec<_> = changes
+                .iter()
+                .filter_map(|(&(x, y, z), &new)| {
+                    let old = self.get(x, i32::from(y), z);
+                    (matches!(new >> 4, 23 | 158)
+                        && new >> 4 == old >> 4
+                        && old & 8 == 0
+                        && new & 8 != 0)
+                        .then_some((x, i32::from(y), z))
+                })
+                .collect();
             let undo: Vec<(Position, Option<u16>)> = changes
                 .keys()
                 .map(|&p| (p, self.edits.get(&p).copied()))
@@ -872,6 +919,7 @@ impl World {
                 return Err(error);
             }
             self.pending_drops.extend(detached_drops);
+            self.pending_device_activations.extend(fired_devices);
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
             }
@@ -1188,12 +1236,17 @@ impl World {
                     | 64
                     | 71
                     | 96
+                    | 27
+                    | 28
+                    | 157
+                    | 149
+                    | 150
             ) {
                 world.pending_support.insert((x, y, z));
             }
             if matches!(
                 block >> 4,
-                27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157
+                23 | 27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157 | 158
             ) {
                 world.pending_devices.insert((x, y, z));
             }
@@ -1742,6 +1795,32 @@ mod tests {
     }
 
     #[test]
+    fn device_fires_once_per_rising_edge_only_after_world_save() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-device-trigger-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world
+            .update_and_save(&path, 0, 65, 0, (23 << 4) | 5)
+            .unwrap();
+        world.update_and_save(&path, -1, 65, 0, 152 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.drain_device_activations(), vec![(0, 65, 0)]);
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert!(world.drain_device_activations().is_empty());
+        assert_eq!(World::load(&path).unwrap().get(0, 65, 0) & 8, 8);
+        world.update_and_save(&path, -1, 65, 0, 0).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 65, 0) & 8, 0);
+        world.update_and_save(&path, -1, 65, 0, 152 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.drain_device_activations(), vec![(0, 65, 0)]);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn piston_pushes_dust_powered_block_and_doors_have_both_halves() {
         let path = std::env::temp_dir().join(format!("ir1710-device-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
@@ -1828,6 +1907,8 @@ mod group_b_regression_tests {
         let path = temp("comparator-delay");
         let _ = std::fs::remove_file(&path);
         let mut world = World::new();
+        // Comparator requires a floor; world reload checks support validity.
+        world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
         world
             .update_and_save(&path, -1, 65, 0, (69 << 4) | 8)
             .unwrap();
@@ -1859,6 +1940,40 @@ mod group_b_regression_tests {
         assert!(!world.can_support(1, 65, 0, 83 << 4));
     }
 
+    #[test]
+    fn comparator_strength_is_not_rounded_up_to_fifteen_by_dust() {
+        let path = temp("comparator-strength");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 1 << 4).unwrap();
+        world.import_block(0, 65, 0, (150 << 4) | 1).unwrap();
+        world.comparator_outputs.insert((0, 65, 0), 5);
+        world.import_block(1, 65, 0, 55 << 4).unwrap();
+        assert_eq!(world.signal_into((0, 65, 0), (1, 65, 0)), 5);
+        assert_eq!(world.signal_into((0, 65, 0), (0, 65, 1)), 0);
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(1, 65, 0), (55 << 4) | 5);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn repeater_strongly_powers_cube_and_not_its_own_input() {
+        let path = temp("conductor-direction");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(0, 65, 0, (94 << 4) | 1).unwrap();
+        world.import_block(1, 65, 0, 1 << 4).unwrap();
+        world.import_block(2, 65, 0, 55 << 4).unwrap();
+        assert_eq!(world.signal_into((1, 65, 0), (2, 65, 0)), 15);
+        assert_eq!(world.signal_into((1, 65, 0), (0, 65, 0)), 0);
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(2, 65, 0), (55 << 4) | 15);
+        // A deleted power source must invalidate the distant dust, too.
+        world.update_and_save(&path, 0, 65, 0, 0).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(2, 65, 0), 55 << 4);
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn raining_extinguishes_fire_through_existing_tick_pipeline() {
         let path = temp("rain-fire");

@@ -1,11 +1,11 @@
-//! Minecraft Java Edition 1.7.10 level.dat: bounded, read-only verification.
-//! No conversion or write-back is enabled until the Anvil persistence gateway.
+//! Minecraft Java Edition 1.7.10 level.dat: bounded validation and
+//! create-only offline serialization. Live write-back is NOT yet enabled.
 use fastnbt::Value;
-use flate2::read::GzDecoder;
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::Path;
 
 const MAX_COMPRESSED_BYTES: u64 = 1024 * 1024;
@@ -103,6 +103,117 @@ pub(crate) fn parse_level(bytes: &[u8]) -> io::Result<LevelRoot> {
     Ok(root)
 }
 
+/// Create a new, validated 1.7.10 level.dat without overwriting a world.
+/// A full live-world save / level.dat_old rotation requires FS03/FS08 and
+/// must not call this staging primitive on an occupied world.
+// Staging API: intentionally not connected to live-world saves before FS08.
+#[allow(dead_code)]
+pub(crate) fn create_level_file(path: &Path, root: &LevelRoot) -> io::Result<()> {
+    root.validate()?;
+    let nbt = fastnbt::to_bytes(root).map_err(|_| invalid("cannot encode 1.7.10 level NBT"))?;
+    if nbt.len() > MAX_DECOMPRESSED_BYTES {
+        return Err(invalid("level NBT exceeds size limit"));
+    }
+    let mut compressor = GzEncoder::new(Vec::new(), Compression::default());
+    compressor.write_all(&nbt)?;
+    let compressed = compressor.finish()?;
+    if compressed.len() as u64 > MAX_COMPRESSED_BYTES {
+        return Err(invalid("compressed level NBT exceeds size limit"));
+    }
+    let parent = path
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !fs::symlink_metadata(parent)?.file_type().is_dir() {
+        return Err(invalid(
+            "level.dat destination parent is not a real directory",
+        ));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "level.dat already exists: create-only writer refuses overwrite",
+            ))
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    let staged = path.with_extension("creating");
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)?;
+    let written = output
+        .write_all(&compressed)
+        .and_then(|_| output.sync_all());
+    drop(output);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&staged);
+        return Err(error);
+    }
+    // Hard-link publishing is atomic and create-only; another process that
+    // created level.dat after the existence check wins without replacement.
+    let published = fs::hard_link(&staged, path);
+    let _ = fs::remove_file(&staged);
+    published?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+/// Explicit OFFLINE recovery for a missing level.dat, preserving the original
+/// compressed NBT bytes from level.dat_old. Never repairs an existing level.dat.
+/// The caller must hold the world session lock; this cannot protect against
+/// a non-cooperating Java server, so only run it on a stopped world.
+pub(crate) fn restore_missing_level(
+    world_dir: &Path,
+    lock: &mut crate::session_lock::WorldSessionLock,
+) -> io::Result<()> {
+    if !fs::symlink_metadata(world_dir)?.file_type().is_dir() {
+        return Err(invalid("recovery requires a real world directory"));
+    }
+    let current = world_dir.join("level.dat");
+    match fs::symlink_metadata(&current) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "level.dat exists; refusing any automatic replacement",
+            ));
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let previous = world_dir.join("level.dat_old");
+    // First validate the source according to the full 1.7.10 NBT parser.
+    let _ = read_level_file(&previous)?;
+    let compressed = fs::read(&previous)?;
+    if compressed.len() as u64 > MAX_COMPRESSED_BYTES {
+        return Err(invalid("recovery source exceeds compressed NBT limit"));
+    }
+    lock.verify()?;
+    let staging = world_dir.join("level.dat.recovering");
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)?;
+    let result = (|| {
+        output.write_all(&compressed)?;
+        output.sync_all()?;
+        drop(output);
+        // Check the exact bytes we intend to publish, without converting
+        // unknown NBT fields to a different serialization.
+        let _ = read_level_file(&staging)?;
+        lock.verify()?;
+        fs::hard_link(&staging, &current)?;
+        #[cfg(unix)]
+        fs::File::open(world_dir)?.sync_all()?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&staging);
+    result
+}
+
 /// Return the checked level.dat, including all unknown NBT fields in memory.
 pub(crate) fn read_level_file(path: &Path) -> io::Result<LevelRoot> {
     let metadata = fs::symlink_metadata(path)?;
@@ -169,6 +280,93 @@ mod tests {
         fs::write(&path, gzip.finish().unwrap()).unwrap();
         assert_eq!(read_level_file(&path).unwrap().data.spawn_x, -16);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn create_only_level_dat_preserves_unknown_tags_and_never_overwrites() {
+        let folder = std::env::temp_dir().join(format!(
+            "ir1710-level-create-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir(&folder).unwrap();
+        let path = folder.join("level.dat");
+        let mut initial = sample();
+        initial.data.time = 90_000;
+        create_level_file(&path, &initial).unwrap();
+        let loaded = read_level_file(&path).unwrap();
+        assert_eq!(loaded.data.time, 90_000);
+        assert!(matches!(
+            loaded.extra.get("CustomWorldTag"),
+            Some(Value::String(tag)) if tag == "unchanged"
+        ));
+        let original = fs::read(&path).unwrap();
+        assert!(create_level_file(&path, &initial).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!path.with_extension("creating").exists());
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn create_only_rejects_corrupt_metadata_without_side_effects() {
+        let folder = std::env::temp_dir().join(format!(
+            "ir1710-level-invalid-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir(&folder).unwrap();
+        let path = folder.join("level.dat");
+        let mut invalid_root = sample();
+        invalid_root.data.spawn_y = 256;
+        assert!(create_level_file(&path, &invalid_root).is_err());
+        assert!(!path.exists());
+        assert!(!path.with_extension("creating").exists());
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn restores_missing_level_from_old_without_changing_gzip_bytes() {
+        let world = std::env::temp_dir().join(format!(
+            "ir1710-level-recovery-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&world);
+        fs::create_dir(&world).unwrap();
+        let previous = world.join("level.dat_old");
+        let mut compressor = GzEncoder::new(Vec::new(), Compression::default());
+        compressor
+            .write_all(&fastnbt::to_bytes(&sample()).unwrap())
+            .unwrap();
+        let compressed = compressor.finish().unwrap();
+        fs::write(&previous, &compressed).unwrap();
+        let mut lock = crate::session_lock::WorldSessionLock::acquire(&world).unwrap();
+        restore_missing_level(&world, &mut lock).unwrap();
+        assert_eq!(fs::read(world.join("level.dat")).unwrap(), compressed);
+        assert_eq!(fs::read(&previous).unwrap(), compressed);
+        assert!(restore_missing_level(&world, &mut lock).is_err());
+        drop(lock);
+        fs::remove_dir_all(world).unwrap();
+    }
+
+    #[test]
+    fn refuses_corrupt_old_level_and_never_creates_target() {
+        let world = std::env::temp_dir().join(format!(
+            "ir1710-level-recovery-invalid-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&world);
+        fs::create_dir(&world).unwrap();
+        fs::write(world.join("level.dat_old"), b"not gzip or NBT").unwrap();
+        let mut lock = crate::session_lock::WorldSessionLock::acquire(&world).unwrap();
+        assert!(restore_missing_level(&world, &mut lock).is_err());
+        assert!(!world.join("level.dat").exists());
+        assert!(!world.join("level.dat.recovering").exists());
+        drop(lock);
+        fs::remove_dir_all(world).unwrap();
     }
 
     #[test]

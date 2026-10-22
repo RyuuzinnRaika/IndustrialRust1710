@@ -456,6 +456,36 @@ impl Inventory {
         *slot = (value.damage < max_uses).then_some(value);
         true
     }
+    /// One durability point when a fishing float is reeled in.
+    /// Fishing rods are distinct from mining tools in 1.7.10.
+    pub fn wear_fishing_rod(&mut self) -> bool {
+        let slot = &mut self.slots[36 + self.selected as usize];
+        let Some(mut rod) = *slot else { return false };
+        if rod.id != 346 || rod.count != 1 || !(0..64).contains(&rod.damage) {
+            return false;
+        }
+        rod.damage += 1;
+        *slot = (rod.damage < 64).then_some(rod);
+        true
+    }
+    pub fn wear_carrot_stick(&mut self) -> bool {
+        let slot = &mut self.slots[36 + self.selected as usize];
+        let Some(mut tool) = *slot else { return false };
+        if tool.id != 398 || tool.count != 1 || !(0..25).contains(&tool.damage) {
+            return false;
+        }
+        tool.damage += 1;
+        if tool.damage == 25 {
+            *slot = Some(Stack {
+                id: 280,
+                count: 1,
+                damage: 0,
+            }); // consumed carrot, remaining stick
+        } else {
+            *slot = Some(tool);
+        }
+        true
+    }
     pub fn held_slot(&self) -> i16 {
         36 + i16::from(self.selected)
     }

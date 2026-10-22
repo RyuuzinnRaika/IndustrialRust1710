@@ -9,7 +9,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 const VERSION: u8 = 1;
-const MAX_RECORD_BYTES: u64 = 8 * 1024 * 1024;
+// JSON stores payload bytes as integer arrays (up to four characters per
+// byte); keep an explicit on-disk limit for four bounded participants.
+const MAX_RECORD_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_TRANSACTION_FILES: usize = 4;
 const MAX_TARGET_BYTES: usize = 1024 * 1024;
 static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -121,7 +124,10 @@ fn sync_directory(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 fn apply(journal: &Path, record: &Record) -> io::Result<()> {
-    if record.version != VERSION || record.files.is_empty() || record.files.len() > 3 {
+    if record.version != VERSION
+        || record.files.is_empty()
+        || record.files.len() > MAX_TRANSACTION_FILES
+    {
         return Err(invalid("invalid journal version or file count"));
     }
     let base = root(journal);
@@ -187,8 +193,8 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
     if journal.exists() {
         return Err(invalid("unrecovered transaction: restart required"));
     }
-    if changes.len() < 2 || changes.len() > 3 {
-        return Err(invalid("expected multi-file transaction"));
+    if changes.len() < 2 || changes.len() > MAX_TRANSACTION_FILES {
+        return Err(invalid("expected 2 to 4 transaction participants"));
     }
     let base = root(journal);
     let files: Vec<Target> = changes
@@ -378,6 +384,101 @@ mod tests {
         }
         recover(&journal).unwrap();
         assert!(!journal.exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn four_participant_commit_recovers_all_file_types_in_one_generation() {
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-four-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("players")).unwrap();
+        let world = home.join("world.irw");
+        let player = home.join("players/worker.inventory.json");
+        let chest = home.join("world.chests.json");
+        let hopper = home.join("world.hoppers.json");
+        let journal = home.join("world.pending-txn.json");
+        let targets = [
+            (world.as_path(), b"new-world".as_slice()),
+            (player.as_path(), b"new-player".as_slice()),
+            (chest.as_path(), b"new-chest".as_slice()),
+            (hopper.as_path(), b"new-hopper".as_slice()),
+        ];
+        for (path, _) in &targets {
+            fs::write(path, b"old-state").unwrap();
+        }
+        // Mimic a power cut between the first rename and the remaining three:
+        // replay must publish the same generation to all four destinations.
+        let record = Record {
+            version: VERSION,
+            files: targets
+                .iter()
+                .map(|(path, data)| Target {
+                    relative: relative(&home, path).unwrap(),
+                    contents: data.to_vec(),
+                    checksum: fingerprint(data),
+                })
+                .collect(),
+        };
+        fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::write(&world, b"new-world").unwrap();
+        recover(&journal).unwrap();
+        for (path, expected) in &targets {
+            assert_eq!(fs::read(path).unwrap().as_slice(), *expected);
+        }
+        assert!(!journal.exists());
+        // Exercise the live four-file commit path as well as crash recovery.
+        let updates = [
+            (world.as_path(), b"updated-world".to_vec()),
+            (player.as_path(), b"updated-player".to_vec()),
+            (chest.as_path(), b"updated-chest".to_vec()),
+            (hopper.as_path(), b"updated-hopper".to_vec()),
+        ];
+        commit(&journal, &updates).unwrap();
+        for (path, data) in &updates {
+            assert_eq!(&fs::read(path).unwrap(), data);
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn corrupt_later_participant_aborts_recovery_without_partial_overwrite() {
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-corrupt-late-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let a = home.join("world.chests.json");
+        let b = home.join("world.hoppers.json");
+        let journal = home.join("world.pending-txn.json");
+        fs::write(&a, b"before-a").unwrap();
+        fs::write(&b, b"before-b").unwrap();
+        let committed = Record {
+            version: VERSION,
+            files: vec![
+                Target {
+                    relative: relative(&home, &a).unwrap(),
+                    contents: b"after-a".to_vec(),
+                    checksum: fingerprint(b"after-a"),
+                },
+                Target {
+                    relative: relative(&home, &b).unwrap(),
+                    contents: b"tampered-after-b".to_vec(),
+                    checksum: fingerprint(b"after-b"), // intentionally wrong
+                },
+            ],
+        };
+        fs::write(&journal, serde_json::to_vec(&committed).unwrap()).unwrap();
+        let error = recover(&journal).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(fs::read(&a).unwrap(), b"before-a");
+        assert_eq!(fs::read(&b).unwrap(), b"before-b");
+        assert!(journal.exists()); // operator intervention; fail closed
         fs::remove_dir_all(home).unwrap();
     }
 
