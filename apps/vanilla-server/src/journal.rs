@@ -425,7 +425,7 @@ mod tests {
         fs::write(world, b"new-world").unwrap();
         recover(&journal).unwrap();
         for (path, expected) in &targets {
-            assert_eq!(&fs::read(path).unwrap(), expected);
+            assert_eq!(fs::read(path).unwrap().as_slice(), *expected);
         }
         assert!(!journal.exists());
         // Exercise the live four-file commit path as well as crash recovery.
