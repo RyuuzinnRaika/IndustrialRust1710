@@ -94,8 +94,8 @@ impl Devices {
         if bytes.len() > MAX_BYTES {
             return Err(invalid("device save too large"));
         }
-        let value: Self = serde_json::from_slice(&bytes)
-            .map_err(|_| invalid("malformed device inventory"))?;
+        let value: Self =
+            serde_json::from_slice(&bytes).map_err(|_| invalid("malformed device inventory"))?;
         value.validate()?;
         Ok(value)
     }
@@ -114,11 +114,18 @@ impl Devices {
     }
 
     pub fn slots(&self, pos: Position) -> [Option<Stack>; DEVICE_SLOTS] {
-        self.entries.get(&key(pos)).copied().unwrap_or([None; DEVICE_SLOTS])
+        self.entries
+            .get(&key(pos))
+            .copied()
+            .unwrap_or([None; DEVICE_SLOTS])
     }
 
     /// Stage a validated update. Existing state is untouched until commit.
-    pub fn staged_update(&self, pos: Position, slots: [Option<Stack>; DEVICE_SLOTS]) -> io::Result<Self> {
+    pub fn staged_update(
+        &self,
+        pos: Position,
+        slots: [Option<Stack>; DEVICE_SLOTS],
+    ) -> io::Result<Self> {
         if !world::in_bounds(pos.0, pos.1, pos.2) {
             return Err(invalid("device position outside world"));
         }
@@ -139,7 +146,9 @@ impl Devices {
     /// selection can be introduced when the world RNG is integrated.
     pub fn stage_eject(&self, pos: Position, seed: u64) -> io::Result<Option<(Self, Stack)>> {
         let slots = self.slots(pos);
-        let filled: Vec<usize> = slots.iter().enumerate()
+        let filled: Vec<usize> = slots
+            .iter()
+            .enumerate()
             .filter_map(|(i, slot)| slot.filter(|s| s.count > 0).map(|_| i))
             .collect();
         if filled.is_empty() {
@@ -161,13 +170,16 @@ mod tests {
 
     #[test]
     fn nine_slots_are_durable_and_ejection_is_staged() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-dispensers-{}.json", std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-dispensers-{}.json", std::process::id()));
         let _ = fs::remove_file(&path);
         let pos = (2, 64, 3);
         let mut slots = [None; DEVICE_SLOTS];
-        slots[8] = Some(Stack { id: 4, count: 2, damage: 0 });
+        slots[8] = Some(Stack {
+            id: 4,
+            count: 2,
+            damage: 0,
+        });
         let storage = Devices::default().staged_update(pos, slots).unwrap();
         storage.save(&path).unwrap();
         let loaded = Devices::load(&path).unwrap();
@@ -177,12 +189,18 @@ mod tests {
         assert_eq!(loaded.slots(pos)[8].unwrap().count, 2);
         assert_eq!(next.slots(pos)[8].unwrap().count, 1);
         next.save(&path).unwrap();
-        assert_eq!(Devices::load(&path).unwrap().slots(pos)[8].unwrap().count, 1);
+        assert_eq!(
+            Devices::load(&path).unwrap().slots(pos)[8].unwrap().count,
+            1
+        );
         fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn empty_ejection_cannot_create_items() {
-        assert!(Devices::default().stage_eject((0, 64, 0), 0).unwrap().is_none());
+        assert!(Devices::default()
+            .stage_eject((0, 64, 0), 0)
+            .unwrap()
+            .is_none());
     }
 }
