@@ -334,9 +334,11 @@ mod tests {
         assert!(destination(Dimension::Nether, Dimension::Overworld, 1e8, 70.0, 0.0).is_none());
         // Valid source coordinates still clamp the 8:1 destination at the
         // target world edge without generating out-of-bounds chunks.
-        assert!(destination(Dimension::Nether, Dimension::Overworld, 16_380.0, 70.0, 0.0)
-            .unwrap()
-            .valid());
+        assert!(
+            destination(Dimension::Nether, Dimension::Overworld, 16_380.0, 70.0, 0.0)
+                .unwrap()
+                .valid()
+        );
     }
     #[test]
     fn world_identification_prevents_dimension_cross_load() {
@@ -442,26 +444,33 @@ mod tests {
             (Dimension::End, 121u16 << 4),
         ];
         for (dim, block) in blocks {
-            worlds.world(dim).lock().unwrap().update_and_save(
-                &worlds.path(dim), 2, 75, 3, block,
-            ).unwrap();
+            worlds
+                .world(dim)
+                .lock()
+                .unwrap()
+                .update_and_save(&worlds.path(dim), 2, 75, 3, block)
+                .unwrap();
         }
         worlds.save_all().unwrap();
-        assert!(worlds.resolve_arrival(
-            Dimension::Overworld, Dimension::End, 0.5, 70.0, 0.5,
-        ).unwrap().is_some());
-        assert!(worlds.resolve_arrival(
-            Dimension::Overworld, Dimension::Nether, f64::NAN, 70.0, 0.0,
-        ).unwrap().is_none());
+        assert!(worlds
+            .resolve_arrival(Dimension::Overworld, Dimension::End, 0.5, 70.0, 0.5,)
+            .unwrap()
+            .is_some());
+        assert!(worlds
+            .resolve_arrival(Dimension::Overworld, Dimension::Nether, f64::NAN, 70.0, 0.0,)
+            .unwrap()
+            .is_none());
         drop(worlds);
 
         let reloaded = DimensionWorlds::load_all(manager.clone()).unwrap();
         for (dim, block) in blocks {
             assert_eq!(reloaded.world(dim).lock().unwrap().get(2, 75, 3), block);
-            assert_eq!(reloaded.world(dim).lock().unwrap().extended_identity(), Some((417, dim)));
+            assert_eq!(
+                reloaded.world(dim).lock().unwrap().extended_identity(),
+                Some((417, dim))
+            );
         }
         assert!(DimensionWorlds::load_all(DimensionManager::new(&root, 418)).is_err());
         fs::remove_dir_all(root).unwrap();
     }
-
 }
