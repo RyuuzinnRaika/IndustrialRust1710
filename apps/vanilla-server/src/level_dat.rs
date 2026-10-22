@@ -1,11 +1,11 @@
-//! Minecraft Java Edition 1.7.10 level.dat: bounded, read-only verification.
-//! No conversion or write-back is enabled until the Anvil persistence gateway.
+//! Minecraft Java Edition 1.7.10 level.dat: bounded validation and
+//! create-only offline serialization. Live write-back is NOT yet enabled.
 use fastnbt::Value;
-use flate2::read::GzDecoder;
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::Path;
 
 const MAX_COMPRESSED_BYTES: u64 = 1024 * 1024;
@@ -103,6 +103,59 @@ pub(crate) fn parse_level(bytes: &[u8]) -> io::Result<LevelRoot> {
     Ok(root)
 }
 
+/// Create a new, validated 1.7.10 level.dat without overwriting a world.
+/// A full live-world save / level.dat_old rotation requires FS03/FS08 and
+/// must not call this staging primitive on an occupied world.
+pub(crate) fn create_level_file(path: &Path, root: &LevelRoot) -> io::Result<()> {
+    root.validate()?;
+    let nbt = fastnbt::to_bytes(root).map_err(|_| invalid("cannot encode 1.7.10 level NBT"))?;
+    if nbt.len() > MAX_DECOMPRESSED_BYTES {
+        return Err(invalid("level NBT exceeds size limit"));
+    }
+    let mut compressor = GzEncoder::new(Vec::new(), Compression::default());
+    compressor.write_all(&nbt)?;
+    let compressed = compressor.finish()?;
+    if compressed.len() as u64 > MAX_COMPRESSED_BYTES {
+        return Err(invalid("compressed level NBT exceeds size limit"));
+    }
+    let parent = path
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !fs::symlink_metadata(parent)?.file_type().is_dir() {
+        return Err(invalid("level.dat destination parent is not a real directory"));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "level.dat already exists: create-only writer refuses overwrite",
+            ))
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    let staged = path.with_extension("creating");
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)?;
+    let written = output.write_all(&compressed).and_then(|_| output.sync_all());
+    drop(output);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&staged);
+        return Err(error);
+    }
+    // Hard-link publishing is atomic and create-only; another process that
+    // created level.dat after the existence check wins without replacement.
+    let published = fs::hard_link(&staged, path);
+    let _ = fs::remove_file(&staged);
+    published?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
 /// Return the checked level.dat, including all unknown NBT fields in memory.
 pub(crate) fn read_level_file(path: &Path) -> io::Result<LevelRoot> {
     let metadata = fs::symlink_metadata(path)?;
@@ -169,6 +222,50 @@ mod tests {
         fs::write(&path, gzip.finish().unwrap()).unwrap();
         assert_eq!(read_level_file(&path).unwrap().data.spawn_x, -16);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn create_only_level_dat_preserves_unknown_tags_and_never_overwrites() {
+        let folder = std::env::temp_dir().join(format!(
+            "ir1710-level-create-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir(&folder).unwrap();
+        let path = folder.join("level.dat");
+        let mut initial = sample();
+        initial.data.time = 90_000;
+        create_level_file(&path, &initial).unwrap();
+        let loaded = read_level_file(&path).unwrap();
+        assert_eq!(loaded.data.time, 90_000);
+        assert!(matches!(
+            loaded.extra.get("CustomWorldTag"),
+            Some(Value::String(tag)) if tag == "unchanged"
+        ));
+        let original = fs::read(&path).unwrap();
+        assert!(create_level_file(&path, &initial).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!path.with_extension("creating").exists());
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn create_only_rejects_corrupt_metadata_without_side_effects() {
+        let folder = std::env::temp_dir().join(format!(
+            "ir1710-level-invalid-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir(&folder).unwrap();
+        let path = folder.join("level.dat");
+        let mut invalid_root = sample();
+        invalid_root.data.spawn_y = 256;
+        assert!(create_level_file(&path, &invalid_root).is_err());
+        assert!(!path.exists());
+        assert!(!path.with_extension("creating").exists());
+        fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
