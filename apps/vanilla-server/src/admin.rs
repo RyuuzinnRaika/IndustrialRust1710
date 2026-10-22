@@ -233,10 +233,14 @@ impl Administration {
     pub fn operator_level(&self, name: &str, verified_uuid: Option<&str>) -> io::Result<u8> {
         let operators = self.ops()?;
         Ok(verified_uuid.map_or(0, |uuid| {
-            operators.iter().filter(|entry| {
-                entry.name.eq_ignore_ascii_case(name)
-                    && entry.uuid.as_deref() == Some(uuid)
-            }).map(|entry| entry.level.unwrap_or(4)).max().unwrap_or(0)
+            operators
+                .iter()
+                .filter(|entry| {
+                    entry.name.eq_ignore_ascii_case(name) && entry.uuid.as_deref() == Some(uuid)
+                })
+                .map(|entry| entry.level.unwrap_or(4))
+                .max()
+                .unwrap_or(0)
         }))
     }
     pub fn is_operator(&self, name: &str, verified_uuid: Option<&str>) -> io::Result<bool> {
@@ -296,13 +300,15 @@ impl Administration {
         }
         if let Some(id) = uuid {
             let bytes = id.as_bytes();
-            if bytes.len() != 36 || bytes.iter().enumerate().any(|(i, byte)| {
-                if matches!(i, 8 | 13 | 18 | 23) {
-                    *byte != b'-'
-                } else {
-                    !byte.is_ascii_hexdigit()
-                }
-            }) {
+            if bytes.len() != 36
+                || bytes.iter().enumerate().any(|(i, byte)| {
+                    if matches!(i, 8 | 13 | 18 | 23) {
+                        *byte != b'-'
+                    } else {
+                        !byte.is_ascii_hexdigit()
+                    }
+                })
+            {
                 return Err(invalid("invalid authenticated OP UUID"));
             }
         }
@@ -435,11 +441,24 @@ mod tests {
         let store = Administration::new(root.clone()).unwrap();
         store.set_op("Operator", true).unwrap();
         assert!(!store.is_operator("Operator", None).unwrap());
-        assert!(!store.is_operator("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca")).unwrap());
-        store.set_op_verified("Operator", "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca").unwrap();
-        assert!(store.is_operator("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca")).unwrap());
-        assert_eq!(store.operator_level("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca")).unwrap(), 4);
-        assert!(!store.is_operator("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9cb")).unwrap());
+        assert!(!store
+            .is_operator("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca"))
+            .unwrap());
+        store
+            .set_op_verified("Operator", "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca")
+            .unwrap();
+        assert!(store
+            .is_operator("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca"))
+            .unwrap());
+        assert_eq!(
+            store
+                .operator_level("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca"))
+                .unwrap(),
+            4
+        );
+        assert!(!store
+            .is_operator("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9cb"))
+            .unwrap());
         store
             .set_player_ban("Spammer", Some("abuse"), true)
             .unwrap();
