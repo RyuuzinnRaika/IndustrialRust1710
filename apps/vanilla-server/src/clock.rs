@@ -168,10 +168,6 @@ impl Clock {
         self.daylight_cycle.store(enabled, Ordering::Release);
     }
 
-    pub fn daylight_cycle(&self) -> bool {
-        self.daylight_cycle.load(Ordering::Acquire)
-    }
-
     pub fn day_time(&self) -> i64 {
         ((6000 + self.ticks() % 24_000 + self.time_offset.load(Ordering::Acquire) % 24_000)
             % 24_000) as i64
