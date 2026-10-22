@@ -2892,7 +2892,11 @@ struct ServerContext {
     survival: bool,
     difficulty: u8,
 }
-fn handle(mut s: TcpStream, context: ServerContext, login_permit: security_limits::Permit) -> io::Result<()> {
+fn handle(
+    mut s: TcpStream,
+    context: ServerContext,
+    login_permit: security_limits::Permit,
+) -> io::Result<()> {
     let ServerContext {
         hub,
         world,
