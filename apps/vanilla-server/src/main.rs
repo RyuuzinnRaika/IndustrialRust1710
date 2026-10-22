@@ -45,7 +45,7 @@ use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use serde_json::json;
 use std::collections::BTreeSet;
-use std::io::{self, ErrorKind};
+use std::io::{self, BufRead, ErrorKind};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -303,7 +303,9 @@ fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipel
         .lock()
         .map_err(|_| bad("world mutex poisoned"))?
         .chunk_data(cx, cz);
-    chunk_pipeline::submit(cx, cz, mask, data)
+    // Session-only bounded retries handle short encoder queue bursts.
+    // No world mutex is held while waiting for the queue to drain.
+    chunk_pipeline::submit_session(cx, cz, mask, data)
 }
 fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
     send(s, 0x21, &queue_chunk(world, cx, cz)?.finish()?)
@@ -1318,86 +1320,84 @@ fn play(
                                         let mut ground = ground_items.lock().map_err(|_| {
                                             io::Error::other("ground items lock poisoned")
                                         })?;
-                                        // A filled entity pool must not destroy a
-                                        // block that should have created an item.
-                                        if (result.drop.is_none() && bonus.is_none())
-                                            || !ground.is_full()
-                                        {
-                                            let mut candidate = inventory.clone();
-                                            let wore =
-                                                result.wear_tool && candidate.wear_held_tool();
-                                            // Commit durability consumption before
-                                            // changing the world, not vice-versa.
-                                            if wore {
-                                                candidate.save(inventory_path)?;
-                                            }
-                                            match w.update_and_save(world_path, x, y, z, 0) {
-                                                Ok(true) => {
-                                                    if wore {
-                                                        *inventory = candidate;
-                                                        send(
-                                                            s,
-                                                            0x2f,
-                                                            &inventory
-                                                                .set_slot(inventory.held_slot())?,
-                                                        )?;
-                                                    }
-                                                    if let Some(drop) = result.drop {
-                                                        let stack = Stack {
-                                                            id: drop.id,
-                                                            count: 1,
-                                                            damage: drop.damage,
-                                                        };
-                                                        // A crash after world save and
-                                                        // before entity persistence can
-                                                        // lose an item, never clone it.
-                                                        let item = ground.put(
-                                                            ground_path,
-                                                            stack,
-                                                            target,
-                                                        )?;
-                                                        hub.register_ground_item(&item);
-                                                    }
-                                                    if let Some(stack) = bonus {
-                                                        if !ground.is_full() {
-                                                            let item = ground.put(
-                                                                ground_path,
-                                                                stack,
-                                                                target,
-                                                            )?;
-                                                            hub.register_ground_item(&item);
-                                                        }
-                                                    }
-                                                    changed = true;
-                                                    let reward = match block {
-                                                        16 => 2,
-                                                        21 => 4,
-                                                        56 => 5,
-                                                        73 | 74 => 3,
-                                                        129 => 5,
-                                                        153 => 3,
-                                                        _ => 0,
-                                                    };
-                                                    if reward > 0 {
-                                                        if let Some(orb) = mobs
-                                                            .lock()
-                                                            .map_err(|_| bad("mob mutex poisoned"))?
-                                                            .spawn_xp(*player, reward)
-                                                        {
-                                                            hub.broadcast(orb);
-                                                        }
-                                                    }
+                                        // Stage the block removal, tool wear and
+                                        // all drops before publishing *any* state.
+                                        // This prevents item loss or duplication
+                                        // after interruption between save files.
+                                        let mut candidate = inventory.clone();
+                                        let wore = result.wear_tool && candidate.wear_held_tool();
+                                        let mut stacks = Vec::new();
+                                        if let Some(drop) = result.drop {
+                                            stacks.push(Stack {
+                                                id: drop.id,
+                                                count: 1,
+                                                damage: drop.damage,
+                                            });
+                                        }
+                                        if let Some(extra) = bonus {
+                                            stacks.push(extra);
+                                        }
+                                        if ground.has_capacity_for(stacks.len()) {
+                                            if let Some(staged_world) =
+                                                w.staged_updates(&[(x, y, z, 0)])?
+                                            {
+                                                let (staged_ground, spawned) =
+                                                    ground.stage_put_many(&stacks, target)?;
+                                                let mut writes =
+                                                    vec![(world_path, staged_world.encoded()?)];
+                                                if wore {
+                                                    writes.push((
+                                                        inventory_path,
+                                                        candidate.encoded()?,
+                                                    ));
                                                 }
-                                                Ok(false) => {
-                                                    if wore {
-                                                        inventory.save(inventory_path)?;
-                                                    }
+                                                if !spawned.is_empty() {
+                                                    writes.push((
+                                                        ground_path,
+                                                        staged_ground.encoded()?,
+                                                    ));
                                                 }
-                                                Err(error) => {
-                                                    if wore {
-                                                        inventory.save(inventory_path)?;
+                                                if writes.len() == 1 {
+                                                    staged_world.save(world_path)?;
+                                                } else {
+                                                    journal::commit(
+                                                        &world_path
+                                                            .with_extension("pending-txn.json"),
+                                                        &writes,
+                                                    )?;
+                                                }
+                                                *w = staged_world;
+                                                *ground = staged_ground;
+                                                if wore {
+                                                    *inventory = candidate;
+                                                    send(
+                                                        s,
+                                                        0x2f,
+                                                        &inventory
+                                                            .set_slot(inventory.held_slot())?,
+                                                    )?;
+                                                }
+                                                for item in spawned {
+                                                    hub.register_ground_item(&item);
+                                                }
+                                                changed = true;
+                                                let reward = match block {
+                                                    16 => 2,
+                                                    21 => 4,
+                                                    56 => 5,
+                                                    73 | 74 => 3,
+                                                    129 => 5,
+                                                    153 => 3,
+                                                    _ => 0,
+                                                };
+                                                if reward > 0 {
+                                                    if let Some(orb) = mobs
+                                                        .lock()
+                                                        .map_err(|_| bad("mob mutex poisoned"))?
+                                                        .spawn_xp(*player, reward)
+                                                    {
+                                                        hub.broadcast(orb);
                                                     }
-                                                    return Err(error);
                                                 }
                                             }
                                         }
@@ -2653,6 +2653,60 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     experience_saved?;
     result
 }
+/// Local server console only. Never grant these operations to unauthenticated
+/// offline-mode player names or an in-game chat packet.
+fn start_admin_console(hub: Arc<Hub>, clock: Arc<Clock>, whitelist_file: Arc<PathBuf>) {
+    let _console = thread::spawn(move || {
+        let input = io::stdin();
+        for next in input.lock().lines() {
+            let Ok(line) = next else {
+                eprintln!("ADMIN: console input unavailable");
+                break;
+            };
+            let parts: Vec<_> = line.split_whitespace().collect();
+            let result = match parts.as_slice() {
+                [] => continue,
+                ["/help"] | ["help"] => {
+                    println!("Admin console: /list, /time query daytime, /weather query, /whitelist list|add NAME|remove NAME");
+                    Ok(())
+                }
+                ["/list"] | ["list"] => hub.names().map(|names| {
+                    println!("Players ({}): {}", names.len(), names.join(", "));
+                }),
+                ["/time", "query", "daytime"] => {
+                    println!("Daytime: {}", clock.day_time());
+                    Ok(())
+                }
+                ["/weather", "query"] => {
+                    let (rain, thunder) = clock.weather();
+                    println!("Weather: rain={rain} thunder={thunder}");
+                    Ok(())
+                }
+                ["/whitelist", "list"] => Whitelist::load(&whitelist_file).map(|list| {
+                    println!("Whitelisted name count: {}", list.len());
+                }),
+                ["/whitelist", "add", name] => {
+                    Whitelist::change_member(&whitelist_file, name, true).map(|changed| {
+                        println!("Whitelist add {name}: changed={changed}");
+                    })
+                }
+                ["/whitelist", "remove", name] => {
+                    Whitelist::change_member(&whitelist_file, name, false).map(|changed| {
+                        println!("Whitelist remove {name}: changed={changed}");
+                    })
+                }
+                _ => {
+                    eprintln!("ADMIN: unknown console command (use /help)");
+                    continue;
+                }
+            };
+            if let Err(error) = result {
+                eprintln!("ADMIN: command failed: {error}");
+            }
+        }
+    });
+}
+
 fn main() -> io::Result<()> {
     let mut bind = "127.0.0.1:25565".parse::<SocketAddr>().unwrap();
     let mut world_path = PathBuf::from("world/flat.irw");
@@ -2853,6 +2907,11 @@ fn main() -> io::Result<()> {
     let connections = Arc::new(AtomicUsize::new(0));
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
+    start_admin_console(
+        Arc::clone(&hub),
+        Arc::clone(&clock),
+        Arc::clone(&allow_path),
+    );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
     // wall-clock downtime after the process was stopped.

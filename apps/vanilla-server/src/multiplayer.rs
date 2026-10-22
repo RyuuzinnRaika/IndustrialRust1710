@@ -56,9 +56,23 @@ fn enqueue(peer: &Peer, packet: &Event) {
 
 /// The server sends player entities only inside the client's loaded view.
 pub fn visible(observer: &PlayerPosition, target: &PlayerPosition) -> bool {
-    let chunk = |n: f64| (n.floor() as i32).div_euclid(16);
-    (chunk(observer.x) - chunk(target.x)).abs() <= VIEW_DISTANCE
-        && (chunk(observer.z) - chunk(target.z)).abs() <= VIEW_DISTANCE
+    // Untrusted Play position coordinates must not overflow signed 32-bit
+    // subtraction/abs in a debug server or create phantom entities at NaN.
+    let chunk = |n: f64| -> Option<i64> {
+        if !n.is_finite() || n < f64::from(i32::MIN) || n > f64::from(i32::MAX) {
+            return None;
+        }
+        Some((n.floor() as i64).div_euclid(16))
+    };
+    let (Some(ax), Some(az), Some(bx), Some(bz)) = (
+        chunk(observer.x),
+        chunk(observer.z),
+        chunk(target.x),
+        chunk(target.z),
+    ) else {
+        return false;
+    };
+    (ax - bx).abs() <= i64::from(VIEW_DISTANCE) && (az - bz).abs() <= i64::from(VIEW_DISTANCE)
 }
 
 pub fn list_entry(name: &str, online: bool) -> io::Result<Event> {
@@ -319,6 +333,35 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn visibility_rejects_untrusted_and_overflow_coordinates() {
+        let center = PlayerPosition::default();
+        let mut remote = center;
+        remote.x = f64::NAN;
+        assert!(!visible(&center, &remote));
+        remote.x = f64::INFINITY;
+        assert!(!visible(&remote, &center));
+        remote.x = f64::from(i32::MAX);
+        assert!(!visible(&center, &remote));
+        let left = PlayerPosition {
+            x: f64::from(i32::MIN),
+            y: 65.0,
+            z: 0.0,
+        };
+        let right = PlayerPosition {
+            x: f64::from(i32::MAX),
+            y: 65.0,
+            z: 0.0,
+        };
+        assert!(!visible(&left, &right));
+        let adjacent = PlayerPosition {
+            x: -0.01,
+            y: center.y,
+            z: center.z,
+        };
+        assert!(visible(&center, &adjacent));
+    }
+
     #[test]
     fn out_of_view_players_spawn_on_entry_and_destroy_on_exit() {
         let hub = Hub::default();

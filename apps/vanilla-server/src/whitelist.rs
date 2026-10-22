@@ -1,8 +1,8 @@
 //! Fail-closed, name-based admission for an *unauthenticated* offline-mode server.
 //! This is authorization, NOT proof of Minecraft account ownership.
 use std::collections::BTreeSet;
-use std::fs;
-use std::io::{self, ErrorKind};
+use std::fs::{self, OpenOptions};
+use std::io::{self, ErrorKind, Write};
 use std::path::Path;
 
 const MAX_WHITELIST_BYTES: u64 = 64 * 1024;
@@ -75,6 +75,66 @@ impl Whitelist {
     pub fn len(&self) -> usize {
         self.names.len()
     }
+
+    /// Console-only membership change. Preserve all existing UUID metadata
+    /// while safely replacing the complete validated whitelist on disk.
+    /// Offline account names never confer permission to call this method.
+    pub fn change_member(path: &Path, name: &str, allow: bool) -> io::Result<bool> {
+        if !valid_name(name) {
+            return Err(invalid("invalid whitelist name"));
+        }
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file() {
+            return Err(invalid("refuse non-regular whitelist path"));
+        }
+        let current = Self::load(path)?;
+        if current.allows(name) == allow {
+            return Ok(false);
+        }
+        let mut members: Vec<serde_json::Value> =
+            serde_json::from_slice(&fs::read(path)?).map_err(|_| invalid("invalid whitelist"))?;
+        if allow {
+            if members.len() >= MAX_PLAYERS {
+                return Err(invalid("whitelist at capacity"));
+            }
+            members.push(serde_json::json!({"name":name}));
+        } else {
+            members.retain(|value| {
+                !value["name"]
+                    .as_str()
+                    .is_some_and(|entry| entry.eq_ignore_ascii_case(name))
+            });
+        }
+        let bytes = serde_json::to_vec_pretty(&members)
+            .map_err(|_| invalid("cannot serialize whitelist"))?;
+        if bytes.len() as u64 > MAX_WHITELIST_BYTES {
+            return Err(invalid("modified whitelist exceeds 64 KiB"));
+        }
+        let temp = path.with_extension("admin-tmp");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        let result = (|| -> io::Result<()> {
+            file.set_permissions(metadata.permissions())?;
+            file.write_all(&bytes)?;
+            file.sync_all()
+        })();
+        drop(file);
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(&temp, path) {
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+        #[cfg(unix)]
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -91,6 +151,29 @@ mod tests {
         assert!(!valid_name("too_long_123456789"));
         assert!(!valid_name("非ASCII"));
     }
+    #[test]
+    fn console_membership_edits_are_case_insensitive_and_preserve_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-console-whitelist-{}.json",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        fs::write(
+            &path,
+            r#"[{"name":"Existing","uuid":"keep-existing-uuid"}]"#,
+        )
+        .unwrap();
+        assert!(Whitelist::change_member(&path, "NewPlayer", true).unwrap());
+        assert!(!Whitelist::change_member(&path, "newplayer", true).unwrap());
+        assert!(Whitelist::load(&path).unwrap().allows("newplayer"));
+        let entries: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(entries[0]["uuid"], "keep-existing-uuid");
+        assert!(Whitelist::change_member(&path, "NEWPLAYER", false).unwrap());
+        assert!(!Whitelist::load(&path).unwrap().allows("newplayer"));
+        assert!(Whitelist::change_member(&path, "x", true).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn rejects_wrong_schemas_fail_closed() {
         for content in [
