@@ -59,7 +59,7 @@ use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use serde_json::json;
 use std::collections::BTreeSet;
-use std::io::{self, ErrorKind};
+use std::io::{self, BufRead, ErrorKind};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3037,6 +3037,57 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     experience_saved?;
     result
 }
+/// Commands are accepted only from the operating-system console, never from
+/// unauthenticated offline-mode players or Protocol 5 chat messages.
+fn start_clock_console(hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf>) {
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            let args: Vec<_> = line.split_whitespace().collect();
+            let result = match args.as_slice() {
+                ["/time", "query", "daytime"] => {
+                    println!("Daytime: {}", clock.day_time());
+                    Ok(())
+                }
+                ["/time", "set", requested] => (|| -> io::Result<()> {
+                    let requested = requested
+                        .parse::<u64>()
+                        .map_err(|_| bad("invalid daytime value"))?;
+                    clock.set_day_time(requested)?;
+                    clock.save_ticks(&clock_path)?;
+                    let mut body = Vec::with_capacity(16);
+                    body.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
+                    body.extend_from_slice(&clock.day_time().to_be_bytes());
+                    hub.broadcast(Event { id: 0x03, body });
+                    println!("Daytime set to {}", clock.day_time());
+                    Ok(())
+                })(),
+                ["/weather", "query"] => {
+                    let (rain, thunder) = clock.weather();
+                    println!("Weather: rain={rain} thunder={thunder}");
+                    Ok(())
+                }
+                ["/weather", "set", kind] => (|| -> io::Result<()> {
+                    clock.set_weather(kind)?;
+                    clock.save_ticks(&clock_path)?;
+                    for body in clock.weather_packets() {
+                        hub.broadcast(Event { id: 0x2b, body });
+                    }
+                    println!("Weather set to {kind}");
+                    Ok(())
+                })(),
+                _ => continue,
+            };
+            if let Err(error) = result {
+                eprintln!("ADMIN CONSOLE ERROR: {error}");
+            }
+        }
+    });
+}
+
 fn main() -> io::Result<()> {
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
@@ -3483,8 +3534,8 @@ fn main() -> io::Result<()> {
         initial
     };
     let clock_path = Arc::new(world_path.with_extension("clock"));
-    let restored_ticks = Clock::load_ticks(&clock_path)?;
-    let (clock, _clock_thread) = Clock::start_at(restored_ticks);
+    let restored_clock = Clock::load_state(&clock_path)?;
+    let (clock, _clock_thread) = Clock::start_from(restored_clock);
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -3519,6 +3570,7 @@ fn main() -> io::Result<()> {
     let connections = Arc::new(AtomicUsize::new(0));
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
+    start_clock_console(Arc::clone(&hub), Arc::clone(&clock), Arc::clone(&clock_path));
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
     // wall-clock downtime after the process was stopped.
