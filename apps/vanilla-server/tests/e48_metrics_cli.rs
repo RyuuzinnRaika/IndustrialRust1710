@@ -25,15 +25,23 @@ fn summary_accepts_current_producer_schema_and_enforces_real_thresholds() {
     let success = Command::new(exe)
         .arg(&path)
         .args([
-            "--min-tps", "19", "--min-tick-ratio", "0.98",
-            "--max-p99-mspt", "20", "--min-seconds", "10",
-            "--min-windows", "1",
+            "--min-tps",
+            "19",
+            "--min-tick-ratio",
+            "0.98",
+            "--max-p99-mspt",
+            "20",
+            "--min-seconds",
+            "10",
+            "--min-windows",
+            "1",
         ])
         .output()
         .unwrap();
     assert!(
         success.status.success(),
-        "{}", String::from_utf8_lossy(&success.stderr)
+        "{}",
+        String::from_utf8_lossy(&success.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&success.stdout).unwrap();
     assert_eq!(report["players_peak"], 4);
