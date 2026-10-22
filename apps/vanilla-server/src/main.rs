@@ -3606,17 +3606,27 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
 }
 /// Commands are accepted only from the operating-system console, never from
 /// unauthenticated offline-mode players or Protocol 5 chat messages.
-fn start_clock_console(
-    hub: Arc<Hub>,
-    clock: Arc<Clock>,
-    clock_path: Arc<PathBuf>,
+struct ConsoleStorage {
     rules: Arc<Mutex<GameRules>>,
     rules_path: Arc<PathBuf>,
     scoreboard: Arc<Mutex<Scoreboard>>,
     scoreboard_path: Arc<PathBuf>,
+}
+
+fn start_clock_console(
+    hub: Arc<Hub>,
+    clock: Arc<Clock>,
+    clock_path: Arc<PathBuf>,
+    storage: ConsoleStorage,
     shutdown: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let ConsoleStorage {
+            rules,
+            rules_path,
+            scoreboard,
+            scoreboard_path,
+        } = storage;
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
             let Ok(line) = line else {
@@ -4414,10 +4424,12 @@ fn main() -> io::Result<()> {
         Arc::clone(&hub),
         Arc::clone(&clock),
         Arc::clone(&clock_path),
-        Arc::clone(&world_rules),
-        Arc::clone(&rules_path),
-        Arc::clone(&shared_scoreboard),
-        Arc::clone(&scoreboard_path),
+        ConsoleStorage {
+            rules: Arc::clone(&world_rules),
+            rules_path: Arc::clone(&rules_path),
+            scoreboard: Arc::clone(&shared_scoreboard),
+            scoreboard_path: Arc::clone(&scoreboard_path),
+        },
         Arc::clone(&shutdown),
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
