@@ -145,6 +145,14 @@ impl Hub {
         let inner = self.0.lock().map_err(|_| poisoned())?;
         Ok(inner.players.values().map(|p| p.name.clone()).collect())
     }
+    /// UUID attached to the currently admitted peer. Caller must ensure the
+    /// server is configured online-mode before treating it as authenticated.
+    pub fn uuid_for_online_name(&self, name: &str) -> io::Result<Option<String>> {
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        Ok(inner.players.values()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+            .map(|p| p.uuid.clone()))
+    }
     /// Queue a privileged teleport to be applied by the owning session thread.
     /// Updating Hub coordinates alone would not update the player's saved state.
     pub fn request_admin_teleport(&self, name: &str, position: PlayerPosition) -> io::Result<bool> {
