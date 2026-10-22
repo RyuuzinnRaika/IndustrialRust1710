@@ -1019,6 +1019,7 @@ fn play(
                 } else {
                     fall.update(candidate.y, grounded)
                 };
+                let landed_distance = fall.take_landing_distance();
                 let mut next_vitals = *vitals;
                 next_vitals.health = (next_vitals.health - f32::from(damage)).max(0.0);
                 // Save accepted position and HP before sending an update.
@@ -1026,6 +1027,14 @@ fn play(
                 *player = candidate;
                 *vitals = next_vitals;
                 location = (candidate.x, candidate.y, candidate.z);
+                if survival && landed_distance >= 1.0 {
+                    let (fx, fy, fz) = (candidate.x.floor() as i32, candidate.y.floor() as i32 - 1, candidate.z.floor() as i32);
+                    let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    if soil.get(fx, fy, fz) >> 4 == 60
+                        && soil.update_and_save(world_path, fx, fy, fz, 3 << 4)? {
+                        hub.broadcast(block_change_event(&soil, fx, fy, fz));
+                    }
+                }
                 send_player_position(s, player)?;
                 if damage != 0 {
                     send(s, 0x06, &health_packet(*vitals))?;
@@ -1487,6 +1496,7 @@ fn play(
                     send_player_position(s, player)?;
                     continue;
                 }
+                let mut landing_distance = 0.0;
                 if survival {
                     let collision_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     if !physics::valid_movement(&collision_world, player, &candidate) {
@@ -1503,6 +1513,7 @@ fn play(
                     } else {
                         fall.update(y, landed)
                     };
+                    landing_distance = fall.take_landing_distance();
                     if damage != 0 {
                         vitals.health = (vitals.health - f32::from(damage)).max(0.0);
                         player.save_state(player_path, *vitals)?;
@@ -1529,7 +1540,7 @@ fn play(
                     let fz = z.floor() as i32;
                     let fy = y.floor() as i32 - 1;
                     // A fall of at least one block onto farmland tramples it.
-                    if fy >= 0 && player.y - y >= 1.0 {
+                    if fy >= 0 && landing_distance >= 1.0 {
                         let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                         if soil.get(fx, fy, fz) >> 4 == 60
                             && soil.update_and_save(world_path, fx, fy, fz, 3 << 4)?

@@ -474,16 +474,19 @@ impl IdleGravity {
 pub struct FallTracker {
     last_y: f64,
     falling: f64,
+    last_landing: f64,
 }
 impl FallTracker {
     pub fn reset(&mut self, y: f64) {
         self.last_y = y;
         self.falling = 0.0;
+        self.last_landing = 0.0;
     }
     pub fn new(y: f64) -> Self {
         Self {
             last_y: y,
             falling: 0.0,
+            last_landing: 0.0,
         }
     }
     /// Return Minecraft-style integer health damage on an authenticated landing.
@@ -495,12 +498,19 @@ impl FallTracker {
         }
         self.last_y = y;
         if on_solid_ground {
+            self.last_landing = self.falling;
             let damage = (self.falling - 3.0).ceil().clamp(0.0, 20.0) as u8;
             self.falling = 0.0;
             damage
         } else {
+            self.last_landing = 0.0;
             0
         }
+    }
+    /// True landing distance across multiple movement packets, not just the
+    /// last packet's delta. Used by farmland trampling only after validation.
+    pub fn take_landing_distance(&mut self) -> f64 {
+        std::mem::take(&mut self.last_landing)
     }
 }
 
