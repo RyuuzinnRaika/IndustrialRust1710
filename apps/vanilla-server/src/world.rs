@@ -40,12 +40,19 @@ pub struct World {
     pending_ecology: BTreeSet<Position>,
     pending_devices: BTreeSet<Position>,
     pending_repeaters: BTreeMap<Position, (u64, bool)>,
+    // Comparator analog output (0..15) is not encoded in block metadata.
+    // Reconstructed by queued evaluation after loading IRW snapshots.
+    comparator_outputs: BTreeMap<Position, u8>,
+    pending_comparators: BTreeMap<Position, (u64, u8)>,
+    comparator_ready: BTreeMap<Position, u8>,
     pending_buttons: BTreeMap<Position, u64>,
     pending_drops: Vec<WorldDrop>,
     // Sparse pending client-facing lighting invalidations, not part of IRW files.
     pending_light_chunks: BTreeSet<(i32, i32)>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
     fluid_phase: u64,
+    // Set from Clock; the weather simulation has one authoritative owner.
+    raining: bool,
 }
 
 /// A persisted world mutation can create a temporary ground-item event.
@@ -83,7 +90,15 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 18 // leaves
             | 59 // wheat
             | 60 // farmland (via hoe)
-            | 66 // rails
+            | 27 | 28 | 66 | 157 // rails (powered/detector/normal/activator)
+            | 81 | 83 // cactus and sugar cane
+            | 104 | 105 // pumpkin/melon stems
+            | 115 // Nether wart
+            | 127 // cocoa pods
+            | 107 // fence gate
+            | 44 | 126 // half slabs
+            | 53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164 // stairs
+            | 149 | 150 // comparator
             | 70 | 72 // pressure plates
             | 77 | 143 // buttons
             | 29 | 33 // pistons
@@ -137,6 +152,9 @@ pub fn is_placeable(block_id: u16) -> bool {
     )
 }
 impl World {
+    pub fn set_raining(&mut self, raining: bool) {
+        self.raining = raining;
+    }
     /// Tracks which chunk columns contain changes, without allocating a full world.
     pub fn drain_drops(&mut self) -> Vec<WorldDrop> {
         std::mem::take(&mut self.pending_drops)
@@ -318,7 +336,7 @@ impl World {
             if !in_bounds(x, candidate_y, z) {
                 continue;
             }
-            if matches!(self.get(x, candidate_y, z) >> 4, 12 | 13) {
+            if matches!(self.get(x, candidate_y, z) >> 4, 12 | 13 | 145) {
                 self.pending_gravity.insert((x, candidate_y as u8, z));
             }
         }
@@ -334,7 +352,7 @@ impl World {
         for &(x, y, z) in &scheduled {
             let height = i32::from(y);
             let block = self.get(x, height, z);
-            if height == 0 || !matches!(block >> 4, 12 | 13) {
+            if height == 0 || !matches!(block >> 4, 12 | 13 | 145) {
                 continue;
             }
             if self.get(x, height - 1, z) != 0 {
@@ -422,7 +440,10 @@ impl World {
             if id == 55 {
                 self.pending_circuit.insert(pos);
             }
-            if matches!(id, 6 | 18 | 59 | 60 | 141 | 142) {
+            if matches!(
+                id,
+                6 | 18 | 51 | 59 | 60 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
+            ) {
                 self.pending_ecology.insert(pos);
             } else {
                 self.pending_ecology.remove(&pos);
@@ -430,6 +451,12 @@ impl World {
             if matches!(
                 id,
                 6 | 50
+                    | 81
+                    | 83
+                    | 104
+                    | 105
+                    | 115
+                    | 127
                     | 55
                     | 59
                     | 66
@@ -449,11 +476,13 @@ impl World {
             ) {
                 self.pending_support.insert(pos);
             }
-            if matches!(id, 29 | 33 | 93 | 94) {
+            if matches!(id, 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157) {
                 self.pending_devices.insert(pos);
             } else {
                 self.pending_devices.remove(&pos);
                 self.pending_repeaters.remove(&pos);
+                self.pending_comparators.remove(&pos);
+                self.comparator_outputs.remove(&pos);
             }
         }
     }
@@ -537,11 +566,10 @@ impl World {
             if level != 0 {
                 let above = self.get(x, y + 1, z);
                 let above_id = above >> 4;
-                let mut next = if above_id == id || above_id == id + 1 {
-                    ((above & 15) + 1).min(7)
-                } else {
-                    8
-                };
+                let fed_from_above = above_id == id || above_id == id + 1;
+                // Falling fluids use metadata level 8, not level 1. They
+                // remain falling while fed vertically from their source.
+                let mut next = if fed_from_above { 8 } else { 9 };
                 let sides = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)];
                 let mut source_neighbors = 0;
                 for (nx, nz) in sides {
@@ -557,7 +585,7 @@ impl World {
                 if id == 8 && source_neighbors >= 2 && solid_below {
                     next = 0;
                 }
-                if next > 7 {
+                if next > 8 || (next == 8 && !fed_from_above) {
                     changes.insert((x, y as u8, z), 0);
                     continue;
                 }
@@ -566,9 +594,7 @@ impl World {
                     level = next;
                 }
             }
-            if level >= 7 {
-                continue;
-            }
+            // Level 7 cannot spread sideways, but it can still fall.
             let down = (x, y - 1, z);
             // Flow down first. Falling lava contacting water below creates
             // stone at the destination rather than replacing the water.
@@ -583,6 +609,8 @@ impl World {
                 in_bounds(down.0, down.1, down.2) && self.get(down.0, down.1, down.2) == 0;
             let targets: Vec<(i32, i32, i32)> = if falling {
                 vec![down]
+            } else if level == 7 {
+                Vec::new()
             } else {
                 vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
             };
@@ -591,12 +619,13 @@ impl World {
                     continue;
                 }
                 let existing = self.get(nx, ny, nz);
-                let desired = (id << 4) | (level + 1);
-                if existing == 0 || (existing >> 4 == id && existing & 15 > level + 1) {
+                let next_level = if falling { 8 } else { (level & 7) + 1 };
+                let desired = (id << 4) | next_level;
+                if existing == 0 || (existing >> 4 == id && existing & 15 > next_level) {
                     let target = (nx, ny as u8, nz);
                     if changes
                         .get(&target)
-                        .is_none_or(|&v| v == 0 || (v >> 4 == id && v & 15 > level + 1))
+                        .is_none_or(|&v| v == 0 || (v >> 4 == id && v & 15 > next_level))
                     {
                         changes.insert(target, desired);
                     }
@@ -709,6 +738,7 @@ impl World {
                 self.save(path)
             };
             if let Err(error) = saved {
+                self.comparator_ready.clear();
                 for (pos, original) in undo {
                     match original {
                         Some(block) => {
@@ -727,6 +757,17 @@ impl World {
             }
         }
 
+        // Publish analog changes only after the block snapshot committed.
+        // Same-output-state comparator strength changes still wake nearby dust.
+        let ready = std::mem::take(&mut self.comparator_ready);
+        for (pos, strength) in ready {
+            if self.get(pos.0, i32::from(pos.1), pos.2) >> 4 == 150 && strength > 0 {
+                self.comparator_outputs.insert(pos, strength);
+            } else {
+                self.comparator_outputs.remove(&pos);
+            }
+            self.wake_block_updates(pos.0, i32::from(pos.1), pos.2);
+        }
         for pos in wet {
             self.pending_fluid.remove(&pos);
         }
@@ -927,7 +968,7 @@ impl World {
             if world.edits.insert((x, y, z), block).is_some() {
                 return Err(invalid("duplicate world block"));
             }
-            if matches!(block >> 4, 12 | 13) {
+            if matches!(block >> 4, 12 | 13 | 145) {
                 world.pending_gravity.insert((x, y, z));
             }
             if matches!(block >> 4, 8..=11) {
@@ -936,7 +977,10 @@ impl World {
             if block >> 4 == 55 {
                 world.pending_circuit.insert((x, y, z));
             }
-            if matches!(block >> 4, 6 | 18 | 59 | 60 | 141 | 142) {
+            if matches!(
+                block >> 4,
+                6 | 18 | 51 | 59 | 60 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
+            ) {
                 world.pending_ecology.insert((x, y, z));
             }
             if matches!(
@@ -961,7 +1005,7 @@ impl World {
             ) {
                 world.pending_support.insert((x, y, z));
             }
-            if matches!(block >> 4, 29 | 33 | 93 | 94) {
+            if matches!(block >> 4, 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157) {
                 world.pending_devices.insert((x, y, z));
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
@@ -1229,12 +1273,12 @@ mod tests {
         w.update_and_save(&path, 5, 66, 5, 8 << 4).unwrap();
         let first = w.block_tick(&path, 64).unwrap();
         assert!(first.contains(&(5, 65, 5)));
-        assert_eq!(w.get(5, 65, 5), (8 << 4) | 1);
+        assert_eq!(w.get(5, 65, 5), (8 << 4) | 8);
         assert_eq!(w.get(6, 65, 5), 0);
-        // Water flows down y=64 before spreading over the grass at y=63.
+        // Falling level-8 water reaches y=64 before spreading at level 1.
         assert!(w.block_tick(&path, 64).unwrap().contains(&(5, 64, 5)));
         assert!(w.block_tick(&path, 64).unwrap().contains(&(6, 64, 5)));
-        assert_eq!(w.get(6, 64, 5), (8 << 4) | 3);
+        assert_eq!(w.get(6, 64, 5), (8 << 4) | 1);
         // Lever -> one wire -> adjacent wire, with 15 and then 14.
         w.update_and_save(&path, 0, 64, 0, (69 << 4) | 8).unwrap();
         w.update_and_save(&path, 1, 64, 0, 55 << 4).unwrap();
@@ -1517,5 +1561,79 @@ mod tests {
         assert_eq!(reloaded.natural_seed(), Some(42));
         assert_eq!(old.get(20, 60, 20), World::natural(42).get(20, 60, 20));
         fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod group_b_regression_tests {
+    use super::*;
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("ir1710-b-{name}-{}.irw", std::process::id()))
+    }
+
+    #[test]
+    fn falling_water_uses_legacy_level_eight_and_survives_reload() {
+        let path = temp("flow-level8");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 75, 0, 8 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 74, 0), (8 << 4) | 8);
+        let mut reloaded = World::load(&path).unwrap();
+        reloaded.block_tick(&path, 64).unwrap();
+        assert_eq!(reloaded.get(0, 74, 0), (8 << 4) | 8);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn comparator_uses_delayed_analog_output_and_survives_world_reload() {
+        let path = temp("comparator-delay");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world
+            .update_and_save(&path, -1, 65, 0, (69 << 4) | 8)
+            .unwrap();
+        world
+            .update_and_save(&path, 0, 65, 0, (149 << 4) | 1)
+            .unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 65, 0) >> 4, 149);
+        world.block_tick(&path, 64).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 65, 0) >> 4, 150);
+        assert!(world.power_into((0, 65, 0), (1, 65, 0)));
+        let mut restored = World::load(&path).unwrap();
+        for _ in 0..3 {
+            restored.block_tick(&path, 64).unwrap();
+        }
+        assert!(restored.power_into((0, 65, 0), (1, 65, 0)));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cactus_and_netther_wart_support_is_validated() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 12 << 4).unwrap();
+        world.import_block(1, 64, 0, 88 << 4).unwrap();
+        assert!(world.can_support(0, 65, 0, 81 << 4));
+        assert!(world.can_support(1, 65, 0, 115 << 4));
+        assert!(!world.can_support(0, 65, 0, 115 << 4));
+        assert!(!world.can_support(1, 65, 0, 83 << 4));
+    }
+
+    #[test]
+    fn raining_extinguishes_fire_through_existing_tick_pipeline() {
+        let path = temp("rain-fire");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 65, 0, 51 << 4).unwrap();
+        world.set_raining(true);
+        for _ in 0..20 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(0, 65, 0), 0);
+        assert_eq!(World::load(&path).unwrap().get(0, 65, 0), 0);
+        std::fs::remove_file(path).unwrap();
     }
 }

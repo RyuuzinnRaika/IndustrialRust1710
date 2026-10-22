@@ -1747,7 +1747,7 @@ fn play(
                 if (0..=5).contains(&face) && world::in_bounds(x, y, z) && near(location, x, y, z) {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let id = w.get(x, y, z) >> 4;
-                    if matches!(id, 69 | 77 | 143 | 64 | 96 | 93 | 94) {
+                    if matches!(id, 69 | 77 | 143 | 64 | 71 | 96 | 93 | 94 | 107 | 149 | 150) {
                         let changed = w.interact_device(world_path, x, y, z)?;
                         for (cx, cy, cz) in changed {
                             hub.broadcast(block_change_event(&w, cx, cy, cz));
@@ -2082,12 +2082,18 @@ fn play(
                                 379 => 117,
                                 326 => 8,
                                 327 => 10,
-                                295 => 59,  // wheat seeds
-                                391 => 141, // carrot
-                                392 => 142, // potato
-                                356 => 93,  // repeater
-                                324 => 64,  // wooden door
-                                330 => 71,  // iron door
+                                295 => 59,                       // wheat seeds
+                                391 => 141,                      // carrot
+                                392 => 142,                      // potato
+                                356 => 93,                       // repeater
+                                404 => 149,                      // comparator
+                                338 => 83,                       // sugar cane
+                                361 => 104,                      // pumpkin seeds
+                                362 => 105,                      // melon seeds
+                                372 => 115,                      // Nether wart
+                                351 if stack.damage == 3 => 127, // cocoa beans
+                                324 => 64,                       // wooden door
+                                330 => 71,                       // iron door
                                 _ => stack.id as u16,
                             };
                             let invalid_chest_merge =
@@ -2111,9 +2117,30 @@ fn play(
                                     5 => 2,
                                     _ => 0,
                                 }
-                            } else if matches!(block_id, 64 | 71 | 93) {
+                            } else if matches!(block_id, 64 | 71 | 93 | 149) {
                                 ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
-                            } else if matches!(block_id, 59 | 141 | 142 | 8 | 10) {
+                            } else if block_id == 127 {
+                                // Cocoa attaches to the side of a jungle log.
+                                match face {
+                                    2 => 0,
+                                    3 => 2,
+                                    4 => 3,
+                                    5 => 1,
+                                    _ => 0,
+                                }
+                            } else if matches!(
+                                block_id,
+                                53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164
+                            ) {
+                                // 1.7.10 stair orientation and inverted-half bit.
+                                let direction = ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3;
+                                direction | if face == 0 { 4 } else { 0 }
+                            } else if block_id == 107 {
+                                ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
+                            } else if matches!(
+                                block_id,
+                                59 | 141 | 142 | 104 | 105 | 81 | 83 | 115 | 8 | 10
+                            ) {
                                 0
                             } else {
                                 stack.damage as u16 & 15
@@ -3534,6 +3561,8 @@ fn main() -> io::Result<()> {
                     Ok(v) => v,
                     Err(_) => break,
                 };
+                // Fire uses the same clock/weather source as client rain packets.
+                gravity_world.set_raining(weather.0);
                 for _ in 0..steps {
                     match gravity_world.gravity_tick(&furnace_world_path, 64) {
                         Ok(changes) => {

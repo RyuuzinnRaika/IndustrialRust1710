@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 fn solid(id: u16) -> bool {
     !matches!(id, 0 | 6 | 8..=11 | 18 | 20 | 31 | 37..=40 | 50 | 55 | 59
         | 63 | 66 | 69 | 70 | 72 | 75..=78 | 83 | 93 | 94 | 96
-        | 141 | 142 | 143)
+        | 104 | 105 | 107 | 115 | 127 | 141 | 142 | 143 | 149 | 150)
 }
 fn chance(phase: u64, x: i32, y: i32, z: i32, divisor: u64) -> bool {
     let mut v = phase
@@ -22,6 +22,12 @@ fn chance(phase: u64, x: i32, y: i32, z: i32, divisor: u64) -> bool {
 fn plantable(id: u16) -> bool {
     matches!(id, 2 | 3 | 60)
 }
+fn flammable(id: u16) -> bool {
+    matches!(
+        id,
+        5 | 6 | 17 | 18 | 35 | 47 | 53 | 58 | 85 | 86 | 103 | 107 | 125 | 126 | 162
+    )
+}
 
 impl World {
     /// Attachment validity also used to reject impossible placements.
@@ -30,7 +36,33 @@ impl World {
         let below = self.get(x, y - 1, z) >> 4;
         match id {
             6 => plantable(below),
-            59 | 141 | 142 => below == 60,
+            59 | 141 | 142 | 104 | 105 => below == 60,
+            115 => below == 88, // Nether wart grows on soul sand.
+            81 => {
+                matches!(below, 12 | 81)
+                    && [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .iter()
+                        .all(|&(dx, dz)| !solid(self.get(x + dx, y, z + dz) >> 4))
+            }
+            83 => {
+                if below == 83 {
+                    return true;
+                }
+                matches!(below, 2 | 3 | 12)
+                    && [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .iter()
+                        .any(|&(dx, dz)| matches!(self.get(x + dx, y - 1, z + dz) >> 4, 8 | 9))
+            }
+            127 => {
+                let (dx, dz) = match block & 3 {
+                    0 => (0, 1),
+                    1 => (-1, 0),
+                    2 => (0, -1),
+                    _ => (1, 0),
+                };
+                let support = self.get(x + dx, y, z + dz);
+                support >> 4 == 17 && support & 3 == 3
+            }
             50 | 75 | 76 => {
                 let support = match block & 7 {
                     1 => self.get(x - 1, y, z) >> 4,
@@ -41,7 +73,7 @@ impl World {
                 };
                 solid(support)
             }
-            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 => solid(below),
+            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 | 149 | 150 => solid(below),
             77 | 143 => {
                 let neighbor = match block & 7 {
                     1 => self.get(x - 1, y, z) >> 4,
@@ -161,6 +193,12 @@ impl World {
                 6 | 50
                     | 55
                     | 59
+                    | 81
+                    | 83
+                    | 104
+                    | 105
+                    | 115
+                    | 127
                     | 66
                     | 70
                     | 72
@@ -175,6 +213,8 @@ impl World {
                     | 77
                     | 143
                     | 96
+                    | 149
+                    | 150
             ) && !self.can_support(x, i32::from(y), z, block)
             {
                 changes.insert((x, y, z), 0);
@@ -210,6 +250,96 @@ impl World {
                         changes.insert((x, y, z), (60 << 4) | (moisture - 1));
                     } else if !matches!(self.get(x, height + 1, z) >> 4, 59 | 141 | 142) {
                         changes.insert((x, y, z), 3 << 4);
+                    }
+                }
+                83 | 81 => {
+                    // Keep a naturally grown column at vanilla's three-block limit.
+                    let mut height_above_base = 1;
+                    while height_above_base < 3
+                        && self.get(x, height - height_above_base, z) >> 4 == id
+                    {
+                        height_above_base += 1;
+                    }
+                    if height_above_base < 3 && self.get(x, height + 1, z) == 0 {
+                        if block & 15 == 15 {
+                            changes.insert((x, y, z), id << 4);
+                            if in_bounds(x, height + 1, z) {
+                                changes.insert((x, (height + 1) as u8, z), id << 4);
+                            }
+                        } else if chance(self.fluid_phase, x, height, z, 2) {
+                            changes.insert((x, y, z), block + 1);
+                        }
+                    }
+                }
+                115 if block & 3 < 3 => {
+                    if chance(self.fluid_phase, x, height, z, 4) {
+                        changes.insert((x, y, z), block + 1);
+                    }
+                }
+                127 if (block >> 2) & 3 < 2 => {
+                    if chance(self.fluid_phase, x, height, z, 4) {
+                        changes.insert((x, y, z), block + 4);
+                    }
+                }
+                104 | 105 => {
+                    let age = block & 7;
+                    if age < 7 {
+                        if chance(self.fluid_phase, x, height, z, 2) {
+                            changes.insert((x, y, z), block + 1);
+                        }
+                    } else {
+                        let fruit = if id == 104 { 86 } else { 103 };
+                        let neighbors = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+                        if !neighbors
+                            .iter()
+                            .any(|&(dx, dz)| self.get(x + dx, height, z + dz) >> 4 == fruit)
+                        {
+                            let index = (self.fluid_phase / 20) as usize % neighbors.len();
+                            let (dx, dz) = neighbors[index];
+                            let (nx, nz) = (x + dx, z + dz);
+                            if self.get(nx, height, nz) == 0
+                                && plantable(self.get(nx, height - 1, nz) >> 4)
+                                && in_bounds(nx, height, nz)
+                                && chance(self.fluid_phase, x, height, z, 2)
+                            {
+                                changes.insert((nx, y, nz), fruit << 4);
+                            }
+                        }
+                    }
+                }
+                51 => {
+                    // Bounded random fire tick. Do not resurrect extinguished fire.
+                    if self.raining {
+                        changes.insert((x, y, z), 0);
+                    } else {
+                        let age = block & 15;
+                        let mut fuel = false;
+                        for (dx, dy, dz) in [
+                            (1, 0, 0),
+                            (-1, 0, 0),
+                            (0, 1, 0),
+                            (0, -1, 0),
+                            (0, 0, 1),
+                            (0, 0, -1),
+                        ] {
+                            let nx = x + dx;
+                            let ny = height + dy;
+                            let nz = z + dz;
+                            if !in_bounds(nx, ny, nz) {
+                                continue;
+                            }
+                            if flammable(self.get(nx, ny, nz) >> 4) {
+                                fuel = true;
+                                if chance(self.fluid_phase, nx, ny, nz, 5) {
+                                    changes.insert((nx, ny as u8, nz), 51 << 4);
+                                }
+                            }
+                        }
+                        if !fuel || age == 15 {
+                            changes.insert((x, y, z), 0);
+                        } else {
+                            changes.insert((x, y, z), (51 << 4) | (age + 1));
+                        }
                     }
                 }
                 59 | 141 | 142 if block & 7 < 7 => {

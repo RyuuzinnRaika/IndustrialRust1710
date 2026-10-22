@@ -39,9 +39,13 @@ fn movable(block: u16) -> bool {
         0 | 7 | 8
             ..=11
                 | 18
+                | 23 // dispenser (tile entity)
+                | 25 // note block (tile entity)
                 | 29
                 | 33
                 | 34
+                | 49 // obsidian
+                | 52 // spawner
                 | 54
                 | 61
                 | 62
@@ -55,28 +59,65 @@ fn movable(block: u16) -> bool {
                 | 116
                 | 117
                 | 120
+                | 127 // attached cocoa
                 | 130
+                | 137 // command block
+                | 146 // trapped chest
+                | 154 // hopper
+                | 158 // dropper
+                | 176 // standing banner
+                | 177 // wall banner
                 | 138
     )
 }
 impl World {
-    /// Whether a source powers a specific neighboring destination.
-    /// Powered repeaters only output toward their face, never into their
-    /// own input or perpendicular dust/pistons.
-    pub(super) fn power_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> bool {
+    /// Directional analog redstone strength; repeaters/comparators have a
+    /// single output face. Dust propagates its stored 0..15 strength.
+    fn signal_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
         let (x, y, z) = from;
         let block = self.get(x, y, z);
         match block >> 4 {
-            55 => block & 15 > 0,
-            69 | 77 | 143 => block & 8 != 0,
-            70 | 72 => block & 1 != 0,
-            76 | 152 => true,
+            55 => (block & 15) as u8,
+            69 | 77 | 143 => {
+                if block & 8 != 0 {
+                    15
+                } else {
+                    0
+                }
+            }
+            70 | 72 => {
+                if block & 1 != 0 {
+                    15
+                } else {
+                    0
+                }
+            }
+            76 | 152 => 15,
             94 => {
                 let (dx, dz) = repeater_direction(block);
-                to == (x + dx, y, z + dz)
+                if to == (x + dx, y, z + dz) {
+                    15
+                } else {
+                    0
+                }
             }
-            _ => false,
+            150 => {
+                let (dx, dz) = repeater_direction(block);
+                if to == (x + dx, y, z + dz) {
+                    self.comparator_outputs
+                        .get(&(x, y as u8, z))
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            }
+            _ => 0,
         }
+    }
+
+    pub(super) fn power_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> bool {
+        self.signal_into(from, to) > 0
     }
 
     fn powered_near(&self, x: i32, y: i32, z: i32) -> bool {
@@ -99,6 +140,34 @@ impl World {
         }
         false
     }
+    /// Power cannot travel infinitely across powered/activator rails.
+    /// Bound traversal to eight rail segments as in 1.7.10.
+    fn rail_powered(&self, x: i32, y: i32, z: i32, id: u16) -> bool {
+        use std::collections::{BTreeSet, VecDeque};
+        let mut seen = BTreeSet::from([(x, y, z)]);
+        let mut next = VecDeque::from([(x, y, z, 0u8)]);
+        while let Some((rx, ry, rz, distance)) = next.pop_front() {
+            if self.powered_near(rx, ry, rz) {
+                return true;
+            }
+            if distance >= 8 {
+                continue;
+            }
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                for dy in [-1, 0, 1] {
+                    let at = (rx + dx, ry + dy, rz + dz);
+                    if in_bounds(at.0, at.1, at.2)
+                        && self.get(at.0, at.1, at.2) >> 4 == id
+                        && seen.insert(at)
+                    {
+                        next.push_back((at.0, at.1, at.2, distance + 1));
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn push_piston(
         &self,
         x: i32,
@@ -109,7 +178,10 @@ impl World {
     ) {
         let (dx, dy, dz) = facing(block);
         let extended = block & 8 != 0;
-        let on = self.powered_near(x, y, z);
+        // Pistons in 1.7.10 are also quasi-connected by power at the
+        // block directly above them (BUD behavior).
+        let on = self.powered_near(x, y, z)
+            || (in_bounds(x, y + 1, z) && self.powered_near(x, y + 1, z));
         if extended == on {
             return;
         }
@@ -221,6 +293,56 @@ impl World {
                         }
                     }
                 }
+                149 | 150 => {
+                    // Rear input and two side inputs are sampled independently.
+                    // Metadata bit 2 chooses subtraction mode; bits 0..1 face.
+                    let (dx, dz) = repeater_direction(current);
+                    let rear = self.signal_into((x - dx, y, z - dz), (x, y, z));
+                    let side = [(-dz, dx), (dz, -dx)]
+                        .into_iter()
+                        .map(|(sx, sz)| self.signal_into((x + sx, y, z + sz), (x, y, z)))
+                        .max()
+                        .unwrap_or(0);
+                    let desired = if current & 4 != 0 {
+                        rear.saturating_sub(side)
+                    } else if rear >= side {
+                        rear
+                    } else {
+                        0
+                    };
+                    let pos = (x, y as u8, z);
+                    let output = self.comparator_outputs.get(&pos).copied().unwrap_or(0);
+                    if desired == output {
+                        self.pending_comparators.remove(&pos);
+                    } else {
+                        let entry = self
+                            .pending_comparators
+                            .entry(pos)
+                            .or_insert((self.fluid_phase + 2, desired));
+                        if entry.1 != desired {
+                            *entry = (self.fluid_phase + 2, desired);
+                        }
+                        if entry.0 <= self.fluid_phase {
+                            // Analog strength is applied after successful save
+                            // in block_tick, so failed disk writes do not power clients.
+                            self.comparator_ready.insert(pos, desired);
+                            let active = desired != 0;
+                            if active != (current >> 4 == 150) {
+                                changes.insert(
+                                    pos,
+                                    ((if active { 150u16 } else { 149u16 }) << 4) | (current & 15),
+                                );
+                            }
+                            self.pending_comparators.remove(&pos);
+                        }
+                    }
+                }
+                27 | 157 => {
+                    let powered = self.rail_powered(x, y, z, current >> 4);
+                    if powered != (current & 8 != 0) {
+                        changes.insert((x, y as u8, z), current ^ 8);
+                    }
+                }
                 29 | 33 => self.push_piston(x, y, z, current, &mut changes),
                 _ => {}
             }
@@ -248,6 +370,12 @@ impl World {
             77 | 143 => old | 8,
             96 => old ^ 4,
             93 | 94 => (old & !12) | (((((old & 12) >> 2) + 1) & 3) << 2),
+            149 | 150 => old ^ 4, // Toggle comparator compare/subtract mode.
+            107 => old ^ 4,       // Fence gate: open/closed.
+            71 => {
+                // Iron doors are powered only, not hand-operated.
+                return Ok(Vec::new());
+            }
             64 => {
                 // Top-half clicks operate on the bottom-half metadata.
                 let lower_y = if old & 8 != 0 { y - 1 } else { y };
