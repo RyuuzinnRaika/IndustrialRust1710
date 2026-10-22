@@ -1934,10 +1934,8 @@ mod tests {
 
     #[test]
     fn piston_collision_sweep_expires_after_three_ticks() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-piston-sweep-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-piston-sweep-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
         w.update_and_save(&path, 0, 65, 0, (33 << 4) | 5).unwrap();
