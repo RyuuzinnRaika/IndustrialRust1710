@@ -180,21 +180,37 @@ impl ServerProperties {
                 ));
             }
         }
-        let level_seed = values.get("level-seed").filter(|value| !value.is_empty()).map(|seed| {
-            // Java Edition interprets numeric longs directly and strings via Java's UTF-16 hashCode.
-            seed.parse::<i64>().map(|number| number as u64).unwrap_or_else(|_| {
-                let hash = seed.encode_utf16().fold(0i32, |hash, code_unit| {
-                    hash.wrapping_mul(31).wrapping_add(i32::from(code_unit))
-                });
-                (i64::from(hash)) as u64
-            })
-        });
-        let level_type = values.get("level-type").map(String::as_str).unwrap_or("FLAT");
+        let level_seed = values
+            .get("level-seed")
+            .filter(|value| !value.is_empty())
+            .map(|seed| {
+                // Java Edition interprets numeric longs directly and strings via Java's UTF-16 hashCode.
+                seed.parse::<i64>()
+                    .map(|number| number as u64)
+                    .unwrap_or_else(|_| {
+                        let hash = seed.encode_utf16().fold(0i32, |hash, code_unit| {
+                            hash.wrapping_mul(31).wrapping_add(i32::from(code_unit))
+                        });
+                        (i64::from(hash)) as u64
+                    })
+            });
+        let level_type = values
+            .get("level-type")
+            .map(String::as_str)
+            .unwrap_or("FLAT");
         match (level_type, level_seed) {
             ("FLAT", None) => {}
             ("DEFAULT", Some(_)) if survival => {}
-            ("DEFAULT", Some(_)) => return Err(invalid("DEFAULT seeded generation requires survival gamemode")),
-            ("FLAT", Some(_)) => return Err(invalid("level-seed is not applied to FLAT; choose level-type=DEFAULT")),
+            ("DEFAULT", Some(_)) => {
+                return Err(invalid(
+                    "DEFAULT seeded generation requires survival gamemode",
+                ))
+            }
+            ("FLAT", Some(_)) => {
+                return Err(invalid(
+                    "level-seed is not applied to FLAT; choose level-type=DEFAULT",
+                ))
+            }
             _ => return Err(invalid("unsupported level-type/level-seed combination")),
         }
         let accepted = [
@@ -307,7 +323,8 @@ gamemode=1
 
     #[test]
     fn seed_uses_java_long_and_string_hash_without_changing_flat_worlds() {
-        let base = SAFE.replace("level-type=FLAT", "level-type=DEFAULT")
+        let base = SAFE
+            .replace("level-type=FLAT", "level-type=DEFAULT")
             .replace("gamemode=1", "gamemode=0");
         let signed = ServerProperties::parse(&format!("{base}level-seed=-123\n")).unwrap();
         assert_eq!(signed.level_seed, Some((-123i64) as u64));
