@@ -62,7 +62,7 @@ use std::collections::BTreeSet;
 use std::io::{self, BufRead, ErrorKind};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -582,6 +582,7 @@ struct PlayerSession<'a> {
     hub: &'a Hub,
     entity_id: i32,
     events: &'a Receiver<Event>,
+    shutdown: Arc<AtomicBool>,
 }
 fn play(
     s: &mut TcpStream,
@@ -616,6 +617,7 @@ fn play(
         hub,
         entity_id,
         events,
+        shutdown,
     } = session;
     s.set_read_timeout(Some(Duration::from_millis(50)))?;
     let mut location = (player.x, player.y, player.z);
@@ -658,6 +660,13 @@ fn play(
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
     loop {
+        if shutdown.load(Ordering::Acquire) {
+            let mut reason = Vec::new();
+            if write_string(&json!({"text":"Server stopping"}).to_string(), &mut reason).is_ok() {
+                let _ = send(s, 0x40, &reason);
+            }
+            return Ok(()); // Owning connection saves player, inventory and XP.
+        }
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
                 "outbound packet overflow or session removed",
@@ -2841,6 +2850,7 @@ struct ServerContext {
     brewer_path: Arc<PathBuf>,
     survival: bool,
     difficulty: u8,
+    shutdown: Arc<AtomicBool>,
 }
 fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     let ServerContext {
@@ -2862,7 +2872,11 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         brewer_path,
         survival,
         difficulty,
+        shutdown,
     } = context;
+    if shutdown.load(Ordering::Acquire) {
+        return Ok(());
+    }
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
     let (id, data) = receive(&mut s)?;
@@ -3045,6 +3059,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             hub: &hub,
             entity_id,
             events: &events,
+            shutdown,
         },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
@@ -3068,7 +3083,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
 }
 /// Commands are accepted only from the operating-system console, never from
 /// unauthenticated offline-mode players or Protocol 5 chat messages.
-fn start_clock_console(hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf>) {
+fn start_clock_console(
+    hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf>, shutdown: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
@@ -3077,6 +3094,11 @@ fn start_clock_console(hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf
             };
             let args: Vec<_> = line.split_whitespace().collect();
             let result = match args.as_slice() {
+                ["/stop"] | ["stop"] => {
+                    shutdown.store(true, Ordering::Release);
+                    println!("Server shutdown requested by console");
+                    break;
+                }
                 ["/time", "query", "daytime"] => {
                     println!("Daytime: {}", clock.day_time());
                     Ok(())
@@ -3601,7 +3623,7 @@ fn main() -> io::Result<()> {
     };
     let clock_path = Arc::new(world_path.with_extension("clock"));
     let restored_clock = Clock::load_state(&clock_path)?;
-    let (clock, _clock_thread) = Clock::start_from(restored_clock);
+    let (clock, clock_thread) = Clock::start_from(restored_clock);
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -3632,14 +3654,16 @@ fn main() -> io::Result<()> {
         listener.local_addr()?
     );
     println!("WARNING: offline-mode has no account authentication. Do not expose to the internet.");
+    let shutdown = Arc::new(AtomicBool::new(false));
     let hub = Arc::new(Hub::default());
     let connections = Arc::new(AtomicUsize::new(0));
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
-    start_clock_console(
+    let console_thread = start_clock_console(
         Arc::clone(&hub),
         Arc::clone(&clock),
         Arc::clone(&clock_path),
+        Arc::clone(&shutdown),
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
@@ -3653,13 +3677,14 @@ fn main() -> io::Result<()> {
     let furnace_hub = Arc::clone(&hub);
     let leaf_drops = Arc::clone(&ground_items);
     let leaf_drops_file = Arc::clone(&ground_path);
-    thread::spawn(move || {
+    let tick_shutdown = Arc::clone(&shutdown);
+    let tick_thread = thread::spawn(move || {
         let mut telemetry =
             telemetry::TickTelemetry::new(furnace_world_path.with_extension("metrics.jsonl"));
         let mut last = furnace_clock.ticks();
         let mut last_clock_snapshot = last;
         let mut last_weather = furnace_clock.weather();
-        loop {
+        while !tick_shutdown.load(Ordering::Acquire) {
             let now = furnace_clock.ticks();
             if now > last {
                 let worker_started = Instant::now();
@@ -3811,9 +3836,10 @@ fn main() -> io::Result<()> {
     let hopper_furnaces = Arc::clone(&furnaces);
     let hopper_furnace_file = Arc::clone(&furnace_path);
     let hopper_world_path = Arc::clone(&path);
-    thread::spawn(move || {
+    let hopper_shutdown = Arc::clone(&shutdown);
+    let hopper_thread = thread::spawn(move || {
         let mut last_cycle = hopper_clock.ticks() / 8;
-        loop {
+        while !hopper_shutdown.load(Ordering::Acquire) {
             let cycle = hopper_clock.ticks() / 8;
             if cycle > last_cycle {
                 last_cycle = cycle;
@@ -3853,9 +3879,10 @@ fn main() -> io::Result<()> {
     let brewer_worker = Arc::clone(&brewers);
     let brewer_file = Arc::clone(&brewer_path);
     let brewer_clock = Arc::clone(&clock);
-    thread::spawn(move || {
+    let brewing_shutdown = Arc::clone(&shutdown);
+    let brewing_thread = thread::spawn(move || {
         let mut last = brewer_clock.ticks();
-        loop {
+        while !brewing_shutdown.load(Ordering::Acquire) {
             let now = brewer_clock.ticks();
             if now > last {
                 let steps = (now - last).min(20) as u32;
@@ -3872,8 +3899,26 @@ fn main() -> io::Result<()> {
             thread::sleep(Duration::from_millis(10));
         }
     });
-    for accepted in listener.incoming() {
-        let stream = accepted?;
+    listener.set_nonblocking(true)?;
+    let mut client_threads = Vec::new();
+    while !shutdown.load(Ordering::Acquire) {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        if shutdown.load(Ordering::Acquire) { break; }
+        // Join completed session workers instead of retaining unbounded thread handles.
+        let mut active = Vec::new();
+        for worker in client_threads.drain(..) {
+            if worker.is_finished() {
+                if worker.join().is_err() { eprintln!("client thread panicked"); }
+            } else { active.push(worker); }
+        }
+        client_threads = active;
         if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             connections.fetch_sub(1, Ordering::AcqRel);
             continue;
@@ -3895,7 +3940,8 @@ fn main() -> io::Result<()> {
         let hopper_file = Arc::clone(&hopper_path);
         let brewer_storage = Arc::clone(&brewers);
         let brewer_file = Arc::clone(&brewer_path);
-        thread::spawn(move || {
+        let client_shutdown = Arc::clone(&shutdown);
+        client_threads.push(thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
                 stream,
@@ -3918,14 +3964,47 @@ fn main() -> io::Result<()> {
                     brewer_path: brewer_file,
                     survival,
                     difficulty,
+                    shutdown: client_shutdown,
                 },
             ) {
                 if e.kind() != ErrorKind::UnexpectedEof {
                     eprintln!("client disconnected: {e}");
                 }
             }
-        });
+        }));
     }
+    // /stop first closes admission, then asks all sessions to persist and exit.
+    // No world/container snapshot is written until all clients and tick workers
+    // have released their in-memory states.
+    drop(listener);
+    for worker in client_threads {
+        worker.join().map_err(|_| io::Error::other("client thread panicked during shutdown"))?;
+    }
+    tick_thread.join().map_err(|_| io::Error::other("tick thread panicked during shutdown"))?;
+    hopper_thread.join().map_err(|_| io::Error::other("hopper thread panicked during shutdown"))?;
+    brewing_thread.join().map_err(|_| io::Error::other("brewing thread panicked during shutdown"))?;
+    clock.stop();
+    clock_thread.join().map_err(|_| io::Error::other("clock thread panicked during shutdown"))?;
+    console_thread.join().map_err(|_| io::Error::other("console thread panicked during shutdown"))?;
+    session_guard.verify()?;
+    {
+        let world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        world.save(&path)?;
+        mobs.lock().map_err(|_| bad("mob mutex poisoned"))?.save(&world)?;
+    }
+    journal::commit(
+        &path.with_extension("pending-txn.json"),
+        &[
+            (chest_path.as_ref().as_path(), chests.lock().map_err(|_| bad("chest mutex poisoned"))?.encoded()?),
+            (furnace_path.as_ref().as_path(), furnaces.lock().map_err(|_| bad("furnace mutex poisoned"))?.encoded()?),
+            (hopper_path.as_ref().as_path(), hoppers.lock().map_err(|_| bad("hopper mutex poisoned"))?.encoded()?),
+            (brewer_path.as_ref().as_path(), brewers.lock().map_err(|_| bad("brewer mutex poisoned"))?.encoded()?),
+            (ground_path.as_ref().as_path(), ground_items.lock().map_err(|_| bad("ground items mutex poisoned"))?.encoded()?),
+        ],
+    )?;
+    clock.save_ticks(&clock_path)?;
+    session_guard.verify()?;
+    println!("Server stopped: all sessions joined and persistent state flushed.");
     Ok(())
 }
 #[cfg(test)]
