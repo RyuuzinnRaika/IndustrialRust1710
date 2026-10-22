@@ -186,12 +186,15 @@ impl ServerProperties {
             .get("level-seed")
             .filter(|value| !value.is_empty())
             .map(|value| {
-                value.parse::<i64>().map(|num| num as u64).unwrap_or_else(|_| {
-                    let hash = value.encode_utf16().fold(0i32, |hash, ch| {
-                        hash.wrapping_mul(31).wrapping_add(i32::from(ch))
-                    });
-                    (hash as i64) as u64
-                })
+                value
+                    .parse::<i64>()
+                    .map(|num| num as u64)
+                    .unwrap_or_else(|_| {
+                        let hash = value.encode_utf16().fold(0i32, |hash, ch| {
+                            hash.wrapping_mul(31).wrapping_add(i32::from(ch))
+                        });
+                        (hash as i64) as u64
+                    })
             });
         let level_type = values
             .get("level-type")
