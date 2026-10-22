@@ -15,6 +15,8 @@ pub const MAX_PLAYERS: usize = 8;
 pub const ADMIN_TELEPORT_EVENT: u32 = u32::MAX - 1;
 /// Internal mailbox event that applies the 1.7.10 ender-pearl health penalty.
 pub const PEARL_TELEPORT_EVENT: u32 = u32::MAX - 2;
+/// Console-only mode change delivered to the owning session.
+pub const ADMIN_GAMEMODE_EVENT: u32 = u32::MAX - 3;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -149,6 +151,30 @@ impl Hub {
     /// Updating Hub coordinates alone would not update the player's saved state.
     pub fn request_admin_teleport(&self, name: &str, position: PlayerPosition) -> io::Result<bool> {
         self.queue_teleport(name, position, ADMIN_TELEPORT_EVENT)
+    }
+    /// Queue a gamemode change. The player thread owns its inventory, and is
+    /// responsible for writing its override before notifying the client.
+    pub fn request_admin_gamemode(&self, name: &str, mode: u8) -> io::Result<bool> {
+        if mode > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "only survival and creative are implemented",
+            ));
+        }
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(name)) else {
+            return Ok(false);
+        };
+        peer.tx
+            .try_send(Event {
+                id: ADMIN_GAMEMODE_EVENT,
+                body: vec![mode],
+            })
+            .map_err(|_| {
+                peer.overloaded.store(true, Ordering::Release);
+                io::Error::other("target session mailbox unavailable")
+            })?;
+        Ok(true)
     }
     pub fn request_pearl_teleport(&self, name: &str, position: PlayerPosition) -> io::Result<bool> {
         self.queue_teleport(name, position, PEARL_TELEPORT_EVENT)
