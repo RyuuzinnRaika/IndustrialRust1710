@@ -60,6 +60,29 @@ fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
     {
         return Err(invalid("journal target type not allowed"));
     }
+    // Both fresh commits and crash replay must refuse a symlinked players/
+    // directory or target file. Otherwise an apparently safe relative path
+    // could escape the trusted world directory during replay.
+    let mut path = root.to_path_buf();
+    let mut parts = rel.components().peekable();
+    while let Some(component) = parts.next() {
+        path.push(component.as_os_str());
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(invalid("journal target follows a symlink"));
+                }
+                if parts.peek().is_some() && !meta.is_dir() {
+                    return Err(invalid("journal target parent is not a directory"));
+                }
+                if parts.peek().is_none() && !meta.is_file() {
+                    return Err(invalid("journal target is not a regular file"));
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
     Ok(rel.to_path_buf())
 }
 fn root(journal: &Path) -> &Path {
@@ -356,6 +379,63 @@ mod tests {
         recover(&journal).unwrap();
         assert!(!journal.exists());
         fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_replay_targets_fail_closed_without_external_writes() {
+        use std::os::unix::fs::symlink;
+
+        let home = std::env::temp_dir().join(format!("ir-journal-symlink-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("ir-journal-outside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let outside_file = outside.join("test.inventory.json");
+        fs::write(&outside_file, b"untouched").unwrap();
+        symlink(&outside, home.join("players")).unwrap();
+
+        let target = home.join("players/test.inventory.json");
+        let chest = home.join("world.chests.json");
+        let journal = home.join("world.pending-txn.json");
+        assert!(commit(
+            &journal,
+            &[
+                (target.as_path(), b"overwrite".to_vec()),
+                (chest.as_path(), b"chest-new".to_vec()),
+            ],
+        )
+        .is_err());
+        assert!(!journal.exists());
+        assert!(!chest.exists());
+
+        // An attacker may plant a validly checksummed redo record and then
+        // change a parent directory into a symlink before server restart.
+        let record = Record {
+            version: VERSION,
+            files: vec![
+                Target {
+                    relative: PathBuf::from("players/test.inventory.json"),
+                    contents: b"overwrite".to_vec(),
+                    checksum: fingerprint(b"overwrite"),
+                },
+                Target {
+                    relative: PathBuf::from("world.chests.json"),
+                    contents: b"chest-new".to_vec(),
+                    checksum: fingerprint(b"chest-new"),
+                },
+            ],
+        };
+        fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(recover(&journal).is_err());
+        assert!(journal.exists()); // Retain evidence and require operator repair.
+        assert!(!chest.exists()); // Check all participants before applying any.
+        assert_eq!(fs::read(&outside_file).unwrap(), b"untouched");
+
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
