@@ -2258,7 +2258,7 @@ fn play(
                             };
                             let invalid_chest_merge =
                                 block_id == 54 && !can_place_chest(&w, (nx, ny, nz));
-                            let metadata = if matches!(block_id, 50 | 77 | 143) {
+                            let metadata = if matches!(block_id, 50 | 77 | 131 | 143) {
                                 match face {
                                     1 => 5,
                                     2 => 3,
