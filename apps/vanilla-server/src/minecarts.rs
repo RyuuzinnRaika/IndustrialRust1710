@@ -201,7 +201,9 @@ mod tests {
         let mut carts = Minecarts::default();
         let packet = carts.place(&world, at, 0).unwrap();
         assert_eq!(packet.id, 0x0e);
-        assert_eq!(packet.body[1], 10);
+        let mut data = packet.body.as_slice();
+        assert_eq!(legacy_protocol::read_varint(&mut data).unwrap(), FIRST_ID as u32);
+        assert_eq!(data[0], 10);
         let id = FIRST_ID;
         assert_eq!(carts.mount(id, 11, at).unwrap().id, 0x1b);
         assert!(carts.mount(id, 12, at).is_none());
