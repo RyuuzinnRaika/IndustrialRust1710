@@ -145,7 +145,11 @@ mod tests {
         rules.save(&path).unwrap();
         assert_eq!(GameRules::load(&path).unwrap(), rules);
         // Migration: old version-1 worlds must retain vanilla natural spawning.
-        fs::write(&path, br#"{"version":1,"doDaylightCycle":true,"keepInventory":false}"#).unwrap();
+        fs::write(
+            &path,
+            br#"{"version":1,"doDaylightCycle":true,"keepInventory":false}"#,
+        )
+        .unwrap();
         assert!(GameRules::load(&path).unwrap().mob_spawning());
         fs::write(
             &path,
