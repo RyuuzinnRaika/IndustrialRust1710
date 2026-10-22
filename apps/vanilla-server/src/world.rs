@@ -695,10 +695,8 @@ impl World {
                     let power = self.get(nx, check_y, nz);
                     let signal = if power >> 4 == 55 {
                         (power & 15).saturating_sub(1)
-                    } else if self.power_into((nx, check_y, nz), (x, y, z)) {
-                        15
                     } else {
-                        0
+                        u16::from(self.signal_into((nx, check_y, nz), (x, y, z)))
                     };
                     strongest = strongest.max(signal);
                 }
