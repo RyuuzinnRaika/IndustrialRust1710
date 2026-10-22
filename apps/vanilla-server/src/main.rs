@@ -1415,14 +1415,11 @@ fn play(
                         as_chat(s, "Admin audit unavailable; operation refused.")?;
                         continue;
                     }
+                    let services = PlayerAdminServices { hub, world, world_path, clock, administration };
                     let result = run_player_admin_command(
                         &message,
                         administration.operator_level(name, verified_uuid)?,
-                        hub,
-                        world,
-                        world_path,
-                        clock,
-                        administration,
+                        &services,
                         name,
                     );
                     let outcome = if result.is_ok() { "success" } else { "failure" };
@@ -3196,17 +3193,22 @@ fn handle(
     experience_saved?;
     result
 }
+/// Services required to execute a level-gated in-game administrative command.
+struct PlayerAdminServices<'a> {
+    hub: &'a Hub,
+    world: &'a Mutex<World>,
+    world_path: &'a Path,
+    clock: &'a Clock,
+    administration: &'a Administration,
+}
 /// Authorization is based exclusively on the Mojang-verified session UUID.
 fn run_player_admin_command(
     message: &str,
     level: u8,
-    hub: &Hub,
-    world: &Mutex<World>,
-    world_path: &Path,
-    clock: &Clock,
-    administration: &Administration,
+    services: &PlayerAdminServices<'_>,
     actor: &str,
 ) -> io::Result<String> {
+    let PlayerAdminServices { hub, world, world_path, clock, administration } = services;
     let parts: Vec<&str> = message.split_whitespace().collect();
     let minimum_level = match parts.first().copied() {
         Some("/time") | Some("/weather") => 2,
@@ -3309,6 +3311,11 @@ fn run_player_admin_command(
     }
 }
 
+struct ConsoleAccess {
+    administration: Arc<Administration>,
+    whitelist_path: Arc<PathBuf>,
+    online_mode: bool,
+}
 /// Host console can administer even when online identity services are down.
 /// Admin operations always record both intent and final outcome durably.
 fn start_clock_console(
@@ -3317,10 +3324,9 @@ fn start_clock_console(
     clock_path: Arc<PathBuf>,
     world: Arc<Mutex<World>>,
     world_path: Arc<PathBuf>,
-    administration: Arc<Administration>,
-    whitelist_path: Arc<PathBuf>,
-    online_mode: bool,
+    access: ConsoleAccess,
 ) {
+    let ConsoleAccess { administration, whitelist_path, online_mode } = access;
     thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
@@ -3987,9 +3993,11 @@ fn main() -> io::Result<()> {
         Arc::clone(&clock_path),
         Arc::clone(&world),
         Arc::clone(&path),
-        Arc::clone(&administration),
-        Arc::clone(&allow_path),
-        online_mode,
+        ConsoleAccess {
+            administration: Arc::clone(&administration),
+            whitelist_path: Arc::clone(&allow_path),
+            online_mode,
+        },
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
