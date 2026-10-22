@@ -1,0 +1,26 @@
+name: Prune merged branches safely
+on:
+  # Bootstrap the cleanup once when this workflow is first merged to main.
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/prune-merged-branches.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: read
+concurrency:
+  group: prune-merged-branches
+  cancel-in-progress: false
+jobs:
+  prune:
+    if: github.repository == 'RyuuzinnRaika/IndustrialRust1710'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Safely remove branches already merged into main
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/prune_merged_pr_branches.py --apply
