@@ -6151,6 +6151,41 @@ fn main() -> io::Result<()> {
                                 let seed = now
                                     ^ (pos.0 as u64).wrapping_mul(31)
                                     ^ (pos.2 as u64).wrapping_mul(131);
+                                // Droppers insert into another dispenser or dropper
+                                // without creating a ground entity. Both inventories
+                                // share one persisted device file and one journal commit.
+                                if state >> 4 == 158
+                                    && matches!(
+                                        gravity_world.get(dest.0, dest.1, dest.2) >> 4,
+                                        23 | 158
+                                    )
+                                {
+                                    let staged = match storage.stage_transfer_one(pos, dest, seed) {
+                                        Ok(value) => value,
+                                        Err(error) => {
+                                            eprintln!("DROPPER DEVICE TRANSFER ERROR: {error}");
+                                            return;
+                                        }
+                                    };
+                                    if let Some(updated) = staged {
+                                        let bytes = match updated.encoded() {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                eprintln!("DROPPER DEVICE ENCODING ERROR: {error}");
+                                                return;
+                                            }
+                                        };
+                                        if let Err(error) = journal::commit(
+                                            &furnace_world_path.with_extension("pending-txn.json"),
+                                            &[(&*ejection_file, bytes)],
+                                        ) {
+                                            eprintln!("DROPPER DEVICE JOURNAL ERROR: {error}");
+                                            return;
+                                        }
+                                        *storage = updated;
+                                    }
+                                    continue;
+                                }
                                 let Some((updated, stack)) = (match storage.stage_eject(pos, seed) {
                                     Ok(result) => result,
                                     Err(error) => {
