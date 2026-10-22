@@ -180,19 +180,28 @@ impl Hub {
     /// Queue an administrative Kick without removing the player from Hub early.
     pub fn request_admin_kick(&self, name: &str, reason: &str) -> io::Result<bool> {
         if reason.is_empty() || reason.len() > 256 || reason.chars().any(char::is_control) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid kick reason"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid kick reason",
+            ));
         }
         let inner = self.0.lock().map_err(|_| poisoned())?;
-        let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(name)) else {
+        let Some(peer) = inner
+            .players
+            .values()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+        else {
             return Ok(false);
         };
-        peer.tx.try_send(Event {
-            id: ADMIN_KICK_EVENT,
-            body: reason.as_bytes().to_vec(),
-        }).map_err(|_| {
-            peer.overloaded.store(true, Ordering::Release);
-            io::Error::other("target session mailbox unavailable")
-        })?;
+        peer.tx
+            .try_send(Event {
+                id: ADMIN_KICK_EVENT,
+                body: reason.as_bytes().to_vec(),
+            })
+            .map_err(|_| {
+                peer.overloaded.store(true, Ordering::Release);
+                io::Error::other("target session mailbox unavailable")
+            })?;
         Ok(true)
     }
 
