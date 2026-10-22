@@ -4565,11 +4565,25 @@ fn main() -> io::Result<()> {
                                         return;
                                     }
                                 };
+                                let device_bytes = match updated.encoded() {
+                                    Ok(bytes) => bytes,
+                                    Err(error) => {
+                                        eprintln!("DEVICE INVENTORY ENCODING ERROR: {error}");
+                                        return;
+                                    }
+                                };
+                                let ground_bytes = match next_ground.encoded() {
+                                    Ok(bytes) => bytes,
+                                    Err(error) => {
+                                        eprintln!("DEVICE ITEM ENCODING ERROR: {error}");
+                                        return;
+                                    }
+                                };
                                 if let Err(error) = journal::commit(
                                     &furnace_world_path.with_extension("pending-txn.json"),
                                     &[
-                                        (&*ejection_file, updated.encoded().unwrap_or_default()),
-                                        (&*leaf_drops_file, next_ground.encoded().unwrap_or_default()),
+                                        (&*ejection_file, device_bytes),
+                                        (&*leaf_drops_file, ground_bytes),
                                     ],
                                 ) {
                                     eprintln!("DEVICE EJECTION JOURNAL ERROR: {error}");
