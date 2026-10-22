@@ -92,12 +92,19 @@ impl World {
             76 if to == (x, y + 1, z) => 15,
             94 => {
                 let (dx, dz) = repeater_direction(block);
-                if to == (x + dx, y, z + dz) { 15 } else { 0 }
+                if to == (x + dx, y, z + dz) {
+                    15
+                } else {
+                    0
+                }
             }
             150 => {
                 let (dx, dz) = repeater_direction(block);
                 if to == (x + dx, y, z + dz) {
-                    self.comparator_outputs.get(&(x, y as u8, z)).copied().unwrap_or(0)
+                    self.comparator_outputs
+                        .get(&(x, y as u8, z))
+                        .copied()
+                        .unwrap_or(0)
                 } else {
                     0
                 }
@@ -112,7 +119,11 @@ impl World {
                     5 | 6 => (x, y - 1, z),
                     _ => (x, y + 1, z),
                 };
-                if to == attached { 15 } else { 0 }
+                if to == attached {
+                    15
+                } else {
+                    0
+                }
             }
             _ => 0,
         }
@@ -225,7 +236,9 @@ impl World {
                 continue;
             }
             let current = self.get(rx, ry, rz);
-            let Some(ports) = Self::rail_ports(current & 7) else { continue };
+            let Some(ports) = Self::rail_ports(current & 7) else {
+                continue;
+            };
             for (dx, dz, height) in ports {
                 for dy in -1..=1 {
                     let (nx, ny, nz) = (rx + dx, ry + dy, rz + dz);
@@ -236,10 +249,12 @@ impl World {
                     if candidate >> 4 != id {
                         continue;
                     }
-                    let Some(other_ports) = Self::rail_ports(candidate & 7) else { continue };
-                    let connected = other_ports.iter().any(|&(ox, oz, oh)| {
-                        ox == -dx && oz == -dz && ry + height == ny + oh
-                    });
+                    let Some(other_ports) = Self::rail_ports(candidate & 7) else {
+                        continue;
+                    };
+                    let connected = other_ports
+                        .iter()
+                        .any(|&(ox, oz, oh)| ox == -dx && oz == -dz && ry + height == ny + oh);
                     if connected && seen.insert((nx, ny, nz)) {
                         next.push_back((nx, ny, nz, distance + 1));
                     }
