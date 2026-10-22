@@ -408,6 +408,83 @@ fn spawn_light_ok(block: u8, sky: u8, now: u64, passive: bool) -> bool {
         block < 8 && effective_sky < 8
     }
 }
+/// Ghasts are four blocks wide and tall. Reusing the player's narrow
+/// collision hull lets them clip through fortress walls, so the conservative
+/// volume test rejects solid blocks throughout their body.
+fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
+    let x = p.x.floor() as i32;
+    let y = p.y.floor() as i32;
+    let z = p.z.floor() as i32;
+    (x - 2..=x + 2).all(|bx| {
+        (y - 2..=y + 2).all(|by| {
+            (z - 2..=z + 2)
+                .all(|bz| matches!(world.get(bx, by, bz) >> 4, 0 | 6 | 8..=11))
+        })
+    })
+}
+
+/// A bounded, collision-swept aerial step. Ghasts keep their distance and
+/// circle their target while blazes try to gain altitude for ranged attacks.
+/// Flight never requires a supporting ground block.
+fn flying_step(
+    world: &World,
+    kind: Kind,
+    from: PlayerPosition,
+    target: PlayerPosition,
+    tick: u64,
+) -> Option<PlayerPosition> {
+    if !matches!(kind, Kind::Ghast | Kind::Blaze)
+        || !from.is_valid()
+        || !target.is_valid()
+    {
+        return None;
+    }
+    let dx = target.x - from.x;
+    let dz = target.z - from.z;
+    let horizontal = dx.hypot(dz);
+    let (step_x, step_z) = if horizontal > 0.01 {
+        let (ux, uz) = (dx / horizontal, dz / horizontal);
+        if kind == Kind::Ghast {
+            if horizontal < 16.0 {
+                (-ux * 0.10, -uz * 0.10)
+            } else if horizontal > 28.0 {
+                (ux * 0.10, uz * 0.10)
+            } else {
+                let sign = if (tick / 80).is_multiple_of(2) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                (-uz * 0.10 * sign, ux * 0.10 * sign)
+            }
+        } else if horizontal < 5.0 {
+            (-ux * 0.10, -uz * 0.10)
+        } else if horizontal > 10.0 {
+            (ux * 0.10, uz * 0.10)
+        } else {
+            (0.0, 0.0)
+        }
+    } else {
+        (0.0, 0.0)
+    };
+    let desired_y = target.y + if kind == Kind::Ghast { 8.0 } else { 3.0 };
+    let step_y = (desired_y - from.y).clamp(-0.08, 0.08);
+    let next = PlayerPosition {
+        x: from.x + step_x,
+        y: from.y + step_y,
+        z: from.z + step_z,
+    };
+    if next.is_valid()
+        && physics::valid_movement(world, &from, &next)
+        && (kind != Kind::Ghast || ghast_has_clearance(world, next))
+        && distance_3d(from, next) > 0.0001
+    {
+        Some(next)
+    } else {
+        None
+    }
+}
+
 fn sky_exposed(world: &World, p: PlayerPosition) -> bool {
     let x = p.x.floor() as i32;
     let z = p.z.floor() as i32;
@@ -1132,6 +1209,8 @@ impl Mobs {
                         let fortress = world.get(x, y - 1, z) >> 4 == 112;
                         if fortress && seed.is_multiple_of(4) {
                             Kind::Blaze
+                        } else if (seed >> 24).is_multiple_of(12) {
+                            Kind::Ghast
                         } else if (seed >> 24).is_multiple_of(8) {
                             Kind::MagmaCube
                         } else {
@@ -1150,8 +1229,21 @@ impl Mobs {
             } else {
                 1
             };
+            let spawn_position = if kind == Kind::Ghast {
+                PlayerPosition {
+                    y: position.y + 4.0,
+                    ..position
+                }
+            } else {
+                position
+            };
+            if kind == Kind::Ghast
+                && (!spawn_position.is_valid() || !ghast_has_clearance(world, spawn_position))
+            {
+                continue;
+            }
             let baby = kind == Kind::Zombie && (seed >> 21).is_multiple_of(20);
-            events.push(self.insert_sized(kind, position, baby, size));
+            events.push(self.insert_sized(kind, spawn_position, baby, size));
             break; // Bound per-cycle packets and CPU.
         }
     }
@@ -1274,7 +1366,17 @@ impl Mobs {
                 let nearest = players
                     .iter()
                     .copied()
-                    .filter(|p| mob.nearby(*p, if mob.kind.passive() { 12.0 } else { 24.0 }))
+                    .filter(|p| {
+                        mob.nearby(
+                            *p,
+                            match mob.kind {
+                                Kind::Ghast => 64.0,
+                                Kind::Blaze | Kind::Wither => 48.0,
+                                _ if mob.kind.passive() => 12.0,
+                                _ => 24.0,
+                            },
+                        )
+                    })
                     .min_by(|a, b| {
                         distance(*a, mob.position).total_cmp(&distance(*b, mob.position))
                     });
@@ -1377,6 +1479,15 @@ impl Mobs {
                         shots.push((mob.id, mob.position, yaw, pitch, kind));
                     }
                 }
+                if matches!(mob.kind, Kind::Ghast | Kind::Blaze) {
+                    if let Some(next) =
+                        flying_step(world, mob.kind, mob.position, target, now)
+                    {
+                        mob.position = next;
+                        events.push(multiplayer::teleport(mob.id, &next, 0.0, 0.0));
+                    }
+                    continue;
+                }
                 let destination = if mob.kind == Kind::Skeleton && d < 7.0 {
                     PlayerPosition {
                         x: mob.position.x + (mob.position.x - target.x),
@@ -1433,8 +1544,8 @@ impl Mobs {
                 {
                     mob.position = candidate;
                     events.push(multiplayer::teleport(mob.id, &candidate, 0.0, 0.0));
-                } else if mob.kind == Kind::Spider {
-                    // Climb alongside a wall, never through it.
+                } else if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
+                    // Both spider variants climb alongside a wall, never through it.
                     let front = PlayerPosition {
                         x: mob.position.x + dx / len * 0.6,
                         z: mob.position.z + dz / len * 0.6,
@@ -1788,6 +1899,50 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn flying_mobs_move_without_a_ground_support_block() {
+        let world = World::new();
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        let player = PlayerPosition {
+            x: 36.5,
+            y: 75.0,
+            z: 0.5,
+        };
+        assert!(!physics::supported(&world, &from));
+        let ghast = flying_step(&world, Kind::Ghast, from, player, 100).unwrap();
+        assert!(ghast.x > from.x);
+        assert!(ghast.y > from.y);
+        let blaze = flying_step(&world, Kind::Blaze, from, player, 100).unwrap();
+        assert!(blaze.x > from.x);
+        assert!(blaze.y < from.y);
+        assert!(flying_step(&world, Kind::Zombie, from, player, 100).is_none());
+    }
+
+    #[test]
+    fn ghast_large_body_cannot_clip_through_a_block_or_ceiling() {
+        let mut world = World::new();
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        let target = PlayerPosition {
+            x: 36.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        assert!(ghast_has_clearance(&world, from));
+        world.import_block(2, 80, 0, 1 << 4).unwrap();
+        assert!(!ghast_has_clearance(&world, from));
+        assert!(flying_step(&world, Kind::Ghast, from, target, 20).is_none());
+        // A blaze has a smaller collision envelope and still moves.
+        assert!(flying_step(&world, Kind::Blaze, from, target, 20).is_some());
+    }
+
     #[test]
     fn living_health_metadata_is_shared_on_spawn_and_after_damage() {
         let mut mobs = Mobs::default();
