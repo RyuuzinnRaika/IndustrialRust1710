@@ -19,7 +19,7 @@ fn invalid(reason: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, reason)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MapData {
     center_x: i32,
@@ -235,9 +235,9 @@ mod tests {
         let data = MapData::centered(-99, 101);
         let packet = data.packet(7, 0, 0, 90.0, 20, 10);
         assert_eq!(packet[0], 7);
-        assert_eq!(packet[7], 1);
-        assert_eq!(packet[8], 16);
-        assert_eq!(&packet[9..12], &[20, 10, 16]);
-        assert_eq!(packet.len(), 28);
+        assert_eq!(packet[6], 1);
+        assert_eq!(packet[7], 16);
+        assert_eq!(&packet[8..11], &[20, 10, 16]);
+        assert_eq!(packet.len(), 27);
     }
 }
