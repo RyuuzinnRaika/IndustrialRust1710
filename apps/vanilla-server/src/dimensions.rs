@@ -1,12 +1,14 @@
 //! IRW4 dimension identities, disjoint files and safe coordinate conversion.
 //! Minecraft 1.7.10 dimension IDs: Nether=-1, Overworld=0, End=1.
-// These APIs are preparatory until the multi-world session router is connected.
+// This module owns independent world handles; Protocol 5 session switching is
+// intentionally separate and must not be assumed by callers.
 #![allow(dead_code)]
 use crate::world::{World, WORLD_LIMIT};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[repr(i8)]
@@ -74,6 +76,83 @@ impl DimensionManager {
         }
     }
 }
+
+/// Three independent, live IRW4 world handles. All three are loaded and checked
+/// against the same generation seed before the caller exposes any handle.
+/// The server's session router can retain these handles between transitions;
+/// loading each world for every teleport would lose unsaved state.
+///
+/// Ownership of session.lock and recovery of any pending journals remains the
+/// responsibility of the server bootstrap before calling `load_all`.
+#[derive(Debug)]
+pub struct DimensionWorlds {
+    manager: DimensionManager,
+    overworld: Arc<Mutex<World>>,
+    nether: Arc<Mutex<World>>,
+    end: Arc<Mutex<World>>,
+}
+
+impl DimensionWorlds {
+    pub fn load_all(manager: DimensionManager) -> io::Result<Self> {
+        // Keep each world separate even when they have the same coordinates.
+        // Fail closed on any seed/identity mismatch.
+        let overworld = manager.load_or_create(Dimension::Overworld)?;
+        let nether = manager.load_or_create(Dimension::Nether)?;
+        let end = manager.load_or_create(Dimension::End)?;
+        Ok(Self {
+            manager,
+            overworld: Arc::new(Mutex::new(overworld)),
+            nether: Arc::new(Mutex::new(nether)),
+            end: Arc::new(Mutex::new(end)),
+        })
+    }
+
+    pub fn world(&self, dimension: Dimension) -> Arc<Mutex<World>> {
+        match dimension {
+            Dimension::Overworld => Arc::clone(&self.overworld),
+            Dimension::Nether => Arc::clone(&self.nether),
+            Dimension::End => Arc::clone(&self.end),
+        }
+    }
+
+    pub fn path(&self, dimension: Dimension) -> PathBuf {
+        self.manager.path(dimension)
+    }
+
+    /// Persist each dimension to its own file. A session lock must cover all
+    /// three paths at the server level; this is not a cross-file transaction.
+    pub fn save_all(&self) -> io::Result<()> {
+        for dimension in [Dimension::Overworld, Dimension::Nether, Dimension::End] {
+            self.world(dimension)
+                .lock()
+                .map_err(|_| io::Error::other("dimension world mutex poisoned"))?
+                .save(&self.manager.path(dimension))?;
+        }
+        Ok(())
+    }
+
+    /// Resolve a portal destination against the actual target world, without
+    /// touching source world state. None means that the transition must be
+    /// rejected; never teleport to a solid, liquid or out-of-bounds block.
+    pub fn resolve_arrival(
+        &self,
+        source: Dimension,
+        target: Dimension,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> io::Result<Option<PortalDestination>> {
+        let Some(anchor) = destination(source, target, x, y, z) else {
+            return Ok(None);
+        };
+        let target_world = self.world(target);
+        let guard = target_world
+            .lock()
+            .map_err(|_| io::Error::other("dimension world mutex poisoned"))?;
+        Ok(safe_arrival(&guard, anchor))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortalDestination {
@@ -104,7 +183,14 @@ pub fn destination(
     y: f64,
     z: f64,
 ) -> Option<PortalDestination> {
-    if !x.is_finite() || !y.is_finite() || !z.is_finite() || !(0.0..256.0).contains(&y) {
+    let limit = WORLD_LIMIT as f64;
+    if !x.is_finite()
+        || !y.is_finite()
+        || !z.is_finite()
+        || !(0.0..256.0).contains(&y)
+        || !(-limit..limit).contains(&x)
+        || !(-limit..limit).contains(&z)
+    {
         return None;
     }
     let scale = match (source, target) {
@@ -130,7 +216,7 @@ pub fn destination(
 /// and limited to the destination World; it never creates chunks or writes
 /// blocks. A caller must refuse teleportation when no safe space exists.
 pub fn safe_arrival(world: &World, anchor: PortalDestination) -> Option<PortalDestination> {
-    if !anchor.valid() {
+    if !anchor.valid() || world.dimension() != anchor.dimension {
         return None;
     }
     let (cx, cz) = (anchor.x.floor() as i32, anchor.z.floor() as i32);
@@ -245,11 +331,12 @@ mod tests {
         assert!(
             destination(Dimension::Nether, Dimension::Overworld, f64::NAN, 70.0, 0.0).is_none()
         );
-        assert!(
-            destination(Dimension::Nether, Dimension::Overworld, 1e8, 70.0, 0.0)
-                .unwrap()
-                .valid()
-        );
+        assert!(destination(Dimension::Nether, Dimension::Overworld, 1e8, 70.0, 0.0).is_none());
+        // Valid source coordinates still clamp the 8:1 destination at the
+        // target world edge without generating out-of-bounds chunks.
+        assert!(destination(Dimension::Nether, Dimension::Overworld, 16_380.0, 70.0, 0.0)
+            .unwrap()
+            .valid());
     }
     #[test]
     fn world_identification_prevents_dimension_cross_load() {
@@ -318,4 +405,63 @@ mod tests {
         );
         fs::remove_file(file).unwrap();
     }
+    #[test]
+    fn refuses_cross_dimension_arrival_and_invalid_source_coordinates() {
+        let overworld = World::expanded(42, Dimension::Overworld);
+        let nether_anchor = PortalDestination {
+            dimension: Dimension::Nether,
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        assert!(safe_arrival(&overworld, nether_anchor).is_none());
+        for (x, y, z) in [
+            (f64::INFINITY, 70.0, 0.0),
+            (16_384.0, 70.0, 0.0),
+            (-16_385.0, 70.0, 0.0),
+            (0.0, -1.0, 0.0),
+            (0.0, 256.0, 0.0),
+        ] {
+            assert!(destination(Dimension::Overworld, Dimension::Nether, x, y, z).is_none());
+        }
+    }
+
+    #[test]
+    fn multi_world_handles_are_isolated_and_survive_reload() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-multi-world-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let manager = DimensionManager::new(&root, 417);
+        let worlds = DimensionWorlds::load_all(manager.clone()).unwrap();
+        let blocks = [
+            (Dimension::Overworld, 1u16 << 4),
+            (Dimension::Nether, 49u16 << 4),
+            (Dimension::End, 121u16 << 4),
+        ];
+        for (dim, block) in blocks {
+            worlds.world(dim).lock().unwrap().update_and_save(
+                &worlds.path(dim), 2, 75, 3, block,
+            ).unwrap();
+        }
+        worlds.save_all().unwrap();
+        assert!(worlds.resolve_arrival(
+            Dimension::Overworld, Dimension::End, 0.5, 70.0, 0.5,
+        ).unwrap().is_some());
+        assert!(worlds.resolve_arrival(
+            Dimension::Overworld, Dimension::Nether, f64::NAN, 70.0, 0.0,
+        ).unwrap().is_none());
+        drop(worlds);
+
+        let reloaded = DimensionWorlds::load_all(manager.clone()).unwrap();
+        for (dim, block) in blocks {
+            assert_eq!(reloaded.world(dim).lock().unwrap().get(2, 75, 3), block);
+            assert_eq!(reloaded.world(dim).lock().unwrap().extended_identity(), Some((417, dim)));
+        }
+        assert!(DimensionWorlds::load_all(DimensionManager::new(&root, 418)).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }
