@@ -5925,7 +5925,8 @@ fn main() -> io::Result<()> {
                                         };
                                         let result = (|| -> io::Result<()> {
                                             journal::commit(
-                                                &furnace_world_path.with_extension("pending-txn.json"),
+                                                &furnace_world_path
+                                                    .with_extension("pending-txn.json"),
                                                 &[
                                                     (&*ejection_file, updated.encoded()?),
                                                     (&*ejection_chest_file, next_chest.encoded()?),
