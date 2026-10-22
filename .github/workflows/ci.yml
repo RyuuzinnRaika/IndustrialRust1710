@@ -17,20 +17,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.99.1
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Native Minecraft Protocol 5 tests (real TCP and Anvil roundtrip)
-        run: cargo test --workspace --all-targets
+        run: cargo test --locked --workspace --all-targets
       - name: Deny Rust lints
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Build optimized Rust server binaries
-        run: cargo build --release -p vanilla-server -p legacy-status-server
-      - name: Export resolved dependency lock for pinning
-        shell: bash
-        run: |
-          echo LOCKFILE_FOR_PINNING_BEGIN
-          base64 -w0 Cargo.lock
-          echo
-          echo LOCKFILE_FOR_PINNING_END
+        run: cargo build --locked --release -p vanilla-server -p legacy-status-server
+      - name: Validate Python maintenance supervisor
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
