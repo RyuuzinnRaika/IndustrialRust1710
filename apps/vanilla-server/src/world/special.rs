@@ -262,7 +262,18 @@ impl World {
                             } else {
                                 self.get(cx + rx, y, cz + rz)
                             };
-                            if state >> 4 != 120 || state & 4 == 0 {
+                            // Legacy 1.7.10 metadata: 0=S, 1=W, 2=N, 3=E.
+                            // Every side of the ring must face the portal center.
+                            let facing = if rz == -2 {
+                                0
+                            } else if rz == 2 {
+                                2
+                            } else if rx == -2 {
+                                3
+                            } else {
+                                1
+                            };
+                            if state >> 4 != 120 || state & 4 == 0 || state & 3 != facing {
                                 ring = false;
                                 break;
                             }
@@ -628,8 +639,9 @@ mod tests {
         let y = 80;
         for dx in -1..=1 {
             for (px, pz) in [(dx, -2), (dx, 2), (-2, dx), (2, dx)] {
-                let meta = if (px, pz) == (0, -2) { 0 } else { 4 };
-                world.import_block(px, y, pz, (120 << 4) | meta).unwrap();
+                let facing = if pz == -2 { 0 } else if pz == 2 { 2 } else if px == -2 { 3 } else { 1 };
+                let eye = if (px, pz) == (0, -2) { 0 } else { 4 };
+                world.import_block(px, y, pz, (120 << 4) | facing | eye).unwrap();
             }
         }
         world.save(&path).unwrap();
@@ -642,6 +654,26 @@ mod tests {
                 assert_eq!(saved.get(dx, y, dz) >> 4, 119);
             }
         }
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn wrong_facing_end_frame_cannot_activate_portal() {
+        let path = file("portal-facing");
+        let mut world = World::new();
+        let y = 80;
+        for dx in -1..=1 {
+            for (px, pz) in [(dx, -2), (dx, 2), (-2, dx), (2, dx)] {
+                let facing = if pz == -2 { 0 } else if pz == 2 { 2 } else if px == -2 { 3 } else { 1 };
+                let facing = if (px, pz) == (1, 2) { 0 } else { facing };
+                let eye = if (px, pz) == (0, -2) { 0 } else { 4 };
+                world.import_block(px, y, pz, (120 << 4) | facing | eye).unwrap();
+            }
+        }
+        world.save(&path).unwrap();
+        let changed = world.insert_end_eye(&path, 0, y, -2).unwrap();
+        assert_eq!(changed.len(), 1, "only inserted eye, not the invalid portal");
+        assert_eq!(world.get(0, y, 0), 0);
         fs::remove_file(path).ok();
     }
 
