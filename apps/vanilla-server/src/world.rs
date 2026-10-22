@@ -485,6 +485,35 @@ impl World {
                 self.comparator_outputs.remove(&pos);
             }
         }
+        // A strong input may power a solid neighbor, then weakly feed dust
+        // or a device one additional block away. Wake only redstone at this
+        // distance, not fluid/ecology: O(36) fixed neighborhood probes.
+        const FACES: [(i32, i32, i32); 6] = [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ];
+        for (dx, dy, dz) in FACES {
+            for (ex, ey, ez) in FACES {
+                let (nx, ny, nz) = (x + dx + ex, y + dy + ey, z + dz + ez);
+                if !in_bounds(nx, ny, nz) {
+                    continue;
+                }
+                let pos = (nx, ny as u8, nz);
+                match self.get(nx, ny, nz) >> 4 {
+                    55 => {
+                        self.pending_circuit.insert(pos);
+                    }
+                    27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 => {
+                        self.pending_devices.insert(pos);
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
     fn wake_leaves(&mut self, x: i32, y: i32, z: i32) {
         for dx in -4..=4 {
@@ -668,10 +697,8 @@ impl World {
                     let power = self.get(nx, check_y, nz);
                     let signal = if power >> 4 == 55 {
                         (power & 15).saturating_sub(1)
-                    } else if self.power_into((nx, check_y, nz), (x, y, z)) {
-                        15
                     } else {
-                        0
+                        u16::from(self.signal_into((nx, check_y, nz), (x, y, z)))
                     };
                     strongest = strongest.max(signal);
                 }
@@ -1013,6 +1040,11 @@ impl World {
                     | 64
                     | 71
                     | 96
+                    | 27
+                    | 28
+                    | 157
+                    | 149
+                    | 150
             ) {
                 world.pending_support.insert((x, y, z));
             }
@@ -1653,6 +1685,40 @@ mod group_b_regression_tests {
         assert!(!world.can_support(1, 65, 0, 83 << 4));
     }
 
+    #[test]
+    fn comparator_strength_is_not_rounded_up_to_fifteen_by_dust() {
+        let path = temp("comparator-strength");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 1 << 4).unwrap();
+        world.import_block(0, 65, 0, (150 << 4) | 1).unwrap();
+        world.comparator_outputs.insert((0, 65, 0), 5);
+        world.import_block(1, 65, 0, 55 << 4).unwrap();
+        assert_eq!(world.signal_into((0, 65, 0), (1, 65, 0)), 5);
+        assert_eq!(world.signal_into((0, 65, 0), (0, 65, 1)), 0);
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(1, 65, 0), (55 << 4) | 5);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn repeater_strongly_powers_cube_and_not_its_own_input() {
+        let path = temp("conductor-direction");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(0, 65, 0, (94 << 4) | 1).unwrap();
+        world.import_block(1, 65, 0, 1 << 4).unwrap();
+        world.import_block(2, 65, 0, 55 << 4).unwrap();
+        assert_eq!(world.signal_into((1, 65, 0), (2, 65, 0)), 15);
+        assert_eq!(world.signal_into((1, 65, 0), (0, 65, 0)), 0);
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(2, 65, 0), (55 << 4) | 15);
+        // A deleted power source must invalidate the distant dust, too.
+        world.update_and_save(&path, 0, 65, 0, 0).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(2, 65, 0), 55 << 4);
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn raining_extinguishes_fire_through_existing_tick_pipeline() {
         let path = temp("rain-fire");
