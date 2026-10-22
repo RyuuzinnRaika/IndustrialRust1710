@@ -1324,14 +1324,32 @@ impl World {
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&staging)?;
+            .open(&staging)
+            .map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("failed to create new world staging file {}: {err}", staging.display()),
+                )
+            })?;
         let written = self.write_to(&mut file).and_then(|_| file.sync_all());
         drop(file);
         if let Err(err) = written {
             let _ = fs::remove_file(&staging);
-            return Err(err);
+            return Err(io::Error::new(
+                err.kind(),
+                format!("failed to write new world staging file {}: {err}", staging.display()),
+            ));
         }
-        let published = fs::hard_link(&staging, path);
+        let published = fs::hard_link(&staging, path).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to publish new world file {} from {}: {err}",
+                    path.display(),
+                    staging.display()
+                ),
+            )
+        });
         let _ = fs::remove_file(staging);
         published
     }

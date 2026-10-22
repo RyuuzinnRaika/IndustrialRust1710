@@ -9,6 +9,52 @@ use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct WindowsFileInformation {
+    _attributes: u32,
+    _creation_time: [u32; 2],
+    _last_access_time: [u32; 2],
+    _last_write_time: [u32; 2],
+    volume_serial_number: u32,
+    _file_size_high: u32,
+    _file_size_low: u32,
+    _number_of_links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetFileInformationByHandle(
+        file: *mut std::ffi::c_void,
+        information: *mut WindowsFileInformation,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &File) -> io::Result<(u32, u64)> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+
+    let mut information = MaybeUninit::<WindowsFileInformation>::uninit();
+    // SAFETY: `file` is an open handle and `information` points to a writable
+    // buffer with the layout expected by GetFileInformationByHandle.
+    let succeeded = unsafe {
+        GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr())
+    };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the Windows API initialized the output buffer on success.
+    let information = unsafe { information.assume_init() };
+    let file_index =
+        (u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low);
+    Ok((information.volume_serial_number, file_index))
+}
+
 #[derive(Debug)]
 pub struct WorldSessionLock {
     file: File,
@@ -87,7 +133,7 @@ impl WorldSessionLock {
                 "Minecraft session.lock was replaced or is not a regular 8-byte file",
             ));
         }
-        let mut visible = File::open(&self.path)?;
+        let visible = File::open(&self.path)?;
         let opened = visible.metadata()?;
         if opened.len() != 8 {
             return Err(io::Error::new(
@@ -110,14 +156,17 @@ impl WorldSessionLock {
                 ));
             }
         }
-        let mut visible_marker = [0u8; 8];
-        visible.read_exact(&mut visible_marker)?;
-        if i64::from_be_bytes(visible_marker) != self.started_ms {
+
+        #[cfg(windows)]
+        if windows_file_identity(&self.file)? != windows_file_identity(&visible)? {
             return Err(io::Error::new(
                 ErrorKind::PermissionDenied,
-                "Minecraft session.lock on disk no longer matches the active session",
+                "Minecraft session.lock was replaced while the world was open",
             ));
         }
+
+        // Read through the handle that owns the exclusive byte-range lock.
+        // Windows rejects reads of this locked range through a second handle.
         self.file.seek(SeekFrom::Start(0))?;
         let mut marker = [0u8; 8];
         self.file.read_exact(&mut marker)?;
