@@ -2173,9 +2173,11 @@ mod weather_observation_limits_tests {
         assert_eq!(world.weather_tracking_len(), MAX_WEATHER_COLUMNS);
         assert_eq!(world.pending_weather_order.len(), MAX_WEATHER_COLUMNS);
         assert!(!world.pending_weather.contains(&(first_x, 64, 0)));
-        assert!(world
-            .pending_weather
-            .contains(&(first_x + MAX_WEATHER_COLUMNS as i32 + 19, 64, 0)));
+        assert!(world.pending_weather.contains(&(
+            first_x + MAX_WEATHER_COLUMNS as i32 + 19,
+            64,
+            0
+        )));
         world.register_weather_column((first_x, 64, 0));
         assert!(world.pending_weather.contains(&(first_x, 64, 0)));
         assert!(!world.pending_weather.contains(&(first_x + 20, 64, 0)));
