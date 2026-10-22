@@ -1084,7 +1084,7 @@ impl World {
         }
         Ok(world)
     }
-    fn write_to(&self, f: &mut File) -> io::Result<()> {
+    fn write_to(&self, f: &mut impl Write) -> io::Result<()> {
         match self.generation {
             Generation::Flat => f.write_all(MAGIC)?,
             Generation::Natural(seed) => {
@@ -1109,6 +1109,16 @@ impl World {
             f.write_all(&block.to_be_bytes())?;
         }
         Ok(())
+    }
+    /// Encode the same bounded IRW snapshot used by save(), for journaled
+    /// inventory/world transactions without an intermediate live disk write.
+    pub fn encoded(&self) -> io::Result<Vec<u8>> {
+        if self.edits.len() > MAX_EDITS {
+            return Err(invalid("world edits exceed IRW capacity"));
+        }
+        let mut bytes = Vec::new();
+        self.write_to(&mut bytes)?;
+        Ok(bytes)
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
