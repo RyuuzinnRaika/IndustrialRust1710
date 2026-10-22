@@ -212,8 +212,15 @@ impl Decorations {
         }
         Ok(())
     }
-    pub fn sign_packets(&self) -> io::Result<Vec<Vec<u8>>> {
-        self.signs.iter().map(|(k, lines)| sign_packet(parse_key(k)?, lines)).collect()
+    pub fn sign_packets_in(&self, chunks: &std::collections::BTreeSet<(i32, i32)>) -> io::Result<Vec<Vec<u8>>> {
+        let mut packets = Vec::new();
+        for (key, lines) in &self.signs {
+            let position = parse_key(key)?;
+            if chunks.contains(&(position.0.div_euclid(16), position.2.div_euclid(16))) {
+                packets.push(sign_packet(position, lines)?);
+            }
+        }
+        Ok(packets)
     }
 }
 
