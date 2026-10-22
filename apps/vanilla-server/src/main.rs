@@ -709,6 +709,7 @@ fn play(
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
     let mut last_beacon_tick = clock.ticks();
+    let mut last_plate_refresh_tick = clock.ticks();
     loop {
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
@@ -1048,6 +1049,47 @@ fn play(
                 vitals.health = (vitals.health - total).max(0.0);
                 player.save_state(player_path, *vitals)?;
                 send(s, 0x06, &health_packet(*vitals))?;
+            }
+        }
+        // A stationary player continues pressing a plate. Refresh its timer
+        // at most every five existing server ticks; do not resave an unchanged
+        // analog value or create a second physics/tick scheduler.
+        if vitals.health > 0.0
+            && now_tick.saturating_sub(last_plate_refresh_tick) >= 5
+        {
+            last_plate_refresh_tick = now_tick;
+            let (bx, by, bz) = (
+                player.x.floor() as i32,
+                player.y.floor() as i32 - 1,
+                player.z.floor() as i32,
+            );
+            if world::in_bounds(bx, by, bz) {
+                let plate_id = world
+                    .lock()
+                    .map_err(|_| bad("world mutex poisoned"))?
+                    .get(bx, by, bz)
+                    >> 4;
+                if matches!(plate_id, 70 | 72 | 147 | 148) {
+                    let count = 1 + hub
+                        .participants()?
+                        .into_iter()
+                        .filter(|(other_id, at)| {
+                            *other_id != entity_id
+                                && at.x.floor() as i32 == bx
+                                && at.y.floor() as i32 - 1 == by
+                                && at.z.floor() as i32 == bz
+                        })
+                        .count();
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let changed = if matches!(w.get(bx, by, bz) >> 4, 147 | 148) {
+                        w.press_weighted_plate(world_path, bx, by, bz, count)?
+                    } else {
+                        w.press_plate(world_path, bx, by, bz)?
+                    };
+                    if changed {
+                        hub.broadcast(block_change_event(&w, bx, by, bz));
+                    }
+                }
             }
         }
         // Active beacons sample their pyramid on the existing 20TPS clock.
