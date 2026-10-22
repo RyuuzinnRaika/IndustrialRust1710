@@ -205,6 +205,40 @@ fn sky_exposed(world: &World, p: PlayerPosition) -> bool {
     let z = p.z.floor() as i32;
     ((p.y as i32 + 2)..=255).all(|y| world.get(x, y, z) == 0)
 }
+/// Approximate block-emitted light at a spawn location without allocating a
+/// full chunk lighting array. Conservative: reject positions near emitters.
+fn emitted_light_near(world: &World, at: PlayerPosition) -> u8 {
+    let x = at.x.floor() as i32;
+    let y = at.y.floor() as i32;
+    let z = at.z.floor() as i32;
+    let mut strongest = 0u8;
+    for dx in -7i32..=7 {
+        for dz in -7i32..=7 {
+            for dy in -4i32..=4 {
+                let level: u8 = match world.get(x + dx, y + dy, z + dz) >> 4 {
+                    10 | 11 | 89 | 91 => 15,
+                    50 | 76 => 14,
+                    62 => 13,
+                    51 => 15,
+                    _ => 0,
+                };
+                let attenuation = dx.abs() + dz.abs() + dy.abs();
+                strongest = strongest.max(level.saturating_sub(attenuation as u8));
+            }
+        }
+    }
+    strongest
+}
+/// Minecraft's 24-block exclusion is spherical, not horizontal only.
+fn natural_spawn_distance_ok(at: PlayerPosition, players: &[PlayerPosition]) -> bool {
+    let min_sq = players.iter().map(|p| {
+        let dx = p.x - at.x;
+        let dy = p.y - at.y;
+        let dz = p.z - at.z;
+        dx * dx + dy * dy + dz * dz
+    }).fold(f64::INFINITY, f64::min);
+    (24.0_f64 * 24.0..=128.0_f64 * 128.0).contains(&min_sq)
+}
 fn damage_held(held: Option<Stack>) -> i16 {
     match held.map(|s| s.id) {
         Some(268) | Some(283) => 4,
@@ -474,8 +508,6 @@ impl Mobs {
         if !self.enabled || players.is_empty() || !now.is_multiple_of(80) {
             return;
         }
-        let passive = self.entities.values().filter(|m| m.kind.passive()).count();
-        let hostile = self.entities.len() - passive;
         for index in 0..4u64 {
             let seed = hash(
                 now ^ index.wrapping_mul(0x9e3779b97f4a7c15) ^ world.natural_seed().unwrap_or(0),
@@ -493,13 +525,15 @@ impl Mobs {
                 z: z as f64 + 0.5,
             };
             if !p.is_valid()
-                || distance_to_players(p, players) < 24.0
+                || !natural_spawn_distance_ok(p, players)
                 || !physics::supported(world, &p)
                 || physics::collides(world, &p)
             {
                 continue;
             }
             let open = sky_exposed(world, p);
+            let passive = self.entities.values().filter(|m| m.kind.passive()).count();
+            let hostile = self.entities.len() - passive;
             let is_night = (now % 24000) >= 13000 && (now % 24000) <= 23000;
             let grass = world.get(x, p.y as i32 - 1, z) >> 4 == 2;
             let kind = if open && !is_night && grass {
@@ -513,7 +547,7 @@ impl Mobs {
                     _ => Kind::Chicken,
                 }
             } else {
-                if hostile >= HOSTILE_CAP || (open && !is_night) {
+                if hostile >= HOSTILE_CAP || (open && !is_night) || emitted_light_near(world, p) > 7 {
                     continue;
                 }
                 match seed % 4 {
@@ -785,6 +819,24 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn natural_spawn_excludes_near_and_out_of_range_players() {
+        let p = PlayerPosition { x: 0.0, y: 64.0, z: 0.0 };
+        let at = |x: f64| PlayerPosition { x, ..p };
+        assert!(!natural_spawn_distance_ok(at(23.9), &[p]));
+        assert!(natural_spawn_distance_ok(at(24.0), &[p]));
+        assert!(natural_spawn_distance_ok(at(128.0), &[p]));
+        assert!(!natural_spawn_distance_ok(at(128.1), &[p]));
+        assert!(!natural_spawn_distance_ok(at(30.0), &[p, at(29.0)]));
+    }
+    #[test]
+    fn torch_blocks_hostile_spawn_nearby() {
+        let mut world = World::new();
+        let pos = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        assert_eq!(emitted_light_near(&world, pos), 0);
+        world.import_block(1, 65, 0, 50 << 4).unwrap();
+        assert!(emitted_light_near(&world, pos) > 7);
+    }
     #[test]
     fn explosion_damages_all_nearby_players_once_even_when_overlapping() {
         let mut mobs = Mobs::default();
