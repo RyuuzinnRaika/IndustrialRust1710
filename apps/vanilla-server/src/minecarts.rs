@@ -218,6 +218,12 @@ impl Minecarts {
 
     pub fn tick(&mut self, world: &World, now: u64) -> Vec<(PlayerPosition, Event)> {
         let mut events = Vec::new();
+        // Use a bounded snapshot, updated after each cart moves, so no two
+        // server-authoritative carts can occupy the same physical volume.
+        let mut occupied: BTreeMap<_, _> = self.carts
+            .iter()
+            .map(|(&id, cart)| (id, cart.position))
+            .collect();
         for cart in self.carts.values_mut() {
             let steps = now.saturating_sub(cart.last_tick).min(20);
             if steps == 0 {
@@ -273,7 +279,18 @@ impl Minecarts {
                     cart.speed = 0.0;
                     break;
                 }
+                let collision = occupied.iter().any(|(&id, position)| {
+                    id != cart.id
+                        && (position.x - next.x).abs() < 0.9
+                        && (position.y - next.y).abs() < 0.75
+                        && (position.z - next.z).abs() < 0.9
+                });
+                if collision {
+                    cart.speed = 0.0;
+                    break;
+                }
                 cart.position = next;
+                occupied.insert(cart.id, next);
             }
             events.push((
                 cart.position,
@@ -367,6 +384,27 @@ mod tests {
         carts.tick(&world, 1);
         assert!((carts.carts[&FIRST_ID].position.x - origin.x).abs() < f64::EPSILON);
         assert_eq!(carts.carts[&FIRST_ID].speed, 0.0);
+    }
+
+    #[test]
+    fn colliding_minecarts_stop_before_overlapping() {
+        let mut world = World::new();
+        for x in 0..4 {
+            world.import_block(x, 65, 0, (27 << 4) | 9).unwrap();
+        }
+        let mut carts = Minecarts::default();
+        let left = PlayerPosition { x: 0.5, y: 65.5, z: 0.5 };
+        let right = PlayerPosition { x: 2.5, y: 65.5, z: 0.5 };
+        carts.place(&world, left, 0).unwrap();
+        carts.place(&world, right, 0).unwrap();
+        carts.carts.get_mut(&FIRST_ID).unwrap().speed = 0.4;
+        for tick in 1..8 {
+            carts.tick(&world, tick);
+        }
+        let first = &carts.carts[&FIRST_ID];
+        let other = &carts.carts[&(FIRST_ID + 1)];
+        assert!(other.position.x - first.position.x >= 0.9);
+        assert_eq!(first.speed, 0.0);
     }
 
     #[test]
