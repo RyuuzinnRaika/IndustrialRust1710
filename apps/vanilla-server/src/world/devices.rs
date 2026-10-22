@@ -565,8 +565,7 @@ mod redstone_regression_tests {
     #[test]
     fn piston_rejects_registered_tile_entities_and_keeps_solid_blocks_movable() {
         for id in [
-            23, 25, 52, 54, 61, 62, 84, 116, 117, 130, 137, 138, 140, 144, 146, 151, 154,
-            158,
+            23, 25, 52, 54, 61, 62, 84, 116, 117, 130, 137, 138, 140, 144, 146, 151, 154, 158,
         ] {
             assert!(!movable(id << 4), "tile entity block {id} must not move");
         }
