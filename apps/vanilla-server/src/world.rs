@@ -364,7 +364,8 @@ impl World {
             })
         };
         let mut found = BTreeSet::new();
-        if let Generation::Expanded(seed, crate::dimensions::Dimension::Overworld) = self.generation {
+        if let Generation::Expanded(seed, crate::dimensions::Dimension::Overworld) = self.generation
+        {
             for player in &players {
                 let gx = (player.x.floor() as i32).div_euclid(64);
                 let gz = (player.z.floor() as i32).div_euclid(64);
