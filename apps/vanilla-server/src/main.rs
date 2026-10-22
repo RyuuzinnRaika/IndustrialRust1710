@@ -1867,6 +1867,10 @@ fn play(
                                                 .map_err(|_| bad("furnace lock poisoned"))?
                                                 .get(target)
                                                 .occupied())
+                                        || (matches!(block, 23 | 158)
+                                            && devices.lock()
+                                                .map_err(|_| bad("device lock poisoned"))?
+                                                .slots(target).iter().any(Option::is_some))
                                         || (block == 154
                                             && hoppers
                                                 .lock()
@@ -4407,6 +4411,8 @@ fn main() -> io::Result<()> {
     let furnace_hub = Arc::clone(&hub);
     let leaf_drops = Arc::clone(&ground_items);
     let leaf_drops_file = Arc::clone(&ground_path);
+    let ejection_devices = Arc::clone(&devices);
+    let ejection_file = Arc::clone(&device_path);
     thread::spawn(move || {
         let mut telemetry =
             telemetry::TickTelemetry::new(furnace_world_path.with_extension("metrics.jsonl"));
@@ -4509,6 +4515,75 @@ fn main() -> io::Result<()> {
                         Ok(changed) => {
                             for (x, y, z) in changed {
                                 furnace_hub.broadcast(block_change_event(&gravity_world, x, y, z));
+                            }
+                            // Execute each persisted rising-edge exactly once.
+                            // Both inventory debit and spawned ground entity are
+                            // redo-journaled before either state is published.
+                            for pos in gravity_world.drain_device_activations() {
+                                let state = gravity_world.get(pos.0, pos.1, pos.2);
+                                if !matches!(state >> 4, 23 | 158) || state & 8 == 0 {
+                                    continue;
+                                }
+                                let offset = match state & 7 {
+                                    0 => (0, -1, 0),
+                                    1 => (0, 1, 0),
+                                    2 => (0, 0, -1),
+                                    3 => (0, 0, 1),
+                                    4 => (-1, 0, 0),
+                                    _ => (1, 0, 0),
+                                };
+                                let dest = (pos.0 + offset.0, pos.1 + offset.1, pos.2 + offset.2);
+                                if !world::in_bounds(dest.0, dest.1, dest.2) {
+                                    continue;
+                                }
+                                let mut storage = match ejection_devices.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                let mut ground = match leaf_drops.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                if ground.is_full() {
+                                    continue;
+                                }
+                                let seed = now ^ (pos.0 as u64).wrapping_mul(31)
+                                    ^ (pos.2 as u64).wrapping_mul(131);
+                                let Some((updated, stack)) = (match storage.stage_eject(pos, seed) {
+                                    Ok(result) => result,
+                                    Err(error) => {
+                                        eprintln!("DEVICE EJECTION ERROR: {error}");
+                                        return;
+                                    }
+                                }) else {
+                                    continue;
+                                };
+                                let (next_ground, spawned) = match ground.stage_put_many(&[stack], dest) {
+                                    Ok(result) => result,
+                                    Err(error) => {
+                                        eprintln!("DEVICE GROUND ITEM ERROR: {error}");
+                                        return;
+                                    }
+                                };
+                                if let Err(error) = journal::commit(
+                                    &furnace_world_path.with_extension("pending-txn.json"),
+                                    &[
+                                        (&*ejection_file, updated.encoded().unwrap_or_default()),
+                                        (&*leaf_drops_file, next_ground.encoded().unwrap_or_default()),
+                                    ],
+                                ) {
+                                    eprintln!("DEVICE EJECTION JOURNAL ERROR: {error}");
+                                    return;
+                                }
+                                *storage = updated;
+                                *ground = next_ground;
+                                drop(ground);
+                                drop(storage);
+                                for item in spawned {
+                                    for packet in item.spawn() {
+                                        furnace_hub.broadcast(packet);
+                                    }
+                                }
                             }
                             let decayed = gravity_world.drain_drops();
                             if !decayed.is_empty() {
