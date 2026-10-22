@@ -162,6 +162,34 @@ impl Hub {
     pub fn request_admin_teleport(&self, name: &str, position: PlayerPosition) -> io::Result<bool> {
         self.queue_teleport(name, position, ADMIN_TELEPORT_EVENT)
     }
+    /// Queue a gamemode change. The player thread owns its inventory, and is
+    /// responsible for writing its override before notifying the client.
+    pub fn request_admin_gamemode(&self, name: &str, mode: u8) -> io::Result<bool> {
+        if mode > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "only survival and creative are implemented",
+            ));
+        }
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(peer) = inner
+            .players
+            .values()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+        else {
+            return Ok(false);
+        };
+        peer.tx
+            .try_send(Event {
+                id: ADMIN_GAMEMODE_EVENT,
+                body: vec![mode],
+            })
+            .map_err(|_| {
+                peer.overloaded.store(true, Ordering::Release);
+                io::Error::other("target session mailbox unavailable")
+            })?;
+        Ok(true)
+    }
     pub fn request_pearl_teleport(&self, name: &str, position: PlayerPosition) -> io::Result<bool> {
         self.queue_teleport(name, position, PEARL_TELEPORT_EVENT)
     }
