@@ -417,8 +417,7 @@ fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
     let z = p.z.floor() as i32;
     (x - 2..=x + 2).all(|bx| {
         (y - 2..=y + 2).all(|by| {
-            (z - 2..=z + 2)
-                .all(|bz| matches!(world.get(bx, by, bz) >> 4, 0 | 6 | 8..=11))
+            (z - 2..=z + 2).all(|bz| matches!(world.get(bx, by, bz) >> 4, 0 | 6 | 8..=11))
         })
     })
 }
@@ -433,10 +432,7 @@ fn flying_step(
     target: PlayerPosition,
     tick: u64,
 ) -> Option<PlayerPosition> {
-    if !matches!(kind, Kind::Ghast | Kind::Blaze)
-        || !from.is_valid()
-        || !target.is_valid()
-    {
+    if !matches!(kind, Kind::Ghast | Kind::Blaze) || !from.is_valid() || !target.is_valid() {
         return None;
     }
     let dx = target.x - from.x;
@@ -1480,9 +1476,7 @@ impl Mobs {
                     }
                 }
                 if matches!(mob.kind, Kind::Ghast | Kind::Blaze) {
-                    if let Some(next) =
-                        flying_step(world, mob.kind, mob.position, target, now)
-                    {
+                    if let Some(next) = flying_step(world, mob.kind, mob.position, target, now) {
                         mob.position = next;
                         events.push(multiplayer::teleport(mob.id, &next, 0.0, 0.0));
                     }
