@@ -415,7 +415,16 @@ mod tests {
         fs::write(Hoppers::location(&source), hoppers.encoded().unwrap()).unwrap();
 
         let brewer = Brewer {
-            slots: [Some(Stack { id: 373, count: 1, damage: 0 }), None, None, None],
+            slots: [
+                Some(Stack {
+                    id: 373,
+                    count: 1,
+                    damage: 0,
+                }),
+                None,
+                None,
+                None,
+            ],
             brew_time: 5,
         };
         let brewers = Brewers::default()
