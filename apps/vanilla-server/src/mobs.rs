@@ -658,6 +658,12 @@ impl Mobs {
                 || value.next_id < BASE_ID
                 || value.next_id >= 1_000_000
                 || value.entities.len() > MAX_LOADED_MOBS
+                // All three entity categories share a single Protocol 5 ID
+                // space. Reject corrupt snapshots that reuse an ID.
+                || value.entities.keys().any(|id| {
+                    value.arrows.contains_key(id) || value.orbs.contains_key(id)
+                })
+                || value.arrows.keys().any(|id| value.orbs.contains_key(id))
                 || value.arrows.len() > ARROW_CAP
                 || value.orbs.len() > 256
                 || value.entities.iter().any(|(&id, mob)| {
@@ -683,8 +689,10 @@ impl Mobs {
                 })
                 || value
                     .orbs
-                    .values()
-                    .any(|(pos, amount, _)| !pos.is_valid() || *amount == 0)
+                    .iter()
+                    .any(|(&id, (pos, amount, _))| {
+                        id < BASE_ID || !pos.is_valid() || *amount == 0
+                    })
             {
                 return Err(invalid("invalid mob identity, position or bounds"));
             }
@@ -2902,6 +2910,28 @@ mod tests {
         );
         assert!(Mobs::load_or_new(&World::natural(11), true, 2, &path).is_err());
         std::fs::write(&path, b"{garbled").unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn snapshots_reject_duplicate_entity_ids_across_mobs_and_xp() {
+        let world = World::natural(9981);
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust-mobs-{}-duplicate-entity.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        mobs.insert(Kind::Cow, at, false);
+        let id = mobs.next_id - 1;
+        mobs.orbs.insert(id, (at, 5, 0));
+        mobs.save(&world).unwrap();
         assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
         let _ = std::fs::remove_file(path);
     }
