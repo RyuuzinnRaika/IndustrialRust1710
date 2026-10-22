@@ -235,7 +235,11 @@ fn consume_initial(socket: &mut TcpStream, expected_entity_id: i32) {
                 window_items = true;
             }
             0x2f => {
-                assert_eq!(body, [255, 255, 255, 255, 255], "empty cursor S2F golden bytes");
+                assert_eq!(
+                    body,
+                    [255, 255, 255, 255, 255],
+                    "empty cursor S2F golden bytes"
+                );
                 cursor_slot = true;
             }
             0x08 => {
@@ -332,9 +336,7 @@ fn live_protocol5_creative_slot_set_and_clear_golden() {
 
     // A Slot with item ID -1 occupies exactly two bytes: there is no
     // count/damage/NBT trailer on an empty slot.
-    alpha
-        .write_all(&packet(0x10, &[0, 36, 255, 255]))
-        .unwrap();
+    alpha.write_all(&packet(0x10, &[0, 36, 255, 255])).unwrap();
     let mut cleared = false;
     for _ in 0..30 {
         let (id, body) = received(&mut alpha);
