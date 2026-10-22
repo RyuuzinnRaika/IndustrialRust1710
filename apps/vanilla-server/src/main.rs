@@ -2007,15 +2007,51 @@ fn play(
                                     if let Some(reel) = candidate_state.reel(entity_id, now_tick) {
                                         let mut candidate = inventory.clone();
                                         if candidate.wear_fishing_rod() {
+                                            let mut spawned = Vec::new();
                                             if let Some(loot) = reel.loot {
-                                                // On full inventory, release without synthesizing free loot.
-                                                let _ = candidate.receive_stack(loot);
+                                                if candidate.receive_stack(loot).is_none() {
+                                                    // Never silently discard a caught item when
+                                                    // the inventory is full. Stage it as a
+                                                    // real ground entity and commit both files.
+                                                    let mut ground = ground_items.lock().map_err(|_| {
+                                                        bad("ground items mutex poisoned")
+                                                    })?;
+                                                    if !ground.has_capacity_for(1) {
+                                                        // Preserve the active bobber and rod:
+                                                        // no item is created or consumed.
+                                                        continue;
+                                                    }
+                                                    let at = (
+                                                        player.x.floor() as i32,
+                                                        player.y.floor() as i32,
+                                                        player.z.floor() as i32,
+                                                    );
+                                                    let (staged, dropped) =
+                                                        ground.stage_put_many(&[loot], at)?;
+                                                    journal::commit(
+                                                        &world_path.with_extension("pending-txn.json"),
+                                                        &[
+                                                            (inventory_path, candidate.encoded()?),
+                                                            (ground_path, staged.encoded()?),
+                                                        ],
+                                                    )?;
+                                                    *ground = staged;
+                                                    spawned = dropped;
+                                                } else {
+                                                    candidate.save(inventory_path)?;
+                                                }
+                                            } else {
+                                                candidate.save(inventory_path)?;
                                             }
-                                            candidate.save(inventory_path)?;
                                             *inventory = candidate;
                                             *state = candidate_state;
                                             drop(state);
                                             send(s, 0x30, &inventory.window_items())?;
+                                            for drop in spawned {
+                                                for packet in drop.spawn() {
+                                                    hub.broadcast(packet);
+                                                }
+                                            }
                                             for event in reel.events {
                                                 hub.broadcast(event);
                                             }
