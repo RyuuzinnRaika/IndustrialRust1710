@@ -2425,19 +2425,35 @@ mod tests {
     fn world_spawn_and_player_exclusion_apply_to_all_natural_candidates() {
         let world = World::natural(42);
         let y = world.spawn_y();
-        let player = PlayerPosition {
-            x: 60.5,
-            y,
-            z: 0.5,
-        };
+        let player = PlayerPosition { x: 60.5, y, z: 0.5 };
         let candidate = |x| PlayerPosition { x, y, z: 0.5 };
-        assert!(!natural_spawn_location_ok(&world, candidate(24.4), &[player]));
-        assert!(natural_spawn_location_ok(&world, candidate(24.5), &[player]));
-        assert!(!natural_spawn_location_ok(&world, candidate(36.6), &[candidate(40.0)]));
-        assert!(!natural_spawn_location_ok(&world, candidate(200.5), &[player]));
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(24.4),
+            &[player]
+        ));
+        assert!(natural_spawn_location_ok(
+            &world,
+            candidate(24.5),
+            &[player]
+        ));
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(36.6),
+            &[candidate(40.0)]
+        ));
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(200.5),
+            &[player]
+        ));
         assert!(!natural_spawn_location_ok(&world, candidate(45.5), &[]));
-        assert!(Mobs::new_with_difficulty(&world, true, 0).entities.is_empty());
-        assert!(Mobs::new_with_difficulty(&world, true, 3).entities.is_empty());
+        assert!(Mobs::new_with_difficulty(&world, true, 0)
+            .entities
+            .is_empty());
+        assert!(Mobs::new_with_difficulty(&world, true, 3)
+            .entities
+            .is_empty());
     }
     #[test]
     fn natural_mobs_spawn_in_protocol5() {
