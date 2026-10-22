@@ -3976,18 +3976,27 @@ struct ConsoleAccess {
 }
 /// Host console can administer even when online identity services are down.
 /// Admin operations always record both intent and final outcome durably.
-fn start_clock_console(
-    hub: Arc<Hub>,
-    clock: Arc<Clock>,
-    clock_path: Arc<PathBuf>,
+struct ConsoleGameData {
     rules: Arc<Mutex<GameRules>>,
     rules_path: Arc<PathBuf>,
     scoreboard: Arc<Mutex<Scoreboard>>,
     scoreboard_path: Arc<PathBuf>,
+}
+fn start_clock_console(
+    hub: Arc<Hub>,
+    clock: Arc<Clock>,
+    clock_path: Arc<PathBuf>,
+    game_data: ConsoleGameData,
     world: Arc<Mutex<World>>,
     world_path: Arc<PathBuf>,
     access: ConsoleAccess,
 ) {
+    let ConsoleGameData {
+        rules,
+        rules_path,
+        scoreboard,
+        scoreboard_path,
+    } = game_data;
     let ConsoleAccess {
         administration,
         whitelist_path,
@@ -4808,10 +4817,12 @@ fn main() -> io::Result<()> {
         Arc::clone(&hub),
         Arc::clone(&clock),
         Arc::clone(&clock_path),
-        Arc::clone(&world_rules),
-        Arc::clone(&rules_path),
-        Arc::clone(&shared_scoreboard),
-        Arc::clone(&scoreboard_path),
+        ConsoleGameData {
+            rules: Arc::clone(&world_rules),
+            rules_path: Arc::clone(&rules_path),
+            scoreboard: Arc::clone(&shared_scoreboard),
+            scoreboard_path: Arc::clone(&scoreboard_path),
+        },
         Arc::clone(&world),
         Arc::clone(&path),
         ConsoleAccess {
