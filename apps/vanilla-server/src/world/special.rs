@@ -394,6 +394,33 @@ impl World {
         day.saturating_sub(if self.raining { 3 } else { 0 })
     }
 
+    /// Validate a facing hook against a contiguous, non-disarmed wire and
+    /// an oppositely facing hook. Both endpoints must be at most 40 strings
+    /// apart, as in the legacy pre-flattening data layout.
+    fn hook_has_valid_wire(&self, x: i32, y: i32, z: i32, state: u16) -> bool {
+        let (dx, dz) = match state & 3 {
+            0 => (0, 1),
+            1 => (-1, 0),
+            2 => (0, -1),
+            _ => (1, 0),
+        };
+        for distance in 1..=41 {
+            let px = x + dx * distance;
+            let pz = z + dz * distance;
+            if !in_bounds(px, y, pz) {
+                return false;
+            }
+            let other = self.get(px, y, pz);
+            if other >> 4 == 132 && other & 8 == 0 {
+                continue;
+            }
+            return distance >= 2
+                && other >> 4 == 131
+                && other & 3 == ((state & 3) + 2) % 4;
+        }
+        false
+    }
+
     /// Additional scheduled state changes are merged into the existing
     /// fluid/ecology/devices single-snapshot commit.
     pub(super) fn special_changes(&self, budget: usize) -> BTreeMap<Position, u16> {
@@ -409,6 +436,13 @@ impl World {
                 .take(budget.min(len))
             {
                 let state = self.get(x, i32::from(y), z);
+                if state >> 4 == 131 {
+                    let linked = self.hook_has_valid_wire(x, i32::from(y), z, state);
+                    let updated = if linked { state | 4 } else { state & !12 };
+                    if state != updated {
+                        changes.insert((x, y, z), updated);
+                    }
+                }
                 if state >> 4 == 151 {
                     let level = if (i32::from(y) + 1..=255)
                         .all(|sy| matches!(self.get(x, sy, z) >> 4, 0 | 20 | 95 | 102 | 160))
@@ -773,6 +807,31 @@ mod tests {
         assert_eq!(w.get(0, 64, 0) & 1, 0);
         assert_eq!(w.get(0, 64, 0) & 4, 4);
         assert_eq!(World::load(&path).unwrap().get(0, 64, 0) & 1, 0);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn broken_tripwire_unlinks_and_unpowers_hooks() {
+        let path = file("wire-break");
+        let mut w = World::new();
+        for x in [-3, 3] {
+            w.import_block(x, 64, 0, 1 << 4).unwrap();
+        }
+        w.import_block(-2, 64, 0, (131 << 4) | 3).unwrap();
+        w.import_block(2, 64, 0, (131 << 4) | 1).unwrap();
+        for x in -1..=1 {
+            w.import_block(x, 64, 0, 132 << 4).unwrap();
+        }
+        w.save(&path).unwrap();
+        w.touch_tripwire(&path, 0, 64, 0).unwrap();
+        assert_ne!(w.get(-2, 64, 0) & 8, 0);
+        w.update_and_save(&path, 0, 64, 0, 0).unwrap();
+        for _ in 0..3 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(w.get(-2, 64, 0) & 12, 0);
+        assert_eq!(w.get(2, 64, 0) & 12, 0);
+        assert_eq!(World::load(&path).unwrap().get(-2, 64, 0) & 12, 0);
         fs::remove_file(path).ok();
     }
 
