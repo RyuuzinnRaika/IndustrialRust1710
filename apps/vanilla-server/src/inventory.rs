@@ -53,40 +53,10 @@ impl Stack {
     /// Legacy Java 1.7.10 stack limits. Tool, armor, potion and container
     /// items must not silently merge into a 64-stack in any window.
     pub fn max_count(self) -> u8 {
-        match self.id {
-            323 | 325 | 332 | 344 | 368 | 381 => 16,
-            256..=259
-            | 261
-            | 267..=279
-            | 282..=286
-            | 290..=294
-            | 298..=317
-            | 326..=329
-            | 333
-            | 335
-            | 342
-            | 343
-            | 346
-            | 354
-            | 355
-            | 358
-            | 359
-            | 373
-            | 386
-            | 387
-            | 398
-            | 403
-            | 407
-            | 408
-            | 417..=419
-            | 2256..=2267 => 1,
-            _ => 64,
-        }
+        crate::items_1710::max_count(self.id)
     }
     pub fn is_valid(self) -> bool {
-        (1..=4095).contains(&self.id)
-            && (1..=self.max_count()).contains(&self.count)
-            && self.damage >= 0
+        crate::items_1710::valid_stack(self.id, self.count, self.damage)
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
