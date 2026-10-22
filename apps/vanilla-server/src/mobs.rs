@@ -25,6 +25,7 @@ enum Kind {
     Zombie,
     Cow,
     Pig,
+    Horse,
     Sheep,
     Chicken,
     Skeleton,
@@ -53,6 +54,7 @@ impl Kind {
             Self::Zombie => 54,
             Self::Cow => 92,
             Self::Pig => 90,
+            Self::Horse => 100,
             Self::Sheep => 91,
             Self::Chicken => 93,
             Self::Skeleton => 51,
@@ -75,7 +77,7 @@ impl Kind {
     fn passive(self) -> bool {
         matches!(
             self,
-            Self::Cow | Self::Pig | Self::Sheep | Self::Chicken | Self::Villager
+            Self::Cow | Self::Pig | Self::Horse | Self::Sheep | Self::Chicken | Self::Villager
         )
     }
     fn peaceful_safe(self) -> bool {
@@ -91,6 +93,7 @@ impl Kind {
         match self {
             Self::Chicken => 4,
             Self::Sheep | Self::Pig | Self::Cow => 10,
+            Self::Horse => 30,
             Self::Spider => 16,
             Self::CaveSpider => 12,
             Self::Enderman => 40,
@@ -112,6 +115,7 @@ impl Kind {
             Self::Zombie => 367,
             Self::Cow => 363,
             Self::Pig => 319,
+            Self::Horse => 334,
             Self::Sheep => 35,
             Self::Chicken => 365,
             Self::Skeleton => 352,
@@ -139,6 +143,7 @@ impl Kind {
         match self {
             Self::Cow | Self::Sheep => held == 296,
             Self::Pig => held == 391,
+            Self::Horse => matches!(held, 260 | 296 | 353),
             Self::Chicken => matches!(held, 295 | 361 | 362),
             _ => false,
         }
@@ -162,9 +167,22 @@ struct Mob {
     profession: u8,
     size: u8,
     anger_until: u64,
-    // Added with a default so version-1 Mob JSON snapshots remain readable.
     #[serde(default)]
     zombie_villager: bool,
+    #[serde(default)]
+    saddled: bool,
+    #[serde(default)]
+    tamed: bool,
+    #[serde(default)]
+    tame_progress: u8,
+    #[serde(default)]
+    fence_anchor: Option<[i32; 3]>,
+    #[serde(skip)]
+    rider: Option<i32>,
+    #[serde(skip)]
+    leash_holder: Option<i32>,
+    #[serde(skip)]
+    last_ride_tick: u64,
 }
 impl Mob {
     fn spawn(self) -> Event {
@@ -200,12 +218,34 @@ impl Mob {
             body.push(16); // sheep colour + sheared bit (byte metadata)
             body.push(if self.sheared { 0x10 } else { 0 });
         }
+        if self.kind == Kind::Pig {
+            body.push(16); // pig saddle metadata byte
+            body.push(u8::from(self.saddled));
+        }
+        if self.kind == Kind::Horse {
+            body.push((2 << 5) | 16); // horse flags int
+            let flags: i32 = (if self.tamed { 2 } else { 0 }) | (if self.saddled { 4 } else { 0 });
+            body.extend_from_slice(&flags.to_be_bytes());
+        }
         // All living mobs expose health as a float at DataWatcher index 6,
         // not only bosses. New joiners must observe the current shared HP.
         body.push((3 << 5) | 6);
         body.extend_from_slice(&f32::from(self.health).to_be_bytes());
         body.push(0x7f);
         Event { id: 0x0f, body }
+    }
+    fn mount_metadata(self) -> Event {
+        let mut body = self.id.to_be_bytes().to_vec();
+        if self.kind == Kind::Horse {
+            body.push((2 << 5) | 16);
+            let flags: i32 = (if self.tamed { 2 } else { 0 }) | (if self.saddled { 4 } else { 0 });
+            body.extend_from_slice(&flags.to_be_bytes());
+        } else {
+            body.push(16);
+            body.push(u8::from(self.saddled));
+        }
+        body.push(0x7f);
+        Event { id: 0x1c, body }
     }
     /// Protocol 5 Entity Metadata (0x1C): server-authoritative current HP.
     fn health_metadata(self) -> Event {
@@ -348,10 +388,13 @@ pub struct Mobs {
     #[serde(skip)]
     explosions: Vec<Explosion>,
     last_tick: u64,
-    // Persist this cursor so many player sessions cannot repeat grazing on
-    // the same tick, including immediately after a server restart.
     #[serde(default)]
     last_graze_tick: u64,
+    #[serde(skip)]
+    last_leash_tick: u64,
+    // Runtime-only flag. Default false (not paused) on new/load.
+    #[serde(skip)]
+    natural_spawning_paused: bool,
     next_id: i32,
     dragon_defeated: bool,
     enabled: bool,
@@ -583,12 +626,15 @@ impl Mobs {
                 .unwrap_or(BASE_ID - 1);
             if value.next_id <= max_id
                 || value.next_id < BASE_ID
-                || value.next_id >= i32::MAX - 1024
+                || value.next_id >= 1_000_000
                 || value.entities.len() > 128
                 || value.arrows.len() > ARROW_CAP
                 || value.orbs.len() > 256
                 || value.entities.iter().any(|(&id, mob)| {
                     id < BASE_ID
+                        || mob.tame_progress > 20
+                        || (mob.saddled && !matches!(mob.kind, Kind::Pig | Kind::Horse))
+                        || (mob.fence_anchor.is_some() && !mob.kind.passive())
                         || id != mob.id
                         || !mob.position.is_valid()
                         || mob.health <= 0
@@ -685,10 +731,24 @@ impl Mobs {
             size,
             anger_until: 0,
             zombie_villager: false,
+            saddled: false,
+            tamed: false,
+            tame_progress: 0,
+            fence_anchor: None,
+            rider: None,
+            leash_holder: None,
+            last_ride_tick: 0,
         };
         let event = mob.spawn();
         self.entities.insert(id, mob);
         event
+    }
+    /// An egg impact may spawn one baby chicken, under the existing Mob cap.
+    pub fn hatch_egg(&mut self, world: &World, at: PlayerPosition) -> Option<Event> {
+        if self.entities.len() >= 128 || !at.is_valid() || physics::collides(world, &at) {
+            return None;
+        }
+        Some(self.insert(Kind::Chicken, at, true))
     }
     /// Set zombie-villager metadata before sending the authoritative spawn.
     /// The former villager's age and profession survive for future curing.
@@ -868,6 +928,7 @@ impl Mobs {
             .values()
             .copied()
             .map(Mob::spawn)
+            .chain(self.tether_snapshots())
             .chain(self.arrows.values().copied().map(Arrow::spawn))
             .chain(self.orbs.iter().map(|(&id, &(at, amount, _))| {
                 let mut body = Vec::new();
@@ -1110,6 +1171,265 @@ impl Mobs {
         ))
     }
 
+    /// Only a nearby, eligible animal can receive a saddle (item debit is caller-owned).
+    pub fn can_saddle(&self, id: i32, player: PlayerPosition) -> bool {
+        self.entities.get(&id).is_some_and(|mob| {
+            matches!(mob.kind, Kind::Pig | Kind::Horse)
+                && (mob.kind == Kind::Pig || mob.tamed)
+                && !mob.baby
+                && !mob.saddled
+                && mob.nearby(player, 3.0)
+        })
+    }
+    pub fn saddle(&mut self, id: i32, player: PlayerPosition) -> Option<Event> {
+        if !self.can_saddle(id, player) {
+            return None;
+        }
+        let mob = self.entities.get_mut(&id)?;
+        mob.saddled = true;
+        Some(mob.mount_metadata())
+    }
+    pub fn use_mount(&mut self, id: i32, rider: i32, player: PlayerPosition) -> Option<Vec<Event>> {
+        if self.entities.values().any(|mob| mob.rider == Some(rider)) {
+            return None;
+        }
+        let mob = self.entities.get_mut(&id)?;
+        if !matches!(mob.kind, Kind::Pig | Kind::Horse)
+            || mob.baby
+            || mob.rider.is_some()
+            || !mob.nearby(player, 4.0)
+        {
+            return None;
+        }
+        let mut result = Vec::new();
+        if mob.kind == Kind::Horse && !mob.tamed {
+            mob.tame_progress = mob.tame_progress.saturating_add(1);
+            if mob.tame_progress >= 3 {
+                mob.tamed = true;
+                result.push(mob.mount_metadata());
+                result.push(mob.status(7)); // taming hearts
+            }
+        } else if !mob.saddled {
+            return None;
+        }
+        mob.rider = Some(rider);
+        result.push(crate::vehicles::attachment(rider, id));
+        Some(result)
+    }
+    pub fn rider_position(&self, rider: i32) -> Option<PlayerPosition> {
+        self.entities
+            .values()
+            .find(|mob| mob.rider == Some(rider))
+            .map(|mob| PlayerPosition {
+                y: (mob.position.y + 0.8).min(255.8),
+                ..mob.position
+            })
+    }
+    pub fn is_riding(&self, rider: i32) -> bool {
+        self.rider_position(rider).is_some()
+    }
+    pub fn dismount(&mut self, rider: i32) -> Option<Event> {
+        let mob = self
+            .entities
+            .values_mut()
+            .find(|mob| mob.rider == Some(rider))?;
+        mob.rider = None;
+        Some(crate::vehicles::attachment(rider, -1))
+    }
+    pub fn steer_rider(
+        &mut self,
+        rider: i32,
+        world: &World,
+        forward: f32,
+        yaw: f32,
+        holding_carrot: bool,
+        now: u64,
+    ) -> Vec<Event> {
+        if !forward.is_finite() || !yaw.is_finite() {
+            return Vec::new();
+        }
+        let Some(mob) = self
+            .entities
+            .values_mut()
+            .find(|mob| mob.rider == Some(rider))
+        else {
+            return Vec::new();
+        };
+        if now <= mob.last_ride_tick {
+            return Vec::new();
+        }
+        mob.last_ride_tick = now;
+        if !mob.saddled || (mob.kind == Kind::Pig && !holding_carrot) {
+            return Vec::new();
+        }
+        let radians = (yaw as f64).to_radians();
+        let speed = if mob.kind == Kind::Horse { 0.22 } else { 0.11 };
+        let step = f64::from(forward.clamp(-1.0, 1.0)) * speed;
+        let next = PlayerPosition {
+            x: mob.position.x - radians.sin() * step,
+            z: mob.position.z + radians.cos() * step,
+            ..mob.position
+        };
+        if next.is_valid()
+            && physics::valid_movement(world, &mob.position, &next)
+            && physics::supported(world, &next)
+        {
+            mob.position = next;
+            return vec![multiplayer::teleport(mob.id, &next, yaw, 0.0)];
+        }
+        Vec::new()
+    }
+    /// Leash packet 0x1B is server-owned; a fence tie remains in the saved Mob.
+    pub fn can_leash(&self, id: i32, holder: i32, player: PlayerPosition) -> bool {
+        holder > 0
+            && self.entities.get(&id).is_some_and(|mob| {
+                mob.kind.passive()
+                    && !mob.baby
+                    && mob.rider.is_none()
+                    && mob.leash_holder.is_none()
+                    && mob.fence_anchor.is_none()
+                    && mob.nearby(player, 5.0)
+            })
+    }
+    pub fn leash(&mut self, id: i32, holder: i32, player: PlayerPosition) -> Option<Event> {
+        if !self.can_leash(id, holder, player) {
+            return None;
+        }
+        self.entities.get_mut(&id)?.leash_holder = Some(holder);
+        Some(Self::leash_packet(id, holder))
+    }
+    fn leash_packet(id: i32, holder: i32) -> Event {
+        let mut body = Vec::with_capacity(9);
+        body.extend_from_slice(&id.to_be_bytes());
+        body.extend_from_slice(&holder.to_be_bytes());
+        body.push(1);
+        Event { id: 0x1b, body }
+    }
+    fn knot_id(mob_id: i32) -> i32 {
+        2_000_000 + mob_id
+    }
+    fn knot_spawn(mob_id: i32, anchor: [i32; 3]) -> Event {
+        let mut body = Vec::new();
+        write_varint(Self::knot_id(mob_id) as u32, &mut body);
+        body.push(77);
+        for value in anchor {
+            let fixed = ((f64::from(value) + 0.5) * 32.0) as i32;
+            body.extend_from_slice(&fixed.to_be_bytes());
+        }
+        body.extend_from_slice(&[0, 0]);
+        body.extend_from_slice(&0i32.to_be_bytes());
+        Event { id: 0x0e, body }
+    }
+    pub fn tie_fence(&mut self, holder: i32, anchor: [i32; 3]) -> Vec<Event> {
+        let mut events = Vec::new();
+        for mob in self.entities.values_mut() {
+            let dx = mob.position.x - f64::from(anchor[0]);
+            let dz = mob.position.z - f64::from(anchor[2]);
+            if mob.leash_holder == Some(holder) && dx.hypot(dz) <= 8.0 && events.len() < 32 {
+                mob.leash_holder = None;
+                mob.fence_anchor = Some(anchor);
+                events.push(Self::knot_spawn(mob.id, anchor));
+                events.push(Self::leash_packet(mob.id, Self::knot_id(mob.id)));
+            }
+        }
+        events
+    }
+    pub fn untie_fence(&mut self, anchor: [i32; 3]) -> Vec<Event> {
+        let mut result = Vec::new();
+        for mob in self.entities.values_mut() {
+            if mob.fence_anchor == Some(anchor) {
+                mob.fence_anchor = None;
+                result.push(Self::leash_packet(mob.id, -1));
+                result.push(multiplayer::destroy(Self::knot_id(mob.id)));
+            }
+        }
+        result
+    }
+    pub fn release_player(&mut self, holder: i32) -> Vec<Event> {
+        let mut result = Vec::new();
+        if let Some(detach) = self.dismount(holder) {
+            result.push(detach);
+        }
+        for mob in self.entities.values_mut() {
+            if mob.leash_holder == Some(holder) {
+                mob.leash_holder = None;
+                result.push(Self::leash_packet(mob.id, -1));
+            }
+        }
+        result
+    }
+    pub fn tether_snapshots(&self) -> Vec<Event> {
+        let mut result = Vec::new();
+        for mob in self.entities.values() {
+            if let Some(anchor) = mob.fence_anchor {
+                result.push(Self::knot_spawn(mob.id, anchor));
+                result.push(Self::leash_packet(mob.id, Self::knot_id(mob.id)));
+            } else if let Some(holder) = mob.leash_holder {
+                result.push(Self::leash_packet(mob.id, holder));
+            }
+            if let Some(rider) = mob.rider {
+                result.push(crate::vehicles::attachment(rider, mob.id));
+            }
+        }
+        result
+    }
+    /// Follow a verified player entity or a persisted fence anchor once per tick.
+    pub fn advance_leashes(
+        &mut self,
+        world: &World,
+        now: u64,
+        players: &[(i32, PlayerPosition)],
+    ) -> Vec<Event> {
+        if now <= self.last_leash_tick {
+            return Vec::new();
+        }
+        self.last_leash_tick = now;
+        let mut events = Vec::new();
+        for mob in self.entities.values_mut() {
+            let destination = if let Some(anchor) = mob.fence_anchor {
+                Some(PlayerPosition {
+                    x: f64::from(anchor[0]) + 0.5,
+                    y: f64::from(anchor[1]),
+                    z: f64::from(anchor[2]) + 0.5,
+                })
+            } else {
+                mob.leash_holder.and_then(|id| {
+                    players
+                        .iter()
+                        .find(|(owner, _)| *owner == id)
+                        .map(|(_, p)| *p)
+                })
+            };
+            let Some(target) = destination else { continue };
+            let dx = target.x - mob.position.x;
+            let dz = target.z - mob.position.z;
+            let gap = dx.hypot(dz);
+            if gap > 10.0 {
+                mob.leash_holder = None;
+                if mob.fence_anchor.take().is_some() {
+                    events.push(multiplayer::destroy(Self::knot_id(mob.id)));
+                }
+                events.push(Self::leash_packet(mob.id, -1));
+                continue;
+            }
+            if gap > 2.5 && gap.is_finite() && now.is_multiple_of(2) {
+                let step = 0.18;
+                let next = PlayerPosition {
+                    x: mob.position.x + dx / gap * step,
+                    z: mob.position.z + dz / gap * step,
+                    ..mob.position
+                };
+                if next.is_valid()
+                    && physics::valid_movement(world, &mob.position, &next)
+                    && physics::supported(world, &next)
+                {
+                    mob.position = next;
+                    events.push(multiplayer::teleport(mob.id, &next, 0.0, 0.0));
+                }
+            }
+        }
+        events
+    }
     /// Animal breeding consumes feed only if a nearby same-kind partner exists.
     pub fn feed(
         &mut self,
@@ -1213,7 +1533,11 @@ impl Mobs {
         players: &[PlayerPosition],
         events: &mut Vec<Event>,
     ) {
-        if !self.enabled || players.is_empty() || !now.is_multiple_of(20) {
+        if !self.enabled
+            || self.natural_spawning_paused
+            || players.is_empty()
+            || !now.is_multiple_of(20)
+        {
             return;
         }
         let passive = self
@@ -1304,10 +1628,11 @@ impl Mobs {
                 {
                     continue;
                 }
-                match seed % 4 {
-                    0 => Kind::Cow,
-                    1 => Kind::Pig,
-                    2 => Kind::Sheep,
+                match seed % 8 {
+                    0 | 1 => Kind::Cow,
+                    2 => Kind::Pig,
+                    3 | 4 => Kind::Sheep,
+                    5 if matches!(biome, 1 | 3 | 4 | 18) => Kind::Horse,
                     _ => Kind::Chicken,
                 }
             } else {
@@ -1377,6 +1702,10 @@ impl Mobs {
             }
             break; // Bound per-cycle packets and CPU.
         }
+    }
+    /// The world GameRule controls only natural spawning, never existing mob AI.
+    pub fn set_natural_spawning(&mut self, allowed: bool) {
+        self.natural_spawning_paused = !allowed;
     }
     /// Tick at most four elapsed 20Hz steps; caller owns broadcast fan-out.
     pub fn tick(&mut self, now: u64, world: &World, players: &[PlayerPosition]) -> Vec<Event> {
@@ -1454,6 +1783,9 @@ impl Mobs {
                         body.push(0x7f);
                         events.push(Event { id: 0x1c, body });
                     }
+                }
+                if mob.rider.is_some() || mob.leash_holder.is_some() || mob.fence_anchor.is_some() {
+                    continue; // Mounted or leashed animals never wander independently.
                 }
                 let nearest_distance = distance_to_players(mob.position, players);
                 if !mob.kind.passive() && nearest_distance > 128.0 {
@@ -2172,6 +2504,48 @@ mod tests {
             .is_empty());
         assert_eq!(World::load(&path).unwrap().get(0, 64, 0) >> 4, 3);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn mounted_pig_requires_saddle_and_horse_tames_on_server() {
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let at = PlayerPosition::default();
+        let pig = mobs.next_id;
+        mobs.insert(Kind::Pig, at, false);
+        assert!(mobs.use_mount(pig, 2, at).is_none());
+        assert!(mobs.can_saddle(pig, at));
+        assert_eq!(mobs.saddle(pig, at).unwrap().id, 0x1c);
+        assert!(mobs.use_mount(pig, 2, at).is_some());
+        assert_eq!(mobs.dismount(2).unwrap().id, 0x1b);
+        let horse = mobs.next_id;
+        mobs.insert(Kind::Horse, at, false);
+        for _ in 0..3 {
+            assert!(mobs.use_mount(horse, 3, at).is_some());
+            mobs.dismount(3).unwrap();
+        }
+        assert!(mobs.can_saddle(horse, at));
+    }
+
+    #[test]
+    fn leash_cannot_attach_to_hostile_or_duplicate_animal() {
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let at = PlayerPosition::default();
+        let cow = mobs.next_id;
+        mobs.insert(Kind::Cow, at, false);
+        let zombie = mobs.next_id;
+        mobs.insert(Kind::Zombie, at, false);
+        assert!(!mobs.can_leash(zombie, 1, at));
+        assert_eq!(mobs.leash(cow, 1, at).unwrap().id, 0x1b);
+        assert!(!mobs.can_leash(cow, 1, at));
+        let tied = mobs.tie_fence(1, [0, 64, 0]);
+        assert_eq!(tied.len(), 2);
+        assert_eq!(mobs.untie_fence([0, 64, 0]).len(), 2);
     }
 
     #[test]
