@@ -87,13 +87,12 @@ impl World {
 
     /// A bounded, transactional edit for structures larger than a door.
     /// The original World (including wake queues) survives any save failure.
-    pub(super) fn special_batch(
-        &mut self,
-        path: &Path,
+    fn stage_special_batch(
+        &self,
         changes: &BTreeMap<Position, u16>,
-    ) -> io::Result<Vec<(i32, i32, i32)>> {
+    ) -> io::Result<(World, Vec<(i32, i32, i32)>)> {
         if changes.is_empty() {
-            return Ok(Vec::new());
+            return Ok((self.clone(), Vec::new()));
         }
         if changes.len() > 128 {
             return Err(io::Error::new(
@@ -123,13 +122,21 @@ impl World {
                 changed.push((x, i32::from(y), z));
             }
         }
+        Ok((candidate, changed))
+    }
+
+    pub(super) fn special_batch(
+        &mut self,
+        path: &Path,
+        changes: &BTreeMap<Position, u16>,
+    ) -> io::Result<Vec<(i32, i32, i32)>> {
+        let (candidate, changed) = self.stage_special_batch(changes)?;
         if !changed.is_empty() {
             candidate.save(path)?;
             *self = candidate;
         }
         Ok(changed)
     }
-
     /// ID 118 encodes 0..3 water levels directly in persistent block metadata.
     /// Returns a replacement item only for a valid interaction. The caller
     /// must commit the held-stack exchange before exposing the block edit.
@@ -231,16 +238,10 @@ impl World {
 
     /// Legacy portal frames have orientation in bits 0..1 and Eye in bit 2.
     /// Only a complete 3x3 ring is activated; the center is updated atomically.
-    pub fn insert_end_eye(
-        &mut self,
-        path: &Path,
-        x: i32,
-        y: i32,
-        z: i32,
-    ) -> io::Result<Vec<(i32, i32, i32)>> {
+    fn end_eye_changes(&self, x: i32, y: i32, z: i32) -> BTreeMap<Position, u16> {
         let old = self.get(x, y, z);
         if old >> 4 != 120 || old & 4 != 0 {
-            return Ok(Vec::new());
+            return BTreeMap::new();
         }
         let mut changes = BTreeMap::new();
         changes.insert((x, y as u8, z), old | 4);
@@ -278,25 +279,29 @@ impl World {
                                 changes.insert((cx + dx, y as u8, cz + dz), 119 << 4);
                             }
                         }
-                        return self.special_batch(path, &changes);
+                        return changes;
                     }
                 }
             }
         }
-        self.special_batch(path, &changes)
+        changes
     }
 
-    /// Bone meal applies vanilla-style full crop maturity, one sapling tree,
-    /// or short-grass/flowers; it never overwrites an occupied build.
-    pub fn apply_bonemeal(
+    pub fn insert_end_eye(
         &mut self,
         path: &Path,
         x: i32,
         y: i32,
         z: i32,
     ) -> io::Result<Vec<(i32, i32, i32)>> {
+        self.special_batch(path, &self.end_eye_changes(x, y, z))
+    }
+
+    /// Bone meal applies vanilla-style full crop maturity, one sapling tree,
+    /// or short-grass/flowers; it never overwrites an occupied build.
+    fn bonemeal_changes(&self, x: i32, y: i32, z: i32) -> BTreeMap<Position, u16> {
         if !in_bounds(x, y, z) {
-            return Ok(Vec::new());
+            return BTreeMap::new();
         }
         let block = self.get(x, y, z);
         let mut changes = BTreeMap::new();
@@ -322,7 +327,55 @@ impl World {
             }
             _ => {}
         }
-        self.special_batch(path, &changes)
+        changes
+    }
+
+    pub fn apply_bonemeal(
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> io::Result<Vec<(i32, i32, i32)>> {
+        self.special_batch(path, &self.bonemeal_changes(x, y, z))
+    }
+
+    /// Stage a player special-item interaction entirely in memory. The caller
+    /// atomically commits inventory and world snapshots through the redo journal
+    /// before publishing either state or any TNT spawn packet.
+    pub fn stage_special_item(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        held: Stack,
+    ) -> io::Result<Option<(World, Vec<(i32, i32, i32)>, Option<Stack>, bool)>> {
+        if !in_bounds(x, y, z) {
+            return Ok(None);
+        }
+        let target = self.get(x, y, z) >> 4;
+        let mut changes = BTreeMap::new();
+        let (exchange, wears_tool) =
+            if let Some((block, replacement)) = self.cauldron_exchange(x, y, z, held) {
+                changes.insert((x, y as u8, z), block);
+                (Some(replacement), false)
+            } else if target == 120 && held.id == 381 {
+                changes = self.end_eye_changes(x, y, z);
+                (None, false)
+            } else if held.id == 351 && held.damage == 15 {
+                changes = self.bonemeal_changes(x, y, z);
+                (None, false)
+            } else if target == 46 && held.id == 259 {
+                changes.insert((x, y as u8, z), 0);
+                (None, true)
+            } else {
+                return Ok(None);
+            };
+        let (mut next, changed) = self.stage_special_batch(&changes)?;
+        if wears_tool && !changed.is_empty() {
+            next.spawn_primed_tnt(x, y, z, 80);
+        }
+        Ok(Some((next, changed, exchange, wears_tool)))
     }
 
     /// Approximate 1.7.10 daylight detector curve: noon=15, midnight=0,
