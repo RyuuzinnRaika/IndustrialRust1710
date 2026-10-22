@@ -1,0 +1,74 @@
+name: J100 two-build artifact reproducibility check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 55
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Lock resolved dependencies for this run
+        run: cargo generate-lockfile
+      - name: Record dependency graph
+        run: cargo metadata --locked --format-version 1 > cargo-metadata.json
+        shell: bash
+      - name: First optimized build
+        run: cargo build --release --locked -p vanilla-server -p legacy-status-server
+      - name: Capture first checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $binarySuffix = if ($IsWindows) { ".exe" } else { "" }
+          @("vanilla-server", "legacy-status-server") | ForEach-Object {
+            $file = "target/release/$($_)$binarySuffix"
+            if (!(Test-Path $file -PathType Leaf)) { throw "Missing: $file" }
+            (Get-FileHash -Algorithm SHA256 -Path $file).Hash.ToLowerInvariant() + "  " + $_
+          } | Set-Content -Encoding utf8 first-build-sha256.txt
+      - name: Remove every build output before second build
+        run: cargo clean
+      - name: Second optimized build, same source and lockfile
+        run: cargo build --release --locked -p vanilla-server -p legacy-status-server
+      - name: Compare binary bytes by SHA256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $binarySuffix = if ($IsWindows) { ".exe" } else { "" }
+          @("vanilla-server", "legacy-status-server") | ForEach-Object {
+            $file = "target/release/$($_)$binarySuffix"
+            (Get-FileHash -Algorithm SHA256 -Path $file).Hash.ToLowerInvariant() + "  " + $_
+          } | Set-Content -Encoding utf8 second-build-sha256.txt
+          $first = Get-Content first-build-sha256.txt
+          $second = Get-Content second-build-sha256.txt
+          if ((Compare-Object $first $second).Count -ne 0) {
+            Write-Error "Two clean optimized builds produced different SHA256 digests"
+            exit 1
+          }
+          Write-Host "Two clean optimized builds match for this runner and locked dependency graph"
+          @(
+            "commit=$env:GITHUB_SHA"
+            "runner=$env:RUNNER_OS"
+            "rustc=$(& rustc --version)"
+            "cargo=$(& cargo --version)"
+            "run_id=$env:GITHUB_RUN_ID"
+          ) | Set-Content -Encoding utf8 build-provenance.txt
+      - name: Publish reproducibility audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: j100-two-builds-${{ matrix.os }}
+          path: |
+            Cargo.lock
+            cargo-metadata.json
+            first-build-sha256.txt
+            second-build-sha256.txt
+            build-provenance.txt
+          if-no-files-found: error
+          retention-days: 30
