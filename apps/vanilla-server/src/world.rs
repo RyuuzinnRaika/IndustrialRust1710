@@ -114,6 +114,7 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 8 // flowing water: simplified bounded propagation
             | 10 // flowing lava
             | 6 // saplings
+            | 31 | 32 | 37 | 38 // tall grass, dead bush and flowers
             | 18 // leaves
             | 59 // wheat
             | 60 // farmland (via hoe)
@@ -581,7 +582,7 @@ impl World {
             }
             if matches!(
                 id,
-                6 | 50
+                6 | 31 | 32 | 37 | 38 | 50
                     | 81
                     | 83
                     | 104
@@ -915,6 +916,7 @@ impl World {
                             }
                         }
                         66 => 66,
+                        37 | 38 => id as i16,
                         70 | 72 | 77 | 143 => id as i16,
                         75 | 76 => 76,
                         93 | 94 => 356,
@@ -932,7 +934,11 @@ impl World {
                     let stack = crate::inventory::Stack {
                         id: item_id,
                         count: 1,
-                        damage: if id == 6 { (old & 7) as i16 } else { 0 },
+                        damage: if matches!(id, 6 | 38) {
+                            (old & 15) as i16
+                        } else {
+                            0
+                        },
                     };
                     Some(WorldDrop { pos, stack })
                 })
@@ -1552,6 +1558,29 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn flower_support_break_detaches_original_variant_after_commit() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-flower-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        let flower = (38 << 4) | 5;
+        assert!(world.can_support(1, 64, 1, flower));
+        world.update_and_save(&path, 1, 64, 1, flower).unwrap();
+        world.update_and_save(&path, 1, 63, 1, 0).unwrap();
+        assert!(world.block_tick(&path, 64).unwrap().contains(&(1, 64, 1)));
+        assert_eq!(world.get(1, 64, 1), 0);
+        assert!(world
+            .drain_drops()
+            .iter()
+            .any(|drop| drop.stack.id == 38 && drop.stack.damage == 5));
+        assert_eq!(World::load(&path).unwrap().get(1, 64, 1), 0);
+        assert!(!world.can_support(1, 64, 1, 31 << 4));
+        assert!(!world.can_support(1, 64, 1, 32 << 4));
+        world.import_block(1, 63, 1, 12 << 4).unwrap();
+        assert!(world.can_support(1, 64, 1, 32 << 4));
+        fs::remove_file(path).unwrap();
+    }
     #[test]
     fn unsupported_torch_detaches_into_an_item_after_commit() {
         let path =
