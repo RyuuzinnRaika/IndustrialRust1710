@@ -1906,14 +1906,16 @@ impl Mobs {
                 break;
             }
             let key = format!("{x},{y},{z}");
-            if self.spawner_next_tick.get(&key).is_some_and(|tick| *tick > now) {
+            if self
+                .spawner_next_tick
+                .get(&key)
+                .is_some_and(|tick| *tick > now)
+            {
                 continue;
             }
             // Keep this persisted table bounded even on servers that place
             // and destroy very large numbers of spawners.
-            if self.spawner_next_tick.len() >= 512
-                && !self.spawner_next_tick.contains_key(&key)
-            {
+            if self.spawner_next_tick.len() >= 512 && !self.spawner_next_tick.contains_key(&key) {
                 continue;
             }
             let salt = (x as i64 as u64).wrapping_mul(0x9e3779b185ebca87)
@@ -1927,12 +1929,16 @@ impl Mobs {
                 2 => Kind::Skeleton,
                 _ => Kind::Spider,
             };
-            let nearby_mobs = self.entities.values().filter(|mob| {
-                mob.kind == kind
-                    && (mob.position.x - (f64::from(x) + 0.5)).abs() <= 8.0
-                    && (mob.position.y - f64::from(y)).abs() <= 4.0
-                    && (mob.position.z - (f64::from(z) + 0.5)).abs() <= 8.0
-            }).count();
+            let nearby_mobs = self
+                .entities
+                .values()
+                .filter(|mob| {
+                    mob.kind == kind
+                        && (mob.position.x - (f64::from(x) + 0.5)).abs() <= 8.0
+                        && (mob.position.y - f64::from(y)).abs() <= 4.0
+                        && (mob.position.z - (f64::from(z) + 0.5)).abs() <= 8.0
+                })
+                .count();
             if nearby_mobs < 6 {
                 for attempt in 0..4 {
                     let roll = hash(salt ^ now ^ (attempt as u64).wrapping_mul(0x94d049bb133111eb));
@@ -1945,7 +1951,10 @@ impl Mobs {
                         z: f64::from(sz) + 0.5,
                     };
                     if !position.is_valid()
-                        || !matches!(world.get(sx, sy - 1, sz) >> 4, 1..=5 | 7 | 12 | 13 | 24 | 48 | 49 | 87 | 88 | 89 | 112 | 121)
+                        || !matches!(
+                            world.get(sx, sy - 1, sz) >> 4,
+                            1..=5 | 7 | 12 | 13 | 24 | 48 | 49 | 87 | 88 | 89 | 112 | 121
+                        )
                         || world.get(sx, sy, sz) != 0
                         || world.get(sx, sy + 1, sz) != 0
                         || physics::collides(world, &position)
@@ -1956,7 +1965,10 @@ impl Mobs {
                     break; // One new mob per spawner/second, bounded packet fan-out.
                 }
             }
-            self.spawner_next_tick.insert(key, now.saturating_add(200 + hash(salt ^ now ^ 0x5a0f) % 600));
+            self.spawner_next_tick.insert(
+                key,
+                now.saturating_add(200 + hash(salt ^ now ^ 0x5a0f) % 600),
+            );
         }
     }
     /// The world GameRule controls only natural spawning, never existing mob AI.
