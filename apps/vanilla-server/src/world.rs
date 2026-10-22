@@ -8,7 +8,8 @@ mod special;
 pub use special::TntEvent;
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// Temporary world edge (blocks). Prevents unbounded player edits or packet positions.
 /// Coordinates x/z must be in [-WORLD_LIMIT, WORLD_LIMIT).
@@ -67,6 +68,9 @@ pub struct World {
     primed_tnt: BTreeMap<i32, special::PrimedTnt>,
     next_tnt_id: i32,
     tnt_events: Vec<special::TntEvent>,
+    // Only live worlds bind to a session; standalone conversions and tests
+    // retain their portable save behavior, while clones share one OS lock.
+    save_session: Option<(PathBuf, Arc<Mutex<crate::session_lock::WorldSessionLock>>)>,
 }
 
 /// A persisted world mutation can create a temporary ground-item event.
@@ -188,6 +192,37 @@ pub fn is_placeable(block_id: u16) -> bool {
     )
 }
 impl World {
+    /// Bind this live world's IRW saves to the startup session.lock. Any
+    /// subsequent clone (e.g. an atomic two-block edit) keeps this binding.
+    pub fn bind_save_session(
+        &mut self,
+        world_path: &Path,
+        session: Arc<Mutex<crate::session_lock::WorldSessionLock>>,
+    ) -> io::Result<()> {
+        let mut lock = session
+            .lock()
+            .map_err(|_| invalid("session lock mutex poisoned"))?;
+        lock.verify()?;
+        drop(lock);
+        self.save_session = Some((world_path.to_path_buf(), session));
+        Ok(())
+    }
+
+    /// Verify the live world still owns session.lock before a journal can
+    /// publish serialized IRW bytes. Full cross-file atomicity is FS12.
+    fn verify_save_session(&self, path: Option<&Path>) -> io::Result<()> {
+        if let Some((world_path, session)) = &self.save_session {
+            if path.is_some_and(|path| path != world_path) {
+                return Err(invalid("world save path differs from session-locked world"));
+            }
+            session
+                .lock()
+                .map_err(|_| invalid("session lock mutex poisoned"))?
+                .verify()?;
+        }
+        Ok(())
+    }
+
     pub fn set_raining(&mut self, raining: bool) {
         self.raining = raining;
     }
@@ -1386,6 +1421,7 @@ impl World {
     /// Encode the same bounded IRW snapshot used by save(), for journaled
     /// inventory/world transactions without an intermediate live disk write.
     pub fn encoded(&self) -> io::Result<Vec<u8>> {
+        self.verify_save_session(None)?;
         if self.edits.len() > MAX_EDITS {
             return Err(invalid("world edits exceed IRW capacity"));
         }
@@ -1394,6 +1430,24 @@ impl World {
         Ok(bytes)
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        // Keep the session mutex held across staging and publication, so
+        // another Rust write on the same world cannot interleave with us.
+        // Re-verify immediately before renaming the finished IRW snapshot.
+        let mut session_guard = if let Some((bound_path, session)) = &self.save_session {
+            if bound_path != path {
+                return Err(invalid("world save path differs from session-locked world"));
+            }
+            Some(
+                session
+                    .lock()
+                    .map_err(|_| invalid("session lock mutex poisoned"))?,
+            )
+        } else {
+            None
+        };
+        if let Some(guard) = session_guard.as_mut() {
+            guard.verify()?;
+        }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
@@ -1402,6 +1456,9 @@ impl World {
         self.write_to(&mut f)?;
         f.sync_all()?;
         drop(f);
+        if let Some(guard) = session_guard.as_mut() {
+            guard.verify()?;
+        }
         // Keep the original on filesystems that disallow atomic replacement.
         fs::rename(temp, path)
     }
@@ -1733,6 +1790,39 @@ mod tests {
         assert_eq!(world.chunk_data(0, -1).0, 0x18 | (1 << 13));
         assert_eq!(world.chunk_data(-1, 0).0, 0x18 | (1 << 14));
         assert_eq!(world.chunk_data(0, 0).0, 0x18 | (1 << 15));
+    }
+
+    #[test]
+    fn live_world_refuses_irw_writes_after_session_lock_is_stolen() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-guarded-irw-save-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let world_path = root.join("flat.irw");
+        let session = Arc::new(Mutex::new(
+            crate::session_lock::WorldSessionLock::acquire(&root).unwrap(),
+        ));
+        let mut world = World::new();
+        world
+            .bind_save_session(&world_path, Arc::clone(&session))
+            .unwrap();
+        world.save(&world_path).unwrap();
+        let before = fs::read(&world_path).unwrap();
+        // A cloned editor must carry the same ownership requirement.
+        let cloned = world.clone();
+        assert!(cloned.save(&root.join("wrong.irw")).is_err());
+        fs::write(root.join("session.lock"), 0i64.to_be_bytes()).unwrap();
+        assert!(cloned.save(&world_path).is_err());
+        assert!(cloned.encoded().is_err());
+        assert_eq!(fs::read(&world_path).unwrap(), before);
+        assert!(!world_path.with_extension("tmp").exists());
+        drop(cloned);
+        drop(world);
+        drop(session);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

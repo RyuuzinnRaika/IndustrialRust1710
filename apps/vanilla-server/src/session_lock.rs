@@ -9,6 +9,7 @@ use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Debug)]
 pub struct WorldSessionLock {
     file: File,
     path: PathBuf,
