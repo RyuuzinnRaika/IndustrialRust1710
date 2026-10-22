@@ -31,6 +31,7 @@ mod navigation;
 mod physics;
 mod player;
 mod server_config;
+mod signs;
 mod session_lock;
 mod survival;
 mod survival_damage;
