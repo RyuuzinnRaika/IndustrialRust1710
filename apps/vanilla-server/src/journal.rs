@@ -124,7 +124,10 @@ fn sync_directory(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 fn apply(journal: &Path, record: &Record) -> io::Result<()> {
-    if record.version != VERSION || record.files.is_empty() || record.files.len() > MAX_TRANSACTION_FILES {
+    if record.version != VERSION
+        || record.files.is_empty()
+        || record.files.len() > MAX_TRANSACTION_FILES
+    {
         return Err(invalid("invalid journal version or file count"));
     }
     let base = root(journal);
@@ -383,7 +386,6 @@ mod tests {
         assert!(!journal.exists());
         fs::remove_dir_all(home).unwrap();
     }
-
 
     #[test]
     fn four_participant_commit_recovers_all_file_types_in_one_generation() {
