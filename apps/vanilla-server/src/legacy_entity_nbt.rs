@@ -27,8 +27,8 @@ pub(crate) fn validate_entities(entities: &[Value]) -> io::Result<()> {
     for original in entities {
         let bytes =
             fastnbt::to_bytes(original).map_err(|_| invalid("invalid entity NBT compound"))?;
-        let entity: EntityIdentity =
-            fastnbt::from_bytes(&bytes).map_err(|_| invalid("missing legacy entity identity or Pos"))?;
+        let entity: EntityIdentity = fastnbt::from_bytes(&bytes)
+            .map_err(|_| invalid("missing legacy entity identity or Pos"))?;
         if entity.id.is_empty()
             || entity.id.len() > 256
             || entity.pos.len() != 3
@@ -62,7 +62,10 @@ mod tests {
 
     fn entity(id: &str, pos: Vec<f64>) -> Value {
         let mut extra = BTreeMap::new();
-        extra.insert("ModdedEntityField".into(), Value::String("preserved".into()));
+        extra.insert(
+            "ModdedEntityField".into(),
+            Value::String("preserved".into()),
+        );
         let compound = SampleEntity {
             id: id.into(),
             pos,
