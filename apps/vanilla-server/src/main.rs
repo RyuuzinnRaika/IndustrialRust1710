@@ -3545,6 +3545,7 @@ fn start_clock_console(
                         ["objectives", "add", name, criterion, display] => {
                             candidate.add_objective(name, display, criterion)?
                         }
+                        ["objectives", "remove", name] => candidate.remove_objective(name)?,
                         ["objectives", "setdisplay", slot, name] => {
                             let slot = match *slot {
                                 "list" => 0,
@@ -3562,6 +3563,11 @@ fn start_clock_console(
                                 .parse::<i32>()
                                 .map_err(|_| bad("invalid scoreboard score"))?;
                             candidate.set_score(holder, objective, value)?
+                        }
+                        ["players", "reset", holder] => candidate.reset_player_scores(holder)?,
+                        ["teams", "remove", name] => candidate.remove_team(name)?,
+                        ["teams", "leave", name, holder] => {
+                            candidate.remove_player_from_team(name, holder)?
                         }
                         ["teams", "add", name, display] => candidate.add_team(name, display)?,
                         ["teams", "join", name, holder] => {
