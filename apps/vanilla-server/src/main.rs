@@ -1322,26 +1322,45 @@ fn play(
                 input.finish()?;
                 // Frame/painting IDs are disjoint from mobs. Server owns all
                 // insertions, rotations, destruction and resulting item drops.
-                let mut hanging_state = hangings.lock().map_err(|_| bad("hanging lock poisoned"))?;
+                let mut hanging_state =
+                    hangings.lock().map_err(|_| bad("hanging lock poisoned"))?;
                 if let Some(entity) = hanging_state.get(target_id as i32).cloned() {
-                    let at = (player.x.floor() as i32, player.y.floor() as i32, player.z.floor() as i32);
-                    if !entity.near(at) { continue; }
+                    let at = (
+                        player.x.floor() as i32,
+                        player.y.floor() as i32,
+                        player.z.floor() as i32,
+                    );
+                    if !entity.near(at) {
+                        continue;
+                    }
                     if action == 1 {
-                        if let Some((next, removed)) = hanging_state.stage_remove(target_id as i32)? {
+                        if let Some((next, removed)) =
+                            hanging_state.stage_remove(target_id as i32)?
+                        {
                             if survival {
                                 let drops = removed.drops();
-                                let mut ground = ground_items.lock().map_err(|_| bad("ground items lock poisoned"))?;
-                                if !ground.has_capacity_for(drops.len()) { continue; }
-                                let (staged_ground, spawned) = ground.stage_put_many(&drops, removed.drop_position())?;
+                                let mut ground = ground_items
+                                    .lock()
+                                    .map_err(|_| bad("ground items lock poisoned"))?;
+                                if !ground.has_capacity_for(drops.len()) {
+                                    continue;
+                                }
+                                let (staged_ground, spawned) =
+                                    ground.stage_put_many(&drops, removed.drop_position())?;
                                 journal::commit(
                                     &world_path.with_extension("pending-txn.json"),
-                                    &[(hanging_path, next.encoded()?), (ground_path, staged_ground.encoded()?)],
+                                    &[
+                                        (hanging_path, next.encoded()?),
+                                        (ground_path, staged_ground.encoded()?),
+                                    ],
                                 )?;
                                 *ground = staged_ground;
                                 *hanging_state = next;
                                 hub.broadcast(removed.destroy());
                                 for dropped in spawned {
-                                    for event in dropped.spawn() { hub.broadcast(event); }
+                                    for event in dropped.spawn() {
+                                        hub.broadcast(event);
+                                    }
                                 }
                             } else {
                                 next.save(hanging_path)?;
@@ -1350,15 +1369,18 @@ fn play(
                             }
                         }
                     } else if action == 0 && entity.is_frame() {
-                        if let Some((next, debit, event)) = hanging_state.stage_frame_use(
-                            target_id as i32, inventory.held()
-                        )? {
+                        if let Some((next, debit, event)) =
+                            hanging_state.stage_frame_use(target_id as i32, inventory.held())?
+                        {
                             if debit && survival {
                                 let mut candidate = inventory.clone();
                                 if candidate.consume_held() {
                                     journal::commit(
                                         &world_path.with_extension("pending-txn.json"),
-                                        &[(inventory_path, candidate.encoded()?), (hanging_path, next.encoded()?)],
+                                        &[
+                                            (inventory_path, candidate.encoded()?),
+                                            (hanging_path, next.encoded()?),
+                                        ],
                                     )?;
                                     *inventory = candidate;
                                     *hanging_state = next;
@@ -2021,28 +2043,42 @@ fn play(
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
                     && inventory.can_place(held)
-                    && inventory.held().is_some_and(|stack| matches!(stack.id, 321 | 389))
+                    && inventory
+                        .held()
+                        .is_some_and(|stack| matches!(stack.id, 321 | 389))
                 {
-                    let stack = inventory.held().ok_or_else(|| bad("missing hanging item"))?;
+                    let stack = inventory
+                        .held()
+                        .ok_or_else(|| bad("missing hanging item"))?;
                     let terrain = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                    let mut hanging_state = hangings.lock().map_err(|_| bad("hanging lock poisoned"))?;
-                    if let Some((next, placed)) = hanging_state.stage_place(&terrain, (x, y, z), face, stack.id)? {
+                    let mut hanging_state =
+                        hangings.lock().map_err(|_| bad("hanging lock poisoned"))?;
+                    if let Some((next, placed)) =
+                        hanging_state.stage_place(&terrain, (x, y, z), face, stack.id)?
+                    {
                         if survival {
                             let mut candidate = inventory.clone();
                             if candidate.consume_held() {
                                 journal::commit(
                                     &world_path.with_extension("pending-txn.json"),
-                                    &[(inventory_path, candidate.encoded()?), (hanging_path, next.encoded()?)],
+                                    &[
+                                        (inventory_path, candidate.encoded()?),
+                                        (hanging_path, next.encoded()?),
+                                    ],
                                 )?;
                                 *inventory = candidate;
                                 *hanging_state = next;
                                 send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                                for event in placed.spawn()? { hub.broadcast(event); }
+                                for event in placed.spawn()? {
+                                    hub.broadcast(event);
+                                }
                             }
                         } else {
                             next.save(hanging_path)?;
                             *hanging_state = next;
-                            for event in placed.spawn()? { hub.broadcast(event); }
+                            for event in placed.spawn()? {
+                                hub.broadcast(event);
+                            }
                         }
                     }
                     continue;
@@ -3424,7 +3460,11 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         &decorations,
         &view_chunks(chunk_center(&player_state)),
     )?;
-    for event in hangings.lock().map_err(|_| bad("hanging lock poisoned"))?.spawn_events()? {
+    for event in hangings
+        .lock()
+        .map_err(|_| bad("hanging lock poisoned"))?
+        .spawn_events()?
+    {
         send(&mut s, event.id, &event.body)?;
     }
     // 1.7.10 tab list entries precede other player entity spawns.
