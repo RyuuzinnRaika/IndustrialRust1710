@@ -424,7 +424,7 @@ mod tests {
                 .collect(),
         };
         fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
-        fs::write(world, b"new-world").unwrap();
+        fs::write(&world, b"new-world").unwrap();
         recover(&journal).unwrap();
         for (path, expected) in &targets {
             assert_eq!(fs::read(path).unwrap().as_slice(), *expected);
