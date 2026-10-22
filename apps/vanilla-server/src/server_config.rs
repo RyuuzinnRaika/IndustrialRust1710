@@ -114,7 +114,12 @@ impl ServerProperties {
         // user using only the current offline username whitelist.
         // Explicit online-mode now performs the Protocol 5 RSA/AES session handshake.
         // Missing server.properties still preserves the historical offline CLI mode.
-        let online_mode = boolean(&values, "online-mode", true)?;
+        // Do not silently switch a legacy deployment to a different auth mode.
+        // Unlike vanilla's default, this prototype requires an explicit choice.
+        if !values.contains_key("online-mode") {
+            return Err(invalid("server.properties must explicitly set online-mode"));
+        }
+        let online_mode = boolean(&values, "online-mode", false)?;
         if !boolean(&values, "white-list", false)? {
             return Err(invalid(
                 "white-list=false is unsafe for the current offline-mode server",
@@ -242,6 +247,8 @@ gamemode=1
         assert!(!p.survival);
         assert_eq!(p.difficulty, 1);
         assert!(!p.online_mode);
+        // An existing configuration must not silently change authentication.
+        assert!(ServerProperties::parse(&SAFE.replace("online-mode=false\n", "")).is_err());
         assert!(
             ServerProperties::parse(&SAFE.replace("online-mode=false", "online-mode=true"))
                 .unwrap()
