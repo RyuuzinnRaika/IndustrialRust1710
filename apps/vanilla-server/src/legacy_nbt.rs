@@ -133,6 +133,29 @@ pub(crate) fn parse_chunk(nbt: &[u8], cx: i32, cz: i32) -> io::Result<ChunkRoot>
 mod tests {
     use super::*;
 
+    #[test]
+    fn malformed_nbt_fuzz_smoke_never_panics() {
+        // Seeded, deterministic mutation corpus suitable for normal CI.
+        // Values are bounded to avoid intentionally exhausting runner memory.
+        let mut state = 0x1710_cafe_d00d_beefu64;
+        for case in 0..1500 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let count = (state as usize) % 1024;
+            let mut bytes = vec![0u8; count];
+            for x in &mut bytes {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *x = state as u8;
+            }
+            let result = std::panic::catch_unwind(|| parse_chunk(&bytes, 0, 0));
+            assert!(result.is_ok(), "NBT panic in deterministic case {case}");
+        }
+        assert!(parse_chunk(&vec![0u8; MAX_NBT_BYTES + 1], 0, 0).is_err());
+    }
+
     fn sample() -> ChunkRoot {
         let mut blocks = vec![0i8; 4096];
         blocks[0] = 1;
