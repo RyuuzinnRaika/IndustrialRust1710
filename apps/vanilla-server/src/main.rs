@@ -352,16 +352,20 @@ fn send_chunk_batch(
     coords: impl IntoIterator<Item = (i32, i32)>,
 ) -> io::Result<()> {
     let mut pending = Vec::with_capacity(chunk_pipeline::SESSION_BATCH_LIMIT);
+    let mut deadline = Instant::now() + chunk_pipeline::BATCH_DEADLINE;
     for (cx, cz) in coords {
         pending.push(queue_chunk(world, cx, cz)?);
         if pending.len() == chunk_pipeline::SESSION_BATCH_LIMIT {
             for chunk in pending.drain(..) {
-                send(s, 0x21, &chunk.finish()?)?;
+                send(s, 0x21, &chunk.finish_before(deadline)?)?;
             }
+            // Reset only after the entire bounded batch drains; not once per
+            // chunk, which would allow a stalled worker to hang a session.
+            deadline = Instant::now() + chunk_pipeline::BATCH_DEADLINE;
         }
     }
     for chunk in pending {
-        send(s, 0x21, &chunk.finish()?)?;
+        send(s, 0x21, &chunk.finish_before(deadline)?)?;
     }
     Ok(())
 }
