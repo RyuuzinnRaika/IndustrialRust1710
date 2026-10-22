@@ -1029,10 +1029,15 @@ fn play(
                 *vitals = next_vitals;
                 location = (candidate.x, candidate.y, candidate.z);
                 if survival && landed_distance >= 1.0 {
-                    let (fx, fy, fz) = (candidate.x.floor() as i32, candidate.y.floor() as i32 - 1, candidate.z.floor() as i32);
+                    let (fx, fy, fz) = (
+                        candidate.x.floor() as i32,
+                        candidate.y.floor() as i32 - 1,
+                        candidate.z.floor() as i32,
+                    );
                     let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     if soil.get(fx, fy, fz) >> 4 == 60
-                        && soil.update_and_save(world_path, fx, fy, fz, 3 << 4)? {
+                        && soil.update_and_save(world_path, fx, fy, fz, 3 << 4)?
+                    {
                         hub.broadcast(block_change_event(&soil, fx, fy, fz));
                     }
                 }
@@ -1076,14 +1081,20 @@ fn play(
         // Active beacons sample their pyramid on the existing 20TPS clock.
         if survival && vitals.health > 0.0 && now_tick.saturating_sub(last_beacon_tick) >= 80 {
             last_beacon_tick = now_tick;
-            let affected = world.lock().map_err(|_| bad("world mutex poisoned"))?
+            let affected = world
+                .lock()
+                .map_err(|_| bad("world mutex poisoned"))?
                 .beacon_in_range(player.x, player.y, player.z);
-            if affected && !active_effects.iter().any(|effect| {
-                effect.kind == 1 && effect.amplifier > 0 && effect.expires_at > now_tick
-            }) {
+            if affected
+                && !active_effects.iter().any(|effect| {
+                    effect.kind == 1 && effect.amplifier > 0 && effect.expires_at > now_tick
+                })
+            {
                 active_effects.retain(|effect| effect.kind != 1);
                 active_effects.push(ActiveEffect {
-                    kind: 1, amplifier: 0, expires_at: now_tick + 180,
+                    kind: 1,
+                    amplifier: 0,
+                    expires_at: now_tick + 180,
                     next_periodic: now_tick + 180,
                 });
                 send(s, 0x1d, &potion_effect_packet(entity_id, 1, 0, 180))?;
@@ -1573,12 +1584,16 @@ fn play(
                     let by = y.floor() as i32 - 1;
                     let bz = z.floor() as i32;
                     // Snapshot peers outside the world lock to preserve ordering.
-                    let count = 1 + hub.participants()?.into_iter().filter(|(other_id, at)| {
-                        *other_id != entity_id
-                            && at.x.floor() as i32 == bx
-                            && at.y.floor() as i32 - 1 == by
-                            && at.z.floor() as i32 == bz
-                    }).count();
+                    let count = 1 + hub
+                        .participants()?
+                        .into_iter()
+                        .filter(|(other_id, at)| {
+                            *other_id != entity_id
+                                && at.x.floor() as i32 == bx
+                                && at.y.floor() as i32 - 1 == by
+                                && at.z.floor() as i32 == bz
+                        })
+                        .count();
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     if world::in_bounds(bx, by, bz) {
                         let activated = if matches!(w.get(bx, by, bz) >> 4, 147 | 148) {

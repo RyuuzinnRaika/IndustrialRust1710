@@ -367,10 +367,16 @@ impl World {
         let weather_len = self.pending_weather.len();
         if self.raining && weather_len != 0 {
             let offset = (self.fluid_phase as usize).wrapping_mul(budget) % weather_len;
-            for &(x, y, z) in self.pending_weather.iter().cycle()
-                .skip(offset).take(budget.min(weather_len)) {
+            for &(x, y, z) in self
+                .pending_weather
+                .iter()
+                .cycle()
+                .skip(offset)
+                .take(budget.min(weather_len))
+            {
                 let y = i32::from(y);
-                if !self.is_cold_biome(x, z) || !in_bounds(x, y + 1, z)
+                if !self.is_cold_biome(x, z)
+                    || !in_bounds(x, y + 1, z)
                     || !(y + 1..=255).all(|sy| self.get(x, sy, z) == 0)
                 {
                     continue;
@@ -390,11 +396,17 @@ impl World {
         // exploding block. Chain-primed blocks use the shorter legacy fuse.
         if len != 0 {
             let offset = (self.fluid_phase as usize).wrapping_mul(budget) % len;
-            for &(x, y, z) in self.pending_devices.iter().cycle()
-                .skip(offset).take(budget.min(len)) {
-            if self.get(x, i32::from(y), z) >> 4 == 46 && self.powered_near(x, i32::from(y), z) {
-                changes.insert((x, y, z), 0);
-            }
+            for &(x, y, z) in self
+                .pending_devices
+                .iter()
+                .cycle()
+                .skip(offset)
+                .take(budget.min(len))
+            {
+                if self.get(x, i32::from(y), z) >> 4 == 46 && self.powered_near(x, i32::from(y), z)
+                {
+                    changes.insert((x, y, z), 0);
+                }
             }
         }
         for tnt in self
@@ -590,9 +602,10 @@ mod tests {
             assert!(world.drain_tnt_events().is_empty());
         }
         world.block_tick(&path, 64).unwrap();
-        assert!(world.drain_tnt_events().iter().any(|event| {
-            matches!(event, TntEvent::Explode { .. })
-        }));
+        assert!(world
+            .drain_tnt_events()
+            .iter()
+            .any(|event| { matches!(event, TntEvent::Explode { .. }) }));
         fs::remove_file(path).ok();
     }
 
