@@ -13,16 +13,23 @@ fn check(path: &Path) -> io::Result<()> {
     println!("Configuration is valid for supported options.");
     println!("Bind: {}", config.bind);
     println!("World: {}", config.world_path.display());
-    println!("Mode: {}", if config.survival { "survival" } else { "creative" });
+    println!(
+        "Mode: {}",
+        if config.survival { "survival" } else { "creative" }
+    );
     println!("Difficulty: {}", config.difficulty);
     println!("Hardcore: {}", config.hardcore);
     println!("Online authentication: {}", config.online_mode);
     println!("Level name: {}", config.level_name);
     if !config.online_mode {
-        eprintln!("WARNING: offline usernames are unauthenticated; do not expose this server publicly.");
+        eprintln!(
+            "WARNING: offline usernames are unauthenticated; do not expose this server publicly."
+        );
     }
     if !config.bind.ip().is_loopback() {
-        eprintln!("WARNING: binding to a non-loopback address; verify firewall and account authentication.");
+        eprintln!(
+            "WARNING: binding to a non-loopback address; verify firewall and account authentication."
+        );
     }
     Ok(())
 }
@@ -37,7 +44,10 @@ fn main() -> io::Result<()> {
     }
     let path = args.next().unwrap_or_else(|| "server.properties".into());
     if args.next().is_some() {
-        return Err(io::Error::new(ErrorKind::InvalidInput, "too many arguments"));
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "too many arguments",
+        ));
     }
     check(Path::new(&path))
 }
