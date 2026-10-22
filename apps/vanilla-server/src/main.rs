@@ -1238,6 +1238,31 @@ fn play(
             continue;
         }
         match id {
+            18 => {
+                // Protocol 5 C12: Int X, Short Y, Int Z, four Strings.
+                // Reject unsolicited edits; only the placing player gets S36.
+                let pos = (input.i32()?, input.i16()? as i32, input.i32()?);
+                let lines = [
+                    input.string(15)?, input.string(15)?,
+                    input.string(15)?, input.string(15)?,
+                ];
+                input.finish()?;
+                if pending_sign.take() == Some(pos)
+                    && world::in_bounds(pos.0, pos.1, pos.2)
+                    && near(location, pos.0, pos.1, pos.2)
+                {
+                    let sign_block = world.lock().map_err(|_| bad("world mutex poisoned"))?
+                        .get(pos.0, pos.1, pos.2) >> 4;
+                    if matches!(sign_block, 63 | 68) {
+                        decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                            .set_sign(decoration_path, pos, lines.clone())?;
+                        hub.broadcast(Event {
+                            id: 0x33,
+                            body: decorations::sign_packet(pos, &lines)?,
+                        });
+                    }
+                }
+            }
             2 => {
                 // Protocol 5 C02 Use Entity: target VarInt and action VarInt.
                 let target_id = input.varint()?;
@@ -1491,7 +1516,11 @@ fn play(
                 }
                 location = (x, y, z);
                 *player = candidate;
+                let old_chunks = loaded_chunks.clone();
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(&candidate))?;
+                if loaded_chunks != old_chunks {
+                    send_visible_signs(s, decorations, &loaded_chunks)?;
+                }
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, candidate, yaw, pitch);
                     last_movement_broadcast = Instant::now();
@@ -2185,13 +2214,20 @@ fn play(
                                 362 => 105,                      // melon seeds
                                 372 => 115,                      // Nether wart
                                 351 if stack.damage == 3 => 127, // cocoa beans
+                                323 => if face == 1 { 63 } else if (2..=5).contains(&face) { 68 } else { 0 }, // standing/wall sign
+                                354 => 92,                       // cake
+                                390 => 140,                      // flower pot
                                 324 => 64,                       // wooden door
                                 330 => 71,                       // iron door
                                 _ => stack.id as u16,
                             };
                             let invalid_chest_merge =
                                 block_id == 54 && !can_place_chest(&w, (nx, ny, nz));
-                            let metadata = if matches!(block_id, 50 | 77 | 143) {
+                            let metadata = if block_id == 63 {
+                                ((yaw.rem_euclid(360.0) * 16.0 / 360.0).round() as u16) & 15
+                            } else if block_id == 68 {
+                                face as u16
+                            } else if matches!(block_id, 50 | 77 | 143) {
                                 match face {
                                     1 => 5,
                                     2 => 3,
@@ -2317,6 +2353,14 @@ fn play(
                         let event = block_change_event(&w, nx, ny, nz);
                         if changed {
                             hub.broadcast(event);
+                            if matches!(w.get(nx, ny, nz) >> 4, 63 | 68) {
+                                let pos = (nx, ny, nz);
+                                // A block change must precede S36 sign editor.
+                                pending_sign = Some(pos);
+                                decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                                    .set_sign(decoration_path, pos, Default::default())?;
+                                send(s, 0x36, &decorations::sign_editor_packet(pos))?;
+                            }
                             if matches!(w.get(nx, ny, nz) >> 4, 64 | 71)
                                 && world::in_bounds(nx, ny + 1, nz)
                             {
@@ -2758,6 +2802,7 @@ fn play(
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks on respawn
                     sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                    send_visible_signs(s, decorations, &loaded_chunks)?;
                     for mob in mobs
                         .lock()
                         .map_err(|_| bad("mob mutex poisoned"))?
