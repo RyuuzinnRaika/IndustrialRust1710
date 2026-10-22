@@ -215,13 +215,7 @@ impl World {
     /// Generate a bounded dark-oak crown only after every destination has
     /// passed validation. The four saplings are replaced together, so an
     /// obstructed canopy neither destroys blocks nor consumes bone meal.
-    fn grow_dark_oak(
-        &self,
-        x: i32,
-        y: i32,
-        z: i32,
-        changes: &mut BTreeMap<Position, u16>,
-    ) {
+    fn grow_dark_oak(&self, x: i32, y: i32, z: i32, changes: &mut BTreeMap<Position, u16>) {
         if y > 247 {
             return;
         }
@@ -256,10 +250,7 @@ impl World {
                             if dy <= 5 && (0..2).contains(&dx) && (0..2).contains(&dz) {
                                 continue;
                             }
-                            proposed.insert(
-                                (ax + dx, (y + dy) as u8, az + dz),
-                                (161 << 4) | 1,
-                            );
+                            proposed.insert((ax + dx, (y + dy) as u8, az + dz), (161 << 4) | 1);
                         }
                     }
                 }
