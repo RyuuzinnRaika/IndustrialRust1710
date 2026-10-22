@@ -538,7 +538,7 @@ impl Mobs {
                 .unwrap_or(BASE_ID - 1);
             if value.next_id <= max_id
                 || value.next_id < BASE_ID
-                || value.next_id >= i32::MAX - 1024
+                || value.next_id >= 1_000_000
                 || value.entities.len() > 128
                 || value.arrows.len() > ARROW_CAP
                 || value.orbs.len() > 256
@@ -779,6 +779,7 @@ impl Mobs {
             .values()
             .copied()
             .map(Mob::spawn)
+            .chain(self.tether_snapshots())
             .chain(self.arrows.values().copied().map(Arrow::spawn))
             .chain(self.orbs.iter().map(|(&id, &(at, amount, _))| {
                 let mut body = Vec::new();
@@ -1122,6 +1123,51 @@ impl Mobs {
         }
         result
     }
+    /// Follow a verified player entity or a persisted fence anchor once per tick.
+    pub fn advance_leashes(&mut self, world: &World, now: u64,
+        players: &[(i32, PlayerPosition)]) -> Vec<Event> {
+        let mut events = Vec::new();
+        for mob in self.entities.values_mut() {
+            let destination = if let Some(anchor) = mob.fence_anchor {
+                Some(PlayerPosition {
+                    x: f64::from(anchor[0]) + 0.5,
+                    y: f64::from(anchor[1]),
+                    z: f64::from(anchor[2]) + 0.5,
+                })
+            } else {
+                mob.leash_holder.and_then(|id| {
+                    players.iter().find(|(owner, _)| *owner == id).map(|(_, p)| *p)
+                })
+            };
+            let Some(target) = destination else { continue };
+            let dx = target.x - mob.position.x;
+            let dz = target.z - mob.position.z;
+            let gap = dx.hypot(dz);
+            if gap > 10.0 {
+                mob.leash_holder = None;
+                if mob.fence_anchor.take().is_some() {
+                    events.push(multiplayer::destroy(Self::knot_id(mob.id)));
+                }
+                events.push(Self::leash_packet(mob.id, -1));
+                continue;
+            }
+            if gap > 2.5 && gap.is_finite() && now.is_multiple_of(2) {
+                let step = 0.18;
+                let next = PlayerPosition {
+                    x: mob.position.x + dx / gap * step,
+                    z: mob.position.z + dz / gap * step,
+                    ..mob.position
+                };
+                if next.is_valid() && physics::valid_movement(world, &mob.position, &next)
+                    && physics::supported(world, &next)
+                {
+                    mob.position = next;
+                    events.push(multiplayer::teleport(mob.id, &next, 0.0, 0.0));
+                }
+            }
+        }
+        events
+    }
     /// Animal breeding consumes feed only if a nearby same-kind partner exists.
     pub fn feed(
         &mut self,
@@ -1443,8 +1489,8 @@ impl Mobs {
                         events.push(Event { id: 0x1c, body });
                     }
                 }
-                if mob.rider.is_some() {
-                    continue; // Mounted animals never run autonomous AI.
+                if mob.rider.is_some() || mob.leash_holder.is_some() || mob.fence_anchor.is_some() {
+                    continue; // Mounted or leashed animals never wander independently.
                 }
                 let nearest_distance = distance_to_players(mob.position, players);
                 if !mob.kind.passive() && nearest_distance > 128.0 {
@@ -2008,6 +2054,44 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mounted_pig_requires_saddle_and_horse_tames_on_server() {
+        let mut mobs = Mobs::default();
+        mobs.next_id = BASE_ID;
+        let at = PlayerPosition::default();
+        let pig = mobs.next_id;
+        mobs.insert(Kind::Pig, at, false);
+        assert!(mobs.use_mount(pig, 2, at).is_none());
+        assert!(mobs.can_saddle(pig, at));
+        assert_eq!(mobs.saddle(pig, at).unwrap().id, 0x1c);
+        assert!(mobs.use_mount(pig, 2, at).is_some());
+        assert_eq!(mobs.dismount(2).unwrap().id, 0x1b);
+        let horse = mobs.next_id;
+        mobs.insert(Kind::Horse, at, false);
+        for _ in 0..3 {
+            assert!(mobs.use_mount(horse, 3, at).is_some());
+            mobs.dismount(3).unwrap();
+        }
+        assert!(mobs.can_saddle(horse, at));
+    }
+
+    #[test]
+    fn leash_cannot_attach_to_hostile_or_duplicate_animal() {
+        let mut mobs = Mobs::default();
+        mobs.next_id = BASE_ID;
+        let at = PlayerPosition::default();
+        let cow = mobs.next_id;
+        mobs.insert(Kind::Cow, at, false);
+        let zombie = mobs.next_id;
+        mobs.insert(Kind::Zombie, at, false);
+        assert!(!mobs.can_leash(zombie, 1, at));
+        assert_eq!(mobs.leash(cow, 1, at).unwrap().id, 0x1b);
+        assert!(!mobs.can_leash(cow, 1, at));
+        let tied = mobs.tie_fence(1, [0, 64, 0]);
+        assert_eq!(tied.len(), 2);
+        assert_eq!(mobs.untie_fence([0, 64, 0]).len(), 2);
+    }
+
     #[test]
     fn living_health_metadata_is_shared_on_spawn_and_after_damage() {
         let mut mobs = Mobs::default();
