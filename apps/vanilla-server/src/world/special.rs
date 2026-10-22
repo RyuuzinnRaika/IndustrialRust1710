@@ -526,8 +526,9 @@ impl World {
         self.update_and_save(path, x, y, z, (state & !15) | level)
     }
 
-    /// Probe at player feet or shoulder height. Two hooks connected by
-    /// contiguous string in one axis become powered for ten server ticks.
+    /// Probe at player feet or shoulder height. A valid tripwire must join
+    /// two inward-facing hooks over at most 40 string blocks. Publish the
+    /// hook and wire metadata together, using one world snapshot.
     pub fn touch_tripwire(
         &mut self,
         path: &Path,
@@ -549,32 +550,57 @@ impl World {
                     }
                     let block = self.get(px, y, pz);
                     if block >> 4 == 131 {
-                        hooks.push((px, pz));
+                        // Hook metadata is its outward-facing orientation,
+                        // not the facing of the supporting wall.
+                        let facing = match (dx, dz, direction) {
+                            (1, 0, -1) => 3, // west hook points east
+                            (1, 0, 1) => 1,  // east hook points west
+                            (0, 1, -1) => 0, // north hook points south
+                            _ => 2,          // south hook points north
+                        };
+                        if block & 3 == facing {
+                            hooks.push((px, pz, distance, direction));
+                        }
                         break;
                     }
-                    if block >> 4 != 132 {
-                        break;
+                    if block >> 4 != 132 || block & 8 != 0 {
+                        break; // A missing or disarmed string breaks the circuit.
                     }
                 }
             }
-            if hooks.len() == 2 {
-                let cells: Vec<_> = hooks
-                    .iter()
-                    .map(|&(px, pz)| (px, y, pz, self.get(px, y, pz) | 8))
-                    .collect();
-                let changed = self.update_many_and_save(path, &cells)?;
-                for &(px, pz) in &hooks {
-                    self.pending_buttons
-                        .insert((px, y as u8, pz), self.fluid_phase + 10);
-                }
-                if changed {
-                    return Ok(hooks.into_iter().map(|(px, pz)| (px, y, pz)).collect());
-                }
-                return Ok(Vec::new());
+            if hooks.len() != 2 || hooks[0].2 + hooks[1].2 - 1 > 40 {
+                continue;
             }
+            let mut batch = BTreeMap::new();
+            for &(px, pz, _, _) in &hooks {
+                batch.insert((px, y as u8, pz), self.get(px, y, pz) | 4 | 8);
+            }
+            // Bits 0 and 2 indicate triggered and attached tripwire.
+            for distance in -(hooks[0].2 - 1)..=(hooks[1].2 - 1) {
+                let px = x + dx * distance;
+                let pz = z + dz * distance;
+                let old = self.get(px, y, pz);
+                if old >> 4 != 132 {
+                    return Ok(Vec::new());
+                }
+                batch.insert((px, y as u8, pz), old | 1 | 4);
+            }
+            let (mut candidate, changed) = self.stage_special_batch(&batch)?;
+            let expires = self.fluid_phase.saturating_add(10);
+            for (&pos, &block) in &batch {
+                if matches!(block >> 4, 131 | 132) {
+                    candidate.pending_buttons.insert(pos, expires);
+                }
+            }
+            if !changed.is_empty() {
+                candidate.save(path)?;
+            }
+            *self = candidate;
+            return Ok(changed);
         }
         Ok(Vec::new())
     }
+
 }
 
 #[cfg(test)]
@@ -713,6 +739,56 @@ mod tests {
             .iter()
             .any(|event| { matches!(event, TntEvent::Explode { .. }) }));
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn tripwire_only_powers_inward_facing_hooks_and_releases_on_tick() {
+        let path = file("tripwire-facing-release");
+        let mut w = World::new();
+        // The outside support blocks keep each wall hook attached.
+        for x in [-3, 3] {
+            w.import_block(x, 64, 0, 1 << 4).unwrap();
+        }
+        w.import_block(-2, 64, 0, (131 << 4) | 3).unwrap();
+        w.import_block(2, 64, 0, (131 << 4) | 1).unwrap();
+        for x in -1..=1 {
+            w.import_block(x, 64, 0, 132 << 4).unwrap();
+        }
+        w.save(&path).unwrap();
+        let changed = w.touch_tripwire(&path, 0, 64, 0).unwrap();
+        assert_eq!(changed.len(), 5);
+        assert_eq!(w.get(-2, 64, 0) & 12, 12);
+        assert_eq!(w.get(0, 64, 0) & 5, 5);
+        // A second contact extends the timer without creating a disk edit.
+        for _ in 0..5 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert!(w.touch_tripwire(&path, 0, 64, 0).unwrap().is_empty());
+        for _ in 0..9 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_ne!(w.get(-2, 64, 0) & 8, 0);
+        w.block_tick(&path, 64).unwrap();
+        assert_eq!(w.get(-2, 64, 0) & 8, 0);
+        assert_eq!(w.get(2, 64, 0) & 8, 0);
+        assert_eq!(w.get(0, 64, 0) & 1, 0);
+        assert_eq!(w.get(0, 64, 0) & 4, 4);
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0) & 1, 0);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn tripwire_rejects_wrong_facing_hooks_without_writing() {
+        let path = file("tripwire-invalid");
+        let mut w = World::new();
+        w.import_block(-2, 64, 0, (131 << 4) | 1).unwrap();
+        w.import_block(2, 64, 0, (131 << 4) | 1).unwrap();
+        for x in -1..=1 {
+            w.import_block(x, 64, 0, 132 << 4).unwrap();
+        }
+        assert!(w.touch_tripwire(&path, 0, 64, 0).unwrap().is_empty());
+        assert_eq!(w.get(0, 64, 0), 132 << 4);
+        assert!(!path.exists());
     }
 
     #[test]
