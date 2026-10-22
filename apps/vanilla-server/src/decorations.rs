@@ -121,13 +121,17 @@ impl Decorations {
         store.validate()?;
         Ok(store)
     }
-    fn save(&self, path: &Path) -> io::Result<()> {
+    pub fn encoded(&self) -> io::Result<Vec<u8>> {
         self.validate()?;
         let data =
             serde_json::to_vec(self).map_err(|_| invalid("decoration JSON encoding failed"))?;
         if data.len() as u64 > MAX_BYTES {
             return Err(invalid("decoration file too large"));
         }
+        Ok(data)
+    }
+    fn save(&self, path: &Path) -> io::Result<()> {
+        let data = self.encoded()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -202,14 +206,14 @@ impl Decorations {
     pub fn pot(&self, position: Position) -> Option<Stack> {
         self.pots.get(&key(position)).copied()
     }
-    pub fn set_pot(
-        &mut self,
-        path: &Path,
-        position: Position,
-        item: Option<Stack>,
-    ) -> io::Result<()> {
-        if item.is_some_and(|stack| !pot_compatible(stack)) {
-            return Err(invalid("invalid flower pot item"));
+    /// Stage a flower-pot update without publishing it. The caller journals
+    /// the resulting decoration snapshot together with the inventory debit or
+    /// item return, so a crash cannot duplicate or lose the plant.
+    pub fn stage_pot(&self, position: Position, item: Option<Stack>) -> io::Result<Self> {
+        if !world::in_bounds(position.0, position.1, position.2)
+            || item.is_some_and(|stack| !pot_compatible(stack))
+        {
+            return Err(invalid("invalid flower pot item or position"));
         }
         let mut next = self.clone();
         match item {
@@ -220,9 +224,8 @@ impl Decorations {
                 next.pots.remove(&key(position));
             }
         }
-        next.save(path)?;
-        *self = next;
-        Ok(())
+        next.encoded()?;
+        Ok(next)
     }
     pub fn remove(&mut self, path: &Path, position: Position) -> io::Result<()> {
         let mut next = self.clone();
@@ -412,6 +415,30 @@ mod tests {
             .signs
             .contains_key(&key((3, 64, -2))));
         let _ = fs::remove_file(&path);
+    }
+    #[test]
+    fn pot_item_and_inventory_are_saved_as_one_recoverable_transaction() {
+        let root = std::env::temp_dir().join(format!("irw-pot-journal-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let decoration_path = root.join("world.decorations.json");
+        let inventory_path = root.join("reader.inventory.json");
+        let log_path = root.join("world.pending-txn.json");
+        let plant = Stack { id: 37, count: 1, damage: 0 };
+        let staged = Decorations::default().stage_pot((0, 64, 0), Some(plant)).unwrap();
+        let mut inventory = crate::inventory::Inventory::default();
+        inventory.creative_set(36, Some(plant)).unwrap();
+        assert!(inventory.consume_held());
+        crate::journal::commit(
+            &log_path,
+            &[
+                (&inventory_path, inventory.encoded().unwrap()),
+                (&decoration_path, staged.encoded().unwrap()),
+            ],
+        ).unwrap();
+        assert!(crate::inventory::Inventory::load(&inventory_path).unwrap().held().is_none());
+        assert_eq!(Decorations::load(&decoration_path).unwrap().pot((0, 64, 0)), Some(plant));
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn pot_rejects_non_decorative_items() {
