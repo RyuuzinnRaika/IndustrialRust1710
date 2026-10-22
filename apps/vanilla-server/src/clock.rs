@@ -75,6 +75,11 @@ impl Clock {
         });
         (clock, handle)
     }
+    /// Stop the tick loop before joining its worker and flushing final state.
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::Release);
+    }
+
     /// Persist exact server ticks, including the day and deterministic weather
     /// phase, without changing any existing IRW1/2/3 world data.
     /// Tick complement detects truncation or elementary file corruption.
