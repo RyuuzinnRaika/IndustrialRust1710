@@ -8,6 +8,7 @@
 //! needed for full crash consistency.
 use crate::inventory::Stack;
 use crate::multiplayer::{self, Event};
+use crate::player::PlayerPosition;
 use crate::world::WORLD_LIMIT;
 use legacy_protocol::write_varint;
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,14 @@ impl GroundItem {
                 body: metadata,
             },
         ]
+    }
+    /// Coordinates used by the multiplayer chunk-visibility index.
+    pub fn world_position(&self) -> PlayerPosition {
+        PlayerPosition {
+            x: f64::from(self.position[0]) / 32.0,
+            y: f64::from(self.position[1]) / 32.0,
+            z: f64::from(self.position[2]) / 32.0,
+        }
     }
     pub fn in_pickup_range(&self, feet: (f64, f64, f64)) -> bool {
         let x = f64::from(self.position[0]) / 32.0 - feet.0;

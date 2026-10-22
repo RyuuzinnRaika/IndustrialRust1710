@@ -1273,6 +1273,37 @@ impl Inventory {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn protocol5_inventory_and_cursor_wire_goldens() {
+        let mut inventory = super::Inventory::default();
+        // Independent 1.7.10 S2F: window=0, slot=36, empty signed-short -1.
+        assert_eq!(inventory.set_slot(36).unwrap(), [0, 0, 36, 255, 255]);
+        assert_eq!(inventory.cursor_packet(), [255, 255, 255, 255, 255]);
+        inventory
+            .creative_set(
+                36,
+                Some(super::Stack {
+                    id: 4,
+                    count: 64,
+                    damage: 2,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            inventory.set_slot(36).unwrap(),
+            [0, 0, 36, 0, 4, 64, 0, 2, 255, 255]
+        );
+        // S30: fixed i16 slot count 45, then 45 legacy Slot records.
+        let items = inventory.window_items();
+        assert_eq!(&items[..3], &[0, 0, 45]);
+        assert_eq!(items.len(), 3 + 44 * 2 + 7);
+        assert!(items[3..3 + 36 * 2].iter().all(|&b| b == 255));
+        assert_eq!(
+            &items[3 + 36 * 2..3 + 36 * 2 + 7],
+            &[0, 4, 64, 0, 2, 255, 255]
+        );
+    }
+
+    #[test]
     fn armor_equipping_reduces_damage_and_is_included_in_death_drops() {
         let mut inv = super::Inventory::default();
         let helm = super::Stack {
