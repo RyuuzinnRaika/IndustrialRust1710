@@ -88,6 +88,7 @@ impl Maps {
         }
         for (id, map) in &self.entries {
             if *id < 0
+                || *id >= self.next_id
                 || map.colors.len() != PIXELS
                 || !world::in_bounds(map.center_x, 64, map.center_z)
             {
@@ -165,14 +166,13 @@ impl Maps {
         if id < 0 {
             return Ok(None);
         }
-        let mut next = self.clone();
-        if !next.entries.contains_key(&id) {
-            if next.entries.len() >= MAX_MAPS || id == i16::MAX {
-                return Ok(None);
-            }
-            next.entries.insert(id, MapData::centered(x, z));
-            next.next_id = next.next_id.max(id + 1);
+        // Only an empty map converted by stage_new may allocate an ID.
+        // A Creative client can submit arbitrary damage on a filled-map
+        // stack; merely holding one must not create persisted map records.
+        if !self.entries.contains_key(&id) {
+            return Ok(None);
         }
+        let mut next = self.clone();
         let map = next
             .entries
             .get_mut(&id)
@@ -256,6 +256,25 @@ mod tests {
             PIXELS
         );
         let _ = fs::remove_file(path);
+    }
+    #[test]
+    fn forged_or_unknown_map_id_never_allocates_a_world_record() {
+        let mut maps = Maps::default();
+        let path = std::env::temp_dir().join(format!("irw-unknown-map-{}.json", std::process::id()));
+        let _ = fs::remove_file(&path);
+        assert!(maps
+            .refresh(&path, &World::new(), 300, (0, 0), 0.0, 0)
+            .unwrap()
+            .is_none());
+        assert!(maps.entries.is_empty());
+        assert_eq!(maps.next_id, 0);
+        assert!(!path.exists());
+        let corrupt = Maps {
+            version: VERSION,
+            next_id: 1,
+            entries: BTreeMap::from([(2, MapData::centered(0, 0))]),
+        };
+        assert!(corrupt.validate().is_err());
     }
     #[test]
     fn map_data_packet_has_one_column_of_sixteen_rows() {
