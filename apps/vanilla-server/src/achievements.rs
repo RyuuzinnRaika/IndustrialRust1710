@@ -26,6 +26,25 @@ const DEFINITIONS: &[(&str, Option<&str>)] = &[
     ("diamonds", Some("acquireIron")),
     ("enchantments", Some("diamonds")),
     ("breedCow", Some("killCow")),
+    ("buildBetterPickaxe", Some("buildPickaxe")),
+    ("cookFish", Some("buildFurnace")),
+    ("onARail", Some("acquireIron")),
+    ("flyPig", Some("killCow")),
+    ("snipeSkeleton", Some("killEnemy")),
+    ("diamondsToYou", Some("diamonds")),
+    ("portal", Some("diamonds")),
+    ("ghast", Some("portal")),
+    ("blazeRod", Some("portal")),
+    ("potion", Some("blazeRod")),
+    ("theEnd", Some("blazeRod")),
+    ("theEnd2", Some("theEnd")),
+    ("overkill", Some("enchantments")),
+    ("bookcase", Some("enchantments")),
+    ("exploreAllBiomes", Some("theEnd")),
+    ("spawnWither", Some("theEnd2")),
+    ("killWither", Some("spawnWither")),
+    ("fullBeacon", Some("killWither")),
+    ("overpowered", Some("buildBetterPickaxe")),
 ];
 
 fn invalid(reason: &'static str) -> io::Error {
@@ -65,6 +84,14 @@ impl Achievements {
                 .any(|name| !DEFINITIONS.iter().any(|(k, _)| k == name))
         {
             return Err(invalid("invalid achievements list"));
+        }
+        // Never replay a corrupted save where a child is unlocked without its parent.
+        for (name, parent) in DEFINITIONS {
+            if result.unlocked.contains(*name)
+                && parent.is_some_and(|p| !result.unlocked.contains(p))
+            {
+                return Err(invalid("achievement prerequisite missing"));
+            }
         }
         Ok(result)
     }
@@ -149,6 +176,38 @@ mod tests {
         state.save(&path).unwrap();
         assert!(Achievements::load(&path).unwrap().has("openInventory"));
         fs::write(&path, b"{broken").unwrap();
+        assert!(Achievements::load(&path).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn vanilla_1710_catalogue_and_prerequisites() {
+        // All 34 Java 1.7.10 names must be recognized even when their
+        // gameplay triggers are implemented in a different module.
+        assert_eq!(DEFINITIONS.len(), 34);
+        let mut known = BTreeSet::new();
+        for (name, parent) in DEFINITIONS {
+            assert!(known.insert(*name), "duplicate achievement: {name}");
+            if let Some(parent) = parent {
+                assert!(DEFINITIONS.iter().any(|(key, _)| key == parent));
+            }
+        }
+        let mut stats = Achievements::default();
+        assert!(stats.award("fullBeacon").unwrap().is_none());
+        assert!(stats.award("openInventory").unwrap().is_some());
+        assert!(stats.award("mineWood").unwrap().is_some());
+        assert!(stats.award("notAVanillaAchievement").unwrap().is_none());
+    }
+
+    #[test]
+    fn corrupt_child_without_parent_is_rejected() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-achievement-orphans-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_file(&path);
+        fs::write(&path, br#"{"version":1,"unlocked":["fullBeacon"]}"#).unwrap();
         assert!(Achievements::load(&path).is_err());
         fs::remove_file(path).unwrap();
     }
