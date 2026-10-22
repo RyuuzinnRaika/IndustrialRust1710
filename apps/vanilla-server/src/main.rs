@@ -1320,6 +1320,61 @@ fn play(
                 let target_id = input.varint()?;
                 let action = input.varint()?;
                 input.finish()?;
+                // Frame/painting IDs are disjoint from mobs. Server owns all
+                // insertions, rotations, destruction and resulting item drops.
+                let mut hanging_state = hangings.lock().map_err(|_| bad("hanging lock poisoned"))?;
+                if let Some(entity) = hanging_state.get(target_id as i32).cloned() {
+                    let at = (player.x.floor() as i32, player.y.floor() as i32, player.z.floor() as i32);
+                    if !entity.near(at) { continue; }
+                    if action == 1 {
+                        if let Some((next, removed)) = hanging_state.stage_remove(target_id as i32)? {
+                            if survival {
+                                let drops = removed.drops();
+                                let mut ground = ground_items.lock().map_err(|_| bad("ground items lock poisoned"))?;
+                                if !ground.has_capacity_for(drops.len()) { continue; }
+                                let (staged_ground, spawned) = ground.stage_put_many(&drops, removed.drop_position())?;
+                                journal::commit(
+                                    &world_path.with_extension("pending-txn.json"),
+                                    &[(hanging_path, next.encoded()?), (ground_path, staged_ground.encoded()?)],
+                                )?;
+                                *ground = staged_ground;
+                                *hanging_state = next;
+                                hub.broadcast(removed.destroy());
+                                for dropped in spawned {
+                                    for event in dropped.spawn() { hub.broadcast(event); }
+                                }
+                            } else {
+                                next.save(hanging_path)?;
+                                *hanging_state = next;
+                                hub.broadcast(removed.destroy());
+                            }
+                        }
+                    } else if action == 0 && entity.is_frame() {
+                        if let Some((next, debit, event)) = hanging_state.stage_frame_use(
+                            target_id as i32, inventory.held()
+                        )? {
+                            if debit && survival {
+                                let mut candidate = inventory.clone();
+                                if candidate.consume_held() {
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &[(inventory_path, candidate.encoded()?), (hanging_path, next.encoded()?)],
+                                    )?;
+                                    *inventory = candidate;
+                                    *hanging_state = next;
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                    hub.broadcast(event);
+                                }
+                            } else {
+                                next.save(hanging_path)?;
+                                *hanging_state = next;
+                                hub.broadcast(event);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                drop(hanging_state);
                 if survival && vitals.health > 0.0 && action == 0 {
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
                     // Protocol 5 Use Entity: adult cow + held empty bucket.
