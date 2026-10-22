@@ -415,7 +415,7 @@ mod tests {
         fs::write(Hoppers::location(&source), hoppers.encoded().unwrap()).unwrap();
 
         let brewer = Brewer {
-            slots: [Some(stack), None, None, None],
+            slots: [Some(Stack { id: 373, count: 1, damage: 0 }), None, None, None],
             brew_time: 5,
         };
         let brewers = Brewers::default()
@@ -437,19 +437,19 @@ mod tests {
             tiles.insert(decoded.x, decoded);
         }
         assert_eq!(tiles.len(), 4);
-        for (x, name, slot) in [
-            (1, "Chest", 26i8),
-            (2, "Furnace", 0),
-            (3, "Hopper", 4),
-            (4, "Cauldron", 0),
+        for (x, name, slot, item_id, count) in [
+            (1, "Chest", 26i8, 4, 7),
+            (2, "Furnace", 0, 4, 7),
+            (3, "Hopper", 4, 4, 7),
+            (4, "Cauldron", 0, 373, 1),
         ] {
             let tile = &tiles[&x];
             assert_eq!(tile.id, name);
             let items = tile.items.as_ref().unwrap();
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].slot, slot);
-            assert_eq!(items[0].id, 4);
-            assert_eq!(items[0].count, 7);
+            assert_eq!(items[0].id, item_id);
+            assert_eq!(items[0].count, count);
         }
         assert_eq!(tiles[&2].extra["BurnTime"], fastnbt::Value::Short(50));
         assert_eq!(tiles[&2].extra["CookTime"], fastnbt::Value::Short(10));
