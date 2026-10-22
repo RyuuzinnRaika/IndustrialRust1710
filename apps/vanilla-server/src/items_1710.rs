@@ -8,7 +8,7 @@
 /// The IDs registered for vanilla 1.7.10 block items, regular items, horse
 /// items and music discs. ID 0 represents air and never forms a nonempty Stack.
 pub fn exists(id: i16) -> bool {
-    matches!(id, 1..=175 | 256..=408 | 417..=422 | 2256..=2267)
+    matches!(id, 1..=164 | 170..=175 | 256..=408 | 417..=422 | 2256..=2267)
 }
 
 /// Item count cap, not the default inventory slot size. All tools, armor,
@@ -112,10 +112,10 @@ mod tests {
 
     #[test]
     fn vanilla_id_bounds_reject_unregistered_and_modern_items() {
-        for id in [1, 5, 175, 256, 373, 408, 417, 422, 2256, 2267] {
+        for id in [1, 5, 164, 170, 175, 256, 373, 408, 417, 422, 2256, 2267] {
             assert!(exists(id), "missing vanilla id {id}");
         }
-        for id in [-1, 0, 176, 255, 409, 416, 423, 2255, 2268, 4095] {
+        for id in [-1, 0, 165, 166, 167, 168, 169, 176, 255, 409, 416, 423, 2255, 2268, 4095] {
             assert!(!exists(id), "non-1.7.10 item accepted: {id}");
         }
     }
