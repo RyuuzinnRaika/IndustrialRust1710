@@ -3562,6 +3562,7 @@ fn play(
                     opened.push(0); // fixed 3-slot anvil, not a chest inventory
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &inventory.anvil_window_items(active_window))?;
+                    send(s, 0x31, &inventory.anvil_cost_property(active_window))?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     continue;
                 }
@@ -4231,6 +4232,9 @@ fn play(
                 }
                 if active_brewer.is_some() {
                     send(s, 0x31, &last_brewer_view.property(active_window))?;
+                }
+                if active_anvil.is_some() {
+                    send(s, 0x31, &inventory.anvil_cost_property(active_window))?;
                 }
                 send(s, 0x2f, &inventory.cursor_packet())?;
             }
