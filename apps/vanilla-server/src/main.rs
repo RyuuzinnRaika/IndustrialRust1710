@@ -591,10 +591,9 @@ fn use_special_item(
     inventory: &mut Inventory,
     inventory_path: &Path,
     survival: bool,
-    x: i32,
-    y: i32,
-    z: i32,
+    pos: (i32, i32, i32),
 ) -> io::Result<Option<Vec<(i32, i32, i32)>>> {
+    let (x, y, z) = pos;
     let Some(held) = inventory.held() else {
         return Ok(None);
     };
@@ -1948,9 +1947,7 @@ fn play(
                         inventory,
                         inventory_path,
                         survival,
-                        x,
-                        y,
-                        z,
+                        (x, y, z),
                     )? {
                         for (cx, cy, cz) in changes {
                             hub.broadcast(block_change_event(&w, cx, cy, cz));
