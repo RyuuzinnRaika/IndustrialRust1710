@@ -5141,6 +5141,9 @@ fn main() -> io::Result<()> {
     let furnace_hub = Arc::clone(&hub);
     let leaf_drops = Arc::clone(&ground_items);
     let leaf_drops_file = Arc::clone(&ground_path);
+    // Keep the world -> mob lock ordering used by player sessions.
+    // TNT blast damage is applied by the *existing* 20TPS world worker.
+    let tnt_mobs = Arc::clone(&mobs);
     let ejection_devices = Arc::clone(&devices);
     let ejection_file = Arc::clone(&device_path);
     thread::spawn(move || {
@@ -5240,6 +5243,11 @@ fn main() -> io::Result<()> {
                             return;
                         }
                     }
+                    // Snapshot only when TNT's fuse expires. Exposure must be
+                    // sampled before the explosion clears intervening walls.
+                    let tnt_exposure = gravity_world
+                        .tnt_detonates_next_tick()
+                        .then(|| gravity_world.clone());
                     // Queued fluid and redstone updates use the same tick and
                     // save all staged block changes with one world-file commit.
                     match gravity_world.block_tick(&furnace_world_path, 64) {
@@ -5334,6 +5342,7 @@ fn main() -> io::Result<()> {
                             }
                             // Spawn and remove primed TNT entities only after
                             // their block changes were durably committed.
+                            let mut tnt_explosions = Vec::new();
                             for tnt in gravity_world.drain_tnt_events() {
                                 match tnt {
                                     world::TntEvent::Spawn {
@@ -5356,6 +5365,14 @@ fn main() -> io::Result<()> {
                                         entity_id,
                                         pos: (x, y, z),
                                     } => {
+                                        tnt_explosions.push(mobs::Explosion {
+                                            position: PlayerPosition {
+                                                x: f64::from(x) + 0.5,
+                                                y: f64::from(y) + 0.5,
+                                                z: f64::from(z) + 0.5,
+                                            },
+                                            radius: 4.0,
+                                        });
                                         furnace_hub.broadcast(multiplayer::destroy(entity_id));
                                         let mut body = Vec::new();
                                         for coordinate in [x, y, z] {
@@ -5370,6 +5387,38 @@ fn main() -> io::Result<()> {
                                         }
                                         furnace_hub.broadcast(Event { id: 0x27, body });
                                     }
+                                }
+                            }
+                            // Reuse the same explosion exposure, Mob HP and
+                            // per-player pending-damage path as creeper blasts.
+                            // This prevents a TNT graphic from being harmless
+                            // to all living entities. Entity state is persisted
+                            // before broadcasting Mob health/death packets.
+                            if !tnt_explosions.is_empty() {
+                                let participants = match furnace_hub.participants() {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        eprintln!("TNT PLAYER SNAPSHOT ERROR: {error}");
+                                        return;
+                                    }
+                                };
+                                let mut creatures = match tnt_mobs.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                let exposure = tnt_exposure.as_ref().unwrap_or(&gravity_world);
+                                let packets = creatures.queue_explosion_hits(
+                                    exposure,
+                                    &tnt_explosions,
+                                    &participants,
+                                );
+                                if let Err(error) = creatures.save(&gravity_world) {
+                                    eprintln!("TNT MOB SAVE ERROR: {error}");
+                                    return;
+                                }
+                                drop(creatures);
+                                for packet in packets {
+                                    furnace_hub.broadcast(packet);
                                 }
                             }
                             let decayed = gravity_world.drain_drops();
