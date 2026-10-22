@@ -27,6 +27,7 @@ pub struct Clock {
     running: AtomicBool,
     time_offset: AtomicU64,
     weather_override: AtomicU8, // 0=automatic, 1=clear, 2=rain, 3=thunder
+    daylight_cycle: AtomicBool,
 }
 impl Clock {
     /// Start the monotonic server ticker from an already validated snapshot.
@@ -46,6 +47,7 @@ impl Clock {
             running: AtomicBool::new(true),
             time_offset: AtomicU64::new(snapshot.time_offset),
             weather_override: AtomicU8::new(snapshot.weather_override),
+            daylight_cycle: AtomicBool::new(true),
         });
         let worker = Arc::clone(&clock);
         let handle = thread::spawn(move || {
@@ -61,7 +63,13 @@ impl Clock {
                 if !worker.running.load(Ordering::Acquire) {
                     break;
                 }
+                // World age advances even when the daylight cycle is disabled.
+                // Reverse its contribution to the time offset so the same
+                // persisted clock snapshot can restore a frozen daytime.
                 worker.ticks.fetch_add(1, Ordering::AcqRel);
+                if !worker.daylight_cycle.load(Ordering::Acquire) {
+                    worker.time_offset.fetch_add(23_999, Ordering::AcqRel);
+                }
                 next += TICK;
             }
         });
@@ -156,6 +164,10 @@ impl Clock {
     pub fn ticks(&self) -> u64 {
         self.ticks.load(Ordering::Acquire)
     }
+    pub fn set_daylight_cycle(&self, enabled: bool) {
+        self.daylight_cycle.store(enabled, Ordering::Release);
+    }
+
     pub fn day_time(&self) -> i64 {
         ((6000 + self.ticks() % 24_000 + self.time_offset.load(Ordering::Acquire) % 24_000)
             % 24_000) as i64
@@ -240,6 +252,7 @@ mod tests {
             running: AtomicBool::new(false),
             time_offset: AtomicU64::new(0),
             weather_override: AtomicU8::new(0),
+            daylight_cycle: AtomicBool::new(true),
         };
         assert_eq!(clock.weather(), (true, true));
         clock.save_ticks(&path).unwrap();

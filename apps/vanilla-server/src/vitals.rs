@@ -55,6 +55,12 @@ impl Default for Vitals {
 }
 
 impl Vitals {
+    /// 1.7.10 ender pearl damage is 5 HP (two-and-a-half hearts);
+    /// the owning session saves this together with the new coordinates.
+    pub fn apply_ender_pearl_damage(&mut self) {
+        self.health = (self.health - 5.0).max(0.0);
+    }
+
     pub fn valid(&self) -> bool {
         self.health.is_finite()
             && (0.0..=20.0).contains(&self.health)
@@ -395,6 +401,17 @@ mod tests {
             healthy.tick(20);
         }
         assert_eq!(healthy.health, 16.0);
+    }
+    #[test]
+    fn ender_pearl_damage_is_five_hp_and_cannot_underflow() {
+        let mut v = Vitals::default();
+        v.apply_ender_pearl_damage();
+        assert_eq!(v.health, 15.0);
+        v.health = 3.0;
+        v.apply_ender_pearl_damage();
+        assert_eq!(v.health, 0.0);
+        v.apply_ender_pearl_damage();
+        assert_eq!(v.health, 0.0);
     }
     #[test]
     fn normal_difficulty_starvation_stops_at_one_health() {
