@@ -73,12 +73,18 @@ impl Minecarts {
     }
 
     pub fn place(&mut self, world: &World, at: PlayerPosition, tick: u64) -> Option<Event> {
-        if !self.can_place(world, at) { return None; }
+        if !self.can_place(world, at) {
+            return None;
+        }
         let id = FIRST_ID.checked_add(self.next)?;
         self.next = self.next.checked_add(1)?;
         let cart = Cart {
-            id, position: at, speed: 0.0, direction: 1,
-            rider: None, last_tick: tick,
+            id,
+            position: at,
+            speed: 0.0,
+            direction: 1,
+            rider: None,
+            last_tick: tick,
         };
         let spawned = cart.spawn();
         self.carts.insert(id, cart);
@@ -86,11 +92,14 @@ impl Minecarts {
     }
 
     pub fn mount(&mut self, id: i32, rider: i32, position: PlayerPosition) -> Option<Event> {
-        if self.cart_for(rider).is_some() { return None; }
+        if self.cart_for(rider).is_some() {
+            return None;
+        }
         let cart = self.carts.get_mut(&id)?;
         if cart.rider.is_some()
             || (cart.position.x - position.x).hypot(cart.position.z - position.z) > 4.0
-            || (cart.position.y - position.y).abs() > 3.0 {
+            || (cart.position.y - position.y).abs() > 3.0
+        {
             return None;
         }
         cart.rider = Some(rider);
@@ -98,14 +107,20 @@ impl Minecarts {
     }
 
     pub fn cart_for(&self, rider: i32) -> Option<i32> {
-        self.carts.values().find(|c| c.rider == Some(rider)).map(|c| c.id)
+        self.carts
+            .values()
+            .find(|c| c.rider == Some(rider))
+            .map(|c| c.id)
     }
 
     pub fn rider_position(&self, rider: i32) -> Option<PlayerPosition> {
-        self.carts.values().find(|c| c.rider == Some(rider)).map(|c| PlayerPosition {
-            y: c.position.y + 0.1,
-            ..c.position
-        })
+        self.carts
+            .values()
+            .find(|c| c.rider == Some(rider))
+            .map(|c| PlayerPosition {
+                y: c.position.y + 0.1,
+                ..c.position
+            })
     }
 
     pub fn dismount(&mut self, rider: i32) -> Option<Event> {
@@ -116,11 +131,17 @@ impl Minecarts {
 
     /// A bounded push along the rail axis. Never accepts a client position.
     pub fn control(&mut self, rider: i32, forward: f32, heading: f32) -> bool {
-        if !forward.is_finite() || !heading.is_finite() { return false; }
+        if !forward.is_finite() || !heading.is_finite() {
+            return false;
+        }
         let Some(cart) = self.carts.values_mut().find(|c| c.rider == Some(rider)) else {
             return false;
         };
-        let sign = if heading.rem_euclid(360.0) < 180.0 { 1 } else { -1 };
+        let sign = if heading.rem_euclid(360.0) < 180.0 {
+            1
+        } else {
+            -1
+        };
         cart.direction = sign;
         if forward.abs() > 0.01 {
             cart.speed = (cart.speed + f64::from(forward) * 0.012).clamp(-0.4, 0.4);
@@ -132,7 +153,9 @@ impl Minecarts {
         let mut events = Vec::new();
         for cart in self.carts.values_mut() {
             let steps = now.saturating_sub(cart.last_tick).min(20);
-            if steps == 0 { continue; }
+            if steps == 0 {
+                continue;
+            }
             cart.last_tick = now;
             for _ in 0..steps {
                 let Some((id, meta)) = rail(world, cart.position) else {
@@ -179,7 +202,11 @@ impl Minecarts {
 
     pub fn snapshot(&self, observer: PlayerPosition) -> Vec<Event> {
         let mut events = Vec::new();
-        for cart in self.carts.values().filter(|c| multiplayer::visible(&observer, &c.position)) {
+        for cart in self
+            .carts
+            .values()
+            .filter(|c| multiplayer::visible(&observer, &c.position))
+        {
             events.push(cart.spawn());
             if let Some(rider) = cart.rider {
                 events.push(attachment(rider, cart.id));
@@ -197,18 +224,27 @@ mod tests {
         let mut world = World::new();
         world.import_block(0, 65, 0, 27 << 4 | 9).unwrap();
         world.import_block(1, 65, 0, 27 << 4 | 9).unwrap();
-        let at = PlayerPosition { x: 0.5, y: 65.5, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.5,
+            z: 0.5,
+        };
         let mut carts = Minecarts::default();
         let packet = carts.place(&world, at, 0).unwrap();
         assert_eq!(packet.id, 0x0e);
         let mut data = packet.body.as_slice();
-        assert_eq!(legacy_protocol::read_varint(&mut data).unwrap(), FIRST_ID as u32);
+        assert_eq!(
+            legacy_protocol::read_varint(&mut data).unwrap(),
+            FIRST_ID as u32
+        );
         assert_eq!(data[0], 10);
         let id = FIRST_ID;
         assert_eq!(carts.mount(id, 11, at).unwrap().id, 0x1b);
         assert!(carts.mount(id, 12, at).is_none());
         assert!(carts.control(11, 1.0, 90.0));
-        for tick in 1..10 { carts.tick(&world, tick); }
+        for tick in 1..10 {
+            carts.tick(&world, tick);
+        }
         assert!(carts.rider_position(11).is_some());
         assert_eq!(carts.dismount(11).unwrap().id, 0x1b);
         assert!(carts.cart_for(11).is_none());
