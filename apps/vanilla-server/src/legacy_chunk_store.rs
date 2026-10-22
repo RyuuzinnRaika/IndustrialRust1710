@@ -215,9 +215,8 @@ mod tests {
         let world = root.join("world");
         let file = world.join("region/r.0.0.mca");
         let mut bytes = fs::read(&file).unwrap();
-        let sector = (usize::from(bytes[0]) << 16)
-            | (usize::from(bytes[1]) << 8)
-            | usize::from(bytes[2]);
+        let sector =
+            (usize::from(bytes[0]) << 16) | (usize::from(bytes[1]) << 8) | usize::from(bytes[2]);
         bytes[sector * SECTOR_BYTES + 4] = 7;
         fs::write(&file, bytes).unwrap();
         let mut cache = ReadOnlyChunkCache::open(&world, 2).unwrap();
