@@ -4112,21 +4112,46 @@ fn main() -> io::Result<()> {
     journal::commit(
         &journal_path,
         &[
-            (chest_path.as_ref().as_path(),
-                chests.lock().map_err(|_| bad("chest mutex poisoned"))?.encoded()?),
-            (furnace_path.as_ref().as_path(),
-                furnaces.lock().map_err(|_| bad("furnace mutex poisoned"))?.encoded()?),
-            (hopper_path.as_ref().as_path(),
-                hoppers.lock().map_err(|_| bad("hopper mutex poisoned"))?.encoded()?),
+            (
+                chest_path.as_ref().as_path(),
+                chests
+                    .lock()
+                    .map_err(|_| bad("chest mutex poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                furnace_path.as_ref().as_path(),
+                furnaces
+                    .lock()
+                    .map_err(|_| bad("furnace mutex poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                hopper_path.as_ref().as_path(),
+                hoppers
+                    .lock()
+                    .map_err(|_| bad("hopper mutex poisoned"))?
+                    .encoded()?,
+            ),
         ],
     )?;
     journal::commit(
         &journal_path,
         &[
-            (brewer_path.as_ref().as_path(),
-                brewers.lock().map_err(|_| bad("brewer mutex poisoned"))?.encoded()?),
-            (ground_path.as_ref().as_path(),
-                ground_items.lock().map_err(|_| bad("ground items mutex poisoned"))?.encoded()?),
+            (
+                brewer_path.as_ref().as_path(),
+                brewers
+                    .lock()
+                    .map_err(|_| bad("brewer mutex poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                ground_path.as_ref().as_path(),
+                ground_items
+                    .lock()
+                    .map_err(|_| bad("ground items mutex poisoned"))?
+                    .encoded()?,
+            ),
         ],
     )?;
     clock.save_ticks(&clock_path)?;
