@@ -6351,7 +6351,7 @@ fn main() -> io::Result<()> {
         None
     };
     listener.set_nonblocking(true)?;
-    let mut client_threads = Vec::new();
+    let mut client_threads: Vec<thread::JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::Acquire) {
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
@@ -6502,10 +6502,7 @@ fn main() -> io::Result<()> {
     console_thread
         .join()
         .map_err(|_| io::Error::other("console worker panicked during shutdown"))?;
-    session_guard
-        .lock()
-        .map_err(|_| bad("session lock mutex poisoned"))?
-        .verify()?;
+    session_guard.verify()?;
     {
         let world_guard = world.lock().map_err(|_| bad("world lock poisoned"))?;
         world_guard.save(&path)?;
@@ -6602,10 +6599,7 @@ fn main() -> io::Result<()> {
         .map_err(|_| bad("scoreboard lock poisoned"))?
         .save(&scoreboard_path)?;
     clock.save_ticks(&clock_path)?;
-    session_guard
-        .lock()
-        .map_err(|_| bad("session lock mutex poisoned"))?
-        .verify()?;
+    session_guard.verify()?;
     println!("Server safely stopped; player sessions, workers and persistent state flushed.");
     Ok(())
 }
