@@ -229,15 +229,18 @@ impl Administration {
         validate_permissions(&data)?;
         Ok(data)
     }
-    /// Only a session-authenticated UUID can match an OP entry.
-    /// Offline UUIDs and user-supplied names never authorize any command.
-    pub fn is_operator(&self, name: &str, verified_uuid: Option<&str>) -> io::Result<bool> {
+    /// An OP entry is authorized only by a Mojang-verified UUID, never an offline name.
+    pub fn operator_level(&self, name: &str, verified_uuid: Option<&str>) -> io::Result<u8> {
         let operators = self.ops()?;
-        Ok(verified_uuid.is_some_and(|uuid| {
-            operators.iter().any(|entry| {
-                entry.name.eq_ignore_ascii_case(name) && entry.uuid.as_deref() == Some(uuid)
-            })
+        Ok(verified_uuid.map_or(0, |uuid| {
+            operators.iter().filter(|entry| {
+                entry.name.eq_ignore_ascii_case(name)
+                    && entry.uuid.as_deref() == Some(uuid)
+            }).map(|entry| entry.level.unwrap_or(4)).max().unwrap_or(0)
         }))
+    }
+    pub fn is_operator(&self, name: &str, verified_uuid: Option<&str>) -> io::Result<bool> {
+        Ok(self.operator_level(name, verified_uuid)? > 0)
     }
     pub fn banned(&self, name: &str, address: IpAddr) -> io::Result<Option<String>> {
         let by_name = self.banned_players()?;
@@ -280,20 +283,40 @@ impl Administration {
             }))
     }
     pub fn set_op(&self, name: &str, enabled: bool) -> io::Result<()> {
+        self.update_op(name, enabled, None)
+    }
+    /// Console may grant OP only to an identity already authenticated by
+    /// the online-mode handshake. Never accept a username as proof of UUID.
+    pub fn set_op_verified(&self, name: &str, uuid: &str) -> io::Result<()> {
+        self.update_op(name, true, Some(uuid))
+    }
+    fn update_op(&self, name: &str, enabled: bool, uuid: Option<&str>) -> io::Result<()> {
         if !valid_name(name) {
             return Err(invalid("invalid OP username"));
+        }
+        if let Some(id) = uuid {
+            let bytes = id.as_bytes();
+            if bytes.len() != 36 || bytes.iter().enumerate().any(|(i, byte)| {
+                if matches!(i, 8 | 13 | 18 | 23) {
+                    *byte != b'-'
+                } else {
+                    !byte.is_ascii_hexdigit()
+                }
+            }) {
+                return Err(invalid("invalid authenticated OP UUID"));
+            }
         }
         let mut ops = self.ops()?;
         ops.retain(|e| !e.name.eq_ignore_ascii_case(name));
         if enabled {
             ops.push(NamedEntry {
                 name: name.into(),
-                uuid: None,
+                uuid: uuid.map(str::to_owned),
                 reason: None,
                 level: Some(4),
                 bypasses_player_limit: Some(false),
                 created: None,
-                source: None,
+                source: Some("CONSOLE".into()),
                 expires: None,
             });
         }
@@ -412,7 +435,11 @@ mod tests {
         let store = Administration::new(root.clone()).unwrap();
         store.set_op("Operator", true).unwrap();
         assert!(!store.is_operator("Operator", None).unwrap());
-        assert!(!store.is_operator("Operator", None).unwrap());
+        assert!(!store.is_operator("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca")).unwrap());
+        store.set_op_verified("Operator", "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca").unwrap();
+        assert!(store.is_operator("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca")).unwrap());
+        assert_eq!(store.operator_level("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca")).unwrap(), 4);
+        assert!(!store.is_operator("Operator", Some("d3a0a8b1-4753-4a66-b9c8-f4ac1234c9cb")).unwrap());
         store
             .set_player_ban("Spammer", Some("abuse"), true)
             .unwrap();
