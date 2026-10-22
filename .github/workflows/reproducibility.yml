@@ -1,0 +1,52 @@
+name: Independent same-commit reproducibility audit
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    name: compare-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      - name: Two isolated locked release builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR=target/repro-a cargo build --locked --release -p vanilla-server -p legacy-status-server
+          CARGO_TARGET_DIR=target/repro-b cargo build --locked --release -p vanilla-server -p legacy-status-server
+          if [[ "${{ runner.os }}" == "Windows" ]]; then ext=.exe; else ext=; fi
+          {
+            echo "## J100: same-host independent target-directory comparison"
+            echo ""
+            echo "Commit: \`${{ github.sha }}\`"
+            echo ""
+            echo "OS: \`${{ runner.os }}\` — rustc: \`$(rustc --version)\`"
+            echo ""
+            echo "| Binary | Build A SHA256 | Build B SHA256 | Outcome |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          failed=0
+          for name in vanilla-server legacy-status-server; do
+            a="target/repro-a/release/${name}${ext}"
+            b="target/repro-b/release/${name}${ext}"
+            hash_a=$(sha256sum "$a" | cut -d' ' -f1)
+            hash_b=$(sha256sum "$b" | cut -d' ' -f1)
+            if cmp -s "$a" "$b"; then state=PASS; else state=MISMATCH; failed=1; fi
+            echo "|${name}|\`${hash_a}\`|\`${hash_b}\`|${state}|" >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [[ "$failed" != "0" ]]; then
+            echo "::error::Release binaries differ across isolated builds; investigate before declaring reproducibility."
+            exit 1
+          fi
