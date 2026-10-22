@@ -551,6 +551,28 @@ impl World {
         let mut changes: BTreeMap<Position, u16> = self.ecology_changes(budget);
         changes.extend(self.device_changes(budget));
         changes.extend(self.special_changes(budget));
+        // Timed redstone components must release power on the authoritative
+        // world tick, not merely disappear from the in-memory timer table.
+        // Stage their reset in the same durable snapshot as other updates.
+        let expired_timers: Vec<Position> = self
+            .pending_buttons
+            .iter()
+            .filter(|&(_, deadline)| self.fluid_phase >= *deadline)
+            .take(budget)
+            .map(|(&pos, _)| pos)
+            .collect();
+        for &(x, y, z) in &expired_timers {
+            let old = self.get(x, i32::from(y), z);
+            let reset = match old >> 4 {
+                70 | 72 => old & !1,        // Stone and wooden pressure plates.
+                77 | 131 | 143 => old & !8, // Buttons and tripwire hooks.
+                147 | 148 => old & !15,     // Weighted analog pressure plates.
+                _ => old,
+            };
+            if reset != old {
+                changes.entry((x, y, z)).or_insert(reset);
+            }
+        }
         // Retain the old block identity until the world snapshot has committed.
         let primed_on_commit: Vec<_> = changes
             .iter()
@@ -830,13 +852,9 @@ impl World {
         for pos in supported {
             self.pending_support.remove(&pos);
         }
-        let expired: Vec<_> = self
-            .pending_buttons
-            .iter()
-            .filter(|&(_, when)| self.fluid_phase >= *when)
-            .map(|(&pos, _)| pos)
-            .collect();
-        for pos in expired {
+        // Clear timers only after the world save succeeded, so a storage
+        // failure cannot silently leave a permanently powered component.
+        for pos in expired_timers {
             self.pending_buttons.remove(&pos);
         }
         let mut changed = Vec::with_capacity(changes.len());
