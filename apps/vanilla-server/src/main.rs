@@ -1,6 +1,7 @@
 //! Vanilla-only Minecraft 1.7.10 / Protocol 5 server proof of concept.
 //! Offline-mode by design: bind to loopback unless you trust every client on your LAN.
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
+mod achievements;
 mod admin;
 mod anvil_export;
 mod anvil_import;
@@ -11,10 +12,11 @@ mod chunk_pipeline;
 mod clock;
 mod crafting;
 mod dimensions;
-#[allow(dead_code)] // B13 staged storage: Protocol 5 activation integration pending.
 mod dispensers;
 mod experience;
+mod fishing;
 mod furnaces;
+mod game_rules;
 mod ground_items;
 mod hoppers;
 mod inventory;
@@ -29,10 +31,12 @@ mod legacy_world_inspect;
 mod level_dat;
 mod mobs;
 mod multiplayer;
+mod native_tile_export;
 mod navigation;
 mod online_auth;
 mod physics;
 mod player;
+mod scoreboard;
 mod security_limits;
 mod server_config;
 mod session_lock;
@@ -40,17 +44,23 @@ mod survival;
 mod survival_damage;
 mod telemetry;
 mod terrain;
+mod throwables;
+mod vehicles;
 mod vitals;
 mod whitelist;
 mod world;
 mod worldgen;
 
+use achievements::Achievements;
 use admin::Administration;
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
+use dispensers::{Devices, Position as DevicePosition};
 use experience::Experience;
+use fishing::Fishing;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
+use game_rules::GameRules;
 use ground_items::GroundItems;
 use hoppers::{Hoppers, Position as HopperPosition};
 use inventory::{Inventory, Stack};
@@ -59,10 +69,11 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use mobs::Mobs;
-use multiplayer::{Event, Hub, JoinError, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS};
+use multiplayer::{Event, Hub, JoinError, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT};
 use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
+use scoreboard::Scoreboard;
 use security_limits::{ChatLimiter, ConnectionLimiter};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -76,6 +87,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use survival::MiningProgress;
 use survival_damage::Hazards;
+use throwables::Throwables;
+use vehicles::Boats;
 use vitals::Vitals;
 use whitelist::Whitelist;
 use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
@@ -241,6 +254,7 @@ struct InitialPlayer<'a> {
     inventory: &'a Inventory,
     vitals: Vitals,
     survival: bool,
+    hardcore: bool,
     difficulty: u8,
 }
 fn join(
@@ -255,6 +269,7 @@ fn join(
         inventory,
         vitals,
         survival,
+        hardcore,
         difficulty,
     } = initial;
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
@@ -267,7 +282,7 @@ fn join(
         .extended_identity()
         .map_or(0, |(_, dim)| dim.protocol_id());
     join.extend_from_slice(&[
-        u8::from(!survival),
+        u8::from(!survival) | if hardcore { 0x08 } else { 0 },
         dimension_id as u8,
         difficulty, // explicitly configured difficulty
         MAX_PLAYERS as u8,
@@ -573,22 +588,33 @@ struct PlayerSession<'a> {
     vitals: &'a mut Vitals,
     experience: &'a mut Experience,
     experience_path: &'a Path,
+    achievements: &'a mut Achievements,
+    achievements_path: &'a Path,
     save_path: &'a Path,
     inventory: &'a mut Inventory,
     inventory_path: &'a Path,
     ground_items: &'a Mutex<GroundItems>,
     ground_path: &'a Path,
     mobs: &'a Mutex<Mobs>,
+    throwables: &'a Mutex<Throwables>,
+    boats: &'a Mutex<Boats>,
+    fishing: &'a Mutex<Fishing>,
     chests: &'a Mutex<Chests>,
     chest_path: &'a Path,
     furnaces: &'a Mutex<Furnaces>,
     furnace_path: &'a Path,
     hoppers: &'a Mutex<Hoppers>,
     hopper_path: &'a Path,
+    devices: &'a Mutex<Devices>,
+    device_path: &'a Path,
     brewers: &'a Mutex<Brewers>,
     brewer_path: &'a Path,
     survival: bool,
+    hardcore: bool,
     difficulty: u8,
+    game_rules: &'a Mutex<GameRules>,
+    scoreboard: &'a Mutex<Scoreboard>,
+    scoreboard_path: &'a Path,
     hub: &'a Hub,
     entity_id: i32,
     events: &'a Receiver<Event>,
@@ -610,22 +636,33 @@ fn play(
         vitals,
         experience,
         experience_path,
+        achievements,
+        achievements_path,
         save_path: player_path,
         inventory,
         inventory_path,
         ground_items,
         ground_path,
         mobs,
+        throwables,
+        boats,
+        fishing,
         chests,
         chest_path,
         furnaces,
         furnace_path,
         hoppers,
         hopper_path,
+        devices,
+        device_path,
         brewers,
         brewer_path,
         survival,
+        hardcore,
         difficulty,
+        game_rules,
+        scoreboard,
+        scoreboard_path,
         hub,
         entity_id,
         events,
@@ -661,6 +698,8 @@ fn play(
     let mut active_chest_partner: Option<ChestPosition> = None;
     let mut active_furnace: Option<FurnacePosition> = None;
     let mut active_hopper: Option<HopperPosition> = None;
+    let mut active_device: Option<DevicePosition> = None;
+    let mut last_device_view = [None; dispensers::DEVICE_SLOTS];
     let mut active_brewer: Option<BrewerPosition> = None;
     let mut last_brewer_view = Brewer::default();
     let mut last_furnace_view = Furnace::default();
@@ -675,6 +714,8 @@ fn play(
     let mut last_hazards_tick = clock.ticks();
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
+    let mut death_recorded = vitals.health <= 0.0;
+    let mut last_carrot_wear = 0u64;
     loop {
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
@@ -690,7 +731,7 @@ fn play(
                 send(s, 0x40, &payload)?;
                 return Ok(());
             }
-            if event.id == ADMIN_TELEPORT_EVENT {
+            if matches!(event.id, ADMIN_TELEPORT_EVENT | PEARL_TELEPORT_EVENT) {
                 if event.body.len() != 24 {
                     return Err(bad("invalid internal teleport payload"));
                 }
@@ -702,8 +743,19 @@ fn play(
                 if !target.is_valid() {
                     return Err(bad("invalid internal teleport coordinates"));
                 }
-                // Only the owning session updates player position and its save.
-                target.save_state(player_path, *vitals)?;
+                // Distinguish command teleport from a paid ender-pearl impact:
+                // the latter costs 5 health (2.5 hearts), exactly once, in
+                // the owning player session before its new location is saved.
+                let pearl_impact = event.id == PEARL_TELEPORT_EVENT;
+                if pearl_impact && vitals.health <= 0.0 {
+                    continue;
+                }
+                let mut next_vitals = *vitals;
+                if pearl_impact {
+                    next_vitals.apply_ender_pearl_damage();
+                }
+                target.save_state(player_path, next_vitals)?;
+                *vitals = next_vitals;
                 *player = target;
                 location = (target.x, target.y, target.z);
                 fall = FallTracker::new(target.y);
@@ -715,6 +767,9 @@ fn play(
                 pitch = 0.0;
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
                 send_player_position(s, player)?;
+                if pearl_impact {
+                    send(s, 0x06, &health_packet(*vitals))?;
+                }
                 hub.move_player(entity_id, *player, yaw, pitch);
                 last_movement_broadcast = Instant::now();
                 continue;
@@ -772,6 +827,19 @@ fn play(
                 send(s, 0x31, &current.property(active_window))?;
             }
         }
+        if let Some(pos) = active_device {
+            let guard = devices.lock().map_err(|_| bad("device lock poisoned"))?;
+            let current = guard.slots(pos);
+            if current != last_device_view {
+                last_device_view = current;
+                drop(guard);
+                send(
+                    s,
+                    0x30,
+                    &inventory.chest_window_items(active_window, &current),
+                )?;
+            }
+        }
         if let Some(pos) = active_hopper {
             let guard = hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?;
             if guard.revision() != observed_hopper_revision {
@@ -826,6 +894,16 @@ fn play(
                         for slot in slots {
                             send(s, 0x2f, &inventory.set_slot(slot)?)?;
                         }
+                        // A grant is sent only after the inventory and ground
+                        // item transaction commits successfully.
+                        if let Some(key) = Achievements::collected_item_trigger(item.stack.id) {
+                            let mut next_achievements = achievements.clone();
+                            if let Some(packet) = next_achievements.award(key)? {
+                                next_achievements.save(achievements_path)?;
+                                *achievements = next_achievements;
+                                send(s, packet.id, &packet.body)?;
+                            }
+                        }
                     }
                 }
             }
@@ -851,6 +929,24 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
+        let boat_mount = boats
+            .lock()
+            .map_err(|_| bad("boats mutex poisoned"))?
+            .rider_position(entity_id);
+        let animal_mount = mobs
+            .lock()
+            .map_err(|_| bad("mob mutex poisoned"))?
+            .rider_position(entity_id);
+        if let Some(mounted) = boat_mount.or(animal_mount) {
+            if mounted.is_valid() && *player != mounted {
+                *player = mounted;
+                location = (mounted.x, mounted.y, mounted.z);
+                fall.reset(mounted.y);
+                idle_gravity.observe_client(now_tick);
+                sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                hub.move_player(entity_id, mounted, yaw, pitch);
+            }
+        }
         // XP orbs belong to the world and are collected by proximity, not by client inventory claims.
         if survival && vitals.health > 0.0 {
             let collected = mobs
@@ -871,10 +967,16 @@ fn play(
         if survival && vitals.health > 0.0 {
             let participants = hub.participants()?;
             let players = hub.positions()?;
+            // Read the rule before taking world/mob locks to preserve lock order.
+            let allow_natural_spawning = game_rules
+                .lock()
+                .map_err(|_| bad("game rules mutex poisoned"))?
+                .mob_spawning();
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+            creatures.set_natural_spawning(allow_natural_spawning);
             let mut updates = creatures.tick(now_tick, &w, &players);
-            // Persist sheep grazing before propagating wool-regrowth metadata.
+            // Preserve main's grazing and Group I's leash simulation.
             let mut grazed_blocks = Vec::new();
             for (metadata, at) in creatures.graze(&mut w, world_path, now_tick)? {
                 if let Some(packet) = metadata {
@@ -882,6 +984,7 @@ fn play(
                 }
                 grazed_blocks.push(at);
             }
+            updates.extend(creatures.advance_leashes(&w, now_tick, &participants));
             let explosions = creatures.take_explosions();
             updates.extend(creatures.queue_explosion_hits(&w, &explosions, &participants));
             updates.extend(creatures.take_player_effects(entity_id, *player, now_tick));
@@ -1221,15 +1324,45 @@ fn play(
         }
         if survival && vitals.health <= 0.0 {
             eating = None;
-            commit_death_drops(
-                inventory,
-                inventory_path,
-                ground_items,
-                ground_path,
-                world_path,
-                hub,
-                location,
-            )?;
+            if !death_recorded {
+                // A death is counted exactly once in this session and the
+                // updated shared scoreboard is durable before client notify.
+                let changes = {
+                    let mut board = scoreboard
+                        .lock()
+                        .map_err(|_| bad("scoreboard lock poisoned"))?;
+                    let mut candidate = board.clone();
+                    let changes = candidate.record_death(name)?;
+                    candidate.save(scoreboard_path)?;
+                    *board = candidate;
+                    changes
+                };
+                for change in changes {
+                    hub.broadcast(change);
+                }
+                death_recorded = true;
+            }
+            let keep_inventory = game_rules
+                .lock()
+                .map_err(|_| bad("game rules mutex poisoned"))?
+                .keep_inventory();
+            if !keep_inventory {
+                commit_death_drops(
+                    inventory,
+                    inventory_path,
+                    ground_items,
+                    ground_path,
+                    world_path,
+                    hub,
+                    location,
+                )?;
+            }
+            if hardcore {
+                // Persist the dead state before ending the connection. Future
+                // logins reject this player even after server restart.
+                player.save_state(player_path, *vitals)?;
+                return Ok(());
+            }
         }
         if now_tick.saturating_sub(last_time_tick) >= 20 {
             let mut time = Vec::with_capacity(16);
@@ -1269,7 +1402,58 @@ fn play(
                 let action = input.varint()?;
                 input.finish()?;
                 if survival && vitals.health > 0.0 && action == 0 {
+                    if let Some(attach) = boats
+                        .lock()
+                        .map_err(|_| bad("boats mutex poisoned"))?
+                        .mount(target_id, entity_id, *player)
+                    {
+                        hub.broadcast(attach);
+                        continue;
+                    }
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    // Leashes and saddles must debit a real held item before
+                    // changing the shared entity. Never trust the client slot.
+                    if inventory.held().is_some_and(|item| item.id == 420)
+                        && creatures.can_leash(target_id, entity_id, *player)
+                    {
+                        let mut candidate = inventory.clone();
+                        if candidate.consume_held() {
+                            candidate.save(inventory_path)?;
+                            if let Some(event) = creatures.leash(target_id, entity_id, *player) {
+                                *inventory = candidate;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                hub.broadcast(event);
+                            }
+                        }
+                        continue;
+                    }
+                    if inventory.held().is_some_and(|item| item.id == 329)
+                        && creatures.can_saddle(target_id, *player)
+                    {
+                        let mut candidate = inventory.clone();
+                        if candidate.consume_held() {
+                            candidate.save(inventory_path)?;
+                            if let Some(event) = creatures.saddle(target_id, *player) {
+                                *inventory = candidate;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                hub.broadcast(event);
+                            }
+                        }
+                        continue;
+                    }
+                    if boats
+                        .lock()
+                        .map_err(|_| bad("boats mutex poisoned"))?
+                        .boat_for(entity_id)
+                        .is_none()
+                    {
+                        if let Some(events) = creatures.use_mount(target_id, entity_id, *player) {
+                            for event in events {
+                                hub.broadcast(event);
+                            }
+                            continue;
+                        }
+                    }
                     // Protocol 5 Use Entity: adult cow + held empty bucket.
                     // Inventory is cloned, exchanged and persisted before the
                     // authoritative window refresh. On a full inventory, the
@@ -1340,6 +1524,16 @@ fn play(
                     }
                 }
                 if survival && vitals.health > 0.0 && action == 1 {
+                    if let Some(events) = boats
+                        .lock()
+                        .map_err(|_| bad("boats mutex poisoned"))?
+                        .break_boat(target_id, *player)
+                    {
+                        for event in events {
+                            hub.broadcast(event);
+                        }
+                        continue;
+                    }
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
                     let result =
                         creatures.player_attack(target_id, *player, inventory.held(), now_tick);
@@ -1500,6 +1694,19 @@ fn play(
                     send_player_position(s, player)?;
                     continue;
                 }
+                if boats
+                    .lock()
+                    .map_err(|_| bad("boats mutex poisoned"))?
+                    .boat_for(entity_id)
+                    .is_some()
+                    || mobs
+                        .lock()
+                        .map_err(|_| bad("mob mutex poisoned"))?
+                        .is_riding(entity_id)
+                {
+                    // Riding position comes from server-side boat physics, never C04/C06.
+                    continue;
+                }
                 if survival {
                     let collision_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     if !physics::valid_movement(&collision_world, player, &candidate) {
@@ -1582,6 +1789,54 @@ fn play(
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, *player, yaw, pitch);
                     last_movement_broadcast = Instant::now();
+                }
+            }
+            12 => {
+                // Protocol 5 Steer Vehicle: float sideways, float forward,
+                // bool jump, bool dismount. No client-supplied vehicle ID.
+                let sideways = input.f32()?;
+                let forward = input.f32()?;
+                let _jump = input.u8()? != 0;
+                let dismount = input.u8()? != 0;
+                input.finish()?;
+                if !sideways.is_finite() || !forward.is_finite() {
+                    return Err(bad("non-finite vehicle controls"));
+                }
+                let mut state = boats.lock().map_err(|_| bad("boats mutex poisoned"))?;
+                if dismount {
+                    if let Some(event) = state.dismount(entity_id) {
+                        hub.broadcast(event);
+                    }
+                    drop(state);
+                    if let Some(event) = mobs
+                        .lock()
+                        .map_err(|_| bad("mob mutex poisoned"))?
+                        .dismount(entity_id)
+                    {
+                        hub.broadcast(event);
+                    }
+                } else if !state.control(entity_id, sideways, forward, yaw) {
+                    drop(state);
+                    let carrot = inventory.held().is_some_and(|item| item.id == 398);
+                    let collision = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let events = mobs
+                        .lock()
+                        .map_err(|_| bad("mob mutex poisoned"))?
+                        .steer_rider(entity_id, &collision, forward, yaw, carrot, now_tick);
+                    drop(collision);
+                    let moved = !events.is_empty();
+                    for event in events {
+                        hub.broadcast(event);
+                    }
+                    if moved && carrot && now_tick.saturating_sub(last_carrot_wear) >= 40 {
+                        let mut candidate = inventory.clone();
+                        if candidate.wear_carrot_stick() {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
+                            send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                            last_carrot_wear = now_tick;
+                        }
+                    }
                 }
             }
             11 => {
@@ -1695,6 +1950,13 @@ fn play(
                                                 .map_err(|_| bad("furnace lock poisoned"))?
                                                 .get(target)
                                                 .occupied())
+                                        || (matches!(block, 23 | 158)
+                                            && devices
+                                                .lock()
+                                                .map_err(|_| bad("device lock poisoned"))?
+                                                .slots(target)
+                                                .iter()
+                                                .any(Option::is_some))
                                         || (block == 154
                                             && hoppers
                                                 .lock()
@@ -1876,6 +2138,95 @@ fn play(
                         if inventory.can_place(held) {
                             if stack.id == 261 {
                                 bow_start = Some(now_tick);
+                            } else if stack.id == 346 {
+                                let mut state =
+                                    fishing.lock().map_err(|_| bad("fishing mutex poisoned"))?;
+                                if state.has_float(entity_id) {
+                                    let mut candidate_state = state.clone();
+                                    if let Some(reel) = candidate_state.reel(entity_id, now_tick) {
+                                        let mut candidate = inventory.clone();
+                                        if candidate.wear_fishing_rod() {
+                                            let mut spawned = Vec::new();
+                                            if let Some(loot) = reel.loot {
+                                                if candidate.receive_stack(loot).is_none() {
+                                                    // Never silently discard a caught item when
+                                                    // the inventory is full. Stage it as a
+                                                    // real ground entity and commit both files.
+                                                    let mut ground =
+                                                        ground_items.lock().map_err(|_| {
+                                                            bad("ground items mutex poisoned")
+                                                        })?;
+                                                    if !ground.has_capacity_for(1) {
+                                                        // Preserve the active bobber and rod:
+                                                        // no item is created or consumed.
+                                                        continue;
+                                                    }
+                                                    let at = (
+                                                        player.x.floor() as i32,
+                                                        player.y.floor() as i32,
+                                                        player.z.floor() as i32,
+                                                    );
+                                                    let (staged, dropped) =
+                                                        ground.stage_put_many(&[loot], at)?;
+                                                    journal::commit(
+                                                        &world_path
+                                                            .with_extension("pending-txn.json"),
+                                                        &[
+                                                            (inventory_path, candidate.encoded()?),
+                                                            (ground_path, staged.encoded()?),
+                                                        ],
+                                                    )?;
+                                                    *ground = staged;
+                                                    spawned = dropped;
+                                                } else {
+                                                    candidate.save(inventory_path)?;
+                                                }
+                                            } else {
+                                                candidate.save(inventory_path)?;
+                                            }
+                                            *inventory = candidate;
+                                            *state = candidate_state;
+                                            drop(state);
+                                            send(s, 0x30, &inventory.window_items())?;
+                                            for drop in spawned {
+                                                for packet in drop.spawn() {
+                                                    hub.broadcast(packet);
+                                                }
+                                            }
+                                            for event in reel.events {
+                                                hub.broadcast(event);
+                                            }
+                                        }
+                                    }
+                                } else if let Some(event) =
+                                    state.cast(entity_id, *player, yaw, pitch, now_tick)
+                                {
+                                    drop(state);
+                                    hub.broadcast_in_view(*player, event);
+                                }
+                            } else if throwables::Kind::from_item(stack.id).is_some() {
+                                let mut state = throwables
+                                    .lock()
+                                    .map_err(|_| bad("throwables lock poisoned"))?;
+                                // Under the bounded lock the item is paid for
+                                // before the newly spawned entity is public.
+                                let mut next = inventory.clone();
+                                if state.can_launch(stack.id, entity_id, name, *player, yaw, pitch)
+                                    && next.consume_held()
+                                {
+                                    // Persist first: failure never leaves an unpaid
+                                    // projectile. The same lock covers preflight + launch.
+                                    next.save(inventory_path)?;
+                                    let event = state
+                                        .launch(stack.id, entity_id, name, *player, yaw, pitch)
+                                        .ok_or_else(|| {
+                                            bad("projectile launch after preflight failed")
+                                        })?;
+                                    *inventory = next;
+                                    drop(state);
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                    hub.broadcast_in_view(*player, event);
+                                }
                             } else if vitals.can_eat(stack)
                                 || (stack.id == 373 && brewing::effect(stack).is_some())
                                 || stack.id == 335
@@ -1883,6 +2234,62 @@ fn play(
                             {
                                 eating = Some((now_tick, stack));
                             }
+                        }
+                    }
+                    continue;
+                }
+                // A fence click ties all of this player's nearby lead endpoints.
+                // Re-clicking a tied knot releases the anchored animals.
+                if survival
+                    && (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 85
+                {
+                    let anchor = [x, y, z];
+                    let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    let mut effects = creatures.tie_fence(entity_id, anchor);
+                    if effects.is_empty() {
+                        effects = creatures.untie_fence(anchor);
+                    }
+                    for effect in effects {
+                        hub.broadcast(effect);
+                    }
+                    continue;
+                }
+                // Boat item 333 places a bounded entity on a water block.
+                if survival
+                    && (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && inventory.held().is_some_and(|item| item.id == 333)
+                    && inventory.can_place(held)
+                {
+                    let water = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let spawn_at = PlayerPosition {
+                        x: f64::from(x) + 0.5,
+                        y: f64::from(y) + 0.45,
+                        z: f64::from(z) + 0.5,
+                    };
+                    let mut state = boats.lock().map_err(|_| bad("boats mutex poisoned"))?;
+                    if state.can_place(&water, spawn_at) {
+                        let mut candidate = inventory.clone();
+                        if candidate.consume_held() {
+                            candidate.save(inventory_path)?;
+                            let spawned =
+                                state.place(&water, spawn_at, now_tick).ok_or_else(|| {
+                                    bad("boat vanished between preflight and placement")
+                                })?;
+                            *inventory = candidate;
+                            drop(state);
+                            drop(water);
+                            send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                            hub.broadcast_in_view(spawn_at, spawned);
                         }
                     }
                     continue;
@@ -2054,6 +2461,7 @@ fn play(
                     active_chest_partner = None;
                     active_furnace = Some(pos);
                     active_hopper = None;
+                    active_device = None;
                     active_brewer = None;
                     let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
                     last_furnace_view = guard.get(pos);
@@ -2098,6 +2506,7 @@ fn play(
                         .map(|w| chest_neighbor(&w, pos))?;
                     active_furnace = None;
                     active_hopper = None;
+                    active_device = None;
                     active_brewer = None;
                     let generated_loot = world
                         .lock()
@@ -2148,6 +2557,7 @@ fn play(
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
+                    active_device = None;
                     let guard = brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
                     last_brewer_view = guard.get(pos);
                     drop(guard);
@@ -2162,6 +2572,45 @@ fn play(
                         &inventory.chest_window_items(active_window, &last_brewer_view.slots),
                     )?;
                     send(s, 0x31, &last_brewer_view.property(active_window))?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && matches!(
+                        world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(x, y, z)
+                            >> 4,
+                        23 | 158
+                    )
+                {
+                    let pos = (x, y, z);
+                    let guard = devices.lock().map_err(|_| bad("device lock poisoned"))?;
+                    last_device_view = guard.slots(pos);
+                    active_window = next_window;
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
+                    active_device = Some(pos);
+                    active_chest = None;
+                    active_chest_partner = None;
+                    active_furnace = None;
+                    active_hopper = None;
+                    active_brewer = None;
+                    let items = inventory.chest_window_items(active_window, &last_device_view);
+                    drop(guard);
+                    let mut opened = vec![active_window];
+                    // Both machines use the 1.7.10 dispenser 3x3 window.
+                    write_string("minecraft:dispenser", &mut opened)?;
+                    write_string(&json!({"text":"Dispenser"}).to_string(), &mut opened)?;
+                    opened.push(dispensers::DEVICE_SLOTS as u8);
+                    send(s, 0x2d, &opened)?;
+                    send(s, 0x30, &items)?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     continue;
                 }
@@ -2185,6 +2634,7 @@ fn play(
                         next_window + 1
                     };
                     active_hopper = Some(pos);
+                    active_device = None;
                     active_brewer = None;
                     active_chest = None;
                     active_chest_partner = None;
@@ -2218,6 +2668,7 @@ fn play(
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
+                    active_device = None;
                     active_brewer = None;
                     next_window = if next_window >= 100 {
                         1
@@ -2670,6 +3121,55 @@ fn play(
                     response_items =
                         inventory.chest_window_items(active_window, &last_brewer_view.slots);
                     drop(storage);
+                } else if let Some(pos) = active_device {
+                    let still_open = {
+                        let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        matches!(w.get(pos.0, pos.1, pos.2) >> 4, 23 | 158)
+                            && near(location, pos.0, pos.1, pos.2)
+                    };
+                    let mut storage = devices.lock().map_err(|_| bad("device lock poisoned"))?;
+                    let original = storage.slots(pos);
+                    let mut next_slots = original;
+                    let mut candidate = inventory.clone();
+                    let change = if still_open && requested_window {
+                        candidate.chest_click_window(
+                            active_window,
+                            &mut next_slots,
+                            slot,
+                            button,
+                            mode,
+                        )
+                    } else {
+                        None
+                    };
+                    if change.is_some() {
+                        accepted = true;
+                        let item_changed = next_slots != original;
+                        let player_changed = candidate != *inventory;
+                        if item_changed {
+                            let staged = storage.staged_update(pos, next_slots)?;
+                            if player_changed {
+                                journal::commit(
+                                    &world_path.with_extension("pending-txn.json"),
+                                    &[
+                                        (inventory_path, candidate.encoded()?),
+                                        (device_path, staged.encoded()?),
+                                    ],
+                                )?;
+                            } else {
+                                staged.save(device_path)?;
+                            }
+                            *storage = staged;
+                        } else if player_changed {
+                            candidate.save(inventory_path)?;
+                        }
+                        if player_changed {
+                            *inventory = candidate;
+                        }
+                    }
+                    last_device_view = storage.slots(pos);
+                    response_items = inventory.chest_window_items(active_window, &last_device_view);
+                    drop(storage);
                 } else if let Some(pos) = active_hopper {
                     let still_open = {
                         let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -2761,6 +3261,7 @@ fn play(
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
+                    active_device = None;
                     active_brewer = None;
                     send(s, 0x30, &inventory.window_items())?;
                 }
@@ -2769,16 +3270,36 @@ fn play(
                 // Protocol 5 C16 Client Status: 0 = Perform Respawn.
                 let action = input.i8()?;
                 input.finish()?;
+                if survival && action == 2 {
+                    // Vanilla 1.7.10 Client Status: 2 = Open Inventory
+                    // Achievement. Never trust an arbitrary client stat name.
+                    let mut candidate = achievements.clone();
+                    if let Some(event) = candidate.award("openInventory")? {
+                        candidate.save(achievements_path)?;
+                        *achievements = candidate;
+                        send(s, event.id, &event.body)?;
+                    }
+                }
                 if survival && action == 0 && vitals.health <= 0.0 {
-                    commit_death_drops(
-                        inventory,
-                        inventory_path,
-                        ground_items,
-                        ground_path,
-                        world_path,
-                        hub,
-                        location,
-                    )?;
+                    if hardcore {
+                        player.save_state(player_path, *vitals)?;
+                        return Ok(());
+                    }
+                    let keep_inventory = game_rules
+                        .lock()
+                        .map_err(|_| bad("game rules mutex poisoned"))?
+                        .keep_inventory();
+                    if !keep_inventory {
+                        commit_death_drops(
+                            inventory,
+                            inventory_path,
+                            ground_items,
+                            ground_path,
+                            world_path,
+                            hub,
+                            location,
+                        )?;
+                    }
                     // Preserve the death site before changing the saved player
                     // position. XP orbs belong beside the dropped inventory,
                     // never at a distant bed or fallback world spawn.
@@ -2807,6 +3328,7 @@ fn play(
                     origin.save_state(player_path, fresh_vitals)?;
                     *vitals = fresh_vitals;
                     *player = origin;
+                    death_recorded = false;
                     fall = FallTracker::new(origin.y);
                     idle_gravity = IdleGravity::new(now_tick);
                     eating = None;
@@ -2819,16 +3341,18 @@ fn play(
                     hazards = Hazards::new();
                     last_hazards_tick = now_tick;
                     // In vanilla, death loses XP and may leave up to 100 XP in orbs.
-                    let drop_amount =
-                        (u32::from(experience.level_and_fraction().0) * 7).min(100) as u16;
-                    *experience = Experience::default();
-                    experience.save(experience_path)?;
-                    if let Some(orb) = mobs
-                        .lock()
-                        .map_err(|_| bad("mob mutex poisoned"))?
-                        .spawn_xp(death_position, drop_amount)
-                    {
-                        hub.broadcast(orb);
+                    if !keep_inventory {
+                        let drop_amount =
+                            (u32::from(experience.level_and_fraction().0) * 7).min(100) as u16;
+                        *experience = Experience::default();
+                        experience.save(experience_path)?;
+                        if let Some(orb) = mobs
+                            .lock()
+                            .map_err(|_| bad("mob mutex poisoned"))?
+                            .spawn_xp(death_position, drop_amount)
+                        {
+                            hub.broadcast(orb);
+                        }
                     }
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = 0i32.to_be_bytes().to_vec();
@@ -2930,16 +3454,25 @@ struct ServerContext {
     ground_items: Arc<Mutex<GroundItems>>,
     ground_path: Arc<PathBuf>,
     mobs: Arc<Mutex<Mobs>>,
+    throwables: Arc<Mutex<Throwables>>,
+    boats: Arc<Mutex<Boats>>,
+    fishing: Arc<Mutex<Fishing>>,
     chests: Arc<Mutex<Chests>>,
     chest_path: Arc<PathBuf>,
     furnaces: Arc<Mutex<Furnaces>>,
     furnace_path: Arc<PathBuf>,
     hoppers: Arc<Mutex<Hoppers>>,
     hopper_path: Arc<PathBuf>,
+    devices: Arc<Mutex<Devices>>,
+    device_path: Arc<PathBuf>,
     brewers: Arc<Mutex<Brewers>>,
     brewer_path: Arc<PathBuf>,
     survival: bool,
+    hardcore: bool,
     difficulty: u8,
+    game_rules: Arc<Mutex<GameRules>>,
+    scoreboard: Arc<Mutex<Scoreboard>>,
+    scoreboard_path: Arc<PathBuf>,
     online_mode: bool,
     auth_key: Option<Arc<ServerIdentity>>,
 }
@@ -2958,16 +3491,25 @@ fn handle(
         ground_items,
         ground_path,
         mobs,
+        throwables,
+        boats,
+        fishing,
         chests,
         chest_path,
         furnaces,
         furnace_path,
         hoppers,
         hopper_path,
+        devices,
+        device_path,
         brewers,
         brewer_path,
         survival,
+        hardcore,
         difficulty,
+        game_rules,
+        scoreboard,
+        scoreboard_path,
         online_mode,
         auth_key,
     } = context;
@@ -3078,6 +3620,13 @@ fn handle(
             return Ok(());
         }
     };
+    if hardcore && player_vitals.health <= 0.0 {
+        login_disconnect(
+            &mut s,
+            "Hardcore death: rejoining this world is not permitted.",
+        )?;
+        return Ok(());
+    }
     if !player_file.exists() && !player_file.with_extension("json").exists() {
         player_state = safe_spawn(&world)?;
     }
@@ -3101,6 +3650,8 @@ fn handle(
     };
     let experience_file = player_file.with_extension("experience.json");
     let mut experience_state = Experience::load(&experience_file)?;
+    let achievements_file = player_file.with_extension("achievements.json");
+    let mut achievements_state = Achievements::load(&achievements_file)?;
     let (entity_id, events, previous) = match hub.add(name.clone(), uuid.clone(), player_state) {
         Ok(result) => result,
         Err(JoinError::Full) => {
@@ -3142,12 +3693,22 @@ fn handle(
             inventory: &inventory_state,
             vitals: player_vitals,
             survival,
+            hardcore,
             difficulty,
         },
     )?;
     if survival {
         send(&mut s, 0x1f, &experience_state.packet())?;
     }
+    for packet in scoreboard
+        .lock()
+        .map_err(|_| bad("scoreboard lock poisoned"))?
+        .snapshot()?
+    {
+        send(&mut s, packet.id, &packet.body)?;
+    }
+    let achievements_packet = achievements_state.snapshot()?;
+    send(&mut s, achievements_packet.id, &achievements_packet.body)?;
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
     send(&mut s, self_list.id, &self_list.body)?;
@@ -3171,12 +3732,30 @@ fn handle(
             }
         }
         drop(ground);
-        for mob in mobs
-            .lock()
-            .map_err(|_| bad("mob mutex poisoned"))?
-            .spawn_events()
-        {
+        let creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+        for mob in creatures.spawn_events() {
             send(&mut s, mob.id, &mob.body)?;
+        }
+        for object in throwables
+            .lock()
+            .map_err(|_| bad("throwables mutex poisoned"))?
+            .snapshot(player_state)
+        {
+            send(&mut s, object.id, &object.body)?;
+        }
+        for object in boats
+            .lock()
+            .map_err(|_| bad("boats mutex poisoned"))?
+            .snapshot(player_state)
+        {
+            send(&mut s, object.id, &object.body)?;
+        }
+        for object in fishing
+            .lock()
+            .map_err(|_| bad("fishing mutex poisoned"))?
+            .snapshot(player_state)
+        {
+            send(&mut s, object.id, &object.body)?;
         }
     }
     let result = play(
@@ -3191,22 +3770,33 @@ fn handle(
             vitals: &mut player_vitals,
             experience: &mut experience_state,
             experience_path: &experience_file,
+            achievements: &mut achievements_state,
+            achievements_path: &achievements_file,
             save_path: &player_file,
             inventory: &mut inventory_state,
             inventory_path: &inventory_file,
             ground_items: &ground_items,
             ground_path: &ground_path,
             mobs: &mobs,
+            throwables: &throwables,
+            boats: &boats,
+            fishing: &fishing,
             chests: &chests,
             chest_path: &chest_path,
             furnaces: &furnaces,
             furnace_path: &furnace_path,
             hoppers: &hoppers,
             hopper_path: &hopper_path,
+            devices: &devices,
+            device_path: &device_path,
             brewers: &brewers,
             brewer_path: &brewer_path,
             survival,
+            hardcore,
             difficulty,
+            game_rules: &game_rules,
+            scoreboard: &scoreboard,
+            scoreboard_path: &scoreboard_path,
             hub: &hub,
             entity_id,
             events: &events,
@@ -3227,11 +3817,28 @@ fn handle(
     let player_saved = player_state.save_state(&player_file, player_vitals);
     let inventory_saved = inventory_state.save(&inventory_file);
     let experience_saved = experience_state.save(&experience_file);
+    let achievements_saved = achievements_state.save(&achievements_file);
+    if let Ok(mut state) = boats.lock() {
+        if let Some(event) = state.dismount(entity_id) {
+            hub.broadcast(event);
+        }
+    }
+    if let Ok(mut state) = mobs.lock() {
+        for event in state.release_player(entity_id) {
+            hub.broadcast(event);
+        }
+    }
+    if let Ok(mut state) = fishing.lock() {
+        if let Some(event) = state.remove_owner(entity_id) {
+            hub.broadcast(event);
+        }
+    }
     println!("left: {name}");
     mob_saved?;
     player_saved?;
     inventory_saved?;
     experience_saved?;
+    achievements_saved?;
     result
 }
 /// Services required to execute a level-gated in-game administrative command.
@@ -3370,6 +3977,10 @@ fn start_clock_console(
     hub: Arc<Hub>,
     clock: Arc<Clock>,
     clock_path: Arc<PathBuf>,
+    rules: Arc<Mutex<GameRules>>,
+    rules_path: Arc<PathBuf>,
+    scoreboard: Arc<Mutex<Scoreboard>>,
+    scoreboard_path: Arc<PathBuf>,
     world: Arc<Mutex<World>>,
     world_path: Arc<PathBuf>,
     access: ConsoleAccess,
@@ -3394,6 +4005,76 @@ fn start_clock_console(
             }
             let args: Vec<_> = line.split_whitespace().collect();
             let result: io::Result<()> = match args.as_slice() {
+                ["/gamerule", key] => (|| -> io::Result<()> {
+                    let rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
+                    let value = rules.get(key).ok_or_else(|| bad("unsupported game rule"))?;
+                    println!("{key} = {value}");
+                    Ok(())
+                })(),
+                ["/gamerule", key, value] => (|| -> io::Result<()> {
+                    let value = match *value {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err(bad("gamerule value must be true or false")),
+                    };
+                    let mut rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
+                    let mut candidate = *rules;
+                    candidate.set(key, value)?;
+                    candidate.save(&rules_path)?;
+                    *rules = candidate;
+                    if *key == "doDaylightCycle" {
+                        clock.set_daylight_cycle(value);
+                    }
+                    println!("{key} = {value}");
+                    Ok(())
+                })(),
+                ["/scoreboard", operation @ ..] => (|| -> io::Result<()> {
+                    let mut state = scoreboard
+                        .lock()
+                        .map_err(|_| bad("scoreboard lock poisoned"))?;
+                    let mut candidate = state.clone();
+                    let changes = match operation {
+                        ["objectives", "add", name, criterion, display] => {
+                            candidate.add_objective(name, display, criterion)?
+                        }
+                        ["objectives", "remove", name] => candidate.remove_objective(name)?,
+                        ["objectives", "setdisplay", slot, name] => {
+                            let slot = match *slot {
+                                "list" => 0,
+                                "sidebar" => 1,
+                                "belowName" => 2,
+                                _ => return Err(bad("invalid scoreboard display slot")),
+                            };
+                            candidate.set_display(
+                                slot,
+                                if *name == "clear" { None } else { Some(name) },
+                            )?
+                        }
+                        ["players", "set", holder, objective, value] => {
+                            let value = value
+                                .parse::<i32>()
+                                .map_err(|_| bad("invalid scoreboard score"))?;
+                            candidate.set_score(holder, objective, value)?
+                        }
+                        ["players", "reset", holder] => candidate.reset_player_scores(holder)?,
+                        ["teams", "remove", name] => candidate.remove_team(name)?,
+                        ["teams", "leave", name, holder] => {
+                            candidate.remove_player_from_team(name, holder)?
+                        }
+                        ["teams", "add", name, display] => candidate.add_team(name, display)?,
+                        ["teams", "join", name, holder] => {
+                            candidate.add_player_to_team(name, holder)?
+                        }
+                        _ => return Err(bad("unsupported scoreboard console command")),
+                    };
+                    candidate.save(&scoreboard_path)?;
+                    *state = candidate;
+                    drop(state);
+                    for event in changes {
+                        hub.broadcast(event);
+                    }
+                    Ok(())
+                })(),
                 ["/list"] => (|| -> io::Result<()> {
                     println!("Online ({}): {}", hub.count()?, hub.names()?.join(", "));
                     Ok(())
@@ -3564,6 +4245,19 @@ fn main() -> io::Result<()> {
             return Err(bad("usage: --recover-level-dat STOPPED_WORLD_DIR"));
         }
         let world_directory = Path::new(&raw_args[1]);
+        // Preflight is read-only. A corrupt backup or an existing level.dat
+        // must not cause recovery to rewrite the world's session.lock.
+        match std::fs::symlink_metadata(world_directory.join("level.dat")) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    "level.dat already exists; manual recovery never overwrites it",
+                ));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let _ = level_dat::read_level_file(&world_directory.join("level.dat_old"))?;
         let mut lock = session_lock::WorldSessionLock::acquire(world_directory)?;
         level_dat::restore_missing_level(world_directory, &mut lock)?;
         println!(
@@ -3608,6 +4302,7 @@ fn main() -> io::Result<()> {
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
     let mut survival = properties.as_ref().is_some_and(|config| config.survival);
+    let hardcore = properties.as_ref().is_some_and(|config| config.hardcore);
     let mut online_mode = properties.as_ref().is_some_and(|config| config.online_mode);
     let mut difficulty = properties.as_ref().map_or(2, |config| config.difficulty);
     let mut requested_seed: Option<u64> = None;
@@ -3761,6 +4456,9 @@ fn main() -> io::Result<()> {
             }
             _ => return Err(bad("unknown command-line argument")),
         }
+    }
+    if hardcore && (!survival || difficulty != 3) {
+        return Err(bad("hardcore requires survival mode and difficulty 3"));
     }
     if (requested_seed.is_some() || biome_seed.is_some() || expanded_seed.is_some())
         && (!survival
@@ -3933,8 +4631,27 @@ fn main() -> io::Result<()> {
                 "source IRW1 world does not exist",
             ));
         }
+        // An offline export cannot mix an IRW snapshot with live inventory
+        // updates. Hold the same world lock as the native game server.
+        let world_directory = world_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut export_lock = session_lock::WorldSessionLock::acquire(world_directory)?;
+        export_lock.verify()?;
+        for journal in [
+            world_path.with_extension("pending-txn.json"),
+            Chests::location(&world_path).with_extension("pending-txn.json"),
+            Furnaces::location(&world_path).with_extension("pending-txn.json"),
+        ] {
+            if journal.exists() {
+                return Err(bad(
+                    "pending save journal: start server recovery before Anvil export",
+                ));
+            }
+        }
         let world = World::load(&world_path)?;
-        let count = anvil_export::export(&world, &destination)?;
+        let count = anvil_export::export_with_storage(&world, &destination, &world_path)?;
         println!(
             "Anvil 1.7.10 snapshot exported: {count} chunks to {}",
             destination.display()
@@ -4034,6 +4751,16 @@ fn main() -> io::Result<()> {
     let clock_path = Arc::new(world_path.with_extension("clock"));
     let restored_clock = Clock::load_state(&clock_path)?;
     let (clock, _clock_thread) = Clock::start_from(restored_clock);
+    let rules_path = Arc::new(GameRules::location(&world_path));
+    let world_rules = Arc::new(Mutex::new(GameRules::load(&rules_path)?));
+    let scoreboard_path = Arc::new(Scoreboard::location(&world_path));
+    let shared_scoreboard = Arc::new(Mutex::new(Scoreboard::load(&scoreboard_path)?));
+    clock.set_daylight_cycle(
+        world_rules
+            .lock()
+            .map_err(|_| bad("game rules mutex poisoned"))?
+            .daylight_cycle(),
+    );
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -4044,6 +4771,9 @@ fn main() -> io::Result<()> {
             &world_path.with_extension("mobs.json"),
         )?
     }));
+    let throwables = Arc::new(Mutex::new(Throwables::default()));
+    let boats = Arc::new(Mutex::new(Boats::default()));
+    let fishing = Arc::new(Mutex::new(Fishing::default()));
     let ground_path = Arc::new(GroundItems::location(&world_path));
     let ground_items = Arc::new(Mutex::new(if survival {
         GroundItems::load(&ground_path)?
@@ -4056,6 +4786,8 @@ fn main() -> io::Result<()> {
     let furnaces = Arc::new(Mutex::new(Furnaces::load(&furnace_path)?));
     let hopper_path = Arc::new(Hoppers::location(&world_path));
     let hoppers = Arc::new(Mutex::new(Hoppers::load(&hopper_path)?));
+    let device_path = Arc::new(Devices::location(&world_path));
+    let devices = Arc::new(Mutex::new(Devices::load(&device_path)?));
     let brewer_path = Arc::new(Brewers::location(&world_path));
     let brewers = Arc::new(Mutex::new(Brewers::load(&brewer_path)?));
     let listener = TcpListener::bind(bind)?;
@@ -4073,6 +4805,10 @@ fn main() -> io::Result<()> {
         Arc::clone(&hub),
         Arc::clone(&clock),
         Arc::clone(&clock_path),
+        Arc::clone(&world_rules),
+        Arc::clone(&rules_path),
+        Arc::clone(&shared_scoreboard),
+        Arc::clone(&scoreboard_path),
         Arc::clone(&world),
         Arc::clone(&path),
         ConsoleAccess {
@@ -4093,6 +4829,8 @@ fn main() -> io::Result<()> {
     let furnace_hub = Arc::clone(&hub);
     let leaf_drops = Arc::clone(&ground_items);
     let leaf_drops_file = Arc::clone(&ground_path);
+    let ejection_devices = Arc::clone(&devices);
+    let ejection_file = Arc::clone(&device_path);
     thread::spawn(move || {
         let mut telemetry =
             telemetry::TickTelemetry::new(furnace_world_path.with_extension("metrics.jsonl"));
@@ -4195,6 +4933,91 @@ fn main() -> io::Result<()> {
                         Ok(changed) => {
                             for (x, y, z) in changed {
                                 furnace_hub.broadcast(block_change_event(&gravity_world, x, y, z));
+                            }
+                            // Execute each persisted rising-edge exactly once.
+                            // Both inventory debit and spawned ground entity are
+                            // redo-journaled before either state is published.
+                            for pos in gravity_world.drain_device_activations() {
+                                let state = gravity_world.get(pos.0, pos.1, pos.2);
+                                if !matches!(state >> 4, 23 | 158) || state & 8 == 0 {
+                                    continue;
+                                }
+                                let offset = match state & 7 {
+                                    0 => (0, -1, 0),
+                                    1 => (0, 1, 0),
+                                    2 => (0, 0, -1),
+                                    3 => (0, 0, 1),
+                                    4 => (-1, 0, 0),
+                                    _ => (1, 0, 0),
+                                };
+                                let dest = (pos.0 + offset.0, pos.1 + offset.1, pos.2 + offset.2);
+                                if !world::in_bounds(dest.0, dest.1, dest.2) {
+                                    continue;
+                                }
+                                let mut storage = match ejection_devices.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                let mut ground = match leaf_drops.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                if ground.is_full() {
+                                    continue;
+                                }
+                                let seed = now
+                                    ^ (pos.0 as u64).wrapping_mul(31)
+                                    ^ (pos.2 as u64).wrapping_mul(131);
+                                let Some((updated, stack)) = (match storage.stage_eject(pos, seed) {
+                                    Ok(result) => result,
+                                    Err(error) => {
+                                        eprintln!("DEVICE EJECTION ERROR: {error}");
+                                        return;
+                                    }
+                                }) else {
+                                    continue;
+                                };
+                                let (next_ground, spawned) =
+                                    match ground.stage_put_many(&[stack], dest) {
+                                        Ok(result) => result,
+                                        Err(error) => {
+                                            eprintln!("DEVICE GROUND ITEM ERROR: {error}");
+                                            return;
+                                        }
+                                    };
+                                let device_bytes = match updated.encoded() {
+                                    Ok(bytes) => bytes,
+                                    Err(error) => {
+                                        eprintln!("DEVICE INVENTORY ENCODING ERROR: {error}");
+                                        return;
+                                    }
+                                };
+                                let ground_bytes = match next_ground.encoded() {
+                                    Ok(bytes) => bytes,
+                                    Err(error) => {
+                                        eprintln!("DEVICE ITEM ENCODING ERROR: {error}");
+                                        return;
+                                    }
+                                };
+                                if let Err(error) = journal::commit(
+                                    &furnace_world_path.with_extension("pending-txn.json"),
+                                    &[
+                                        (&*ejection_file, device_bytes),
+                                        (&*leaf_drops_file, ground_bytes),
+                                    ],
+                                ) {
+                                    eprintln!("DEVICE EJECTION JOURNAL ERROR: {error}");
+                                    return;
+                                }
+                                *storage = updated;
+                                *ground = next_ground;
+                                drop(ground);
+                                drop(storage);
+                                for item in spawned {
+                                    for packet in item.spawn() {
+                                        furnace_hub.broadcast(packet);
+                                    }
+                                }
                             }
                             let decayed = gravity_world.drain_drops();
                             if !decayed.is_empty() {
@@ -4312,6 +5135,71 @@ fn main() -> io::Result<()> {
             thread::sleep(Duration::from_millis(10));
         }
     });
+    // Ephemeral thrown entities have a separate bounded, shared 20TPS
+    // physics loop and do not block Mob AI session locks during fan-out.
+    let projectile_state = Arc::clone(&throwables);
+    let projectile_world = Arc::clone(&world);
+    let projectile_clock = Arc::clone(&clock);
+    let projectile_hub = Arc::clone(&hub);
+    let projectile_mobs = Arc::clone(&mobs);
+    let projectile_boats = Arc::clone(&boats);
+    let projectile_fishing = Arc::clone(&fishing);
+    thread::spawn(move || {
+        let mut last = projectile_clock.ticks();
+        loop {
+            let now = projectile_clock.ticks();
+            if now > last {
+                let begin = last.saturating_add(1);
+                last = now;
+                let world = match projectile_world.lock() {
+                    Ok(world) => world,
+                    Err(_) => return,
+                };
+                let mut objects = match projectile_state.lock() {
+                    Ok(objects) => objects,
+                    Err(_) => return,
+                };
+                let mut actions = throwables::TickResult::default();
+                for tick in begin.max(now.saturating_sub(19))..=now {
+                    let step = objects.tick(&world, tick);
+                    actions.events.extend(step.events);
+                    actions.pearl_teleports.extend(step.pearl_teleports);
+                    actions.egg_hatches.extend(step.egg_hatches);
+                }
+                drop(objects);
+                let boat_events = match projectile_boats.lock() {
+                    Ok(mut state) => state.tick(&world, now),
+                    Err(_) => return,
+                };
+                let fishing_events = match projectile_fishing.lock() {
+                    Ok(mut state) => state.tick(&world, now),
+                    Err(_) => return,
+                };
+                for at in actions.egg_hatches {
+                    if let Ok(mut mobs) = projectile_mobs.lock() {
+                        if let Some(entity) = mobs.hatch_egg(&world, at) {
+                            projectile_hub.broadcast_in_view(at, entity);
+                        }
+                    }
+                }
+                drop(world);
+                for (at, packet) in actions
+                    .events
+                    .into_iter()
+                    .chain(boat_events)
+                    .chain(fishing_events)
+                {
+                    projectile_hub.broadcast_in_view(at, packet);
+                }
+                for (owner, destination) in actions.pearl_teleports {
+                    if let Err(error) = projectile_hub.request_pearl_teleport(&owner, destination) {
+                        eprintln!("ENDER PEARL TELEPORT ERROR: {error}");
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
     // Initialize once at startup. A failure here prevents any online-mode bind.
     let server_auth = if online_mode {
         Some(Arc::new(ServerIdentity::generate()?))
@@ -4345,14 +5233,22 @@ fn main() -> io::Result<()> {
         let drops = Arc::clone(&ground_items);
         let drops_path = Arc::clone(&ground_path);
         let mob_state = Arc::clone(&mobs);
+        let thrown_state = Arc::clone(&throwables);
+        let boat_state = Arc::clone(&boats);
+        let fishing_state = Arc::clone(&fishing);
         let storage = Arc::clone(&chests);
         let storage_path = Arc::clone(&chest_path);
         let machine_storage = Arc::clone(&furnaces);
         let machine_file = Arc::clone(&furnace_path);
         let hopper_storage = Arc::clone(&hoppers);
         let hopper_file = Arc::clone(&hopper_path);
+        let device_storage = Arc::clone(&devices);
+        let device_file = Arc::clone(&device_path);
         let brewer_storage = Arc::clone(&brewers);
         let brewer_file = Arc::clone(&brewer_path);
+        let rules = Arc::clone(&world_rules);
+        let board = Arc::clone(&shared_scoreboard);
+        let board_path = Arc::clone(&scoreboard_path);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -4367,16 +5263,25 @@ fn main() -> io::Result<()> {
                     ground_items: drops,
                     ground_path: drops_path,
                     mobs: mob_state,
+                    throwables: thrown_state,
+                    boats: boat_state,
+                    fishing: fishing_state,
                     chests: storage,
                     chest_path: storage_path,
                     furnaces: machine_storage,
                     furnace_path: machine_file,
                     hoppers: hopper_storage,
                     hopper_path: hopper_file,
+                    devices: device_storage,
+                    device_path: device_file,
                     brewers: brewer_storage,
                     brewer_path: brewer_file,
                     survival,
+                    hardcore,
                     difficulty,
+                    game_rules: rules,
+                    scoreboard: board,
+                    scoreboard_path: board_path,
                     online_mode,
                     auth_key,
                 },

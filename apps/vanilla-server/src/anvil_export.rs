@@ -104,7 +104,7 @@ struct LevelInfo {
     initialized: i8,
 }
 
-fn nbt_for_chunk(world: &World, cx: i32, cz: i32) -> io::Result<Vec<u8>> {
+fn nbt_for_chunk(world: &World, cx: i32, cz: i32, tiles: &[fastnbt::Value]) -> io::Result<Vec<u8>> {
     let mut sections = Vec::new();
     let base_x = cx * 16;
     let base_z = cz * 16;
@@ -155,7 +155,7 @@ fn nbt_for_chunk(world: &World, cx: i32, cz: i32) -> io::Result<Vec<u8>> {
             height_map: IntArray::new(heights),
             sections,
             entities: Vec::new(),
-            tile_entities: Vec::new(),
+            tile_entities: tiles.to_vec(),
         },
     };
     fastnbt::to_bytes(&root).map_err(wrap)
@@ -191,7 +191,12 @@ fn export_level_dat(directory: &Path) -> io::Result<()> {
 /// Writes into a private sibling directory and publishes it only once the
 /// region files and level.dat are fully synchronized. The active IRW source
 /// is never modified; this is still an offline snapshot, not live Anvil IO.
-fn write_snapshot(world: &World, stage: &Path, chunks: &BTreeSet<(i32, i32)>) -> io::Result<()> {
+fn write_snapshot(
+    world: &World,
+    stage: &Path,
+    chunks: &BTreeSet<(i32, i32)>,
+    tiles: &crate::native_tile_export::TileColumns,
+) -> io::Result<()> {
     let regions_dir = stage.join("region");
     fs::create_dir(&regions_dir)?;
     let mut regions: BTreeMap<(i32, i32), Vec<(i32, i32)>> = BTreeMap::new();
@@ -210,7 +215,12 @@ fn write_snapshot(world: &World, stage: &Path, chunks: &BTreeSet<(i32, i32)>) ->
             .open(filename)?;
         let mut region = Region::create(file).map_err(wrap)?;
         for (cx, cz) in columns {
-            let bytes = nbt_for_chunk(world, cx, cz)?;
+            let bytes = nbt_for_chunk(
+                world,
+                cx,
+                cz,
+                tiles.get(&(cx, cz)).map_or(&[], Vec::as_slice),
+            )?;
             region
                 .write_chunk(
                     cx.rem_euclid(32) as usize,
@@ -238,13 +248,30 @@ fn write_snapshot(world: &World, stage: &Path, chunks: &BTreeSet<(i32, i32)>) ->
 /// Exports only spawn 5x5 and changed chunk columns, never an unbounded map.
 /// The destination must not exist. Failed serialization cleans up the private
 /// staging tree rather than exposing a partially written Minecraft world.
+#[cfg(test)]
 pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
+    export_tiles(world, dest, &Default::default())
+}
+
+/// Offline exported worlds include persisted native container slots when
+/// requested by the CLI; ordinary test exports remain side-effect free.
+pub fn export_with_storage(world: &World, dest: &Path, source: &Path) -> io::Result<usize> {
+    let tiles = crate::native_tile_export::load(world, source)?;
+    export_tiles(world, dest, &tiles)
+}
+
+fn export_tiles(
+    world: &World,
+    dest: &Path,
+    tiles: &crate::native_tile_export::TileColumns,
+) -> io::Result<usize> {
     let mut chunks: BTreeSet<(i32, i32)> = world.edited_chunks();
     for z in -VIEW_DISTANCE..=VIEW_DISTANCE {
         for x in -VIEW_DISTANCE..=VIEW_DISTANCE {
             chunks.insert((x, z));
         }
     }
+    chunks.extend(tiles.keys().copied());
     if chunks.len() > MAX_EXPORT_CHUNKS {
         return Err(invalid("Anvil snapshot exceeds 256 chunk limit"));
     }
@@ -276,7 +303,7 @@ pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
     ));
     fs::create_dir(&stage)?;
     let result = (|| {
-        write_snapshot(world, &stage, &chunks)?;
+        write_snapshot(world, &stage, &chunks, tiles)?;
         // Do not rename over a world that appeared during export. The check
         // prevents accidental overwrite during normal operation; concurrent
         // uncooperative directory creation still requires external locking.
@@ -332,6 +359,141 @@ mod tests {
         blocks: ByteArray,
         #[serde(rename = "Data")]
         metadata: ByteArray,
+    }
+
+    #[test]
+    fn exports_four_persisted_container_tiles_with_items_and_legacy_timers() {
+        use crate::brewing::{Brewer, Brewers};
+        use crate::chests::{Chests, CHEST_SLOTS};
+        use crate::furnaces::{Furnace, Furnaces};
+        use crate::hoppers::{Hoppers, HOPPER_SLOTS};
+        use crate::inventory::Stack;
+        use crate::legacy_inventory_nbt::TileEntity;
+
+        let base = std::env::temp_dir().join(format!(
+            "industrial-anvil-native-tiles-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir(&base).unwrap();
+        let source = base.join("flat.irw");
+        let dest = base.join("snapshot");
+        let mut world = World::new();
+        for (x, block) in [(1, 54u16), (2, 61), (3, 154), (4, 117)] {
+            world
+                .update_and_save(&source, x, 64, 1, block << 4)
+                .unwrap();
+        }
+        let stack = Stack {
+            id: 4,
+            count: 7,
+            damage: 0,
+        };
+        let mut chest_slots = [None; CHEST_SLOTS];
+        chest_slots[26] = Some(stack);
+        let chests = Chests::default()
+            .staged_update((1, 64, 1), chest_slots)
+            .unwrap();
+        fs::write(Chests::location(&source), chests.encoded().unwrap()).unwrap();
+
+        let furnace = Furnace {
+            slots: [Some(stack), None, None],
+            burn_left: 50,
+            burn_total: 100,
+            cook: 10,
+        };
+        let furnaces = Furnaces::default()
+            .staged_update((2, 64, 1), furnace)
+            .unwrap();
+        fs::write(Furnaces::location(&source), furnaces.encoded().unwrap()).unwrap();
+
+        let mut hopper_slots = [None; HOPPER_SLOTS];
+        hopper_slots[4] = Some(stack);
+        let hoppers = Hoppers::default()
+            .staged_update((3, 64, 1), hopper_slots)
+            .unwrap();
+        fs::write(Hoppers::location(&source), hoppers.encoded().unwrap()).unwrap();
+
+        let brewer = Brewer {
+            slots: [
+                Some(Stack {
+                    id: 373,
+                    count: 1,
+                    damage: 0,
+                }),
+                None,
+                None,
+                None,
+            ],
+            brew_time: 5,
+        };
+        let brewers = Brewers::default()
+            .staged_update((4, 64, 1), brewer)
+            .unwrap();
+        fs::write(Brewers::location(&source), brewers.encoded().unwrap()).unwrap();
+
+        let world_before = fs::read(&source).unwrap();
+        assert_eq!(export_with_storage(&world, &dest, &source).unwrap(), 25);
+        assert_eq!(fs::read(&source).unwrap(), world_before);
+        let file = File::open(dest.join("region/r.0.0.mca")).unwrap();
+        let mut region = Region::from_stream(file).unwrap();
+        let raw = region.read_chunk(0, 0).unwrap().unwrap();
+        let parsed = crate::legacy_nbt::parse_chunk(&raw, 0, 0).unwrap();
+        let mut tiles = BTreeMap::new();
+        for value in &parsed.level.tile_entities {
+            let decoded: TileEntity =
+                fastnbt::from_bytes(&fastnbt::to_bytes(value).unwrap()).unwrap();
+            tiles.insert(decoded.x, decoded);
+        }
+        assert_eq!(tiles.len(), 4);
+        for (x, name, slot, item_id, count) in [
+            (1, "Chest", 26i8, 4, 7),
+            (2, "Furnace", 0, 4, 7),
+            (3, "Hopper", 4, 4, 7),
+            (4, "Cauldron", 0, 373, 1),
+        ] {
+            let tile = &tiles[&x];
+            assert_eq!(tile.id, name);
+            let items = tile.items.as_ref().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].slot, slot);
+            assert_eq!(items[0].id, item_id);
+            assert_eq!(items[0].count, count);
+        }
+        assert_eq!(tiles[&2].extra["BurnTime"], fastnbt::Value::Short(50));
+        assert_eq!(tiles[&2].extra["CookTime"], fastnbt::Value::Short(10));
+        assert_eq!(tiles[&4].extra["BrewTime"], fastnbt::Value::Short(5));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn mismatched_container_block_aborts_snapshot_without_writing_destination() {
+        use crate::chests::{Chests, CHEST_SLOTS};
+        use crate::inventory::Stack;
+        let base = std::env::temp_dir().join(format!(
+            "industrial-anvil-orphan-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir(&base).unwrap();
+        let source = base.join("flat.irw");
+        let dest = base.join("snapshot");
+        let world = World::new();
+        world.save(&source).unwrap();
+        let mut slots = [None; CHEST_SLOTS];
+        slots[0] = Some(Stack {
+            id: 4,
+            count: 1,
+            damage: 0,
+        });
+        let state = Chests::default().staged_update((1, 64, 1), slots).unwrap();
+        fs::write(Chests::location(&source), state.encoded().unwrap()).unwrap();
+        assert!(export_with_storage(&world, &dest, &source).is_err());
+        assert!(!dest.exists());
+        assert!(source.is_file());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

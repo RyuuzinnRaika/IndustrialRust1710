@@ -13,8 +13,10 @@ use std::sync::{Arc, Mutex};
 pub const MAX_PLAYERS: usize = 8;
 /// Internal mailbox operation, never serialized as a network packet.
 pub const ADMIN_TELEPORT_EVENT: u32 = u32::MAX - 1;
+/// Internal mailbox event that applies the 1.7.10 ender-pearl health penalty.
+pub const PEARL_TELEPORT_EVENT: u32 = u32::MAX - 2;
 /// A session-owned safe Kick: the session sends Disconnect, then persists state.
-pub const ADMIN_KICK_EVENT: u32 = u32::MAX - 2;
+pub const ADMIN_KICK_EVENT: u32 = u32::MAX - 3;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -158,6 +160,17 @@ impl Hub {
     /// Queue a privileged teleport to be applied by the owning session thread.
     /// Updating Hub coordinates alone would not update the player's saved state.
     pub fn request_admin_teleport(&self, name: &str, position: PlayerPosition) -> io::Result<bool> {
+        self.queue_teleport(name, position, ADMIN_TELEPORT_EVENT)
+    }
+    pub fn request_pearl_teleport(&self, name: &str, position: PlayerPosition) -> io::Result<bool> {
+        self.queue_teleport(name, position, PEARL_TELEPORT_EVENT)
+    }
+    fn queue_teleport(
+        &self,
+        name: &str,
+        position: PlayerPosition,
+        event_id: u32,
+    ) -> io::Result<bool> {
         if !position.is_valid() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -177,10 +190,7 @@ impl Hub {
             body.extend_from_slice(&coord.to_be_bytes());
         }
         peer.tx
-            .try_send(Event {
-                id: ADMIN_TELEPORT_EVENT,
-                body,
-            })
+            .try_send(Event { id: event_id, body })
             .map_err(|_| {
                 peer.overloaded.store(true, Ordering::Release);
                 io::Error::other("target session mailbox unavailable")
@@ -519,6 +529,10 @@ mod tests {
             f64::from_be_bytes(event.body[0..8].try_into().unwrap()),
             -15.5
         );
+        assert!(hub.request_pearl_teleport("Alex", target).unwrap());
+        let pearl = rx.try_recv().unwrap();
+        assert_eq!(pearl.id, PEARL_TELEPORT_EVENT);
+        assert_eq!(pearl.body, event.body);
         assert!(!hub.request_admin_teleport("not-online", target).unwrap());
         assert!(hub
             .request_admin_teleport(

@@ -47,6 +47,8 @@ pub struct World {
     comparator_ready: BTreeMap<Position, u8>,
     pending_buttons: BTreeMap<Position, u64>,
     pending_drops: Vec<WorldDrop>,
+    // Fired devices are published only after the block snapshot is durable.
+    pending_device_activations: Vec<(i32, i32, i32)>,
     // Sparse pending client-facing lighting invalidations, not part of IRW files.
     pending_light_chunks: BTreeSet<(i32, i32)>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
@@ -101,6 +103,7 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 149 | 150 // comparator
             | 70 | 72 // pressure plates
             | 77 | 143 // buttons
+            | 23 | 158 // dispenser/dropper
             | 29 | 33 // pistons
             | 64 | 71 // doors
             | 96 // trapdoors
@@ -158,6 +161,10 @@ impl World {
     /// Tracks which chunk columns contain changes, without allocating a full world.
     pub fn drain_drops(&mut self) -> Vec<WorldDrop> {
         std::mem::take(&mut self.pending_drops)
+    }
+
+    pub fn drain_device_activations(&mut self) -> Vec<(i32, i32, i32)> {
+        std::mem::take(&mut self.pending_device_activations)
     }
 
     /// Bounded per-worker budget; remaining light updates survive the next tick.
@@ -476,7 +483,7 @@ impl World {
             ) {
                 self.pending_support.insert(pos);
             }
-            if matches!(id, 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157) {
+            if matches!(id, 23 | 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 | 158) {
                 self.pending_devices.insert(pos);
             } else {
                 self.pending_devices.remove(&pos);
@@ -763,6 +770,17 @@ impl World {
                         .then_some((x, z, old, new))
                 })
                 .collect();
+            let fired_devices: Vec<_> = changes
+                .iter()
+                .filter_map(|(&(x, y, z), &new)| {
+                    let old = self.get(x, i32::from(y), z);
+                    (matches!(new >> 4, 23 | 158)
+                        && new >> 4 == old >> 4
+                        && old & 8 == 0
+                        && new & 8 != 0)
+                        .then_some((x, i32::from(y), z))
+                })
+                .collect();
             let undo: Vec<(Position, Option<u16>)> = changes
                 .keys()
                 .map(|&p| (p, self.edits.get(&p).copied()))
@@ -790,6 +808,7 @@ impl World {
                 return Err(error);
             }
             self.pending_drops.extend(detached_drops);
+            self.pending_device_activations.extend(fired_devices);
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
             }
@@ -1048,7 +1067,10 @@ impl World {
             ) {
                 world.pending_support.insert((x, y, z));
             }
-            if matches!(block >> 4, 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157) {
+            if matches!(
+                block >> 4,
+                23 | 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 | 158
+            ) {
                 world.pending_devices.insert((x, y, z));
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
@@ -1564,6 +1586,32 @@ mod tests {
         w.block_tick(&path, 64).unwrap();
         assert_eq!(w.get(12, 64, 0), 0);
         assert_eq!(World::load(&path).unwrap().get(0, 64, 0), (59 << 4) | 7);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn device_fires_once_per_rising_edge_only_after_world_save() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-device-trigger-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world
+            .update_and_save(&path, 0, 65, 0, (23 << 4) | 5)
+            .unwrap();
+        world.update_and_save(&path, -1, 65, 0, 152 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.drain_device_activations(), vec![(0, 65, 0)]);
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert!(world.drain_device_activations().is_empty());
+        assert_eq!(World::load(&path).unwrap().get(0, 65, 0) & 8, 8);
+        world.update_and_save(&path, -1, 65, 0, 0).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 65, 0) & 8, 0);
+        world.update_and_save(&path, -1, 65, 0, 152 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.drain_device_activations(), vec![(0, 65, 0)]);
         fs::remove_file(path).unwrap();
     }
 
