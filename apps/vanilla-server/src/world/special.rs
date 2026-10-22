@@ -294,7 +294,8 @@ impl World {
         y: i32,
         z: i32,
     ) -> io::Result<Vec<(i32, i32, i32)>> {
-        self.special_batch(path, &self.end_eye_changes(x, y, z))
+        let changes = self.end_eye_changes(x, y, z);
+        self.special_batch(path, &changes)
     }
 
     /// Bone meal applies vanilla-style full crop maturity, one sapling tree,
@@ -337,7 +338,8 @@ impl World {
         y: i32,
         z: i32,
     ) -> io::Result<Vec<(i32, i32, i32)>> {
-        self.special_batch(path, &self.bonemeal_changes(x, y, z))
+        let changes = self.bonemeal_changes(x, y, z);
+        self.special_batch(path, &changes)
     }
 
     /// Stage a player special-item interaction entirely in memory. The caller
