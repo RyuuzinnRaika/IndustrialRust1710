@@ -272,7 +272,7 @@ fn join(
 
     // Bound per-session outstanding compression jobs, including simultaneous
     // logins. Encoding is done off the world tick mutex by shared workers.
-    send_chunk_batch(s, world, view_chunks(chunk_center(position)).into_iter())?;
+    send_chunk_batch(s, world, view_chunks(chunk_center(position)))?;
 
     // Clientbound 0x30 / 0x09: authoritative Creative inventory and hotbar.
     send(s, 0x30, &inventory.window_items())?;
