@@ -66,7 +66,10 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use mobs::Mobs;
-use multiplayer::{Event, Hub, JoinError, ADMIN_GAMEMODE_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT};
+use multiplayer::{
+    Event, Hub, JoinError, ADMIN_GAMEMODE_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS,
+    PEARL_TELEPORT_EVENT,
+};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use scoreboard::Scoreboard;
@@ -3800,7 +3803,10 @@ fn start_clock_console(
                     }
                     let mode = admin_state::parse_gamemode(requested)?;
                     if !hub.request_admin_gamemode(target, mode)? {
-                        return Err(io::Error::new(ErrorKind::NotFound, "target player not online"));
+                        return Err(io::Error::new(
+                            ErrorKind::NotFound,
+                            "target player not online",
+                        ));
                     }
                     println!("Gamemode change queued for {target}: {mode}");
                     Ok(())
