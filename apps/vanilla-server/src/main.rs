@@ -26,8 +26,8 @@ mod legacy_nbt;
 mod legacy_region;
 mod legacy_world_inspect;
 mod level_dat;
-mod mobs;
 mod migration_staging;
+mod mobs;
 mod multiplayer;
 mod navigation;
 mod physics;
@@ -3170,9 +3170,13 @@ fn main() -> io::Result<()> {
             return Err(bad("usage: --prepare-anvil-copy SOURCE_DIR NEW_DEST_DIR"));
         }
         let stats = migration_staging::prepare_anvil_copy(
-            Path::new(&supplied[1]), Path::new(&supplied[2]))?;
-        println!("Validated Anvil working copy only: {} files, {} bytes (not converted to IRW)",
-            stats.files, stats.bytes);
+            Path::new(&supplied[1]),
+            Path::new(&supplied[2]),
+        )?;
+        println!(
+            "Validated Anvil working copy only: {} files, {} bytes (not converted to IRW)",
+            stats.files, stats.bytes
+        );
         return Ok(());
     }
     if supplied.iter().any(|arg| arg == "--verify-world") {

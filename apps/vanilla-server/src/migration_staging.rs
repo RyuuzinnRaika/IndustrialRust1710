@@ -12,7 +12,10 @@ fn invalid(message: &'static str) -> io::Error {
 }
 
 #[derive(Debug, Default)]
-pub struct CopyStats { pub files: usize, pub bytes: u64 }
+pub struct CopyStats {
+    pub files: usize,
+    pub bytes: u64,
+}
 
 fn compare_files(original: &Path, duplicate: &Path) -> io::Result<()> {
     let mut a = File::open(original)?;
@@ -24,12 +27,16 @@ fn compare_files(original: &Path, duplicate: &Path) -> io::Result<()> {
         if n != m || first[..n] != second[..m] {
             return Err(invalid("source and copy bytes differ"));
         }
-        if n == 0 { return Ok(()); }
+        if n == 0 {
+            return Ok(());
+        }
     }
 }
 
 fn copy_tree(source: &Path, dest: &Path, depth: usize, stats: &mut CopyStats) -> io::Result<()> {
-    if depth > MAX_DEPTH { return Err(invalid("Anvil world directory nesting too deep")); }
+    if depth > MAX_DEPTH {
+        return Err(invalid("Anvil world directory nesting too deep"));
+    }
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let from = entry.path();
@@ -39,8 +46,14 @@ fn copy_tree(source: &Path, dest: &Path, depth: usize, stats: &mut CopyStats) ->
             fs::create_dir(&to)?;
             copy_tree(&from, &to, depth + 1, stats)?;
         } else if meta.file_type().is_file() {
-            stats.files = stats.files.checked_add(1).ok_or_else(|| invalid("too many files"))?;
-            stats.bytes = stats.bytes.checked_add(meta.len()).ok_or_else(|| invalid("size overflow"))?;
+            stats.files = stats
+                .files
+                .checked_add(1)
+                .ok_or_else(|| invalid("too many files"))?;
+            stats.bytes = stats
+                .bytes
+                .checked_add(meta.len())
+                .ok_or_else(|| invalid("size overflow"))?;
             if stats.files > MAX_FILES || stats.bytes > MAX_BYTES {
                 return Err(invalid("Anvil world exceeds migration copy limits"));
             }
@@ -51,7 +64,9 @@ fn copy_tree(source: &Path, dest: &Path, depth: usize, stats: &mut CopyStats) ->
             compare_files(&from, &to)?;
             File::open(&to)?.sync_all()?;
         } else {
-            return Err(invalid("refusing symlinks, sockets and special input files"));
+            return Err(invalid(
+                "refusing symlinks, sockets and special input files",
+            ));
         }
     }
     Ok(())
@@ -66,15 +81,24 @@ pub fn prepare_anvil_copy(source: &Path, destination: &Path) -> io::Result<CopyS
     // Read-only format validation precedes any output creation.
     let before = crate::legacy_world_inspect::inspect_world(source)?;
     let canonical_source = fs::canonicalize(source)?;
-    let dest_name = destination.file_name().ok_or_else(|| invalid("destination has no name"))?;
-    let parent = destination.parent().filter(|p| !p.as_os_str().is_empty())
+    let dest_name = destination
+        .file_name()
+        .ok_or_else(|| invalid("destination has no name"))?;
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let canonical_parent = fs::canonicalize(parent)?;
     if canonical_parent.starts_with(&canonical_source) {
         return Err(invalid("destination must not overlap source tree"));
     }
     match fs::symlink_metadata(destination) {
-        Ok(_) => return Err(io::Error::new(ErrorKind::AlreadyExists, "destination already exists")),
+        Ok(_) => {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "destination already exists",
+            ))
+        }
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
@@ -91,12 +115,17 @@ pub fn prepare_anvil_copy(source: &Path, destination: &Path) -> io::Result<CopyS
             return Err(invalid("Anvil structural summary changed while copying"));
         }
         if fs::symlink_metadata(destination).is_ok() {
-            return Err(io::Error::new(ErrorKind::AlreadyExists, "destination appeared"));
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "destination appeared",
+            ));
         }
         fs::rename(&staging, destination)?;
         Ok(stats)
     })();
-    if work.is_err() { let _ = fs::remove_dir_all(&staging); }
+    if work.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
     work
 }
 

@@ -41,7 +41,9 @@ fn stop_closes_server_and_persists_readable_world() {
     thread::sleep(Duration::from_millis(200));
     child.stdin.take().unwrap().write_all(b"/stop\n").unwrap();
     let finished = loop {
-        if let Some(status) = child.try_wait().unwrap() { break status; }
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
         if Instant::now() >= deadline {
             child.kill().unwrap();
             let _ = child.wait();
@@ -49,9 +51,15 @@ fn stop_closes_server_and_persists_readable_world() {
         }
         thread::sleep(Duration::from_millis(50));
     };
-    assert!(finished.success(), "server exit status after /stop: {finished}");
-    let check = Command::new(exe).arg("--verify-world")
-        .arg(world.parent().unwrap()).status().unwrap();
+    assert!(
+        finished.success(),
+        "server exit status after /stop: {finished}"
+    );
+    let check = Command::new(exe)
+        .arg("--verify-world")
+        .arg(world.parent().unwrap())
+        .status()
+        .unwrap();
     assert!(check.success(), "saved world failed read-only validation");
     fs::remove_dir_all(&root).unwrap();
 }
