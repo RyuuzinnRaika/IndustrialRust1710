@@ -770,13 +770,17 @@ impl World {
                         .then_some((x, z, old, new))
                 })
                 .collect();
-            let fired_devices: Vec<_> = changes.iter().filter_map(|(&(x, y, z), &new)| {
-                let old = self.get(x, i32::from(y), z);
-                (matches!(new >> 4, 23 | 158)
-                    && new >> 4 == old >> 4
-                    && old & 8 == 0 && new & 8 != 0)
-                    .then_some((x, i32::from(y), z))
-            }).collect();
+            let fired_devices: Vec<_> = changes
+                .iter()
+                .filter_map(|(&(x, y, z), &new)| {
+                    let old = self.get(x, i32::from(y), z);
+                    (matches!(new >> 4, 23 | 158)
+                        && new >> 4 == old >> 4
+                        && old & 8 == 0
+                        && new & 8 != 0)
+                        .then_some((x, i32::from(y), z))
+                })
+                .collect();
             let undo: Vec<(Position, Option<u16>)> = changes
                 .keys()
                 .map(|&p| (p, self.edits.get(&p).copied()))
@@ -1063,7 +1067,10 @@ impl World {
             ) {
                 world.pending_support.insert((x, y, z));
             }
-            if matches!(block >> 4, 23 | 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 | 158) {
+            if matches!(
+                block >> 4,
+                23 | 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 | 158
+            ) {
                 world.pending_devices.insert((x, y, z));
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
@@ -1584,13 +1591,13 @@ mod tests {
 
     #[test]
     fn device_fires_once_per_rising_edge_only_after_world_save() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-device-trigger-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-device-trigger-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
-        world.update_and_save(&path, 0, 65, 0, (23 << 4) | 5).unwrap();
+        world
+            .update_and_save(&path, 0, 65, 0, (23 << 4) | 5)
+            .unwrap();
         world.update_and_save(&path, -1, 65, 0, 152 << 4).unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.drain_device_activations(), vec![(0, 65, 0)]);
