@@ -260,7 +260,8 @@ mod tests {
     #[test]
     fn forged_or_unknown_map_id_never_allocates_a_world_record() {
         let mut maps = Maps::default();
-        let path = std::env::temp_dir().join(format!("irw-unknown-map-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("irw-unknown-map-{}.json", std::process::id()));
         let _ = fs::remove_file(&path);
         assert!(maps
             .refresh(&path, &World::new(), 300, (0, 0), 0.0, 0)
