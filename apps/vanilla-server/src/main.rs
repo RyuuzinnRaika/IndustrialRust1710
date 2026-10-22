@@ -6,6 +6,7 @@ mod admin;
 mod admin_state;
 mod anvil_export;
 mod anvil_import;
+mod backup_rotation;
 mod backup_world;
 mod books;
 mod brewing;
@@ -36,6 +37,7 @@ mod legacy_region_rewrite;
 mod legacy_world_inspect;
 mod level_dat;
 mod maps;
+mod migration_staging;
 mod minecarts;
 mod mobs;
 mod multiplayer;
@@ -54,6 +56,7 @@ mod telemetry;
 mod terrain;
 mod throwables;
 mod vehicles;
+mod verify_world;
 mod vitals;
 mod whitelist;
 mod world;
@@ -93,9 +96,9 @@ use security_limits::{ChatLimiter, ConnectionLimiter};
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, ErrorKind};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -706,6 +709,7 @@ struct PlayerSession<'a> {
     administration: &'a Administration,
     peer_ip: IpAddr,
     verified_uuid: Option<&'a str>,
+    shutdown: Arc<AtomicBool>,
 }
 /// Apply server-authoritative special item uses; return None for a normal
 /// right-click, Some(changes) when this interaction was handled (including no-op).
@@ -845,6 +849,7 @@ fn play(
         administration,
         peer_ip,
         verified_uuid,
+        shutdown,
     } = session;
     s.set_read_timeout(Some(Duration::from_millis(50)))?;
     let mut location = (player.x, player.y, player.z);
@@ -898,6 +903,13 @@ fn play(
     let mut last_plate_refresh_tick = clock.ticks();
     let mut last_map_tick = clock.ticks();
     loop {
+        if shutdown.load(Ordering::Acquire) {
+            let mut reason = Vec::new();
+            if write_string(&json!({"text":"Server stopping"}).to_string(), &mut reason).is_ok() {
+                let _ = send(s, 0x40, &reason);
+            }
+            return Ok(());
+        }
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
                 "outbound packet overflow or session removed",
@@ -4419,6 +4431,7 @@ struct ServerContext {
     scoreboard_path: Arc<PathBuf>,
     online_mode: bool,
     auth_key: Option<Arc<ServerIdentity>>,
+    shutdown: Arc<AtomicBool>,
 }
 fn handle(
     s: TcpStream,
@@ -4463,7 +4476,11 @@ fn handle(
         scoreboard_path,
         online_mode,
         auth_key,
+        shutdown,
     } = context;
+    if shutdown.load(Ordering::Acquire) {
+        return Ok(());
+    }
     let mut s = Connection::new(s);
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -4786,6 +4803,7 @@ fn handle(
             administration: &administration,
             peer_ip,
             verified_uuid: if online_mode { Some(&uuid) } else { None },
+            shutdown: Arc::clone(&shutdown),
         },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
@@ -4979,7 +4997,8 @@ fn start_clock_console(
     world: Arc<Mutex<World>>,
     world_path: Arc<PathBuf>,
     access: ConsoleAccess,
-) {
+    shutdown: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
     let ConsoleGameData {
         rules,
         rules_path,
@@ -5112,6 +5131,11 @@ fn start_clock_console(
                     }
                     Ok(())
                 })(),
+                ["/stop"] => {
+                    shutdown.store(true, Ordering::Release);
+                    println!("Stopping server; flushing player and world state");
+                    Ok(())
+                },
                 ["/list"] => (|| -> io::Result<()> {
                     println!("Online ({}): {}", hub.count()?, hub.names()?.join(", "));
                     Ok(())
@@ -5266,8 +5290,11 @@ fn start_clock_console(
             if let Err(error) = result {
                 eprintln!("ADMIN CONSOLE ERROR: {error}");
             }
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
         }
-    });
+    })
 }
 
 fn main() -> io::Result<()> {
@@ -5304,11 +5331,40 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+
+    // Offline, standalone operations. Never create a server listener or modify
+    // an original vanilla world as part of verification or migration staging.
+    if raw_args.iter().any(|arg| arg == "--prepare-anvil-copy") {
+        if raw_args.len() != 3 || raw_args[0] != "--prepare-anvil-copy" {
+            return Err(bad("usage: --prepare-anvil-copy SOURCE_DIR NEW_DEST_DIR"));
+        }
+        let stats = migration_staging::prepare_anvil_copy(
+            Path::new(&raw_args[1]),
+            Path::new(&raw_args[2]),
+        )?;
+        println!(
+            "Validated Anvil working copy only: {} files, {} bytes (not converted to IRW)",
+            stats.files, stats.bytes
+        );
+        return Ok(());
+    }
+    if raw_args.iter().any(|arg| arg == "--verify-world") {
+        if raw_args.len() != 2 || raw_args[0] != "--verify-world" {
+            return Err(bad("usage: --verify-world WORLD_DIR_OR_IRW_FILE"));
+        }
+        let summary = verify_world::inspect(Path::new(&raw_args[1]))?;
+        println!(
+            "World verified (read-only): {} ({})",
+            summary.description, summary.files
+        );
+        return Ok(());
+    }
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
     let properties = if std::env::args().any(|arg| {
         arg == "--help"
             || arg == "--backup-world"
+            || arg == "--backup-rotate"
             || arg == "--inspect-player-data"
             || arg == "--inspect-level-dat"
             || arg == "--inspect-anvil-region"
@@ -5335,6 +5391,7 @@ fn main() -> io::Result<()> {
     let mut anvil_export_path: Option<PathBuf> = None;
     let mut anvil_import_path: Option<PathBuf> = None;
     let mut backup_destination: Option<PathBuf> = None;
+    let mut backup_rotation: Option<(PathBuf, usize)> = None;
     let mut explicit_world = false;
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
@@ -5343,14 +5400,14 @@ fn main() -> io::Result<()> {
     let mut online_mode = properties.as_ref().is_some_and(|config| config.online_mode);
     let mut difficulty = properties.as_ref().map_or(2, |config| config.difficulty);
     let mut requested_seed: Option<u64> = None;
-    let mut biome_seed: Option<u64> = None;
+    let mut biome_seed: Option<u64> = properties.as_ref().and_then(|config| config.level_seed);
     let mut expanded_seed: Option<u64> = None;
     let mut expanded_dimension = dimensions::Dimension::Overworld;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--online-mode] [--survival] [--recover-level-dat STOPPED_WORLD_DIR] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--online-mode] [--survival] [--recover-level-dat STOPPED_WORLD_DIR] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--backup-rotate ROOT KEEP] [--verify-world DIR_OR_FILE] [--prepare-anvil-copy SOURCE_DIR NEW_DEST_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Offline usernames can be impersonated; --online-mode validates Mojang accounts and requires encrypted Protocol 5 login."
                 );
@@ -5399,6 +5456,9 @@ fn main() -> io::Result<()> {
                 );
             }
             "--biome-seed" => {
+                if properties.as_ref().and_then(|config| config.level_seed).is_some() {
+                    return Err(bad("biome seed already set by server.properties"));
+                }
                 biome_seed = Some(
                     args.next()
                         .ok_or_else(|| bad("missing --biome-seed value"))?
@@ -5485,6 +5545,15 @@ fn main() -> io::Result<()> {
                         .ok_or_else(|| bad("missing --inspect-player-data FILE"))?,
                 ));
             }
+            "--backup-rotate" => {
+                let root = PathBuf::from(args.next().ok_or_else(|| bad("missing backup root"))?);
+                let keep = args
+                    .next()
+                    .ok_or_else(|| bad("missing retention count"))?
+                    .parse::<usize>()
+                    .map_err(|_| bad("invalid retention count"))?;
+                backup_rotation = Some((root, keep));
+            }
             "--backup-world" => {
                 backup_destination = Some(PathBuf::from(
                     args.next()
@@ -5498,7 +5567,7 @@ fn main() -> io::Result<()> {
         return Err(bad("hardcore requires survival mode and difficulty 3"));
     }
     if (requested_seed.is_some() || biome_seed.is_some() || expanded_seed.is_some())
-        && (!survival
+        && ((!survival && properties.as_ref().and_then(|config| config.level_seed).is_none())
             || anvil_export_path.is_some()
             || anvil_import_path.is_some()
             || [
@@ -5618,6 +5687,36 @@ fn main() -> io::Result<()> {
         }
         let (inventory, ender) = legacy_inventory_nbt::inspect_player(&path)?;
         println!("Legacy 1.7.10 playerdata verified (read-only): {inventory} inventory stacks, {ender} ender stacks");
+        return Ok(());
+    }
+    if let Some((root, keep)) = backup_rotation {
+        if !explicit_world
+            || backup_destination.is_some()
+            || anvil_import_path.is_some()
+            || anvil_export_path.is_some()
+            || requested_seed.is_some()
+            || biome_seed.is_some()
+            || expanded_seed.is_some()
+        {
+            return Err(bad(
+                "--backup-rotate requires only --world with no other file operation or seed",
+            ));
+        }
+        let dir = world_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| bad("world file must be in a directory"))?;
+        if !world_path.is_file() && !dir.join("level.dat").is_file() {
+            return Err(bad("offline backup source missing"));
+        }
+        let mut lock = session_lock::WorldSessionLock::acquire(dir)?;
+        let (dest, stats) = backup_rotation::rotate(&world_path, &root, keep, &mut lock)?;
+        println!(
+            "Verified backup: {} files / {} bytes at {}",
+            stats.files,
+            stats.bytes,
+            dest.display()
+        );
         return Ok(());
     }
     if let Some(destination) = backup_destination {
@@ -5800,7 +5899,7 @@ fn main() -> io::Result<()> {
     let decorations = Arc::new(Mutex::new(Decorations::load(&decoration_path)?));
     let clock_path = Arc::new(world_path.with_extension("clock"));
     let restored_clock = Clock::load_state(&clock_path)?;
-    let (clock, _clock_thread) = Clock::start_from(restored_clock);
+    let (clock, clock_thread) = Clock::start_from(restored_clock);
     let difficulty_path = Arc::new(world_path.with_extension("difficulty"));
     let difficulty = admin_state::read(&difficulty_path, 3)?.unwrap_or(difficulty);
     if hardcore && difficulty != 3 {
@@ -5854,12 +5953,13 @@ fn main() -> io::Result<()> {
         listener.local_addr()?
     );
     println!("WARNING: offline-mode has no account authentication. Do not expose to the internet.");
+    let shutdown = Arc::new(AtomicBool::new(false));
     let hub = Arc::new(Hub::default());
     let connections = Arc::new(AtomicUsize::new(0));
     let limiter = Arc::new(ConnectionLimiter::default());
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
-    start_clock_console(
+    let console_thread = start_clock_console(
         Arc::clone(&hub),
         Arc::clone(&clock),
         Arc::clone(&clock_path),
@@ -5880,6 +5980,7 @@ fn main() -> io::Result<()> {
             whitelist_path: Arc::clone(&allow_path),
             online_mode,
         },
+        Arc::clone(&shutdown),
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
@@ -5899,7 +6000,8 @@ fn main() -> io::Result<()> {
     let wire_mobs = Arc::clone(&mobs);
     let ejection_devices = Arc::clone(&devices);
     let ejection_file = Arc::clone(&device_path);
-    thread::spawn(move || {
+    let tick_shutdown = Arc::clone(&shutdown);
+    let tick_thread = thread::spawn(move || {
         let mut telemetry =
             telemetry::TickTelemetry::new(furnace_world_path.with_extension("metrics.jsonl"));
         let mut last = furnace_clock.ticks();
@@ -6262,9 +6364,10 @@ fn main() -> io::Result<()> {
     let hopper_furnaces = Arc::clone(&furnaces);
     let hopper_furnace_file = Arc::clone(&furnace_path);
     let hopper_world_path = Arc::clone(&path);
-    thread::spawn(move || {
+    let hopper_shutdown = Arc::clone(&shutdown);
+    let hopper_thread = thread::spawn(move || {
         let mut last_cycle = hopper_clock.ticks() / 8;
-        loop {
+        while !hopper_shutdown.load(Ordering::Acquire) {
             let cycle = hopper_clock.ticks() / 8;
             if cycle > last_cycle {
                 last_cycle = cycle;
@@ -6304,9 +6407,10 @@ fn main() -> io::Result<()> {
     let brewer_worker = Arc::clone(&brewers);
     let brewer_file = Arc::clone(&brewer_path);
     let brewer_clock = Arc::clone(&clock);
-    thread::spawn(move || {
+    let brewing_shutdown = Arc::clone(&shutdown);
+    let brewing_thread = thread::spawn(move || {
         let mut last = brewer_clock.ticks();
-        loop {
+        while !brewing_shutdown.load(Ordering::Acquire) {
             let now = brewer_clock.ticks();
             if now > last {
                 let steps = (now - last).min(20) as u32;
@@ -6333,9 +6437,10 @@ fn main() -> io::Result<()> {
     let projectile_boats = Arc::clone(&boats);
     let projectile_carts = Arc::clone(&minecarts);
     let projectile_fishing = Arc::clone(&fishing);
-    thread::spawn(move || {
+    let projectile_shutdown = Arc::clone(&shutdown);
+    let projectile_thread = thread::spawn(move || {
         let mut last = projectile_clock.ticks();
-        loop {
+        while !projectile_shutdown.load(Ordering::Acquire) {
             let now = projectile_clock.ticks();
             if now > last {
                 let begin = last.saturating_add(1);
@@ -6400,8 +6505,32 @@ fn main() -> io::Result<()> {
     } else {
         None
     };
-    for accepted in listener.incoming() {
-        let stream = accepted?;
+    listener.set_nonblocking(true)?;
+    let mut client_threads: Vec<(thread::JoinHandle<()>, TcpStream)> = Vec::new();
+    while !shutdown.load(Ordering::Acquire) {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        stream.set_nonblocking(false)?;
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        let mut active = Vec::new();
+        for (worker, socket) in client_threads.drain(..) {
+            if worker.is_finished() {
+                if worker.join().is_err() {
+                    eprintln!("client thread panicked");
+                }
+            } else {
+                active.push((worker, socket));
+            }
+        }
+        client_threads = active;
         let peer_ip = stream.peer_addr()?.ip();
         // Rate limit before accessing disk so repeated banned connections cannot
         // turn into an unlimited JSON parsing workload.
@@ -6451,7 +6580,9 @@ fn main() -> io::Result<()> {
         let hanging_state = Arc::clone(&hangings);
         let hanging_file = Arc::clone(&hanging_path);
         let peer_difficulty = Arc::clone(&shared_difficulty);
-        thread::spawn(move || {
+        let client_shutdown = Arc::clone(&shutdown);
+        let socket = stream.try_clone()?;
+        let worker = thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
                 stream,
@@ -6493,6 +6624,7 @@ fn main() -> io::Result<()> {
                     scoreboard_path: board_path,
                     online_mode,
                     auth_key,
+                    shutdown: client_shutdown,
                 },
                 ip_permit,
             ) {
@@ -6501,7 +6633,97 @@ fn main() -> io::Result<()> {
                 }
             }
         });
+        client_threads.push((worker, socket));
     }
+    // Stop accepting first. Then allow session-owned writes to complete before
+    // persisting shared world state. Interrupt any stalled login handshakes.
+    drop(listener);
+    thread::sleep(Duration::from_millis(250));
+    for (_, socket) in &client_threads {
+        let _ = socket.shutdown(Shutdown::Both);
+    }
+    for (worker, _) in client_threads {
+        worker
+            .join()
+            .map_err(|_| io::Error::other("client thread panicked during shutdown"))?;
+    }
+    tick_thread
+        .join()
+        .map_err(|_| io::Error::other("tick thread panicked during shutdown"))?;
+    hopper_thread
+        .join()
+        .map_err(|_| io::Error::other("hopper thread panicked during shutdown"))?;
+    brewing_thread
+        .join()
+        .map_err(|_| io::Error::other("brewing thread panicked during shutdown"))?;
+    projectile_thread
+        .join()
+        .map_err(|_| io::Error::other("projectile thread panicked during shutdown"))?;
+    clock.stop();
+    clock_thread
+        .join()
+        .map_err(|_| io::Error::other("clock thread panicked during shutdown"))?;
+    console_thread
+        .join()
+        .map_err(|_| io::Error::other("console thread panicked during shutdown"))?;
+    session_guard.verify()?;
+    {
+        let world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        world.save(&path)?;
+        mobs.lock()
+            .map_err(|_| bad("mob mutex poisoned"))?
+            .save(&world)?;
+    }
+    // The redo journal permits at most three target files in one transaction.
+    let journal_path = path.with_extension("pending-txn.json");
+    journal::commit(
+        &journal_path,
+        &[
+            (
+                chest_path.as_ref().as_path(),
+                chests
+                    .lock()
+                    .map_err(|_| bad("chest mutex poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                furnace_path.as_ref().as_path(),
+                furnaces
+                    .lock()
+                    .map_err(|_| bad("furnace mutex poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                hopper_path.as_ref().as_path(),
+                hoppers
+                    .lock()
+                    .map_err(|_| bad("hopper mutex poisoned"))?
+                    .encoded()?,
+            ),
+        ],
+    )?;
+    journal::commit(
+        &journal_path,
+        &[
+            (
+                brewer_path.as_ref().as_path(),
+                brewers
+                    .lock()
+                    .map_err(|_| bad("brewer mutex poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                ground_path.as_ref().as_path(),
+                ground_items
+                    .lock()
+                    .map_err(|_| bad("ground items mutex poisoned"))?
+                    .encoded()?,
+            ),
+        ],
+    )?;
+    clock.save_ticks(&clock_path)?;
+    session_guard.verify()?;
+    println!("Server stopped: all sessions joined and persistent state flushed.");
     Ok(())
 }
 #[cfg(test)]

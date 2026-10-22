@@ -233,7 +233,6 @@ impl Clock {
         }
         packets
     }
-    #[cfg(test)]
     pub fn stop(&self) {
         self.running.store(false, Ordering::Release);
     }
