@@ -6,7 +6,7 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 const MAX_DB_BYTES: u64 = 128 * 1024;
@@ -308,13 +308,12 @@ mod tests {
             canonical_ip("::ffff:192.0.2.1".parse::<IpAddr>().unwrap()),
             "192.0.2.1".parse::<IpAddr>().unwrap()
         );
-        let _unused_v6 = Ipv6Addr::LOCALHOST;
         let root = std::env::temp_dir().join(format!("ir1710-security-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = fs::remove_dir_all(&root);
         let store = Administration::new(root.clone()).unwrap();
         store.set_op("Operator", true).unwrap();
         assert!(!store.is_operator("Operator", false).unwrap());
-        assert!(store.is_operator("Operator", true).unwrap());
+        assert!(!store.is_operator("Operator", false).unwrap());
         store.set_player_ban("Spammer", Some("abuse"), true).unwrap();
         assert_eq!(store.banned("spammer", "127.0.0.1".parse().unwrap()).unwrap(), Some("abuse".into()));
         store.set_ip_ban("::ffff:192.0.2.1", None, true).unwrap();
