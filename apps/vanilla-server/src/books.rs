@@ -321,6 +321,87 @@ mod tests {
         assert!(incoming(&payload, true).is_err());
     }
     #[test]
+    fn edit_sign_and_reconnect_restore_book_nbt() {
+        let home =
+            std::env::temp_dir().join(format!("ir-book-edit-sign-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let world = home.join("world.irw");
+        let inventory_file = home.join("reader.inventory.json");
+        initialize(&world).unwrap();
+        let mut inventory = Inventory::default();
+        inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 386,
+                    count: 1,
+                    damage: 0,
+                }),
+            )
+            .unwrap();
+        let mut writable = Vec::new();
+        writable.extend_from_slice(&386i16.to_be_bytes());
+        writable.push(1);
+        writable.extend_from_slice(&0i16.to_be_bytes());
+        let data = compressed_nbt(&Book {
+            pages: vec!["First page".to_owned()],
+            title: None,
+            author: None,
+        })
+        .unwrap();
+        writable.extend_from_slice(&(data.len() as i16).to_be_bytes());
+        writable.extend_from_slice(&data);
+        assert!(process(
+            "MC|BEdit",
+            &writable,
+            &mut inventory,
+            &inventory_file,
+            &world,
+            "Reader",
+        )
+        .unwrap());
+        let edited = inventory.held().unwrap();
+        assert_eq!(edited.id, 386);
+        assert!(edited.damage > 0);
+        assert_eq!(Inventory::load(&inventory_file).unwrap().held(), Some(edited));
+
+        let signed_nbt = compressed_nbt(&Book {
+            pages: vec!["First page".to_owned()],
+            title: Some("A title".to_owned()),
+            author: Some("Spoofed".to_owned()),
+        })
+        .unwrap();
+        let mut signing = Vec::new();
+        signing.extend_from_slice(&387i16.to_be_bytes());
+        signing.push(1);
+        signing.extend_from_slice(&edited.damage.to_be_bytes());
+        signing.extend_from_slice(&(signed_nbt.len() as i16).to_be_bytes());
+        signing.extend_from_slice(&signed_nbt);
+        assert!(process(
+            "MC|BSign",
+            &signing,
+            &mut inventory,
+            &inventory_file,
+            &world,
+            "Reader",
+        )
+        .unwrap());
+        let signed = inventory.held().unwrap();
+        assert_eq!(signed.id, 387);
+        assert_eq!(signed.damage, edited.damage);
+        assert_eq!(Inventory::load(&inventory_file).unwrap().held(), Some(signed));
+        let stored = Store::load(&world.with_extension("books.json")).unwrap();
+        let record = stored.books.get(&(signed.damage as u16)).unwrap();
+        assert!(record.signed);
+        assert_eq!(record.book.author.as_deref(), Some("Reader"));
+        assert_eq!(record.book.title.as_deref(), Some("A title"));
+        assert_eq!(record.book.pages, ["First page"]);
+        assert!(wire_nbt(signed).is_some());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn rejects_missing_or_forged_book_reference() {
         let mut store = Store {
             next_id: 2,
