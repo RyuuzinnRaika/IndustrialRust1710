@@ -378,6 +378,8 @@ pub struct Mobs {
     #[serde(skip)]
     explosions: Vec<Explosion>,
     last_tick: u64,
+    #[serde(skip)]
+    last_leash_tick: u64,
     next_id: i32,
     dragon_defeated: bool,
     enabled: bool,
@@ -1174,6 +1176,10 @@ impl Mobs {
         now: u64,
         players: &[(i32, PlayerPosition)],
     ) -> Vec<Event> {
+        if now <= self.last_leash_tick {
+            return Vec::new();
+        }
+        self.last_leash_tick = now;
         let mut events = Vec::new();
         for mob in self.entities.values_mut() {
             let destination = if let Some(anchor) = mob.fence_anchor {
