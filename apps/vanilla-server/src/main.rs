@@ -16,6 +16,7 @@ mod ground_items;
 mod hoppers;
 mod inventory;
 mod journal;
+mod legacy_chunk_store;
 mod legacy_inventory_nbt;
 mod legacy_nbt;
 mod legacy_region;
@@ -2974,6 +2975,7 @@ fn main() -> io::Result<()> {
             || arg == "--inspect-level-dat"
             || arg == "--inspect-anvil-region"
             || arg == "--inspect-anvil-world"
+            || arg == "--inspect-anvil-chunk"
     }) {
         None
     } else {
@@ -2987,6 +2989,7 @@ fn main() -> io::Result<()> {
         .as_ref()
         .map(|config| config.world_path.clone())
         .unwrap_or_else(|| PathBuf::from("world/flat.irw"));
+    let mut chunk_inspect: Option<(PathBuf, dimensions::Dimension, i32, i32)> = None;
     let mut world_inspect_path: Option<PathBuf> = None;
     let mut region_inspect_path: Option<PathBuf> = None;
     let mut level_inspect_path: Option<PathBuf> = None;
@@ -3007,7 +3010,7 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -3094,6 +3097,29 @@ fn main() -> io::Result<()> {
                         .ok_or_else(|| bad("missing --import-anvil directory"))?,
                 ));
             }
+            "--inspect-anvil-chunk" => {
+                let root = PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| bad("missing --inspect-anvil-chunk DIR"))?,
+                );
+                let dimension = match args.next().as_deref() {
+                    Some("overworld") => dimensions::Dimension::Overworld,
+                    Some("nether") => dimensions::Dimension::Nether,
+                    Some("end") => dimensions::Dimension::End,
+                    _ => return Err(bad("invalid Anvil inspection dimension")),
+                };
+                let cx = args
+                    .next()
+                    .ok_or_else(|| bad("missing Anvil chunk X"))?
+                    .parse::<i32>()
+                    .map_err(|_| bad("invalid Anvil chunk X"))?;
+                let cz = args
+                    .next()
+                    .ok_or_else(|| bad("missing Anvil chunk Z"))?
+                    .parse::<i32>()
+                    .map_err(|_| bad("invalid Anvil chunk Z"))?;
+                chunk_inspect = Some((root, dimension, cx, cz));
+            }
             "--inspect-anvil-world" => {
                 world_inspect_path = Some(PathBuf::from(
                     args.next()
@@ -3152,6 +3178,35 @@ fn main() -> io::Result<()> {
         return Err(bad(
             "--export-anvil and --import-anvil are mutually exclusive",
         ));
+    }
+    if let Some((root, dimension, cx, cz)) = chunk_inspect {
+        if world_inspect_path.is_some()
+            || region_inspect_path.is_some()
+            || level_inspect_path.is_some()
+            || player_inspect_path.is_some()
+            || backup_destination.is_some()
+            || anvil_import_path.is_some()
+            || anvil_export_path.is_some()
+        {
+            return Err(bad(
+                "Anvil chunk inspection cannot be combined with file operations",
+            ));
+        }
+        let mut cache = legacy_chunk_store::ReadOnlyChunkCache::open(root, 16)?;
+        match cache.get(dimension, cx, cz)? {
+            Some(chunk) => println!(
+                "Anvil 1.7.10 read-only chunk ({cx},{cz}) dimension={} sections={} entities={} tiles={}",
+                dimension.name(),
+                chunk.level.sections.len(),
+                chunk.level.entities.len(),
+                chunk.level.tile_entities.len()
+            ),
+            None => println!(
+                "Anvil 1.7.10 chunk ({cx},{cz}) dimension={} not generated",
+                dimension.name()
+            ),
+        }
+        return Ok(());
     }
     if let Some(path) = world_inspect_path {
         if region_inspect_path.is_some()
