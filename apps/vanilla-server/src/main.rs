@@ -5597,8 +5597,14 @@ fn main() -> io::Result<()> {
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let mut session_guard = session_lock::WorldSessionLock::acquire(world_directory)?;
-    session_guard.verify()?;
+    let session_guard = Arc::new(Mutex::new(session_lock::WorldSessionLock::acquire(
+        world_directory,
+    )?));
+    session_guard
+        .lock()
+        .map_err(|_| bad("session lock mutex poisoned"))?
+        .verify()?;
+
     // Replay interrupted multi-file credits before loading any container or
     // accepting connections. Corrupt/unrecoverable logs prevent startup.
     journal::recover(&world_path.with_extension("pending-txn.json"))?;
@@ -5606,7 +5612,7 @@ fn main() -> io::Result<()> {
     journal::recover(&Chests::location(&world_path).with_extension("pending-txn.json"))?;
     journal::recover(&Furnaces::location(&world_path).with_extension("pending-txn.json"))?;
     books::initialize(&world_path)?;
-    let loaded_world = if world_path.exists() {
+    let mut loaded_world = if world_path.exists() {
         let existing = World::load(&world_path)?;
         if let Some(seed) = requested_seed {
             if existing.natural_seed() != Some(seed)
@@ -5671,6 +5677,7 @@ fn main() -> io::Result<()> {
             .map_err(|_| bad("game rules mutex poisoned"))?
             .daylight_cycle(),
     );
+    loaded_world.bind_save_session(&world_path, Arc::clone(&session_guard))?;
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
