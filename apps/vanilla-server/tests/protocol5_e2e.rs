@@ -186,10 +186,15 @@ impl NativeServer {
         )
     }
 }
-impl Drop for NativeServer {
-    fn drop(&mut self) {
+impl NativeServer {
+    fn stop(&mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
+    }
+}
+impl Drop for NativeServer {
+    fn drop(&mut self) {
+        self.stop();
         let _ = fs::remove_dir_all(&self.directory);
     }
 }
@@ -445,6 +450,9 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     drop(scout);
     server.wait_idle();
 
+    // Native Anvil export takes the same exclusive session.lock as the
+    // running server. Stop the server before acquiring the offline snapshot.
+    server.stop();
     // The native Anvil export and import must preserve every IRW1 byte.
     let before = fs::read(&original_path).unwrap();
     let source_dir = server.directory.join("snapshot");
