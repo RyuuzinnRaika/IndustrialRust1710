@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 mod devices;
 mod ecology;
 mod lighting;
+mod special;
+pub use special::TntEvent;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
@@ -38,6 +40,8 @@ pub struct World {
     pending_circuit: BTreeSet<Position>,
     pending_support: BTreeSet<Position>,
     pending_ecology: BTreeSet<Position>,
+    // Weather surfaces are scheduled separately to avoid disturbing crop ticks.
+    pending_weather: BTreeSet<Position>,
     pending_devices: BTreeSet<Position>,
     pending_repeaters: BTreeMap<Position, (u64, bool)>,
     // Comparator analog output (0..15) is not encoded in block metadata.
@@ -55,6 +59,10 @@ pub struct World {
     fluid_phase: u64,
     // Set from Clock; the weather simulation has one authoritative owner.
     raining: bool,
+    day_time: i64,
+    primed_tnt: BTreeMap<i32, special::PrimedTnt>,
+    next_tnt_id: i32,
+    tnt_events: Vec<special::TntEvent>,
 }
 
 /// A persisted world mutation can create a temporary ground-item event.
@@ -101,7 +109,14 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 44 | 126 // half slabs
             | 53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164 // stairs
             | 149 | 150 // comparator
-            | 70 | 72 // pressure plates
+            | 131 | 132 // tripwire and hook
+            | 151 // daylight detector
+            | 118 // cauldron
+            | 138 // beacon
+            | 120 // end portal frame
+            | 46 // TNT
+            | 78 | 79 // snow layer and ice
+            | 70 | 72 | 147 | 148 // pressure plates
             | 77 | 143 // buttons
             | 23 | 158 // dispenser/dropper
             | 29 | 33 // pistons
@@ -157,6 +172,9 @@ pub fn is_placeable(block_id: u16) -> bool {
 impl World {
     pub fn set_raining(&mut self, raining: bool) {
         self.raining = raining;
+    }
+    pub fn set_day_time(&mut self, value: i64) {
+        self.day_time = value.rem_euclid(24_000);
     }
     /// Tracks which chunk columns contain changes, without allocating a full world.
     pub fn drain_drops(&mut self) -> Vec<WorldDrop> {
@@ -295,6 +313,42 @@ impl World {
                 Some(crate::worldgen::height(seed, x, z))
             }
             Generation::Expanded(_, _) => None,
+        }
+    }
+    /// Keep natural, unedited weather columns near loaded client chunks
+    /// eligible for snow/ice updates. The existing 20TPS world tick is the
+    /// only scheduler; observing a chunk does not write or mutate its blocks.
+    pub fn observe_weather_chunk(&mut self, cx: i32, cz: i32) {
+        if self.dimension() != crate::dimensions::Dimension::Overworld {
+            return;
+        }
+        let (Some(x0), Some(z0)) = (cx.checked_mul(16), cz.checked_mul(16)) else {
+            return;
+        };
+        for dx in 0..16 {
+            for dz in 0..16 {
+                let (x, z) = (x0 + dx, z0 + dz);
+                if !in_bounds(x, 64, z) || !self.is_cold_biome(x, z) {
+                    continue;
+                }
+                let Some(base_y) = self.surface_height_at(x, z) else {
+                    continue;
+                };
+                let mut top = base_y.clamp(0, 254);
+                // Include shallow trees/raised surface edits and sea-level
+                // water without scanning all 256 Y cells for every chunk.
+                for y in top + 1..=(top + 24).min(254) {
+                    if self.get(x, y, z) != 0 {
+                        top = y;
+                    }
+                }
+                if matches!(
+                    self.get(x, top, z) >> 4,
+                    1 | 2 | 3 | 4 | 5 | 8 | 9 | 12 | 13 | 24 | 80
+                ) {
+                    self.pending_weather.insert((x, top as u8, z));
+                }
+            }
         }
     }
     pub fn spawn_y(&self) -> f64 {
@@ -447,9 +501,14 @@ impl World {
             if id == 55 {
                 self.pending_circuit.insert(pos);
             }
+            if matches!(id, 2 | 3 | 8 | 9) {
+                self.pending_weather.insert(pos);
+            } else {
+                self.pending_weather.remove(&pos);
+            }
             if matches!(
                 id,
-                6 | 18 | 51 | 59 | 60 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
+                6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
             ) {
                 self.pending_ecology.insert(pos);
             } else {
@@ -468,6 +527,11 @@ impl World {
                     | 59
                     | 66
                     | 70
+                    | 131
+                    | 132
+                    | 147
+                    | 148
+                    | 151
                     | 72
                     | 75
                     | 76
@@ -483,7 +547,10 @@ impl World {
             ) {
                 self.pending_support.insert(pos);
             }
-            if matches!(id, 23 | 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 | 158) {
+            if matches!(
+                id,
+                23 | 27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157 | 158
+            ) {
                 self.pending_devices.insert(pos);
             } else {
                 self.pending_devices.remove(&pos);
@@ -555,6 +622,41 @@ impl World {
         let supported: Vec<Position> = self.pending_support.iter().take(budget).copied().collect();
         let mut changes: BTreeMap<Position, u16> = self.ecology_changes(budget);
         changes.extend(self.device_changes(budget));
+        changes.extend(self.special_changes(budget));
+        // Timed redstone components must release power on the authoritative
+        // world tick, not merely disappear from the in-memory timer table.
+        // Stage their reset in the same durable snapshot as other updates.
+        let expired_timers: Vec<Position> = self
+            .pending_buttons
+            .iter()
+            .filter(|&(_, deadline)| self.fluid_phase >= *deadline)
+            .take(budget)
+            .map(|(&pos, _)| pos)
+            .collect();
+        for &(x, y, z) in &expired_timers {
+            let old = self.get(x, i32::from(y), z);
+            let reset = match old >> 4 {
+                70 | 72 => old & !1,        // Stone and wooden pressure plates.
+                77 | 131 | 143 => old & !8, // Buttons and tripwire hooks.
+                132 => old & !1,            // Tripwire: clear triggered, retain attachment.
+                147 | 148 => old & !15,     // Weighted analog pressure plates.
+                _ => old,
+            };
+            if reset != old {
+                changes.entry((x, y, z)).or_insert(reset);
+            }
+        }
+        // Retain the old block identity until the world snapshot has committed.
+        let primed_on_commit: Vec<_> = changes
+            .iter()
+            .filter_map(|(&(x, y, z), &new)| {
+                (new == 0 && self.get(x, i32::from(y), z) >> 4 == 46).then_some((
+                    x,
+                    i32::from(y),
+                    z,
+                ))
+            })
+            .collect();
 
         for &(x, y, z) in &wet {
             let y = i32::from(y);
@@ -715,6 +817,13 @@ impl World {
             }
         }
 
+        // Advance the primed entity state BEFORE the atomic IRW snapshot.
+        // On any storage failure, undo the state and newly queued packets.
+        let primed_before = self.primed_tnt.clone();
+        let tnt_events_before = self.tnt_events.len();
+        self.finalize_tnt(&primed_on_commit);
+        let tnt_changed = self.primed_tnt != primed_before;
+
         if !changes.is_empty() {
             // Decaying oak leaves may yield a sapling or apple. Stage these
             // before mutation, but expose them only after a successful save.
@@ -794,6 +903,8 @@ impl World {
                 self.save(path)
             };
             if let Err(error) = saved {
+                self.primed_tnt = primed_before;
+                self.tnt_events.truncate(tnt_events_before);
                 self.comparator_ready.clear();
                 for (pos, original) in undo {
                     match original {
@@ -811,6 +922,17 @@ impl World {
             self.pending_device_activations.extend(fired_devices);
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
+            }
+        } else if tnt_changed
+            || (!self.primed_tnt.is_empty() && self.fluid_phase.is_multiple_of(20))
+        {
+            // Persist the fuse once per second even without terrain edits;
+            // also durably remove TNT that exploded in otherwise empty air.
+            // This uses the existing 20TPS block_tick, never a second loop.
+            if let Err(error) = self.save(path) {
+                self.primed_tnt = primed_before;
+                self.tnt_events.truncate(tnt_events_before);
+                return Err(error);
             }
         }
 
@@ -834,13 +956,9 @@ impl World {
         for pos in supported {
             self.pending_support.remove(&pos);
         }
-        let expired: Vec<_> = self
-            .pending_buttons
-            .iter()
-            .filter(|&(_, when)| self.fluid_phase >= *when)
-            .map(|(&pos, _)| pos)
-            .collect();
-        for pos in expired {
+        // Clear timers only after the world save succeeded, so a storage
+        // failure cannot silently leave a permanently powered component.
+        for pos in expired_timers {
             self.pending_buttons.remove(&pos);
         }
         let mut changed = Vec::with_capacity(changes.len());
@@ -942,6 +1060,10 @@ impl World {
         }
         let key = (x, y as u8, z);
         if block == self.base_block(x, y as u8, z) {
+            if self.edits.remove(&key).is_some() {
+                self.wake_gravity(x, y, z);
+                self.wake_block_updates(x, y, z);
+            }
             return Ok(());
         }
         if !self.edits.contains_key(&key) && self.edits.len() >= MAX_EDITS {
@@ -1011,10 +1133,57 @@ impl World {
             _ => return Err(invalid("unknown IRW world format")),
         };
         let count = u32::from_be_bytes(bytes[offset - 4..offset].try_into().unwrap()) as usize;
-        if count > MAX_EDITS || bytes.len() != offset + count * 11 {
+        if count > MAX_EDITS {
+            return Err(invalid("world edit count exceeds limit"));
+        }
+        let blocks_end = offset + count * 11;
+        // Optional IRW TNT1 extension: older snapshots have no trailer.
+        // Every stored fuse is relative to the next loaded world tick,
+        // preventing accidental detonation after a server restart.
+        if bytes.len() < blocks_end {
             return Err(invalid("world file length/count mismatch"));
         }
-        for entry in bytes[offset..].as_chunks::<11>().0 {
+        let trailer = &bytes[blocks_end..];
+        if !trailer.is_empty() {
+            if trailer.len() < 6 || &trailer[..4] != b"TNT1" {
+                return Err(invalid("unrecognized world entity trailer"));
+            }
+            let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
+            if primed_count > 4096 || trailer.len() != 6 + primed_count * 20 {
+                return Err(invalid("invalid primed TNT trailer length"));
+            }
+            for entry in trailer[6..].as_chunks::<20>().0 {
+                let entity_id = i32::from_be_bytes(entry[..4].try_into().unwrap());
+                let x = i32::from_be_bytes(entry[4..8].try_into().unwrap());
+                let y = i32::from_be_bytes(entry[8..12].try_into().unwrap());
+                let z = i32::from_be_bytes(entry[12..16].try_into().unwrap());
+                let remaining = u32::from_be_bytes(entry[16..20].try_into().unwrap());
+                if entity_id < 10_000_001 || !in_bounds(x, y, z) || remaining == 0 {
+                    return Err(invalid("invalid primed TNT entity"));
+                }
+                if world
+                    .primed_tnt
+                    .insert(
+                        entity_id,
+                        special::PrimedTnt {
+                            entity_id,
+                            pos: (x, y, z),
+                            explode_at: u64::from(remaining),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(invalid("duplicate primed TNT entity"));
+                }
+                world.next_tnt_id = world.next_tnt_id.max(entity_id);
+                // A reconnected 1.7.10 client needs to see surviving TNT.
+                world.tnt_events.push(TntEvent::Spawn {
+                    entity_id,
+                    pos: (x, y, z),
+                });
+            }
+        }
+        for entry in bytes[offset..blocks_end].as_chunks::<11>().0 {
             let x = i32::from_be_bytes(entry[0..4].try_into().unwrap());
             let y = entry[4];
             let z = i32::from_be_bytes(entry[5..9].try_into().unwrap());
@@ -1034,9 +1203,12 @@ impl World {
             if block >> 4 == 55 {
                 world.pending_circuit.insert((x, y, z));
             }
+            if matches!(block >> 4, 2 | 3 | 8 | 9) {
+                world.pending_weather.insert((x, y, z));
+            }
             if matches!(
                 block >> 4,
-                6 | 18 | 51 | 59 | 60 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
+                6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
             ) {
                 world.pending_ecology.insert((x, y, z));
             }
@@ -1047,6 +1219,11 @@ impl World {
                     | 59
                     | 66
                     | 70
+                    | 131
+                    | 132
+                    | 147
+                    | 148
+                    | 151
                     | 72
                     | 75
                     | 76
@@ -1069,7 +1246,7 @@ impl World {
             }
             if matches!(
                 block >> 4,
-                23 | 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 | 158
+                23 | 27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157 | 158
             ) {
                 world.pending_devices.insert((x, y, z));
             }
@@ -1081,7 +1258,7 @@ impl World {
         }
         Ok(world)
     }
-    fn write_to(&self, f: &mut File) -> io::Result<()> {
+    fn write_to(&self, f: &mut impl Write) -> io::Result<()> {
         match self.generation {
             Generation::Flat => f.write_all(MAGIC)?,
             Generation::Natural(seed) => {
@@ -1105,7 +1282,35 @@ impl World {
             f.write_all(&z.to_be_bytes())?;
             f.write_all(&block.to_be_bytes())?;
         }
+        if !self.primed_tnt.is_empty() {
+            if self.primed_tnt.len() > 4096 {
+                return Err(invalid("primed TNT entity capacity exceeded"));
+            }
+            f.write_all(b"TNT1")?;
+            f.write_all(&(self.primed_tnt.len() as u16).to_be_bytes())?;
+            for tnt in self.primed_tnt.values() {
+                let remaining = tnt.explode_at.saturating_sub(self.fluid_phase);
+                if remaining == 0 || remaining > u64::from(u32::MAX) {
+                    return Err(invalid("invalid primed TNT fuse"));
+                }
+                f.write_all(&tnt.entity_id.to_be_bytes())?;
+                f.write_all(&tnt.pos.0.to_be_bytes())?;
+                f.write_all(&tnt.pos.1.to_be_bytes())?;
+                f.write_all(&tnt.pos.2.to_be_bytes())?;
+                f.write_all(&(remaining as u32).to_be_bytes())?;
+            }
+        }
         Ok(())
+    }
+    /// Encode the same bounded IRW snapshot used by save(), for journaled
+    /// inventory/world transactions without an intermediate live disk write.
+    pub fn encoded(&self) -> io::Result<Vec<u8>> {
+        if self.edits.len() > MAX_EDITS {
+            return Err(invalid("world edits exceed IRW capacity"));
+        }
+        let mut bytes = Vec::new();
+        self.write_to(&mut bytes)?;
+        Ok(bytes)
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {

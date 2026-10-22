@@ -391,6 +391,33 @@ impl Inventory {
         }
         true
     }
+    /// Replace exactly one selected ingredient with a container result.
+    /// Stacked ingredients require room elsewhere; a full inventory is a no-op.
+    pub fn exchange_one_held(&mut self, result: Stack) -> bool {
+        if !result.is_valid() || self.held().is_none() {
+            return false;
+        }
+        let mut candidate = self.clone();
+        let slot = candidate.held_slot() as usize;
+        if candidate.held().is_some_and(|held| held.count == 1) {
+            candidate.slots[slot] = Some(result);
+        } else if !candidate.consume_held() || candidate.receive_stack(result).is_none() {
+            return false;
+        }
+        *self = candidate;
+        true
+    }
+    /// Flint and steel (259) has exactly 64 ignition uses.
+    pub fn wear_flint_steel(&mut self) -> bool {
+        let slot = &mut self.slots[36 + self.selected as usize];
+        let Some(mut item) = *slot else { return false };
+        if item.id != 259 || item.damage >= 64 {
+            return false;
+        }
+        item.damage += 1;
+        *slot = (item.damage < 64).then_some(item);
+        true
+    }
     /// Convert one held empty bucket (325) to milk (335) only when the
     /// entire resulting inventory fits. In particular, a stacked bucket
     /// must never lose one unit when there is no free destination slot.

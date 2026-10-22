@@ -73,7 +73,21 @@ impl World {
                 };
                 solid(support)
             }
-            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 | 149 | 150 => solid(below),
+            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 | 132 | 147 | 148 | 149 | 150 | 151 => {
+                solid(below)
+            }
+            78 => solid(below) || below == 79,
+            131 => {
+                // 1.7.10 hook metadata 0=S, 1=W, 2=N, 3=E.
+                // The supporting wall is behind the direction it faces.
+                let neighbor = match block & 3 {
+                    0 => self.get(x, y, z - 1) >> 4,
+                    1 => self.get(x + 1, y, z) >> 4,
+                    2 => self.get(x, y, z + 1) >> 4,
+                    _ => self.get(x - 1, y, z) >> 4,
+                };
+                solid(neighbor)
+            }
             77 | 143 => {
                 let neighbor = match block & 7 {
                     1 => self.get(x - 1, y, z) >> 4,
@@ -102,6 +116,9 @@ impl World {
             }
             _ => true,
         }
+    }
+    pub(super) fn is_cold_biome(&self, x: i32, z: i32) -> bool {
+        matches!(self.biome_at(x, z), 11 | 12 | 13 | 26 | 30 | 31)
     }
     fn wet_farmland(&self, x: i32, y: i32, z: i32) -> bool {
         for dx in -4..=4 {
@@ -143,10 +160,25 @@ impl World {
         }
         false
     }
-    fn grow_tree(&self, x: i32, y: i32, z: i32, changes: &mut BTreeMap<Position, u16>) {
+    pub(super) fn grow_tree(&self, x: i32, y: i32, z: i32, changes: &mut BTreeMap<Position, u16>) {
         if y > 249 || !plantable(self.get(x, y - 1, z) >> 4) {
             return;
         }
+        // Large dark oak is only legal for a complete 2x2 group.
+        // Reuse this path for both natural growth and bone meal.
+        if self.get(x, y, z) & 7 == 5 {
+            self.grow_dark_oak(x, y, z, changes);
+            return;
+        }
+        // Retain legacy log and leaf species for smaller saplings.
+        let (log, log_meta, leaves, leaf_meta) = match self.get(x, y, z) & 7 {
+            0 => (17, 0, 18, 0),   // Oak
+            1 => (17, 1, 18, 1),   // Spruce
+            2 => (17, 2, 18, 2),   // Birch
+            3 => (17, 3, 18, 3),   // Jungle
+            4 => (162, 0, 161, 0), // Acacia
+            _ => return,
+        };
         // First pass checks every eventual occupied cell; tree generation
         // must never overwrite players' buildings or another sapling.
         for dy in 1..=5 {
@@ -160,7 +192,7 @@ impl World {
             }
         }
         for dy in 0..4 {
-            changes.insert((x, (y + dy) as u8, z), 17 << 4);
+            changes.insert((x, (y + dy) as u8, z), (log << 4) | log_meta);
         }
         for dy in 3..=5 {
             let radius: i32 = if dy == 5 { 1 } else { 2 };
@@ -174,9 +206,67 @@ impl World {
                     }
                     let pos = (x + dx, (y + dy) as u8, z + dz);
                     if in_bounds(pos.0, i32::from(pos.1), pos.2) {
-                        changes.insert(pos, 18 << 4);
+                        changes.insert(pos, (leaves << 4) | leaf_meta);
                     }
                 }
+            }
+        }
+    }
+    /// Generate a bounded dark-oak crown only after every destination has
+    /// passed validation. The four saplings are replaced together, so an
+    /// obstructed canopy neither destroys blocks nor consumes bone meal.
+    fn grow_dark_oak(&self, x: i32, y: i32, z: i32, changes: &mut BTreeMap<Position, u16>) {
+        if y > 247 {
+            return;
+        }
+        for ox in [-1, 0] {
+            for oz in [-1, 0] {
+                let (ax, az) = (x + ox, z + oz);
+                if !(0..2).all(|dx| {
+                    (0..2).all(|dz| {
+                        in_bounds(ax + dx, y, az + dz)
+                            && self.get(ax + dx, y, az + dz) >> 4 == 6
+                            && self.get(ax + dx, y, az + dz) & 7 == 5
+                            && plantable(self.get(ax + dx, y - 1, az + dz) >> 4)
+                    })
+                }) {
+                    continue;
+                }
+                let mut proposed = BTreeMap::new();
+                // Six-block high 2x2 trunk (log2, dark-oak metadata 1).
+                for dy in 0..=5 {
+                    for dx in 0..2 {
+                        for dz in 0..2 {
+                            proposed.insert((ax + dx, (y + dy) as u8, az + dz), (162 << 4) | 1);
+                        }
+                    }
+                }
+                // Crown is bounded to fit the special block transaction's
+                // 128-block limit; higher rings taper without overwriting logs.
+                for dy in 4..=7 {
+                    let radius = if matches!(dy, 4 | 7) { 1 } else { 2 };
+                    for dx in -radius..=1 + radius {
+                        for dz in -radius..=1 + radius {
+                            if dy <= 5 && (0..2).contains(&dx) && (0..2).contains(&dz) {
+                                continue;
+                            }
+                            proposed.insert((ax + dx, (y + dy) as u8, az + dz), (161 << 4) | 1);
+                        }
+                    }
+                }
+                if proposed.len() > 128
+                    || proposed.iter().any(|(&(px, py, pz), &block)| {
+                        !in_bounds(px, i32::from(py), pz)
+                            || (self.get(px, i32::from(py), pz) != 0
+                                && !(py == y as u8
+                                    && block >> 4 == 162
+                                    && self.get(px, i32::from(py), pz) >> 4 == 6))
+                    })
+                {
+                    continue;
+                }
+                changes.extend(proposed);
+                return;
             }
         }
     }
@@ -202,6 +292,11 @@ impl World {
                     | 66
                     | 70
                     | 72
+                    | 131
+                    | 132
+                    | 147
+                    | 148
+                    | 151
                     | 75
                     | 76
                     | 93
@@ -240,6 +335,12 @@ impl World {
                 continue;
             }
             match id {
+                78 if self.light_at(x, height, z).0 >= 12 => {
+                    changes.insert((x, y, z), 0);
+                }
+                79 if self.light_at(x, height, z).0 >= 12 => {
+                    changes.insert((x, y, z), 9 << 4);
+                }
                 60 => {
                     let moisture = block & 7;
                     if self.wet_farmland(x, height, z) {
@@ -366,7 +467,7 @@ impl World {
                 6 if chance(self.fluid_phase, x, height, z, 4) => {
                     if block & 8 == 0 {
                         changes.insert((x, y, z), block | 8);
-                    } else if block & 7 == 0 {
+                    } else {
                         self.grow_tree(x, height, z, &mut changes);
                     }
                 }
@@ -415,6 +516,33 @@ mod regression_tests {
         let changes = world.ecology_changes(64);
         assert_eq!(changes.get(&(0, 65, 0)), Some(&0));
         assert!(!changes.contains_key(&(-1, 65, 0)));
+    }
+
+    #[test]
+    fn dark_oak_requires_two_by_two_and_preserves_existing_blocks() {
+        let mut w = World::new();
+        for dx in 0..2 {
+            for dz in 0..2 {
+                w.import_block(dx, 64, dz, (6 << 4) | 5).unwrap();
+                w.import_block(dx, 63, dz, 3 << 4).unwrap();
+            }
+        }
+        let mut changes = BTreeMap::new();
+        w.grow_tree(0, 64, 0, &mut changes);
+        assert_eq!(changes.get(&(0, 64, 0)), Some(&((162 << 4) | 1)));
+        assert_eq!(changes.get(&(1, 69, 1)), Some(&((162 << 4) | 1)));
+        assert_eq!(changes.get(&(0, 71, 0)), Some(&((161 << 4) | 1)));
+        assert!(changes.len() <= 128);
+
+        w.import_block(0, 70, 0, 1 << 4).unwrap();
+        let mut blocked = BTreeMap::new();
+        w.grow_tree(0, 64, 0, &mut blocked);
+        assert!(blocked.is_empty(), "a building must never be overwritten");
+
+        w.import_block(0, 70, 0, 0).unwrap();
+        w.import_block(1, 64, 1, 0).unwrap();
+        w.grow_tree(0, 64, 0, &mut blocked);
+        assert!(blocked.is_empty(), "a lone dark oak does not grow");
     }
 
     #[test]

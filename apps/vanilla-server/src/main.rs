@@ -365,10 +365,11 @@ fn view_chunks(center: (i32, i32)) -> BTreeSet<(i32, i32)> {
     chunks
 }
 fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipeline::PendingChunk> {
-    let (mask, data) = world
-        .lock()
-        .map_err(|_| bad("world mutex poisoned"))?
-        .chunk_data(cx, cz);
+    let (mask, data) = {
+        let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        w.observe_weather_chunk(cx, cz);
+        w.chunk_data(cx, cz)
+    };
     chunk_pipeline::submit(cx, cz, mask, data)
 }
 /// Submit at most eight chunks per session before draining them in wire order.
@@ -628,6 +629,57 @@ struct PlayerSession<'a> {
     peer_ip: IpAddr,
     verified_uuid: Option<&'a str>,
 }
+/// Apply server-authoritative special item uses; return None for a normal
+/// right-click, Some(changes) when this interaction was handled (including no-op).
+fn use_special_item(
+    w: &mut World,
+    world_path: &Path,
+    inventory: &mut Inventory,
+    inventory_path: &Path,
+    survival: bool,
+    pos: (i32, i32, i32),
+) -> io::Result<Option<Vec<(i32, i32, i32)>>> {
+    let (x, y, z) = pos;
+    let Some(held) = inventory.held() else {
+        return Ok(None);
+    };
+    let Some((staged_world, changed, replacement, wears_tool)) =
+        w.stage_special_item(x, y, z, held)?
+    else {
+        return Ok(None);
+    };
+    // Invalid uses and blocked tree generation never debit or damage an item.
+    if changed.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    if survival {
+        let mut staged_inventory = inventory.clone();
+        let spent = if let Some(result) = replacement {
+            staged_inventory.exchange_one_held(result)
+        } else if wears_tool {
+            staged_inventory.wear_flint_steel()
+        } else {
+            staged_inventory.consume_held()
+        };
+        if !spent {
+            return Ok(Some(Vec::new()));
+        }
+        // Existing E45 redo journal atomically publishes both durable files.
+        // Do not swap either live state until the journal completes.
+        journal::commit(
+            &world_path.with_extension("pending-txn.json"),
+            &[
+                (world_path, staged_world.encoded()?),
+                (inventory_path, staged_inventory.encoded()?),
+            ],
+        )?;
+        *inventory = staged_inventory;
+    } else {
+        staged_world.save(world_path)?;
+    }
+    *w = staged_world;
+    Ok(Some(changed))
+}
 fn play(
     s: &mut Connection,
     world: &Mutex<World>,
@@ -723,6 +775,8 @@ fn play(
     let mut last_effect_tick = clock.ticks();
     let mut death_recorded = vitals.health <= 0.0;
     let mut last_carrot_wear = 0u64;
+    let mut last_beacon_tick = clock.ticks();
+    let mut last_plate_refresh_tick = clock.ticks();
     loop {
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
@@ -1095,6 +1149,7 @@ fn play(
                 } else {
                     fall.update(candidate.y, grounded)
                 };
+                let landed_distance = fall.take_landing_distance();
                 let mut next_vitals = *vitals;
                 next_vitals.health = (next_vitals.health - f32::from(damage)).max(0.0);
                 // Save accepted position and HP before sending an update.
@@ -1102,6 +1157,19 @@ fn play(
                 *player = candidate;
                 *vitals = next_vitals;
                 location = (candidate.x, candidate.y, candidate.z);
+                if survival && landed_distance >= 1.0 {
+                    let (fx, fy, fz) = (
+                        candidate.x.floor() as i32,
+                        candidate.y.floor() as i32 - 1,
+                        candidate.z.floor() as i32,
+                    );
+                    let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    if soil.get(fx, fy, fz) >> 4 == 60
+                        && soil.update_and_save(world_path, fx, fy, fz, 3 << 4)?
+                    {
+                        hub.broadcast(block_change_event(&soil, fx, fy, fz));
+                    }
+                }
                 send_player_position(s, player)?;
                 if damage != 0 {
                     send(s, 0x06, &health_packet(*vitals))?;
@@ -1137,6 +1205,67 @@ fn play(
                 vitals.health = (vitals.health - total).max(0.0);
                 player.save_state(player_path, *vitals)?;
                 send(s, 0x06, &health_packet(*vitals))?;
+            }
+        }
+        // A stationary player continues pressing a plate. Refresh its timer
+        // at most every five existing server ticks; do not resave an unchanged
+        // analog value or create a second physics/tick scheduler.
+        if vitals.health > 0.0 && now_tick.saturating_sub(last_plate_refresh_tick) >= 5 {
+            last_plate_refresh_tick = now_tick;
+            let (bx, by, bz) = (
+                player.x.floor() as i32,
+                player.y.floor() as i32 - 1,
+                player.z.floor() as i32,
+            );
+            if world::in_bounds(bx, by, bz) {
+                let plate_id = world
+                    .lock()
+                    .map_err(|_| bad("world mutex poisoned"))?
+                    .get(bx, by, bz)
+                    >> 4;
+                if matches!(plate_id, 70 | 72 | 147 | 148) {
+                    let count = 1 + hub
+                        .participants()?
+                        .into_iter()
+                        .filter(|(other_id, at)| {
+                            *other_id != entity_id
+                                && at.x.floor() as i32 == bx
+                                && at.y.floor() as i32 - 1 == by
+                                && at.z.floor() as i32 == bz
+                        })
+                        .count();
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let changed = if matches!(w.get(bx, by, bz) >> 4, 147 | 148) {
+                        w.press_weighted_plate(world_path, bx, by, bz, count)?
+                    } else {
+                        w.press_plate(world_path, bx, by, bz)?
+                    };
+                    if changed {
+                        hub.broadcast(block_change_event(&w, bx, by, bz));
+                    }
+                }
+            }
+        }
+        // Active beacons sample their pyramid on the existing 20TPS clock.
+        if survival && vitals.health > 0.0 && now_tick.saturating_sub(last_beacon_tick) >= 80 {
+            last_beacon_tick = now_tick;
+            let affected = world
+                .lock()
+                .map_err(|_| bad("world mutex poisoned"))?
+                .beacon_in_range(player.x, player.y, player.z);
+            if affected
+                && !active_effects.iter().any(|effect| {
+                    effect.kind == 1 && effect.amplifier > 0 && effect.expires_at > now_tick
+                })
+            {
+                active_effects.retain(|effect| effect.kind != 1);
+                active_effects.push(ActiveEffect {
+                    kind: 1,
+                    amplifier: 0,
+                    expires_at: now_tick + 180,
+                    next_periodic: now_tick + 180,
+                });
+                send(s, 0x1d, &potion_effect_packet(entity_id, 1, 0, 180))?;
             }
         }
         // A food right-click starts a 32 tick use animation. The server owns
@@ -1750,6 +1879,7 @@ fn play(
                     // Riding position comes from server-side boat physics, never C04/C06.
                     continue;
                 }
+                let mut landing_distance = 0.0;
                 if survival {
                     let collision_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     if !physics::valid_movement(&collision_world, player, &candidate) {
@@ -1766,6 +1896,7 @@ fn play(
                     } else {
                         fall.update(y, landed)
                     };
+                    landing_distance = fall.take_landing_distance();
                     if damage != 0 {
                         vitals.health = (vitals.health - f32::from(damage)).max(0.0);
                         player.save_state(player_path, *vitals)?;
@@ -1792,7 +1923,7 @@ fn play(
                     let fz = z.floor() as i32;
                     let fy = y.floor() as i32 - 1;
                     // A fall of at least one block onto farmland tramples it.
-                    if fy >= 0 && player.y - y >= 1.0 {
+                    if fy >= 0 && landing_distance >= 1.0 {
                         let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                         if soil.get(fx, fy, fz) >> 4 == 60
                             && soil.update_and_save(world_path, fx, fy, fz, 3 << 4)?
@@ -1807,9 +1938,36 @@ fn play(
                     let bx = x.floor() as i32;
                     let by = y.floor() as i32 - 1;
                     let bz = z.floor() as i32;
+                    // Snapshot peers outside the world lock to preserve ordering.
+                    let count = 1 + hub
+                        .participants()?
+                        .into_iter()
+                        .filter(|(other_id, at)| {
+                            *other_id != entity_id
+                                && at.x.floor() as i32 == bx
+                                && at.y.floor() as i32 - 1 == by
+                                && at.z.floor() as i32 == bz
+                        })
+                        .count();
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                    if world::in_bounds(bx, by, bz) && w.press_plate(world_path, bx, by, bz)? {
-                        hub.broadcast(block_change_event(&w, bx, by, bz));
+                    if world::in_bounds(bx, by, bz) {
+                        let activated = if matches!(w.get(bx, by, bz) >> 4, 147 | 148) {
+                            w.press_weighted_plate(world_path, bx, by, bz, count)?
+                        } else {
+                            w.press_plate(world_path, bx, by, bz)?
+                        };
+                        if activated {
+                            hub.broadcast(block_change_event(&w, bx, by, bz));
+                        }
+                    }
+                    // Tripwire triggers are evaluated at feet and body height,
+                    // never from untrusted client onGround flags.
+                    for ty in [by + 1, by + 2] {
+                        if world::in_bounds(bx, ty, bz) {
+                            for (tx, hy, tz) in w.touch_tripwire(world_path, bx, ty, bz)? {
+                                hub.broadcast(block_change_event(&w, tx, hy, tz));
+                            }
+                        }
                     }
                 }
                 location = (x, y, z);
@@ -2384,6 +2542,31 @@ fn play(
                     }
                     continue;
                 }
+                // Cauldrons, End eyes and bone meal use the authoritative
+                // selected slot. Multi-block trees/portals use one world commit.
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && inventory.can_place(held)
+                {
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    if let Some(changes) = use_special_item(
+                        &mut w,
+                        world_path,
+                        inventory,
+                        inventory_path,
+                        survival,
+                        (x, y, z),
+                    )? {
+                        for (cx, cy, cz) in changes {
+                            hub.broadcast(block_change_event(&w, cx, cy, cz));
+                        }
+                        if survival {
+                            send(s, 0x30, &inventory.window_items())?;
+                        }
+                        continue;
+                    }
+                }
                 // Hoe -> farmland. In Survival, commit tool wear first;
                 // no item is consumed for tilling soil.
                 if face == 1
@@ -2792,6 +2975,7 @@ fn play(
                             // dust ID331 -> wire55, water/lava buckets -> fluid8/10.
                             let block_id = match stack.id {
                                 331 => 55,
+                                287 => 132, // placed tripwire string
                                 379 => 117,
                                 326 => 8,
                                 327 => 10,
@@ -2811,7 +2995,17 @@ fn play(
                             };
                             let invalid_chest_merge =
                                 block_id == 54 && !can_place_chest(&w, (nx, ny, nz));
-                            let metadata = if matches!(block_id, 50 | 77 | 143) {
+                            let metadata = if block_id == 131 {
+                                // Hook orientation is its outward face (0=S,
+                                // 1=W, 2=N, 3=E), not the wall-torch metadata.
+                                match face {
+                                    2 => 2,
+                                    3 => 0,
+                                    4 => 1,
+                                    5 => 3,
+                                    _ => 0,
+                                }
+                            } else if matches!(block_id, 50 | 77 | 143) {
                                 match face {
                                     1 => 5,
                                     2 => 3,
@@ -2861,6 +3055,7 @@ fn play(
                             if (world::is_placeable(block_id) || block_id == 61)
                                 && w.can_support(nx, ny, nz, (block_id << 4) | metadata)
                                 && block_id != 7
+                                && (block_id != 131 || (2..=5).contains(&face))
                                 && !invalid_chest_merge
                                 && w.get(x, y, z) != 0
                                 && w.get(nx, ny, nz) == 0
@@ -5025,6 +5220,7 @@ fn main() -> io::Result<()> {
                 };
                 // Fire uses the same clock/weather source as client rain packets.
                 gravity_world.set_raining(weather.0);
+                gravity_world.set_day_time(furnace_clock.day_time());
                 for _ in 0..steps {
                     match gravity_world.gravity_tick(&furnace_world_path, 64) {
                         Ok(changes) => {
@@ -5133,6 +5329,46 @@ fn main() -> io::Result<()> {
                                 for item in spawned {
                                     for packet in item.spawn() {
                                         furnace_hub.broadcast(packet);
+                                    }
+                                }
+                            }
+                            // Spawn and remove primed TNT entities only after
+                            // their block changes were durably committed.
+                            for tnt in gravity_world.drain_tnt_events() {
+                                match tnt {
+                                    world::TntEvent::Spawn {
+                                        entity_id,
+                                        pos: (x, y, z),
+                                    } => {
+                                        let mut body = Vec::new();
+                                        write_varint(entity_id as u32, &mut body);
+                                        body.push(50); // Protocol 5 Spawn Object: primed TNT
+                                        for coordinate in [x, y, z] {
+                                            body.extend_from_slice(
+                                                &(coordinate * 32 + 16).to_be_bytes(),
+                                            );
+                                        }
+                                        body.extend_from_slice(&[0, 0]);
+                                        body.extend_from_slice(&0i32.to_be_bytes());
+                                        furnace_hub.broadcast(Event { id: 0x0e, body });
+                                    }
+                                    world::TntEvent::Explode {
+                                        entity_id,
+                                        pos: (x, y, z),
+                                    } => {
+                                        furnace_hub.broadcast(multiplayer::destroy(entity_id));
+                                        let mut body = Vec::new();
+                                        for coordinate in [x, y, z] {
+                                            body.extend_from_slice(
+                                                &(coordinate as f32 + 0.5).to_be_bytes(),
+                                            );
+                                        }
+                                        body.extend_from_slice(&4f32.to_be_bytes());
+                                        body.extend_from_slice(&0i32.to_be_bytes());
+                                        for _ in 0..3 {
+                                            body.extend_from_slice(&0f32.to_be_bytes());
+                                        }
+                                        furnace_hub.broadcast(Event { id: 0x27, body });
                                     }
                                 }
                             }
@@ -5420,6 +5656,99 @@ fn main() -> io::Result<()> {
     }
     Ok(())
 }
+#[cfg(test)]
+mod h_special_item_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn cauldron_and_inventory_commit_as_one_recoverable_action() {
+        let root =
+            std::env::temp_dir().join(format!("ir1710-h-transaction-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let world_path = root.join("world.irw");
+        let inventory_path = root.join("player.inventory.json");
+        let mut world = World::new();
+        let mut inventory = Inventory::default();
+        world
+            .update_and_save(&world_path, 1, 65, 1, 118 << 4)
+            .unwrap();
+        inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 326,
+                    count: 1,
+                    damage: 0,
+                }),
+            )
+            .unwrap();
+        inventory.save(&inventory_path).unwrap();
+        let changed = use_special_item(
+            &mut world,
+            &world_path,
+            &mut inventory,
+            &inventory_path,
+            true,
+            (1, 65, 1),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(changed, vec![(1, 65, 1)]);
+        let reloaded_world = World::load(&world_path).unwrap();
+        let reloaded_inventory = Inventory::load(&inventory_path).unwrap();
+        assert_eq!(reloaded_world.get(1, 65, 1) & 15, 3);
+        assert_eq!(reloaded_inventory.held().unwrap().id, 325);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bonemeal_noop_does_not_debit_items_or_write_a_world() {
+        let root =
+            std::env::temp_dir().join(format!("ir1710-h-bonemeal-noop-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let world_path = root.join("world.irw");
+        let inventory_path = root.join("player.inventory.json");
+        let mut world = World::new();
+        let mut inventory = Inventory::default();
+        world
+            .update_and_save(&world_path, 1, 65, 1, 1 << 4)
+            .unwrap();
+        inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 351,
+                    count: 2,
+                    damage: 15,
+                }),
+            )
+            .unwrap();
+        inventory.save(&inventory_path).unwrap();
+        let changed = use_special_item(
+            &mut world,
+            &world_path,
+            &mut inventory,
+            &inventory_path,
+            true,
+            (1, 65, 1),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(changed.is_empty());
+        assert_eq!(inventory.held().unwrap().count, 2);
+        assert_eq!(
+            Inventory::load(&inventory_path)
+                .unwrap()
+                .held()
+                .unwrap()
+                .count,
+            2
+        );
+        assert_eq!(World::load(&world_path).unwrap().get(1, 65, 1), 1 << 4);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod sprint_action_tests {
     use super::sprint_action;

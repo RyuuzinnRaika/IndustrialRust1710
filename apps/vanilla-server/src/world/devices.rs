@@ -186,6 +186,14 @@ impl World {
                     0
                 }
             }
+            131 => {
+                if block & 8 != 0 {
+                    15
+                } else {
+                    0
+                }
+            }
+            147 | 148 | 151 => (block & 15) as u8,
             76 | 152 => 15,
             94 => {
                 let (dx, dz) = repeater_direction(block);
@@ -222,7 +230,7 @@ impl World {
         self.signal_into(from, to) > 0
     }
 
-    fn powered_near(&self, x: i32, y: i32, z: i32) -> bool {
+    pub(super) fn powered_near(&self, x: i32, y: i32, z: i32) -> bool {
         NEIGHBORS
             .iter()
             .any(|&(dx, dy, dz)| self.power_into((x + dx, y + dy, z + dz), (x, y, z)))
@@ -344,12 +352,14 @@ impl World {
             if self.fluid_phase >= when {
                 let (x, y, z) = pos;
                 let current = self.get(x, i32::from(y), z);
-                let flag = if matches!(current >> 4, 70 | 72) {
-                    1
-                } else {
-                    8
+                let flag = match current >> 4 {
+                    70 | 72 => 1,
+                    147 | 148 => 15,
+                    _ => 8,
                 };
-                if matches!(current >> 4, 70 | 72 | 77 | 143) && current & flag != 0 {
+                if matches!(current >> 4, 70 | 72 | 77 | 131 | 143 | 147 | 148)
+                    && current & flag != 0
+                {
                     changes.insert(pos, current & !flag);
                 }
             }
@@ -572,6 +582,9 @@ impl World {
     /// Pressure plates stay down for ten ticks after last player contact.
     pub fn press_plate(&mut self, path: &Path, x: i32, y: i32, z: i32) -> io::Result<bool> {
         let block = self.get(x, y, z);
+        if matches!(block >> 4, 147 | 148) {
+            return self.press_weighted_plate(path, x, y, z, 1);
+        }
         if !matches!(block >> 4, 70 | 72) {
             return Ok(false);
         }
