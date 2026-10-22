@@ -33,6 +33,17 @@ fn repeater_direction(meta: u16) -> (i32, i32) {
     }
 }
 
+/// Full opaque cubes can pass weak current after a *strong* input.
+fn full_conductor(id: u16) -> bool {
+    matches!(
+        id,
+        1..=5 | 7 | 12..=17 | 19 | 22..=25 | 41..=43 | 45..=49
+            | 56..=58 | 61 | 62 | 73 | 74 | 80 | 82 | 86..=89
+            | 98..=100 | 103 | 110 | 112 | 121 | 129 | 133
+            | 137 | 152 | 155 | 159 | 173
+    )
+}
+
 fn movable(block: u16) -> bool {
     !matches!(
         block >> 4,
@@ -71,9 +82,56 @@ fn movable(block: u16) -> bool {
     )
 }
 impl World {
+    /// Strict strong-power path. Never recursively query a conductor: this
+    /// keeps the signal graph bounded even for rings of solid blocks.
+    fn strong_signal_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
+        let (x, y, z) = from;
+        let block = self.get(x, y, z);
+        match block >> 4 {
+            152 => 15,
+            76 if to == (x, y + 1, z) => 15,
+            94 => {
+                let (dx, dz) = repeater_direction(block);
+                if to == (x + dx, y, z + dz) {
+                    15
+                } else {
+                    0
+                }
+            }
+            150 => {
+                let (dx, dz) = repeater_direction(block);
+                if to == (x + dx, y, z + dz) {
+                    self.comparator_outputs
+                        .get(&(x, y as u8, z))
+                        .copied()
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            }
+            // Buttons and levers strongly power the block they are attached to.
+            69 | 77 | 143 if block & 8 != 0 => {
+                let attached = match block & 7 {
+                    1 => (x - 1, y, z),
+                    2 => (x + 1, y, z),
+                    3 => (x, y, z - 1),
+                    4 => (x, y, z + 1),
+                    5 | 6 => (x, y - 1, z),
+                    _ => (x, y + 1, z),
+                };
+                if to == attached {
+                    15
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
     /// Directional analog redstone strength; repeaters/comparators have a
     /// single output face. Dust propagates its stored 0..15 strength.
-    fn signal_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
+    pub(super) fn signal_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
         let (x, y, z) = from;
         let block = self.get(x, y, z);
         match block >> 4 {
@@ -112,6 +170,15 @@ impl World {
                     0
                 }
             }
+            id if full_conductor(id) => NEIGHBORS
+                .iter()
+                .filter_map(|&(dx, dy, dz)| {
+                    let neighbor = (x + dx, y + dy, z + dz);
+                    // Do not feed the destination's power back to itself.
+                    (neighbor != to).then(|| self.strong_signal_into(neighbor, from))
+                })
+                .max()
+                .unwrap_or(0),
             _ => 0,
         }
     }
@@ -140,8 +207,23 @@ impl World {
         }
         false
     }
-    /// Power cannot travel infinitely across powered/activator rails.
-    /// Bound traversal to eight rail segments as in 1.7.10.
+    /// Powered/activator rails have only two physical endpoints. For sloped
+    /// rails the uphill endpoint is one block higher. Return endpoint
+    /// direction and height relative to the supporting block.
+    fn rail_ports(metadata: u16) -> Option<[(i32, i32, i32); 2]> {
+        match metadata & 7 {
+            0 => Some([(0, -1, 0), (0, 1, 0)]),
+            1 => Some([(-1, 0, 0), (1, 0, 0)]),
+            2 => Some([(-1, 0, 0), (1, 0, 1)]),
+            3 => Some([(-1, 0, 1), (1, 0, 0)]),
+            4 => Some([(0, -1, 1), (0, 1, 0)]),
+            5 => Some([(0, -1, 0), (0, 1, 1)]),
+            _ => None,
+        }
+    }
+
+    /// At most eight connected rail segments. Merely adjacent perpendicular
+    /// rails must not transmit power; endpoints must face and meet at height.
     fn rail_powered(&self, x: i32, y: i32, z: i32, id: u16) -> bool {
         use std::collections::{BTreeSet, VecDeque};
         let mut seen = BTreeSet::from([(x, y, z)]);
@@ -153,14 +235,28 @@ impl World {
             if distance >= 8 {
                 continue;
             }
-            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                for dy in [-1, 0, 1] {
-                    let at = (rx + dx, ry + dy, rz + dz);
-                    if in_bounds(at.0, at.1, at.2)
-                        && self.get(at.0, at.1, at.2) >> 4 == id
-                        && seen.insert(at)
-                    {
-                        next.push_back((at.0, at.1, at.2, distance + 1));
+            let current = self.get(rx, ry, rz);
+            let Some(ports) = Self::rail_ports(current & 7) else {
+                continue;
+            };
+            for (dx, dz, height) in ports {
+                for dy in -1..=1 {
+                    let (nx, ny, nz) = (rx + dx, ry + dy, rz + dz);
+                    if !in_bounds(nx, ny, nz) || seen.contains(&(nx, ny, nz)) {
+                        continue;
+                    }
+                    let candidate = self.get(nx, ny, nz);
+                    if candidate >> 4 != id {
+                        continue;
+                    }
+                    let Some(other_ports) = Self::rail_ports(candidate & 7) else {
+                        continue;
+                    };
+                    let connected = other_ports
+                        .iter()
+                        .any(|&(ox, oz, oh)| ox == -dx && oz == -dz && ry + height == ny + oh);
+                    if connected && seen.insert((nx, ny, nz)) {
+                        next.push_back((nx, ny, nz, distance + 1));
                     }
                 }
             }
@@ -473,6 +569,31 @@ impl World {
 mod redstone_regression_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn powered_rails_follow_orientation_not_simple_adjacency() {
+        let mut w = World::new();
+        w.import_block(0, 65, 0, (27 << 4) | 1).unwrap(); // east/west
+        w.import_block(1, 65, 0, 27 << 4).unwrap(); // north/south
+        w.import_block(1, 65, 1, 152 << 4).unwrap();
+        // The second rail is powered, but it is perpendicular to the first.
+        assert!(w.rail_powered(1, 65, 0, 27));
+        assert!(!w.rail_powered(0, 65, 0, 27));
+        w.import_block(1, 65, 0, (27 << 4) | 1).unwrap();
+        assert!(w.rail_powered(0, 65, 0, 27));
+    }
+
+    #[test]
+    fn powered_rail_slope_connects_to_raised_flat_rail() {
+        let mut w = World::new();
+        w.import_block(0, 65, 0, (27 << 4) | 2).unwrap(); // ascending east
+        w.import_block(1, 66, 0, (27 << 4) | 1).unwrap();
+        w.import_block(2, 66, 0, 152 << 4).unwrap();
+        assert!(w.rail_powered(0, 65, 0, 27));
+        // Reversing the slope disconnects the same two rail blocks.
+        w.import_block(0, 65, 0, (27 << 4) | 3).unwrap();
+        assert!(!w.rail_powered(0, 65, 0, 27));
+    }
 
     #[test]
     fn powered_repeater_only_outputs_in_its_facing_direction() {
