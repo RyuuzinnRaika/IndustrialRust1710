@@ -36,6 +36,11 @@ jobs:
           components: rustfmt, clippy
       - name: Verify formatting
         run: cargo fmt --all -- --check
+      # The repository does not currently track Cargo.lock. Freeze the resolution
+      # for this release job, package it, and use --locked for every subsequent build.
+      # Cross-release bit-for-bit reproducibility still needs a committed lockfile.
+      - name: Generate release dependency lockfile
+        run: cargo generate-lockfile
       - name: Run workspace tests
         run: cargo test --workspace --all-targets --locked
       - name: Build release executables
