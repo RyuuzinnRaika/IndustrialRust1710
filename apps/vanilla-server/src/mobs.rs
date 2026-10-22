@@ -315,6 +315,9 @@ impl Explosion {
         Event { id: 0x27, body }
     }
 }
+/// Optional Entity Metadata together with a changed grass block coordinate.
+pub type GrazingUpdate = (Option<Event>, (i32, i32, i32));
+
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct Mobs {
     entities: BTreeMap<i32, Mob>,
@@ -954,7 +957,7 @@ impl Mobs {
         world: &mut World,
         world_path: &Path,
         tick: u64,
-    ) -> io::Result<Vec<(Option<Event>, (i32, i32, i32))>> {
+    ) -> io::Result<Vec<GrazingUpdate>> {
         if tick <= self.last_graze_tick || !tick.is_multiple_of(2) {
             return Ok(Vec::new());
         }
@@ -968,7 +971,9 @@ impl Mobs {
                 continue;
             }
             let chance = if mob.baby { 25 } else { 500 };
-            if hash(tick ^ (mob.id as u64).wrapping_mul(0x9e3779b97f4a7c15)) % chance != 0 {
+            if !hash(tick ^ (mob.id as u64).wrapping_mul(0x9e3779b97f4a7c15))
+                .is_multiple_of(chance)
+            {
                 continue;
             }
             let (x, y, z) = (
@@ -2015,7 +2020,9 @@ mod tests {
         mobs.entities.get_mut(&id).unwrap().sheared = true;
         let successful_tick = (2..50000u64)
             .step_by(2)
-            .find(|tick| hash(*tick ^ (id as u64).wrapping_mul(0x9e3779b97f4a7c15)) % 500 == 0)
+            .find(|tick| {
+                hash(*tick ^ (id as u64).wrapping_mul(0x9e3779b97f4a7c15)).is_multiple_of(500)
+            })
             .unwrap();
         // Before grazing, the wool stays sheared.
         assert!(mobs.entities.get(&id).unwrap().sheared);
