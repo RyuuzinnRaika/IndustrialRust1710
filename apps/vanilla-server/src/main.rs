@@ -3186,6 +3186,19 @@ fn main() -> io::Result<()> {
             return Err(bad("usage: --recover-level-dat STOPPED_WORLD_DIR"));
         }
         let world_directory = Path::new(&raw_args[1]);
+        // Preflight is read-only. A corrupt backup or an existing level.dat
+        // must not cause recovery to rewrite the world's session.lock.
+        match std::fs::symlink_metadata(world_directory.join("level.dat")) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    "level.dat already exists; manual recovery never overwrites it",
+                ));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let _ = level_dat::read_level_file(&world_directory.join("level.dat_old"))?;
         let mut lock = session_lock::WorldSessionLock::acquire(world_directory)?;
         level_dat::restore_missing_level(world_directory, &mut lock)?;
         println!(
