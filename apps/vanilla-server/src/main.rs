@@ -19,6 +19,7 @@ mod journal;
 mod legacy_inventory_nbt;
 mod legacy_nbt;
 mod legacy_region;
+mod legacy_world_inspect;
 mod level_dat;
 mod mobs;
 mod multiplayer;
@@ -2909,6 +2910,7 @@ fn main() -> io::Result<()> {
             || arg == "--inspect-player-data"
             || arg == "--inspect-level-dat"
             || arg == "--inspect-anvil-region"
+            || arg == "--inspect-anvil-world"
     }) {
         None
     } else {
@@ -2922,6 +2924,7 @@ fn main() -> io::Result<()> {
         .as_ref()
         .map(|config| config.world_path.clone())
         .unwrap_or_else(|| PathBuf::from("world/flat.irw"));
+    let mut world_inspect_path: Option<PathBuf> = None;
     let mut region_inspect_path: Option<PathBuf> = None;
     let mut level_inspect_path: Option<PathBuf> = None;
     let mut player_inspect_path: Option<PathBuf> = None;
@@ -2940,7 +2943,7 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -3017,6 +3020,12 @@ fn main() -> io::Result<()> {
                         .ok_or_else(|| bad("missing --import-anvil directory"))?,
                 ));
             }
+            "--inspect-anvil-world" => {
+                world_inspect_path = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| bad("missing --inspect-anvil-world DIR"))?,
+                ));
+            }
             "--inspect-anvil-region" => {
                 region_inspect_path = Some(PathBuf::from(
                     args.next()
@@ -3069,6 +3078,29 @@ fn main() -> io::Result<()> {
         return Err(bad(
             "--export-anvil and --import-anvil are mutually exclusive",
         ));
+    }
+    if let Some(path) = world_inspect_path {
+        if region_inspect_path.is_some()
+            || level_inspect_path.is_some()
+            || player_inspect_path.is_some()
+            || backup_destination.is_some()
+            || anvil_import_path.is_some()
+            || anvil_export_path.is_some()
+        {
+            return Err(bad(
+                "--inspect-anvil-world cannot be combined with another file operation",
+            ));
+        }
+        let summary = legacy_world_inspect::inspect_world(&path)?;
+        println!(
+            "Anvil 1.7.10 world validated (read-only): {} dimension(s), {} region(s), {} chunk(s), {} player file(s), {} region byte(s)",
+            summary.dimensions,
+            summary.regions,
+            summary.chunks,
+            summary.player_files,
+            summary.region_bytes
+        );
+        return Ok(());
     }
     if let Some(path) = region_inspect_path {
         if level_inspect_path.is_some()
