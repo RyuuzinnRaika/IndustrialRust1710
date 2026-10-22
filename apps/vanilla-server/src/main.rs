@@ -20,6 +20,7 @@ mod inventory;
 mod items_1710;
 mod journal;
 mod legacy_chunk_store;
+mod legacy_entity_nbt;
 mod legacy_inventory_nbt;
 mod legacy_nbt;
 mod legacy_region;
