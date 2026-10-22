@@ -47,9 +47,16 @@ pub fn enchanting_costs(shelves: u8, seed: u64) -> [u8; 3] {
         state ^= state << 17;
         ((state >> 16) as u32) % (limit + 1)
     };
-    let base = 1 + sample(7) + (n >> 1) + sample(n);
-    [(base / 3).max(1) as u8, (2 * base / 3 + 1) as u8,
-        base.max(2 * n) as u8]
+    let mut costs = [0u8; 3];
+    for (option, cost) in costs.iter_mut().enumerate() {
+        let base = 1 + sample(7) + (n >> 1) + sample(n);
+        *cost = match option {
+            0 => (base / 3).max(1),
+            1 => 2 * base / 3 + 1,
+            _ => base.max(2 * n),
+        } as u8;
+    }
+    costs
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,13 +79,11 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
         return None;
     }
     let material = match left.id {
-        256..=259 | 267 | 292 | 306..=309 => 265, // iron
-        257 | 258 | 267 | 292 => 265,
-        268..=271 | 290 | 298..=301 => 5, // wood / leather handled below
+        256..=258 | 267 | 292 | 302..=309 => 265, // iron and chain
+        268..=271 | 290 => 5, // wood
         272..=275 | 291 => 4, // cobblestone
         276..=279 | 293 | 310..=313 => 264, // diamond
         283..=286 | 294 | 314..=317 => 266, // gold
-        302..=305 => 265, // chainmail, conservative proxy
         _ => -1,
     };
     let material = if (298..=301).contains(&left.id) { 334 } else { material };
