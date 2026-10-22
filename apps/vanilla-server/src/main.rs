@@ -6543,7 +6543,6 @@ fn main() -> io::Result<()> {
     println!("Server stopped: all sessions joined and persistent state flushed.");
     Ok(())
 }
-}
 #[cfg(test)]
 mod h_special_item_transaction_tests {
     use super::*;
