@@ -640,7 +640,11 @@ mod group_b_collision_tests {
     #[test]
     fn opened_door_collision_respects_upper_hinge_bit() {
         let mut world = World::new();
-        let position = PlayerPosition { x: 0.1, y: 64.0, z: 0.5 };
+        let position = PlayerPosition {
+            x: 0.1,
+            y: 64.0,
+            z: 0.5,
+        };
         world.import_block(0, 64, 0, (64 << 4) | 4).unwrap();
         world.import_block(0, 65, 0, (64 << 4) | 8).unwrap();
         assert!(!collides(&world, &position));
