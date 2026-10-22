@@ -186,7 +186,13 @@ impl Minecarts {
                     z: cart.position.z + if east_west { 0.0 } else { advance },
                     ..cart.position
                 };
-                if !next.is_valid() || rail(world, next).is_none() {
+                // Do not glide sideways onto a perpendicular straight rail.
+                // Curves and ascending tracks need their own explicit solver.
+                if !next.is_valid()
+                    || rail(world, next)
+                        .and_then(|(next_id, next_meta)| straight_axis(next_id, next_meta))
+                        != Some(east_west)
+                {
                     cart.speed = 0.0;
                     break;
                 }
@@ -219,6 +225,26 @@ impl Minecarts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn minecart_stops_before_perpendicular_unconnected_track() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, (27 << 4) | 9).unwrap();
+        world.import_block(1, 65, 0, (27 << 4) | 8).unwrap();
+        let origin = PlayerPosition {
+            x: 0.85,
+            y: 65.5,
+            z: 0.5,
+        };
+        let mut carts = Minecarts::default();
+        carts.place(&world, origin, 0).unwrap();
+        let cart = carts.carts.get_mut(&FIRST_ID).unwrap();
+        cart.speed = 0.35;
+        cart.direction = 1;
+        carts.tick(&world, 1);
+        assert!((carts.carts[&FIRST_ID].position.x - origin.x).abs() < f64::EPSILON);
+        assert_eq!(carts.carts[&FIRST_ID].speed, 0.0);
+    }
+
     #[test]
     fn minecart_mount_and_rail_bounds() {
         let mut world = World::new();
