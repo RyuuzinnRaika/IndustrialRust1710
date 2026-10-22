@@ -386,14 +386,9 @@ mod tests {
     fn symlinked_replay_targets_fail_closed_without_external_writes() {
         use std::os::unix::fs::symlink;
 
-        let home = std::env::temp_dir().join(format!(
-            "ir-journal-symlink-{}",
-            std::process::id()
-        ));
-        let outside = std::env::temp_dir().join(format!(
-            "ir-journal-outside-{}",
-            std::process::id()
-        ));
+        let home = std::env::temp_dir().join(format!("ir-journal-symlink-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("ir-journal-outside-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         let _ = fs::remove_dir_all(&outside);
         fs::create_dir_all(&home).unwrap();
