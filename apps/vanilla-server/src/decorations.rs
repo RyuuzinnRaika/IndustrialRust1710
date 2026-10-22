@@ -181,14 +181,14 @@ impl Decorations {
     pub fn occupied(&self, position: Position) -> bool {
         self.records.contains_key(&key(position)) || self.pots.contains_key(&key(position))
     }
-    pub fn set_record(
-        &mut self,
-        path: &Path,
-        position: Position,
-        item: Option<i16>,
-    ) -> io::Result<()> {
-        if item.is_some_and(|id| !(2256..=2267).contains(&id)) {
-            return Err(invalid("invalid record ID"));
+    /// Stage a jukebox disc change without making it visible. The caller
+    /// journals this snapshot with the inventory debit or item return to
+    /// prevent disc loss across a crash between otherwise separate saves.
+    pub fn stage_record(&self, position: Position, item: Option<i16>) -> io::Result<Self> {
+        if !world::in_bounds(position.0, position.1, position.2)
+            || item.is_some_and(|id| !(2256..=2267).contains(&id))
+        {
+            return Err(invalid("invalid record or jukebox position"));
         }
         let mut next = self.clone();
         match item {
@@ -199,6 +199,16 @@ impl Decorations {
                 next.records.remove(&key(position));
             }
         }
+        next.encoded()?;
+        Ok(next)
+    }
+    pub fn set_record(
+        &mut self,
+        path: &Path,
+        position: Position,
+        item: Option<i16>,
+    ) -> io::Result<()> {
+        let next = self.stage_record(position, item)?;
         next.save(path)?;
         *self = next;
         Ok(())
@@ -415,6 +425,73 @@ mod tests {
             .signs
             .contains_key(&key((3, 64, -2))));
         let _ = fs::remove_file(&path);
+    }
+    #[test]
+    fn jukebox_disc_and_inventory_survive_an_atomic_round_trip() {
+        let root = std::env::temp_dir().join(format!("irw-record-journal-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let decoration_path = root.join("world.decorations.json");
+        let inventory_path = root.join("reader.inventory.json");
+        let log_path = root.join("world.pending-txn.json");
+        let disc = Stack {
+            id: 2256,
+            count: 1,
+            damage: 0,
+        };
+        let mut inventory = crate::inventory::Inventory::default();
+        inventory.creative_set(36, Some(disc)).unwrap();
+        let mut debited = inventory.clone();
+        assert!(debited.consume_held());
+        let inserted = Decorations::default()
+            .stage_record((1, 64, 1), Some(disc.id))
+            .unwrap();
+        crate::journal::commit(
+            &log_path,
+            &[
+                (&decoration_path, inserted.encoded().unwrap()),
+                (&inventory_path, debited.encoded().unwrap()),
+            ],
+        )
+        .unwrap();
+        assert!(crate::inventory::Inventory::load(&inventory_path)
+            .unwrap()
+            .held()
+            .is_none());
+        assert_eq!(
+            Decorations::load(&decoration_path)
+                .unwrap()
+                .record((1, 64, 1)),
+            Some(disc.id)
+        );
+
+        let mut returned = crate::inventory::Inventory::load(&inventory_path).unwrap();
+        assert!(returned.receive_stack(disc).is_some());
+        let ejected = Decorations::load(&decoration_path)
+            .unwrap()
+            .stage_record((1, 64, 1), None)
+            .unwrap();
+        crate::journal::commit(
+            &log_path,
+            &[
+                (&decoration_path, ejected.encoded().unwrap()),
+                (&inventory_path, returned.encoded().unwrap()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            Decorations::load(&decoration_path)
+                .unwrap()
+                .record((1, 64, 1)),
+            None
+        );
+        assert_eq!(
+            crate::inventory::Inventory::load(&inventory_path)
+                .unwrap()
+                .held(),
+            Some(disc)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn pot_item_and_inventory_are_saved_as_one_recoverable_transaction() {

@@ -2170,11 +2170,18 @@ fn play(
                                         })
                                         .is_some()
                                 {
-                                    // Debit the jukebox first, then return the item (loss on crash, not duplication).
-                                    stored.set_record(decoration_path, pos, None)?;
+                                    let staged = stored.stage_record(pos, None)?;
+                                    let mut changes = vec![(decoration_path, staged.encoded()?)];
+                                    if survival {
+                                        changes.push((inventory_path, candidate.encoded()?));
+                                    }
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &changes,
+                                    )?;
+                                    *stored = staged;
                                     w.update_and_save(world_path, x, y, z, 84 << 4)?;
                                     if survival {
-                                        candidate.save(inventory_path)?;
                                         *inventory = candidate;
                                         send(s, 0x30, &inventory.window_items())?;
                                     }
@@ -2192,12 +2199,20 @@ fn play(
                                 let disc = inventory.held().unwrap().id;
                                 let mut candidate = inventory.clone();
                                 if !survival || candidate.consume_held() {
+                                    let staged = stored.stage_record(pos, Some(disc))?;
+                                    let mut changes = vec![(decoration_path, staged.encoded()?)];
                                     if survival {
-                                        candidate.save(inventory_path)?;
+                                        changes.push((inventory_path, candidate.encoded()?));
+                                    }
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &changes,
+                                    )?;
+                                    *stored = staged;
+                                    if survival {
                                         *inventory = candidate;
                                         send(s, 0x30, &inventory.window_items())?;
                                     }
-                                    stored.set_record(decoration_path, pos, Some(disc))?;
                                     w.update_and_save(world_path, x, y, z, (84 << 4) | 1)?;
                                     hub.broadcast(block_change_event(&w, x, y, z));
                                     hub.broadcast(Event {
