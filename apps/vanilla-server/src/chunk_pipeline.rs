@@ -4,11 +4,15 @@
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::io::{self, Write};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::{Duration, Instant};
 
 const QUEUE_CAPACITY: usize = 32;
+/// Per-session bounded batch to prevent one login from filling the shared queue.
+pub const SESSION_BATCH_LIMIT: usize = 8;
+const SUBMIT_TIMEOUT: Duration = Duration::from_millis(100);
 const WORKERS: usize = 2;
 const MAX_RAW_CHUNK_BYTES: usize = 16 * 10_240 + 256;
 static WORK: OnceLock<SyncSender<Job>> = OnceLock::new();
@@ -99,15 +103,35 @@ pub fn submit(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChun
     }
     let (tx, rx) = mpsc::sync_channel(1);
     // Bounded backpressure: never allocate an unbounded work backlog.
-    sender()
-        .send(Job {
-            x,
-            z,
-            mask,
-            raw,
-            reply: tx,
-        })
-        .map_err(|_| io::Error::other("chunk compression queue closed"))?;
+    // Never indefinitely block an inbound session on an overloaded compression
+    // pipeline. The calling thread must NOT hold the world lock at this point.
+    // Keep ownership of the Job across retries; no duplicate jobs are queued.
+    let mut job = Job {
+        x,
+        z,
+        mask,
+        raw,
+        reply: tx,
+    };
+    let deadline = Instant::now() + SUBMIT_TIMEOUT;
+    loop {
+        match sender().try_send(job) {
+            Ok(()) => break,
+            Err(TrySendError::Full(pending)) => {
+                job = pending;
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "chunk compression queue busy",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(io::Error::other("chunk compression queue closed"));
+            }
+        }
+    }
     Ok(PendingChunk(rx))
 }
 
