@@ -364,8 +364,11 @@ impl World {
         }
         // Snow and ice use nearby edited surface columns, never a global
         // biome/chunk scan. Only a small share of this tick's existing budget.
-        if self.raining {
-            for &(x, y, z) in self.pending_weather.iter().take(budget) {
+        let weather_len = self.pending_weather.len();
+        if self.raining && weather_len != 0 {
+            let offset = (self.fluid_phase as usize).wrapping_mul(budget) % weather_len;
+            for &(x, y, z) in self.pending_weather.iter().cycle()
+                .skip(offset).take(budget.min(weather_len)) {
                 let y = i32::from(y);
                 if !self.is_cold_biome(x, z) || !in_bounds(x, y + 1, z)
                     || !(y + 1..=255).all(|sy| self.get(x, sy, z) == 0)
@@ -385,9 +388,13 @@ impl World {
         }
         // Redstone-powered TNT becomes an entity, not an immediately
         // exploding block. Chain-primed blocks use the shorter legacy fuse.
-        for &(x, y, z) in self.pending_devices.iter().take(budget) {
+        if len != 0 {
+            let offset = (self.fluid_phase as usize).wrapping_mul(budget) % len;
+            for &(x, y, z) in self.pending_devices.iter().cycle()
+                .skip(offset).take(budget.min(len)) {
             if self.get(x, i32::from(y), z) >> 4 == 46 && self.powered_near(x, i32::from(y), z) {
                 changes.insert((x, y, z), 0);
+            }
             }
         }
         for tnt in self
@@ -544,6 +551,48 @@ mod tests {
         let path = file("eye");
         w.update_and_save(&path, 3, 65, 3, (120 << 4) | 4).unwrap();
         assert!(w.insert_end_eye(&path, 3, 65, 3).unwrap().is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn portal_ring_activates_nine_tiles_and_persists() {
+        let path = file("portal");
+        let mut world = World::new();
+        let y = 80;
+        for dx in -1..=1 {
+            for (px, pz) in [(dx, -2), (dx, 2), (-2, dx), (2, dx)] {
+                let meta = if (px, pz) == (0, -2) { 0 } else { 4 };
+                world.import_block(px, y, pz, (120 << 4) | meta).unwrap();
+            }
+        }
+        world.save(&path).unwrap();
+        let changed = world.insert_end_eye(&path, 0, y, -2).unwrap();
+        assert_eq!(changed.len(), 10);
+        let saved = World::load(&path).unwrap();
+        assert_eq!(saved.get(0, y, -2) & 4, 4);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                assert_eq!(saved.get(dx, y, dz) >> 4, 119);
+            }
+        }
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn primed_tnt_waits_eighty_server_ticks() {
+        let path = file("tnt");
+        let mut world = World::new();
+        world.update_and_save(&path, 1, 64, 1, 46 << 4).unwrap();
+        assert!(world.ignite_tnt(&path, 1, 64, 1).unwrap());
+        assert_eq!(world.drain_tnt_events().len(), 1);
+        for _ in 0..79 {
+            world.block_tick(&path, 64).unwrap();
+            assert!(world.drain_tnt_events().is_empty());
+        }
+        world.block_tick(&path, 64).unwrap();
+        assert!(world.drain_tnt_events().iter().any(|event| {
+            matches!(event, TntEvent::Explode { .. })
+        }));
         fs::remove_file(path).ok();
     }
 
