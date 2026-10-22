@@ -35,7 +35,7 @@ fn validate_locations(locations: &[u8; SECTOR_BYTES], sectors: usize) -> io::Res
     let mut occupied = vec![false; sectors];
     occupied[0] = true; // Location table
     occupied[1] = true; // Timestamp table
-    for entry in locations.chunks_exact(4) {
+    for entry in locations.as_chunks::<4>().0 {
         let offset =
             (usize::from(entry[0]) << 16) | (usize::from(entry[1]) << 8) | usize::from(entry[2]);
         let count = usize::from(entry[3]);
