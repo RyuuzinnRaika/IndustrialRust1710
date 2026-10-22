@@ -1,6 +1,6 @@
 //! B14: bounded, server-authoritative rideable minecart foundation.
-//! Flat straight rails and powered rail acceleration are supported first;
-//! junction switching, slopes, minecart collisions and durable NBT remain TODO.
+//! Straight and sloped rails and powered acceleration are supported first;
+//! junction switching, curves, minecart collisions and durable NBT remain TODO.
 use crate::multiplayer::{self, Event};
 use crate::player::PlayerPosition;
 use crate::vehicles::attachment;
@@ -34,10 +34,61 @@ fn rail(world: &World, pos: PlayerPosition) -> Option<(u16, u16)> {
 
 fn straight_axis(id: u16, meta: u16) -> Option<bool> {
     match if id == 66 { meta } else { meta & 7 } {
-        0 => Some(false), // north/south
-        1 => Some(true),  // east/west
-        _ => None,        // unsupported junction / ascending track
+        0 | 4 | 5 => Some(false), // north/south, ascending N/S
+        1..=3 => Some(true),      // east/west, ascending E/W
+        _ => None,                // corners and switches need an explicit turn solver
     }
+}
+
+/// Rail center height in world coordinates. Ascending rails climb one
+/// block over the width of the rail cell. Player-position Y is rail
+/// baseline + 0.5, consistent with normal minecart placement.
+fn rail_height(y: i32, id: u16, meta: u16, x: f64, z: f64) -> f64 {
+    let fraction_x = x.rem_euclid(1.0);
+    let fraction_z = z.rem_euclid(1.0);
+    let slope = match if id == 66 { meta } else { meta & 7 } {
+        2 => fraction_x,
+        3 => 1.0 - fraction_x,
+        4 => 1.0 - fraction_z,
+        5 => fraction_z,
+        _ => 0.0,
+    };
+    f64::from(y) + 0.5 + slope
+}
+
+/// Find the actual rail in a column, including a high end of a slope
+/// whose rail block is one Y below the cart's current feet position.
+/// Refuse transitions with a vertical gap or a perpendicular rail.
+fn straight_track(
+    world: &World,
+    at: PlayerPosition,
+    axis: Option<bool>,
+) -> Option<(u16, u16, f64, bool)> {
+    let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
+    let base = (at.y - 0.5).floor() as i32;
+    let mut selected: Option<(u16, u16, f64, bool, f64)> = None;
+    for y in [base, base - 1, base + 1] {
+        let block = world.get(x, y, z);
+        let (id, meta) = (block >> 4, block & 15);
+        if !matches!(id, 27 | 28 | 66 | 157) {
+            continue;
+        }
+        let Some(east_west) = straight_axis(id, meta) else {
+            continue;
+        };
+        if axis.is_some_and(|wanted| wanted != east_west) {
+            continue;
+        }
+        let height = rail_height(y, id, meta, at.x, at.z);
+        let distance = (height - at.y).abs();
+        if distance > 0.51 {
+            continue;
+        }
+        if selected.is_none_or(|candidate| distance < candidate.4) {
+            selected = Some((id, meta, height, east_west, distance));
+        }
+    }
+    selected.map(|(id, meta, y, axis, _)| (id, meta, y, axis))
 }
 
 impl Cart {
@@ -78,6 +129,16 @@ impl Minecarts {
         }
         let id = FIRST_ID.checked_add(self.next)?;
         self.next = self.next.checked_add(1)?;
+        let (x, y, z) = (
+            at.x.floor() as i32,
+            (at.y - 0.5).floor() as i32,
+            at.z.floor() as i32,
+        );
+        let state = world.get(x, y, z);
+        let at = PlayerPosition {
+            y: rail_height(y, state >> 4, state & 15, at.x, at.z),
+            ..at
+        };
         let cart = Cart {
             id,
             position: at,
@@ -158,14 +219,13 @@ impl Minecarts {
             }
             cart.last_tick = now;
             for _ in 0..steps {
-                let Some((id, meta)) = rail(world, cart.position) else {
+                let Some((id, meta, height, east_west)) =
+                    straight_track(world, cart.position, None)
+                else {
                     cart.speed = 0.0;
                     break;
                 };
-                let Some(east_west) = straight_axis(id, meta) else {
-                    cart.speed = 0.0;
-                    break;
-                };
+                cart.position.y = height;
                 if id == 27 {
                     if meta & 8 != 0 {
                         let drive = if cart.speed < 0.0 { -1.0 } else { 1.0 };
@@ -186,13 +246,23 @@ impl Minecarts {
                     z: cart.position.z + if east_west { 0.0 } else { advance },
                     ..cart.position
                 };
-                // Do not glide sideways onto a perpendicular straight rail.
-                // Curves and ascending tracks need their own explicit solver.
-                if !next.is_valid()
-                    || rail(world, next)
-                        .and_then(|(next_id, next_meta)| straight_axis(next_id, next_meta))
-                        != Some(east_west)
-                {
+                // Sample the destination rail at its interpolated elevation.
+                // Uphill/downhill transitions must physically meet; a rail
+                // that is a full block above or below cannot teleport the cart.
+                let Some((_, _, next_height, _)) = straight_track(world, next, Some(east_west))
+                else {
+                    cart.speed = 0.0;
+                    break;
+                };
+                if (next_height - cart.position.y).abs() > 0.51 {
+                    cart.speed = 0.0;
+                    break;
+                }
+                let next = PlayerPosition {
+                    y: next_height,
+                    ..next
+                };
+                if !next.is_valid() {
                     cart.speed = 0.0;
                     break;
                 }
@@ -225,6 +295,53 @@ impl Minecarts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ascending_east_connects_lower_and_upper_tracks() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, (27 << 4) | 9).unwrap();
+        world.import_block(1, 64, 0, (27 << 4) | 10).unwrap();
+        world.import_block(2, 65, 0, (27 << 4) | 9).unwrap();
+        let at = PlayerPosition {
+            x: 0.8,
+            y: 64.5,
+            z: 0.5,
+        };
+        let mut carts = Minecarts::default();
+        carts.place(&world, at, 0).unwrap();
+        let cart = carts.carts.get_mut(&FIRST_ID).unwrap();
+        cart.speed = 0.34;
+        cart.direction = 1;
+        for tick in 1..7 {
+            carts.tick(&world, tick);
+        }
+        let at = carts.carts[&FIRST_ID].position;
+        assert!(at.x > 2.0, "cart failed to climb: {}", at.x);
+        assert!(
+            (at.y - 65.5).abs() < 0.05,
+            "incorrect slope height: {}",
+            at.y
+        );
+    }
+
+    #[test]
+    fn slope_rejects_unconnected_one_block_jump() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, (27 << 4) | 9).unwrap();
+        world.import_block(1, 65, 0, (27 << 4) | 9).unwrap();
+        let at = PlayerPosition {
+            x: 0.85,
+            y: 64.5,
+            z: 0.5,
+        };
+        let mut carts = Minecarts::default();
+        carts.place(&world, at, 0).unwrap();
+        let cart = carts.carts.get_mut(&FIRST_ID).unwrap();
+        cart.speed = 0.35;
+        carts.tick(&world, 1);
+        assert!(carts.carts[&FIRST_ID].position.x < 1.0);
+        assert_eq!(carts.carts[&FIRST_ID].speed, 0.0);
+    }
+
     #[test]
     fn minecart_stops_before_perpendicular_unconnected_track() {
         let mut world = World::new();
