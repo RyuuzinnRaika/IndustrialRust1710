@@ -6155,7 +6155,10 @@ fn main() -> io::Result<()> {
                                 // without creating a ground entity. Both inventories
                                 // share one persisted device file and one journal commit.
                                 if state >> 4 == 158
-                                    && matches!(gravity_world.get(dest.0, dest.1, dest.2) >> 4, 23 | 158)
+                                    && matches!(
+                                        gravity_world.get(dest.0, dest.1, dest.2) >> 4,
+                                        23 | 158
+                                    )
                                 {
                                     let staged = match storage.stage_transfer_one(pos, dest, seed) {
                                         Ok(value) => value,
