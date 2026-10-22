@@ -407,7 +407,10 @@ mod tests {
         assert_eq!(restored.note((4, 64, -2)), 1);
         assert_eq!(restored.record((5, 64, -2)), Some(2256));
         store.remove(&path, (3, 64, -2)).unwrap();
-        assert!(Decorations::load(&path).unwrap().signs.get(&key((3, 64, -2)))
+        assert!(Decorations::load(&path)
+            .unwrap()
+            .signs
+            .get(&key((3, 64, -2)))
             .is_none());
         let _ = fs::remove_file(&path);
     }
