@@ -583,6 +583,59 @@ struct PlayerSession<'a> {
     entity_id: i32,
     events: &'a Receiver<Event>,
 }
+/// Apply server-authoritative special item uses; return None for a normal
+/// right-click, Some(changes) when this interaction was handled (including no-op).
+fn use_special_item(
+    w: &mut World, world_path: &Path, inventory: &mut Inventory,
+    inventory_path: &Path, survival: bool, x: i32, y: i32, z: i32,
+) -> io::Result<Option<Vec<(i32, i32, i32)>>> {
+    let Some(held) = inventory.held() else { return Ok(None) };
+    let target = w.get(x, y, z) >> 4;
+    let cauldron = w.cauldron_exchange(x, y, z, held);
+    let action = if cauldron.is_some() {
+        1
+    } else if target == 120 && held.id == 381 {
+        2
+    } else if held.id == 351 && held.damage == 15 {
+        3
+    } else {
+        return Ok(None);
+    };
+    let mut candidate = inventory.clone();
+    if survival {
+        let spent = match cauldron {
+            Some((_, replacement)) => candidate.exchange_one_held(replacement),
+            None => candidate.consume_held(),
+        };
+        if !spent { return Ok(Some(Vec::new())); }
+        // Never grant a free block while persistence is uncertain.
+        candidate.save(inventory_path)?;
+    }
+    let result = match action {
+        1 => {
+            let (block, _) = cauldron.expect("cauldron action must have a replacement");
+            w.update_and_save(world_path, x, y, z, block)
+                .map(|changed| if changed { vec![(x, y, z)] } else { Vec::new() })
+        }
+        2 => w.insert_end_eye(world_path, x, y, z),
+        _ => w.apply_bonemeal(world_path, x, y, z),
+    };
+    match result {
+        Ok(changed) if !changed.is_empty() => {
+            if survival { *inventory = candidate; }
+            Ok(Some(changed))
+        }
+        Ok(_) => {
+            if survival { inventory.save(inventory_path)?; }
+            Ok(Some(Vec::new()))
+        }
+        Err(error) => {
+            if survival { inventory.save(inventory_path)?; }
+            Err(error)
+        }
+    }
+}
+
 fn play(
     s: &mut TcpStream,
     world: &Mutex<World>,
@@ -1469,6 +1522,15 @@ fn play(
                     if world::in_bounds(bx, by, bz) && w.press_plate(world_path, bx, by, bz)? {
                         hub.broadcast(block_change_event(&w, bx, by, bz));
                     }
+                    // Tripwire triggers are evaluated at feet and body height,
+                    // never from untrusted client onGround flags.
+                    for ty in [by + 1, by + 2] {
+                        if world::in_bounds(bx, ty, bz) {
+                            for (tx, hy, tz) in w.touch_tripwire(world_path, bx, ty, bz)? {
+                                hub.broadcast(block_change_event(&w, tx, hy, tz));
+                            }
+                        }
+                    }
                 }
                 location = (x, y, z);
                 *player = candidate;
@@ -1788,6 +1850,24 @@ fn play(
                         }
                     }
                     continue;
+                }
+                // Cauldrons, End eyes and bone meal use the authoritative
+                // selected slot. Multi-block trees/portals use one world commit.
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && inventory.can_place(held)
+                {
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    if let Some(changes) = use_special_item(
+                        &mut w, world_path, inventory, inventory_path, survival, x, y, z,
+                    )? {
+                        for (cx, cy, cz) in changes {
+                            hub.broadcast(block_change_event(&w, cx, cy, cz));
+                        }
+                        if survival { send(s, 0x30, &inventory.window_items())?; }
+                        continue;
+                    }
                 }
                 // Hoe -> farmland. In Survival, commit tool wear first;
                 // no item is consumed for tilling soil.
@@ -2153,6 +2233,7 @@ fn play(
                             // dust ID331 -> wire55, water/lava buckets -> fluid8/10.
                             let block_id = match stack.id {
                                 331 => 55,
+                                287 => 132, // placed tripwire string
                                 379 => 117,
                                 326 => 8,
                                 327 => 10,
@@ -3710,6 +3791,7 @@ fn main() -> io::Result<()> {
                 };
                 // Fire uses the same clock/weather source as client rain packets.
                 gravity_world.set_raining(weather.0);
+                gravity_world.set_day_time(furnace_clock.day_time());
                 for _ in 0..steps {
                     match gravity_world.gravity_tick(&furnace_world_path, 64) {
                         Ok(changes) => {
