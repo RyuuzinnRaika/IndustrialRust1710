@@ -2591,18 +2591,18 @@ mod tests {
     }
     #[test]
     fn anvil_insufficient_experience_is_fail_closed() {
-        let inv = Inventory {
+        let mut inv = Inventory {
             anvil_inputs: [
-            Some(Stack {
-                id: 257,
-                count: 1,
-                damage: 100,
-            }),
-            Some(Stack {
-                id: 265,
-                count: 3,
-                damage: 0,
-            }),
+                Some(Stack {
+                    id: 257,
+                    count: 1,
+                    damage: 100,
+                }),
+                Some(Stack {
+                    id: 265,
+                    count: 3,
+                    damage: 0,
+                }),
             ],
             ..Inventory::default()
         };
