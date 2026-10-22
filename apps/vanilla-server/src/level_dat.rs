@@ -162,6 +162,58 @@ pub(crate) fn create_level_file(path: &Path, root: &LevelRoot) -> io::Result<()>
     Ok(())
 }
 
+/// Explicit OFFLINE recovery for a missing level.dat, preserving the original
+/// compressed NBT bytes from level.dat_old. Never repairs an existing level.dat.
+/// The caller must hold the world session lock; this cannot protect against
+/// a non-cooperating Java server, so only run it on a stopped world.
+pub(crate) fn restore_missing_level(
+    world_dir: &Path,
+    lock: &mut crate::session_lock::WorldSessionLock,
+) -> io::Result<()> {
+    if !fs::symlink_metadata(world_dir)?.file_type().is_dir() {
+        return Err(invalid("recovery requires a real world directory"));
+    }
+    let current = world_dir.join("level.dat");
+    match fs::symlink_metadata(&current) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "level.dat exists; refusing any automatic replacement",
+            ));
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let previous = world_dir.join("level.dat_old");
+    // First validate the source according to the full 1.7.10 NBT parser.
+    let _ = read_level_file(&previous)?;
+    let compressed = fs::read(&previous)?;
+    if compressed.len() as u64 > MAX_COMPRESSED_BYTES {
+        return Err(invalid("recovery source exceeds compressed NBT limit"));
+    }
+    lock.verify()?;
+    let staging = world_dir.join("level.dat.recovering");
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)?;
+    let result = (|| {
+        output.write_all(&compressed)?;
+        output.sync_all()?;
+        drop(output);
+        // Check the exact bytes we intend to publish, without converting
+        // unknown NBT fields to a different serialization.
+        let _ = read_level_file(&staging)?;
+        lock.verify()?;
+        fs::hard_link(&staging, &current)?;
+        #[cfg(unix)]
+        fs::File::open(world_dir)?.sync_all()?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&staging);
+    result
+}
+
 /// Return the checked level.dat, including all unknown NBT fields in memory.
 pub(crate) fn read_level_file(path: &Path) -> io::Result<LevelRoot> {
     let metadata = fs::symlink_metadata(path)?;
@@ -272,6 +324,49 @@ mod tests {
         assert!(!path.exists());
         assert!(!path.with_extension("creating").exists());
         fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn restores_missing_level_from_old_without_changing_gzip_bytes() {
+        let world = std::env::temp_dir().join(format!(
+            "ir1710-level-recovery-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&world);
+        fs::create_dir(&world).unwrap();
+        let previous = world.join("level.dat_old");
+        let mut compressor = GzEncoder::new(Vec::new(), Compression::default());
+        compressor
+            .write_all(&fastnbt::to_bytes(&sample()).unwrap())
+            .unwrap();
+        let compressed = compressor.finish().unwrap();
+        fs::write(&previous, &compressed).unwrap();
+        let mut lock = crate::session_lock::WorldSessionLock::acquire(&world).unwrap();
+        restore_missing_level(&world, &mut lock).unwrap();
+        assert_eq!(fs::read(world.join("level.dat")).unwrap(), compressed);
+        assert_eq!(fs::read(&previous).unwrap(), compressed);
+        assert!(restore_missing_level(&world, &mut lock).is_err());
+        drop(lock);
+        fs::remove_dir_all(world).unwrap();
+    }
+
+    #[test]
+    fn refuses_corrupt_old_level_and_never_creates_target() {
+        let world = std::env::temp_dir().join(format!(
+            "ir1710-level-recovery-invalid-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&world);
+        fs::create_dir(&world).unwrap();
+        fs::write(world.join("level.dat_old"), b"not gzip or NBT").unwrap();
+        let mut lock = crate::session_lock::WorldSessionLock::acquire(&world).unwrap();
+        assert!(restore_missing_level(&world, &mut lock).is_err());
+        assert!(!world.join("level.dat").exists());
+        assert!(!world.join("level.dat.recovering").exists());
+        drop(lock);
+        fs::remove_dir_all(world).unwrap();
     }
 
     #[test]
