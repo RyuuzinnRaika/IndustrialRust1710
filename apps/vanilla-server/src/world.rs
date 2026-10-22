@@ -338,6 +338,54 @@ impl World {
             _ => None,
         }
     }
+    /// Bounded lookup of intact dungeon spawners close to active players.
+    /// IRW4 generated sites are indexed by their 64-block feature cells so
+    /// this never walks ungenerated chunks or scans a large 3D volume.
+    /// Spawners added through block edits are also included.
+    pub fn nearby_spawners(
+        &self,
+        players: &[crate::player::PlayerPosition],
+    ) -> Vec<(i32, i32, i32)> {
+        let players: Vec<_> = players
+            .iter()
+            .copied()
+            .filter(|p| p.is_valid())
+            .take(32)
+            .collect();
+        if players.is_empty() {
+            return Vec::new();
+        }
+        let nearby = |x: i32, y: i32, z: i32| {
+            players.iter().any(|p| {
+                (p.x - (f64::from(x) + 0.5)).powi(2)
+                    + (p.y - (f64::from(y) + 0.5)).powi(2)
+                    + (p.z - (f64::from(z) + 0.5)).powi(2)
+                    <= 16.0 * 16.0
+            })
+        };
+        let mut found = BTreeSet::new();
+        if let Generation::Expanded(seed, crate::dimensions::Dimension::Overworld) = self.generation {
+            for player in &players {
+                let gx = (player.x.floor() as i32).div_euclid(64);
+                let gz = (player.z.floor() as i32).div_euclid(64);
+                for rx in gx - 1..=gx + 1 {
+                    for rz in gz - 1..=gz + 1 {
+                        let (x, y, z) = crate::worldgen::dungeon_spawner_in_cell(seed, rx, rz);
+                        if nearby(x, y, z) && self.get(x, y, z) >> 4 == 52 {
+                            found.insert((x, y, z));
+                        }
+                    }
+                }
+            }
+        }
+        for (&(x, y, z), &block) in &self.edits {
+            if block >> 4 == 52 && nearby(x, i32::from(y), z) {
+                found.insert((x, i32::from(y), z));
+            }
+        }
+        found.into_iter().take(128).collect()
+    }
+
     pub fn with_biomes(seed: u64) -> Self {
         Self {
             generation: Generation::Biomes(seed),
@@ -1570,6 +1618,25 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_spawner_lookup_tracks_removal_and_placement() {
+        let seed = 42;
+        let mut overworld = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+        let (x, y, z) = crate::worldgen::dungeon_spawner_in_cell(seed, 0, 0);
+        let player = crate::player::PlayerPosition {
+            x: f64::from(x) + 0.5,
+            y: f64::from(y) + 1.0,
+            z: f64::from(z) + 0.5,
+        };
+        assert!(overworld.nearby_spawners(&[player]).contains(&(x, y, z)));
+        overworld.import_block(x, y, z, 0).unwrap();
+        assert!(!overworld.nearby_spawners(&[player]).contains(&(x, y, z)));
+        overworld.import_block(x, y, z, 52 << 4).unwrap();
+        assert!(overworld.nearby_spawners(&[player]).contains(&(x, y, z)));
+        let nether = World::expanded(seed, crate::dimensions::Dimension::Nether);
+        assert!(!nether.nearby_spawners(&[player]).contains(&(x, y, z)));
+    }
+
     #[test]
     fn flower_support_break_detaches_original_variant_after_commit() {
         let path = std::env::temp_dir().join(format!("ir1710-flower-{}.irw", std::process::id()));
