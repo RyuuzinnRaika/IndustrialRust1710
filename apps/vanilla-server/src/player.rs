@@ -13,7 +13,7 @@ const MAX_COMPRESSED_BYTES: u64 = 8192;
 const MAX_DECOMPRESSED_BYTES: u64 = 32768;
 const MAX_LEGACY_BYTES: u64 = 2048;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlayerPosition {
     pub x: f64,
     pub y: f64,

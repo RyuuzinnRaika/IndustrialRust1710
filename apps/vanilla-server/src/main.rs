@@ -211,6 +211,7 @@ struct InitialPlayer<'a> {
     inventory: &'a Inventory,
     vitals: Vitals,
     survival: bool,
+    difficulty: u8,
 }
 fn join(
     s: &mut TcpStream,
@@ -224,6 +225,7 @@ fn join(
         inventory,
         vitals,
         survival,
+        difficulty,
     } = initial;
     // S01 Join Game: entity i32, gamemode u8 (1=creative), dimension i8,
     // difficulty u8, maxPlayers u8, levelType string.
@@ -237,7 +239,7 @@ fn join(
     join.extend_from_slice(&[
         u8::from(!survival),
         dimension_id as u8,
-        2, // Java 1.7.10 Normal difficulty is protocol value 2
+        difficulty, // explicitly configured difficulty
         MAX_PLAYERS as u8,
     ]);
     write_string("default", &mut join)?;
@@ -543,6 +545,7 @@ struct PlayerSession<'a> {
     brewers: &'a Mutex<Brewers>,
     brewer_path: &'a Path,
     survival: bool,
+    difficulty: u8,
     hub: &'a Hub,
     entity_id: i32,
     events: &'a Receiver<Event>,
@@ -576,6 +579,7 @@ fn play(
         brewers,
         brewer_path,
         survival,
+        difficulty,
         hub,
         entity_id,
         events,
@@ -777,10 +781,12 @@ fn play(
             let players = hub.positions()?;
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
-            let updates = creatures.tick(now_tick, &w, &players);
+            let mut updates = creatures.tick(now_tick, &w, &players);
             let explosions = creatures.take_explosions();
-            creatures.queue_explosion_hits(&explosions, &participants);
-            let hurt = creatures.hurt_player(entity_id, *player, now_tick);
+            updates.extend(creatures.queue_explosion_hits(&w, &explosions, &participants));
+            updates.extend(creatures.take_player_effects(entity_id, *player, now_tick));
+            let hurt =
+                creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
             let drops = creatures.take_drops();
             drop(creatures);
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
@@ -1158,6 +1164,50 @@ fn play(
                 input.finish()?;
                 if survival && vitals.health > 0.0 && action == 0 {
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    // Shears, a sheep's shared metadata, inventory durability and
+                    // spawned wool are all decided by the server.
+                    if inventory.held().is_some_and(|item| item.id == 359) {
+                        if let Some((wool, event)) =
+                            creatures.shear(target_id, *player, inventory.held())
+                        {
+                            let mut next_inventory = inventory.clone();
+                            if next_inventory.wear_held_tool() {
+                                next_inventory.save(inventory_path)?;
+                                *inventory = next_inventory;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                let mut ground = ground_items
+                                    .lock()
+                                    .map_err(|_| bad("ground items mutex poisoned"))?;
+                                if !ground.is_full() {
+                                    let at = (
+                                        player.x.floor() as i32,
+                                        player.y.floor() as i32,
+                                        player.z.floor() as i32,
+                                    );
+                                    let dropped = ground.put(ground_path, wool, at)?;
+                                    for packet in dropped.spawn() {
+                                        hub.broadcast(packet);
+                                    }
+                                }
+                                hub.broadcast(event);
+                            }
+                            continue;
+                        }
+                    }
+                    // Server-controlled villager barter, never trust a client
+                    // supplied output stack. Clone first to ensure we can fit
+                    // the reward without deleting the emerald on a full bag.
+                    if let Some(output) =
+                        creatures.village_offer(target_id, *player, inventory.held())
+                    {
+                        let mut candidate = inventory.clone();
+                        if candidate.consume_held() && candidate.receive_stack(output).is_some() {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
+                            send(s, 0x30, &inventory.window_items())?;
+                            continue;
+                        }
+                    }
                     if let Some(event) =
                         creatures.feed(target_id, *player, inventory.held(), now_tick)
                     {
@@ -2582,7 +2632,7 @@ fn play(
                     }
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = 0i32.to_be_bytes().to_vec();
-                    respawn.extend_from_slice(&[2, 0]); // normal difficulty, survival
+                    respawn.extend_from_slice(&[difficulty, 0]); // configured difficulty, survival
                     write_string("default", &mut respawn)?;
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks on respawn
@@ -2688,6 +2738,7 @@ struct ServerContext {
     brewers: Arc<Mutex<Brewers>>,
     brewer_path: Arc<PathBuf>,
     survival: bool,
+    difficulty: u8,
 }
 fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     let ServerContext {
@@ -2708,6 +2759,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         brewers,
         brewer_path,
         survival,
+        difficulty,
     } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -2823,6 +2875,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             inventory: &inventory_state,
             vitals: player_vitals,
             survival,
+            difficulty,
         },
     )?;
     if survival {
@@ -2886,16 +2939,26 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             brewers: &brewers,
             brewer_path: &brewer_path,
             survival,
+            difficulty,
             hub: &hub,
             entity_id,
             events: &events,
         },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
+    // Snapshot living entities on disconnect, not only on periodic 20TPS ticks.
+    // Always lock world before mobs to match the gameplay tick lock order.
+    let mob_saved = {
+        let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        mobs.lock()
+            .map_err(|_| bad("mob mutex poisoned"))?
+            .save(&guard)
+    };
     let player_saved = player_state.save_state(&player_file, player_vitals);
     let inventory_saved = inventory_state.save(&inventory_file);
     let experience_saved = experience_state.save(&experience_file);
     println!("left: {name}");
+    mob_saved?;
     player_saved?;
     inventory_saved?;
     experience_saved?;
@@ -2935,6 +2998,7 @@ fn main() -> io::Result<()> {
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
     let mut survival = properties.as_ref().is_some_and(|config| config.survival);
+    let mut difficulty = properties.as_ref().map_or(2, |config| config.difficulty);
     let mut requested_seed: Option<u64> = None;
     let mut biome_seed: Option<u64> = None;
     let mut expanded_seed: Option<u64> = None;
@@ -2972,6 +3036,16 @@ fn main() -> io::Result<()> {
             "--insecure-offline-lan" => insecure_offline_lan = true,
             "--survival" => survival = true,
             "--creative" => survival = false,
+            "--difficulty" => {
+                difficulty = args
+                    .next()
+                    .ok_or_else(|| bad("missing --difficulty value"))?
+                    .parse::<u8>()
+                    .map_err(|_| bad("invalid difficulty"))?;
+                if difficulty > 3 {
+                    return Err(bad("difficulty must be 0..=3"));
+                }
+            }
             "--terrain-seed" => {
                 requested_seed = Some(
                     args.next()
@@ -3287,7 +3361,12 @@ fn main() -> io::Result<()> {
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-        Mobs::new(&guard, survival)
+        Mobs::load_or_new(
+            &guard,
+            survival,
+            difficulty,
+            &world_path.with_extension("mobs.json"),
+        )?
     }));
     let ground_path = Arc::new(GroundItems::location(&world_path));
     let ground_items = Arc::new(Mutex::new(if survival {
@@ -3587,6 +3666,7 @@ fn main() -> io::Result<()> {
                     brewers: brewer_storage,
                     brewer_path: brewer_file,
                     survival,
+                    difficulty,
                 },
             ) {
                 if e.kind() != ErrorKind::UnexpectedEof {
