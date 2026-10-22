@@ -174,6 +174,10 @@ struct Mob {
     profession: u8,
     size: u8,
     anger_until: u64,
+    // Transient local light decision. Recomputed from the actual world each
+    // server tick; do not persist a stale day/night aggression state.
+    #[serde(skip)]
+    bright_spider: bool,
     #[serde(default)]
     zombie_villager: bool,
     #[serde(default)]
@@ -488,6 +492,12 @@ fn can_see(world: &World, source: PlayerPosition, target: PlayerPosition) -> boo
 fn sunlight(now: u64) -> bool {
     (0..=12000).contains(&(now % 24000))
 }
+/// In Java 1.7.10, both spider variants acquire targets in light below 12.
+/// Night reduces the effective skylight, while block light remains unchanged.
+fn spider_bright_light(block: u8, sky: u8, now: u64) -> bool {
+    let sky = sky.saturating_sub(if sunlight(now) { 0 } else { 11 });
+    block.max(sky) >= 12
+}
 fn spawn_light_ok(block: u8, sky: u8, now: u64, passive: bool) -> bool {
     let effective_sky = sky.saturating_sub(if sunlight(now) { 0 } else { 11 });
     if passive {
@@ -776,6 +786,7 @@ impl Mobs {
             profession: (hash(self.last_tick ^ id as u64) % 5) as u8,
             size,
             anger_until: 0,
+            bright_spider: false,
             zombie_villager: false,
             // Java's uncommon break-door capability is assigned on spawn,
             // not enabled for every zombie in Hard mode.
@@ -1131,7 +1142,9 @@ impl Mobs {
             // unrelated Enderman never receives this anger state.
             let position = mob.position;
             self.alert_nearby_pigmen(position, tick);
-        } else if mob.kind == Kind::Enderman {
+        } else if matches!(mob.kind, Kind::Enderman | Kind::Spider | Kind::CaveSpider) {
+            // A spider attacked in bright light must retaliate even though
+            // naturally neutral spiders do not start fights on their own.
             mob.anger_until = tick.saturating_add(1200);
         }
         Some(result)
@@ -1987,6 +2000,15 @@ impl Mobs {
                         ),
                     ));
                 }
+                if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
+                    let p = mob.position;
+                    let (block, sky) = world.light_at(
+                        p.x.floor() as i32,
+                        p.y.floor() as i32,
+                        p.z.floor() as i32,
+                    );
+                    mob.bright_spider = spider_bright_light(block, sky, now);
+                }
                 let nearest = players
                     .iter()
                     .copied()
@@ -2031,11 +2053,10 @@ impl Mobs {
                     _ => continue,
                 };
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider)
-                    && sunlight(now)
-                    && sky_exposed(world, mob.position)
-                    && distance(target, mob.position) > 3.0
+                    && mob.bright_spider
+                    && now >= mob.anger_until
                 {
-                    continue; // Daylight spiders are neutral until provoked.
+                    continue; // Light >= 12: neutral, unless attacked first.
                 }
                 let d = distance(target, mob.position);
                 if mob.kind == Kind::EnderDragon {
@@ -2482,6 +2503,9 @@ impl Mobs {
             if (mob.kind.hostile_to_players()
                 || (matches!(mob.kind, Kind::Enderman | Kind::ZombiePigman)
                     && tick < mob.anger_until))
+                && (!matches!(mob.kind, Kind::Spider | Kind::CaveSpider)
+                    || !mob.bright_spider
+                    || tick < mob.anger_until)
                 && !matches!(
                     mob.kind,
                     Kind::Skeleton
@@ -2860,6 +2884,35 @@ mod tests {
             },
             bucket
         ));
+    }
+
+    #[test]
+    fn daylight_spiders_are_neutral_in_both_ai_and_melee_until_attacked() {
+        // A bright, unprovoked spider cannot inflict a close-range hit. The
+        // same mob retaliates when attacked and calms when anger expires.
+        let at = PlayerPosition::default();
+        for kind in [Kind::Spider, Kind::CaveSpider] {
+            let mut mobs = Mobs {
+                difficulty: Some(2),
+                ..Mobs::default()
+            };
+            let id = mobs.next_id;
+            mobs.insert(kind, at, false);
+            mobs.entities.get_mut(&id).unwrap().bright_spider = true;
+            assert_eq!(mobs.hurt_player(777, at, 20), 0);
+            assert!(mobs.player_attack(id, at, None, 21).is_some());
+            assert_eq!(mobs.hurt_player(777, at, 42), 2);
+            mobs.entities.get_mut(&id).unwrap().anger_until = 0;
+            assert_eq!(mobs.hurt_player(777, at, 100), 0);
+        }
+    }
+
+    #[test]
+    fn spider_brightness_accounts_for_night_and_artificial_light() {
+        assert!(spider_bright_light(0, 15, 6000));
+        assert!(!spider_bright_light(0, 15, 18000));
+        assert!(spider_bright_light(12, 0, 18000));
+        assert!(!spider_bright_light(11, 0, 6000));
     }
 
     #[test]
