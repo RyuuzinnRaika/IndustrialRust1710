@@ -6,7 +6,71 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
+/// Primed TNT is an entity and can no longer be mined as a TNT block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PrimedTnt {
+    entity_id: i32,
+    pos: (i32, i32, i32),
+    explode_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TntEvent {
+    Spawn { entity_id: i32, pos: (i32, i32, i32) },
+    Explode { entity_id: i32, pos: (i32, i32, i32) },
+}
+
 impl World {
+    fn spawn_primed_tnt(&mut self, x: i32, y: i32, z: i32, fuse: u64) {
+        self.next_tnt_id = if self.next_tnt_id < 10_000_000 {
+            10_000_001
+        } else {
+            self.next_tnt_id.saturating_add(1)
+        };
+        let entity_id = self.next_tnt_id;
+        self.primed_tnt.insert(entity_id, PrimedTnt {
+            entity_id,
+            pos: (x, y, z),
+            explode_at: self.fluid_phase.saturating_add(fuse),
+        });
+        self.tnt_events.push(TntEvent::Spawn { entity_id, pos: (x, y, z) });
+    }
+
+    /// Direct flint/redstone ignition commits removal before entity spawn.
+    pub fn ignite_tnt(
+        &mut self, path: &Path, x: i32, y: i32, z: i32,
+    ) -> io::Result<bool> {
+        if self.get(x, y, z) >> 4 != 46 {
+            return Ok(false);
+        }
+        if !self.update_and_save(path, x, y, z, 0)? {
+            return Ok(false);
+        }
+        self.spawn_primed_tnt(x, y, z, 80);
+        Ok(true)
+    }
+
+    /// Publish only events from committed state.
+    pub fn drain_tnt_events(&mut self) -> Vec<TntEvent> {
+        std::mem::take(&mut self.tnt_events)
+    }
+
+    pub(super) fn finalize_tnt(&mut self, newly_primed: &[(i32, i32, i32)]) {
+        let expired: Vec<_> = self.primed_tnt.values()
+            .filter(|t| t.explode_at <= self.fluid_phase)
+            .copied()
+            .collect();
+        for tnt in expired {
+            self.primed_tnt.remove(&tnt.entity_id);
+            self.tnt_events.push(TntEvent::Explode {
+                entity_id: tnt.entity_id, pos: tnt.pos,
+            });
+        }
+        for &(x, y, z) in newly_primed {
+            self.spawn_primed_tnt(x, y, z, 25);
+        }
+    }
+
     /// A bounded, transactional edit for structures larger than a door.
     /// The original World (including wake queues) survives any save failure.
     pub(super) fn special_batch(
@@ -228,6 +292,34 @@ impl World {
                     }) { self.daylight_strength() } else { 0 };
                     if state & 15 != level {
                         changes.insert((x, y, z), (151 << 4) | level);
+                    }
+                }
+            }
+        }
+        // Redstone-powered TNT becomes an entity, not an immediately
+        // exploding block. Chain-primed blocks use the shorter legacy fuse.
+        for &(x, y, z) in self.pending_devices.iter().take(budget) {
+            if self.get(x, i32::from(y), z) >> 4 == 46
+                && self.powered_near(x, i32::from(y), z)
+            {
+                changes.insert((x, y, z), 0);
+            }
+        }
+        for tnt in self.primed_tnt.values()
+            .filter(|t| t.explode_at <= self.fluid_phase)
+            .take(4)
+        {
+            let (x, y, z) = tnt.pos;
+            for dx in -3i32..=3 {
+                for dy in -3i32..=3 {
+                    for dz in -3i32..=3 {
+                        if dx * dx + dy * dy + dz * dz > 9 { continue; }
+                        let (px, py, pz) = (x + dx, y + dy, z + dz);
+                        if !in_bounds(px, py, pz) { continue; }
+                        let id = self.get(px, py, pz) >> 4;
+                        if id != 0 && !matches!(id, 7 | 49 | 90 | 119 | 120) {
+                            changes.insert((px, py as u8, pz), 0);
+                        }
                     }
                 }
             }
