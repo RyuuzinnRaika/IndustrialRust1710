@@ -1576,7 +1576,9 @@ impl Mobs {
         let first = *self.entities.get(&id)?;
         let food = held?.id;
         if !first.nearby(player, 3.0)
-            || self.entities.values().filter(|m| m.kind.passive()).count() >= PASSIVE_CAP
+            || self.entities.len() >= MAX_LOADED_MOBS
+            || self.entities.values().filter(|m| m.kind.passive()).count()
+                >= MAX_NATURAL_PER_CATEGORY
             || !first.kind.passive()
             || first.baby
             || !first.kind.breeding_food(food)
