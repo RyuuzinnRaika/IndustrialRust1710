@@ -3107,24 +3107,43 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     experience_saved?;
     result
 }
-/// Commands are accepted only from the operating-system console, never from
-/// unauthenticated offline-mode players or Protocol 5 chat messages.
-fn start_clock_console(hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf>) {
+/// Offline players are unauthenticated, so only the host console can administer.
+/// Admin operations always record both intent and final outcome durably.
+fn start_clock_console(
+    hub: Arc<Hub>,
+    clock: Arc<Clock>,
+    clock_path: Arc<PathBuf>,
+    world: Arc<Mutex<World>>,
+    world_path: Arc<PathBuf>,
+    administration: Arc<Administration>,
+    whitelist_path: Arc<PathBuf>,
+) {
     thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
-            let Ok(line) = line else {
-                break;
-            };
+            let Ok(line) = line else { break; };
+            if line.trim().is_empty() { continue; }
+            if let Err(error) = administration.audit("CONSOLE", &line, "attempt") {
+                eprintln!("ADMIN AUDIT UNAVAILABLE, operation refused: {error}");
+                continue;
+            }
             let args: Vec<_> = line.split_whitespace().collect();
-            let result = match args.as_slice() {
+            let result: io::Result<()> = match args.as_slice() {
+                ["/list"] => (|| -> io::Result<()> {
+                    println!("Online ({}): {}", hub.count()?, hub.names()?.join(", "));
+                    Ok(())
+                })(),
+                ["/save"] => (|| -> io::Result<()> {
+                    world.lock().map_err(|_| bad("world mutex poisoned"))?.save(&world_path)?;
+                    println!("World saved");
+                    Ok(())
+                })(),
                 ["/time", "query", "daytime"] => {
                     println!("Daytime: {}", clock.day_time());
                     Ok(())
                 }
                 ["/time", "set", requested] => (|| -> io::Result<()> {
-                    let requested = requested
-                        .parse::<u64>()
+                    let requested = requested.parse::<u64>()
                         .map_err(|_| bad("invalid daytime value"))?;
                     clock.set_day_time(requested)?;
                     clock.save_ticks(&clock_path)?;
@@ -3151,23 +3170,69 @@ fn start_clock_console(hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf
                 })(),
                 ["/tp", name, x, y, z] => (|| -> io::Result<()> {
                     let parse = |value: &str| {
-                        value
-                            .parse::<f64>()
+                        value.parse::<f64>()
                             .map_err(|_| bad("invalid teleport coordinate"))
                     };
-                    let position = PlayerPosition {
-                        x: parse(x)?,
-                        y: parse(y)?,
-                        z: parse(z)?,
-                    };
+                    let position = PlayerPosition { x: parse(x)?, y: parse(y)?, z: parse(z)? };
                     if !hub.request_admin_teleport(name, position)? {
                         return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
                     }
                     println!("Teleport queued for {name}");
                     Ok(())
                 })(),
-                _ => continue,
+                ["/op", name] => (|| -> io::Result<()> {
+                    administration.set_op(name, true)?;
+                    println!("OP record saved for {name} (offline-mode clients do not gain authority)");
+                    Ok(())
+                })(),
+                ["/deop", name] => administration.set_op(name, false),
+                ["/ban", name, reason @ ..] => (|| -> io::Result<()> {
+                    let reason = if reason.is_empty() { "Banned by administrator".to_owned() } else { reason.join(" ") };
+                    administration.set_player_ban(name, Some(&reason), true)?;
+                    let _ = hub.request_admin_kick(name, &reason)?;
+                    println!("Banned {name}");
+                    Ok(())
+                })(),
+                ["/pardon", name] => administration.set_player_ban(name, None, false),
+                ["/ban-ip", address, reason @ ..] => (|| -> io::Result<()> {
+                    let reason = if reason.is_empty() { "IP banned by administrator".to_owned() } else { reason.join(" ") };
+                    administration.set_ip_ban(address, Some(&reason), true)?;
+                    // Active sessions are rechecked within two seconds.
+                    println!("Banned IP {address}");
+                    Ok(())
+                })(),
+                ["/pardon-ip", address] => administration.set_ip_ban(address, None, false),
+                ["/kick", name, reason @ ..] => (|| -> io::Result<()> {
+                    let reason = if reason.is_empty() { "Kicked by administrator".to_owned() } else { reason.join(" ") };
+                    if !hub.request_admin_kick(name, &reason)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Kick queued for {name}");
+                    Ok(())
+                })(),
+                ["/whitelist", "reload"] => (|| -> io::Result<()> {
+                    let loaded = Whitelist::load(&whitelist_path)?;
+                    println!("Whitelist validated: {} names; next login/session poll uses it", loaded.len());
+                    Ok(())
+                })(),
+                ["/whitelist", "list"] => (|| -> io::Result<()> {
+                    let loaded = Whitelist::load(&whitelist_path)?;
+                    println!("Whitelist: {} entries", loaded.len());
+                    Ok(())
+                })(),
+                ["/permission", name, kind, state] => (|| -> io::Result<()> {
+                    let enabled = match *state { "allow" => true, "deny" => false,
+                        _ => return Err(bad("permission must be allow or deny")) };
+                    administration.set_permission(name, kind, enabled)?;
+                    println!("Permission updated for {name}: {kind}={enabled}");
+                    Ok(())
+                })(),
+                _ => Err(bad("unknown administrator console command")),
             };
+            let outcome = if result.is_ok() { "success" } else { "failure" };
+            if let Err(error) = administration.audit("CONSOLE", &line, outcome) {
+                eprintln!("ADMIN AUDIT WRITE FAILURE: {error}");
+            }
             if let Err(error) = result {
                 eprintln!("ADMIN CONSOLE ERROR: {error}");
             }
@@ -3556,6 +3621,7 @@ fn main() -> io::Result<()> {
             "offline-mode whitelist cannot authenticate usernames: non-loopback bind requires explicit --insecure-offline-lan"));
     }
     let list = Whitelist::load(&whitelist_path)?;
+    let administration = Arc::new(Administration::new(PathBuf::from("."))?);
     println!(
         "Whitelist: {} permitted name(s) (NOT cryptographic identity authentication)",
         list.len()
@@ -3655,12 +3721,17 @@ fn main() -> io::Result<()> {
     println!("WARNING: offline-mode has no account authentication. Do not expose to the internet.");
     let hub = Arc::new(Hub::default());
     let connections = Arc::new(AtomicUsize::new(0));
+    let limiter = Arc::new(ConnectionLimiter::default());
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
     start_clock_console(
         Arc::clone(&hub),
         Arc::clone(&clock),
         Arc::clone(&clock_path),
+        Arc::clone(&world),
+        Arc::clone(&path),
+        Arc::clone(&administration),
+        Arc::clone(&allow_path),
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
@@ -3895,6 +3966,11 @@ fn main() -> io::Result<()> {
     });
     for accepted in listener.incoming() {
         let stream = accepted?;
+        let peer_ip = stream.peer_addr()?.ip();
+        // Fail closed on corrupt or missing ban databases. Refuse before
+        // spawning a session thread or consuming a global connection slot.
+        if administration.ip_banned(peer_ip).unwrap_or(true) { continue; }
+        let Some(ip_permit) = limiter.acquire(peer_ip) else { continue; };
         if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             connections.fetch_sub(1, Ordering::AcqRel);
             continue;
@@ -3904,6 +3980,7 @@ fn main() -> io::Result<()> {
         let w = Arc::clone(&world);
         let p = Arc::clone(&path);
         let wl = Arc::clone(&allow_path);
+        let admin = Arc::clone(&administration);
         let game_clock = Arc::clone(&clock);
         let drops = Arc::clone(&ground_items);
         let drops_path = Arc::clone(&ground_path);
@@ -3918,6 +3995,7 @@ fn main() -> io::Result<()> {
         let brewer_file = Arc::clone(&brewer_path);
         thread::spawn(move || {
             let _connection = admission;
+            let _ip_permit = ip_permit;
             if let Err(e) = handle(
                 stream,
                 ServerContext {
@@ -3925,6 +4003,7 @@ fn main() -> io::Result<()> {
                     world: w,
                     path: p,
                     whitelist_path: wl,
+                    administration: admin,
                     clock: game_clock,
                     ground_items: drops,
                     ground_path: drops_path,
