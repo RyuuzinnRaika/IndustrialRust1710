@@ -44,6 +44,21 @@ fn horizontal_right(face: i8) -> (i32, i32) {
         _ => (0, 1),
     }
 }
+/// Blocks occupied in front of the supporting wall by a frame or painting.
+fn occupied_cells(anchor: Position, face: i8, width: i32, height: i32) -> Vec<Position> {
+    let (rx, rz) = horizontal_right(face);
+    let mut cells = Vec::with_capacity((width * height) as usize);
+    for column in 0..width {
+        for row in 0..height {
+            cells.push((
+                anchor.0 + (column - (width - 1) / 2) * rx,
+                anchor.1 + row - (height - 1) / 2,
+                anchor.2 + (column - (width - 1) / 2) * rz,
+            ));
+        }
+    }
+    cells
+}
 const PAINTINGS: &[(&str, i32, i32)] = &[
     ("Pointer", 4, 4),
     ("Pigscene", 4, 4),
@@ -96,6 +111,14 @@ pub struct Hanging {
 impl Hanging {
     fn chunk(&self) -> (i32, i32) {
         (self.at[0].div_euclid(16), self.at[2].div_euclid(16))
+    }
+    fn covers(&self, pos: Position) -> bool {
+        let (width, height) = match self.kind {
+            Kind::Frame { .. } => (1, 1),
+            Kind::Painting { width, height, .. } => (i32::from(width), i32::from(height)),
+        };
+        occupied_cells((self.at[0], self.at[1], self.at[2]), self.face, width, height)
+            .contains(&pos)
     }
     pub fn near(&self, (x, y, z): Position) -> bool {
         // Compare as i64: untrusted player coordinates may be far outside the
@@ -317,23 +340,16 @@ impl Hangings {
             .map(Hanging::destroy)
             .collect()
     }
-    fn painting_fits(world: &World, anchor: Position, face: i8, width: i32, height: i32) -> bool {
-        let (rx, rz) = horizontal_right(face);
+    fn painting_fits(&self, world: &World, anchor: Position, face: i8, width: i32, height: i32) -> bool {
         let (dx, dz) = offset(face);
-        for column in 0..width {
-            for row in 0..height {
-                let x = anchor.0 + (column - (width - 1) / 2) * rx;
-                let y = anchor.1 + row - (height - 1) / 2;
-                let z = anchor.2 + (column - (width - 1) / 2) * rz;
-                if !world::in_bounds(x, y, z)
-                    || world.get(x, y, z) != 0
-                    || world.get(x - dx, y, z - dz) == 0
-                {
-                    return false;
-                }
-            }
-        }
-        true
+        occupied_cells(anchor, face, width, height)
+            .into_iter()
+            .all(|(x, y, z)| {
+                world::in_bounds(x, y, z)
+                    && world.get(x, y, z) == 0
+                    && world.get(x - dx, y, z - dz) != 0
+                    && self.entities.values().all(|entity| !entity.covers((x, y, z)))
+            })
     }
     pub fn stage_place(
         &self,
@@ -343,6 +359,7 @@ impl Hangings {
         id: i16,
     ) -> io::Result<Option<(Self, Hanging)>> {
         if !matches!(id, 389 | 321)
+            || !world::in_bounds(clicked.0, clicked.1, clicked.2)
             || facing(face).is_none()
             || self.next == u16::MAX
             || self.entities.len() >= MAX_HANGING
@@ -354,7 +371,7 @@ impl Hangings {
         if !world::in_bounds(at.0, at.1, at.2)
             || world.get(clicked.0, clicked.1, clicked.2) == 0
             || world.get(at.0, at.1, at.2) != 0
-            || self.entities.values().any(|e| e.at == [at.0, at.1, at.2])
+            || self.entities.values().any(|e| e.covers(at))
         {
             return Ok(None);
         }
@@ -364,12 +381,23 @@ impl Hangings {
                 rotation: 0,
             }
         } else {
-            let choice = PAINTINGS.iter().find(|&&(title, w, h)| {
-                !title.is_empty() && Self::painting_fits(world, at, face, w, h)
-            });
-            let Some(&(title, width, height)) = choice else {
+            let choices: Vec<_> = PAINTINGS
+                .iter()
+                .copied()
+                .filter(|&(title, w, h)| {
+                    !title.is_empty() && self.painting_fits(world, at, face, w, h)
+                })
+                .collect();
+            if choices.is_empty() {
                 return Ok(None);
-            };
+            }
+            // Choose among every motif that fits, rather than always selecting
+            // the first 4x4 motif on a large wall.
+            let index = (usize::from(self.next)
+                + at.0.unsigned_abs() as usize
+                + at.2.unsigned_abs() as usize)
+                % choices.len();
+            let (title, width, height) = choices[index];
             Kind::Painting {
                 title: title.to_owned(),
                 width: width as u8,
@@ -493,6 +521,32 @@ mod tests {
         assert!(both.spawn_events_in(&BTreeSet::new()).unwrap().is_empty());
         assert!(first_frame.near((0, 64, 1)));
         assert!(!first_frame.near((i32::MIN, i32::MAX, i32::MIN)));
+    }
+    #[test]
+    fn paintings_choose_eligible_motifs_and_reserve_their_whole_footprint() {
+        let mut world = World::new();
+        for x in -2..=3 {
+            for y in 62..=67 {
+                world.import_block(x, y, 0, 1 << 4).unwrap();
+            }
+        }
+        let (first, painting) = Hangings::default()
+            .stage_place(&world, (0, 64, 0), 3, 321)
+            .unwrap()
+            .unwrap();
+        let Kind::Painting { width, height, .. } = painting.kind else {
+            panic!("expected painting");
+        };
+        assert!(width > 1 && height > 1);
+        // A new frame must not overlap even an off-center part of an existing painting.
+        assert!(first
+            .stage_place(&world, (1, 64, 0), 3, 389)
+            .unwrap()
+            .is_none());
+        assert!(first
+            .stage_place(&world, (i32::MAX, 64, 0), 3, 389)
+            .unwrap()
+            .is_none());
     }
     #[test]
     fn rejects_invalid_attachment_and_duplicate() {
