@@ -27,6 +27,19 @@ fn index(x: i32, y: i32, z: i32, min_x: i32, min_z: i32) -> usize {
 }
 
 impl World {
+    /// Sample the same propagated lighting arrays sent to the 1.7.10 client.
+    /// Used sparingly on natural spawn attempts (never once per mob per tick).
+    pub fn light_at(&self, x: i32, y: i32, z: i32) -> (u8, u8) {
+        if !(0..=255).contains(&y) || !super::in_bounds(x, y, z) {
+            return (0, 0);
+        }
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let (block, sky) = self.light_arrays(cx, cz);
+        let slot = index(x, y, z, cx * 16, cz * 16);
+        (block[slot], sky[slot])
+    }
+
     /// Returns separate 16x256x16 block-light and sky-light nibble values.
     /// Direct sky columns are computed top-down. Artificial block light
     /// travels through air/transparent blocks for at most 15 blocks and may

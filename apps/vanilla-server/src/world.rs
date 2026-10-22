@@ -243,6 +243,35 @@ impl World {
             Generation::Flat => None,
         }
     }
+    /// Biome at a natural spawn candidate (legacy flat/natural worlds use plains).
+    pub fn biome_at(&self, x: i32, z: i32) -> u8 {
+        match self.generation {
+            Generation::Biomes(seed) => crate::terrain::biome(seed, x, z),
+            Generation::Expanded(seed, crate::dimensions::Dimension::Overworld) => {
+                crate::worldgen::biome(seed, x, z)
+            }
+            Generation::Expanded(_, crate::dimensions::Dimension::Nether) => 8,
+            Generation::Expanded(_, crate::dimensions::Dimension::End) => 9,
+            _ => 1,
+        }
+    }
+    pub fn dimension(&self) -> crate::dimensions::Dimension {
+        self.extended_identity()
+            .map(|(_, dimension)| dimension)
+            .unwrap_or(crate::dimensions::Dimension::Overworld)
+    }
+    /// Uses the active generator, not the legacy terrain generator, for mob candidates.
+    pub fn surface_height_at(&self, x: i32, z: i32) -> Option<i32> {
+        match self.generation {
+            Generation::Flat => None,
+            Generation::Natural(seed) => Some(crate::terrain::surface(seed, x, z)),
+            Generation::Biomes(seed) => Some(crate::terrain::biome_surface(seed, x, z)),
+            Generation::Expanded(seed, crate::dimensions::Dimension::Overworld) => {
+                Some(crate::worldgen::height(seed, x, z))
+            }
+            Generation::Expanded(_, _) => None,
+        }
+    }
     pub fn spawn_y(&self) -> f64 {
         match self.generation {
             Generation::Natural(seed) => f64::from(crate::terrain::surface(seed, 0, 0) + 1),
