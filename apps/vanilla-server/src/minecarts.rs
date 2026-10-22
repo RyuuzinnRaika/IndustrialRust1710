@@ -35,7 +35,7 @@ fn rail(world: &World, pos: PlayerPosition) -> Option<(u16, u16)> {
 fn straight_axis(id: u16, meta: u16) -> Option<bool> {
     match if id == 66 { meta } else { meta & 7 } {
         0 | 4 | 5 => Some(false), // north/south, ascending N/S
-        1..=3 => Some(true),    // east/west, ascending E/W
+        1..=3 => Some(true),      // east/west, ascending E/W
         _ => None,                // corners and switches need an explicit turn solver
     }
 }
