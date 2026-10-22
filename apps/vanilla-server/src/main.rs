@@ -31,6 +31,8 @@ mod legacy_entity_nbt;
 mod legacy_inventory_nbt;
 mod legacy_nbt;
 mod legacy_region;
+#[allow(dead_code)] // FS08 offline copy-on-write stage; live Anvil writes disabled.
+mod legacy_region_rewrite;
 mod legacy_world_inspect;
 mod level_dat;
 mod maps;
