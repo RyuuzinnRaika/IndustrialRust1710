@@ -168,10 +168,10 @@ impl World {
         // Dark oak requires a 2x2 sapling structure; single-sapling bone
         // meal is deliberately a no-op until large-tree growth is supported.
         let (log, log_meta, leaves, leaf_meta) = match self.get(x, y, z) & 7 {
-            0 => (17, 0, 18, 0),  // Oak
-            1 => (17, 1, 18, 1),  // Spruce
-            2 => (17, 2, 18, 2),  // Birch
-            3 => (17, 3, 18, 3),  // Jungle
+            0 => (17, 0, 18, 0),   // Oak
+            1 => (17, 1, 18, 1),   // Spruce
+            2 => (17, 2, 18, 2),   // Birch
+            3 => (17, 3, 18, 3),   // Jungle
             4 => (162, 0, 161, 0), // Acacia
             _ => return,
         };
