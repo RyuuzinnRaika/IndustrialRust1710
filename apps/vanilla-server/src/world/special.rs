@@ -791,6 +791,46 @@ mod tests {
     }
 
     #[test]
+    fn bonemeal_preserves_sapling_species_and_rejects_lone_dark_oak() {
+        let mut w = World::new();
+        let meal = Stack {
+            id: 351,
+            count: 1,
+            damage: 15,
+        };
+        w.import_block(0, 64, 0, (6 << 4) | 2).unwrap();
+        let (_, changed, _, _) = w.stage_special_item(0, 64, 0, meal).unwrap().unwrap();
+        assert!(!changed.is_empty());
+        let mut batch = w.bonemeal_changes(0, 64, 0);
+        assert_eq!(batch.get(&(0, 64, 0)), Some(&((17 << 4) | 2)));
+        assert_eq!(batch.get(&(1, 68, 0)), Some(&((18 << 4) | 2)));
+        w.import_block(5, 64, 0, (6 << 4) | 4).unwrap();
+        batch = w.bonemeal_changes(5, 64, 0);
+        assert_eq!(batch.get(&(5, 64, 0)), Some(&(162 << 4)));
+        assert_eq!(batch.get(&(6, 68, 0)), Some(&(161 << 4)));
+        w.import_block(10, 64, 0, (6 << 4) | 5).unwrap();
+        assert!(w.bonemeal_changes(10, 64, 0).is_empty());
+        let (_, changed, _, _) = w.stage_special_item(10, 64, 0, meal).unwrap().unwrap();
+        assert!(changed.is_empty(), "unsupported dark oak cannot debit bone meal");
+    }
+
+    #[test]
+    fn weighted_plate_releases_and_saves_zero_signal() {
+        let path = file("plate-release");
+        let mut w = World::new();
+        w.update_and_save(&path, 0, 64, 0, 148 << 4).unwrap();
+        assert!(w.press_weighted_plate(&path, 0, 64, 0, 11).unwrap());
+        for _ in 0..9 {
+            w.block_tick(&path, 64).unwrap();
+            assert_eq!(w.get(0, 64, 0) & 15, 2);
+        }
+        assert!(w.block_tick(&path, 64).unwrap().contains(&(0, 64, 0)));
+        assert_eq!(w.get(0, 64, 0) & 15, 0);
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0) & 15, 0);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn weighted_plate_strength_and_timer() {
         let path = file("plate");
         let mut w = World::new();
