@@ -566,7 +566,7 @@ impl World {
             let reset = match old >> 4 {
                 70 | 72 => old & !1,        // Stone and wooden pressure plates.
                 77 | 131 | 143 => old & !8, // Buttons and tripwire hooks.
-                132 => old & !1,           // Tripwire: clear triggered, retain attachment.
+                132 => old & !1,            // Tripwire: clear triggered, retain attachment.
                 147 | 148 => old & !15,     // Weighted analog pressure plates.
                 _ => old,
             };
