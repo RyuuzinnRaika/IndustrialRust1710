@@ -23,6 +23,7 @@ mod inventory;
 mod items_1710;
 mod journal;
 mod legacy_chunk_store;
+mod legacy_entity_nbt;
 mod legacy_inventory_nbt;
 mod legacy_nbt;
 mod legacy_region;
@@ -366,16 +367,20 @@ fn send_chunk_batch(
     coords: impl IntoIterator<Item = (i32, i32)>,
 ) -> io::Result<()> {
     let mut pending = Vec::with_capacity(chunk_pipeline::SESSION_BATCH_LIMIT);
+    let mut deadline = Instant::now() + chunk_pipeline::BATCH_DEADLINE;
     for (cx, cz) in coords {
         pending.push(queue_chunk(world, cx, cz)?);
         if pending.len() == chunk_pipeline::SESSION_BATCH_LIMIT {
             for chunk in pending.drain(..) {
-                send(s, 0x21, &chunk.finish()?)?;
+                send(s, 0x21, &chunk.finish_before(deadline)?)?;
             }
+            // Reset only after the entire bounded batch drains; not once per
+            // chunk, which would allow a stalled worker to hang a session.
+            deadline = Instant::now() + chunk_pipeline::BATCH_DEADLINE;
         }
     }
     for chunk in pending {
-        send(s, 0x21, &chunk.finish()?)?;
+        send(s, 0x21, &chunk.finish_before(deadline)?)?;
     }
     Ok(())
 }
@@ -926,6 +931,14 @@ fn play(
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
             creatures.set_natural_spawning(allow_natural_spawning);
             let mut updates = creatures.tick(now_tick, &w, &players);
+            // Preserve main's grazing and Group I's leash simulation.
+            let mut grazed_blocks = Vec::new();
+            for (metadata, at) in creatures.graze(&mut w, world_path, now_tick)? {
+                if let Some(packet) = metadata {
+                    updates.push(packet);
+                }
+                grazed_blocks.push(at);
+            }
             updates.extend(creatures.advance_leashes(&w, now_tick, &participants));
             let explosions = creatures.take_explosions();
             updates.extend(creatures.queue_explosion_hits(&w, &explosions, &participants));
@@ -934,6 +947,9 @@ fn play(
                 creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
             let drops = creatures.take_drops();
             drop(creatures);
+            for (x, y, z) in grazed_blocks {
+                hub.broadcast(block_change_event(&w, x, y, z));
+            }
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
             for explosion in explosions {
                 hub.broadcast_in_view(explosion.position, explosion.packet());
@@ -2003,7 +2019,7 @@ fn play(
                 let z = input.i32()?;
                 let face = input.i8()?;
                 let held = input.slot()?;
-                input.take(3)?; // cursor x/y/z
+                let cursor = input.take(3)?; // Protocol 5 cursor x/y/z, 0..15
                 input.finish()?;
 
                 // Protocol 5 Use Item: air target is (-1,255,-1), face -1.
@@ -2562,13 +2578,23 @@ fn play(
                             } else if matches!(block_id, 29 | 33) {
                                 face as u16
                             } else if block_id == 96 {
-                                match face {
+                                let facing = match face {
                                     2 => 1,
                                     3 => 0,
                                     4 => 3,
                                     5 => 2,
                                     _ => 0,
-                                }
+                                };
+                                facing | if cursor[1] >= 8 { 8 } else { 0 }
+                            } else if matches!(block_id, 44 | 126 | 182) {
+                                // Slab variant is an item damage value; upper/lower
+                                // placement is derived from the clicked face and Y.
+                                (stack.damage as u16 & 7)
+                                    | if face == 0 || (face != 1 && cursor[1] >= 8) {
+                                        8
+                                    } else {
+                                        0
+                                    }
                             } else if matches!(block_id, 64 | 71 | 93 | 149) {
                                 ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
                             } else if block_id == 127 {
@@ -2585,8 +2611,20 @@ fn play(
                                 53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164
                             ) {
                                 // 1.7.10 stair orientation and inverted-half bit.
-                                let direction = ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3;
-                                direction | if face == 0 { 4 } else { 0 }
+                                let quadrant =
+                                    ((yaw.rem_euclid(360.0) / 90.0 + 0.5).floor() as u16) & 3;
+                                let direction = match quadrant {
+                                    0 => 2,
+                                    1 => 1,
+                                    2 => 3,
+                                    _ => 0,
+                                };
+                                direction
+                                    | if face == 0 || (face != 1 && cursor[1] >= 8) {
+                                        4
+                                    } else {
+                                        0
+                                    }
                             } else if block_id == 107 {
                                 ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
                             } else if matches!(
@@ -2598,6 +2636,7 @@ fn play(
                                 stack.damage as u16 & 15
                             };
                             if (world::is_placeable(block_id) || block_id == 61)
+                                && (block_id != 96 || (2..=5).contains(&face))
                                 && w.can_support(nx, ny, nz, (block_id << 4) | metadata)
                                 && block_id != 7
                                 && !invalid_chest_merge
@@ -3691,6 +3730,25 @@ fn start_clock_console(
 }
 
 fn main() -> io::Result<()> {
+    // Explicit, offline-only create-if-missing recovery. No network listener,
+    // no server.properties parsing, and no silent replacement of a live world.
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if raw_args
+        .first()
+        .is_some_and(|arg| arg == "--recover-level-dat")
+    {
+        if raw_args.len() != 2 {
+            return Err(bad("usage: --recover-level-dat STOPPED_WORLD_DIR"));
+        }
+        let world_directory = Path::new(&raw_args[1]);
+        let mut lock = session_lock::WorldSessionLock::acquire(world_directory)?;
+        level_dat::restore_missing_level(world_directory, &mut lock)?;
+        println!(
+            "Recovered a missing level.dat from validated level.dat_old in {}",
+            world_directory.display()
+        );
+        return Ok(());
+    }
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
     let properties = if std::env::args().any(|arg| {
@@ -3736,7 +3794,7 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--recover-level-dat STOPPED_WORLD_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );

@@ -168,6 +168,8 @@ struct Mob {
     size: u8,
     anger_until: u64,
     #[serde(default)]
+    zombie_villager: bool,
+    #[serde(default)]
     saddled: bool,
     #[serde(default)]
     tamed: bool,
@@ -198,6 +200,11 @@ impl Mob {
         if self.baby {
             body.push((2 << 5) | 12); // metadata index 12, type 2 (int)
             body.extend_from_slice(&(-24000i32).to_be_bytes());
+        }
+        if self.kind == Kind::Zombie && self.zombie_villager {
+            // Protocol 5 / Java 1.7.10: zombie DataWatcher byte 13
+            // distinguishes infected villagers from ordinary zombies.
+            body.extend_from_slice(&[13, 1]);
         }
         if self.kind.splitting() {
             body.push(16); // DataWatcher byte index 16: slime/magma cube size
@@ -356,6 +363,9 @@ impl Explosion {
         Event { id: 0x27, body }
     }
 }
+/// Optional Entity Metadata together with a changed grass block coordinate.
+pub type GrazingUpdate = (Option<Event>, (i32, i32, i32));
+
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct Mobs {
     entities: BTreeMap<i32, Mob>,
@@ -378,6 +388,8 @@ pub struct Mobs {
     #[serde(skip)]
     explosions: Vec<Explosion>,
     last_tick: u64,
+    #[serde(default)]
+    last_graze_tick: u64,
     #[serde(skip)]
     last_leash_tick: u64,
     // Runtime-only flag. Default false (not paused) on new/load.
@@ -454,6 +466,79 @@ fn spawn_light_ok(block: u8, sky: u8, now: u64, passive: bool) -> bool {
         block < 8 && effective_sky < 8
     }
 }
+/// Ghasts are four blocks wide and tall. Reusing the player's narrow
+/// collision hull lets them clip through fortress walls, so the conservative
+/// volume test rejects solid blocks throughout their body.
+fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
+    let x = p.x.floor() as i32;
+    let y = p.y.floor() as i32;
+    let z = p.z.floor() as i32;
+    (x - 2..=x + 2).all(|bx| {
+        (y - 2..=y + 2).all(|by| {
+            (z - 2..=z + 2).all(|bz| matches!(world.get(bx, by, bz) >> 4, 0 | 6 | 8..=11))
+        })
+    })
+}
+
+/// A bounded, collision-swept aerial step. Ghasts keep their distance and
+/// circle their target while blazes try to gain altitude for ranged attacks.
+/// Flight never requires a supporting ground block.
+fn flying_step(
+    world: &World,
+    kind: Kind,
+    from: PlayerPosition,
+    target: PlayerPosition,
+    tick: u64,
+) -> Option<PlayerPosition> {
+    if !matches!(kind, Kind::Ghast | Kind::Blaze) || !from.is_valid() || !target.is_valid() {
+        return None;
+    }
+    let dx = target.x - from.x;
+    let dz = target.z - from.z;
+    let horizontal = dx.hypot(dz);
+    let (step_x, step_z) = if horizontal > 0.01 {
+        let (ux, uz) = (dx / horizontal, dz / horizontal);
+        if kind == Kind::Ghast {
+            if horizontal < 16.0 {
+                (-ux * 0.10, -uz * 0.10)
+            } else if horizontal > 28.0 {
+                (ux * 0.10, uz * 0.10)
+            } else {
+                let sign = if (tick / 80).is_multiple_of(2) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                (-uz * 0.10 * sign, ux * 0.10 * sign)
+            }
+        } else if horizontal < 5.0 {
+            (-ux * 0.10, -uz * 0.10)
+        } else if horizontal > 10.0 {
+            (ux * 0.10, uz * 0.10)
+        } else {
+            (0.0, 0.0)
+        }
+    } else {
+        (0.0, 0.0)
+    };
+    let desired_y = target.y + if kind == Kind::Ghast { 8.0 } else { 3.0 };
+    let step_y = (desired_y - from.y).clamp(-0.08, 0.08);
+    let next = PlayerPosition {
+        x: from.x + step_x,
+        y: from.y + step_y,
+        z: from.z + step_z,
+    };
+    if next.is_valid()
+        && physics::valid_movement(world, &from, &next)
+        && (kind != Kind::Ghast || ghast_has_clearance(world, next))
+        && distance_3d(from, next) > 0.0001
+    {
+        Some(next)
+    } else {
+        None
+    }
+}
+
 fn sky_exposed(world: &World, p: PlayerPosition) -> bool {
     let x = p.x.floor() as i32;
     let z = p.z.floor() as i32;
@@ -645,6 +730,7 @@ impl Mobs {
             profession: (hash(self.last_tick ^ id as u64) % 5) as u8,
             size,
             anger_until: 0,
+            zombie_villager: false,
             saddled: false,
             tamed: false,
             tame_progress: 0,
@@ -663,6 +749,93 @@ impl Mobs {
             return None;
         }
         Some(self.insert(Kind::Chicken, at, true))
+    }
+    /// Set zombie-villager metadata before sending the authoritative spawn.
+    /// The former villager's age and profession survive for future curing.
+    fn insert_zombie_villager(
+        &mut self,
+        position: PlayerPosition,
+        baby: bool,
+        profession: u8,
+    ) -> Event {
+        let id = self.next_id;
+        let _ = self.insert(Kind::Zombie, position, baby);
+        let mob = self.entities.get_mut(&id).expect("newly inserted zombie");
+        mob.zombie_villager = true;
+        mob.profession = profession;
+        mob.spawn()
+    }
+
+    /// Resolve zombie-on-villager melee on the server. The existing mob tick
+    /// calls this once; each zombie's bite cooldown prevents duplicated hits.
+    fn zombies_attack_villagers(
+        &mut self,
+        now: u64,
+        world: &World,
+        players: &[PlayerPosition],
+        events: &mut Vec<Event>,
+    ) {
+        if self.difficulty == Some(0) {
+            return;
+        }
+        let attackers: Vec<_> = self
+            .entities
+            .values()
+            .filter(|mob| {
+                mob.kind == Kind::Zombie
+                    && mob.health > 0
+                    && (mob.bite_tick == 0 || now.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
+            })
+            .map(|mob| (mob.id, mob.position))
+            .collect();
+        for (zombie_id, origin) in attackers {
+            let victim_id = self
+                .entities
+                .values()
+                .filter(|mob| {
+                    mob.kind == Kind::Villager
+                        && mob.nearby(origin, 1.6)
+                        // A player closer than the villager takes target
+                        // priority; the zombie must not burn its bite cooldown
+                        // by attacking a collocated villager instead.
+                        && !players.iter().any(|player| {
+                            distance_3d(origin, *player)
+                                <= distance_3d(origin, mob.position)
+                        })
+                        && can_see(world, origin, mob.position)
+                })
+                .min_by(|a, b| {
+                    distance_3d(origin, a.position).total_cmp(&distance_3d(origin, b.position))
+                })
+                .map(|mob| mob.id);
+            let Some(victim_id) = victim_id else { continue };
+            if let Some(zombie) = self.entities.get_mut(&zombie_id) {
+                zombie.bite_tick = now;
+            }
+            let Some(villager) = self.entities.get_mut(&victim_id) else {
+                continue;
+            };
+            villager.health -= 3;
+            events.push(villager.status(if villager.health <= 0 { 3 } else { 2 }));
+            if villager.health > 0 {
+                events.push(villager.health_metadata());
+                continue;
+            }
+            // Old entity ID must be destroyed before any replacement is sent
+            // to multiple clients; only the shared next_id allocates new IDs.
+            let victim = self.entities.remove(&victim_id).expect("living victim");
+            events.push(multiplayer::destroy(victim_id));
+            let roll = hash(now ^ zombie_id as u64 ^ victim_id as u64);
+            if zombie_infects_villager(self.difficulty.unwrap_or(2), roll)
+                && self.entities.len() < 128
+            {
+                events.push(self.insert_zombie_villager(
+                    victim.position,
+                    victim.baby,
+                    victim.profession,
+                ));
+            }
+        }
     }
     /// Construct a server-owned boss. External summoning rules must validate
     /// soul sand/skulls or End progression before calling this method.
@@ -740,42 +913,15 @@ impl Mobs {
     }
     /// Natural Survival only, preserving flat E2E world behaviour.
     pub fn new_with_difficulty(world: &World, enabled: bool, difficulty: u8) -> Self {
-        let mut state = Self {
+        // Do not place fixed zombies/skeletons near (0,0) at world creation:
+        // that bypassed all biome, light, player-radius and world-spawn checks.
+        // Only the validated natural-spawn tick may create initial monsters.
+        Self {
             next_id: BASE_ID,
             enabled: enabled && world.is_natural(),
             difficulty: Some(difficulty.min(3)),
             ..Self::default()
-        };
-        if state.enabled {
-            for (n, (x, z)) in [(8, 9), (-8, 7), (7, -8), (-9, -7)].into_iter().enumerate() {
-                let p = PlayerPosition {
-                    x: x as f64 + 0.5,
-                    y: world.natural_seed().map_or(65.0, |seed| {
-                        crate::terrain::surface(seed, x, z) as f64 + 1.0
-                    }),
-                    z: z as f64 + 0.5,
-                };
-                if !physics::collides(world, &p)
-                    && physics::supported(world, &p)
-                    && (difficulty > 0 || n == 2)
-                {
-                    state.insert(
-                        if n == 0 {
-                            Kind::Zombie
-                        } else if n == 1 {
-                            Kind::Skeleton
-                        } else if n == 2 {
-                            Kind::Cow
-                        } else {
-                            Kind::Creeper
-                        },
-                        p,
-                        false,
-                    );
-                }
-            }
         }
-        state
     }
     pub fn spawn_events(&self) -> impl Iterator<Item = Event> + '_ {
         self.entities
@@ -932,6 +1078,61 @@ impl Mobs {
         }
         Some(result)
     }
+    /// Grazing is server-owned and persisted before clients see sheep wool
+    /// regrowth. Each sheep has a bounded chance every other game tick:
+    /// adults 1/500, babies 1/25. Grass blocks turn into dirt on success.
+    /// At most four grazing edits run in a single global tick.
+    pub fn graze(
+        &mut self,
+        world: &mut World,
+        world_path: &Path,
+        tick: u64,
+    ) -> io::Result<Vec<GrazingUpdate>> {
+        if tick <= self.last_graze_tick || !tick.is_multiple_of(2) {
+            return Ok(Vec::new());
+        }
+        self.last_graze_tick = tick;
+        let mut events = Vec::new();
+        for mob in self.entities.values_mut() {
+            if events.len() >= 4 {
+                break;
+            }
+            if mob.kind != Kind::Sheep {
+                continue;
+            }
+            let chance = if mob.baby { 25 } else { 500 };
+            if !hash(tick ^ (mob.id as u64).wrapping_mul(0x9e3779b97f4a7c15)).is_multiple_of(chance)
+            {
+                continue;
+            }
+            let (x, y, z) = (
+                mob.position.x.floor() as i32,
+                mob.position.y.floor() as i32 - 1,
+                mob.position.z.floor() as i32,
+            );
+            if !(0..255).contains(&y) || world.get(x, y, z) >> 4 != 2 {
+                continue;
+            }
+            // Do not mutate the Mob before the world snapshot commits.
+            if world.update_and_save(world_path, x, y, z, 3 << 4)? {
+                if mob.sheared {
+                    mob.sheared = false;
+                    let mut body = mob.id.to_be_bytes().to_vec();
+                    body.extend_from_slice(&[16, 0, 0x7f]);
+                    events.push((Some(Event { id: 0x1c, body }), (x, y, z)));
+                } else {
+                    // A grass change still needs a block packet, even when
+                    // the sheep already has its wool.
+                    events.push((None, (x, y, z)));
+                }
+            }
+        }
+        if !events.is_empty() {
+            self.save(world)?;
+        }
+        Ok(events)
+    }
+
     /// Cow milking is read-only for the animal; inventory substitution and
     /// persistence belong to the authenticated player session.
     pub fn can_milk(&self, id: i32, at: PlayerPosition, held: Option<Stack>) -> bool {
@@ -1406,7 +1607,7 @@ impl Mobs {
                 z: z as f64 + 0.5,
             };
             if !position.is_valid()
-                || !(24.0..=128.0).contains(&distance_to_players(position, players))
+                || !natural_spawn_location_ok(world, position, players)
                 || !physics::supported(world, &position)
                 || physics::collides(world, &position)
             {
@@ -1460,6 +1661,8 @@ impl Mobs {
                         let fortress = world.get(x, y - 1, z) >> 4 == 112;
                         if fortress && seed.is_multiple_of(4) {
                             Kind::Blaze
+                        } else if (seed >> 24).is_multiple_of(12) {
+                            Kind::Ghast
                         } else if (seed >> 24).is_multiple_of(8) {
                             Kind::MagmaCube
                         } else {
@@ -1478,8 +1681,25 @@ impl Mobs {
             } else {
                 1
             };
+            let spawn_position = if kind == Kind::Ghast {
+                PlayerPosition {
+                    y: position.y + 4.0,
+                    ..position
+                }
+            } else {
+                position
+            };
+            if kind == Kind::Ghast
+                && (!spawn_position.is_valid() || !ghast_has_clearance(world, spawn_position))
+            {
+                continue;
+            }
             let baby = kind == Kind::Zombie && (seed >> 21).is_multiple_of(20);
-            events.push(self.insert_sized(kind, position, baby, size));
+            if kind == Kind::Zombie && (seed >> 26).is_multiple_of(20) {
+                events.push(self.insert_zombie_villager(spawn_position, baby, 0));
+            } else {
+                events.push(self.insert_sized(kind, spawn_position, baby, size));
+            }
             break; // Bound per-cycle packets and CPU.
         }
     }
@@ -1546,6 +1766,12 @@ impl Mobs {
         for _ in 0..steps {
             let mut shots = Vec::new();
             let mut dead = Vec::new();
+            let villagers: Vec<_> = self
+                .entities
+                .values()
+                .filter(|mob| mob.kind == Kind::Villager)
+                .map(|mob| mob.position)
+                .collect();
             for mob in self.entities.values_mut() {
                 if mob.baby {
                     mob.age_ticks = mob.age_ticks.saturating_add(1);
@@ -1609,12 +1835,45 @@ impl Mobs {
                 let nearest = players
                     .iter()
                     .copied()
-                    .filter(|p| mob.nearby(*p, if mob.kind.passive() { 12.0 } else { 24.0 }))
+                    .filter(|p| {
+                        mob.nearby(
+                            *p,
+                            match mob.kind {
+                                Kind::Ghast => 64.0,
+                                Kind::Blaze | Kind::Wither => 48.0,
+                                _ if mob.kind.passive() => 12.0,
+                                _ => 24.0,
+                            },
+                        )
+                    })
                     .min_by(|a, b| {
                         distance(*a, mob.position).total_cmp(&distance(*b, mob.position))
                     });
-                let Some(target) = nearest else {
-                    continue;
+                let prey = (mob.kind == Kind::Zombie)
+                    .then(|| {
+                        villagers
+                            .iter()
+                            .copied()
+                            .filter(|at| {
+                                distance_3d(mob.position, *at) <= 16.0
+                                    && can_see(world, mob.position, *at)
+                            })
+                            .min_by(|a, b| {
+                                distance_3d(mob.position, *a)
+                                    .total_cmp(&distance_3d(mob.position, *b))
+                            })
+                    })
+                    .flatten();
+                let target = match (nearest, prey) {
+                    (Some(player), Some(villager))
+                        if distance_3d(mob.position, villager)
+                            < distance_3d(mob.position, player) =>
+                    {
+                        villager
+                    }
+                    (None, Some(villager)) => villager,
+                    (Some(player), _) => player,
+                    _ => continue,
                 };
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider)
                     && sunlight(now)
@@ -1712,6 +1971,13 @@ impl Mobs {
                         shots.push((mob.id, mob.position, yaw, pitch, kind));
                     }
                 }
+                if matches!(mob.kind, Kind::Ghast | Kind::Blaze) {
+                    if let Some(next) = flying_step(world, mob.kind, mob.position, target, now) {
+                        mob.position = next;
+                        events.push(multiplayer::teleport(mob.id, &next, 0.0, 0.0));
+                    }
+                    continue;
+                }
                 let destination = if mob.kind == Kind::Skeleton && d < 7.0 {
                     PlayerPosition {
                         x: mob.position.x + (mob.position.x - target.x),
@@ -1768,8 +2034,8 @@ impl Mobs {
                 {
                     mob.position = candidate;
                     events.push(multiplayer::teleport(mob.id, &candidate, 0.0, 0.0));
-                } else if mob.kind == Kind::Spider {
-                    // Climb alongside a wall, never through it.
+                } else if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
+                    // Both spider variants climb alongside a wall, never through it.
                     let front = PlayerPosition {
                         x: mob.position.x + dx / len * 0.6,
                         z: mob.position.z + dz / len * 0.6,
@@ -1792,6 +2058,7 @@ impl Mobs {
                     }
                 }
             }
+            self.zombies_attack_villagers(now, world, players, &mut events);
             // Iron golems target nearby hostile mobs, never players or villagers.
             // Resolve after the iteration to avoid mutable aliasing and keep
             // each hit authoritative for all connected clients.
@@ -2120,9 +2387,125 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
         .map(|other| distance_3d(p, *other))
         .fold(f64::INFINITY, f64::min)
 }
+/// Vanilla 1.7.10 villager infection chance by world difficulty.
+fn zombie_infects_villager(difficulty: u8, roll: u64) -> bool {
+    match difficulty {
+        3 => true,
+        2 => roll & 1 == 0,
+        _ => false,
+    }
+}
+/// Respect both the closest *online player* and Overworld world-spawn
+/// exclusion zones. This guard runs for every natural spawn candidate.
+fn natural_spawn_location_ok(
+    world: &World,
+    at: PlayerPosition,
+    players: &[PlayerPosition],
+) -> bool {
+    if !(24.0..=128.0).contains(&distance_to_players(at, players)) {
+        return false;
+    }
+    if world.dimension() == crate::dimensions::Dimension::Overworld {
+        let origin = PlayerPosition {
+            x: 0.5,
+            y: world.spawn_y(),
+            z: 0.5,
+        };
+        if distance_3d(at, origin) < 24.0 {
+            return false;
+        }
+    }
+    true
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn flying_mobs_move_without_a_ground_support_block() {
+        let world = World::new();
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        let player = PlayerPosition {
+            x: 36.5,
+            y: 75.0,
+            z: 0.5,
+        };
+        assert!(!physics::supported(&world, &from));
+        let ghast = flying_step(&world, Kind::Ghast, from, player, 100).unwrap();
+        assert!(ghast.x > from.x);
+        assert!(ghast.y > from.y);
+        let blaze = flying_step(&world, Kind::Blaze, from, player, 100).unwrap();
+        assert!(blaze.x > from.x);
+        assert!(blaze.y < from.y);
+        assert!(flying_step(&world, Kind::Zombie, from, player, 100).is_none());
+    }
+
+    #[test]
+    fn ghast_large_body_cannot_clip_through_a_block_or_ceiling() {
+        let mut world = World::new();
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        let target = PlayerPosition {
+            x: 36.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        assert!(ghast_has_clearance(&world, from));
+        world.import_block(2, 80, 0, 1 << 4).unwrap();
+        assert!(!ghast_has_clearance(&world, from));
+        assert!(flying_step(&world, Kind::Ghast, from, target, 20).is_none());
+        // A blaze has a smaller collision envelope and still moves.
+        assert!(flying_step(&world, Kind::Blaze, from, target, 20).is_some());
+    }
+
+    #[test]
+    fn sheared_sheep_regrows_only_after_persisted_grass_consumption() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 2 << 4).unwrap();
+        let path = std::env::temp_dir().join(format!("ir1710-grazing-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::default();
+        let id = mobs.next_id;
+        mobs.insert(
+            Kind::Sheep,
+            PlayerPosition {
+                x: 0.5,
+                y: 65.0,
+                z: 0.5,
+            },
+            false,
+        );
+        mobs.entities.get_mut(&id).unwrap().sheared = true;
+        let successful_tick = (2..50000u64)
+            .step_by(2)
+            .find(|tick| {
+                hash(*tick ^ (id as u64).wrapping_mul(0x9e3779b97f4a7c15)).is_multiple_of(500)
+            })
+            .unwrap();
+        // Before grazing, the wool stays sheared.
+        assert!(mobs.entities.get(&id).unwrap().sheared);
+        let changes = mobs.graze(&mut world, &path, successful_tick).unwrap();
+        assert_eq!(changes.len(), 1);
+        let metadata = changes[0].0.as_ref().unwrap();
+        assert_eq!(metadata.id, 0x1c);
+        assert_eq!(&metadata.body[..4], &id.to_be_bytes());
+        assert_eq!(&metadata.body[4..], &[16, 0, 0x7f]);
+        assert!(!mobs.entities.get(&id).unwrap().sheared);
+        assert_eq!(world.get(0, 64, 0) >> 4, 3);
+        assert!(mobs
+            .graze(&mut world, &path, successful_tick)
+            .unwrap()
+            .is_empty());
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0) >> 4, 3);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn mounted_pig_requires_saddle_and_horse_tames_on_server() {
         let mut mobs = Mobs {
@@ -2551,10 +2934,128 @@ mod tests {
         assert_eq!(mobs.spawn_events().count(), 0);
     }
     #[test]
+    fn world_spawn_and_player_exclusion_apply_to_all_natural_candidates() {
+        let world = World::natural(42);
+        let y = world.spawn_y();
+        let player = PlayerPosition { x: 60.5, y, z: 0.5 };
+        let candidate = |x| PlayerPosition { x, y, z: 0.5 };
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(24.4),
+            &[player]
+        ));
+        assert!(natural_spawn_location_ok(
+            &world,
+            candidate(24.5),
+            &[player]
+        ));
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(36.6),
+            &[candidate(40.0)]
+        ));
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(200.5),
+            &[player]
+        ));
+        assert!(!natural_spawn_location_ok(&world, candidate(45.5), &[]));
+        assert!(Mobs::new_with_difficulty(&world, true, 0)
+            .entities
+            .is_empty());
+        assert!(Mobs::new_with_difficulty(&world, true, 3)
+            .entities
+            .is_empty());
+    }
+    #[test]
+    fn zombie_attacks_player_before_equally_close_villager() {
+        let at = PlayerPosition::default();
+        let world = World::new();
+        let mut mobs = Mobs {
+            difficulty: Some(2),
+            ..Mobs::default()
+        };
+        mobs.insert(Kind::Zombie, at, false);
+        mobs.insert(Kind::Villager, at, false);
+        let mut packets = Vec::new();
+        mobs.zombies_attack_villagers(20, &world, &[at], &mut packets);
+        assert!(packets.is_empty());
+        assert_eq!(mobs.entities.get(&1).unwrap().health, 20);
+        assert_eq!(mobs.hurt_player(900, at, 21), 3);
+    }
+    #[test]
+    fn zombie_villager_metadata_and_infection_follow_difficulty() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let world = World::new();
+        for (difficulty, convert) in [(1, false), (3, true)] {
+            let mut mobs = Mobs {
+                difficulty: Some(difficulty),
+                ..Mobs::default()
+            };
+            let zombie_id = mobs.next_id;
+            mobs.insert(Kind::Zombie, at, false);
+            let villager_id = mobs.next_id;
+            mobs.insert(
+                Kind::Villager,
+                PlayerPosition {
+                    x: at.x + 1.0,
+                    ..at
+                },
+                false,
+            );
+            mobs.entities.get_mut(&villager_id).unwrap().profession = 2;
+            let mut all_events = Vec::new();
+            for tick in (20..=140).step_by(20) {
+                mobs.zombies_attack_villagers(tick, &world, &[], &mut all_events);
+            }
+            assert!(!mobs.entities.contains_key(&villager_id));
+            assert!(all_events.iter().any(|event| event.id == 0x13));
+            let infected: Vec<_> = mobs
+                .entities
+                .values()
+                .filter(|mob| mob.zombie_villager)
+                .collect();
+            assert_eq!(infected.len(), usize::from(convert));
+            assert!(mobs.entities.contains_key(&zombie_id));
+            if convert {
+                let infected = infected[0];
+                assert!(infected.id != villager_id && infected.id != zombie_id);
+                assert_eq!(infected.profession, 2);
+                assert!(infected
+                    .spawn()
+                    .body
+                    .windows(2)
+                    .any(|entry| entry == [13, 1]));
+            }
+        }
+        let mut previous = Mobs::default();
+        previous.insert(Kind::Zombie, at, false);
+        let mut legacy = serde_json::to_value(previous.entities.get(&0).unwrap()).unwrap();
+        let _ = legacy.as_object_mut().unwrap().remove("zombie_villager");
+        let old: Mob = serde_json::from_value(legacy).unwrap();
+        assert!(!old.zombie_villager);
+        assert!(!zombie_infects_villager(1, 0));
+        assert!(zombie_infects_villager(2, 0));
+        assert!(!zombie_infects_villager(2, 1));
+        assert!(zombie_infects_villager(3, 1));
+    }
+    #[test]
     fn natural_mobs_spawn_in_protocol5() {
         let world = World::natural(42);
         let mut mobs = Mobs::new_with_difficulty(&world, true, 1);
-        assert!(!mobs.entities.is_empty());
+        // Starting a new world never sidesteps the spawn eligibility checks.
+        assert!(mobs.entities.is_empty());
+        assert_eq!(mobs.next_id, BASE_ID);
+        let position = PlayerPosition {
+            x: 32.5,
+            y: world.spawn_y(),
+            z: 32.5,
+        };
+        mobs.insert(Kind::Zombie, position, false);
         let zombie = *mobs.entities.values().next().unwrap();
         assert_eq!(zombie.kind, Kind::Zombie);
         let packet = zombie.spawn();

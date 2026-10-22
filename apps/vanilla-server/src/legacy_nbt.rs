@@ -75,11 +75,12 @@ impl Section {
         let pair = index / 2;
         let shift = (index & 1) * 4;
         let metadata = ((*self.metadata.get(pair)? as u8) >> shift) & 15;
-        let high = self
-            .add
-            .as_ref()
-            .map(|layer| ((layer[pair] as u8 >> shift) & 15) as u16)
-            .unwrap_or(0);
+        // block_at is also called by future readers that may inspect a
+        // detached, not-yet-validated section. Never panic for short Add.
+        let high = match self.add.as_ref() {
+            Some(layer) => u16::from((*layer.get(pair)? as u8 >> shift) & 15),
+            None => 0,
+        };
         Some((low | high << 8, metadata))
     }
 }
@@ -126,6 +127,7 @@ pub(crate) fn parse_chunk(nbt: &[u8], cx: i32, cz: i32) -> io::Result<ChunkRoot>
         }
     }
     crate::legacy_inventory_nbt::validate_tiles(&parsed.level.tile_entities, Some((cx, cz)))?;
+    crate::legacy_entity_nbt::validate_entities(&parsed.level.entities)?;
     Ok(parsed)
 }
 
@@ -164,6 +166,15 @@ mod tests {
             },
             extra,
         }
+    }
+
+    #[test]
+    fn truncated_optional_add_returns_none_instead_of_panicking() {
+        let mut section = sample().level.sections.remove(0);
+        section.add = Some(ByteArray::new(vec![]));
+        assert_eq!(section.block_at(0), None);
+        section.add = Some(ByteArray::new(vec![0]));
+        assert_eq!(section.block_at(4095), None);
     }
 
     #[test]
