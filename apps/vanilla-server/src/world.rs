@@ -1583,6 +1583,32 @@ mod tests {
     }
 
     #[test]
+    fn device_fires_once_per_rising_edge_only_after_world_save() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-device-trigger-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 65, 0, (23 << 4) | 5).unwrap();
+        world.update_and_save(&path, -1, 65, 0, 152 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.drain_device_activations(), vec![(0, 65, 0)]);
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert!(world.drain_device_activations().is_empty());
+        assert_eq!(World::load(&path).unwrap().get(0, 65, 0) & 8, 8);
+        world.update_and_save(&path, -1, 65, 0, 0).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 65, 0) & 8, 0);
+        world.update_and_save(&path, -1, 65, 0, 152 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.drain_device_activations(), vec![(0, 65, 0)]);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn piston_pushes_dust_powered_block_and_doors_have_both_halves() {
         let path = std::env::temp_dir().join(format!("ir1710-device-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
