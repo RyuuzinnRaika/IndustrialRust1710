@@ -5135,7 +5135,7 @@ fn start_clock_console(
                     shutdown.store(true, Ordering::Release);
                     println!("Stopping server; flushing player and world state");
                     Ok(())
-                },
+                }
                 ["/list"] => (|| -> io::Result<()> {
                     println!("Online ({}): {}", hub.count()?, hub.names()?.join(", "));
                     Ok(())
@@ -5331,7 +5331,6 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-
     // Offline, standalone operations. Never create a server listener or modify
     // an original vanilla world as part of verification or migration staging.
     if raw_args.iter().any(|arg| arg == "--prepare-anvil-copy") {
@@ -5456,7 +5455,11 @@ fn main() -> io::Result<()> {
                 );
             }
             "--biome-seed" => {
-                if properties.as_ref().and_then(|config| config.level_seed).is_some() {
+                if properties
+                    .as_ref()
+                    .and_then(|config| config.level_seed)
+                    .is_some()
+                {
                     return Err(bad("biome seed already set by server.properties"));
                 }
                 biome_seed = Some(
@@ -5567,7 +5570,11 @@ fn main() -> io::Result<()> {
         return Err(bad("hardcore requires survival mode and difficulty 3"));
     }
     if (requested_seed.is_some() || biome_seed.is_some() || expanded_seed.is_some())
-        && ((!survival && properties.as_ref().and_then(|config| config.level_seed).is_none())
+        && ((!survival
+            && properties
+                .as_ref()
+                .and_then(|config| config.level_seed)
+                .is_none())
             || anvil_export_path.is_some()
             || anvil_import_path.is_some()
             || [
