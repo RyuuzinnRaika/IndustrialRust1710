@@ -1785,7 +1785,7 @@ fn play(
                 let z = input.i32()?;
                 let face = input.i8()?;
                 let held = input.slot()?;
-                input.take(3)?; // cursor x/y/z
+                let cursor = input.take(3)?; // Protocol 5 cursor x/y/z, 0..15
                 input.finish()?;
 
                 // Protocol 5 Use Item: air target is (-1,255,-1), face -1.
@@ -2201,13 +2201,23 @@ fn play(
                             } else if matches!(block_id, 29 | 33) {
                                 face as u16
                             } else if block_id == 96 {
-                                match face {
+                                let facing = match face {
                                     2 => 1,
                                     3 => 0,
                                     4 => 3,
                                     5 => 2,
                                     _ => 0,
-                                }
+                                };
+                                facing | if cursor[1] >= 8 { 8 } else { 0 }
+                            } else if matches!(block_id, 44 | 126 | 182) {
+                                // Slab variant is an item damage value; upper/lower
+                                // placement is derived from the clicked face and Y.
+                                (stack.damage as u16 & 7)
+                                    | if face == 0 || (face != 1 && cursor[1] >= 8) {
+                                        8
+                                    } else {
+                                        0
+                                    }
                             } else if matches!(block_id, 64 | 71 | 93 | 149) {
                                 ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
                             } else if block_id == 127 {
@@ -2224,8 +2234,20 @@ fn play(
                                 53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164
                             ) {
                                 // 1.7.10 stair orientation and inverted-half bit.
-                                let direction = ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3;
-                                direction | if face == 0 { 4 } else { 0 }
+                                let quadrant =
+                                    ((yaw.rem_euclid(360.0) / 90.0 + 0.5).floor() as u16) & 3;
+                                let direction = match quadrant {
+                                    0 => 2,
+                                    1 => 1,
+                                    2 => 3,
+                                    _ => 0,
+                                };
+                                direction
+                                    | if face == 0 || (face != 1 && cursor[1] >= 8) {
+                                        4
+                                    } else {
+                                        0
+                                    }
                             } else if block_id == 107 {
                                 ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
                             } else if matches!(
@@ -2237,6 +2259,7 @@ fn play(
                                 stack.damage as u16 & 15
                             };
                             if (world::is_placeable(block_id) || block_id == 61)
+                                && (block_id != 96 || (2..=5).contains(&face))
                                 && w.can_support(nx, ny, nz, (block_id << 4) | metadata)
                                 && block_id != 7
                                 && !invalid_chest_merge
