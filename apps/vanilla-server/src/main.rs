@@ -1390,7 +1390,7 @@ fn play(
                 } else if message.starts_with('/') {
                     // Never authorize offline player usernames using ops.json:
                     // these names can be trivially impersonated.
-                    let _trusted_operator = administration.is_operator(name, false)?;
+                    let _trusted_operator = administration.is_operator(name, None)?;
                     as_chat(s, "Permission denied or unknown command. Admin commands are console-only.")?;
                 } else if !permissions.chat {
                     as_chat(s, "Chat permission denied.")?;
@@ -3967,10 +3967,11 @@ fn main() -> io::Result<()> {
     for accepted in listener.incoming() {
         let stream = accepted?;
         let peer_ip = stream.peer_addr()?.ip();
-        // Fail closed on corrupt or missing ban databases. Refuse before
-        // spawning a session thread or consuming a global connection slot.
-        if administration.ip_banned(peer_ip).unwrap_or(true) { continue; }
+        // Rate limit before accessing disk so repeated banned connections cannot
+        // turn into an unlimited JSON parsing workload.
         let Some(ip_permit) = limiter.acquire(peer_ip) else { continue; };
+        // Corrupt or missing BAN databases fail closed before thread creation.
+        if administration.ip_banned(peer_ip).unwrap_or(true) { continue; }
         if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             connections.fetch_sub(1, Ordering::AcqRel);
             continue;
