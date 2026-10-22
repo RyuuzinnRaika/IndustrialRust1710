@@ -27,6 +27,13 @@ jobs:
       - name: Build production binaries from committed Cargo.lock
         shell: bash
         run: cargo build --release --locked -p vanilla-server -p legacy-status-server
+      - name: Smoke-test executable on the target operating system
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Windows" ]]; then ext=.exe; else ext=; fi
+          "target/release/vanilla-server${ext}" --help > server-help.txt
+          grep -q "Usage: vanilla-server" server-help.txt
       - name: Assemble auditable distribution
         shell: bash
         run: |
