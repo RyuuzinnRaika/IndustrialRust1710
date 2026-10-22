@@ -18,6 +18,7 @@ pub struct ServerProperties {
     pub bind: SocketAddr,
     pub world_path: PathBuf,
     pub survival: bool,
+    pub online_mode: bool,
     pub difficulty: u8,
     pub level_name: String,
 }
@@ -111,11 +112,9 @@ impl ServerProperties {
         }
         // Vanilla defaults to online-mode=true. Never claim to authenticate a
         // user using only the current offline username whitelist.
-        if boolean(&values, "online-mode", true)? {
-            return Err(invalid(
-                "online-mode=true needs Mojang session authentication (not implemented)",
-            ));
-        }
+        // Explicit online-mode now performs the Protocol 5 RSA/AES session handshake.
+        // Missing server.properties still preserves the historical offline CLI mode.
+        let online_mode = boolean(&values, "online-mode", true)?;
         if !boolean(&values, "white-list", false)? {
             return Err(invalid(
                 "white-list=false is unsafe for the current offline-mode server",
@@ -211,6 +210,7 @@ impl ServerProperties {
             bind: SocketAddr::new(ip, port),
             world_path: PathBuf::from(level_name).join("flat.irw"),
             survival,
+            online_mode,
             difficulty,
             level_name: level_name.to_string(),
         })
@@ -241,6 +241,8 @@ gamemode=1
         assert_eq!(p.world_path, PathBuf::from("TestWorld/flat.irw"));
         assert!(!p.survival);
         assert_eq!(p.difficulty, 1);
+        assert!(!p.online_mode);
+        assert!(ServerProperties::parse(&SAFE.replace("online-mode=false", "online-mode=true")).unwrap().online_mode);
         for difficulty in 0..=3 {
             let text = SAFE.replace("difficulty=1", &format!("difficulty={difficulty}"));
             assert_eq!(
@@ -253,7 +255,6 @@ gamemode=1
     #[test]
     fn refuses_auth_bypass_public_server_and_traversal() {
         for bad in [
-            SAFE.replace("online-mode=false", "online-mode=true"),
             SAFE.replace("white-list=true", "white-list=false"),
             SAFE.replace("level-name=TestWorld", "level-name=../outside"),
             SAFE.replace("level-name=TestWorld", "level-name=CON"),
