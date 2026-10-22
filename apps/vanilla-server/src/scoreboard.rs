@@ -259,7 +259,11 @@ impl Scoreboard {
         if !token(holder, 40) {
             return Err(invalid("invalid scoreboard score holder"));
         }
-        if !self.scores.values().any(|scores| scores.contains_key(holder)) {
+        if !self
+            .scores
+            .values()
+            .any(|scores| scores.contains_key(holder))
+        {
             return Err(invalid("score holder has no scores"));
         }
         let packet = Self::reset_score_packet(holder)?;
@@ -317,7 +321,12 @@ impl Scoreboard {
         Ok(vec![event(0x3e, body)])
     }
     pub fn remove_player_from_team(&mut self, name: &str, holder: &str) -> io::Result<Vec<Event>> {
-        if !token(holder, 40) || !self.teams.get(name).is_some_and(|t| t.players.contains(holder)) {
+        if !token(holder, 40)
+            || !self
+                .teams
+                .get(name)
+                .is_some_and(|t| t.players.contains(holder))
+        {
             return Err(invalid("unknown member of scoreboard team"));
         }
         let mut body = Vec::new();
@@ -389,7 +398,10 @@ mod tests {
         board.add_player_to_team("blue", "Alice").unwrap();
         assert!(board.add_player_to_team("blue", "Alice").is_err());
         assert!(board.snapshot().unwrap().iter().any(|e| e.id == 0x3e));
-        assert_eq!(board.remove_player_from_team("blue", "Alice").unwrap()[0].id, 0x3e);
+        assert_eq!(
+            board.remove_player_from_team("blue", "Alice").unwrap()[0].id,
+            0x3e
+        );
         assert!(board.remove_player_from_team("blue", "Alice").is_err());
         board.add_player_to_team("blue", "Alice").unwrap();
         assert_eq!(board.remove_team("blue").unwrap()[0].id, 0x3e);
