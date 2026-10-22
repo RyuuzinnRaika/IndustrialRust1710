@@ -579,6 +579,21 @@ fn flying_step(
     }
 }
 
+/// Endermen are almost three blocks tall. A player-sized (1.8 block)
+/// collision check alone would teleport the head into a solid block, water
+/// or lava. Require a dry three-block column and a real supporting floor.
+fn enderman_teleport_safe(world: &World, position: PlayerPosition) -> bool {
+    if !position.is_valid() || !(1.0..=252.0).contains(&position.y) {
+        return false;
+    }
+    let x = position.x.floor() as i32;
+    let y = position.y.floor() as i32;
+    let z = position.z.floor() as i32;
+    (0..3).all(|dy| world.get(x, y + dy, z) >> 4 == 0)
+        && physics::supported(world, &position)
+        && !physics::collides(world, &position)
+}
+
 fn sky_exposed(world: &World, p: PlayerPosition) -> bool {
     let x = p.x.floor() as i32;
     let z = p.z.floor() as i32;
@@ -2087,10 +2102,7 @@ impl Mobs {
                             y: mob.position.y,
                             z: mob.position.z + (((h >> 8) & 15) as f64 - 7.5),
                         };
-                        if new_pos.is_valid()
-                            && !physics::collides(world, &new_pos)
-                            && physics::supported(world, &new_pos)
-                        {
+                        if enderman_teleport_safe(world, new_pos) {
                             mob.position = new_pos;
                             mob.waypoint = None;
                             events.push(multiplayer::teleport(mob.id, &new_pos, 0.0, 0.0));
@@ -3173,6 +3185,25 @@ mod tests {
             .values()
             .any(|mob| mob.kind == Kind::EnderDragon));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn enderman_teleport_rejects_low_ceiling_liquid_and_missing_floor() {
+        let mut world = World::new();
+        let standing = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        assert!(enderman_teleport_safe(&world, standing));
+        world.import_block(0, 66, 0, 1 << 4).unwrap();
+        assert!(!enderman_teleport_safe(&world, standing));
+        world.import_block(0, 66, 0, 0).unwrap();
+        world.import_block(0, 64, 0, 9 << 4).unwrap();
+        assert!(!enderman_teleport_safe(&world, standing));
+        world.import_block(0, 64, 0, 0).unwrap();
+        world.import_block(0, 63, 0, 0).unwrap();
+        assert!(!enderman_teleport_safe(&world, standing));
     }
 
     #[test]
