@@ -16,11 +16,11 @@ mod ground_items;
 mod hoppers;
 mod inventory;
 mod journal;
+mod legacy_chunk_store;
 mod legacy_inventory_nbt;
 mod legacy_nbt;
 mod legacy_region;
 mod legacy_world_inspect;
-mod legacy_chunk_store;
 mod level_dat;
 mod mobs;
 mod multiplayer;
@@ -3114,7 +3114,9 @@ fn main() -> io::Result<()> {
             || anvil_import_path.is_some()
             || anvil_export_path.is_some()
         {
-            return Err(bad("Anvil chunk inspection cannot be combined with file operations"));
+            return Err(bad(
+                "Anvil chunk inspection cannot be combined with file operations",
+            ));
         }
         let mut cache = legacy_chunk_store::ReadOnlyChunkCache::open(root, 16)?;
         match cache.get(dimension, cx, cz)? {
