@@ -1068,7 +1068,7 @@ impl World {
             if primed_count > 4096 || trailer.len() != 6 + primed_count * 20 {
                 return Err(invalid("invalid primed TNT trailer length"));
             }
-            for entry in trailer[6..].chunks_exact(20) {
+            for entry in trailer[6..].as_chunks::<20>().0 {
                 let entity_id = i32::from_be_bytes(entry[..4].try_into().unwrap());
                 let x = i32::from_be_bytes(entry[4..8].try_into().unwrap());
                 let y = i32::from_be_bytes(entry[8..12].try_into().unwrap());
