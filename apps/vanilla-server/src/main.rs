@@ -2,8 +2,8 @@
 //! Offline-mode by design: bind to loopback unless you trust every client on your LAN.
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
 mod achievements;
-mod admin_state;
 mod admin;
+mod admin_state;
 mod anvil_export;
 mod anvil_import;
 mod backup_world;
