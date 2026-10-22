@@ -4414,11 +4414,11 @@ fn main() -> io::Result<()> {
         Arc::clone(&hub),
         Arc::clone(&clock),
         Arc::clone(&clock_path),
-        Arc::clone(&shutdown),
         Arc::clone(&world_rules),
         Arc::clone(&rules_path),
         Arc::clone(&shared_scoreboard),
         Arc::clone(&scoreboard_path),
+        Arc::clone(&shutdown),
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
