@@ -60,6 +60,7 @@ use mobs::Mobs;
 use multiplayer::{Event, Hub, JoinError, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
+use security_limits::{ChatLimiter, ConnectionLimiter};
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, ErrorKind};
@@ -74,7 +75,6 @@ use survival::MiningProgress;
 use survival_damage::Hazards;
 use vitals::Vitals;
 use whitelist::Whitelist;
-use security_limits::{ChatLimiter, ConnectionLimiter};
 use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
 
 const MAX_CONNECTIONS: usize = 32;
@@ -827,7 +827,9 @@ fn play(
             // Reload on a bounded interval: file removal, corruption or revocation
             // causes active sessions to be disconnected (fail closed).
             let allowed = Whitelist::load(whitelist_path).is_ok_and(|list| list.allows(name))
-                && administration.banned(name, peer_ip).is_ok_and(|reason| reason.is_none());
+                && administration
+                    .banned(name, peer_ip)
+                    .is_ok_and(|reason| reason.is_none());
             if !allowed {
                 let mut reason = Vec::new();
                 write_string(
@@ -1240,7 +1242,9 @@ fn play(
         }
         match id {
             2 => {
-                if !permissions.interact { continue; }
+                if !permissions.interact {
+                    continue;
+                }
                 // Protocol 5 C02 Use Entity: target VarInt and action VarInt.
                 let target_id = input.varint()?;
                 let action = input.varint()?;
@@ -1376,7 +1380,10 @@ fn play(
                 if let Err(disconnect) = chat_limiter.check(&message) {
                     if disconnect {
                         let mut reason = Vec::new();
-                        write_string(&json!({"text":"Repeated chat spam"}).to_string(), &mut reason)?;
+                        write_string(
+                            &json!({"text":"Repeated chat spam"}).to_string(),
+                            &mut reason,
+                        )?;
                         send(s, 0x40, &reason)?;
                         return Ok(());
                     }
@@ -1384,14 +1391,23 @@ fn play(
                     continue;
                 }
                 if message == "/help" {
-                    as_chat(s, "Commands: /help, /list. Admin commands are console-only in offline mode.")?;
+                    as_chat(
+                        s,
+                        "Commands: /help, /list. Admin commands are console-only in offline mode.",
+                    )?;
                 } else if message == "/list" {
-                    as_chat(s, &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")))?;
+                    as_chat(
+                        s,
+                        &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")),
+                    )?;
                 } else if message.starts_with('/') {
                     // Never authorize offline player usernames using ops.json:
                     // these names can be trivially impersonated.
                     let _trusted_operator = administration.is_operator(name, None)?;
-                    as_chat(s, "Permission denied or unknown command. Admin commands are console-only.")?;
+                    as_chat(
+                        s,
+                        "Permission denied or unknown command. Admin commands are console-only.",
+                    )?;
                 } else if !permissions.chat {
                     as_chat(s, "Chat permission denied.")?;
                 } else {
@@ -1400,7 +1416,10 @@ fn play(
                         &json!({"text":format!("<{name}> {message}")}).to_string(),
                         &mut bytes,
                     )?;
-                    hub.broadcast(Event { id: 0x02, body: bytes });
+                    hub.broadcast(Event {
+                        id: 0x02,
+                        body: bytes,
+                    });
                 }
             }
             3 => {
@@ -1528,7 +1547,9 @@ fn play(
                 }
             }
             7 => {
-                if !permissions.build { continue; }
+                if !permissions.build {
+                    continue;
+                }
                 let action = input.i8()?;
                 let x = input.i32()?;
                 let y = input.u8()? as i32;
@@ -1788,7 +1809,9 @@ fn play(
                 }
             }
             8 => {
-                if !permissions.build { continue; }
+                if !permissions.build {
+                    continue;
+                }
                 let x = input.i32()?;
                 let y = input.u8()? as i32;
                 let z = input.i32()?;
@@ -2930,7 +2953,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     }
     // Recheck bans at Login Start. Missing/corrupt DBs are fail-closed.
     match administration.banned(&name, peer_ip) {
-        Ok(Some(reason)) => { login_disconnect(&mut s, &reason)?; return Ok(()); }
+        Ok(Some(reason)) => {
+            login_disconnect(&mut s, &reason)?;
+            return Ok(());
+        }
         Err(error) => {
             eprintln!("admin database unavailable: {error}");
             login_disconnect(&mut s, "Administration database unavailable.")?;
@@ -3121,8 +3147,12 @@ fn start_clock_console(
     thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
-            let Ok(line) = line else { break; };
-            if line.trim().is_empty() { continue; }
+            let Ok(line) = line else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
             if let Err(error) = administration.audit("CONSOLE", &line, "attempt") {
                 eprintln!("ADMIN AUDIT UNAVAILABLE, operation refused: {error}");
                 continue;
@@ -3134,7 +3164,10 @@ fn start_clock_console(
                     Ok(())
                 })(),
                 ["/save"] => (|| -> io::Result<()> {
-                    world.lock().map_err(|_| bad("world mutex poisoned"))?.save(&world_path)?;
+                    world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .save(&world_path)?;
                     println!("World saved");
                     Ok(())
                 })(),
@@ -3143,7 +3176,8 @@ fn start_clock_console(
                     Ok(())
                 }
                 ["/time", "set", requested] => (|| -> io::Result<()> {
-                    let requested = requested.parse::<u64>()
+                    let requested = requested
+                        .parse::<u64>()
                         .map_err(|_| bad("invalid daytime value"))?;
                     clock.set_day_time(requested)?;
                     clock.save_ticks(&clock_path)?;
@@ -3170,24 +3204,35 @@ fn start_clock_console(
                 })(),
                 ["/tp", name, x, y, z] => (|| -> io::Result<()> {
                     let parse = |value: &str| {
-                        value.parse::<f64>()
+                        value
+                            .parse::<f64>()
                             .map_err(|_| bad("invalid teleport coordinate"))
                     };
-                    let position = PlayerPosition { x: parse(x)?, y: parse(y)?, z: parse(z)? };
+                    let position = PlayerPosition {
+                        x: parse(x)?,
+                        y: parse(y)?,
+                        z: parse(z)?,
+                    };
                     if !hub.request_admin_teleport(name, position)? {
                         return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
                     }
                     println!("Teleport queued for {name}");
                     Ok(())
                 })(),
-                ["/op", name] => (|| -> io::Result<()> {
-                    administration.set_op(name, true)?;
-                    println!("OP record saved for {name} (offline-mode clients do not gain authority)");
-                    Ok(())
-                })(),
+                ["/op", name] => {
+                    (|| -> io::Result<()> {
+                        administration.set_op(name, true)?;
+                        println!("OP record saved for {name} (offline-mode clients do not gain authority)");
+                        Ok(())
+                    })()
+                }
                 ["/deop", name] => administration.set_op(name, false),
                 ["/ban", name, reason @ ..] => (|| -> io::Result<()> {
-                    let reason = if reason.is_empty() { "Banned by administrator".to_owned() } else { reason.join(" ") };
+                    let reason = if reason.is_empty() {
+                        "Banned by administrator".to_owned()
+                    } else {
+                        reason.join(" ")
+                    };
                     administration.set_player_ban(name, Some(&reason), true)?;
                     let _ = hub.request_admin_kick(name, &reason)?;
                     println!("Banned {name}");
@@ -3195,7 +3240,11 @@ fn start_clock_console(
                 })(),
                 ["/pardon", name] => administration.set_player_ban(name, None, false),
                 ["/ban-ip", address, reason @ ..] => (|| -> io::Result<()> {
-                    let reason = if reason.is_empty() { "IP banned by administrator".to_owned() } else { reason.join(" ") };
+                    let reason = if reason.is_empty() {
+                        "IP banned by administrator".to_owned()
+                    } else {
+                        reason.join(" ")
+                    };
                     administration.set_ip_ban(address, Some(&reason), true)?;
                     // Active sessions are rechecked within two seconds.
                     println!("Banned IP {address}");
@@ -3203,7 +3252,11 @@ fn start_clock_console(
                 })(),
                 ["/pardon-ip", address] => administration.set_ip_ban(address, None, false),
                 ["/kick", name, reason @ ..] => (|| -> io::Result<()> {
-                    let reason = if reason.is_empty() { "Kicked by administrator".to_owned() } else { reason.join(" ") };
+                    let reason = if reason.is_empty() {
+                        "Kicked by administrator".to_owned()
+                    } else {
+                        reason.join(" ")
+                    };
                     if !hub.request_admin_kick(name, &reason)? {
                         return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
                     }
@@ -3212,7 +3265,10 @@ fn start_clock_console(
                 })(),
                 ["/whitelist", "reload"] => (|| -> io::Result<()> {
                     let loaded = Whitelist::load(&whitelist_path)?;
-                    println!("Whitelist validated: {} names; next login/session poll uses it", loaded.len());
+                    println!(
+                        "Whitelist validated: {} names; next login/session poll uses it",
+                        loaded.len()
+                    );
                     Ok(())
                 })(),
                 ["/whitelist", "list"] => (|| -> io::Result<()> {
@@ -3221,8 +3277,11 @@ fn start_clock_console(
                     Ok(())
                 })(),
                 ["/permission", name, kind, state] => (|| -> io::Result<()> {
-                    let enabled = match *state { "allow" => true, "deny" => false,
-                        _ => return Err(bad("permission must be allow or deny")) };
+                    let enabled = match *state {
+                        "allow" => true,
+                        "deny" => false,
+                        _ => return Err(bad("permission must be allow or deny")),
+                    };
                     administration.set_permission(name, kind, enabled)?;
                     println!("Permission updated for {name}: {kind}={enabled}");
                     Ok(())
@@ -3969,9 +4028,13 @@ fn main() -> io::Result<()> {
         let peer_ip = stream.peer_addr()?.ip();
         // Rate limit before accessing disk so repeated banned connections cannot
         // turn into an unlimited JSON parsing workload.
-        let Some(ip_permit) = limiter.acquire(peer_ip) else { continue; };
+        let Some(ip_permit) = limiter.acquire(peer_ip) else {
+            continue;
+        };
         // Corrupt or missing BAN databases fail closed before thread creation.
-        if administration.ip_banned(peer_ip).unwrap_or(true) { continue; }
+        if administration.ip_banned(peer_ip).unwrap_or(true) {
+            continue;
+        }
         if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             connections.fetch_sub(1, Ordering::AcqRel);
             continue;
