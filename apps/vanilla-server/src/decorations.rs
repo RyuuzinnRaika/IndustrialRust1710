@@ -116,13 +116,15 @@ impl Decorations {
         if data.len() as u64 > MAX_BYTES {
             return Err(invalid("decoration file too large"));
         }
-        let store: Self = serde_json::from_slice(&data).map_err(|_| invalid("invalid decoration JSON"))?;
+        let store: Self =
+            serde_json::from_slice(&data).map_err(|_| invalid("invalid decoration JSON"))?;
         store.validate()?;
         Ok(store)
     }
     fn save(&self, path: &Path) -> io::Result<()> {
         self.validate()?;
-        let data = serde_json::to_vec(self).map_err(|_| invalid("decoration JSON encoding failed"))?;
+        let data =
+            serde_json::to_vec(self).map_err(|_| invalid("decoration JSON encoding failed"))?;
         if data.len() as u64 > MAX_BYTES {
             return Err(invalid("decoration file too large"));
         }
@@ -144,7 +146,12 @@ impl Decorations {
     pub fn sign(&self, position: Position) -> Option<&[String; 4]> {
         self.signs.get(&key(position))
     }
-    pub fn set_sign(&mut self, path: &Path, position: Position, lines: [String; 4]) -> io::Result<()> {
+    pub fn set_sign(
+        &mut self,
+        path: &Path,
+        position: Position,
+        lines: [String; 4],
+    ) -> io::Result<()> {
         if !world::in_bounds(position.0, position.1, position.2)
             || !lines.iter().all(|line| valid_line(line))
         {
@@ -170,14 +177,23 @@ impl Decorations {
     pub fn record(&self, position: Position) -> Option<i16> {
         self.records.get(&key(position)).copied()
     }
-    pub fn set_record(&mut self, path: &Path, position: Position, item: Option<i16>) -> io::Result<()> {
+    pub fn set_record(
+        &mut self,
+        path: &Path,
+        position: Position,
+        item: Option<i16>,
+    ) -> io::Result<()> {
         if item.is_some_and(|id| !(2256..=2267).contains(&id)) {
             return Err(invalid("invalid record ID"));
         }
         let mut next = self.clone();
         match item {
-            Some(id) => { next.records.insert(key(position), id); }
-            None => { next.records.remove(&key(position)); }
+            Some(id) => {
+                next.records.insert(key(position), id);
+            }
+            None => {
+                next.records.remove(&key(position));
+            }
         }
         next.save(path)?;
         *self = next;
@@ -186,14 +202,23 @@ impl Decorations {
     pub fn pot(&self, position: Position) -> Option<Stack> {
         self.pots.get(&key(position)).copied()
     }
-    pub fn set_pot(&mut self, path: &Path, position: Position, item: Option<Stack>) -> io::Result<()> {
+    pub fn set_pot(
+        &mut self,
+        path: &Path,
+        position: Position,
+        item: Option<Stack>,
+    ) -> io::Result<()> {
         if item.is_some_and(|stack| !pot_compatible(stack)) {
             return Err(invalid("invalid flower pot item"));
         }
         let mut next = self.clone();
         match item {
-            Some(stack) => { next.pots.insert(key(position), stack); }
-            None => { next.pots.remove(&key(position)); }
+            Some(stack) => {
+                next.pots.insert(key(position), stack);
+            }
+            None => {
+                next.pots.remove(&key(position));
+            }
         }
         next.save(path)?;
         *self = next;
@@ -212,7 +237,10 @@ impl Decorations {
         }
         Ok(())
     }
-    pub fn pot_packets_in(&self, chunks: &std::collections::BTreeSet<(i32, i32)>) -> io::Result<Vec<Vec<u8>>> {
+    pub fn pot_packets_in(
+        &self,
+        chunks: &std::collections::BTreeSet<(i32, i32)>,
+    ) -> io::Result<Vec<Vec<u8>>> {
         let mut packets = Vec::new();
         for (key, stack) in &self.pots {
             let pos = parse_key(key)?;
@@ -222,7 +250,10 @@ impl Decorations {
         }
         Ok(packets)
     }
-    pub fn sign_packets_in(&self, chunks: &std::collections::BTreeSet<(i32, i32)>) -> io::Result<Vec<Vec<u8>>> {
+    pub fn sign_packets_in(
+        &self,
+        chunks: &std::collections::BTreeSet<(i32, i32)>,
+    ) -> io::Result<Vec<Vec<u8>>> {
         let mut packets = Vec::new();
         for (key, lines) in &self.signs {
             let position = parse_key(key)?;
@@ -235,7 +266,8 @@ impl Decorations {
 }
 
 pub fn pot_compatible(stack: Stack) -> bool {
-    stack.count == 1 && stack.is_valid()
+    stack.count == 1
+        && stack.is_valid()
         && matches!(stack.id, 6 | 31 | 32 | 37 | 38 | 39 | 40 | 81 | 175 | 351)
         && (stack.id != 351 || stack.damage == 3)
 }
@@ -272,10 +304,10 @@ pub fn note_action((x, y, z): Position, instrument: u8, pitch: u8) -> Vec<u8> {
 pub fn instrument(below: u16) -> u8 {
     match below {
         5 | 17 | 162 | 47 | 53 | 85 | 126 => 1, // wood/bass
-        12 | 13 | 88 => 2, // sand/snare
-        20 | 95 | 102 => 3, // glass/hat
-        1 | 4 | 14 | 15 | 16 | 48 | 49 => 4, // stone/bass drum
-        _ => 0, // harp/piano
+        12 | 13 | 88 => 2,                      // sand/snare
+        20 | 95 | 102 => 3,                     // glass/hat
+        1 | 4 | 14 | 15 | 16 | 48 | 49 => 4,    // stone/bass drum
+        _ => 0,                                 // harp/piano
     }
 }
 /// S35 Update Tile Entity: action 5 = FlowerPot; compressed NBT Short+GZip.
@@ -296,8 +328,15 @@ pub fn pot_packet((x, y, z): Position, stack: Option<Stack>) -> io::Result<Vec<u
         return Err(invalid("invalid pot tile entity"));
     }
     let (item, data) = stack.map_or((0, 0), |s| (i32::from(s.id), i32::from(s.damage)));
-    let nbt = fastnbt::to_bytes(&PotNbt { id: "FlowerPot", x, y, z, item, data })
-        .map_err(|_| invalid("invalid pot NBT"))?;
+    let nbt = fastnbt::to_bytes(&PotNbt {
+        id: "FlowerPot",
+        x,
+        y,
+        z,
+        item,
+        data,
+    })
+    .map_err(|_| invalid("invalid pot NBT"))?;
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&nbt)?;
     let gzip = encoder.finish()?;
@@ -329,20 +368,36 @@ mod tests {
 
     #[test]
     fn sign_wire_fields_and_limit() {
-        let text = ["Hello".to_owned(), "世界".to_owned(), "".to_owned(), "!".to_owned()];
+        let text = [
+            "Hello".to_owned(),
+            "世界".to_owned(),
+            "".to_owned(),
+            "!".to_owned(),
+        ];
         let bytes = sign_packet((-1, 64, 2), &text).unwrap();
         assert_eq!(&bytes[..4], &(-1i32).to_be_bytes());
         assert_eq!(&bytes[4..6], &(64i16).to_be_bytes());
         assert_eq!(&bytes[6..10], &(2i32).to_be_bytes());
         assert_eq!(bytes[10], 5);
-        assert!(sign_packet((0, 64, 0), &["1234567890123456".into(), "".into(), "".into(), "".into()]).is_err());
+        assert!(sign_packet(
+            (0, 64, 0),
+            &["1234567890123456".into(), "".into(), "".into(), "".into()]
+        )
+        .is_err());
     }
     #[test]
     fn persistence_round_trip_and_bad_data() {
-        let path = std::env::temp_dir().join(format!("irw-g-decoration-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("irw-g-decoration-{}.json", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut store = Decorations::default();
-        store.set_sign(&path, (3, 64, -2), ["A".into(), "".into(), "".into(), "".into()]).unwrap();
+        store
+            .set_sign(
+                &path,
+                (3, 64, -2),
+                ["A".into(), "".into(), "".into(), "".into()],
+            )
+            .unwrap();
         store.next_note(&path, (4, 64, -2)).unwrap();
         store.set_record(&path, (5, 64, -2), Some(2256)).unwrap();
         let restored = Decorations::load(&path).unwrap();
@@ -350,12 +405,23 @@ mod tests {
         assert_eq!(restored.note((4, 64, -2)), 1);
         assert_eq!(restored.record((5, 64, -2)), Some(2256));
         store.remove(&path, (3, 64, -2)).unwrap();
-        assert!(Decorations::load(&path).unwrap().sign((3, 64, -2)).is_none());
+        assert!(Decorations::load(&path)
+            .unwrap()
+            .sign((3, 64, -2))
+            .is_none());
         let _ = fs::remove_file(&path);
     }
     #[test]
     fn pot_rejects_non_decorative_items() {
-        assert!(!pot_compatible(Stack { id: 276, count: 1, damage: 0 }));
-        assert!(pot_compatible(Stack { id: 37, count: 1, damage: 0 }));
+        assert!(!pot_compatible(Stack {
+            id: 276,
+            count: 1,
+            damage: 0
+        }));
+        assert!(pot_compatible(Stack {
+            id: 37,
+            count: 1,
+            damage: 0
+        }));
     }
 }
