@@ -7,11 +7,13 @@ mod admin_state;
 mod anvil_export;
 mod anvil_import;
 mod backup_world;
+mod books;
 mod brewing;
 mod chests;
 mod chunk_pipeline;
 mod clock;
 mod crafting;
+mod decorations;
 mod dimensions;
 mod dispensers;
 mod experience;
@@ -19,6 +21,7 @@ mod fishing;
 mod furnaces;
 mod game_rules;
 mod ground_items;
+mod hanging;
 mod hoppers;
 mod inventory;
 mod items_1710;
@@ -30,6 +33,7 @@ mod legacy_nbt;
 mod legacy_region;
 mod legacy_world_inspect;
 mod level_dat;
+mod maps;
 mod minecarts;
 mod mobs;
 mod multiplayer;
@@ -58,18 +62,21 @@ use admin::Administration;
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
+use decorations::Decorations;
 use dispensers::{Devices, Position as DevicePosition};
 use experience::Experience;
 use fishing::Fishing;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use game_rules::GameRules;
 use ground_items::GroundItems;
+use hanging::Hangings;
 use hoppers::{Hoppers, Position as HopperPosition};
 use inventory::{Inventory, Stack};
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
     PROTOCOL_VERSION,
 };
+use maps::Maps;
 use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
@@ -157,8 +164,13 @@ impl<'a> Input<'a> {
         let count = self.u8()?;
         let damage = self.i16()?;
         let nbt_length = self.i16()?;
+        // Use-Item sends the held Slot. Book data is not trusted here: C17
+        // carries edits and the server-held book record determines its content.
         if nbt_length != -1 {
-            return Err(bad("NBT item stacks are not supported yet"));
+            if !matches!(id, 386 | 387) || nbt_length < 0 {
+                return Err(bad("unsupported item NBT"));
+            }
+            self.take(nbt_length as usize)?;
         }
         let stack = Stack { id, count, damage };
         if !stack.is_valid() {
@@ -401,6 +413,50 @@ fn send_chunk_batch(
 fn send_chunk(s: &mut Connection, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
     send(s, 0x21, &queue_chunk(world, cx, cz)?.finish()?)
 }
+fn send_visible_signs(
+    s: &mut Connection,
+    decorations: &Mutex<Decorations>,
+    chunks: &BTreeSet<(i32, i32)>,
+) -> io::Result<()> {
+    let (signs, pots) = {
+        let storage = decorations
+            .lock()
+            .map_err(|_| bad("decorations lock poisoned"))?;
+        (
+            storage.sign_packets_in(chunks)?,
+            storage.pot_packets_in(chunks)?,
+        )
+    };
+    for body in signs {
+        send(s, 0x33, &body)?;
+    }
+    for body in pots {
+        send(s, 0x35, &body)?;
+    }
+    Ok(())
+}
+/// Keep hanging entities in sync with the client's chunk set. A chunk unload
+/// destroys client-side entities; they must be spawned again on re-entry.
+fn send_hanging_delta(
+    s: &mut Connection,
+    hangings: &Mutex<Hangings>,
+    previous: &BTreeSet<(i32, i32)>,
+    current: &BTreeSet<(i32, i32)>,
+) -> io::Result<()> {
+    let events = {
+        let state = hangings.lock().map_err(|_| bad("hanging lock poisoned"))?;
+        let leaving = previous.difference(current).copied().collect();
+        let entering = current.difference(previous).copied().collect();
+        let mut events = state.destroy_events_in(&leaving);
+        events.extend(state.spawn_events_in(&entering)?);
+        events
+    };
+    // Never hold the hanging-world mutex while writing to a network socket.
+    for event in events {
+        send(s, event.id, &event.body)?;
+    }
+    Ok(())
+}
 fn unload_chunk(s: &mut Connection, cx: i32, cz: i32) -> io::Result<()> {
     // Protocol 5: full column with zero section bitmap and no data.
     let mut packet = Vec::with_capacity(17);
@@ -453,6 +509,19 @@ fn chunk_relight_event(cx: i32, cz: i32) -> Event {
         id: CHUNK_RELIGHT_EVENT,
         body,
     }
+}
+
+/// Legacy 1.7.10 S24 Block Action: X:Int, Y:Short, Z:Int,
+/// action (0=extend, 1=retract), facing, and block-id VarInt.
+fn piston_action_event(action: world::PistonAction) -> Event {
+    let mut body = Vec::with_capacity(16);
+    body.extend_from_slice(&action.pos.0.to_be_bytes());
+    body.extend_from_slice(&(action.pos.1 as i16).to_be_bytes());
+    body.extend_from_slice(&action.pos.2.to_be_bytes());
+    body.push(u8::from(!action.extending));
+    body.push(action.facing);
+    write_varint(u32::from(action.block_id), &mut body);
+    Event { id: 0x24, body }
 }
 
 fn block_change_event(world: &World, x: i32, y: i32, z: i32) -> Event {
@@ -617,6 +686,12 @@ struct PlayerSession<'a> {
     device_path: &'a Path,
     brewers: &'a Mutex<Brewers>,
     brewer_path: &'a Path,
+    decorations: &'a Mutex<Decorations>,
+    decoration_path: &'a Path,
+    maps: &'a Mutex<Maps>,
+    map_path: &'a Path,
+    hangings: &'a Mutex<Hangings>,
+    hanging_path: &'a Path,
     survival: bool,
     hardcore: bool,
     difficulty: &'a AtomicU8,
@@ -717,6 +792,12 @@ fn play(
         device_path,
         brewers,
         brewer_path,
+        decorations,
+        decoration_path,
+        maps,
+        map_path,
+        hangings,
+        hanging_path,
         mut survival,
         hardcore,
         difficulty,
@@ -753,6 +834,8 @@ fn play(
     // Keep fragmented TCP frames across short receive timeouts.
     let mut packet_reader = BufferedFrameReader::new();
     let mut mining: Option<MiningProgress> = None;
+    // Only the same player who placed a sign may submit the next C12 edit.
+    let mut pending_sign: Option<(i32, i32, i32)> = None;
     let mut active_window: u8 = 0;
     let mut active_chest: Option<ChestPosition> = None;
     let mut active_chest_partner: Option<ChestPosition> = None;
@@ -778,6 +861,7 @@ fn play(
     let mut last_carrot_wear = 0u64;
     let mut last_beacon_tick = clock.ticks();
     let mut last_plate_refresh_tick = clock.ticks();
+    let mut last_map_tick = clock.ticks();
     loop {
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
@@ -879,7 +963,11 @@ fn play(
                 bow_start = None;
                 yaw = 0.0;
                 pitch = 0.0;
+                let old_chunks = loaded_chunks.clone();
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                let entering = loaded_chunks.difference(&old_chunks).copied().collect();
+                send_visible_signs(s, decorations, &entering)?;
+                send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                 send_player_position(s, player)?;
                 if pearl_impact {
                     send(s, 0x06, &health_packet(*vitals))?;
@@ -1065,6 +1153,26 @@ fn play(
                 hub.move_player(entity_id, mounted, yaw, pitch);
             }
         }
+        if now_tick > last_map_tick && now_tick.is_multiple_of(4) {
+            last_map_tick = now_tick;
+            if let Some(Stack {
+                id: 358, damage, ..
+            }) = inventory.held()
+            {
+                let terrain = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                let packet = maps.lock().map_err(|_| bad("map lock poisoned"))?.refresh(
+                    map_path,
+                    &terrain,
+                    damage,
+                    (player.x.floor() as i32, player.z.floor() as i32),
+                    yaw,
+                    now_tick / 4,
+                )?;
+                if let Some(packet) = packet {
+                    send(s, 0x34, &packet)?;
+                }
+            }
+        }
         // XP orbs belong to the world and are collected by proximity, not by client inventory claims.
         if survival && vitals.health > 0.0 {
             let collected = mobs
@@ -1103,6 +1211,10 @@ fn play(
                 grazed_blocks.push(at);
             }
             updates.extend(creatures.advance_leashes(&w, now_tick, &participants));
+            // Publish both door halves only after the paired world write
+            // commits; all clients observe the same server-owned destruction.
+            let broken_doors =
+                creatures.break_wooden_doors(&mut w, world_path, now_tick, &players)?;
             let explosions = creatures.take_explosions();
             updates.extend(creatures.queue_explosion_hits(&w, &explosions, &participants));
             updates.extend(creatures.take_player_effects(entity_id, *player, now_tick));
@@ -1110,7 +1222,7 @@ fn play(
                 creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
             let drops = creatures.take_drops();
             drop(creatures);
-            for (x, y, z) in grazed_blocks {
+            for (x, y, z) in grazed_blocks.into_iter().chain(broken_doors) {
                 hub.broadcast(block_change_event(&w, x, y, z));
             }
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
@@ -1586,6 +1698,38 @@ fn play(
             continue;
         }
         match id {
+            18 => {
+                // Protocol 5 C12: Int X, Short Y, Int Z, four Strings.
+                // Reject unsolicited edits; only the placing player gets S36.
+                let pos = (input.i32()?, input.i16()? as i32, input.i32()?);
+                let lines = [
+                    input.string(15)?,
+                    input.string(15)?,
+                    input.string(15)?,
+                    input.string(15)?,
+                ];
+                input.finish()?;
+                if pending_sign.take() == Some(pos)
+                    && world::in_bounds(pos.0, pos.1, pos.2)
+                    && near(location, pos.0, pos.1, pos.2)
+                {
+                    let sign_block = world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(pos.0, pos.1, pos.2)
+                        >> 4;
+                    if matches!(sign_block, 63 | 68) {
+                        decorations
+                            .lock()
+                            .map_err(|_| bad("decorations lock poisoned"))?
+                            .set_sign(decoration_path, pos, lines.clone())?;
+                        hub.broadcast(Event {
+                            id: 0x33,
+                            body: decorations::sign_packet(pos, &lines)?,
+                        });
+                    }
+                }
+            }
             2 => {
                 if !permissions.interact {
                     continue;
@@ -1594,6 +1738,81 @@ fn play(
                 let target_id = input.varint()?;
                 let action = input.varint()?;
                 input.finish()?;
+                // Frame/painting IDs are disjoint from mobs. Server owns all
+                // insertions, rotations, destruction and resulting item drops.
+                let mut hanging_state =
+                    hangings.lock().map_err(|_| bad("hanging lock poisoned"))?;
+                if let Some(entity) = hanging_state.get(target_id).cloned() {
+                    let at = (
+                        player.x.floor() as i32,
+                        player.y.floor() as i32,
+                        player.z.floor() as i32,
+                    );
+                    if !entity.near(at) {
+                        continue;
+                    }
+                    if action == 1 {
+                        if let Some((next, removed)) = hanging_state.stage_remove(target_id)? {
+                            if survival {
+                                let drops = removed.drops();
+                                let mut ground = ground_items
+                                    .lock()
+                                    .map_err(|_| bad("ground items lock poisoned"))?;
+                                if !ground.has_capacity_for(drops.len()) {
+                                    continue;
+                                }
+                                let (staged_ground, spawned) =
+                                    ground.stage_put_many(&drops, removed.drop_position())?;
+                                journal::commit(
+                                    &world_path.with_extension("pending-txn.json"),
+                                    &[
+                                        (hanging_path, next.encoded()?),
+                                        (ground_path, staged_ground.encoded()?),
+                                    ],
+                                )?;
+                                *ground = staged_ground;
+                                *hanging_state = next;
+                                hub.broadcast(removed.destroy());
+                                for dropped in spawned {
+                                    for event in dropped.spawn() {
+                                        hub.broadcast(event);
+                                    }
+                                }
+                            } else {
+                                next.save(hanging_path)?;
+                                *hanging_state = next;
+                                hub.broadcast(removed.destroy());
+                            }
+                        }
+                    } else if action == 0 && entity.is_frame() {
+                        if let Some((next, debit, event)) =
+                            hanging_state.stage_frame_use(target_id, inventory.held())?
+                        {
+                            if debit && survival {
+                                let mut candidate = inventory.clone();
+                                if candidate.consume_held() {
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &[
+                                            (inventory_path, candidate.encoded()?),
+                                            (hanging_path, next.encoded()?),
+                                        ],
+                                    )?;
+                                    *inventory = candidate;
+                                    *hanging_state = next;
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                    hub.broadcast(event);
+                                }
+                            } else {
+                                next.save(hanging_path)?;
+                                *hanging_state = next;
+                                hub.broadcast(event);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                drop(hanging_state);
                 if survival && vitals.health > 0.0 && action == 0 {
                     if minecarts
                         .lock()
@@ -2025,7 +2244,13 @@ fn play(
                 }
                 location = (x, y, z);
                 *player = candidate;
+                let old_chunks = loaded_chunks.clone();
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(&candidate))?;
+                if loaded_chunks != old_chunks {
+                    let entering = loaded_chunks.difference(&old_chunks).copied().collect();
+                    send_visible_signs(s, decorations, &entering)?;
+                    send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
+                }
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, candidate, yaw, pitch);
                     last_movement_broadcast = Instant::now();
@@ -2189,6 +2414,25 @@ fn play(
                         }
                         0 => {
                             let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                            if w.get(x, y, z) >> 4 == 25
+                                && w.get(x, y + 1, z) == 0
+                                && world::in_bounds(x, y, z)
+                                && near(location, x, y, z)
+                            {
+                                let pos = (x, y, z);
+                                let pitch = decorations
+                                    .lock()
+                                    .map_err(|_| bad("decorations lock poisoned"))?
+                                    .note(pos);
+                                hub.broadcast(Event {
+                                    id: 0x24,
+                                    body: decorations::note_action(
+                                        pos,
+                                        decorations::instrument(w.get(x, y - 1, z) >> 4),
+                                        pitch,
+                                    ),
+                                });
+                            }
                             mining = if world::in_bounds(x, y, z) && near(location, x, y, z) {
                                 MiningProgress::start(target, w.get(x, y, z), inventory.held())
                             } else {
@@ -2234,7 +2478,12 @@ fn play(
                                             && brewers
                                                 .lock()
                                                 .map_err(|_| bad("brewer lock poisoned"))?
-                                                .is_nonempty(target));
+                                                .is_nonempty(target))
+                                        || (matches!(block, 84 | 140)
+                                            && decorations
+                                                .lock()
+                                                .map_err(|_| bad("decorations lock poisoned"))?
+                                                .occupied(target));
                                     if !occupied {
                                         let bonus = survival::additional_drop(
                                             w.get(x, y, z),
@@ -2259,6 +2508,12 @@ fn play(
                                             }
                                             match w.update_and_save(world_path, x, y, z, 0) {
                                                 Ok(true) => {
+                                                    decorations
+                                                        .lock()
+                                                        .map_err(|_| {
+                                                            bad("decorations lock poisoned")
+                                                        })?
+                                                        .remove(decoration_path, target)?;
                                                     if wore {
                                                         *inventory = candidate;
                                                         send(
@@ -2370,7 +2625,12 @@ fn play(
                                     && brewers
                                         .lock()
                                         .map_err(|_| bad("brewer lock poisoned"))?
-                                        .is_nonempty((x, y, z)));
+                                        .is_nonempty((x, y, z)))
+                                || (matches!(block, 84 | 140)
+                                    && decorations
+                                        .lock()
+                                        .map_err(|_| bad("decorations lock poisoned"))?
+                                        .occupied((x, y, z)));
                             if occupied {
                                 false
                             } else {
@@ -2381,6 +2641,10 @@ fn play(
                         };
                     let event = block_change_event(&w, x, y, z);
                     if changed {
+                        decorations
+                            .lock()
+                            .map_err(|_| bad("decorations lock poisoned"))?
+                            .remove(decoration_path, (x, y, z))?;
                         hub.broadcast(event);
                     } else {
                         send(s, event.id, &event.body)?;
@@ -2401,7 +2665,40 @@ fn play(
 
                 // Protocol 5 Use Item: air target is (-1,255,-1), face -1.
                 // Only an authenticated, selected inventory stack can be used.
-                if survival && x == -1 && y == 255 && z == -1 && face == -1 {
+                if x == -1 && y == 255 && z == -1 && face == -1 {
+                    if inventory.can_place(held) && inventory.held().is_some_and(|s| s.id == 395) {
+                        let mut map_storage = maps.lock().map_err(|_| bad("map lock poisoned"))?;
+                        let current_x = player.x.floor() as i32;
+                        let current_z = player.z.floor() as i32;
+                        if let Some((next_maps, new_id)) =
+                            map_storage.stage_new(current_x, current_z)?
+                        {
+                            let mut remaining = inventory.clone();
+                            let _ = remaining.consume_held();
+                            if remaining
+                                .receive_stack(Stack {
+                                    id: 358,
+                                    count: 1,
+                                    damage: new_id,
+                                })
+                                .is_some()
+                            {
+                                journal::commit(
+                                    &world_path.with_extension("pending-txn.json"),
+                                    &[
+                                        (inventory_path, remaining.encoded()?),
+                                        (map_path, next_maps.encoded()?),
+                                    ],
+                                )?;
+                                *inventory = remaining;
+                                *map_storage = next_maps;
+                                send(s, 0x30, &inventory.window_items())?;
+                            }
+                        }
+                    }
+                    if !survival {
+                        continue;
+                    }
                     if let Some(stack) = inventory.held() {
                         if inventory.can_place(held) {
                             if stack.id == 261 {
@@ -2618,6 +2915,221 @@ fn play(
                             send(s, 0x30, &inventory.window_items())?;
                         }
                         continue;
+                    }
+                }
+                // Item frames and paintings are hanging entities, not blocks.
+                if (2..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && inventory.can_place(held)
+                    && inventory
+                        .held()
+                        .is_some_and(|stack| matches!(stack.id, 321 | 389))
+                {
+                    let stack = inventory
+                        .held()
+                        .ok_or_else(|| bad("missing hanging item"))?;
+                    let terrain = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let mut hanging_state =
+                        hangings.lock().map_err(|_| bad("hanging lock poisoned"))?;
+                    if let Some((next, placed)) =
+                        hanging_state.stage_place(&terrain, (x, y, z), face, stack.id)?
+                    {
+                        if survival {
+                            let mut candidate = inventory.clone();
+                            if candidate.consume_held() {
+                                journal::commit(
+                                    &world_path.with_extension("pending-txn.json"),
+                                    &[
+                                        (inventory_path, candidate.encoded()?),
+                                        (hanging_path, next.encoded()?),
+                                    ],
+                                )?;
+                                *inventory = candidate;
+                                *hanging_state = next;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                for event in placed.spawn()? {
+                                    hub.broadcast(event);
+                                }
+                            }
+                        } else {
+                            next.save(hanging_path)?;
+                            *hanging_state = next;
+                            for event in placed.spawn()? {
+                                hub.broadcast(event);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // World-owned decoration interactions precede ordinary item placement.
+                if (0..=5).contains(&face) && world::in_bounds(x, y, z) && near(location, x, y, z) {
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let block = w.get(x, y, z);
+                    let pos = (x, y, z);
+                    match block >> 4 {
+                        25 => {
+                            let pitch = decorations
+                                .lock()
+                                .map_err(|_| bad("decorations lock poisoned"))?
+                                .next_note(decoration_path, pos)?;
+                            if w.get(x, y + 1, z) == 0 {
+                                let instrument = decorations::instrument(w.get(x, y - 1, z) >> 4);
+                                hub.broadcast(Event {
+                                    id: 0x24,
+                                    body: decorations::note_action(pos, instrument, pitch),
+                                });
+                            }
+                            continue;
+                        }
+                        92 => {
+                            if survival && vitals.health > 0.0 && vitals.food < 20 {
+                                let bites = block & 7;
+                                if bites <= 5 {
+                                    let next = if bites == 5 {
+                                        0
+                                    } else {
+                                        (92 << 4) | (bites + 1)
+                                    };
+                                    if w.update_and_save(world_path, x, y, z, next)? {
+                                        vitals.food = (vitals.food + 2).min(20);
+                                        vitals.saturation =
+                                            (vitals.saturation + 0.4).min(vitals.food as f32);
+                                        player.save_state(player_path, *vitals)?;
+                                        send(s, 0x06, &health_packet(*vitals))?;
+                                        hub.broadcast(block_change_event(&w, x, y, z));
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        84 => {
+                            let mut stored = decorations
+                                .lock()
+                                .map_err(|_| bad("decorations lock poisoned"))?;
+                            if let Some(disc) = stored.record(pos) {
+                                let mut candidate = inventory.clone();
+                                if !survival
+                                    || candidate
+                                        .receive_stack(Stack {
+                                            id: disc,
+                                            count: 1,
+                                            damage: 0,
+                                        })
+                                        .is_some()
+                                {
+                                    let staged = stored.stage_record(pos, None)?;
+                                    let mut changes = vec![(decoration_path, staged.encoded()?)];
+                                    if survival {
+                                        changes.push((inventory_path, candidate.encoded()?));
+                                    }
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &changes,
+                                    )?;
+                                    *stored = staged;
+                                    w.update_and_save(world_path, x, y, z, 84 << 4)?;
+                                    if survival {
+                                        *inventory = candidate;
+                                        send(s, 0x30, &inventory.window_items())?;
+                                    }
+                                    hub.broadcast(block_change_event(&w, x, y, z));
+                                    hub.broadcast(Event {
+                                        id: 0x28,
+                                        body: decorations::disc_event(pos, None),
+                                    });
+                                }
+                            } else if inventory.can_place(held)
+                                && inventory
+                                    .held()
+                                    .is_some_and(|item| (2256..=2267).contains(&item.id))
+                            {
+                                let disc = inventory.held().unwrap().id;
+                                let mut candidate = inventory.clone();
+                                if !survival || candidate.consume_held() {
+                                    let staged = stored.stage_record(pos, Some(disc))?;
+                                    let mut changes = vec![(decoration_path, staged.encoded()?)];
+                                    if survival {
+                                        changes.push((inventory_path, candidate.encoded()?));
+                                    }
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &changes,
+                                    )?;
+                                    *stored = staged;
+                                    if survival {
+                                        *inventory = candidate;
+                                        send(s, 0x30, &inventory.window_items())?;
+                                    }
+                                    w.update_and_save(world_path, x, y, z, (84 << 4) | 1)?;
+                                    hub.broadcast(block_change_event(&w, x, y, z));
+                                    hub.broadcast(Event {
+                                        id: 0x28,
+                                        body: decorations::disc_event(pos, Some(disc)),
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+                        140 => {
+                            let mut stored = decorations
+                                .lock()
+                                .map_err(|_| bad("decorations lock poisoned"))?;
+                            if let Some(stack) = stored.pot(pos) {
+                                let mut candidate = inventory.clone();
+                                if !survival || candidate.receive_stack(stack).is_some() {
+                                    let staged = stored.stage_pot(pos, None)?;
+                                    let mut changes = vec![(decoration_path, staged.encoded()?)];
+                                    if survival {
+                                        changes.push((inventory_path, candidate.encoded()?));
+                                    }
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &changes,
+                                    )?;
+                                    *stored = staged;
+                                    if survival {
+                                        *inventory = candidate;
+                                        send(s, 0x30, &inventory.window_items())?;
+                                    }
+                                    hub.broadcast(Event {
+                                        id: 0x35,
+                                        body: decorations::pot_packet(pos, None)?,
+                                    });
+                                }
+                            } else if inventory.can_place(held)
+                                && inventory
+                                    .held()
+                                    .is_some_and(decorations::pot_item_supported)
+                            {
+                                let item = inventory.held().unwrap();
+                                let plant = Stack { count: 1, ..item };
+                                let mut candidate = inventory.clone();
+                                if !survival || candidate.consume_held() {
+                                    let staged = stored.stage_pot(pos, Some(plant))?;
+                                    let mut changes = vec![(decoration_path, staged.encoded()?)];
+                                    if survival {
+                                        changes.push((inventory_path, candidate.encoded()?));
+                                    }
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &changes,
+                                    )?;
+                                    *stored = staged;
+                                    if survival {
+                                        *inventory = candidate;
+                                        send(s, 0x30, &inventory.window_items())?;
+                                    }
+                                    hub.broadcast(Event {
+                                        id: 0x35,
+                                        body: decorations::pot_packet(pos, Some(plant))?,
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+                        63 | 68 => continue, // signs are editable only immediately after placement
+                        _ => {}
                     }
                 }
                 // Hoe -> farmland. In Survival, commit tool wear first;
@@ -3042,13 +3554,28 @@ fn play(
                                 362 => 105,                      // melon seeds
                                 372 => 115,                      // Nether wart
                                 351 if stack.damage == 3 => 127, // cocoa beans
+                                323 => {
+                                    if face == 1 {
+                                        63
+                                    } else if (2..=5).contains(&face) {
+                                        68
+                                    } else {
+                                        0
+                                    }
+                                } // standing/wall sign
+                                354 => 92,                       // cake
+                                390 => 140,                      // flower pot
                                 324 => 64,                       // wooden door
                                 330 => 71,                       // iron door
                                 _ => stack.id as u16,
                             };
                             let invalid_chest_merge =
                                 block_id == 54 && !can_place_chest(&w, (nx, ny, nz));
-                            let metadata = if block_id == 131 {
+                            let metadata = if block_id == 63 {
+                                ((yaw.rem_euclid(360.0) * 16.0 / 360.0).round() as u16) & 15
+                            } else if block_id == 68 {
+                                face as u16
+                            } else if block_id == 131 {
                                 // Hook orientation is its outward face (0=S,
                                 // 1=W, 2=N, 3=E), not the wall-torch metadata.
                                 match face {
@@ -3185,6 +3712,16 @@ fn play(
                         let event = block_change_event(&w, nx, ny, nz);
                         if changed {
                             hub.broadcast(event);
+                            if matches!(w.get(nx, ny, nz) >> 4, 63 | 68) {
+                                let pos = (nx, ny, nz);
+                                // A block change must precede S36 sign editor.
+                                pending_sign = Some(pos);
+                                decorations
+                                    .lock()
+                                    .map_err(|_| bad("decorations lock poisoned"))?
+                                    .set_sign(decoration_path, pos, Default::default())?;
+                                send(s, 0x36, &decorations::sign_editor_packet(pos))?;
+                            }
                             if matches!(w.get(nx, ny, nz) >> 4, 64 | 71)
                                 && world::in_bounds(nx, ny + 1, nz)
                             {
@@ -3697,8 +4234,10 @@ fn play(
                     respawn.extend_from_slice(&[difficulty.load(Ordering::Acquire), 0]); // current difficulty, survival
                     write_string("default", &mut respawn)?;
                     send(s, 0x07, &respawn)?;
-                    loaded_chunks.clear(); // the client forgets chunks on respawn
+                    loaded_chunks.clear(); // the client forgets chunks and entities on respawn
                     sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                    send_visible_signs(s, decorations, &loaded_chunks)?;
+                    send_hanging_delta(s, hangings, &BTreeSet::new(), &loaded_chunks)?;
                     for mob in mobs
                         .lock()
                         .map_err(|_| bad("mob mutex poisoned"))?
@@ -3714,8 +4253,33 @@ fn play(
                     hub.move_player(entity_id, *player, yaw, pitch);
                 }
             }
+            23 => {
+                // Protocol 5 C17 Custom Payload: String channel, Short length,
+                // bytes. Client NBT is untrusted; books::process validates
+                // held item identity, compressed NBT and page/title bounds.
+                let channel = input.string(20)?;
+                let length = input.i16()?;
+                if length < 0 {
+                    return Err(bad("negative plugin payload size"));
+                }
+                let payload = input.take(length as usize)?;
+                input.finish()?;
+                if matches!(channel.as_str(), "MC|BEdit" | "MC|BSign")
+                    && books::process(
+                        &channel,
+                        payload,
+                        inventory,
+                        inventory_path,
+                        world_path,
+                        name,
+                    )?
+                {
+                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                    send(s, 0x30, &inventory.window_items())?;
+                }
+            }
             // Other packets are not trusted inventory or world mutations.
-            10..=12 | 17..=21 | 23 => {}
+            10..=12 | 17..=21 => {}
             _ => return Err(bad("invalid play packet ID")),
         }
     }
@@ -3806,6 +4370,12 @@ struct ServerContext {
     device_path: Arc<PathBuf>,
     brewers: Arc<Mutex<Brewers>>,
     brewer_path: Arc<PathBuf>,
+    decorations: Arc<Mutex<Decorations>>,
+    decoration_path: Arc<PathBuf>,
+    maps: Arc<Mutex<Maps>>,
+    map_path: Arc<PathBuf>,
+    hangings: Arc<Mutex<Hangings>>,
+    hanging_path: Arc<PathBuf>,
     survival: bool,
     hardcore: bool,
     difficulty: Arc<AtomicU8>,
@@ -3844,6 +4414,12 @@ fn handle(
         device_path,
         brewers,
         brewer_path,
+        decorations,
+        decoration_path,
+        maps,
+        map_path,
+        hangings,
+        hanging_path,
         survival,
         hardcore,
         difficulty,
@@ -4055,6 +4631,18 @@ fn handle(
     }
     let achievements_packet = achievements_state.snapshot()?;
     send(&mut s, achievements_packet.id, &achievements_packet.body)?;
+    // Chunks do not embed tile entities: replay persisted sign text after joining.
+    send_visible_signs(
+        &mut s,
+        &decorations,
+        &view_chunks(chunk_center(&player_state)),
+    )?;
+    send_hanging_delta(
+        &mut s,
+        &hangings,
+        &BTreeSet::new(),
+        &view_chunks(chunk_center(&player_state)),
+    )?;
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
     send(&mut s, self_list.id, &self_list.body)?;
@@ -4145,6 +4733,12 @@ fn handle(
             device_path: &device_path,
             brewers: &brewers,
             brewer_path: &brewer_path,
+            decorations: &decorations,
+            decoration_path: &decoration_path,
+            maps: &maps,
+            map_path: &map_path,
+            hangings: &hangings,
+            hanging_path: &hanging_path,
             survival,
             hardcore,
             difficulty: &difficulty,
@@ -5102,15 +5696,22 @@ fn main() -> io::Result<()> {
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let mut session_guard = session_lock::WorldSessionLock::acquire(world_directory)?;
-    session_guard.verify()?;
+    let session_guard = Arc::new(Mutex::new(session_lock::WorldSessionLock::acquire(
+        world_directory,
+    )?));
+    session_guard
+        .lock()
+        .map_err(|_| bad("session lock mutex poisoned"))?
+        .verify()?;
+
     // Replay interrupted multi-file credits before loading any container or
     // accepting connections. Corrupt/unrecoverable logs prevent startup.
     journal::recover(&world_path.with_extension("pending-txn.json"))?;
     // Accept older independent log locations for one-time migration.
     journal::recover(&Chests::location(&world_path).with_extension("pending-txn.json"))?;
     journal::recover(&Furnaces::location(&world_path).with_extension("pending-txn.json"))?;
-    let loaded_world = if world_path.exists() {
+    books::initialize(&world_path)?;
+    let mut loaded_world = if world_path.exists() {
         let existing = World::load(&world_path)?;
         if let Some(seed) = requested_seed {
             if existing.natural_seed() != Some(seed)
@@ -5156,6 +5757,12 @@ fn main() -> io::Result<()> {
         initial.save_new(&world_path)?;
         initial
     };
+    let hanging_path = Arc::new(Hangings::location(&world_path));
+    let hangings = Arc::new(Mutex::new(Hangings::load(&hanging_path)?));
+    let map_path = Arc::new(Maps::location(&world_path));
+    let maps = Arc::new(Mutex::new(Maps::load(&map_path)?));
+    let decoration_path = Arc::new(Decorations::location(&world_path));
+    let decorations = Arc::new(Mutex::new(Decorations::load(&decoration_path)?));
     let clock_path = Arc::new(world_path.with_extension("clock"));
     let restored_clock = Clock::load_state(&clock_path)?;
     let (clock, _clock_thread) = Clock::start_from(restored_clock);
@@ -5175,6 +5782,7 @@ fn main() -> io::Result<()> {
             .map_err(|_| bad("game rules mutex poisoned"))?
             .daylight_cycle(),
     );
+    loaded_world.bind_save_session(&world_path, Arc::clone(&session_guard))?;
     let world = Arc::new(Mutex::new(loaded_world));
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -5250,6 +5858,9 @@ fn main() -> io::Result<()> {
     let furnace_hub = Arc::clone(&hub);
     let leaf_drops = Arc::clone(&ground_items);
     let leaf_drops_file = Arc::clone(&ground_path);
+    // Keep the world -> mob lock ordering used by player sessions.
+    // TNT blast damage is applied by the *existing* 20TPS world worker.
+    let tnt_mobs = Arc::clone(&mobs);
     let ejection_devices = Arc::clone(&devices);
     let ejection_file = Arc::clone(&device_path);
     thread::spawn(move || {
@@ -5349,10 +5960,18 @@ fn main() -> io::Result<()> {
                             return;
                         }
                     }
+                    // Snapshot only when TNT's fuse expires. Exposure must be
+                    // sampled before the explosion clears intervening walls.
+                    let tnt_exposure = gravity_world
+                        .tnt_detonates_next_tick()
+                        .then(|| gravity_world.clone());
                     // Queued fluid and redstone updates use the same tick and
                     // save all staged block changes with one world-file commit.
                     match gravity_world.block_tick(&furnace_world_path, 64) {
                         Ok(changed) => {
+                            for action in gravity_world.drain_piston_actions() {
+                                furnace_hub.broadcast(piston_action_event(action));
+                            }
                             for (x, y, z) in changed {
                                 furnace_hub.broadcast(block_change_event(&gravity_world, x, y, z));
                             }
@@ -5443,6 +6062,7 @@ fn main() -> io::Result<()> {
                             }
                             // Spawn and remove primed TNT entities only after
                             // their block changes were durably committed.
+                            let mut tnt_explosions = Vec::new();
                             for tnt in gravity_world.drain_tnt_events() {
                                 match tnt {
                                     world::TntEvent::Spawn {
@@ -5465,6 +6085,14 @@ fn main() -> io::Result<()> {
                                         entity_id,
                                         pos: (x, y, z),
                                     } => {
+                                        tnt_explosions.push(mobs::Explosion {
+                                            position: PlayerPosition {
+                                                x: f64::from(x) + 0.5,
+                                                y: f64::from(y) + 0.5,
+                                                z: f64::from(z) + 0.5,
+                                            },
+                                            radius: 4.0,
+                                        });
                                         furnace_hub.broadcast(multiplayer::destroy(entity_id));
                                         let mut body = Vec::new();
                                         for coordinate in [x, y, z] {
@@ -5479,6 +6107,38 @@ fn main() -> io::Result<()> {
                                         }
                                         furnace_hub.broadcast(Event { id: 0x27, body });
                                     }
+                                }
+                            }
+                            // Reuse the same explosion exposure, Mob HP and
+                            // per-player pending-damage path as creeper blasts.
+                            // This prevents a TNT graphic from being harmless
+                            // to all living entities. Entity state is persisted
+                            // before broadcasting Mob health/death packets.
+                            if !tnt_explosions.is_empty() {
+                                let participants = match furnace_hub.participants() {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        eprintln!("TNT PLAYER SNAPSHOT ERROR: {error}");
+                                        return;
+                                    }
+                                };
+                                let mut creatures = match tnt_mobs.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                let exposure = tnt_exposure.as_ref().unwrap_or(&gravity_world);
+                                let packets = creatures.queue_explosion_hits(
+                                    exposure,
+                                    &tnt_explosions,
+                                    &participants,
+                                );
+                                if let Err(error) = creatures.save(&gravity_world) {
+                                    eprintln!("TNT MOB SAVE ERROR: {error}");
+                                    return;
+                                }
+                                drop(creatures);
+                                for packet in packets {
+                                    furnace_hub.broadcast(packet);
                                 }
                             }
                             let decayed = gravity_world.drain_drops();
@@ -5718,6 +6378,12 @@ fn main() -> io::Result<()> {
         let rules = Arc::clone(&world_rules);
         let board = Arc::clone(&shared_scoreboard);
         let board_path = Arc::clone(&scoreboard_path);
+        let decoration_state = Arc::clone(&decorations);
+        let decoration_file = Arc::clone(&decoration_path);
+        let map_state = Arc::clone(&maps);
+        let map_file = Arc::clone(&map_path);
+        let hanging_state = Arc::clone(&hangings);
+        let hanging_file = Arc::clone(&hanging_path);
         let peer_difficulty = Arc::clone(&shared_difficulty);
         thread::spawn(move || {
             let _connection = admission;
@@ -5747,6 +6413,12 @@ fn main() -> io::Result<()> {
                     device_path: device_file,
                     brewers: brewer_storage,
                     brewer_path: brewer_file,
+                    decorations: decoration_state,
+                    decoration_path: decoration_file,
+                    maps: map_state,
+                    map_path: map_file,
+                    hangings: hanging_state,
+                    hanging_path: hanging_file,
                     survival,
                     hardcore,
                     difficulty: peer_difficulty,
@@ -5856,6 +6528,26 @@ mod h_special_item_transaction_tests {
         );
         assert_eq!(World::load(&world_path).unwrap().get(1, 65, 1), 1 << 4);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod piston_action_wire_tests {
+    use super::*;
+
+    #[test]
+    fn protocol5_piston_action_uses_legacy_coordinates() {
+        let packet = piston_action_event(world::PistonAction {
+            pos: (123, 65, -40),
+            block_id: 33,
+            facing: 5,
+            extending: true,
+        });
+        assert_eq!(packet.id, 0x24);
+        assert_eq!(&packet.body[0..4], &123i32.to_be_bytes());
+        assert_eq!(&packet.body[4..6], &65i16.to_be_bytes());
+        assert_eq!(&packet.body[6..10], &(-40i32).to_be_bytes());
+        assert_eq!(&packet.body[10..], &[0, 5, 33]);
     }
 }
 

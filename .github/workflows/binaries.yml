@@ -1,0 +1,82 @@
+name: Windows and Linux verified binaries
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            suffix: ''
+          - os: windows-latest
+            platform: windows-x86_64
+            suffix: '.exe'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Resolve dependencies and preserve generated lockfile
+        shell: bash
+        run: |
+          cargo generate-lockfile
+          cargo metadata --locked --format-version 1 > cargo-metadata.json
+      - name: Verify formatting and tests
+        run: |
+          cargo fmt --all -- --check
+          cargo test --workspace --all-targets --locked
+      - name: Build release binaries from locked dependencies
+        run: cargo build --release --locked -p vanilla-server -p legacy-status-server
+      - name: Bundle provenance, dependency graph and SHA256 checksums
+        shell: pwsh
+        env:
+          PLATFORM_NAME: ${{ matrix.platform }}
+          BINARY_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $destination = Join-Path $env:RUNNER_TEMP ('industrialrust1710-' + $env:PLATFORM_NAME)
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          $files = @('vanilla-server', 'legacy-status-server')
+          foreach ($name in $files) {
+            $source = Join-Path 'target/release' ($name + $env:BINARY_SUFFIX)
+            if (-not (Test-Path $source -PathType Leaf)) { throw "Missing binary: $source" }
+            Copy-Item -LiteralPath $source -Destination $destination
+          }
+          Copy-Item Cargo.lock, cargo-metadata.json -Destination $destination
+          $version = (& rustc --version)
+          $cargoVersion = (& cargo --version)
+          $details = @(
+            "commit=$env:GITHUB_SHA"
+            "ref=$env:GITHUB_REF"
+            "platform=$env:PLATFORM_NAME"
+            "rustc=$version"
+            "cargo=$cargoVersion"
+            "runner=$env:RUNNER_OS"
+            "run_id=$env:GITHUB_RUN_ID"
+          )
+          [System.IO.File]::WriteAllLines((Join-Path $destination 'build-info.txt'), $details)
+          $checksums = Get-ChildItem -LiteralPath $destination -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          [System.IO.File]::WriteAllLines((Join-Path $destination 'SHA256SUMS'), $checksums)
+          Get-Content (Join-Path $destination 'SHA256SUMS')
+          "PACKAGE_DIR=$destination" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: industrialrust1710-${{ matrix.platform }}
+          path: ${{ env.PACKAGE_DIR }}
+          if-no-files-found: error
+          retention-days: 30

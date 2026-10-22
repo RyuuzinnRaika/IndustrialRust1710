@@ -8,7 +8,8 @@ mod special;
 pub use special::TntEvent;
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// Temporary world edge (blocks). Prevents unbounded player edits or packet positions.
 /// Coordinates x/z must be in [-WORLD_LIMIT, WORLD_LIMIT).
@@ -53,6 +54,10 @@ pub struct World {
     pending_drops: Vec<WorldDrop>,
     // Fired devices are published only after the block snapshot is durable.
     pending_device_activations: Vec<(i32, i32, i32)>,
+    // Protocol 5 piston animation is published only after the world save.
+    pending_piston_actions: Vec<PistonAction>,
+    // Short-lived conservative collision of blocks swept during a push/pull.
+    piston_sweep_ghosts: BTreeMap<Position, u64>,
     // Sparse pending client-facing lighting invalidations, not part of IRW files.
     pending_light_chunks: BTreeSet<(i32, i32)>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
@@ -63,6 +68,9 @@ pub struct World {
     primed_tnt: BTreeMap<i32, special::PrimedTnt>,
     next_tnt_id: i32,
     tnt_events: Vec<special::TntEvent>,
+    // Only live worlds bind to a session; standalone conversions and tests
+    // retain their portable save behavior, while clones share one OS lock.
+    save_session: Option<(PathBuf, Arc<Mutex<crate::session_lock::WorldSessionLock>>)>,
 }
 
 /// A persisted world mutation can create a temporary ground-item event.
@@ -71,6 +79,15 @@ pub struct World {
 pub struct WorldDrop {
     pub pos: (i32, i32, i32),
     pub stack: crate::inventory::Stack,
+}
+
+/// A committed piston base transition for Protocol 5 block-action packets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PistonAction {
+    pub pos: (i32, i32, i32),
+    pub block_id: u16,
+    pub facing: u8,
+    pub extending: bool,
 }
 
 /// A gravity block moved exactly one vertical cell during one 20Hz world tick.
@@ -146,6 +163,11 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 45
             | 49
             | 26 // two-block bed
+            | 25 // note block
+            | 63 | 68 // standing/wall signs
+            | 84 // jukebox
+            | 92 // cake
+            | 140 // flower pot
             | 54 // chest (single or double)
             | 117 // brewing stand
             | 154 // hopper
@@ -170,6 +192,37 @@ pub fn is_placeable(block_id: u16) -> bool {
     )
 }
 impl World {
+    /// Bind this live world's IRW saves to the startup session.lock. Any
+    /// subsequent clone (e.g. an atomic two-block edit) keeps this binding.
+    pub fn bind_save_session(
+        &mut self,
+        world_path: &Path,
+        session: Arc<Mutex<crate::session_lock::WorldSessionLock>>,
+    ) -> io::Result<()> {
+        let mut lock = session
+            .lock()
+            .map_err(|_| invalid("session lock mutex poisoned"))?;
+        lock.verify()?;
+        drop(lock);
+        self.save_session = Some((world_path.to_path_buf(), session));
+        Ok(())
+    }
+
+    /// Verify the live world still owns session.lock before a journal can
+    /// publish serialized IRW bytes. Full cross-file atomicity is FS12.
+    fn verify_save_session(&self, path: Option<&Path>) -> io::Result<()> {
+        if let Some((world_path, session)) = &self.save_session {
+            if path.is_some_and(|path| path != world_path) {
+                return Err(invalid("world save path differs from session-locked world"));
+            }
+            session
+                .lock()
+                .map_err(|_| invalid("session lock mutex poisoned"))?
+                .verify()?;
+        }
+        Ok(())
+    }
+
     pub fn set_raining(&mut self, raining: bool) {
         self.raining = raining;
     }
@@ -183,6 +236,18 @@ impl World {
 
     pub fn drain_device_activations(&mut self) -> Vec<(i32, i32, i32)> {
         std::mem::take(&mut self.pending_device_activations)
+    }
+
+    pub fn drain_piston_actions(&mut self) -> Vec<PistonAction> {
+        std::mem::take(&mut self.pending_piston_actions)
+    }
+
+    pub fn piston_sweep_at(&self, x: i32, y: i32, z: i32) -> bool {
+        in_bounds(x, y, z)
+            && self
+                .piston_sweep_ghosts
+                .get(&(x, y as u8, z))
+                .is_some_and(|expiry| *expiry > self.fluid_phase)
     }
 
     /// Bounded per-worker budget; remaining light updates survive the next tick.
@@ -606,6 +671,8 @@ impl World {
     /// Empty fluid destinations and wire strengths are staged before mutation.
     pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
         self.fluid_phase = self.fluid_phase.wrapping_add(1);
+        self.piston_sweep_ghosts
+            .retain(|_, expiry| *expiry > self.fluid_phase);
         // Lava updates every fourth server tick, water every tick. Delayed
         // lava positions remain queued rather than getting silently dropped.
         let wet: Vec<Position> = self
@@ -879,6 +946,47 @@ impl World {
                         .then_some((x, z, old, new))
                 })
                 .collect();
+            let piston_actions: Vec<_> = changes
+                .iter()
+                .filter_map(|(&(x, y, z), &new)| {
+                    let old = self.get(x, i32::from(y), z);
+                    (matches!(old >> 4, 29 | 33) && old >> 4 == new >> 4 && (old ^ new) & 8 != 0)
+                        .then_some(PistonAction {
+                            pos: (x, i32::from(y), z),
+                            block_id: old >> 4,
+                            facing: (old & 7) as u8,
+                            extending: new & 8 != 0,
+                        })
+                })
+                .collect();
+            // Conservative swept AABB coverage over three simulation ticks.
+            // This does not replace 1.7.10's moving-piston tile-entity model.
+            let mut swept = BTreeSet::new();
+            for action in &piston_actions {
+                let (dx, dy, dz) = match action.facing {
+                    0 => (0, -1, 0),
+                    1 => (0, 1, 0),
+                    2 => (0, 0, -1),
+                    3 => (0, 0, 1),
+                    4 => (-1, 0, 0),
+                    _ => (1, 0, 0),
+                };
+                for step in 1..=13 {
+                    let (x, y, z) = (
+                        action.pos.0 + dx * step,
+                        action.pos.1 + dy * step,
+                        action.pos.2 + dz * step,
+                    );
+                    if !in_bounds(x, y, z) {
+                        break;
+                    }
+                    let position = (x, y as u8, z);
+                    let before = self.get(x, y, z);
+                    if changes.get(&position).is_some_and(|&after| before != after) {
+                        swept.insert(position);
+                    }
+                }
+            }
             let fired_devices: Vec<_> = changes
                 .iter()
                 .filter_map(|(&(x, y, z), &new)| {
@@ -920,6 +1028,14 @@ impl World {
             }
             self.pending_drops.extend(detached_drops);
             self.pending_device_activations.extend(fired_devices);
+            self.pending_piston_actions.extend(piston_actions);
+            for position in swept {
+                if self.piston_sweep_ghosts.len() >= 2048 {
+                    break;
+                }
+                self.piston_sweep_ghosts
+                    .insert(position, self.fluid_phase.saturating_add(3));
+            }
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
             }
@@ -1305,6 +1421,7 @@ impl World {
     /// Encode the same bounded IRW snapshot used by save(), for journaled
     /// inventory/world transactions without an intermediate live disk write.
     pub fn encoded(&self) -> io::Result<Vec<u8>> {
+        self.verify_save_session(None)?;
         if self.edits.len() > MAX_EDITS {
             return Err(invalid("world edits exceed IRW capacity"));
         }
@@ -1313,6 +1430,24 @@ impl World {
         Ok(bytes)
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        // Keep the session mutex held across staging and publication, so
+        // another Rust write on the same world cannot interleave with us.
+        // Re-verify immediately before renaming the finished IRW snapshot.
+        let mut session_guard = if let Some((bound_path, session)) = &self.save_session {
+            if bound_path != path {
+                return Err(invalid("world save path differs from session-locked world"));
+            }
+            Some(
+                session
+                    .lock()
+                    .map_err(|_| invalid("session lock mutex poisoned"))?,
+            )
+        } else {
+            None
+        };
+        if let Some(guard) = session_guard.as_mut() {
+            guard.verify()?;
+        }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
@@ -1321,6 +1456,9 @@ impl World {
         self.write_to(&mut f)?;
         f.sync_all()?;
         drop(f);
+        if let Some(guard) = session_guard.as_mut() {
+            guard.verify()?;
+        }
         // Keep the original on filesystems that disallow atomic replacement.
         fs::rename(temp, path)
     }
@@ -1655,6 +1793,39 @@ mod tests {
     }
 
     #[test]
+    fn live_world_refuses_irw_writes_after_session_lock_is_stolen() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-guarded-irw-save-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let world_path = root.join("flat.irw");
+        let session = Arc::new(Mutex::new(
+            crate::session_lock::WorldSessionLock::acquire(&root).unwrap(),
+        ));
+        let mut world = World::new();
+        world
+            .bind_save_session(&world_path, Arc::clone(&session))
+            .unwrap();
+        world.save(&world_path).unwrap();
+        let before = fs::read(&world_path).unwrap();
+        // A cloned editor must carry the same ownership requirement.
+        let cloned = world.clone();
+        assert!(cloned.save(&root.join("wrong.irw")).is_err());
+        fs::write(root.join("session.lock"), 0i64.to_be_bytes()).unwrap();
+        assert!(cloned.save(&world_path).is_err());
+        assert!(cloned.encoded().is_err());
+        assert_eq!(fs::read(&world_path).unwrap(), before);
+        assert!(!world_path.with_extension("tmp").exists());
+        drop(cloned);
+        drop(world);
+        drop(session);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn persist_and_rollback() {
         let path = std::env::temp_dir().join(format!(
             "industrial-world-test-{}-{}.bin",
@@ -1817,6 +1988,61 @@ mod tests {
         world.update_and_save(&path, -1, 65, 0, 152 << 4).unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.drain_device_activations(), vec![(0, 65, 0)]);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn piston_action_is_published_once_after_durable_world_commit() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-piston-action-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world
+            .update_and_save(&path, 1, 64, 0, (33 << 4) | 5)
+            .unwrap();
+        world.update_and_save(&path, 0, 64, 0, 152 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(
+            world.drain_piston_actions(),
+            vec![PistonAction {
+                pos: (1, 64, 0),
+                block_id: 33,
+                facing: 5,
+                extending: true,
+            }]
+        );
+        world.block_tick(&path, 64).unwrap();
+        assert!(world.drain_piston_actions().is_empty());
+        world.update_and_save(&path, 0, 64, 0, 0).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(
+            world.drain_piston_actions(),
+            vec![PistonAction {
+                pos: (1, 64, 0),
+                block_id: 33,
+                facing: 5,
+                extending: false,
+            }]
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn piston_collision_sweep_expires_after_three_ticks() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-piston-sweep-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path, 0, 65, 0, (33 << 4) | 5).unwrap();
+        w.update_and_save(&path, 1, 65, 0, 1 << 4).unwrap();
+        w.update_and_save(&path, -1, 65, 0, 152 << 4).unwrap();
+        w.block_tick(&path, 64).unwrap();
+        assert!(w.piston_sweep_at(1, 65, 0));
+        assert!(w.piston_sweep_at(2, 65, 0));
+        for _ in 0..3 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert!(!w.piston_sweep_at(1, 65, 0));
         fs::remove_file(path).unwrap();
     }
 
