@@ -94,29 +94,11 @@ fn sender() -> &'static SyncSender<Job> {
     })
 }
 
-pub fn submit(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChunk> {
-    if raw.len() > MAX_RAW_CHUNK_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "chunk snapshot exceeds raw memory bound",
-        ));
-    }
-    let (tx, rx) = mpsc::sync_channel(1);
-    // Bounded backpressure: never allocate an unbounded work backlog.
-    // Never indefinitely block an inbound session on an overloaded compression
-    // pipeline. The calling thread must NOT hold the world lock at this point.
-    // Keep ownership of the Job across retries; no duplicate jobs are queued.
-    let mut job = Job {
-        x,
-        z,
-        mask,
-        raw,
-        reply: tx,
-    };
-    let deadline = Instant::now() + SUBMIT_TIMEOUT;
+fn enqueue(tx: &SyncSender<Job>, mut job: Job, timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
     loop {
-        match sender().try_send(job) {
-            Ok(()) => break,
+        match tx.try_send(job) {
+            Ok(()) => return Ok(()),
             Err(TrySendError::Full(pending)) => {
                 job = pending;
                 if Instant::now() >= deadline {
@@ -132,6 +114,28 @@ pub fn submit(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChun
             }
         }
     }
+}
+
+pub fn submit(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChunk> {
+    if raw.len() > MAX_RAW_CHUNK_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "chunk snapshot exceeds raw memory bound",
+        ));
+    }
+    let (tx, rx) = mpsc::sync_channel(1);
+    // Bounded backpressure: never allocate an unbounded work backlog.
+    // Never indefinitely block an inbound session on an overloaded compression
+    // pipeline. The calling thread must NOT hold the world lock at this point.
+    // Keep ownership of the Job across retries; no duplicate jobs are queued.
+    let job = Job {
+        x,
+        z,
+        mask,
+        raw,
+        reply: tx,
+    };
+    enqueue(sender(), job, SUBMIT_TIMEOUT)?;
     Ok(PendingChunk(rx))
 }
 
@@ -177,6 +181,31 @@ mod tests {
             .read_to_end(&mut decoded)
             .unwrap();
         assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn full_queue_times_out_without_discarding_existing_work() {
+        // A local queue without workers makes backpressure deterministic,
+        // independent of CI runner CPU load and scheduling.
+        let (tx, rx) = mpsc::sync_channel(1);
+        let make_job = |x| {
+            let (response, _reply) = mpsc::sync_channel(1);
+            Job {
+                x,
+                z: 0,
+                mask: 0,
+                raw: vec![0; 256],
+                reply: response,
+            }
+        };
+        enqueue(&tx, make_job(1), Duration::from_millis(10)).unwrap();
+        let start = Instant::now();
+        let error = enqueue(&tx, make_job(2), Duration::from_millis(10)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(rx.try_recv().unwrap().x, 1); // No eviction/reordering.
+        enqueue(&tx, make_job(3), Duration::ZERO).unwrap();
+        assert_eq!(rx.try_recv().unwrap().x, 3);
     }
 
     #[test]
