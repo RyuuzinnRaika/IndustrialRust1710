@@ -177,6 +177,9 @@ impl Decorations {
     pub fn record(&self, position: Position) -> Option<i16> {
         self.records.get(&key(position)).copied()
     }
+    pub fn occupied(&self, position: Position) -> bool {
+        self.records.contains_key(&key(position)) || self.pots.contains_key(&key(position))
+    }
     pub fn set_record(
         &mut self,
         path: &Path,
@@ -265,11 +268,13 @@ impl Decorations {
     }
 }
 
-pub fn pot_compatible(stack: Stack) -> bool {
-    stack.count == 1
-        && stack.is_valid()
+pub fn pot_item_supported(stack: Stack) -> bool {
+    stack.is_valid()
         && matches!(stack.id, 6 | 31 | 32 | 37 | 38 | 39 | 40 | 81 | 175 | 351)
         && (stack.id != 351 || stack.damage == 3)
+}
+pub fn pot_compatible(stack: Stack) -> bool {
+    stack.count == 1 && pot_item_supported(stack)
 }
 pub fn sign_packet((x, y, z): Position, lines: &[String; 4]) -> io::Result<Vec<u8>> {
     if !world::in_bounds(x, y, z) || !lines.iter().all(|line| valid_line(line)) {
