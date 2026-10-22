@@ -598,6 +598,8 @@ fn use_special_item(
         2
     } else if held.id == 351 && held.damage == 15 {
         3
+    } else if target == 46 && held.id == 259 {
+        4
     } else {
         return Ok(None);
     };
@@ -605,6 +607,7 @@ fn use_special_item(
     if survival {
         let spent = match cauldron {
             Some((_, replacement)) => candidate.exchange_one_held(replacement),
+            None if action == 4 => candidate.wear_flint_steel(),
             None => candidate.consume_held(),
         };
         if !spent { return Ok(Some(Vec::new())); }
@@ -618,7 +621,9 @@ fn use_special_item(
                 .map(|changed| if changed { vec![(x, y, z)] } else { Vec::new() })
         }
         2 => w.insert_end_eye(world_path, x, y, z),
-        _ => w.apply_bonemeal(world_path, x, y, z),
+        3 => w.apply_bonemeal(world_path, x, y, z),
+        _ => w.ignite_tnt(world_path, x, y, z)
+            .map(|changed| if changed { vec![(x, y, z)] } else { Vec::new() }),
     };
     match result {
         Ok(changed) if !changed.is_empty() => {
@@ -3817,6 +3822,33 @@ fn main() -> io::Result<()> {
                         Ok(changed) => {
                             for (x, y, z) in changed {
                                 furnace_hub.broadcast(block_change_event(&gravity_world, x, y, z));
+                            }
+                            // Spawn and remove primed TNT entities only after
+                            // their block changes were durably committed.
+                            for tnt in gravity_world.drain_tnt_events() {
+                                match tnt {
+                                    world::TntEvent::Spawn { entity_id, pos: (x, y, z) } => {
+                                        let mut body = entity_id.to_be_bytes().to_vec();
+                                        body.push(50); // Protocol 5 Spawn Object: primed TNT
+                                        for coordinate in [x, y, z] {
+                                            body.extend_from_slice(&(coordinate * 32 + 16).to_be_bytes());
+                                        }
+                                        body.extend_from_slice(&[0, 0]);
+                                        body.extend_from_slice(&0i32.to_be_bytes());
+                                        furnace_hub.broadcast(Event { id: 0x0e, body });
+                                    }
+                                    world::TntEvent::Explode { entity_id, pos: (x, y, z) } => {
+                                        furnace_hub.broadcast(multiplayer::destroy(entity_id));
+                                        let mut body = Vec::new();
+                                        for coordinate in [x, y, z] {
+                                            body.extend_from_slice(&(f64::from(coordinate) + 0.5).to_be_bytes());
+                                        }
+                                        body.extend_from_slice(&4f32.to_be_bytes());
+                                        body.extend_from_slice(&0i32.to_be_bytes());
+                                        for _ in 0..3 { body.extend_from_slice(&0f32.to_be_bytes()); }
+                                        furnace_hub.broadcast(Event { id: 0x27, body });
+                                    }
+                                }
                             }
                             let decayed = gravity_world.drain_drops();
                             if !decayed.is_empty() {
