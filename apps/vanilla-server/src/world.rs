@@ -308,6 +308,39 @@ impl World {
             Generation::Expanded(_, _) => None,
         }
     }
+    /// Keep natural, unedited weather columns near loaded client chunks
+    /// eligible for snow/ice updates. The existing 20TPS world tick is the
+    /// only scheduler; observing a chunk does not write or mutate its blocks.
+    pub fn observe_weather_chunk(&mut self, cx: i32, cz: i32) {
+        if self.dimension() != crate::dimensions::Dimension::Overworld {
+            return;
+        }
+        let (Some(x0), Some(z0)) = (cx.checked_mul(16), cz.checked_mul(16)) else {
+            return;
+        };
+        for dx in 0..16 {
+            for dz in 0..16 {
+                let (x, z) = (x0 + dx, z0 + dz);
+                if !in_bounds(x, 64, z) || !self.is_cold_biome(x, z) {
+                    continue;
+                }
+                let Some(base_y) = self.surface_height_at(x, z) else {
+                    continue;
+                };
+                let mut top = base_y.clamp(0, 254);
+                // Include shallow trees/raised surface edits and sea-level
+                // water without scanning all 256 Y cells for every chunk.
+                for y in top + 1..=(top + 24).min(254) {
+                    if self.get(x, y, z) != 0 {
+                        top = y;
+                    }
+                }
+                if matches!(self.get(x, top, z) >> 4, 1 | 2 | 3 | 4 | 5 | 8 | 9 | 12 | 13 | 24 | 80) {
+                    self.pending_weather.insert((x, top as u8, z));
+                }
+            }
+        }
+    }
     pub fn spawn_y(&self) -> f64 {
         match self.generation {
             Generation::Natural(seed) => f64::from(crate::terrain::surface(seed, 0, 0) + 1),

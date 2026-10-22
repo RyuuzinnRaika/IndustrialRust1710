@@ -338,10 +338,11 @@ fn view_chunks(center: (i32, i32)) -> BTreeSet<(i32, i32)> {
     chunks
 }
 fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipeline::PendingChunk> {
-    let (mask, data) = world
-        .lock()
-        .map_err(|_| bad("world mutex poisoned"))?
-        .chunk_data(cx, cz);
+    let (mask, data) = {
+        let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        w.observe_weather_chunk(cx, cz);
+        w.chunk_data(cx, cz)
+    };
     chunk_pipeline::submit(cx, cz, mask, data)
 }
 /// Submit at most eight chunks per session before draining them in wire order.

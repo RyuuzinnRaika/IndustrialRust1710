@@ -465,7 +465,7 @@ impl World {
         // Snow and ice use nearby edited surface columns, never a global
         // biome/chunk scan. Only a small share of this tick's existing budget.
         let weather_len = self.pending_weather.len();
-        if self.raining && weather_len != 0 {
+        if self.raining && weather_len != 0 && self.fluid_phase.is_multiple_of(4) {
             let offset = (self.fluid_phase as usize).wrapping_mul(budget) % weather_len;
             for &(x, y, z) in self
                 .pending_weather
@@ -482,10 +482,10 @@ impl World {
                     continue;
                 }
                 match self.get(x, y, z) >> 4 {
-                    2 | 3 => {
+                    1 | 2 | 3 | 4 | 5 | 12 | 13 | 24 | 80 => {
                         changes.insert((x, (y + 1) as u8, z), 78 << 4);
                     }
-                    9 => {
+                    8 | 9 if self.get(x, y, z) & 15 == 0 => {
                         changes.insert((x, y as u8, z), 79 << 4);
                     }
                     _ => {}
