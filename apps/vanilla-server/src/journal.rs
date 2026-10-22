@@ -58,6 +58,8 @@ fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
         || name.ends_with(".furnaces.json")
         || name.ends_with(".hoppers.json")
         || name.ends_with(".brewers.json")
+        || name.ends_with(".books.json")
+        || name.ends_with(".decorations.json")
         || name.ends_with(".drops.json")
         || name.ends_with(".irw"))
     {
@@ -247,6 +249,27 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn book_sidecar_and_player_inventory_are_committed_together() {
+        let home = std::env::temp_dir().join(format!("ir-journal-books-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("players")).unwrap();
+        let inventory = home.join("players/reader.inventory.json");
+        let books = home.join("world.books.json");
+        let journal = home.join("world.pending-txn.json");
+        commit(
+            &journal,
+            &[
+                (inventory.as_path(), b"new inventory".to_vec()),
+                (books.as_path(), b"book NBT records".to_vec()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(fs::read(inventory).unwrap(), b"new inventory");
+        assert_eq!(fs::read(books).unwrap(), b"book NBT records");
+        assert!(!journal.exists());
+        fs::remove_dir_all(home).unwrap();
+    }
     #[test]
     fn interrupted_two_file_commit_replays_on_boot() {
         let home = std::env::temp_dir().join(format!("ir-journal-{}-{}", std::process::id(), 42));

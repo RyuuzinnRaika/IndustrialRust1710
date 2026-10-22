@@ -159,6 +159,11 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 45
             | 49
             | 26 // two-block bed
+            | 25 // note block
+            | 63 | 68 // standing/wall signs
+            | 84 // jukebox
+            | 92 // cake
+            | 140 // flower pot
             | 54 // chest (single or double)
             | 117 // brewing stand
             | 154 // hopper
