@@ -403,6 +403,28 @@ fn send_visible_signs(
     }
     Ok(())
 }
+/// Keep hanging entities in sync with the client's chunk set. A chunk unload
+/// destroys client-side entities; they must be spawned again on re-entry.
+fn send_hanging_delta(
+    s: &mut TcpStream,
+    hangings: &Mutex<Hangings>,
+    previous: &BTreeSet<(i32, i32)>,
+    current: &BTreeSet<(i32, i32)>,
+) -> io::Result<()> {
+    let events = {
+        let state = hangings.lock().map_err(|_| bad("hanging lock poisoned"))?;
+        let leaving = previous.difference(current).copied().collect();
+        let entering = current.difference(previous).copied().collect();
+        let mut events = state.destroy_events_in(&leaving);
+        events.extend(state.spawn_events_in(&entering)?);
+        events
+    };
+    // Never hold the hanging-world mutex while writing to a network socket.
+    for event in events {
+        send(s, event.id, &event.body)?;
+    }
+    Ok(())
+}
 fn unload_chunk(s: &mut TcpStream, cx: i32, cz: i32) -> io::Result<()> {
     // Protocol 5: full column with zero section bitmap and no data.
     let mut packet = Vec::with_capacity(17);
@@ -736,8 +758,11 @@ fn play(
                 bow_start = None;
                 yaw = 0.0;
                 pitch = 0.0;
+                let old_chunks = loaded_chunks.clone();
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
-                send_visible_signs(s, decorations, &loaded_chunks)?;
+                let entering = loaded_chunks.difference(&old_chunks).copied().collect();
+                send_visible_signs(s, decorations, &entering)?;
+                send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                 send_player_position(s, player)?;
                 hub.move_player(entity_id, *player, yaw, pitch);
                 last_movement_broadcast = Instant::now();
@@ -1652,7 +1677,9 @@ fn play(
                 let old_chunks = loaded_chunks.clone();
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(&candidate))?;
                 if loaded_chunks != old_chunks {
-                    send_visible_signs(s, decorations, &loaded_chunks)?;
+                    let entering = loaded_chunks.difference(&old_chunks).copied().collect();
+                    send_visible_signs(s, decorations, &entering)?;
+                    send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                 }
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, candidate, yaw, pitch);
@@ -3199,9 +3226,10 @@ fn play(
                     respawn.extend_from_slice(&[difficulty, 0]); // configured difficulty, survival
                     write_string("default", &mut respawn)?;
                     send(s, 0x07, &respawn)?;
-                    loaded_chunks.clear(); // the client forgets chunks on respawn
+                    loaded_chunks.clear(); // the client forgets chunks and entities on respawn
                     sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
                     send_visible_signs(s, decorations, &loaded_chunks)?;
+                    send_hanging_delta(s, hangings, &BTreeSet::new(), &loaded_chunks)?;
                     for mob in mobs
                         .lock()
                         .map_err(|_| bad("mob mutex poisoned"))?
@@ -3489,13 +3517,12 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         &decorations,
         &view_chunks(chunk_center(&player_state)),
     )?;
-    for event in hangings
-        .lock()
-        .map_err(|_| bad("hanging lock poisoned"))?
-        .spawn_events()?
-    {
-        send(&mut s, event.id, &event.body)?;
-    }
+    send_hanging_delta(
+        &mut s,
+        &hangings,
+        &BTreeSet::new(),
+        &view_chunks(chunk_center(&player_state)),
+    )?;
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
     send(&mut s, self_list.id, &self_list.body)?;
