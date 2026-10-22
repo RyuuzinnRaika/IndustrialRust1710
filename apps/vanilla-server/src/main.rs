@@ -1839,23 +1839,19 @@ fn play(
                                 // Under the bounded lock the item is paid for
                                 // before the newly spawned entity is public.
                                 let mut next = inventory.clone();
-                                if next.consume_held() {
-                                    // Do not persist a debit if launch cannot succeed.
-                                    // A valid living player can always launch from
-                                    // a valid nearby eye position unless at capacity.
-                                    if state.snapshot(*player).len() < 128 {
-                                        if let Some(event) = state.launch(
-                                            stack.id, entity_id, name, *player, yaw, pitch
-                                        ) {
-                                            if let Err(error) = next.save(inventory_path) {
-                                                return Err(error);
-                                            }
-                                            *inventory = next;
-                                            drop(state);
-                                            send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                                            hub.broadcast_in_view(*player, event);
-                                        }
-                                    }
+                                if state.can_launch(stack.id, entity_id, name, *player, yaw, pitch)
+                                    && next.consume_held()
+                                {
+                                    // Persist first: failure never leaves an unpaid
+                                    // projectile. The same lock covers preflight + launch.
+                                    next.save(inventory_path)?;
+                                    let event = state.launch(
+                                        stack.id, entity_id, name, *player, yaw, pitch
+                                    ).ok_or_else(|| bad("projectile launch after preflight failed"))?;
+                                    *inventory = next;
+                                    drop(state);
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                    hub.broadcast_in_view(*player, event);
                                 }
                             } else if vitals.can_eat(stack)
                                 || (stack.id == 373 && brewing::effect(stack).is_some())
