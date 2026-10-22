@@ -149,7 +149,9 @@ impl Hub {
     /// server is configured online-mode before treating it as authenticated.
     pub fn uuid_for_online_name(&self, name: &str) -> io::Result<Option<String>> {
         let inner = self.0.lock().map_err(|_| poisoned())?;
-        Ok(inner.players.values()
+        Ok(inner
+            .players
+            .values()
             .find(|p| p.name.eq_ignore_ascii_case(name))
             .map(|p| p.uuid.clone()))
     }
