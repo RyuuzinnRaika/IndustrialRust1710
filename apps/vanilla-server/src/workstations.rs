@@ -5,6 +5,7 @@ use crate::inventory::Stack;
 use crate::items_1710;
 
 /// Counts bookshelves at the vanilla two-block offset, with an air gap.
+#[allow(dead_code)] // D35 offer model, pending generic ItemStack NBT
 pub fn bookshelf_count(mut block: impl FnMut(i32, i32, i32) -> u16) -> u8 {
     let mut found = 0u8;
     for dx in -1i32..=1 {
@@ -37,6 +38,7 @@ pub fn bookshelf_count(mut block: impl FnMut(i32, i32, i32) -> u16) -> u8 {
 /// Deterministic 1.7.10 enchanting cost offers. The caller owns the seed:
 /// each reroll must be server-originated; clients cannot choose level costs.
 /// This is NOT an enchantment writer. It only computes the three displayed costs.
+#[allow(dead_code)] // D35 GUI/enchanted-item binding follows generic NBT support
 pub fn enchanting_costs(shelves: u8, seed: u64) -> [u8; 3] {
     let n = u32::from(shelves.min(15));
     let mut state = seed;
@@ -95,7 +97,7 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
         let per_unit = (max / 4).max(1);
         let units = u16::from(right.count).min(4);
         let available = u16::try_from(left.damage).ok()?;
-        let required = (available + per_unit as u16 - 1) / per_unit as u16;
+        let required = available.div_ceil(per_unit as u16);
         let consumed = units.min(required) as u8;
         if consumed == 0 {
             return None;
