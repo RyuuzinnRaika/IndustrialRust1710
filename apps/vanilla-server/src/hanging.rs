@@ -553,9 +553,19 @@ mod tests {
             panic!("expected painting");
         };
         assert!(width > 1 && height > 1);
-        // A new frame must not overlap even an off-center part of an existing painting.
+        // The chosen motif can be 2x2, 4x3 or 4x4; select an actual
+        // off-center cell rather than assuming a particular width or anchor.
+        let off_center = occupied_cells(
+            (0, 64, 1),
+            3,
+            i32::from(width),
+            i32::from(height),
+        )
+        .into_iter()
+        .find(|&pos| pos != (0, 64, 1))
+        .unwrap();
         assert!(first
-            .stage_place(&world, (1, 64, 0), 3, 389)
+            .stage_place(&world, (off_center.0, off_center.1, 0), 3, 389)
             .unwrap()
             .is_none());
         assert!(first
