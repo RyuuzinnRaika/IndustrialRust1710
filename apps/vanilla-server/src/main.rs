@@ -1697,7 +1697,9 @@ fn play(
                                                 .map_err(|_| bad("brewer lock poisoned"))?
                                                 .is_nonempty(target))
                                         || (matches!(block, 84 | 140)
-                                            && decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                                            && decorations
+                                                .lock()
+                                                .map_err(|_| bad("decorations lock poisoned"))?
                                                 .occupied(target));
                                     if !occupied {
                                         let bonus = survival::additional_drop(
@@ -1723,7 +1725,11 @@ fn play(
                                             }
                                             match w.update_and_save(world_path, x, y, z, 0) {
                                                 Ok(true) => {
-                                                    decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                                                    decorations
+                                                        .lock()
+                                                        .map_err(|_| {
+                                                            bad("decorations lock poisoned")
+                                                        })?
                                                         .remove(decoration_path, target)?;
                                                     if wore {
                                                         *inventory = candidate;
@@ -1838,7 +1844,9 @@ fn play(
                                         .map_err(|_| bad("brewer lock poisoned"))?
                                         .is_nonempty((x, y, z)))
                                 || (matches!(block, 84 | 140)
-                                    && decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                                    && decorations
+                                        .lock()
+                                        .map_err(|_| bad("decorations lock poisoned"))?
                                         .occupied((x, y, z)));
                             if occupied {
                                 false
@@ -1850,7 +1858,9 @@ fn play(
                         };
                     let event = block_change_event(&w, x, y, z);
                     if changed {
-                        decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                        decorations
+                            .lock()
+                            .map_err(|_| bad("decorations lock poisoned"))?
                             .remove(decoration_path, (x, y, z))?;
                         hub.broadcast(event);
                     } else {
@@ -1909,7 +1919,11 @@ fn play(
                             if survival && vitals.health > 0.0 && vitals.food < 20 {
                                 let bites = block & 7;
                                 if bites <= 5 {
-                                    let next = if bites == 5 { 0 } else { (92 << 4) | (bites + 1) };
+                                    let next = if bites == 5 {
+                                        0
+                                    } else {
+                                        (92 << 4) | (bites + 1)
+                                    };
                                     if w.update_and_save(world_path, x, y, z, next)? {
                                         vitals.food = (vitals.food + 2).min(20);
                                         vitals.saturation =
@@ -1994,7 +2008,9 @@ fn play(
                                     });
                                 }
                             } else if inventory.can_place(held)
-                                && inventory.held().is_some_and(decorations::pot_item_supported)
+                                && inventory
+                                    .held()
+                                    .is_some_and(decorations::pot_item_supported)
                             {
                                 let item = inventory.held().unwrap();
                                 let plant = Stack { count: 1, ..item };
