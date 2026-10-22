@@ -164,9 +164,66 @@ impl Devices {
     }
 }
 
+/// Insert exactly one item into a destination container, preferring
+/// compatible partial stacks. Returns false without mutating if it is full.
+pub fn insert_one<const N: usize>(slots: &mut [Option<Stack>; N], item: Stack) -> bool {
+    if item.count != 1 || !item.is_valid() {
+        return false;
+    }
+    for entry in slots.iter_mut() {
+        if let Some(stack) = entry.as_mut() {
+            if stack.id == item.id && stack.damage == item.damage && stack.count < stack.max_count()
+            {
+                stack.count += 1;
+                return true;
+            }
+        }
+    }
+    for entry in slots.iter_mut() {
+        if entry.is_none() {
+            *entry = Some(item);
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_merges_or_uses_empty_slot_without_overflow() {
+        let item = Stack {
+            id: 4,
+            count: 1,
+            damage: 0,
+        };
+        let mut slots = [None; 3];
+        slots[0] = Some(Stack { count: 63, ..item });
+        assert!(insert_one(&mut slots, item));
+        assert_eq!(slots[0].unwrap().count, 64);
+        assert!(insert_one(&mut slots, item));
+        assert_eq!(slots[1], Some(item));
+        let full = Stack { count: 64, ..item };
+        slots.fill(Some(full));
+        assert!(!insert_one(&mut slots, item));
+        assert_eq!(slots, [Some(full); 3]);
+    }
+
+    #[test]
+    fn transfer_rejects_multi_item_batches() {
+        let mut slots = [None; 2];
+        assert!(!insert_one(
+            &mut slots,
+            Stack {
+                id: 4,
+                count: 2,
+                damage: 0
+            }
+        ));
+        assert_eq!(slots, [None; 2]);
+    }
 
     #[test]
     fn nine_slots_are_durable_and_ejection_is_staged() {
