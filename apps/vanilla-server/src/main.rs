@@ -54,7 +54,7 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use mobs::Mobs;
-use multiplayer::{Event, Hub, JoinError, MAX_PLAYERS};
+use multiplayer::{Event, Hub, JoinError, ADMIN_TELEPORT_EVENT, MAX_PLAYERS};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use serde_json::json;
@@ -664,6 +664,35 @@ fn play(
             ));
         }
         while let Ok(event) = events.try_recv() {
+            if event.id == ADMIN_TELEPORT_EVENT {
+                if event.body.len() != 24 {
+                    return Err(bad("invalid internal teleport payload"));
+                }
+                let target = PlayerPosition {
+                    x: f64::from_be_bytes(event.body[0..8].try_into().unwrap()),
+                    y: f64::from_be_bytes(event.body[8..16].try_into().unwrap()),
+                    z: f64::from_be_bytes(event.body[16..24].try_into().unwrap()),
+                };
+                if !target.is_valid() {
+                    return Err(bad("invalid internal teleport coordinates"));
+                }
+                // Only the owning session updates player position and its save.
+                target.save_state(player_path, *vitals)?;
+                *player = target;
+                location = (target.x, target.y, target.z);
+                fall = FallTracker::new(target.y);
+                idle_gravity = IdleGravity::new(clock.ticks());
+                mining = None;
+                eating = None;
+                bow_start = None;
+                yaw = 0.0;
+                pitch = 0.0;
+                sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                send_player_position(s, player)?;
+                hub.move_player(entity_id, *player, yaw, pitch);
+                last_movement_broadcast = Instant::now();
+                continue;
+            }
             if event.id == CHUNK_RELIGHT_EVENT {
                 if event.body.len() == 8 {
                     let cx = i32::from_be_bytes(event.body[0..4].try_into().unwrap());
@@ -3077,6 +3106,23 @@ fn start_clock_console(hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf
                         hub.broadcast(Event { id: 0x2b, body });
                     }
                     println!("Weather set to {kind}");
+                    Ok(())
+                })(),
+                ["/tp", name, x, y, z] => (|| -> io::Result<()> {
+                    let parse = |value: &str| {
+                        value
+                            .parse::<f64>()
+                            .map_err(|_| bad("invalid teleport coordinate"))
+                    };
+                    let position = PlayerPosition {
+                        x: parse(x)?,
+                        y: parse(y)?,
+                        z: parse(z)?,
+                    };
+                    if !hub.request_admin_teleport(name, position)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Teleport queued for {name}");
                     Ok(())
                 })(),
                 _ => continue,
