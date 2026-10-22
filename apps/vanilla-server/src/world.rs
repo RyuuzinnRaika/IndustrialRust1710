@@ -1654,6 +1654,8 @@ mod group_b_regression_tests {
         let path = temp("comparator-delay");
         let _ = std::fs::remove_file(&path);
         let mut world = World::new();
+        // Comparator requires a floor; world reload checks support validity.
+        world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
         world
             .update_and_save(&path, -1, 65, 0, (69 << 4) | 8)
             .unwrap();
