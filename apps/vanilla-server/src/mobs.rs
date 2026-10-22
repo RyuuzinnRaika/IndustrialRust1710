@@ -320,6 +320,10 @@ pub struct Mobs {
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
     #[serde(skip)]
     pending_effects: Vec<(PlayerPosition, u8, u16, u64)>,
+    // Melee effects are keyed by the authenticated player Entity ID, never
+    // by a position that multiple players can occupy simultaneously.
+    #[serde(skip)]
+    pending_target_effects: BTreeMap<i32, (u8, u16, u64)>,
     #[serde(skip)]
     active_effects: BTreeMap<i32, (u8, u64, u64)>,
     #[serde(skip)]
@@ -853,6 +857,15 @@ impl Mobs {
         }
         Some(result)
     }
+    /// Cow milking is read-only for the animal; inventory substitution and
+    /// persistence belong to the authenticated player session.
+    pub fn can_milk(&self, id: i32, at: PlayerPosition, held: Option<Stack>) -> bool {
+        held.is_some_and(|item| item.id == 325)
+            && self
+                .entities
+                .get(&id)
+                .is_some_and(|mob| mob.kind == Kind::Cow && !mob.baby && mob.nearby(at, 3.0))
+    }
     /// Sheep shearing is server-authoritative and changes the shared entity metadata.
     pub fn shear(
         &mut self,
@@ -1133,6 +1146,12 @@ impl Mobs {
     }
     /// Tick at most four elapsed 20Hz steps; caller owns broadcast fan-out.
     pub fn tick(&mut self, now: u64, world: &World, players: &[PlayerPosition]) -> Vec<Event> {
+        // Each connected session can poll the shared world in the same 20 Hz
+        // tick. Execute world simulation only once, including natural spawns.
+        // Never let an out-of-order clock sample rewind the Mob timeline.
+        if now <= self.last_tick {
+            return Vec::new();
+        }
         let steps = now.saturating_sub(self.last_tick).min(MAX_STEPS);
         self.last_tick = now;
         let mut events = Vec::new();
@@ -1637,6 +1656,17 @@ impl Mobs {
             }
         }
         self.pending_effects = remaining;
+        if let Some((effect, duration, created)) = self.pending_target_effects.remove(&player_id) {
+            if tick.saturating_sub(created) < 30 {
+                self.active_effects
+                    .insert(player_id, (effect, tick + u64::from(duration), tick));
+                let mut body = player_id.to_be_bytes().to_vec();
+                body.push(effect);
+                body.push(0); // amplifier 0
+                body.extend_from_slice(&(duration as i16).to_be_bytes());
+                packets.push(Event { id: 0x1d, body });
+            }
+        }
         packets
     }
     #[cfg(test)]
@@ -1677,7 +1707,24 @@ impl Mobs {
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
                 mob.bite_tick = tick;
-                amount = amount.saturating_add(if mob.kind == Kind::Spider { 2 } else { 3 });
+                amount =
+                    amount.saturating_add(if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
+                        2
+                    } else {
+                        3
+                    });
+                // Cave spiders cause poison only on Normal/Hard (7s / 15s).
+                // Directly target this participant; a collocated player must
+                // never inherit the victim's effect.
+                let poison_duration = match self.difficulty.unwrap_or(2) {
+                    2 if mob.kind == Kind::CaveSpider => 140,
+                    3 if mob.kind == Kind::CaveSpider => 300,
+                    _ => 0,
+                };
+                if poison_duration > 0 {
+                    self.pending_target_effects
+                        .insert(player_id, (19, poison_duration, tick));
+                }
                 break;
             }
         }
@@ -1725,6 +1772,75 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repeated_sessions_do_not_rewind_or_double_advance_world_ticks() {
+        let world = World::new();
+        let mut mobs = Mobs::default();
+        let player = PlayerPosition::default();
+        mobs.insert(Kind::Zombie, player, false);
+        mobs.tick(100, &world, &[player]);
+        assert_eq!(mobs.last_tick, 100);
+        assert!(mobs.tick(100, &world, &[player]).is_empty());
+        assert!(mobs.tick(99, &world, &[player]).is_empty());
+        assert_eq!(mobs.last_tick, 100);
+        assert!(mobs.tick(101, &world, &[player]).is_empty());
+        assert_eq!(mobs.last_tick, 101);
+    }
+
+    #[test]
+    fn only_nearby_adult_cows_are_milkable() {
+        let at = PlayerPosition::default();
+        let mut mobs = Mobs::default();
+        let bucket = Some(Stack {
+            id: 325,
+            count: 1,
+            damage: 0,
+        });
+        let cow = mobs.next_id;
+        mobs.insert(Kind::Cow, at, false);
+        let calf = mobs.next_id;
+        mobs.insert(Kind::Cow, at, true);
+        let pig = mobs.next_id;
+        mobs.insert(Kind::Pig, at, false);
+        assert!(mobs.can_milk(cow, at, bucket));
+        assert!(!mobs.can_milk(calf, at, bucket));
+        assert!(!mobs.can_milk(pig, at, bucket));
+        assert!(!mobs.can_milk(cow, at, None));
+        assert!(!mobs.can_milk(
+            cow,
+            PlayerPosition {
+                x: at.x + 4.0,
+                ..at
+            },
+            bucket
+        ));
+    }
+
+    #[test]
+    fn cave_spider_poison_targets_only_bitten_player_and_respects_difficulty() {
+        let at = PlayerPosition::default();
+        for (difficulty, expected_duration) in [(1u8, 0u16), (2, 140), (3, 300)] {
+            let mut mobs = Mobs {
+                difficulty: Some(difficulty),
+                ..Mobs::default()
+            };
+            mobs.insert(Kind::CaveSpider, at, false);
+            assert!(mobs.hurt_player_with_health(17, at, 40, 20.0) > 0);
+            assert!(mobs.take_player_effects(18, at, 41).is_empty());
+            let events = mobs.take_player_effects(17, at, 41);
+            assert_eq!(events.len(), usize::from(expected_duration > 0));
+            if expected_duration > 0 {
+                assert_eq!(events[0].id, 0x1d);
+                assert_eq!(&events[0].body[..4], &17i32.to_be_bytes());
+                assert_eq!(events[0].body[4], 19);
+                assert_eq!(
+                    &events[0].body[6..8],
+                    &(expected_duration as i16).to_be_bytes()
+                );
+            }
+        }
+    }
+
     #[test]
     fn mob_snapshot_roundtrips_ids_health_ages_and_world_identity() {
         let world = World::natural(98765);
