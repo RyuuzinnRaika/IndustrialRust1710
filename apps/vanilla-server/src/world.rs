@@ -570,6 +570,9 @@ impl World {
                 // Falling fluids use metadata level 8, not level 1. They
                 // remain falling while fed vertically from their source.
                 let mut next = if fed_from_above { 8 } else { 9 };
+                // Vanilla Overworld lava dissipates faster than water:
+                // one horizontal lava step costs two fluid levels.
+                let horizontal_cost: u16 = if id == 10 { 2 } else { 1 };
                 let sides = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)];
                 let mut source_neighbors = 0;
                 for (nx, nz) in sides {
@@ -578,7 +581,11 @@ impl World {
                         if other & 15 == 0 {
                             source_neighbors += 1;
                         }
-                        next = next.min((other & 15) + 1);
+                        // Falling neighbors (metadata 8) are not a horizontal
+                        // upstream source; only stationary lateral flow feeds.
+                        if other & 15 < 8 {
+                            next = next.min((other & 15) + horizontal_cost);
+                        }
                     }
                 }
                 let solid_below = y > 0 && !matches!(self.get(x, y - 1, z) >> 4, 0 | 8..=11);
@@ -609,7 +616,7 @@ impl World {
                 in_bounds(down.0, down.1, down.2) && self.get(down.0, down.1, down.2) == 0;
             let targets: Vec<(i32, i32, i32)> = if falling {
                 vec![down]
-            } else if level == 7 {
+            } else if (level & 7) + if id == 10 { 2 } else { 1 } > 7 {
                 Vec::new()
             } else {
                 vec![(x + 1, y, z), (x - 1, y, z), (x, y, z + 1), (x, y, z - 1)]
@@ -619,7 +626,11 @@ impl World {
                     continue;
                 }
                 let existing = self.get(nx, ny, nz);
-                let next_level = if falling { 8 } else { (level & 7) + 1 };
+                let next_level = if falling {
+                    8
+                } else {
+                    (level & 7) + if id == 10 { 2 } else { 1 }
+                };
                 let desired = (id << 4) | next_level;
                 if existing == 0 || (existing >> 4 == id && existing & 15 > next_level) {
                     let target = (nx, ny as u8, nz);
@@ -1264,6 +1275,26 @@ mod tests {
         assert_eq!(World::new().chunk_data(0, 0).0, 0x18);
     }
     #[test]
+    fn overworld_lava_attenuates_twice_as_fast_as_water() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-lava-attenuation-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 64, 0, 10 << 4).unwrap();
+        for _ in 0..48 {
+            world.block_tick(&path, 128).unwrap();
+        }
+        assert_eq!(world.get(1, 64, 0), (10 << 4) | 2);
+        assert_eq!(world.get(2, 64, 0), (10 << 4) | 4);
+        assert_eq!(world.get(3, 64, 0), (10 << 4) | 6);
+        assert_eq!(world.get(4, 64, 0), 0);
+        let loaded = World::load(&path).unwrap();
+        assert_eq!(loaded.get(3, 64, 0), (10 << 4) | 6);
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn water_flow_and_circuit_propagation_are_bounded_and_persistent() {
         let path =
             std::env::temp_dir().join(format!("ir1710-fluid-circuit-{}.irw", std::process::id()));
@@ -1472,7 +1503,7 @@ mod tests {
         }
         assert_eq!(w.get(1, 64, 0), 0);
         w.block_tick(&path, 64).unwrap();
-        assert_eq!(w.get(1, 64, 0), (10 << 4) | 1);
+        assert_eq!(w.get(1, 64, 0), (10 << 4) | 2);
         w.update_and_save(&path, 15, 64, 0, 50 << 4).unwrap();
         let (block, sky) = w.light_arrays(1, 0);
         assert!(block[64 * 256] > 0);
