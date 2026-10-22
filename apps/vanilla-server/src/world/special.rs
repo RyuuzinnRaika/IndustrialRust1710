@@ -58,6 +58,7 @@ impl World {
     pub(super) fn finalize_tnt(&mut self, newly_primed: &[(i32, i32, i32)]) {
         let expired: Vec<_> = self.primed_tnt.values()
             .filter(|t| t.explode_at <= self.fluid_phase)
+            .take(4)
             .copied()
             .collect();
         for tnt in expired {
