@@ -203,6 +203,10 @@ fn shapes(id: u16, meta: u16) -> Vec<Shape> {
     }
 }
 fn shapes_at(world: &World, x: i32, y: i32, z: i32) -> Vec<Shape> {
+    // Conservative three-tick ghost AABB while the piston sweeps a cell.
+    if world.piston_sweep_at(x, y, z) {
+        return vec![FULL];
+    }
     let state = world.get(x, y, z);
     let id = state >> 4;
     let mut metadata = state & 15;
