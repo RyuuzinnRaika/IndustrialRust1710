@@ -11,7 +11,6 @@ mod chunk_pipeline;
 mod clock;
 mod crafting;
 mod dimensions;
-#[allow(dead_code)] // B13 staged storage: Protocol 5 activation integration pending.
 mod dispensers;
 mod experience;
 mod fishing;
@@ -53,6 +52,7 @@ use achievements::Achievements;
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
+use dispensers::{Devices, Position as DevicePosition};
 use experience::Experience;
 use fishing::Fishing;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
@@ -600,6 +600,8 @@ struct PlayerSession<'a> {
     furnace_path: &'a Path,
     hoppers: &'a Mutex<Hoppers>,
     hopper_path: &'a Path,
+    devices: &'a Mutex<Devices>,
+    device_path: &'a Path,
     brewers: &'a Mutex<Brewers>,
     brewer_path: &'a Path,
     survival: bool,
@@ -643,6 +645,8 @@ fn play(
         furnace_path,
         hoppers,
         hopper_path,
+        devices,
+        device_path,
         brewers,
         brewer_path,
         survival,
@@ -681,6 +685,8 @@ fn play(
     let mut active_chest_partner: Option<ChestPosition> = None;
     let mut active_furnace: Option<FurnacePosition> = None;
     let mut active_hopper: Option<HopperPosition> = None;
+    let mut active_device: Option<DevicePosition> = None;
+    let mut last_device_view = [None; dispensers::DEVICE_SLOTS];
     let mut active_brewer: Option<BrewerPosition> = None;
     let mut last_brewer_view = Brewer::default();
     let mut last_furnace_view = Furnace::default();
@@ -798,6 +804,19 @@ fn play(
                     )?;
                 }
                 send(s, 0x31, &current.property(active_window))?;
+            }
+        }
+        if let Some(pos) = active_device {
+            let guard = devices.lock().map_err(|_| bad("device lock poisoned"))?;
+            let current = guard.slots(pos);
+            if current != last_device_view {
+                last_device_view = current;
+                drop(guard);
+                send(
+                    s,
+                    0x30,
+                    &inventory.chest_window_items(active_window, &current),
+                )?;
             }
         }
         if let Some(pos) = active_hopper {
@@ -1852,6 +1871,13 @@ fn play(
                                                 .map_err(|_| bad("furnace lock poisoned"))?
                                                 .get(target)
                                                 .occupied())
+                                        || (matches!(block, 23 | 158)
+                                            && devices
+                                                .lock()
+                                                .map_err(|_| bad("device lock poisoned"))?
+                                                .slots(target)
+                                                .iter()
+                                                .any(Option::is_some))
                                         || (block == 154
                                             && hoppers
                                                 .lock()
@@ -2353,6 +2379,7 @@ fn play(
                     active_chest_partner = None;
                     active_furnace = Some(pos);
                     active_hopper = None;
+                    active_device = None;
                     active_brewer = None;
                     let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
                     last_furnace_view = guard.get(pos);
@@ -2397,6 +2424,7 @@ fn play(
                         .map(|w| chest_neighbor(&w, pos))?;
                     active_furnace = None;
                     active_hopper = None;
+                    active_device = None;
                     active_brewer = None;
                     let generated_loot = world
                         .lock()
@@ -2447,6 +2475,7 @@ fn play(
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
+                    active_device = None;
                     let guard = brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
                     last_brewer_view = guard.get(pos);
                     drop(guard);
@@ -2461,6 +2490,45 @@ fn play(
                         &inventory.chest_window_items(active_window, &last_brewer_view.slots),
                     )?;
                     send(s, 0x31, &last_brewer_view.property(active_window))?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && matches!(
+                        world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(x, y, z)
+                            >> 4,
+                        23 | 158
+                    )
+                {
+                    let pos = (x, y, z);
+                    let guard = devices.lock().map_err(|_| bad("device lock poisoned"))?;
+                    last_device_view = guard.slots(pos);
+                    active_window = next_window;
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
+                    active_device = Some(pos);
+                    active_chest = None;
+                    active_chest_partner = None;
+                    active_furnace = None;
+                    active_hopper = None;
+                    active_brewer = None;
+                    let items = inventory.chest_window_items(active_window, &last_device_view);
+                    drop(guard);
+                    let mut opened = vec![active_window];
+                    // Both machines use the 1.7.10 dispenser 3x3 window.
+                    write_string("minecraft:dispenser", &mut opened)?;
+                    write_string(&json!({"text":"Dispenser"}).to_string(), &mut opened)?;
+                    opened.push(dispensers::DEVICE_SLOTS as u8);
+                    send(s, 0x2d, &opened)?;
+                    send(s, 0x30, &items)?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     continue;
                 }
@@ -2484,6 +2552,7 @@ fn play(
                         next_window + 1
                     };
                     active_hopper = Some(pos);
+                    active_device = None;
                     active_brewer = None;
                     active_chest = None;
                     active_chest_partner = None;
@@ -2517,6 +2586,7 @@ fn play(
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
+                    active_device = None;
                     active_brewer = None;
                     next_window = if next_window >= 100 {
                         1
@@ -2992,6 +3062,55 @@ fn play(
                     response_items =
                         inventory.chest_window_items(active_window, &last_brewer_view.slots);
                     drop(storage);
+                } else if let Some(pos) = active_device {
+                    let still_open = {
+                        let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        matches!(w.get(pos.0, pos.1, pos.2) >> 4, 23 | 158)
+                            && near(location, pos.0, pos.1, pos.2)
+                    };
+                    let mut storage = devices.lock().map_err(|_| bad("device lock poisoned"))?;
+                    let original = storage.slots(pos);
+                    let mut next_slots = original;
+                    let mut candidate = inventory.clone();
+                    let change = if still_open && requested_window {
+                        candidate.chest_click_window(
+                            active_window,
+                            &mut next_slots,
+                            slot,
+                            button,
+                            mode,
+                        )
+                    } else {
+                        None
+                    };
+                    if change.is_some() {
+                        accepted = true;
+                        let item_changed = next_slots != original;
+                        let player_changed = candidate != *inventory;
+                        if item_changed {
+                            let staged = storage.staged_update(pos, next_slots)?;
+                            if player_changed {
+                                journal::commit(
+                                    &world_path.with_extension("pending-txn.json"),
+                                    &[
+                                        (inventory_path, candidate.encoded()?),
+                                        (device_path, staged.encoded()?),
+                                    ],
+                                )?;
+                            } else {
+                                staged.save(device_path)?;
+                            }
+                            *storage = staged;
+                        } else if player_changed {
+                            candidate.save(inventory_path)?;
+                        }
+                        if player_changed {
+                            *inventory = candidate;
+                        }
+                    }
+                    last_device_view = storage.slots(pos);
+                    response_items = inventory.chest_window_items(active_window, &last_device_view);
+                    drop(storage);
                 } else if let Some(pos) = active_hopper {
                     let still_open = {
                         let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -3083,6 +3202,7 @@ fn play(
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
+                    active_device = None;
                     active_brewer = None;
                     send(s, 0x30, &inventory.window_items())?;
                 }
@@ -3283,6 +3403,8 @@ struct ServerContext {
     furnace_path: Arc<PathBuf>,
     hoppers: Arc<Mutex<Hoppers>>,
     hopper_path: Arc<PathBuf>,
+    devices: Arc<Mutex<Devices>>,
+    device_path: Arc<PathBuf>,
     brewers: Arc<Mutex<Brewers>>,
     brewer_path: Arc<PathBuf>,
     survival: bool,
@@ -3311,6 +3433,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         furnace_path,
         hoppers,
         hopper_path,
+        devices,
+        device_path,
         brewers,
         brewer_path,
         survival,
@@ -3537,6 +3661,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             furnace_path: &furnace_path,
             hoppers: &hoppers,
             hopper_path: &hopper_path,
+            devices: &devices,
+            device_path: &device_path,
             brewers: &brewers,
             brewer_path: &brewer_path,
             survival,
@@ -4270,6 +4396,8 @@ fn main() -> io::Result<()> {
     let furnaces = Arc::new(Mutex::new(Furnaces::load(&furnace_path)?));
     let hopper_path = Arc::new(Hoppers::location(&world_path));
     let hoppers = Arc::new(Mutex::new(Hoppers::load(&hopper_path)?));
+    let device_path = Arc::new(Devices::location(&world_path));
+    let devices = Arc::new(Mutex::new(Devices::load(&device_path)?));
     let brewer_path = Arc::new(Brewers::location(&world_path));
     let brewers = Arc::new(Mutex::new(Brewers::load(&brewer_path)?));
     let listener = TcpListener::bind(bind)?;
@@ -4303,6 +4431,8 @@ fn main() -> io::Result<()> {
     let furnace_hub = Arc::clone(&hub);
     let leaf_drops = Arc::clone(&ground_items);
     let leaf_drops_file = Arc::clone(&ground_path);
+    let ejection_devices = Arc::clone(&devices);
+    let ejection_file = Arc::clone(&device_path);
     thread::spawn(move || {
         let mut telemetry =
             telemetry::TickTelemetry::new(furnace_world_path.with_extension("metrics.jsonl"));
@@ -4405,6 +4535,91 @@ fn main() -> io::Result<()> {
                         Ok(changed) => {
                             for (x, y, z) in changed {
                                 furnace_hub.broadcast(block_change_event(&gravity_world, x, y, z));
+                            }
+                            // Execute each persisted rising-edge exactly once.
+                            // Both inventory debit and spawned ground entity are
+                            // redo-journaled before either state is published.
+                            for pos in gravity_world.drain_device_activations() {
+                                let state = gravity_world.get(pos.0, pos.1, pos.2);
+                                if !matches!(state >> 4, 23 | 158) || state & 8 == 0 {
+                                    continue;
+                                }
+                                let offset = match state & 7 {
+                                    0 => (0, -1, 0),
+                                    1 => (0, 1, 0),
+                                    2 => (0, 0, -1),
+                                    3 => (0, 0, 1),
+                                    4 => (-1, 0, 0),
+                                    _ => (1, 0, 0),
+                                };
+                                let dest = (pos.0 + offset.0, pos.1 + offset.1, pos.2 + offset.2);
+                                if !world::in_bounds(dest.0, dest.1, dest.2) {
+                                    continue;
+                                }
+                                let mut storage = match ejection_devices.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                let mut ground = match leaf_drops.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                if ground.is_full() {
+                                    continue;
+                                }
+                                let seed = now
+                                    ^ (pos.0 as u64).wrapping_mul(31)
+                                    ^ (pos.2 as u64).wrapping_mul(131);
+                                let Some((updated, stack)) = (match storage.stage_eject(pos, seed) {
+                                    Ok(result) => result,
+                                    Err(error) => {
+                                        eprintln!("DEVICE EJECTION ERROR: {error}");
+                                        return;
+                                    }
+                                }) else {
+                                    continue;
+                                };
+                                let (next_ground, spawned) =
+                                    match ground.stage_put_many(&[stack], dest) {
+                                        Ok(result) => result,
+                                        Err(error) => {
+                                            eprintln!("DEVICE GROUND ITEM ERROR: {error}");
+                                            return;
+                                        }
+                                    };
+                                let device_bytes = match updated.encoded() {
+                                    Ok(bytes) => bytes,
+                                    Err(error) => {
+                                        eprintln!("DEVICE INVENTORY ENCODING ERROR: {error}");
+                                        return;
+                                    }
+                                };
+                                let ground_bytes = match next_ground.encoded() {
+                                    Ok(bytes) => bytes,
+                                    Err(error) => {
+                                        eprintln!("DEVICE ITEM ENCODING ERROR: {error}");
+                                        return;
+                                    }
+                                };
+                                if let Err(error) = journal::commit(
+                                    &furnace_world_path.with_extension("pending-txn.json"),
+                                    &[
+                                        (&*ejection_file, device_bytes),
+                                        (&*leaf_drops_file, ground_bytes),
+                                    ],
+                                ) {
+                                    eprintln!("DEVICE EJECTION JOURNAL ERROR: {error}");
+                                    return;
+                                }
+                                *storage = updated;
+                                *ground = next_ground;
+                                drop(ground);
+                                drop(storage);
+                                for item in spawned {
+                                    for packet in item.spawn() {
+                                        furnace_hub.broadcast(packet);
+                                    }
+                                }
                             }
                             let decayed = gravity_world.drain_drops();
                             if !decayed.is_empty() {
@@ -4611,6 +4826,8 @@ fn main() -> io::Result<()> {
         let machine_file = Arc::clone(&furnace_path);
         let hopper_storage = Arc::clone(&hoppers);
         let hopper_file = Arc::clone(&hopper_path);
+        let device_storage = Arc::clone(&devices);
+        let device_file = Arc::clone(&device_path);
         let brewer_storage = Arc::clone(&brewers);
         let brewer_file = Arc::clone(&brewer_path);
         let rules = Arc::clone(&world_rules);
@@ -4638,6 +4855,8 @@ fn main() -> io::Result<()> {
                     furnace_path: machine_file,
                     hoppers: hopper_storage,
                     hopper_path: hopper_file,
+                    devices: device_storage,
+                    device_path: device_file,
                     brewers: brewer_storage,
                     brewer_path: brewer_file,
                     survival,
