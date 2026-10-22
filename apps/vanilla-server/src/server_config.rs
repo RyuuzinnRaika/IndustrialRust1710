@@ -162,7 +162,9 @@ impl ServerProperties {
             return Err(invalid("difficulty must be in 0..=3"));
         }
         if hardcore && (!survival || difficulty != 3) {
-            return Err(invalid("hardcore requires gamemode=survival and difficulty=3"));
+            return Err(invalid(
+                "hardcore requires gamemode=survival and difficulty=3",
+            ));
         }
         // These settings remain fixed until their runtime subsystems can honour them.
         for (name, only) in [("view-distance", "2"), ("max-players", "8")] {
@@ -248,8 +250,14 @@ gamemode=1
         assert_eq!(p.world_path, PathBuf::from("TestWorld/flat.irw"));
         assert!(!p.survival);
         assert!(!p.hardcore);
-        let hardcore = SAFE.replace("gamemode=1", "gamemode=0").replace("difficulty=1", "difficulty=3");
-        assert!(ServerProperties::parse(&(hardcore.clone() + "hardcore=true\n")).unwrap().hardcore);
+        let hardcore = SAFE
+            .replace("gamemode=1", "gamemode=0")
+            .replace("difficulty=1", "difficulty=3");
+        assert!(
+            ServerProperties::parse(&(hardcore.clone() + "hardcore=true\n"))
+                .unwrap()
+                .hardcore
+        );
         assert!(ServerProperties::parse(&(SAFE.to_owned() + "hardcore=true\n")).is_err());
         assert_eq!(p.difficulty, 1);
         for difficulty in 0..=3 {
