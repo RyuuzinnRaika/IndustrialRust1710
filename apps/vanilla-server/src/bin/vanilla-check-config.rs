@@ -15,7 +15,11 @@ fn check(path: &Path) -> io::Result<()> {
     println!("World: {}", config.world_path.display());
     println!(
         "Mode: {}",
-        if config.survival { "survival" } else { "creative" }
+        if config.survival {
+            "survival"
+        } else {
+            "creative"
+        }
     );
     println!("Difficulty: {}", config.difficulty);
     println!("Hardcore: {}", config.hardcore);
