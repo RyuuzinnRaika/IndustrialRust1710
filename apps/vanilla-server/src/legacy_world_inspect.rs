@@ -79,7 +79,9 @@ pub(crate) fn inspect_world(root: &Path) -> io::Result<Inspection> {
                 .checked_add(metadata.len())
                 .ok_or_else(|| invalid("region total byte count overflow"))?;
             if result.region_bytes > MAX_TOTAL_REGION_BYTES {
-                return Err(invalid("Anvil world exceeds offline inspection byte budget"));
+                return Err(invalid(
+                    "Anvil world exceeds offline inspection byte budget",
+                ));
             }
             let chunks = crate::legacy_region::inspect_region(&entry.path())?;
             result.chunks = result
@@ -152,11 +154,7 @@ mod tests {
         for dimension in ["DIM-1", "DIM1"] {
             let target = world.join(dimension).join("region");
             fs::create_dir_all(&target).unwrap();
-            fs::copy(
-                world.join("region/r.0.0.mca"),
-                target.join("r.0.0.mca"),
-            )
-            .unwrap();
+            fs::copy(world.join("region/r.0.0.mca"), target.join("r.0.0.mca")).unwrap();
         }
         let summary = inspect_world(&world).unwrap();
         assert_eq!(summary.regions, 6);
