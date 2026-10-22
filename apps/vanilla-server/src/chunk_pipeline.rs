@@ -4,11 +4,15 @@
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::io::{self, Write};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::{Duration, Instant};
 
 const QUEUE_CAPACITY: usize = 32;
+/// Per-session bounded batch to prevent one login from filling the shared queue.
+pub const SESSION_BATCH_LIMIT: usize = 8;
+const SUBMIT_TIMEOUT: Duration = Duration::from_millis(100);
 const WORKERS: usize = 2;
 const MAX_RAW_CHUNK_BYTES: usize = 16 * 10_240 + 256;
 static WORK: OnceLock<SyncSender<Job>> = OnceLock::new();
@@ -90,6 +94,28 @@ fn sender() -> &'static SyncSender<Job> {
     })
 }
 
+fn enqueue(tx: &SyncSender<Job>, mut job: Job, timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match tx.try_send(job) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(pending)) => {
+                job = pending;
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "chunk compression queue busy",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(io::Error::other("chunk compression queue closed"));
+            }
+        }
+    }
+}
+
 pub fn submit(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChunk> {
     if raw.len() > MAX_RAW_CHUNK_BYTES {
         return Err(io::Error::new(
@@ -99,15 +125,17 @@ pub fn submit(x: i32, z: i32, mask: u16, raw: Vec<u8>) -> io::Result<PendingChun
     }
     let (tx, rx) = mpsc::sync_channel(1);
     // Bounded backpressure: never allocate an unbounded work backlog.
-    sender()
-        .send(Job {
-            x,
-            z,
-            mask,
-            raw,
-            reply: tx,
-        })
-        .map_err(|_| io::Error::other("chunk compression queue closed"))?;
+    // Never indefinitely block an inbound session on an overloaded compression
+    // pipeline. The calling thread must NOT hold the world lock at this point.
+    // Keep ownership of the Job across retries; no duplicate jobs are queued.
+    let job = Job {
+        x,
+        z,
+        mask,
+        raw,
+        reply: tx,
+    };
+    enqueue(sender(), job, SUBMIT_TIMEOUT)?;
     Ok(PendingChunk(rx))
 }
 
@@ -153,6 +181,31 @@ mod tests {
             .read_to_end(&mut decoded)
             .unwrap();
         assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn full_queue_times_out_without_discarding_existing_work() {
+        // A local queue without workers makes backpressure deterministic,
+        // independent of CI runner CPU load and scheduling.
+        let (tx, rx) = mpsc::sync_channel(1);
+        let make_job = |x| {
+            let (response, _reply) = mpsc::sync_channel(1);
+            Job {
+                x,
+                z: 0,
+                mask: 0,
+                raw: vec![0; 256],
+                reply: response,
+            }
+        };
+        enqueue(&tx, make_job(1), Duration::from_millis(10)).unwrap();
+        let start = Instant::now();
+        let error = enqueue(&tx, make_job(2), Duration::from_millis(10)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!(rx.try_recv().unwrap().x, 1); // No eviction/reordering.
+        enqueue(&tx, make_job(3), Duration::ZERO).unwrap();
+        assert_eq!(rx.try_recv().unwrap().x, 3);
     }
 
     #[test]

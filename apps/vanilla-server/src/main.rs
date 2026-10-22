@@ -272,15 +272,9 @@ fn join(
         send(s, 0x2b, &weather)?;
     }
 
-    // Prefetch all visible chunks into a fixed-size compression queue.
-    // Independent workers compress while the world mutex stays unlocked.
-    let pending: Vec<_> = view_chunks(chunk_center(position))
-        .into_iter()
-        .map(|(cx, cz)| queue_chunk(world, cx, cz))
-        .collect::<io::Result<_>>()?;
-    for chunk in pending {
-        send(s, 0x21, &chunk.finish()?)?;
-    }
+    // Bound per-session outstanding compression jobs, including simultaneous
+    // logins. Encoding is done off the world tick mutex by shared workers.
+    send_chunk_batch(s, world, view_chunks(chunk_center(position)))?;
 
     // Clientbound 0x30 / 0x09: authoritative Creative inventory and hotbar.
     send(s, 0x30, &inventory.window_items())?;
@@ -330,6 +324,28 @@ fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipel
         .chunk_data(cx, cz);
     chunk_pipeline::submit(cx, cz, mask, data)
 }
+/// Submit at most eight chunks per session before draining them in wire order.
+/// This avoids a large per-client raw-chunk backlog when players join together.
+fn send_chunk_batch(
+    s: &mut TcpStream,
+    world: &Mutex<World>,
+    coords: impl IntoIterator<Item = (i32, i32)>,
+) -> io::Result<()> {
+    let mut pending = Vec::with_capacity(chunk_pipeline::SESSION_BATCH_LIMIT);
+    for (cx, cz) in coords {
+        pending.push(queue_chunk(world, cx, cz)?);
+        if pending.len() == chunk_pipeline::SESSION_BATCH_LIMIT {
+            for chunk in pending.drain(..) {
+                send(s, 0x21, &chunk.finish()?)?;
+            }
+        }
+    }
+    for chunk in pending {
+        send(s, 0x21, &chunk.finish()?)?;
+    }
+    Ok(())
+}
+
 fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
     send(s, 0x21, &queue_chunk(world, cx, cz)?.finish()?)
 }
@@ -354,13 +370,7 @@ fn sync_chunks(
     for &(cx, cz) in loaded.difference(&desired) {
         unload_chunk(s, cx, cz)?;
     }
-    let pending: Vec<_> = desired
-        .difference(loaded)
-        .map(|&(cx, cz)| queue_chunk(world, cx, cz))
-        .collect::<io::Result<_>>()?;
-    for chunk in pending {
-        send(s, 0x21, &chunk.finish()?)?;
-    }
+    send_chunk_batch(s, world, desired.difference(loaded).copied())?;
     *loaded = desired;
     Ok(())
 }
