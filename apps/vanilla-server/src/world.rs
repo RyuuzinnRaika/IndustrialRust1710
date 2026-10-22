@@ -1539,6 +1539,11 @@ mod group_b_regression_tests {
         let path = temp("comparator-delay");
         let _ = std::fs::remove_file(&path);
         let mut world = World::new();
+        // Comparator is attached to the floor in vanilla. On load the
+        // support-validation queue correctly breaks unsupported devices.
+        world
+            .update_and_save(&path, 0, 64, 0, 1 << 4)
+            .unwrap();
         world
             .update_and_save(&path, -1, 65, 0, (69 << 4) | 8)
             .unwrap();
@@ -1575,6 +1580,7 @@ mod group_b_regression_tests {
         let path = temp("comparator-strength");
         let _ = std::fs::remove_file(&path);
         let mut world = World::new();
+        world.import_block(0, 64, 0, 1 << 4).unwrap();
         world.import_block(0, 65, 0, (150 << 4) | 1).unwrap();
         world.comparator_outputs.insert((0, 65, 0), 5);
         world.import_block(1, 65, 0, 55 << 4).unwrap();
