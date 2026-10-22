@@ -367,13 +367,22 @@ fn ravine(seed: u64, x: i32, y: i32, z: i32) -> bool {
     }
     false
 }
+/// Absolute block position of a deterministic IRW4 dungeon spawner in
+/// its 64x64 generation cell. This is a read-only lookup and does not cause
+/// chunk generation; runtime spawning must verify the block still exists.
+pub fn dungeon_spawner_in_cell(seed: u64, gx: i32, gz: i32) -> (i32, i32, i32) {
+    (
+        gx * 64 + 10 + (hash(seed ^ 0xd06e, gx, 0, gz) % 43) as i32,
+        19 + (hash(seed ^ 0xd06e, gx, 2, gz) % 28) as i32,
+        gz * 64 + 10 + (hash(seed ^ 0xd06e, gx, 1, gz) % 43) as i32,
+    )
+}
 /// Dungeon wall/floor, spawner, and loot-chest blocks, all seed-addressable.
 fn dungeon(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
     let gx = x.div_euclid(64);
     let gz = z.div_euclid(64);
-    let cx = gx * 64 + 10 + (hash(seed ^ 0xd06e, gx, 0, gz) % 43) as i32;
-    let cz = gz * 64 + 10 + (hash(seed ^ 0xd06e, gx, 1, gz) % 43) as i32;
-    let cy = 18 + (hash(seed ^ 0xd06e, gx, 2, gz) % 28) as i32;
+    let (cx, sy, cz) = dungeon_spawner_in_cell(seed, gx, gz);
+    let cy = sy - 1;
     if (x - cx).abs() > 3 || (z - cz).abs() > 3 || y < cy || y > cy + 4 {
         return None;
     }
@@ -766,6 +775,20 @@ mod tests {
         assert!((35..=74).any(|y| block(9, Dimension::End, 30, y, 0) == b(121)));
         assert_eq!(biome_for_dimension(9, Dimension::Nether, 0, 0), 8);
         assert_eq!(biome_for_dimension(9, Dimension::End, 0, 0), 9);
+    }
+    #[test]
+    fn dungeon_spawner_lookup_matches_existing_generation_at_negative_cells() {
+        for seed in [0, 42, 99_123] {
+            for gx in -3..=3 {
+                for gz in -3..=3 {
+                    let (x, y, z) = dungeon_spawner_in_cell(seed, gx, gz);
+                    assert_eq!(x.div_euclid(64), gx);
+                    assert_eq!(z.div_euclid(64), gz);
+                    assert!((19..=46).contains(&y));
+                    assert_eq!(block(seed, Dimension::Overworld, x, y, z), b(52));
+                }
+            }
+        }
     }
     #[test]
     fn generated_dungeons_have_spawner_and_loot() {
