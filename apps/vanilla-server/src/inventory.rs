@@ -407,6 +407,15 @@ impl Inventory {
         *self = candidate;
         true
     }
+    /// Flint and steel (259) has exactly 64 ignition uses.
+    pub fn wear_flint_steel(&mut self) -> bool {
+        let slot = &mut self.slots[36 + self.selected as usize];
+        let Some(mut item) = *slot else { return false };
+        if item.id != 259 || item.damage >= 64 { return false; }
+        item.damage += 1;
+        *slot = (item.damage < 64).then_some(item);
+        true
+    }
     /// Convert one held empty bucket (325) to milk (335) only when the
     /// entire resulting inventory fits. In particular, a stacked bucket
     /// must never lose one unit when there is no free destination slot.
