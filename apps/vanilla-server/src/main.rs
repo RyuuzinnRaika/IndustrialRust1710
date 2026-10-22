@@ -893,8 +893,14 @@ fn play(
         if survival && vitals.health > 0.0 {
             let participants = hub.participants()?;
             let players = hub.positions()?;
+            // Read the rule before taking world/mob locks to preserve lock order.
+            let allow_natural_spawning = game_rules
+                .lock()
+                .map_err(|_| bad("game rules mutex poisoned"))?
+                .mob_spawning();
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+            creatures.set_natural_spawning(allow_natural_spawning);
             let mut updates = creatures.tick(now_tick, &w, &players);
             updates.extend(creatures.advance_leashes(&w, now_tick, &participants));
             let explosions = creatures.take_explosions();
