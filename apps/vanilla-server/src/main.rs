@@ -37,6 +37,7 @@ mod survival_damage;
 mod telemetry;
 mod terrain;
 mod vitals;
+mod verify_world;
 mod whitelist;
 mod world;
 mod worldgen;
@@ -3159,6 +3160,14 @@ fn start_clock_console(
 fn main() -> io::Result<()> {
     // Standalone, read-only preflight: no world lock, world creation or socket.
     let supplied: Vec<String> = std::env::args().skip(1).collect();
+    if supplied.iter().any(|arg| arg == "--verify-world") {
+        if supplied.len() != 2 || supplied[0] != "--verify-world" {
+            return Err(bad("usage: --verify-world WORLD_DIR_OR_IRW_FILE"));
+        }
+        let result = verify_world::inspect(Path::new(&supplied[1]))?;
+        println!("World verified (read-only): {} ({})", result.description, result.files);
+        return Ok(());
+    }
     if supplied.iter().any(|arg| arg == "--check-config") {
         if supplied.len() != 1 && !(supplied.len() == 2 && supplied[0] == "--check-config") {
             return Err(bad("--check-config must be used alone or with a properties file"));
@@ -3177,6 +3186,7 @@ fn main() -> io::Result<()> {
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
     let properties = if std::env::args().any(|arg| {
         arg == "--help"
+            || arg == "--verify-world"
             || arg == "--check-config"
             || arg == "--backup-world"
             || arg == "--inspect-player-data"
@@ -3218,7 +3228,7 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--check-config [FILE]] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--check-config [FILE]] [--verify-world DIR_OR_FILE] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
