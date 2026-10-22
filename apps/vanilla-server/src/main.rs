@@ -51,8 +51,8 @@ mod worldgen;
 use achievements::Achievements;
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
-use dispensers::{Devices, Position as DevicePosition};
 use clock::Clock;
+use dispensers::{Devices, Position as DevicePosition};
 use experience::Experience;
 use fishing::Fishing;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
@@ -812,7 +812,11 @@ fn play(
             if current != last_device_view {
                 last_device_view = current;
                 drop(guard);
-                send(s, 0x30, &inventory.chest_window_items(active_window, &current))?;
+                send(
+                    s,
+                    0x30,
+                    &inventory.chest_window_items(active_window, &current),
+                )?;
             }
         }
         if let Some(pos) = active_hopper {
@@ -1868,9 +1872,12 @@ fn play(
                                                 .get(target)
                                                 .occupied())
                                         || (matches!(block, 23 | 158)
-                                            && devices.lock()
+                                            && devices
+                                                .lock()
                                                 .map_err(|_| bad("device lock poisoned"))?
-                                                .slots(target).iter().any(Option::is_some))
+                                                .slots(target)
+                                                .iter()
+                                                .any(Option::is_some))
                                         || (block == 154
                                             && hoppers
                                                 .lock()
@@ -2490,8 +2497,11 @@ fn play(
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
                     && matches!(
-                        world.lock().map_err(|_| bad("world mutex poisoned"))?
-                            .get(x, y, z) >> 4,
+                        world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(x, y, z)
+                            >> 4,
                         23 | 158
                     )
                 {
@@ -2499,7 +2509,11 @@ fn play(
                     let guard = devices.lock().map_err(|_| bad("device lock poisoned"))?;
                     last_device_view = guard.slots(pos);
                     active_window = next_window;
-                    next_window = if next_window >= 100 { 1 } else { next_window + 1 };
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
                     active_device = Some(pos);
                     active_chest = None;
                     active_chest_partner = None;
@@ -3059,7 +3073,13 @@ fn play(
                     let mut next_slots = original;
                     let mut candidate = inventory.clone();
                     let change = if still_open && requested_window {
-                        candidate.chest_click_window(active_window, &mut next_slots, slot, button, mode)
+                        candidate.chest_click_window(
+                            active_window,
+                            &mut next_slots,
+                            slot,
+                            button,
+                            mode,
+                        )
                     } else {
                         None
                     };
@@ -4547,7 +4567,8 @@ fn main() -> io::Result<()> {
                                 if ground.is_full() {
                                     continue;
                                 }
-                                let seed = now ^ (pos.0 as u64).wrapping_mul(31)
+                                let seed = now
+                                    ^ (pos.0 as u64).wrapping_mul(31)
                                     ^ (pos.2 as u64).wrapping_mul(131);
                                 let Some((updated, stack)) = (match storage.stage_eject(pos, seed) {
                                     Ok(result) => result,
@@ -4558,13 +4579,14 @@ fn main() -> io::Result<()> {
                                 }) else {
                                     continue;
                                 };
-                                let (next_ground, spawned) = match ground.stage_put_many(&[stack], dest) {
-                                    Ok(result) => result,
-                                    Err(error) => {
-                                        eprintln!("DEVICE GROUND ITEM ERROR: {error}");
-                                        return;
-                                    }
-                                };
+                                let (next_ground, spawned) =
+                                    match ground.stage_put_many(&[stack], dest) {
+                                        Ok(result) => result,
+                                        Err(error) => {
+                                            eprintln!("DEVICE GROUND ITEM ERROR: {error}");
+                                            return;
+                                        }
+                                    };
                                 let device_bytes = match updated.encoded() {
                                     Ok(bytes) => bytes,
                                     Err(error) => {
