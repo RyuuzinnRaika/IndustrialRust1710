@@ -123,7 +123,10 @@ pub fn initialize(world_path: &Path) -> io::Result<()> {
     let path = world_path.with_extension("books.json");
     let state = Store::load(&path)?;
     SERVICE
-        .set(Service { path, state })
+        .set(Service {
+            path,
+            state: Mutex::new(state),
+        })
         .map_err(|_| invalid("books initialized more than once"))
 }
 
