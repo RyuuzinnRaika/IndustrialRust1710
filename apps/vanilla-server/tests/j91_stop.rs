@@ -52,7 +52,12 @@ fn stop_closes_server_and_persists_readable_world() {
         thread::sleep(Duration::from_millis(50));
     };
     let mut diagnostic = String::new();
-    child.stderr.take().unwrap().read_to_string(&mut diagnostic).unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut diagnostic)
+        .unwrap();
     assert!(
         finished.success(),
         "server exit status after /stop: {finished}; stderr={diagnostic}"
