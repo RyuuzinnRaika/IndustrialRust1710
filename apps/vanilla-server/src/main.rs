@@ -5786,7 +5786,7 @@ fn main() -> io::Result<()> {
     let decorations = Arc::new(Mutex::new(Decorations::load(&decoration_path)?));
     let clock_path = Arc::new(world_path.with_extension("clock"));
     let restored_clock = Clock::load_state(&clock_path)?;
-    let (clock, _clock_thread) = Clock::start_from(restored_clock);
+    let (clock, clock_thread) = Clock::start_from(restored_clock);
     let rules_path = Arc::new(GameRules::location(&world_path));
     let world_rules = Arc::new(Mutex::new(GameRules::load(&rules_path)?));
     let scoreboard_path = Arc::new(Scoreboard::location(&world_path));
