@@ -36,16 +36,16 @@ impl Book {
         !self.pages.is_empty()
             && self.pages.len() <= MAX_PAGES
             && self.pages.iter().all(|page| {
-                page.chars().count() <= MAX_PAGE_CHARS && page.matches('\n').count() <= 13
+                page.encode_utf16().count() <= MAX_PAGE_CHARS && page.matches('\n').count() <= 13
             })
             && if signed {
                 self.title
                     .as_ref()
-                    .is_some_and(|s| !s.is_empty() && s.chars().count() <= MAX_TITLE_CHARS)
+                    .is_some_and(|s| !s.is_empty() && s.encode_utf16().count() <= MAX_TITLE_CHARS)
                     && self
                         .author
                         .as_ref()
-                        .is_some_and(|s| !s.is_empty() && s.chars().count() <= 16)
+                        .is_some_and(|s| !s.is_empty() && s.encode_utf16().count() <= 16)
             } else {
                 self.title.is_none() && self.author.is_none()
             }
@@ -187,12 +187,12 @@ fn incoming(payload: &[u8], signing: bool) -> io::Result<(i16, Book)> {
         || book
             .pages
             .iter()
-            .any(|p| p.chars().count() > MAX_PAGE_CHARS || p.matches('\n').count() > 13)
+            .any(|p| p.encode_utf16().count() > MAX_PAGE_CHARS || p.matches('\n').count() > 13)
         || (signing
             && !book
                 .title
                 .as_ref()
-                .is_some_and(|t| !t.is_empty() && t.chars().count() <= MAX_TITLE_CHARS))
+                .is_some_and(|t| !t.is_empty() && t.encode_utf16().count() <= MAX_TITLE_CHARS))
     {
         return Err(invalid("invalid book pages or title"));
     }
@@ -215,7 +215,7 @@ pub fn process(
         _ => return Ok(false),
     };
     let (claimed_damage, mut book) = incoming(payload, signing)?;
-    if author.is_empty() || author.chars().count() > 16 {
+    if author.is_empty() || author.encode_utf16().count() > 16 {
         return Err(invalid("invalid book author"));
     }
     let held = match inventory.held() {
@@ -292,11 +292,16 @@ mod tests {
         assert!(b.valid(false));
         b.pages[0] = "x".repeat(257);
         assert!(!b.valid(false));
+        // Java String.length is UTF-16 code units, not Rust char count.
+        b.pages[0] = "😀".repeat(129);
+        assert!(!b.valid(false));
         b.pages[0] = "test".into();
         b.title = Some("Title".into());
         b.author = Some("Tester".into());
         assert!(b.valid(true));
         assert!(!b.valid(false));
+        b.title = Some("😀".repeat(9));
+        assert!(!b.valid(true));
     }
     #[test]
     fn compressed_book_nbt_is_a_valid_legacy_compound() {

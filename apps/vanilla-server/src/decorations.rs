@@ -37,7 +37,7 @@ fn parse_key(text: &str) -> io::Result<Position> {
     Ok(position)
 }
 fn valid_line(line: &str) -> bool {
-    line.chars().count() <= 15 && !line.chars().any(char::is_control)
+    line.encode_utf16().count() <= 15 && !line.chars().any(char::is_control)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -397,6 +397,11 @@ mod tests {
         assert!(sign_packet(
             (0, 64, 0),
             &["1234567890123456".into(), "".into(), "".into(), "".into()]
+        )
+        .is_err());
+        assert!(sign_packet(
+            (0, 64, 0),
+            &["😀".repeat(8), "".into(), "".into(), "".into()]
         )
         .is_err());
     }
