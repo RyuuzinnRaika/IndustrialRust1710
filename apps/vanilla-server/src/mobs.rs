@@ -601,6 +601,13 @@ impl Mobs {
         self.entities.insert(id, mob);
         event
     }
+    /// An egg impact may spawn one baby chicken, under the existing Mob cap.
+    pub fn hatch_egg(&mut self, world: &World, at: PlayerPosition) -> Option<Event> {
+        if self.entities.len() >= 128 || !at.is_valid() || physics::collides(world, &at) {
+            return None;
+        }
+        Some(self.insert(Kind::Chicken, at, true))
+    }
     /// Construct a server-owned boss. External summoning rules must validate
     /// soul sand/skulls or End progression before calling this method.
     pub fn summon_boss(
