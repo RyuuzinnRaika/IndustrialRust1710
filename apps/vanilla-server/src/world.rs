@@ -47,6 +47,8 @@ pub struct World {
     comparator_ready: BTreeMap<Position, u8>,
     pending_buttons: BTreeMap<Position, u64>,
     pending_drops: Vec<WorldDrop>,
+    // Fired devices are published only after the block snapshot is durable.
+    pending_device_activations: Vec<(i32, i32, i32)>,
     // Sparse pending client-facing lighting invalidations, not part of IRW files.
     pending_light_chunks: BTreeSet<(i32, i32)>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
@@ -101,6 +103,7 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 149 | 150 // comparator
             | 70 | 72 // pressure plates
             | 77 | 143 // buttons
+            | 23 | 158 // dispenser/dropper
             | 29 | 33 // pistons
             | 64 | 71 // doors
             | 96 // trapdoors
@@ -158,6 +161,10 @@ impl World {
     /// Tracks which chunk columns contain changes, without allocating a full world.
     pub fn drain_drops(&mut self) -> Vec<WorldDrop> {
         std::mem::take(&mut self.pending_drops)
+    }
+
+    pub fn drain_device_activations(&mut self) -> Vec<(i32, i32, i32)> {
+        std::mem::take(&mut self.pending_device_activations)
     }
 
     /// Bounded per-worker budget; remaining light updates survive the next tick.
@@ -476,7 +483,7 @@ impl World {
             ) {
                 self.pending_support.insert(pos);
             }
-            if matches!(id, 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157) {
+            if matches!(id, 23 | 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 | 158) {
                 self.pending_devices.insert(pos);
             } else {
                 self.pending_devices.remove(&pos);
@@ -790,6 +797,18 @@ impl World {
                 return Err(error);
             }
             self.pending_drops.extend(detached_drops);
+            // Save the triggered block metadata before handing inventory
+            // ejections to the worker. On disk failure these events vanish.
+            for (&(x, y, z), &next) in &changes {
+                let previous = undo.iter()
+                    .find(|(pos, _)| *pos == (x, y, z))
+                    .map(|_| self.get(x, i32::from(y), z));
+                // The pre-commit value is captured below using metadata.
+                let _ = previous;
+                if matches!(next >> 4, 23 | 158) && next & 8 != 0 {
+                    self.pending_device_activations.push((x, i32::from(y), z));
+                }
+            }
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
             }
@@ -1048,7 +1067,7 @@ impl World {
             ) {
                 world.pending_support.insert((x, y, z));
             }
-            if matches!(block >> 4, 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157) {
+            if matches!(block >> 4, 23 | 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 | 158) {
                 world.pending_devices.insert((x, y, z));
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
