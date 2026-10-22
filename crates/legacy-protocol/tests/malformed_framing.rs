@@ -11,7 +11,7 @@ fn next(seed: &mut u64) -> u64 {
 
 #[test]
 fn random_short_protocol_inputs_do_not_panic() {
-    let mut seed = 0x17_10_5eed_2026_1022u64;
+    let mut seed = 0x1710_5eed_2026_1022_u64;
     for _ in 0..20_000 {
         let length = (next(&mut seed) % 128) as usize;
         let bytes: Vec<u8> = (0..length).map(|_| next(&mut seed) as u8).collect();
