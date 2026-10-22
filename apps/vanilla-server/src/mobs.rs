@@ -723,6 +723,7 @@ impl Mobs {
             .values()
             .filter(|mob| {
                 mob.kind == Kind::Zombie
+                    && mob.health > 0
                     && (mob.bite_tick == 0 || now.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             })
             .map(|mob| (mob.id, mob.position))
@@ -2657,6 +2658,12 @@ mod tests {
                     .any(|entry| entry == [13, 1]));
             }
         }
+        let mut previous = Mobs::default();
+        previous.insert(Kind::Zombie, at, false);
+        let mut legacy = serde_json::to_value(previous.entities.get(&0).unwrap()).unwrap();
+        let _ = legacy.as_object_mut().unwrap().remove("zombie_villager");
+        let old: Mob = serde_json::from_value(legacy).unwrap();
+        assert!(!old.zombie_villager);
         assert!(!zombie_infects_villager(1, 0));
         assert!(zombie_infects_villager(2, 0));
         assert!(!zombie_infects_villager(2, 1));
