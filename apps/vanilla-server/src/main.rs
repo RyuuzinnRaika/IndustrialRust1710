@@ -29,6 +29,7 @@ mod level_dat;
 mod mobs;
 mod multiplayer;
 mod navigation;
+mod online_auth;
 mod physics;
 mod player;
 mod security_limits;
@@ -57,6 +58,7 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use mobs::Mobs;
+use online_auth::{Connection, ServerIdentity};
 use multiplayer::{Event, Hub, JoinError, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
@@ -171,24 +173,24 @@ impl<'a> Input<'a> {
         }
     }
 }
-fn receive(s: &mut TcpStream) -> io::Result<(i32, Vec<u8>)> {
+fn receive(s: &mut Connection) -> io::Result<(i32, Vec<u8>)> {
     let data = read_frame(s)?;
     let mut r = Input(&data);
     let id = r.varint()?;
     Ok((id, r.0.to_vec()))
 }
-fn send(s: &mut TcpStream, id: u32, body: &[u8]) -> io::Result<()> {
+fn send(s: &mut Connection, id: u32, body: &[u8]) -> io::Result<()> {
     let mut packet = Vec::with_capacity(5 + body.len());
     write_varint(id, &mut packet);
     packet.extend_from_slice(body);
     write_frame(s, &packet)
 }
-fn as_chat(s: &mut TcpStream, message: &str) -> io::Result<()> {
+fn as_chat(s: &mut Connection, message: &str) -> io::Result<()> {
     let mut bytes = Vec::new();
     write_string(&json!({"text": message}).to_string(), &mut bytes)?;
     send(s, 0x02, &bytes)
 }
-fn login_disconnect(s: &mut TcpStream, reason: &str) -> io::Result<()> {
+fn login_disconnect(s: &mut Connection, reason: &str) -> io::Result<()> {
     let mut payload = Vec::new();
     write_string(&json!({"text":reason}).to_string(), &mut payload)?;
     send(s, 0x00, &payload)
@@ -207,7 +209,7 @@ fn offline_uuid(name: &str) -> String {
         &hex[20..32]
     )
 }
-fn status(s: &mut TcpStream, hub: &Hub) -> io::Result<()> {
+fn status(s: &mut Connection, hub: &Hub) -> io::Result<()> {
     let (id, body) = receive(s)?;
     if id != 0 || !body.is_empty() {
         return Err(bad("invalid status request"));
@@ -241,7 +243,7 @@ struct InitialPlayer<'a> {
     difficulty: u8,
 }
 fn join(
-    s: &mut TcpStream,
+    s: &mut Connection,
     world: &Mutex<World>,
     clock: &Clock,
     entity_id: i32,
@@ -351,7 +353,7 @@ fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipel
 /// Submit at most eight chunks per session before draining them in wire order.
 /// This avoids a large per-client raw-chunk backlog when players join together.
 fn send_chunk_batch(
-    s: &mut TcpStream,
+    s: &mut Connection,
     world: &Mutex<World>,
     coords: impl IntoIterator<Item = (i32, i32)>,
 ) -> io::Result<()> {
@@ -370,10 +372,10 @@ fn send_chunk_batch(
     Ok(())
 }
 
-fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
+fn send_chunk(s: &mut Connection, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
     send(s, 0x21, &queue_chunk(world, cx, cz)?.finish()?)
 }
-fn unload_chunk(s: &mut TcpStream, cx: i32, cz: i32) -> io::Result<()> {
+fn unload_chunk(s: &mut Connection, cx: i32, cz: i32) -> io::Result<()> {
     // Protocol 5: full column with zero section bitmap and no data.
     let mut packet = Vec::with_capacity(17);
     packet.extend_from_slice(&cx.to_be_bytes());
@@ -385,7 +387,7 @@ fn unload_chunk(s: &mut TcpStream, cx: i32, cz: i32) -> io::Result<()> {
     send(s, 0x21, &packet)
 }
 fn sync_chunks(
-    s: &mut TcpStream,
+    s: &mut Connection,
     world: &Mutex<World>,
     loaded: &mut BTreeSet<(i32, i32)>,
     center: (i32, i32),
@@ -406,7 +408,7 @@ fn health_packet(vitals: Vitals) -> Vec<u8> {
     packet.extend_from_slice(&vitals.saturation.to_be_bytes());
     packet
 }
-fn send_player_position(s: &mut TcpStream, location: &PlayerPosition) -> io::Result<()> {
+fn send_player_position(s: &mut Connection, location: &PlayerPosition) -> io::Result<()> {
     // Protocol 5 clientbound position/look: x, feet y, z, yaw, pitch, on_ground.
     let mut bytes = Vec::with_capacity(33);
     bytes.extend_from_slice(&location.x.to_be_bytes());
@@ -590,7 +592,7 @@ struct PlayerSession<'a> {
     peer_ip: IpAddr,
 }
 fn play(
-    s: &mut TcpStream,
+    s: &mut Connection,
     world: &Mutex<World>,
     world_path: &Path,
     name: &str,
@@ -2891,9 +2893,11 @@ struct ServerContext {
     brewer_path: Arc<PathBuf>,
     survival: bool,
     difficulty: u8,
+    online_mode: bool,
+    auth_key: Option<Arc<ServerIdentity>>,
 }
 fn handle(
-    mut s: TcpStream,
+    s: TcpStream,
     context: ServerContext,
     login_permit: security_limits::Permit,
 ) -> io::Result<()> {
@@ -2917,7 +2921,10 @@ fn handle(
         brewer_path,
         survival,
         difficulty,
+        online_mode,
+        auth_key,
     } = context;
+    let mut s = Connection::new(s);
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
     let peer_ip = s.peer_addr()?.ip();
@@ -2980,6 +2987,16 @@ fn handle(
         login_disconnect(&mut s, "You are not on the server whitelist.")?;
         return Ok(());
     }
+    // Authenticate before loading or admitting a player. Online failures
+    // must never be turned into offline UUIDs, even on Mojang timeout.
+    let (name, uuid) = if online_mode {
+        let key = auth_key.as_ref().ok_or_else(|| bad("missing online-mode RSA identity"))?;
+        let profile = key.authenticate(&mut s, &name)?;
+        (profile.name, profile.uuid)
+    } else {
+        let uuid = offline_uuid(&name);
+        (name, uuid)
+    };
     let player_file = PlayerPosition::location(&path, &name);
     let (mut player_state, mut player_vitals) = match PlayerPosition::load_state(&player_file) {
         Ok(state) => state,
@@ -3015,7 +3032,6 @@ fn handle(
     };
     let experience_file = player_file.with_extension("experience.json");
     let mut experience_state = Experience::load(&experience_file)?;
-    let uuid = offline_uuid(&name);
     let (entity_id, events, previous) = match hub.add(name.clone(), uuid.clone(), player_state) {
         Ok(result) => result,
         Err(JoinError::Full) => {
@@ -3039,7 +3055,7 @@ fn handle(
     write_string(&uuid, &mut success)?;
     write_string(&name, &mut success)?;
     send(&mut s, 0x02, &success)?;
-    println!("joined: {name} (UNAUTHENTICATED OFFLINE MODE)");
+    println!("joined: {name} ({})", if online_mode { "MOJANG VERIFIED" } else { "UNAUTHENTICATED OFFLINE MODE" });
     join(
         &mut s,
         &world,
@@ -3343,6 +3359,7 @@ fn main() -> io::Result<()> {
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
     let mut survival = properties.as_ref().is_some_and(|config| config.survival);
+    let mut online_mode = properties.as_ref().is_some_and(|config| config.online_mode);
     let mut difficulty = properties.as_ref().map_or(2, |config| config.difficulty);
     let mut requested_seed: Option<u64> = None;
     let mut biome_seed: Option<u64> = None;
@@ -3352,9 +3369,9 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--online-mode] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
-                    "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
+                    "Offline usernames can be impersonated; --online-mode validates Mojang accounts and requires encrypted Protocol 5 login."
                 );
                 return Ok(());
             }
@@ -3379,6 +3396,7 @@ fn main() -> io::Result<()> {
                     .into()
             }
             "--insecure-offline-lan" => insecure_offline_lan = true,
+            "--online-mode" => online_mode = true,
             "--survival" => survival = true,
             "--creative" => survival = false,
             "--difficulty" => {
@@ -3683,7 +3701,7 @@ fn main() -> io::Result<()> {
             config.level_name
         );
     }
-    if !bind.ip().is_loopback() && !insecure_offline_lan {
+    if !bind.ip().is_loopback() && !insecure_offline_lan && !online_mode {
         return Err(io::Error::new(ErrorKind::PermissionDenied,
             "offline-mode whitelist cannot authenticate usernames: non-loopback bind requires explicit --insecure-offline-lan"));
     }
@@ -4042,6 +4060,12 @@ fn main() -> io::Result<()> {
             thread::sleep(Duration::from_millis(10));
         }
     });
+    // Initialize once at startup. A failure here prevents any online-mode bind.
+    let server_auth = if online_mode {
+        Some(Arc::new(ServerIdentity::generate()?))
+    } else {
+        None
+    };
     for accepted in listener.incoming() {
         let stream = accepted?;
         let peer_ip = stream.peer_addr()?.ip();
@@ -4064,6 +4088,7 @@ fn main() -> io::Result<()> {
         let p = Arc::clone(&path);
         let wl = Arc::clone(&allow_path);
         let admin = Arc::clone(&administration);
+        let auth_key = server_auth.clone();
         let game_clock = Arc::clone(&clock);
         let drops = Arc::clone(&ground_items);
         let drops_path = Arc::clone(&ground_path);
@@ -4100,6 +4125,8 @@ fn main() -> io::Result<()> {
                     brewer_path: brewer_file,
                     survival,
                     difficulty,
+                    online_mode,
+                    auth_key,
                 },
                 ip_permit,
             ) {
