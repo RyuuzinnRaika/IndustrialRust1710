@@ -244,8 +244,7 @@ mod tests {
     use super::*;
     #[test]
     fn book_sidecar_and_player_inventory_are_committed_together() {
-        let home =
-            std::env::temp_dir().join(format!("ir-journal-books-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("ir-journal-books-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(home.join("players")).unwrap();
         let inventory = home.join("players/reader.inventory.json");
