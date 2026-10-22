@@ -53,6 +53,7 @@ fn movable(block: u16) -> bool {
                 | 71
                 | 75
                 | 76
+                | 84 // jukebox (tile entity)
                 | 93
                 | 94
                 | 96
@@ -67,6 +68,9 @@ fn movable(block: u16) -> bool {
                 | 158 // dropper
                 | 176 // standing banner
                 | 177 // wall banner
+                | 140 // flower pot (tile entity)
+                | 144 // skull (tile entity)
+                | 151 // daylight sensor (tile entity)
                 | 138
     )
 }
@@ -556,6 +560,17 @@ mod redstone_regression_tests {
         assert_eq!(w.get(1, 64, 0) & 15, 15);
         assert_eq!(w.get(0, 64, 1) & 15, 0);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn piston_rejects_registered_tile_entities_and_keeps_solid_blocks_movable() {
+        for id in [
+            23, 25, 52, 54, 61, 62, 84, 116, 117, 130, 137, 138, 140, 144, 146, 151, 154, 158,
+        ] {
+            assert!(!movable(id << 4), "tile entity block {id} must not move");
+        }
+        assert!(movable(1 << 4));
+        assert!(movable(5 << 4));
     }
 
     #[test]
