@@ -912,11 +912,15 @@ fn play(
             .lock()
             .map_err(|_| bad("boats mutex poisoned"))?
             .rider_position(entity_id);
+        let minecart_mount = minecarts
+            .lock()
+            .map_err(|_| bad("minecarts mutex poisoned"))?
+            .rider_position(entity_id);
         let animal_mount = mobs
             .lock()
             .map_err(|_| bad("mob mutex poisoned"))?
             .rider_position(entity_id);
-        if let Some(mounted) = boat_mount.or(animal_mount) {
+        if let Some(mounted) = minecart_mount.or(boat_mount).or(animal_mount) {
             if mounted.is_valid() && *player != mounted {
                 *player = mounted;
                 location = (mounted.x, mounted.y, mounted.z);
@@ -1378,6 +1382,33 @@ fn play(
                 let action = input.varint()?;
                 input.finish()?;
                 if survival && vitals.health > 0.0 && action == 0 {
+                    if minecarts
+                        .lock()
+                        .map_err(|_| bad("minecarts mutex poisoned"))?
+                        .cart_for(entity_id)
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    let already_riding = boats
+                        .lock()
+                        .map_err(|_| bad("boats mutex poisoned"))?
+                        .boat_for(entity_id)
+                        .is_some()
+                        || mobs
+                            .lock()
+                            .map_err(|_| bad("mob mutex poisoned"))?
+                            .is_riding(entity_id);
+                    if !already_riding {
+                        if let Some(attach) = minecarts
+                            .lock()
+                            .map_err(|_| bad("minecarts mutex poisoned"))?
+                            .mount(target_id, entity_id, *player)
+                        {
+                            hub.broadcast(attach);
+                            continue;
+                        }
+                    }
                     if let Some(attach) = boats
                         .lock()
                         .map_err(|_| bad("boats mutex poisoned"))?
@@ -1627,6 +1658,11 @@ fn play(
                     .map_err(|_| bad("boats mutex poisoned"))?
                     .boat_for(entity_id)
                     .is_some()
+                    || minecarts
+                        .lock()
+                        .map_err(|_| bad("minecarts mutex poisoned"))?
+                        .cart_for(entity_id)
+                        .is_some()
                     || mobs
                         .lock()
                         .map_err(|_| bad("mob mutex poisoned"))?
@@ -1736,6 +1772,13 @@ fn play(
                         hub.broadcast(event);
                     }
                     drop(state);
+                    if let Some(event) = minecarts
+                        .lock()
+                        .map_err(|_| bad("minecarts mutex poisoned"))?
+                        .dismount(entity_id)
+                    {
+                        hub.broadcast(event);
+                    }
                     if let Some(event) = mobs
                         .lock()
                         .map_err(|_| bad("mob mutex poisoned"))?
@@ -1745,6 +1788,13 @@ fn play(
                     }
                 } else if !state.control(entity_id, sideways, forward, yaw) {
                     drop(state);
+                    if minecarts
+                        .lock()
+                        .map_err(|_| bad("minecarts mutex poisoned"))?
+                        .control(entity_id, forward, yaw)
+                    {
+                        continue;
+                    }
                     let carrot = inventory.held().is_some_and(|item| item.id == 398);
                     let collision = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let events = mobs
@@ -2181,6 +2231,38 @@ fn play(
                     }
                     for effect in effects {
                         hub.broadcast(effect);
+                    }
+                    continue;
+                }
+                // Minecart item 328 places a bounded rideable cart on rails.
+                if survival
+                    && (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && inventory.held().is_some_and(|item| item.id == 328)
+                    && inventory.can_place(held)
+                {
+                    let railway = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let position = PlayerPosition {
+                        x: f64::from(x) + 0.5,
+                        y: f64::from(y) + 0.5,
+                        z: f64::from(z) + 0.5,
+                    };
+                    let mut carts = minecarts
+                        .lock()
+                        .map_err(|_| bad("minecarts mutex poisoned"))?;
+                    if carts.can_place(&railway, position) {
+                        let mut candidate = inventory.clone();
+                        if candidate.consume_held() {
+                            candidate.save(inventory_path)?;
+                            let spawned = carts.place(&railway, position, now_tick)
+                                .ok_or_else(|| bad("minecart vanished after preflight"))?;
+                            *inventory = candidate;
+                            drop(carts);
+                            drop(railway);
+                            send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                            hub.broadcast_in_view(position, spawned);
+                        }
                     }
                     continue;
                 }
