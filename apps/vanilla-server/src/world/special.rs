@@ -633,9 +633,10 @@ impl World {
                 batch.insert((px, y as u8, pz), old | 1 | 4);
             }
             let expires = self.fluid_phase.saturating_add(10);
-            if batch.iter().all(|(&(px, py, pz), &state)| {
-                self.get(px, i32::from(py), pz) == state
-            }) {
+            if batch
+                .iter()
+                .all(|(&(px, py, pz), &state)| self.get(px, i32::from(py), pz) == state)
+            {
                 // Holding an activated wire must not clone/save the entire
                 // world on every contact sample. Just renew the timers.
                 for &pos in batch.keys() {
