@@ -54,9 +54,17 @@ fn enqueue(peer: &Peer, packet: &Event) {
 
 /// The server sends player entities only inside the client's loaded view.
 pub fn visible(observer: &PlayerPosition, target: &PlayerPosition) -> bool {
-    let chunk = |n: f64| (n.floor() as i32).div_euclid(16);
-    (chunk(observer.x) - chunk(target.x)).abs() <= VIEW_DISTANCE
-        && (chunk(observer.z) - chunk(target.z)).abs() <= VIEW_DISTANCE
+    // A non-finite coordinate must never resolve to the spawn chunk. Float
+    // casts otherwise silently map NaN to zero, leaking remote entity events.
+    let coords = [observer.x, observer.z, target.x, target.z];
+    if coords.iter().any(|v| !v.is_finite()) {
+        return false;
+    }
+    // Use 64-bit chunks and an unsigned difference: extreme, untrusted
+    // positions cannot overflow a signed subtraction or its absolute value.
+    let chunk = |n: f64| (n / 16.0).floor() as i64;
+    chunk(observer.x).abs_diff(chunk(target.x)) <= VIEW_DISTANCE as u64
+        && chunk(observer.z).abs_diff(chunk(target.z)) <= VIEW_DISTANCE as u64
 }
 
 pub fn list_entry(name: &str, online: bool) -> io::Result<Event> {
@@ -274,6 +282,46 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nonfinite_and_extreme_positions_never_enter_interest_range() {
+        let origin = PlayerPosition::default();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let invalid_x = PlayerPosition { x: value, ..origin };
+            let invalid_z = PlayerPosition { z: value, ..origin };
+            assert!(!visible(&origin, &invalid_x));
+            assert!(!visible(&invalid_x, &origin));
+            assert!(!visible(&origin, &invalid_z));
+            assert!(!visible(&invalid_z, &origin));
+        }
+
+        let positive = PlayerPosition {
+            x: f64::MAX,
+            y: 65.0,
+            z: f64::MAX,
+        };
+        let negative = PlayerPosition {
+            x: -f64::MAX,
+            y: 65.0,
+            z: -f64::MAX,
+        };
+        assert!(!visible(&positive, &negative));
+        assert!(!visible(&negative, &positive));
+        assert!(!visible(&origin, &positive));
+        assert!(!visible(&origin, &negative));
+
+        // Chunk boundaries are inclusive for a configured view radius.
+        let edge = PlayerPosition {
+            x: (VIEW_DISTANCE as f64) * 16.0 + 0.5,
+            ..origin
+        };
+        let outside = PlayerPosition {
+            x: (VIEW_DISTANCE as f64 + 1.0) * 16.0 + 0.5,
+            ..origin
+        };
+        assert!(visible(&origin, &edge));
+        assert!(!visible(&origin, &outside));
+    }
+
     #[test]
     fn out_of_view_players_spawn_on_entry_and_destroy_on_exit() {
         let hub = Hub::default();
