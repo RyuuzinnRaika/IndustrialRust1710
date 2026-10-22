@@ -5266,7 +5266,7 @@ fn main() -> io::Result<()> {
     let mut online_mode = properties.as_ref().is_some_and(|config| config.online_mode);
     let mut difficulty = properties.as_ref().map_or(2, |config| config.difficulty);
     let mut requested_seed: Option<u64> = None;
-    let mut biome_seed: Option<u64> = None;
+    let mut biome_seed: Option<u64> = properties.as_ref().and_then(|config| config.level_seed);
     let mut expanded_seed: Option<u64> = None;
     let mut expanded_dimension = dimensions::Dimension::Overworld;
     let mut args = std::env::args().skip(1);
@@ -5322,6 +5322,9 @@ fn main() -> io::Result<()> {
                 );
             }
             "--biome-seed" => {
+                if properties.as_ref().and_then(|config| config.level_seed).is_some() {
+                    return Err(bad("biome seed already set by server.properties"));
+                }
                 biome_seed = Some(
                     args.next()
                         .ok_or_else(|| bad("missing --biome-seed value"))?
@@ -5430,7 +5433,7 @@ fn main() -> io::Result<()> {
         return Err(bad("hardcore requires survival mode and difficulty 3"));
     }
     if (requested_seed.is_some() || biome_seed.is_some() || expanded_seed.is_some())
-        && (!survival
+        && ((!survival && properties.as_ref().and_then(|config| config.level_seed).is_none())
             || anvil_export_path.is_some()
             || anvil_import_path.is_some()
             || [
