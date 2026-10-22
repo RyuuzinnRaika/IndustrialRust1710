@@ -8,8 +8,14 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Only one live test may reserve a loopback port and launch the binary at
+/// a time. Concurrent port-0 reservations followed by a released listener can
+/// let a second test claim the same port before the first server binds it.
+static LIVE_SERVER_LOCK: Mutex<()> = Mutex::new(());
 
 fn packet(id: u32, payload: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
@@ -260,6 +266,7 @@ fn consume_initial(socket: &mut TcpStream, expected_entity_id: i32) {
 
 #[test]
 fn live_protocol5_entity_chunk_inventory_and_window_golden() {
+    let _live_guard = LIVE_SERVER_LOCK.lock().unwrap();
     let server = Server::start();
     let mut alpha = server.login("Alpha");
     consume_initial(&mut alpha, 1);
@@ -302,6 +309,7 @@ fn live_protocol5_entity_chunk_inventory_and_window_golden() {
 /// independent from Inventory::encode_slot and the server packet writer.
 #[test]
 fn live_protocol5_creative_slot_set_and_clear_golden() {
+    let _live_guard = LIVE_SERVER_LOCK.lock().unwrap();
     let server = Server::start();
     let mut alpha = server.login("Alpha");
     consume_initial(&mut alpha, 1);
