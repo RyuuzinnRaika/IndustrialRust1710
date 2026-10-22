@@ -23,6 +23,9 @@ pub struct ServerProperties {
     pub difficulty: u8,
     pub level_name: String,
     /// Seed for the opt-in IRW3 biome generator, not FLAT terrain.
+    // Also compiled by the standalone vanilla-check-config binary, which does not
+    // currently consume the seed. The full server CLI uses this field.
+    #[allow(dead_code)]
     pub level_seed: Option<u64>,
 }
 
