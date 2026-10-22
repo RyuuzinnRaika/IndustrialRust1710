@@ -123,7 +123,9 @@ pub(crate) fn create_level_file(path: &Path, root: &LevelRoot) -> io::Result<()>
         .filter(|directory| !directory.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     if !fs::symlink_metadata(parent)?.file_type().is_dir() {
-        return Err(invalid("level.dat destination parent is not a real directory"));
+        return Err(invalid(
+            "level.dat destination parent is not a real directory",
+        ));
     }
     match fs::symlink_metadata(path) {
         Ok(_) => {
@@ -140,7 +142,9 @@ pub(crate) fn create_level_file(path: &Path, root: &LevelRoot) -> io::Result<()>
         .write(true)
         .create_new(true)
         .open(&staged)?;
-    let written = output.write_all(&compressed).and_then(|_| output.sync_all());
+    let written = output
+        .write_all(&compressed)
+        .and_then(|_| output.sync_all());
     drop(output);
     if let Err(error) = written {
         let _ = fs::remove_file(&staged);
