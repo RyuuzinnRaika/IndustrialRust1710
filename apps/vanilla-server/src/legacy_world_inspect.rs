@@ -169,7 +169,8 @@ mod tests {
         let world = root.join("world");
         let path = world.join("region/r.0.0.mca");
         let mut corrupted = fs::read(&path).unwrap();
-        corrupted[4..8].copy_from_slice(&corrupted[0..4]); // overlapping sectors
+        let first_entry = corrupted[0..4].to_vec();
+        corrupted[4..8].copy_from_slice(&first_entry); // overlapping sectors
         fs::write(&path, &corrupted).unwrap();
         assert!(inspect_world(&world).is_err());
         assert_eq!(fs::read(&path).unwrap(), corrupted);
