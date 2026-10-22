@@ -44,7 +44,6 @@ const DEFINITIONS: &[(&str, Option<&str>)] = &[
     ("spawnWither", Some("theEnd2")),
     ("killWither", Some("spawnWither")),
     ("fullBeacon", Some("killWither")),
-    ("overpowered", Some("buildBetterPickaxe")),
 ];
 
 fn invalid(reason: &'static str) -> io::Error {
@@ -195,9 +194,9 @@ mod tests {
 
     #[test]
     fn vanilla_1710_catalogue_and_prerequisites() {
-        // All 34 Java 1.7.10 names must be recognized even when their
+        // All 33 Java 1.7.10 names must be recognized even when their
         // gameplay triggers are implemented in a different module.
-        assert_eq!(DEFINITIONS.len(), 34);
+        assert_eq!(DEFINITIONS.len(), 33);
         let mut known = BTreeSet::new();
         for (name, parent) in DEFINITIONS {
             assert!(known.insert(*name), "duplicate achievement: {name}");
