@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 const MAX_BYTES: u64 = 4096;
 const VERSION: u8 = 1;
 
+fn default_enabled() -> bool {
+    true
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GameRules {
@@ -16,6 +20,9 @@ pub struct GameRules {
     daylight_cycle: bool,
     #[serde(rename = "keepInventory")]
     keep_inventory: bool,
+    // Existing version-1 save files predate this field.
+    #[serde(rename = "doMobSpawning", default = "default_enabled")]
+    mob_spawning: bool,
 }
 
 impl Default for GameRules {
@@ -24,6 +31,7 @@ impl Default for GameRules {
             version: VERSION,
             daylight_cycle: true,
             keep_inventory: false,
+            mob_spawning: true,
         }
     }
 }
@@ -60,6 +68,7 @@ impl GameRules {
         match key {
             "doDaylightCycle" => Some(self.daylight_cycle),
             "keepInventory" => Some(self.keep_inventory),
+            "doMobSpawning" => Some(self.mob_spawning),
             _ => None,
         }
     }
@@ -70,11 +79,15 @@ impl GameRules {
     pub fn keep_inventory(self) -> bool {
         self.keep_inventory
     }
+    pub fn mob_spawning(self) -> bool {
+        self.mob_spawning
+    }
 
     pub fn set(&mut self, key: &str, value: bool) -> io::Result<()> {
         match key {
             "doDaylightCycle" => self.daylight_cycle = value,
             "keepInventory" => self.keep_inventory = value,
+            "doMobSpawning" => self.mob_spawning = value,
             _ => {
                 return Err(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -124,11 +137,16 @@ mod tests {
         let mut rules = GameRules::load(&path).unwrap();
         assert_eq!(rules.get("keepInventory"), Some(false));
         assert_eq!(rules.get("doDaylightCycle"), Some(true));
+        assert_eq!(rules.get("doMobSpawning"), Some(true));
         assert!(rules.set("missing", true).is_err());
         rules.set("keepInventory", true).unwrap();
         rules.set("doDaylightCycle", false).unwrap();
+        rules.set("doMobSpawning", false).unwrap();
         rules.save(&path).unwrap();
         assert_eq!(GameRules::load(&path).unwrap(), rules);
+        // Migration: old version-1 worlds must retain vanilla natural spawning.
+        fs::write(&path, br#"{"version":1,"doDaylightCycle":true,"keepInventory":false}"#).unwrap();
+        assert!(GameRules::load(&path).unwrap().mob_spawning());
         fs::write(
             &path,
             br#"{"version":1,"doDaylightCycle":"false","keepInventory":true}"#,
