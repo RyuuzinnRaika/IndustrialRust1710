@@ -119,5 +119,4 @@ mod tests {
         assert!(xp.spend_levels(0));
         assert_eq!(xp.total, 16);
     }
-
 }
