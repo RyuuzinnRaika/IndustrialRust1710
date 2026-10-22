@@ -70,6 +70,38 @@ fn movable(block: u16) -> bool {
                 | 138
     )
 }
+/// Coordinates of the two physical rail endpoints, including ascending slopes.
+fn rail_endpoints(x: i32, y: i32, z: i32, metadata: u16) -> [(i32, i32, i32); 2] {
+    match metadata & 7 {
+        0 => [(x, y, z - 1), (x, y, z + 1)],
+        1 => [(x - 1, y, z), (x + 1, y, z)],
+        2 => [(x - 1, y, z), (x + 1, y + 1, z)],
+        3 => [(x - 1, y + 1, z), (x + 1, y, z)],
+        4 => [(x, y + 1, z - 1), (x, y, z + 1)],
+        5 => [(x, y, z - 1), (x, y + 1, z + 1)],
+        _ => [(x, y, z), (x, y, z)],
+    }
+}
+
+/// Only rails with matching physical endpoints conduct power to each other.
+fn rails_connected(
+    from: (i32, i32, i32),
+    from_meta: u16,
+    to: (i32, i32, i32),
+    to_meta: u16,
+) -> bool {
+    // At a slope boundary, the endpoints describe the neighboring track cell.
+    let from_ends = rail_endpoints(from.0, from.1, from.2, from_meta);
+    let to_ends = rail_endpoints(to.0, to.1, to.2, to_meta);
+    from_ends.iter().any(|&(fx, fy, fz)| {
+        fx == to.0
+            && fz == to.2
+            && to_ends
+                .iter()
+                .any(|&(tx, ty, tz)| tx == from.0 && tz == from.2 && fy == ty)
+    })
+}
+
 impl World {
     /// Directional analog redstone strength; repeaters/comparators have a
     /// single output face. Dust propagates its stored 0..15 strength.
@@ -153,11 +185,16 @@ impl World {
             if distance >= 8 {
                 continue;
             }
+            let from_meta = self.get(rx, ry, rz) & 15;
             for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
                 for dy in [-1, 0, 1] {
                     let at = (rx + dx, ry + dy, rz + dz);
-                    if in_bounds(at.0, at.1, at.2)
-                        && self.get(at.0, at.1, at.2) >> 4 == id
+                    if !in_bounds(at.0, at.1, at.2) {
+                        continue;
+                    }
+                    let neighbor = self.get(at.0, at.1, at.2);
+                    if neighbor >> 4 == id
+                        && rails_connected((rx, ry, rz), from_meta, at, neighbor & 15)
                         && seen.insert(at)
                     {
                         next.push_back((at.0, at.1, at.2, distance + 1));
@@ -545,5 +582,26 @@ mod redstone_regression_tests {
             }
             fs::remove_file(path).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod connected_rail_regressions {
+    use super::rails_connected;
+
+    #[test]
+    fn perpendicular_tracks_do_not_power_each_other() {
+        assert!(!rails_connected((0, 64, 0), 0, (1, 64, 0), 1));
+    }
+
+    #[test]
+    fn straight_tracks_connect_bidirectionally() {
+        assert!(rails_connected((0, 64, 0), 1, (1, 64, 0), 1));
+        assert!(rails_connected((1, 64, 0), 1, (0, 64, 0), 1));
+    }
+
+    #[test]
+    fn rising_track_connects_to_upper_track() {
+        assert!(rails_connected((0, 64, 0), 2, (1, 65, 0), 1));
     }
 }
