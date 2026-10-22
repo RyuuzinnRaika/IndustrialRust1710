@@ -755,6 +755,39 @@ fn use_special_item(
     *w = staged_world;
     Ok(Some(changed))
 }
+/// Drive 1.7.10 tripwire collision from server-authoritative Mob/drop
+/// locations on the existing world worker. Bounded entity registries are
+/// sampled periodically, deduplicating touching entities into block cells.
+fn refresh_entity_tripwires(
+    world: &mut World,
+    path: &Path,
+    mob_positions: &[PlayerPosition],
+    drop_positions: &[[i32; 3]],
+) -> io::Result<Vec<(i32, i32, i32)>> {
+    let mut feet = BTreeSet::new();
+    for position in mob_positions {
+        if position.is_valid() {
+            feet.insert((
+                position.x.floor() as i32,
+                position.y.floor() as i32,
+                position.z.floor() as i32,
+            ));
+        }
+    }
+    for &[x, y, z] in drop_positions {
+        feet.insert((x.div_euclid(32), y.div_euclid(32), z.div_euclid(32)));
+    }
+    let mut changed = BTreeSet::new();
+    for (x, y, z) in feet {
+        for ty in [y, y.saturating_add(1)] {
+            if world::in_bounds(x, ty, z) && world.get(x, ty, z) >> 4 == 132 {
+                changed.extend(world.touch_tripwire(path, x, ty, z)?);
+            }
+        }
+    }
+    Ok(changed.into_iter().collect())
+}
+
 fn play(
     s: &mut Connection,
     world: &Mutex<World>,
@@ -5752,6 +5785,7 @@ fn main() -> io::Result<()> {
     // Keep the world -> mob lock ordering used by player sessions.
     // TNT blast damage is applied by the *existing* 20TPS world worker.
     let tnt_mobs = Arc::clone(&mobs);
+    let wire_mobs = Arc::clone(&mobs);
     let ejection_devices = Arc::clone(&devices);
     let ejection_file = Arc::clone(&device_path);
     thread::spawn(move || {
@@ -6058,6 +6092,36 @@ fn main() -> io::Result<()> {
                         }
                         Err(error) => {
                             eprintln!("BLOCK TICK STORAGE ERROR: {error}");
+                            return;
+                        }
+                    }
+                }
+                // Every fifth existing 20TPS tick, check bounded Mob and
+                // ground-item contacts. A stationary entity renews hook timers;
+                // when it leaves, the normal block_tick releases the signal.
+                // World -> Mob -> Ground lock order matches session updates.
+                if survival && now % 5 < u64::from(steps) {
+                    let positions = match wire_mobs.lock() {
+                        Ok(creatures) => creatures.contact_positions(),
+                        Err(_) => return,
+                    };
+                    let drops = match leaf_drops.lock() {
+                        Ok(ground) => ground.items().map(|item| item.position).collect::<Vec<_>>(),
+                        Err(_) => return,
+                    };
+                    match refresh_entity_tripwires(
+                        &mut gravity_world,
+                        &furnace_world_path,
+                        &positions,
+                        &drops,
+                    ) {
+                        Ok(updated) => {
+                            for (x, y, z) in updated {
+                                furnace_hub.broadcast(block_change_event(&gravity_world, x, y, z));
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("ENTITY TRIPWIRE STORAGE ERROR: {error}");
                             return;
                         }
                     }
@@ -6563,5 +6627,51 @@ mod tests {
         let mut input = Input(&[0xff, 0xff]);
         assert!(input.slot().unwrap().is_none());
         input.finish().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod h74_entity_contact_tests {
+    use super::*;
+
+    #[test]
+    fn stationary_mob_and_item_trigger_wire_then_release_after_departure() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-h74-entity-contacts-{}.irw",
+            std::process::id()
+        ));
+        let mut w = World::new();
+        for x in [-3, 3] {
+            w.import_block(x, 64, 0, 1 << 4).unwrap();
+        }
+        w.import_block(-2, 64, 0, (131 << 4) | 3).unwrap();
+        w.import_block(2, 64, 0, (131 << 4) | 1).unwrap();
+        for x in -1..=1 {
+            w.import_block(x, 64, 0, 132 << 4).unwrap();
+        }
+        w.save(&path).unwrap();
+        let mob = [PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        }];
+        let drops = [[16, 64 * 32 + 16, 16]];
+        let changed = refresh_entity_tripwires(&mut w, &path, &mob, &drops).unwrap();
+        assert_eq!(changed.len(), 5, "contacts must be deduplicated");
+        assert_eq!(w.get(-2, 64, 0) & 8, 8);
+        for _ in 0..6 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert!(refresh_entity_tripwires(&mut w, &path, &mob, &drops)
+            .unwrap()
+            .is_empty());
+        for _ in 0..9 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_ne!(w.get(-2, 64, 0) & 8, 0);
+        w.block_tick(&path, 64).unwrap();
+        assert_eq!(w.get(-2, 64, 0) & 8, 0);
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0) & 1, 0);
+        std::fs::remove_file(path).ok();
     }
 }

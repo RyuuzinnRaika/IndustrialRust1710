@@ -632,8 +632,19 @@ impl World {
                 }
                 batch.insert((px, y as u8, pz), old | 1 | 4);
             }
-            let (mut candidate, changed) = self.stage_special_batch(&batch)?;
             let expires = self.fluid_phase.saturating_add(10);
+            if batch
+                .iter()
+                .all(|(&(px, py, pz), &state)| self.get(px, i32::from(py), pz) == state)
+            {
+                // Holding an activated wire must not clone/save the entire
+                // world on every contact sample. Just renew the timers.
+                for &pos in batch.keys() {
+                    self.pending_buttons.insert(pos, expires);
+                }
+                return Ok(Vec::new());
+            }
+            let (mut candidate, changed) = self.stage_special_batch(&batch)?;
             for (&pos, &block) in &batch {
                 if matches!(block >> 4, 131 | 132) {
                     candidate.pending_buttons.insert(pos, expires);
