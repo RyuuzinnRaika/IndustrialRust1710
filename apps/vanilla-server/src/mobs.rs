@@ -231,12 +231,15 @@ fn emitted_light_near(world: &World, at: PlayerPosition) -> u8 {
 }
 /// Minecraft's 24-block exclusion is spherical, not horizontal only.
 fn natural_spawn_distance_ok(at: PlayerPosition, players: &[PlayerPosition]) -> bool {
-    let min_sq = players.iter().map(|p| {
-        let dx = p.x - at.x;
-        let dy = p.y - at.y;
-        let dz = p.z - at.z;
-        dx * dx + dy * dy + dz * dz
-    }).fold(f64::INFINITY, f64::min);
+    let min_sq = players
+        .iter()
+        .map(|p| {
+            let dx = p.x - at.x;
+            let dy = p.y - at.y;
+            let dz = p.z - at.z;
+            dx * dx + dy * dy + dz * dz
+        })
+        .fold(f64::INFINITY, f64::min);
     (24.0_f64 * 24.0..=128.0_f64 * 128.0).contains(&min_sq)
 }
 fn damage_held(held: Option<Stack>) -> i16 {
@@ -547,7 +550,8 @@ impl Mobs {
                     _ => Kind::Chicken,
                 }
             } else {
-                if hostile >= HOSTILE_CAP || (open && !is_night) || emitted_light_near(world, p) > 7 {
+                if hostile >= HOSTILE_CAP || (open && !is_night) || emitted_light_near(world, p) > 7
+                {
                     continue;
                 }
                 match seed % 4 {
@@ -821,7 +825,11 @@ mod tests {
     use super::*;
     #[test]
     fn natural_spawn_excludes_near_and_out_of_range_players() {
-        let p = PlayerPosition { x: 0.0, y: 64.0, z: 0.0 };
+        let p = PlayerPosition {
+            x: 0.0,
+            y: 64.0,
+            z: 0.0,
+        };
         let at = |x: f64| PlayerPosition { x, ..p };
         assert!(!natural_spawn_distance_ok(at(23.9), &[p]));
         assert!(natural_spawn_distance_ok(at(24.0), &[p]));
@@ -832,7 +840,11 @@ mod tests {
     #[test]
     fn torch_blocks_hostile_spawn_nearby() {
         let mut world = World::new();
-        let pos = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        let pos = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
         assert_eq!(emitted_light_near(&world, pos), 0);
         world.import_block(1, 65, 0, 50 << 4).unwrap();
         assert!(emitted_light_near(&world, pos) > 7);
