@@ -14,6 +14,8 @@ mod dimensions;
 mod dispensers;
 mod experience;
 mod furnaces;
+#[allow(dead_code)] // Game rules persistence is staged; command/tick hooks pending.
+mod game_rules;
 mod ground_items;
 mod hoppers;
 mod inventory;
