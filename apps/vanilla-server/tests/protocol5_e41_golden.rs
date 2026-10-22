@@ -210,6 +210,7 @@ fn consume_initial(socket: &mut TcpStream, expected_entity_id: i32) {
     let mut join = false;
     let mut chunks = 0;
     let mut window_items = false;
+    let mut cursor_slot = false;
     let mut position = false;
     for _ in 0..110 {
         let (id, body) = received(socket);
@@ -233,6 +234,14 @@ fn consume_initial(socket: &mut TcpStream, expected_entity_id: i32) {
                 assert_eq!(body, expected, "empty 1.7.10 Window Items golden bytes");
                 window_items = true;
             }
+            0x2f => {
+                assert_eq!(
+                    body,
+                    [255, 255, 255, 255, 255],
+                    "empty cursor S2F golden bytes"
+                );
+                cursor_slot = true;
+            }
             0x08 => {
                 assert_eq!(body.len(), 33, "Player Position + Look length");
                 position = true;
@@ -243,7 +252,7 @@ fn consume_initial(socket: &mut TcpStream, expected_entity_id: i32) {
         }
     }
     assert!(
-        join && window_items && position,
+        join && window_items && cursor_slot && position,
         "initial login packets missing"
     );
     assert_eq!(chunks, 25, "initial 5x5 chunk view");
@@ -286,4 +295,60 @@ fn live_protocol5_entity_chunk_inventory_and_window_golden() {
         saw_list && saw_entity,
         "second player not visible to first player"
     );
+}
+
+/// C10 (Creative Inventory Action) -> S2F (Set Slot) wire contract, exercised
+/// against the actual server binary. Fixed byte expectations are deliberately
+/// independent from Inventory::encode_slot and the server packet writer.
+#[test]
+fn live_protocol5_creative_slot_set_and_clear_golden() {
+    let server = Server::start();
+    let mut alpha = server.login("Alpha");
+    consume_initial(&mut alpha, 1);
+
+    // Slot 36 = first hotbar slot, item 4 = cobblestone, 64, damage 0,
+    // NBT length -1. This is Protocol 5, not modern Slot/NBT encoding.
+    let create = packet(0x10, &[0, 36, 0, 4, 64, 0, 0, 255, 255]);
+    // A TCP split across the frame-length and packet-ID boundary must not
+    // silently lose the write when the server's read poll times out.
+    alpha.write_all(&create[..1]).unwrap();
+    thread::sleep(Duration::from_millis(75));
+    alpha.write_all(&create[1..]).unwrap();
+
+    let mut created = false;
+    for _ in 0..30 {
+        let (id, body) = received(&mut alpha);
+        match id {
+            0x2f => {
+                assert_eq!(
+                    body,
+                    [0, 0, 36, 0, 4, 64, 0, 0, 255, 255],
+                    "server-authoritative S2F filled slot bytes"
+                );
+                created = true;
+                break;
+            }
+            0x00 if body.len() == 4 => alpha.write_all(&packet(0, &body)).unwrap(),
+            _ => {}
+        }
+    }
+    assert!(created, "no S2F Set Slot after C10 inventory action");
+
+    // A Slot with item ID -1 occupies exactly two bytes: there is no
+    // count/damage/NBT trailer on an empty slot.
+    alpha.write_all(&packet(0x10, &[0, 36, 255, 255])).unwrap();
+    let mut cleared = false;
+    for _ in 0..30 {
+        let (id, body) = received(&mut alpha);
+        match id {
+            0x2f => {
+                assert_eq!(body, [0, 0, 36, 255, 255], "empty slot S2F golden bytes");
+                cleared = true;
+                break;
+            }
+            0x00 if body.len() == 4 => alpha.write_all(&packet(0, &body)).unwrap(),
+            _ => {}
+        }
+    }
+    assert!(cleared, "no S2F Set Slot after clearing hotbar");
 }
