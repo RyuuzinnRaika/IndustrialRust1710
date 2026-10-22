@@ -708,7 +708,13 @@ impl Mobs {
 
     /// Resolve zombie-on-villager melee on the server. The existing mob tick
     /// calls this once; each zombie's bite cooldown prevents duplicated hits.
-    fn zombies_attack_villagers(&mut self, now: u64, world: &World, events: &mut Vec<Event>) {
+    fn zombies_attack_villagers(
+        &mut self,
+        now: u64,
+        world: &World,
+        players: &[PlayerPosition],
+        events: &mut Vec<Event>,
+    ) {
         if self.difficulty == Some(0) {
             return;
         }
@@ -728,6 +734,13 @@ impl Mobs {
                 .filter(|mob| {
                     mob.kind == Kind::Villager
                         && mob.nearby(origin, 1.6)
+                        // A player closer than the villager takes target
+                        // priority; the zombie must not burn its bite cooldown
+                        // by attacking a collocated villager instead.
+                        && !players.iter().any(|player| {
+                            distance_3d(origin, *player)
+                                <= distance_3d(origin, mob.position)
+                        })
                         && can_see(world, origin, mob.position)
                 })
                 .min_by(|a, b| {
@@ -1712,7 +1725,7 @@ impl Mobs {
                     }
                 }
             }
-            self.zombies_attack_villagers(now, world, &mut events);
+            self.zombies_attack_villagers(now, world, players, &mut events);
             // Iron golems target nearby hostile mobs, never players or villagers.
             // Resolve after the iteration to avoid mutable aliasing and keep
             // each hit authoritative for all connected clients.
@@ -2580,6 +2593,22 @@ mod tests {
             .is_empty());
     }
     #[test]
+    fn zombie_attacks_player_before_equally_close_villager() {
+        let at = PlayerPosition::default();
+        let world = World::new();
+        let mut mobs = Mobs {
+            difficulty: Some(2),
+            ..Mobs::default()
+        };
+        mobs.insert(Kind::Zombie, at, false);
+        mobs.insert(Kind::Villager, at, false);
+        let mut packets = Vec::new();
+        mobs.zombies_attack_villagers(20, &world, &[at], &mut packets);
+        assert!(packets.is_empty());
+        assert_eq!(mobs.entities.get(&1).unwrap().health, 20);
+        assert_eq!(mobs.hurt_player(900, at, 21), 3);
+    }
+    #[test]
     fn zombie_villager_metadata_and_infection_follow_difficulty() {
         let at = PlayerPosition {
             x: 0.5,
@@ -2606,7 +2635,7 @@ mod tests {
             mobs.entities.get_mut(&villager_id).unwrap().profession = 2;
             let mut all_events = Vec::new();
             for tick in (20..=140).step_by(20) {
-                mobs.zombies_attack_villagers(tick, &world, &mut all_events);
+                mobs.zombies_attack_villagers(tick, &world, &[], &mut all_events);
             }
             assert!(!mobs.entities.contains_key(&villager_id));
             assert!(all_events.iter().any(|event| event.id == 0x13));
