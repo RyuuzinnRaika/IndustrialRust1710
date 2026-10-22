@@ -78,8 +78,8 @@ impl Hanging {
     pub fn is_frame(&self) -> bool {
         matches!(self.kind, Kind::Frame { .. })
     }
-    pub fn empty_frame(&self) -> bool {
-        matches!(self.kind, Kind::Frame { item: None, .. })
+    pub fn drop_position(&self) -> Position {
+        (self.at[0], self.at[1], self.at[2])
     }
     pub fn drops(&self) -> Vec<Stack> {
         match &self.kind {
