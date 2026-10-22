@@ -739,13 +739,12 @@ impl World {
             let mut level = block & 15;
             // One level per horizontal step in the Nether; two for lava
             // elsewhere, and one for water in every dimension.
-            let horizontal_cost: u16 = if id == 10
-                && self.dimension() != crate::dimensions::Dimension::Nether
-            {
-                2
-            } else {
-                1
-            };
+            let horizontal_cost: u16 =
+                if id == 10 && self.dimension() != crate::dimensions::Dimension::Nether {
+                    2
+                } else {
+                    1
+                };
             let adjacent = [
                 (x - 1, y, z),
                 (x + 1, y, z),
@@ -1682,10 +1681,8 @@ mod tests {
     }
     #[test]
     fn nether_lava_spreads_every_tick_with_one_level_per_horizontal_step() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-nether-lava-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-nether-lava-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::expanded(42, crate::dimensions::Dimension::Nether);
         // Carve a deterministic floor and open channel independent of the
