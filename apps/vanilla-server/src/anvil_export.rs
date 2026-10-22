@@ -270,7 +270,10 @@ pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
         .duration_since(UNIX_EPOCH)
         .map_err(wrap)?
         .as_nanos();
-    let stage = parent.join(format!(".{basename}.ir-export-{}-{nonce}", std::process::id()));
+    let stage = parent.join(format!(
+        ".{basename}.ir-export-{}-{nonce}",
+        std::process::id()
+    ));
     fs::create_dir(&stage)?;
     let result = (|| {
         write_snapshot(world, &stage, &chunks)?;
