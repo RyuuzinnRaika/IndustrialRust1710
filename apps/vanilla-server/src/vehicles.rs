@@ -155,7 +155,7 @@ mod tests {
     use super::*;
     #[test]
     fn boat_spawn_mount_and_bounded_controls() {
-        let mut world = World::new();
+        let world = World::new();
         let at = PlayerPosition { x: 0.5, y: 65.25, z: 0.5 };
         // A flat world may not contain water: invalid boat placements remain rejected.
         assert!(!Boats::default().can_place(&world, at));
