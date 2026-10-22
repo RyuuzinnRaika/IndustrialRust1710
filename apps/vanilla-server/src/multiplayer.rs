@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 pub const MAX_PLAYERS: usize = 8;
 /// Internal mailbox operation, never serialized as a network packet.
 pub const ADMIN_TELEPORT_EVENT: u32 = u32::MAX - 1;
+/// A session-owned safe Kick: the session sends Disconnect, then persists state.
+pub const ADMIN_KICK_EVENT: u32 = u32::MAX - 2;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -175,6 +177,25 @@ impl Hub {
             })?;
         Ok(true)
     }
+    /// Queue an administrative Kick without removing the player from Hub early.
+    pub fn request_admin_kick(&self, name: &str, reason: &str) -> io::Result<bool> {
+        if reason.is_empty() || reason.len() > 256 || reason.chars().any(char::is_control) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid kick reason"));
+        }
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(name)) else {
+            return Ok(false);
+        };
+        peer.tx.try_send(Event {
+            id: ADMIN_KICK_EVENT,
+            body: reason.as_bytes().to_vec(),
+        }).map_err(|_| {
+            peer.overloaded.store(true, Ordering::Release);
+            io::Error::other("target session mailbox unavailable")
+        })?;
+        Ok(true)
+    }
+
     pub fn positions(&self) -> io::Result<Vec<PlayerPosition>> {
         let inner = self.0.lock().map_err(|_| poisoned())?;
         Ok(inner.players.values().map(|peer| peer.position).collect())
