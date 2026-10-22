@@ -1707,11 +1707,12 @@ impl Mobs {
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
                 mob.bite_tick = tick;
-                amount = amount.saturating_add(if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
-                    2
-                } else {
-                    3
-                });
+                amount =
+                    amount.saturating_add(if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
+                        2
+                    } else {
+                        3
+                    });
                 // Cave spiders cause poison only on Normal/Hard (7s / 15s).
                 // Directly target this participant; a collocated player must
                 // never inherit the victim's effect.
@@ -1807,7 +1808,10 @@ mod tests {
         assert!(!mobs.can_milk(cow, at, None));
         assert!(!mobs.can_milk(
             cow,
-            PlayerPosition { x: at.x + 4.0, ..at },
+            PlayerPosition {
+                x: at.x + 4.0,
+                ..at
+            },
             bucket
         ));
     }
