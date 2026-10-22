@@ -35,10 +35,9 @@ impl Book {
     fn valid(&self, signed: bool) -> bool {
         !self.pages.is_empty()
             && self.pages.len() <= MAX_PAGES
-            && self
-                .pages
-                .iter()
-                .all(|page| page.chars().count() <= MAX_PAGE_CHARS && page.matches('\n').count() <= 13)
+            && self.pages.iter().all(|page| {
+                page.chars().count() <= MAX_PAGE_CHARS && page.matches('\n').count() <= 13
+            })
             && if signed {
                 self.title
                     .as_ref()
