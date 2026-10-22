@@ -73,8 +73,9 @@ impl World {
                 };
                 solid(support)
             }
-            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 | 149 | 150 => solid(below),
-            77 | 143 => {
+            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 | 132 | 147 | 148 | 149 | 150 | 151 => solid(below),
+            78 => solid(below) || below == 79,
+            77 | 131 | 143 => {
                 let neighbor = match block & 7 {
                     1 => self.get(x - 1, y, z) >> 4,
                     2 => self.get(x + 1, y, z) >> 4,
@@ -102,6 +103,9 @@ impl World {
             }
             _ => true,
         }
+    }
+    fn is_cold_biome(&self, x: i32, z: i32) -> bool {
+        matches!(self.biome_at(x, z), 11 | 12 | 13 | 26 | 30 | 31)
     }
     fn wet_farmland(&self, x: i32, y: i32, z: i32) -> bool {
         for dx in -4..=4 {
@@ -143,7 +147,7 @@ impl World {
         }
         false
     }
-    fn grow_tree(&self, x: i32, y: i32, z: i32, changes: &mut BTreeMap<Position, u16>) {
+    pub(super) fn grow_tree(&self, x: i32, y: i32, z: i32, changes: &mut BTreeMap<Position, u16>) {
         if y > 249 || !plantable(self.get(x, y - 1, z) >> 4) {
             return;
         }
@@ -202,6 +206,11 @@ impl World {
                     | 66
                     | 70
                     | 72
+                    | 131
+                    | 132
+                    | 147
+                    | 148
+                    | 151
                     | 75
                     | 76
                     | 93
@@ -240,6 +249,20 @@ impl World {
                 continue;
             }
             match id {
+                78 if self.light_at(x, height, z).0 >= 12 => {
+                    changes.insert((x, y, z), 0);
+                }
+                79 if self.light_at(x, height, z).0 >= 12 => {
+                    changes.insert((x, y, z), 9 << 4);
+                }
+                2 | 3 if self.raining && self.is_cold_biome(x, z) => {
+                    if in_bounds(x, height + 1, z)
+                        && self.get(x, height + 1, z) == 0
+                        && (height + 2..=255).all(|sy| self.get(x, sy, z) == 0)
+                    {
+                        changes.insert((x, (height + 1) as u8, z), 78 << 4);
+                    }
+                }
                 60 => {
                     let moisture = block & 7;
                     if self.wet_farmland(x, height, z) {
