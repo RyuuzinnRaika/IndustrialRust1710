@@ -170,6 +170,12 @@ struct Mob {
     #[serde(default)]
     zombie_villager: bool,
     #[serde(default)]
+    can_break_wooden_doors: bool,
+    #[serde(default)]
+    door_break_target: Option<[i32; 3]>,
+    #[serde(default)]
+    door_break_started: u64,
+    #[serde(default)]
     saddled: bool,
     #[serde(default)]
     tamed: bool,
@@ -731,6 +737,12 @@ impl Mobs {
             size,
             anger_until: 0,
             zombie_villager: false,
+            // Java's uncommon break-door capability is assigned on spawn,
+            // not enabled for every zombie in Hard mode.
+            can_break_wooden_doors: kind == Kind::Zombie
+                && hash(self.last_tick ^ id as u64 ^ 0x2a3814f7).is_multiple_of(20),
+            door_break_target: None,
+            door_break_started: 0,
             saddled: false,
             tamed: false,
             tame_progress: 0,
@@ -1099,6 +1111,81 @@ impl Mobs {
                 peer.anger_until = peer.anger_until.max(until);
             }
         }
+    }
+
+    /// Hard-only wooden-door breaking (240 ticks, server authority).
+    /// The caller holds the world and mob locks and broadcasts BOTH changed
+    /// block coordinates after this method returns. Existing doors are never
+    /// edited on Easy/Normal or by zombies without the rare capability.
+    pub fn break_wooden_doors(
+        &mut self,
+        world: &mut World,
+        world_path: &Path,
+        now: u64,
+        players: &[PlayerPosition],
+    ) -> io::Result<Vec<(i32, i32, i32)>> {
+        if self.difficulty != Some(3) {
+            for mob in self.entities.values_mut() {
+                mob.door_break_target = None;
+            }
+            return Ok(Vec::new());
+        }
+        let mut targets = players.to_vec();
+        targets.extend(
+            self.entities
+                .values()
+                .filter(|mob| mob.kind == Kind::Villager)
+                .map(|mob| mob.position),
+        );
+        let mut broken = Vec::new();
+        for mob in self.entities.values_mut() {
+            if mob.kind != Kind::Zombie || !mob.can_break_wooden_doors || mob.health <= 0 {
+                continue;
+            }
+            let current = targets
+                .iter()
+                .copied()
+                .filter(|target| distance_3d(*target, mob.position) <= 16.0)
+                .filter_map(|target| {
+                    closed_wooden_door_on_path(world, mob.position, target)
+                        .map(|door| (distance_3d(target, mob.position), door))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, door)| door);
+            if current != mob.door_break_target {
+                mob.door_break_target = current;
+                mob.door_break_started = now;
+                continue;
+            }
+            let Some([x, y, z]) = current else { continue };
+            if now.saturating_sub(mob.door_break_started) < 240 {
+                continue;
+            }
+            // A paired world transaction never publishes half a door.
+            if world.update_many_and_save(
+                world_path,
+                &[(x, y, z, 0), (x, y + 1, z, 0)],
+            )? {
+                broken.extend([(x, y, z), (x, y + 1, z)]);
+                self.pending_drops.push((
+                    Stack {
+                        id: 324, // wooden door item
+                        count: 1,
+                        damage: 0,
+                    },
+                    (x, y, z),
+                ));
+            }
+            mob.door_break_target = None;
+            mob.door_break_started = 0;
+            if broken.len() >= 8 {
+                break; // maximum four paired door edits per caller pass
+            }
+        }
+        if !broken.is_empty() {
+            self.save(world)?;
+        }
+        Ok(broken)
     }
 
     /// Grazing is server-owned and persisted before clients see sheep wool
@@ -2417,6 +2504,50 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
 /// Java Edition 1.7.10 slime-chunk selection; compatible with java.util.Random.
 /// Chunk arithmetic is **signed 32-bit** (Java int), then widened to Java long
 /// with wrapping signed 64-bit addition. The RNG consumes nextInt(10).
+/// Search only the 3x3 blocks in front of a zombie's feet. A candidate
+/// must be a CLOSED wooden door with a complete upper/lower half, stand
+/// between hunter and target, and lie within the narrow pursuit corridor.
+fn closed_wooden_door_on_path(
+    world: &World,
+    from: PlayerPosition,
+    target: PlayerPosition,
+) -> Option<[i32; 3]> {
+    let dx = target.x - from.x;
+    let dz = target.z - from.z;
+    let horizontal_sq = dx * dx + dz * dz;
+    if horizontal_sq < 4.0 || (target.y - from.y).abs() > 2.0 {
+        return None;
+    }
+    let start_x = from.x.floor() as i32;
+    let start_y = from.y.floor() as i32;
+    let start_z = from.z.floor() as i32;
+    for x in start_x - 1..=start_x + 1 {
+        for z in start_z - 1..=start_z + 1 {
+            let lower = world.get(x, start_y, z);
+            let upper = world.get(x, start_y + 1, z);
+            if lower >> 4 != 64
+                || lower & 8 != 0
+                || lower & 4 != 0
+                || upper >> 4 != 64
+                || upper & 8 == 0
+            {
+                continue;
+            }
+            let door_x = f64::from(x) + 0.5 - from.x;
+            let door_z = f64::from(z) + 0.5 - from.z;
+            let along = (door_x * dx + door_z * dz) / horizontal_sq;
+            let cross = (door_x * dz - door_z * dx).abs() / horizontal_sq.sqrt();
+            if (0.0..1.0).contains(&along)
+                && cross <= 0.75
+                && door_x * door_x + door_z * door_z <= 2.25
+            {
+                return Some([x, start_y, z]);
+            }
+        }
+    }
+    None
+}
+
 fn is_slime_chunk(world_seed: u64, chunk_x: i32, chunk_z: i32) -> bool {
     let x_square = chunk_x.wrapping_mul(chunk_x).wrapping_mul(0x4c1906) as i64;
     let x_linear = chunk_x.wrapping_mul(0x5ac0db) as i64;
@@ -2943,6 +3074,98 @@ mod tests {
         assert!(mobs.player_attack(attacked, at, None, 40).is_some());
         assert_eq!(mobs.entities[&nearby].anger_until, 1240);
         assert!(mobs.hurt_player(900, at, 1240) == 0);
+    }
+
+    #[test]
+    fn hard_zombie_breaks_only_closed_wooden_door_after_240_ticks() {
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust-hard-zombie-door-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        assert!(world.place_door(&path, 1, 64, 0, 64, 0).unwrap());
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let target = PlayerPosition { x: 4.5, ..from };
+        assert_eq!(closed_wooden_door_on_path(&world, from, target), Some([1, 64, 0]));
+        let mut mobs = Mobs {
+            difficulty: Some(3),
+            ..Mobs::default()
+        };
+        mobs.insert(Kind::Zombie, from, false);
+        mobs.entities.get_mut(&0).unwrap().can_break_wooden_doors = true;
+        assert!(mobs
+            .break_wooden_doors(&mut world, &path, 20, &[target])
+            .unwrap()
+            .is_empty());
+        assert!(mobs
+            .break_wooden_doors(&mut world, &path, 259, &[target])
+            .unwrap()
+            .is_empty());
+        assert_eq!(world.get(1, 64, 0) >> 4, 64);
+        let changed = mobs
+            .break_wooden_doors(&mut world, &path, 260, &[target])
+            .unwrap();
+        assert_eq!(changed, vec![(1, 64, 0), (1, 65, 0)]);
+        assert_eq!(world.get(1, 64, 0), 0);
+        assert_eq!(world.get(1, 65, 0), 0);
+        let drops = mobs.take_drops();
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].0.id, 324);
+        assert!(mobs
+            .break_wooden_doors(&mut world, &path, 261, &[target])
+            .unwrap()
+            .is_empty());
+        assert!(mobs.take_drops().is_empty());
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(1, 64, 0), 0);
+        assert_eq!(restored.get(1, 65, 0), 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn zombies_cannot_break_on_nonhard_or_through_open_and_iron_doors() {
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust-door-guard-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        assert!(world.place_door(&path, 1, 64, 0, 64, 0).unwrap());
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let target = PlayerPosition { x: 4.5, ..from };
+        let mut mobs = Mobs {
+            difficulty: Some(2),
+            ..Mobs::default()
+        };
+        mobs.insert(Kind::Zombie, from, false);
+        mobs.entities.get_mut(&0).unwrap().can_break_wooden_doors = true;
+        assert!(mobs
+            .break_wooden_doors(&mut world, &path, 20, &[target])
+            .unwrap()
+            .is_empty());
+        mobs.difficulty = Some(3);
+        // Entering Hard does not retroactively accrue Normal-mode progress.
+        assert!(mobs
+            .break_wooden_doors(&mut world, &path, 260, &[target])
+            .unwrap()
+            .is_empty());
+        assert_eq!(world.get(1, 64, 0) >> 4, 64);
+        // An opened door is not a valid breaking target.
+        world.update_and_save(&path, 1, 64, 0, (64 << 4) | 4).unwrap();
+        assert_eq!(closed_wooden_door_on_path(&world, from, target), None);
+        mobs.break_wooden_doors(&mut world, &path, 600, &[target])
+            .unwrap();
+        assert_eq!(world.get(1, 64, 0) >> 4, 64);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
