@@ -46,7 +46,6 @@ pub struct Fishing {
 pub struct Reel {
     pub events: Vec<Event>,
     pub loot: Option<Stack>,
-    pub wear: i16,
 }
 impl Fishing {
     pub fn has_float(&self, owner: i32) -> bool {
@@ -103,7 +102,6 @@ impl Fishing {
         let mut result = Reel {
             events: vec![multiplayer::destroy(float.id)],
             loot: None,
-            wear: 1,
         };
         if let Some(bite) = float.bite_at {
             if float.in_water && now >= bite && now.saturating_sub(bite) <= 40 {
