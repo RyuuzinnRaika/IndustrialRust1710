@@ -154,7 +154,7 @@ impl World {
         self.signal_into(from, to) > 0
     }
 
-    fn powered_near(&self, x: i32, y: i32, z: i32) -> bool {
+    pub(super) fn powered_near(&self, x: i32, y: i32, z: i32) -> bool {
         NEIGHBORS
             .iter()
             .any(|&(dx, dy, dz)| self.power_into((x + dx, y + dy, z + dz), (x, y, z)))
