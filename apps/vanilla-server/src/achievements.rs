@@ -217,7 +217,10 @@ mod tests {
             (334, "killCow"),
             (369, "blazeRod"),
         ] {
-            assert_eq!(Achievements::collected_item_trigger(item), Some(achievement));
+            assert_eq!(
+                Achievements::collected_item_trigger(item),
+                Some(achievement)
+            );
         }
         assert_eq!(Achievements::collected_item_trigger(0), None);
     }
