@@ -139,7 +139,12 @@ impl Hanging {
                 body.extend_from_slice(&stack.id.to_be_bytes());
                 body.push(stack.count);
                 body.extend_from_slice(&stack.damage.to_be_bytes());
-                body.extend_from_slice(&(-1i16).to_be_bytes());
+                if let Some(nbt) = crate::books::wire_nbt(*stack) {
+                    body.extend_from_slice(&(nbt.len() as i16).to_be_bytes());
+                    body.extend_from_slice(&nbt);
+                } else {
+                    body.extend_from_slice(&(-1i16).to_be_bytes());
+                }
             }
             None => body.extend_from_slice(&(-1i16).to_be_bytes()),
         }
