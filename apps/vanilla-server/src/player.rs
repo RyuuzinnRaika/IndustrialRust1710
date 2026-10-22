@@ -108,6 +108,32 @@ impl PlayerPosition {
             .join(format!("{}.dat", username.to_ascii_lowercase()))
     }
 
+    /// Verified online profiles are stored by UUID in a separate namespace.
+    /// This prevents an authenticated player inheriting saves written under
+    /// an impersonated username while the server was in offline mode.
+    pub fn authenticated_location(world_file: &Path, uuid: &str) -> io::Result<PathBuf> {
+        let bytes = uuid.as_bytes();
+        if bytes.len() != 36
+            || bytes.iter().enumerate().any(|(i, byte)| {
+                if matches!(i, 8 | 13 | 18 | 23) {
+                    *byte != b'-'
+                } else {
+                    !byte.is_ascii_hexdigit()
+                }
+            })
+        {
+            return Err(invalid("invalid authenticated player UUID"));
+        }
+        let parent = world_file
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        Ok(parent
+            .join("players")
+            .join("verified")
+            .join(format!("{}.dat", uuid.to_ascii_lowercase())))
+    }
+
     fn load_legacy_json(path: &Path) -> io::Result<Self> {
         let meta = fs::metadata(path)?;
         if !meta.is_file() || meta.len() > MAX_LEGACY_BYTES {
@@ -243,6 +269,18 @@ impl PlayerPosition {
 mod tests {
     use super::*;
 
+    #[test]
+    fn verified_uuid_saves_cannot_reuse_offline_username_saves() {
+        let world = Path::new("world/flat.irw");
+        let id = "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca";
+        let verified = PlayerPosition::authenticated_location(world, id).unwrap();
+        assert_eq!(
+            verified,
+            Path::new("world/players/verified/d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca.dat")
+        );
+        assert_ne!(verified, PlayerPosition::location(world, "Operator"));
+        assert!(PlayerPosition::authenticated_location(world, "../danger").is_err());
+    }
     #[test]
     fn rejects_invalid_locations() {
         assert!(PlayerPosition::default().is_valid());

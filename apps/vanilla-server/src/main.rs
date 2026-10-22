@@ -2,6 +2,7 @@
 //! Offline-mode by design: bind to loopback unless you trust every client on your LAN.
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
 mod achievements;
+mod admin;
 mod anvil_export;
 mod anvil_import;
 mod backup_world;
@@ -33,9 +34,11 @@ mod mobs;
 mod multiplayer;
 mod native_tile_export;
 mod navigation;
+mod online_auth;
 mod physics;
 mod player;
 mod scoreboard;
+mod security_limits;
 mod server_config;
 mod session_lock;
 mod survival;
@@ -50,6 +53,7 @@ mod world;
 mod worldgen;
 
 use achievements::Achievements;
+use admin::Administration;
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
@@ -67,14 +71,19 @@ use legacy_protocol::{
 };
 use minecarts::Minecarts;
 use mobs::Mobs;
-use multiplayer::{Event, Hub, JoinError, ADMIN_TELEPORT_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT};
+use multiplayer::{
+    Event, Hub, JoinError, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS,
+    PEARL_TELEPORT_EVENT,
+};
+use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use scoreboard::Scoreboard;
+use security_limits::{ChatLimiter, ConnectionLimiter};
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, ErrorKind};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
@@ -183,24 +192,24 @@ impl<'a> Input<'a> {
         }
     }
 }
-fn receive(s: &mut TcpStream) -> io::Result<(i32, Vec<u8>)> {
+fn receive(s: &mut Connection) -> io::Result<(i32, Vec<u8>)> {
     let data = read_frame(s)?;
     let mut r = Input(&data);
     let id = r.varint()?;
     Ok((id, r.0.to_vec()))
 }
-fn send(s: &mut TcpStream, id: u32, body: &[u8]) -> io::Result<()> {
+fn send(s: &mut Connection, id: u32, body: &[u8]) -> io::Result<()> {
     let mut packet = Vec::with_capacity(5 + body.len());
     write_varint(id, &mut packet);
     packet.extend_from_slice(body);
     write_frame(s, &packet)
 }
-fn as_chat(s: &mut TcpStream, message: &str) -> io::Result<()> {
+fn as_chat(s: &mut Connection, message: &str) -> io::Result<()> {
     let mut bytes = Vec::new();
     write_string(&json!({"text": message}).to_string(), &mut bytes)?;
     send(s, 0x02, &bytes)
 }
-fn login_disconnect(s: &mut TcpStream, reason: &str) -> io::Result<()> {
+fn login_disconnect(s: &mut Connection, reason: &str) -> io::Result<()> {
     let mut payload = Vec::new();
     write_string(&json!({"text":reason}).to_string(), &mut payload)?;
     send(s, 0x00, &payload)
@@ -219,7 +228,7 @@ fn offline_uuid(name: &str) -> String {
         &hex[20..32]
     )
 }
-fn status(s: &mut TcpStream, hub: &Hub) -> io::Result<()> {
+fn status(s: &mut Connection, hub: &Hub) -> io::Result<()> {
     let (id, body) = receive(s)?;
     if id != 0 || !body.is_empty() {
         return Err(bad("invalid status request"));
@@ -254,7 +263,7 @@ struct InitialPlayer<'a> {
     difficulty: u8,
 }
 fn join(
-    s: &mut TcpStream,
+    s: &mut Connection,
     world: &Mutex<World>,
     clock: &Clock,
     entity_id: i32,
@@ -365,7 +374,7 @@ fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipel
 /// Submit at most eight chunks per session before draining them in wire order.
 /// This avoids a large per-client raw-chunk backlog when players join together.
 fn send_chunk_batch(
-    s: &mut TcpStream,
+    s: &mut Connection,
     world: &Mutex<World>,
     coords: impl IntoIterator<Item = (i32, i32)>,
 ) -> io::Result<()> {
@@ -377,8 +386,7 @@ fn send_chunk_batch(
             for chunk in pending.drain(..) {
                 send(s, 0x21, &chunk.finish_before(deadline)?)?;
             }
-            // Reset only after the entire bounded batch drains; not once per
-            // chunk, which would allow a stalled worker to hang a session.
+            // Reset only after the bounded batch has drained, not for each chunk.
             deadline = Instant::now() + chunk_pipeline::BATCH_DEADLINE;
         }
     }
@@ -388,10 +396,10 @@ fn send_chunk_batch(
     Ok(())
 }
 
-fn send_chunk(s: &mut TcpStream, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
+fn send_chunk(s: &mut Connection, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
     send(s, 0x21, &queue_chunk(world, cx, cz)?.finish()?)
 }
-fn unload_chunk(s: &mut TcpStream, cx: i32, cz: i32) -> io::Result<()> {
+fn unload_chunk(s: &mut Connection, cx: i32, cz: i32) -> io::Result<()> {
     // Protocol 5: full column with zero section bitmap and no data.
     let mut packet = Vec::with_capacity(17);
     packet.extend_from_slice(&cx.to_be_bytes());
@@ -403,7 +411,7 @@ fn unload_chunk(s: &mut TcpStream, cx: i32, cz: i32) -> io::Result<()> {
     send(s, 0x21, &packet)
 }
 fn sync_chunks(
-    s: &mut TcpStream,
+    s: &mut Connection,
     world: &Mutex<World>,
     loaded: &mut BTreeSet<(i32, i32)>,
     center: (i32, i32),
@@ -424,7 +432,7 @@ fn health_packet(vitals: Vitals) -> Vec<u8> {
     packet.extend_from_slice(&vitals.saturation.to_be_bytes());
     packet
 }
-fn send_player_position(s: &mut TcpStream, location: &PlayerPosition) -> io::Result<()> {
+fn send_player_position(s: &mut Connection, location: &PlayerPosition) -> io::Result<()> {
     // Protocol 5 clientbound position/look: x, feet y, z, yaw, pitch, on_ground.
     let mut bytes = Vec::with_capacity(33);
     bytes.extend_from_slice(&location.x.to_be_bytes());
@@ -616,9 +624,12 @@ struct PlayerSession<'a> {
     hub: &'a Hub,
     entity_id: i32,
     events: &'a Receiver<Event>,
+    administration: &'a Administration,
+    peer_ip: IpAddr,
+    verified_uuid: Option<&'a str>,
 }
 fn play(
-    s: &mut TcpStream,
+    s: &mut Connection,
     world: &Mutex<World>,
     world_path: &Path,
     name: &str,
@@ -662,6 +673,9 @@ fn play(
         hub,
         entity_id,
         events,
+        administration,
+        peer_ip,
+        verified_uuid,
     } = session;
     s.set_read_timeout(Some(Duration::from_millis(50)))?;
     let mut location = (player.x, player.y, player.z);
@@ -680,6 +694,8 @@ fn play(
     let mut last_time_tick: u64 = clock.ticks();
     let mut last_vitals_tick = clock.ticks();
     let mut admission_check = started;
+    let mut permissions = administration.permission(name)?;
+    let mut chat_limiter = ChatLimiter::default();
     let mut saved_at = started;
     // Keep fragmented TCP frames across short receive timeouts.
     let mut packet_reader = BufferedFrameReader::new();
@@ -714,6 +730,14 @@ fn play(
             ));
         }
         while let Ok(event) = events.try_recv() {
+            if event.id == ADMIN_KICK_EVENT {
+                let reason = std::str::from_utf8(&event.body)
+                    .map_err(|_| bad("invalid administrator kick event"))?;
+                let mut payload = Vec::new();
+                write_string(&json!({"text":reason}).to_string(), &mut payload)?;
+                send(s, 0x40, &payload)?;
+                return Ok(());
+            }
             if matches!(event.id, ADMIN_TELEPORT_EVENT | PEARL_TELEPORT_EVENT) {
                 if event.body.len() != 24 {
                     return Err(bad("invalid internal teleport payload"));
@@ -895,7 +919,10 @@ fn play(
         if admission_check.elapsed() >= Duration::from_secs(2) {
             // Reload on a bounded interval: file removal, corruption or revocation
             // causes active sessions to be disconnected (fail closed).
-            let allowed = Whitelist::load(whitelist_path).is_ok_and(|list| list.allows(name));
+            let allowed = Whitelist::load(whitelist_path).is_ok_and(|list| list.allows(name))
+                && administration
+                    .banned_identity(name, verified_uuid, peer_ip)
+                    .is_ok_and(|reason| reason.is_none());
             if !allowed {
                 let mut reason = Vec::new();
                 write_string(
@@ -905,6 +932,7 @@ fn play(
                 send(s, 0x40, &reason)?;
                 return Ok(());
             }
+            permissions = administration.permission(name)?;
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
@@ -1377,6 +1405,9 @@ fn play(
         }
         match id {
             2 => {
+                if !permissions.interact {
+                    continue;
+                }
                 // Protocol 5 C02 Use Entity: target VarInt and action VarInt.
                 let target_id = input.varint()?;
                 let action = input.varint()?;
@@ -1597,20 +1628,70 @@ fn play(
             1 => {
                 let message = input.string(100)?;
                 input.finish()?;
+                if let Err(disconnect) = chat_limiter.check(&message) {
+                    if disconnect {
+                        let mut reason = Vec::new();
+                        write_string(
+                            &json!({"text":"Repeated chat spam"}).to_string(),
+                            &mut reason,
+                        )?;
+                        send(s, 0x40, &reason)?;
+                        return Ok(());
+                    }
+                    as_chat(s, "Chat message rejected by spam filter.")?;
+                    continue;
+                }
                 if message == "/help" {
-                    as_chat(s, "Commands: /help, /save, /list. Survival includes mobs, XP, ranged combat, hazards, armor and crafting.")?;
+                    as_chat(
+                        s,
+                        "Commands: /help, /list. Verified OPs may use /save, /kick, /ban and other level-gated commands.",
+                    )?;
                 } else if message == "/list" {
                     as_chat(
                         s,
                         &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")),
                     )?;
-                } else if message == "/save" {
-                    world
-                        .lock()
-                        .map_err(|_| bad("world mutex poisoned"))?
-                        .save(world_path)?;
-                    as_chat(s, "World saved.")?;
-                } else if !message.starts_with('/') {
+                } else if message.starts_with('/') {
+                    // Offline names never supply a verified UUID. Refuse all
+                    // administrative mutations before attempting an audit log.
+                    if !administration.is_operator(name, verified_uuid)? {
+                        as_chat(s, "Permission denied: verified operator required.")?;
+                        continue;
+                    }
+                    if administration.audit(name, &message, "attempt").is_err() {
+                        as_chat(s, "Admin audit unavailable; operation refused.")?;
+                        continue;
+                    }
+                    let services = PlayerAdminServices {
+                        hub,
+                        world,
+                        world_path,
+                        clock,
+                        administration,
+                    };
+                    let result = run_player_admin_command(
+                        &message,
+                        administration.operator_level(name, verified_uuid)?,
+                        &services,
+                        name,
+                    );
+                    let outcome = if result.is_ok() { "success" } else { "failure" };
+                    if administration.audit(name, &message, outcome).is_err() {
+                        eprintln!(
+                            "CRITICAL: player administrative action could not be audited: {name}"
+                        );
+                        as_chat(s, "Administrative audit write failed.")?;
+                        continue;
+                    }
+                    match result {
+                        Ok(outcome) => as_chat(s, &outcome)?,
+                        Err(error) => {
+                            as_chat(s, &format!("Administrative command rejected: {error}"))?
+                        }
+                    }
+                } else if !permissions.chat {
+                    as_chat(s, "Chat permission denied.")?;
+                } else {
                     let mut bytes = Vec::new();
                     write_string(
                         &json!({"text":format!("<{name}> {message}")}).to_string(),
@@ -1620,8 +1701,6 @@ fn play(
                         id: 0x02,
                         body: bytes,
                     });
-                } else {
-                    as_chat(s, "Unknown command; try /help")?;
                 }
             }
             3 => {
@@ -1829,6 +1908,9 @@ fn play(
                 }
             }
             7 => {
+                if !permissions.build {
+                    continue;
+                }
                 let action = input.i8()?;
                 let x = input.i32()?;
                 let y = input.u8()? as i32;
@@ -2095,12 +2177,15 @@ fn play(
                 }
             }
             8 => {
+                if !permissions.build {
+                    continue;
+                }
                 let x = input.i32()?;
                 let y = input.u8()? as i32;
                 let z = input.i32()?;
                 let face = input.i8()?;
                 let held = input.slot()?;
-                let cursor = input.take(3)?; // Protocol 5 cursor x/y/z, 0..15
+                input.take(3)?; // cursor x/y/z
                 input.finish()?;
 
                 // Protocol 5 Use Item: air target is (-1,255,-1), face -1.
@@ -2738,23 +2823,13 @@ fn play(
                             } else if matches!(block_id, 29 | 33) {
                                 face as u16
                             } else if block_id == 96 {
-                                let facing = match face {
+                                match face {
                                     2 => 1,
                                     3 => 0,
                                     4 => 3,
                                     5 => 2,
                                     _ => 0,
-                                };
-                                facing | if cursor[1] >= 8 { 8 } else { 0 }
-                            } else if matches!(block_id, 44 | 126 | 182) {
-                                // Slab variant is an item damage value; upper/lower
-                                // placement is derived from the clicked face and Y.
-                                (stack.damage as u16 & 7)
-                                    | if face == 0 || (face != 1 && cursor[1] >= 8) {
-                                        8
-                                    } else {
-                                        0
-                                    }
+                                }
                             } else if matches!(block_id, 64 | 71 | 93 | 149) {
                                 ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
                             } else if block_id == 127 {
@@ -2771,20 +2846,8 @@ fn play(
                                 53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164
                             ) {
                                 // 1.7.10 stair orientation and inverted-half bit.
-                                let quadrant =
-                                    ((yaw.rem_euclid(360.0) / 90.0 + 0.5).floor() as u16) & 3;
-                                let direction = match quadrant {
-                                    0 => 2,
-                                    1 => 1,
-                                    2 => 3,
-                                    _ => 0,
-                                };
-                                direction
-                                    | if face == 0 || (face != 1 && cursor[1] >= 8) {
-                                        4
-                                    } else {
-                                        0
-                                    }
+                                let direction = ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3;
+                                direction | if face == 0 { 4 } else { 0 }
                             } else if block_id == 107 {
                                 ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
                             } else if matches!(
@@ -2796,7 +2859,6 @@ fn play(
                                 stack.damage as u16 & 15
                             };
                             if (world::is_placeable(block_id) || block_id == 61)
-                                && (block_id != 96 || (2..=5).contains(&face))
                                 && w.can_support(nx, ny, nz, (block_id << 4) | metadata)
                                 && block_id != 7
                                 && !invalid_chest_merge
@@ -3477,6 +3539,7 @@ struct ServerContext {
     world: Arc<Mutex<World>>,
     path: Arc<PathBuf>,
     whitelist_path: Arc<PathBuf>,
+    administration: Arc<Administration>,
     clock: Arc<Clock>,
     ground_items: Arc<Mutex<GroundItems>>,
     ground_path: Arc<PathBuf>,
@@ -3501,13 +3564,20 @@ struct ServerContext {
     game_rules: Arc<Mutex<GameRules>>,
     scoreboard: Arc<Mutex<Scoreboard>>,
     scoreboard_path: Arc<PathBuf>,
+    online_mode: bool,
+    auth_key: Option<Arc<ServerIdentity>>,
 }
-fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
+fn handle(
+    s: TcpStream,
+    context: ServerContext,
+    login_permit: security_limits::Permit,
+) -> io::Result<()> {
     let ServerContext {
         hub,
         world,
         path,
         whitelist_path,
+        administration,
         clock,
         ground_items,
         ground_path,
@@ -3532,9 +3602,13 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         game_rules,
         scoreboard,
         scoreboard_path,
+        online_mode,
+        auth_key,
     } = context;
+    let mut s = Connection::new(s);
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let peer_ip = s.peer_addr()?.ip();
     let (id, data) = receive(&mut s)?;
     if id != 0 {
         return Err(bad("expected handshake"));
@@ -3550,6 +3624,12 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     }
     if next != 2 {
         return Err(bad("unsupported handshake state"));
+    }
+    // Rate-limit login attempts, not harmless server-list status handshakes.
+    // The pending unauthenticated connection itself remains slot-limited.
+    if !login_permit.login_attempt() {
+        login_disconnect(&mut s, "Too many login attempts. Please try again later.")?;
+        return Ok(());
     }
     if version != PROTOCOL_VERSION {
         login_disconnect(
@@ -3569,6 +3649,19 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         login_disconnect(&mut s, "Invalid player name.")?;
         return Ok(());
     }
+    // Recheck bans at Login Start. Missing/corrupt DBs are fail-closed.
+    match administration.banned(&name, peer_ip) {
+        Ok(Some(reason)) => {
+            login_disconnect(&mut s, &reason)?;
+            return Ok(());
+        }
+        Err(error) => {
+            eprintln!("admin database unavailable: {error}");
+            login_disconnect(&mut s, "Administration database unavailable.")?;
+            return Ok(());
+        }
+        Ok(None) => {}
+    }
     // Every new login reads the whitelist from disk: no implicit public access.
     let allowed = match Whitelist::load(&whitelist_path) {
         Ok(list) => list.allows(&name),
@@ -3581,7 +3674,33 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         login_disconnect(&mut s, "You are not on the server whitelist.")?;
         return Ok(());
     }
-    let player_file = PlayerPosition::location(&path, &name);
+    // Authenticate before loading or admitting a player. Online failures
+    // must never be turned into offline UUIDs, even on Mojang timeout.
+    let (name, uuid) = if online_mode {
+        let key = auth_key
+            .as_ref()
+            .ok_or_else(|| bad("missing online-mode RSA identity"))?;
+        let profile = key.authenticate(&mut s, &name)?;
+        (profile.name, profile.uuid)
+    } else {
+        let uuid = offline_uuid(&name);
+        (name, uuid)
+    };
+    // A ban or whitelist can change while session verification is in flight.
+    // Recheck the authenticated identity before opening any player data.
+    let still_allowed = Whitelist::load(&whitelist_path).is_ok_and(|list| list.allows(&name))
+        && administration
+            .banned_identity(&name, online_mode.then_some(uuid.as_str()), peer_ip)
+            .is_ok_and(|reason| reason.is_none());
+    if !still_allowed {
+        login_disconnect(&mut s, "Login denied: whitelist or ban updated.")?;
+        return Ok(());
+    }
+    let player_file = if online_mode {
+        PlayerPosition::authenticated_location(&path, &uuid)?
+    } else {
+        PlayerPosition::location(&path, &name)
+    };
     let (mut player_state, mut player_vitals) = match PlayerPosition::load_state(&player_file) {
         Ok(state) => state,
         Err(err) => {
@@ -3625,7 +3744,6 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     let mut experience_state = Experience::load(&experience_file)?;
     let achievements_file = player_file.with_extension("achievements.json");
     let mut achievements_state = Achievements::load(&achievements_file)?;
-    let uuid = offline_uuid(&name);
     let (entity_id, events, previous) = match hub.add(name.clone(), uuid.clone(), player_state) {
         Ok(result) => result,
         Err(JoinError::Full) => {
@@ -3641,11 +3759,22 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         hub: Arc::clone(&hub),
         entity_id,
     };
+    // Once Hub admits a named player, the connection is no longer an
+    // unauthenticated pending-login slot. The global MAX_CONNECTIONS and
+    // Hub MAX_PLAYERS limits still apply throughout the Play session.
+    drop(login_permit);
     let mut success = Vec::new();
     write_string(&uuid, &mut success)?;
     write_string(&name, &mut success)?;
     send(&mut s, 0x02, &success)?;
-    println!("joined: {name} (UNAUTHENTICATED OFFLINE MODE)");
+    println!(
+        "joined: {name} ({})",
+        if online_mode {
+            "MOJANG VERIFIED"
+        } else {
+            "UNAUTHENTICATED OFFLINE MODE"
+        }
+    );
     join(
         &mut s,
         &world,
@@ -3771,6 +3900,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             hub: &hub,
             entity_id,
             events: &events,
+            administration: &administration,
+            peer_ip,
+            verified_uuid: if online_mode { Some(&uuid) } else { None },
         },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
@@ -3814,25 +3946,179 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     achievements_saved?;
     result
 }
-/// Commands are accepted only from the operating-system console, never from
-/// unauthenticated offline-mode players or Protocol 5 chat messages.
-fn start_clock_console(
-    hub: Arc<Hub>,
-    clock: Arc<Clock>,
-    clock_path: Arc<PathBuf>,
+/// Services required to execute a level-gated in-game administrative command.
+struct PlayerAdminServices<'a> {
+    hub: &'a Hub,
+    world: &'a Mutex<World>,
+    world_path: &'a Path,
+    clock: &'a Clock,
+    administration: &'a Administration,
+}
+/// Authorization is based exclusively on the Mojang-verified session UUID.
+fn run_player_admin_command(
+    message: &str,
+    level: u8,
+    services: &PlayerAdminServices<'_>,
+    actor: &str,
+) -> io::Result<String> {
+    let PlayerAdminServices {
+        hub,
+        world,
+        world_path,
+        clock,
+        administration,
+    } = services;
+    let parts: Vec<&str> = message.split_whitespace().collect();
+    let minimum_level = match parts.first().copied() {
+        Some("/time") | Some("/weather") => 2,
+        Some("/kick") | Some("/ban") | Some("/pardon") | Some("/ban-ip") | Some("/pardon-ip") => 3,
+        Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
+        _ => return Err(bad("unknown operator command")),
+    };
+    if level < minimum_level {
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            "insufficient OP level",
+        ));
+    }
+    match parts.as_slice() {
+        ["/save"] => {
+            world
+                .lock()
+                .map_err(|_| bad("world mutex poisoned"))?
+                .save(world_path)?;
+            Ok("World saved".into())
+        }
+        ["/kick", target, reason @ ..] => {
+            let reason = if reason.is_empty() {
+                "Kicked by operator".to_string()
+            } else {
+                reason.join(" ")
+            };
+            if !hub.request_admin_kick(target, &reason)? {
+                return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+            }
+            Ok(format!("Kicked {target}"))
+        }
+        ["/ban", target, reason @ ..] => {
+            let reason = if reason.is_empty() {
+                "Banned by operator".to_string()
+            } else {
+                reason.join(" ")
+            };
+            let uuid = hub.uuid_for_online_name(target)?;
+            administration.set_player_ban_verified(target, uuid.as_deref(), Some(&reason), true)?;
+            let _ = hub.request_admin_kick(target, &reason);
+            Ok(format!("Banned {target}"))
+        }
+        ["/pardon", target] => {
+            administration.set_player_ban(target, None, false)?;
+            Ok(format!("Unbanned {target}"))
+        }
+        ["/ban-ip", address, reason @ ..] => {
+            let reason = if reason.is_empty() {
+                "IP banned by operator".to_string()
+            } else {
+                reason.join(" ")
+            };
+            administration.set_ip_ban(address, Some(&reason), true)?;
+            Ok(format!("IP banned {address}"))
+        }
+        ["/pardon-ip", address] => {
+            administration.set_ip_ban(address, None, false)?;
+            Ok(format!("IP unbanned {address}"))
+        }
+        ["/time", "set", ticks] => {
+            let ticks = ticks.parse::<u64>().map_err(|_| bad("invalid time"))?;
+            clock.set_day_time(ticks)?;
+            let mut body = Vec::with_capacity(16);
+            body.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
+            body.extend_from_slice(&clock.day_time().to_be_bytes());
+            hub.broadcast(Event { id: 0x03, body });
+            Ok(format!("Time set by {actor}"))
+        }
+        ["/weather", "set", state] => {
+            clock.set_weather(state)?;
+            for body in clock.weather_packets() {
+                hub.broadcast(Event { id: 0x2b, body });
+            }
+            Ok(format!("Weather set by {actor}"))
+        }
+        ["/op", target] => {
+            let uuid = hub.uuid_for_online_name(target)?.ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::NotFound,
+                    "target must be authenticated and online",
+                )
+            })?;
+            administration.set_op_verified(target, &uuid)?;
+            Ok(format!("OP granted to {target}"))
+        }
+        ["/deop", target] => {
+            administration.set_op(target, false)?;
+            Ok(format!("OP revoked from {target}"))
+        }
+        ["/permission", target, kind, state] => {
+            let enabled = match *state {
+                "allow" => true,
+                "deny" => false,
+                _ => return Err(bad("permission state must be allow or deny")),
+            };
+            administration.set_permission(target, kind, enabled)?;
+            Ok(format!("Permission updated for {target}"))
+        }
+        _ => Err(bad("invalid operator command")),
+    }
+}
+
+struct ConsoleAccess {
+    administration: Arc<Administration>,
+    whitelist_path: Arc<PathBuf>,
+    online_mode: bool,
+}
+/// Host console can administer even when online identity services are down.
+/// Admin operations always record both intent and final outcome durably.
+struct ConsoleGameData {
     rules: Arc<Mutex<GameRules>>,
     rules_path: Arc<PathBuf>,
     scoreboard: Arc<Mutex<Scoreboard>>,
     scoreboard_path: Arc<PathBuf>,
+}
+fn start_clock_console(
+    hub: Arc<Hub>,
+    clock: Arc<Clock>,
+    clock_path: Arc<PathBuf>,
+    game_data: ConsoleGameData,
+    world: Arc<Mutex<World>>,
+    world_path: Arc<PathBuf>,
+    access: ConsoleAccess,
 ) {
+    let ConsoleGameData {
+        rules,
+        rules_path,
+        scoreboard,
+        scoreboard_path,
+    } = game_data;
+    let ConsoleAccess {
+        administration,
+        whitelist_path,
+        online_mode,
+    } = access;
     thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
             let Ok(line) = line else {
                 break;
             };
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Err(error) = administration.audit("CONSOLE", &line, "attempt") {
+                eprintln!("ADMIN AUDIT UNAVAILABLE, operation refused: {error}");
+                continue;
+            }
             let args: Vec<_> = line.split_whitespace().collect();
-            let result = match args.as_slice() {
+            let result: io::Result<()> = match args.as_slice() {
                 ["/gamerule", key] => (|| -> io::Result<()> {
                     let rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
                     let value = rules.get(key).ok_or_else(|| bad("unsupported game rule"))?;
@@ -3903,6 +4189,18 @@ fn start_clock_console(
                     }
                     Ok(())
                 })(),
+                ["/list"] => (|| -> io::Result<()> {
+                    println!("Online ({}): {}", hub.count()?, hub.names()?.join(", "));
+                    Ok(())
+                })(),
+                ["/save"] => (|| -> io::Result<()> {
+                    world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .save(&world_path)?;
+                    println!("World saved");
+                    Ok(())
+                })(),
                 ["/time", "query", "daytime"] => {
                     println!("Daytime: {}", clock.day_time());
                     Ok(())
@@ -3951,8 +4249,97 @@ fn start_clock_console(
                     println!("Teleport queued for {name}");
                     Ok(())
                 })(),
-                _ => continue,
+                ["/op", name] => (|| -> io::Result<()> {
+                    if online_mode {
+                        let uuid = hub.uuid_for_online_name(name)?.ok_or_else(|| {
+                            io::Error::new(
+                                ErrorKind::NotFound,
+                                "player must be authenticated and online to grant OP",
+                            )
+                        })?;
+                        administration.set_op_verified(name, &uuid)?;
+                    } else {
+                        administration.set_op(name, true)?;
+                    }
+                    println!("OP record saved for {name}");
+                    Ok(())
+                })(),
+                ["/deop", name] => administration.set_op(name, false),
+                ["/ban", name, reason @ ..] => (|| -> io::Result<()> {
+                    let reason = if reason.is_empty() {
+                        "Banned by administrator".to_owned()
+                    } else {
+                        reason.join(" ")
+                    };
+                    let uuid = if online_mode {
+                        hub.uuid_for_online_name(name)?
+                    } else {
+                        None
+                    };
+                    administration.set_player_ban_verified(
+                        name,
+                        uuid.as_deref(),
+                        Some(&reason),
+                        true,
+                    )?;
+                    let _ = hub.request_admin_kick(name, &reason)?;
+                    println!("Banned {name}");
+                    Ok(())
+                })(),
+                ["/pardon", name] => administration.set_player_ban(name, None, false),
+                ["/ban-ip", address, reason @ ..] => (|| -> io::Result<()> {
+                    let reason = if reason.is_empty() {
+                        "IP banned by administrator".to_owned()
+                    } else {
+                        reason.join(" ")
+                    };
+                    administration.set_ip_ban(address, Some(&reason), true)?;
+                    // Active sessions are rechecked within two seconds.
+                    println!("Banned IP {address}");
+                    Ok(())
+                })(),
+                ["/pardon-ip", address] => administration.set_ip_ban(address, None, false),
+                ["/kick", name, reason @ ..] => (|| -> io::Result<()> {
+                    let reason = if reason.is_empty() {
+                        "Kicked by administrator".to_owned()
+                    } else {
+                        reason.join(" ")
+                    };
+                    if !hub.request_admin_kick(name, &reason)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Kick queued for {name}");
+                    Ok(())
+                })(),
+                ["/whitelist", "reload"] => (|| -> io::Result<()> {
+                    let loaded = Whitelist::load(&whitelist_path)?;
+                    println!(
+                        "Whitelist validated: {} names; next login/session poll uses it",
+                        loaded.len()
+                    );
+                    Ok(())
+                })(),
+                ["/whitelist", "list"] => (|| -> io::Result<()> {
+                    let loaded = Whitelist::load(&whitelist_path)?;
+                    println!("Whitelist: {} entries", loaded.len());
+                    Ok(())
+                })(),
+                ["/permission", name, kind, state] => (|| -> io::Result<()> {
+                    let enabled = match *state {
+                        "allow" => true,
+                        "deny" => false,
+                        _ => return Err(bad("permission must be allow or deny")),
+                    };
+                    administration.set_permission(name, kind, enabled)?;
+                    println!("Permission updated for {name}: {kind}={enabled}");
+                    Ok(())
+                })(),
+                _ => Err(bad("unknown administrator console command")),
             };
+            let outcome = if result.is_ok() { "success" } else { "failure" };
+            if let Err(error) = administration.audit("CONSOLE", &line, outcome) {
+                eprintln!("ADMIN AUDIT WRITE FAILURE: {error}");
+            }
             if let Err(error) = result {
                 eprintln!("ADMIN CONSOLE ERROR: {error}");
             }
@@ -3993,6 +4380,7 @@ fn main() -> io::Result<()> {
         );
         return Ok(());
     }
+
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
     let properties = if std::env::args().any(|arg| {
@@ -4029,6 +4417,7 @@ fn main() -> io::Result<()> {
     let mut insecure_offline_lan = false;
     let mut survival = properties.as_ref().is_some_and(|config| config.survival);
     let hardcore = properties.as_ref().is_some_and(|config| config.hardcore);
+    let mut online_mode = properties.as_ref().is_some_and(|config| config.online_mode);
     let mut difficulty = properties.as_ref().map_or(2, |config| config.difficulty);
     let mut requested_seed: Option<u64> = None;
     let mut biome_seed: Option<u64> = None;
@@ -4038,9 +4427,9 @@ fn main() -> io::Result<()> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--recover-level-dat STOPPED_WORLD_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--online-mode] [--survival] [--recover-level-dat STOPPED_WORLD_DIR] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
-                    "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
+                    "Offline usernames can be impersonated; --online-mode validates Mojang accounts and requires encrypted Protocol 5 login."
                 );
                 return Ok(());
             }
@@ -4065,6 +4454,7 @@ fn main() -> io::Result<()> {
                     .into()
             }
             "--insecure-offline-lan" => insecure_offline_lan = true,
+            "--online-mode" => online_mode = true,
             "--survival" => survival = true,
             "--creative" => survival = false,
             "--difficulty" => {
@@ -4391,11 +4781,23 @@ fn main() -> io::Result<()> {
             config.level_name
         );
     }
-    if !bind.ip().is_loopback() && !insecure_offline_lan {
+    if !bind.ip().is_loopback() && !insecure_offline_lan && !online_mode {
         return Err(io::Error::new(ErrorKind::PermissionDenied,
             "offline-mode whitelist cannot authenticate usernames: non-loopback bind requires explicit --insecure-offline-lan"));
     }
     let list = Whitelist::load(&whitelist_path)?;
+    // Absolute --world paths are isolated deployments (also used by parallel
+    // integration tests). Keep their admin files next to that world instead
+    // of sharing mutable JSON files in the build/test working directory.
+    let administration_root = if world_path.is_absolute() {
+        world_path
+            .parent()
+            .ok_or_else(|| bad("world path has no parent"))?
+            .to_path_buf()
+    } else {
+        PathBuf::from(".")
+    };
+    let administration = Arc::new(Administration::new(administration_root)?);
     println!(
         "Whitelist: {} permitted name(s) (NOT cryptographic identity authentication)",
         list.len()
@@ -4511,16 +4913,26 @@ fn main() -> io::Result<()> {
     println!("WARNING: offline-mode has no account authentication. Do not expose to the internet.");
     let hub = Arc::new(Hub::default());
     let connections = Arc::new(AtomicUsize::new(0));
+    let limiter = Arc::new(ConnectionLimiter::default());
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
     start_clock_console(
         Arc::clone(&hub),
         Arc::clone(&clock),
         Arc::clone(&clock_path),
-        Arc::clone(&world_rules),
-        Arc::clone(&rules_path),
-        Arc::clone(&shared_scoreboard),
-        Arc::clone(&scoreboard_path),
+        ConsoleGameData {
+            rules: Arc::clone(&world_rules),
+            rules_path: Arc::clone(&rules_path),
+            scoreboard: Arc::clone(&shared_scoreboard),
+            scoreboard_path: Arc::clone(&scoreboard_path),
+        },
+        Arc::clone(&world),
+        Arc::clone(&path),
+        ConsoleAccess {
+            administration: Arc::clone(&administration),
+            whitelist_path: Arc::clone(&allow_path),
+            online_mode,
+        },
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
@@ -4911,8 +5323,24 @@ fn main() -> io::Result<()> {
             thread::sleep(Duration::from_millis(10));
         }
     });
+    // Initialize once at startup. A failure here prevents any online-mode bind.
+    let server_auth = if online_mode {
+        Some(Arc::new(ServerIdentity::generate()?))
+    } else {
+        None
+    };
     for accepted in listener.incoming() {
         let stream = accepted?;
+        let peer_ip = stream.peer_addr()?.ip();
+        // Rate limit before accessing disk so repeated banned connections cannot
+        // turn into an unlimited JSON parsing workload.
+        let Some(ip_permit) = limiter.acquire(peer_ip) else {
+            continue;
+        };
+        // Corrupt or missing BAN databases fail closed before thread creation.
+        if administration.ip_banned(peer_ip).unwrap_or(true) {
+            continue;
+        }
         if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             connections.fetch_sub(1, Ordering::AcqRel);
             continue;
@@ -4922,6 +5350,8 @@ fn main() -> io::Result<()> {
         let w = Arc::clone(&world);
         let p = Arc::clone(&path);
         let wl = Arc::clone(&allow_path);
+        let admin = Arc::clone(&administration);
+        let auth_key = server_auth.clone();
         let game_clock = Arc::clone(&clock);
         let drops = Arc::clone(&ground_items);
         let drops_path = Arc::clone(&ground_path);
@@ -4952,6 +5382,7 @@ fn main() -> io::Result<()> {
                     world: w,
                     path: p,
                     whitelist_path: wl,
+                    administration: admin,
                     clock: game_clock,
                     ground_items: drops,
                     ground_path: drops_path,
@@ -4976,7 +5407,10 @@ fn main() -> io::Result<()> {
                     game_rules: rules,
                     scoreboard: board,
                     scoreboard_path: board_path,
+                    online_mode,
+                    auth_key,
                 },
+                ip_permit,
             ) {
                 if e.kind() != ErrorKind::UnexpectedEof {
                     eprintln!("client disconnected: {e}");

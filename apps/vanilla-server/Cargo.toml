@@ -14,3 +14,10 @@ fs2 = "0.4.3"
 serde_json = "1"
 
 fastanvil = { version = "=0.32.0", default-features = false }
+
+# Protocol 5 online-mode: RSA challenge, continuous AES-CFB8, signed SHA1, HTTPS session verification.
+rsa = "0.9"
+rand = "0.8"
+aes = "0.8"
+sha1 = "0.10"
+ureq = "2.12"

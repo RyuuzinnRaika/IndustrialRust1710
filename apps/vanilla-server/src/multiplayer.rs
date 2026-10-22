@@ -15,6 +15,8 @@ pub const MAX_PLAYERS: usize = 8;
 pub const ADMIN_TELEPORT_EVENT: u32 = u32::MAX - 1;
 /// Internal mailbox event that applies the 1.7.10 ender-pearl health penalty.
 pub const PEARL_TELEPORT_EVENT: u32 = u32::MAX - 2;
+/// A session-owned safe Kick: the session sends Disconnect, then persists state.
+pub const ADMIN_KICK_EVENT: u32 = u32::MAX - 3;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -145,6 +147,16 @@ impl Hub {
         let inner = self.0.lock().map_err(|_| poisoned())?;
         Ok(inner.players.values().map(|p| p.name.clone()).collect())
     }
+    /// UUID attached to the currently admitted peer. Caller must ensure the
+    /// server is configured online-mode before treating it as authenticated.
+    pub fn uuid_for_online_name(&self, name: &str) -> io::Result<Option<String>> {
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        Ok(inner
+            .players
+            .values()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+            .map(|p| p.uuid.clone()))
+    }
     /// Queue a privileged teleport to be applied by the owning session thread.
     /// Updating Hub coordinates alone would not update the player's saved state.
     pub fn request_admin_teleport(&self, name: &str, position: PlayerPosition) -> io::Result<bool> {
@@ -185,6 +197,34 @@ impl Hub {
             })?;
         Ok(true)
     }
+    /// Queue an administrative Kick without removing the player from Hub early.
+    pub fn request_admin_kick(&self, name: &str, reason: &str) -> io::Result<bool> {
+        if reason.is_empty() || reason.len() > 256 || reason.chars().any(char::is_control) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid kick reason",
+            ));
+        }
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(peer) = inner
+            .players
+            .values()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+        else {
+            return Ok(false);
+        };
+        peer.tx
+            .try_send(Event {
+                id: ADMIN_KICK_EVENT,
+                body: reason.as_bytes().to_vec(),
+            })
+            .map_err(|_| {
+                peer.overloaded.store(true, Ordering::Release);
+                io::Error::other("target session mailbox unavailable")
+            })?;
+        Ok(true)
+    }
+
     pub fn positions(&self) -> io::Result<Vec<PlayerPosition>> {
         let inner = self.0.lock().map_err(|_| poisoned())?;
         Ok(inner.players.values().map(|peer| peer.position).collect())
