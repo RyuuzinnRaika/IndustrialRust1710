@@ -106,6 +106,8 @@ pub(crate) fn parse_level(bytes: &[u8]) -> io::Result<LevelRoot> {
 /// Create a new, validated 1.7.10 level.dat without overwriting a world.
 /// A full live-world save / level.dat_old rotation requires FS03/FS08 and
 /// must not call this staging primitive on an occupied world.
+// Staging API: intentionally not connected to live-world saves before FS08.
+#[allow(dead_code)]
 pub(crate) fn create_level_file(path: &Path, root: &LevelRoot) -> io::Result<()> {
     root.validate()?;
     let nbt = fastnbt::to_bytes(root).map_err(|_| invalid("cannot encode 1.7.10 level NBT"))?;
