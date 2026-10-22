@@ -77,7 +77,18 @@ impl World {
                 solid(below)
             }
             78 => solid(below) || below == 79,
-            77 | 131 | 143 => {
+            131 => {
+                // 1.7.10 hook metadata 0=S, 1=W, 2=N, 3=E.
+                // The supporting wall is behind the direction it faces.
+                let neighbor = match block & 3 {
+                    0 => self.get(x, y, z - 1) >> 4,
+                    1 => self.get(x + 1, y, z) >> 4,
+                    2 => self.get(x, y, z + 1) >> 4,
+                    _ => self.get(x - 1, y, z) >> 4,
+                };
+                solid(neighbor)
+            }
+            77 | 143 => {
                 let neighbor = match block & 7 {
                     1 => self.get(x - 1, y, z) >> 4,
                     2 => self.get(x + 1, y, z) >> 4,
