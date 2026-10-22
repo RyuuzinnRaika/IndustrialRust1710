@@ -104,7 +104,12 @@ struct LevelInfo {
     initialized: i8,
 }
 
-fn nbt_for_chunk(world: &World, cx: i32, cz: i32) -> io::Result<Vec<u8>> {
+fn nbt_for_chunk(
+    world: &World,
+    cx: i32,
+    cz: i32,
+    tiles: &[fastnbt::Value],
+) -> io::Result<Vec<u8>> {
     let mut sections = Vec::new();
     let base_x = cx * 16;
     let base_z = cz * 16;
@@ -155,7 +160,7 @@ fn nbt_for_chunk(world: &World, cx: i32, cz: i32) -> io::Result<Vec<u8>> {
             height_map: IntArray::new(heights),
             sections,
             entities: Vec::new(),
-            tile_entities: Vec::new(),
+            tile_entities: tiles.to_vec(),
         },
     };
     fastnbt::to_bytes(&root).map_err(wrap)
@@ -191,7 +196,12 @@ fn export_level_dat(directory: &Path) -> io::Result<()> {
 /// Writes into a private sibling directory and publishes it only once the
 /// region files and level.dat are fully synchronized. The active IRW source
 /// is never modified; this is still an offline snapshot, not live Anvil IO.
-fn write_snapshot(world: &World, stage: &Path, chunks: &BTreeSet<(i32, i32)>) -> io::Result<()> {
+fn write_snapshot(
+    world: &World,
+    stage: &Path,
+    chunks: &BTreeSet<(i32, i32)>,
+    tiles: &crate::native_tile_export::TileColumns,
+) -> io::Result<()> {
     let regions_dir = stage.join("region");
     fs::create_dir(&regions_dir)?;
     let mut regions: BTreeMap<(i32, i32), Vec<(i32, i32)>> = BTreeMap::new();
@@ -210,7 +220,7 @@ fn write_snapshot(world: &World, stage: &Path, chunks: &BTreeSet<(i32, i32)>) ->
             .open(filename)?;
         let mut region = Region::create(file).map_err(wrap)?;
         for (cx, cz) in columns {
-            let bytes = nbt_for_chunk(world, cx, cz)?;
+            let bytes = nbt_for_chunk(world, cx, cz, tiles.get(&(cx, cz)).map_or(&[], Vec::as_slice))?;
             region
                 .write_chunk(
                     cx.rem_euclid(32) as usize,
@@ -239,12 +249,28 @@ fn write_snapshot(world: &World, stage: &Path, chunks: &BTreeSet<(i32, i32)>) ->
 /// The destination must not exist. Failed serialization cleans up the private
 /// staging tree rather than exposing a partially written Minecraft world.
 pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
+    export_tiles(world, dest, &Default::default())
+}
+
+/// Offline exported worlds include persisted native container slots when
+/// requested by the CLI; ordinary test exports remain side-effect free.
+pub fn export_with_storage(world: &World, dest: &Path, source: &Path) -> io::Result<usize> {
+    let tiles = crate::native_tile_export::load(world, source)?;
+    export_tiles(world, dest, &tiles)
+}
+
+fn export_tiles(
+    world: &World,
+    dest: &Path,
+    tiles: &crate::native_tile_export::TileColumns,
+) -> io::Result<usize> {
     let mut chunks: BTreeSet<(i32, i32)> = world.edited_chunks();
     for z in -VIEW_DISTANCE..=VIEW_DISTANCE {
         for x in -VIEW_DISTANCE..=VIEW_DISTANCE {
             chunks.insert((x, z));
         }
     }
+    chunks.extend(tiles.keys().copied());
     if chunks.len() > MAX_EXPORT_CHUNKS {
         return Err(invalid("Anvil snapshot exceeds 256 chunk limit"));
     }
@@ -276,7 +302,7 @@ pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
     ));
     fs::create_dir(&stage)?;
     let result = (|| {
-        write_snapshot(world, &stage, &chunks)?;
+        write_snapshot(world, &stage, &chunks, tiles)?;
         // Do not rename over a world that appeared during export. The check
         // prevents accidental overwrite during normal operation; concurrent
         // uncooperative directory creation still requires external locking.
