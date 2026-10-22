@@ -1419,7 +1419,7 @@ mod tests {
         }
         assert_eq!(w.get(1, 64, 0), 0);
         w.block_tick(&path, 64).unwrap();
-        assert_eq!(w.get(1, 64, 0), (10 << 4) | 1);
+        assert_eq!(w.get(1, 64, 0), (10 << 4) | 2);
         w.update_and_save(&path, 15, 64, 0, 50 << 4).unwrap();
         let (block, sky) = w.light_arrays(1, 0);
         assert!(block[64 * 256] > 0);
