@@ -296,7 +296,7 @@ impl Minecarts {
                 cart.position = next;
                 occupied.insert(cart.id, next);
             }
-
+            events.push((
                 cart.position,
                 multiplayer::teleport(cart.id, &cart.position, 0.0, 0.0),
             ));
