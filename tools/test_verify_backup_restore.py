@@ -40,6 +40,21 @@ class RestoreDrillTests(unittest.TestCase):
         self.assertTrue(run.call_args.kwargs["check"])
 
     @patch.object(module.subprocess, "run")
+    def test_nonflat_irw_basename_is_verified_as_a_file(self, run):
+        (self.backup / "flat.irw").rename(self.backup / "experiment.irw")
+        self.assertEqual(module.verify_restore_point(self.server, self.backup), 3)
+        target = Path(run.call_args.args[0][2])
+        self.assertEqual(target.name, "experiment.irw")
+        self.assertNotEqual(target.parent, self.backup)
+
+    @patch.object(module.subprocess, "run")
+    def test_multiple_irw_candidates_are_rejected(self, run):
+        (self.backup / "second.irw").write_bytes(b"other")
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            module.verify_restore_point(self.server, self.backup)
+        run.assert_not_called()
+
+    @patch.object(module.subprocess, "run")
     def test_unmarked_backup_is_rejected_before_copy(self, run):
         (self.backup / ".industrial1710-backup").unlink()
         with self.assertRaises(OSError):
