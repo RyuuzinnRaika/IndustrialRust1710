@@ -719,7 +719,7 @@ fn play(
                 }
                 let mut next_vitals = *vitals;
                 if pearl_impact {
-                    next_vitals.health = (next_vitals.health - 5.0).max(0.0);
+                    next_vitals.apply_ender_pearl_damage();
                 }
                 target.save_state(player_path, next_vitals)?;
                 *vitals = next_vitals;
