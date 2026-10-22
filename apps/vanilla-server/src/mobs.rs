@@ -1877,11 +1877,99 @@ impl Mobs {
             {
                 continue;
             }
-            let baby = kind == Kind::Zombie && (seed >> 21).is_multiple_of(20);
-            if kind == Kind::Zombie && (seed >> 26).is_multiple_of(20) {
-                events.push(self.insert_zombie_villager(spawn_position, baby, 0));
-            } else {
-                events.push(self.insert_sized(kind, spawn_position, baby, size));
+            // Once a species is selected, attempt a bounded same-species
+            // pack. Recheck every proposed position: one safe center does not
+            // make nearby blocks/biomes/light levels safe. This preserves the
+            // older server's CPU and snapshot guards (at most four per cycle).
+            for member in 0..natural_pack_attempts(kind, seed) {
+                if self.entities.len() >= MAX_LOADED_MOBS || self.next_id >= 1_000_000 {
+                    break;
+                }
+                let candidate = if member == 0 {
+                    spawn_position
+                } else {
+                    let h = hash(seed ^ (member as u64).wrapping_mul(0x517cc1b727220a95));
+                    let dx = (h % 6) as i32 - ((h >> 8) % 6) as i32;
+                    let dz = ((h >> 16) % 6) as i32 - ((h >> 24) % 6) as i32;
+                    let nx = x + dx;
+                    let nz = z + dz;
+                    let ny = if overworld && height.is_some_and(|surface| y > surface) {
+                        world
+                            .surface_height_at(nx, nz)
+                            .map_or(y, |surface| surface + 1)
+                    } else {
+                        y
+                    };
+                    PlayerPosition {
+                        x: f64::from(nx) + 0.5,
+                        y: f64::from(ny) + if kind == Kind::Ghast { 4.0 } else { 0.0 },
+                        z: f64::from(nz) + 0.5,
+                    }
+                };
+                if !candidate.is_valid()
+                    || !natural_spawn_location_ok(world, candidate, players)
+                    || !physics::supported(world, &candidate)
+                    || physics::collides(world, &candidate)
+                {
+                    continue;
+                }
+                let (cx, cy, cz) = (
+                    candidate.x.floor() as i32,
+                    candidate.y.floor() as i32,
+                    candidate.z.floor() as i32,
+                );
+                if overworld {
+                    let (block, sky) = world.light_at(cx, cy, cz);
+                    if !spawn_light_ok(block, sky, now, is_passive) {
+                        continue;
+                    }
+                }
+                if is_passive
+                    && (world.get(cx, cy - 1, cz) >> 4 != 2
+                        || !sky_exposed(world, candidate)
+                        || matches!(
+                            world.biome_at(cx, cz),
+                            0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24
+                        ))
+                {
+                    continue;
+                }
+                if kind == Kind::Blaze && world.get(cx, cy - 1, cz) >> 4 != 112 {
+                    continue;
+                }
+                if kind == Kind::Ghast && !ghast_has_clearance(world, candidate) {
+                    continue;
+                }
+                if kind == Kind::Enderman && world.get(cx, cy + 2, cz) >> 4 != 0 {
+                    continue;
+                }
+                if kind == Kind::Slime
+                    && !is_slime_cave_location(world.natural_seed().unwrap_or(0), cx, cy, cz)
+                    && !(world.biome_at(cx, cz) == 6 && (50..=70).contains(&cy))
+                {
+                    continue;
+                }
+                let current_category = self
+                    .entities
+                    .values()
+                    .filter(|mob| {
+                        if is_passive {
+                            mob.kind.passive()
+                        } else {
+                            !mob.kind.peaceful_safe()
+                        }
+                    })
+                    .count();
+                if current_category >= if is_passive { passive_cap } else { hostile_cap } {
+                    break;
+                }
+                let roll = hash(seed ^ (member as u64).wrapping_mul(0x9e3779b97f4a7c15));
+                let baby = kind == Kind::Zombie && (roll >> 21).is_multiple_of(20);
+                if kind == Kind::Zombie && (roll >> 26).is_multiple_of(20) {
+                    events.push(self.insert_zombie_villager(candidate, baby, 0));
+                } else {
+                    events.push(self.insert_sized(kind, candidate, baby, size));
+                }
             }
             break; // Bound per-cycle packets and CPU.
         }
@@ -2570,6 +2658,17 @@ impl Mobs {
         }
     }
 }
+/// Java 1.7.10 commonly attempts packs of up to four, while the witch
+/// and ghast spawn lists are solitary. Keep the attempt budget deterministic
+/// and independent of the number of connected players.
+fn natural_pack_attempts(kind: Kind, seed: u64) -> usize {
+    if matches!(kind, Kind::Witch | Kind::Ghast) {
+        1
+    } else {
+        1 + ((seed >> 40) % 4) as usize
+    }
+}
+
 /// Unique 17x17 eligible chunk union. Vanilla's mob cap scales with this
 /// area, not with raw online player count or the protocol render distance.
 fn natural_spawn_capacity(players: &[PlayerPosition], base: usize) -> usize {
@@ -3011,6 +3110,18 @@ mod tests {
         mobs.save(&world).unwrap();
         assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn natural_pack_attempts_are_bounded_and_species_specific() {
+        for seed in [0, 1u64 << 40, 2u64 << 40, 3u64 << 40, u64::MAX] {
+            assert!((1..=4).contains(&natural_pack_attempts(Kind::Zombie, seed)));
+            assert!((1..=4).contains(&natural_pack_attempts(Kind::Sheep, seed)));
+            assert_eq!(natural_pack_attempts(Kind::Ghast, seed), 1);
+            assert_eq!(natural_pack_attempts(Kind::Witch, seed), 1);
+        }
+        assert_eq!(natural_pack_attempts(Kind::Zombie, 0), 1);
+        assert_eq!(natural_pack_attempts(Kind::Zombie, 3u64 << 40), 4);
     }
 
     #[test]
