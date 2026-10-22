@@ -20,6 +20,8 @@ pub struct ServerProperties {
     pub survival: bool,
     pub difficulty: u8,
     pub level_name: String,
+    /// Minecraft Java long seed, or Java String.hashCode() mapped to its bit pattern.
+    pub level_seed: Option<u64>,
 }
 
 fn boolean(map: &BTreeMap<String, String>, key: &str, default: bool) -> io::Result<bool> {
@@ -167,19 +169,19 @@ impl ServerProperties {
                 ));
             }
         }
-        if values
-            .get("level-seed")
-            .is_some_and(|value| !value.is_empty())
-        {
-            return Err(invalid(
-                "level-seed is not yet connected to world generation",
-            ));
-        }
-        if values
-            .get("level-type")
-            .is_some_and(|value| value != "FLAT")
-        {
-            return Err(invalid("level-type must be FLAT with legacy IRW storage"));
+        // Seed is meaningful for the opt-in IRW3 biome generator only.
+        // Refuse FLAT + seed rather than silently generate non-flat terrain.
+        let level_seed = values.get("level-seed").filter(|s| !s.is_empty()).map(|seed| {
+            seed.parse::<i64>().map(|number| number as u64).unwrap_or_else(|_| {
+                let hash = seed.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)));
+                (hash as i64) as u64
+            })
+        });
+        let level_type = values.get("level-type").map(String::as_str).unwrap_or("FLAT");
+        match (level_type, level_seed) {
+            ("FLAT", None) | ("DEFAULT", Some(_)) => {}
+            ("FLAT", Some(_)) => return Err(invalid("level-seed with FLAT would be ignored; choose level-type=DEFAULT")),
+            _ => return Err(invalid("only FLAT (unseeded) or DEFAULT (seeded IRW3) are supported")),
         }
         let accepted = [
             "server-port",
@@ -202,10 +204,10 @@ impl ServerProperties {
             .filter(|key| !accepted.contains(key))
             .collect();
         if !ignored.is_empty() {
-            eprintln!(
-                "server.properties: unsupported keys are NOT applied: {}",
-                ignored.join(", ")
-            );
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("unsupported server.properties keys: {}", ignored.join(", ")),
+            ));
         }
         Ok(Self {
             bind: SocketAddr::new(ip, port),
@@ -213,6 +215,7 @@ impl ServerProperties {
             survival,
             difficulty,
             level_name: level_name.to_string(),
+            level_seed,
         })
     }
 }
@@ -266,6 +269,17 @@ gamemode=1
             assert!(ServerProperties::parse(&bad).is_err(), "{bad}");
         }
         assert!(ServerProperties::parse("level-name=world").is_err());
+    }
+
+    #[test]
+    fn seed_matches_java_long_and_string_hash_semantics() {
+        let base = SAFE.replace("level-type=FLAT", "level-type=DEFAULT").replace("gamemode=1", "gamemode=0");
+        let signed = ServerProperties::parse(&format!("{base}level-seed=-123\n")).unwrap();
+        assert_eq!(signed.level_seed, Some((-123i64) as u64));
+        let hashed = ServerProperties::parse(&format!("{base}level-seed=Hello\n")).unwrap();
+        assert_eq!(hashed.level_seed, Some(69609650));
+        assert!(ServerProperties::parse(&format!("{SAFE}level-seed=123\n")).is_err());
+        assert!(ServerProperties::parse(&format!("{SAFE}unknown-option=1\n")).is_err());
     }
 
     #[test]

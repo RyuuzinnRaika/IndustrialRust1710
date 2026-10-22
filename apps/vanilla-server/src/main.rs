@@ -3135,10 +3135,27 @@ fn start_clock_console(hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf
 }
 
 fn main() -> io::Result<()> {
+    // Standalone, read-only preflight: no world lock, world creation or socket.
+    let supplied: Vec<String> = std::env::args().skip(1).collect();
+    if supplied.iter().any(|arg| arg == "--check-config") {
+        if supplied.len() != 1 && !(supplied.len() == 2 && supplied[0] == "--check-config") {
+            return Err(bad("--check-config must be used alone or with a properties file"));
+        }
+        let file = Path::new(if supplied.len() == 2 { &supplied[1] } else { "server.properties" });
+        let config = server_config::ServerProperties::load_optional(file)?
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "server.properties not found"))?;
+        server_config::verify_legacy_storage(&config.world_path)?;
+        if !config.bind.ip().is_loopback() {
+            return Err(io::Error::new(ErrorKind::PermissionDenied, "offline-mode configuration binds a public or LAN address"));
+        }
+        println!("Config validated: {}, world={}, difficulty={}, seed={:?} (no files modified)", config.bind, config.world_path.display(), config.difficulty, config.level_seed);
+        return Ok(());
+    }
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
     let properties = if std::env::args().any(|arg| {
         arg == "--help"
+            || arg == "--check-config"
             || arg == "--backup-world"
             || arg == "--inspect-player-data"
             || arg == "--inspect-level-dat"
@@ -3172,14 +3189,14 @@ fn main() -> io::Result<()> {
     let mut survival = properties.as_ref().is_some_and(|config| config.survival);
     let mut difficulty = properties.as_ref().map_or(2, |config| config.difficulty);
     let mut requested_seed: Option<u64> = None;
-    let mut biome_seed: Option<u64> = None;
+    let mut biome_seed: Option<u64> = properties.as_ref().and_then(|config| config.level_seed);
     let mut expanded_seed: Option<u64> = None;
     let mut expanded_dimension = dimensions::Dimension::Overworld;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--check-config [FILE]] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -3227,6 +3244,9 @@ fn main() -> io::Result<()> {
                 );
             }
             "--biome-seed" => {
+                if biome_seed.is_some() {
+                    return Err(bad("biome seed already set by server.properties"));
+                }
                 biome_seed = Some(
                     args.next()
                         .ok_or_else(|| bad("missing --biome-seed value"))?
@@ -3323,7 +3343,7 @@ fn main() -> io::Result<()> {
         }
     }
     if (requested_seed.is_some() || biome_seed.is_some() || expanded_seed.is_some())
-        && (!survival
+        && (!survival && properties.as_ref().and_then(|config| config.level_seed).is_none()
             || anvil_export_path.is_some()
             || anvil_import_path.is_some()
             || [
