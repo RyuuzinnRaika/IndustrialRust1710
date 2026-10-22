@@ -1695,7 +1695,10 @@ fn play(
                                             && brewers
                                                 .lock()
                                                 .map_err(|_| bad("brewer lock poisoned"))?
-                                                .is_nonempty(target));
+                                                .is_nonempty(target))
+                                        || (matches!(block, 84 | 140)
+                                            && decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                                                .occupied(target));
                                     if !occupied {
                                         let bonus = survival::additional_drop(
                                             w.get(x, y, z),
@@ -1720,6 +1723,8 @@ fn play(
                                             }
                                             match w.update_and_save(world_path, x, y, z, 0) {
                                                 Ok(true) => {
+                                                    decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                                                        .remove(decoration_path, target)?;
                                                     if wore {
                                                         *inventory = candidate;
                                                         send(
@@ -1831,7 +1836,10 @@ fn play(
                                     && brewers
                                         .lock()
                                         .map_err(|_| bad("brewer lock poisoned"))?
-                                        .is_nonempty((x, y, z)));
+                                        .is_nonempty((x, y, z)))
+                                || (matches!(block, 84 | 140)
+                                    && decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                                        .occupied((x, y, z)));
                             if occupied {
                                 false
                             } else {
@@ -1842,6 +1850,8 @@ fn play(
                         };
                     let event = block_change_event(&w, x, y, z);
                     if changed {
+                        decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                            .remove(decoration_path, (x, y, z))?;
                         hub.broadcast(event);
                     } else {
                         send(s, event.id, &event.body)?;
@@ -1984,7 +1994,7 @@ fn play(
                                     });
                                 }
                             } else if inventory.can_place(held)
-                                && inventory.held().is_some_and(decorations::pot_compatible)
+                                && inventory.held().is_some_and(decorations::pot_item_supported)
                             {
                                 let item = inventory.held().unwrap();
                                 let plant = Stack { count: 1, ..item };
