@@ -600,7 +600,6 @@ impl World {
         }
         Ok(Vec::new())
     }
-
 }
 
 #[cfg(test)]
