@@ -1,6 +1,7 @@
 //! Vanilla-only Minecraft 1.7.10 / Protocol 5 server proof of concept.
 //! Offline-mode by design: bind to loopback unless you trust every client on your LAN.
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
+mod achievements;
 mod anvil_export;
 mod anvil_import;
 mod backup_world;
@@ -43,6 +44,7 @@ mod whitelist;
 mod world;
 mod worldgen;
 
+use achievements::Achievements;
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
@@ -569,6 +571,8 @@ struct PlayerSession<'a> {
     vitals: &'a mut Vitals,
     experience: &'a mut Experience,
     experience_path: &'a Path,
+    achievements: &'a mut Achievements,
+    achievements_path: &'a Path,
     save_path: &'a Path,
     inventory: &'a mut Inventory,
     inventory_path: &'a Path,
@@ -607,6 +611,8 @@ fn play(
         vitals,
         experience,
         experience_path,
+        achievements,
+        achievements_path,
         save_path: player_path,
         inventory,
         inventory_path,
@@ -2710,6 +2716,16 @@ fn play(
                 // Protocol 5 C16 Client Status: 0 = Perform Respawn.
                 let action = input.i8()?;
                 input.finish()?;
+                if survival && action == 2 {
+                    // Vanilla 1.7.10 Client Status: 2 = Open Inventory
+                    // Achievement. Never trust an arbitrary client stat name.
+                    let mut candidate = achievements.clone();
+                    if let Some(event) = candidate.award("openInventory")? {
+                        candidate.save(achievements_path)?;
+                        *achievements = candidate;
+                        send(s, event.id, &event.body)?;
+                    }
+                }
                 if survival && action == 0 && vitals.health <= 0.0 {
                     if hardcore {
                         player.save_state(player_path, *vitals)?;
@@ -3008,6 +3024,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     };
     let experience_file = player_file.with_extension("experience.json");
     let mut experience_state = Experience::load(&experience_file)?;
+    let achievements_file = player_file.with_extension("achievements.json");
+    let mut achievements_state = Achievements::load(&achievements_file)?;
     let uuid = offline_uuid(&name);
     let (entity_id, events, previous) = match hub.add(name.clone(), uuid.clone(), player_state) {
         Ok(result) => result,
@@ -3049,6 +3067,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     for packet in scoreboard.lock().map_err(|_| bad("scoreboard lock poisoned"))?.snapshot()? {
         send(&mut s, packet.id, &packet.body)?;
     }
+    let achievements_packet = achievements_state.snapshot()?;
+    send(&mut s, achievements_packet.id, &achievements_packet.body)?;
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
     send(&mut s, self_list.id, &self_list.body)?;
@@ -3092,6 +3112,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             vitals: &mut player_vitals,
             experience: &mut experience_state,
             experience_path: &experience_file,
+            achievements: &mut achievements_state,
+            achievements_path: &achievements_file,
             save_path: &player_file,
             inventory: &mut inventory_state,
             inventory_path: &inventory_file,
@@ -3129,11 +3151,13 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     let player_saved = player_state.save_state(&player_file, player_vitals);
     let inventory_saved = inventory_state.save(&inventory_file);
     let experience_saved = experience_state.save(&experience_file);
+    let achievements_saved = achievements_state.save(&achievements_file);
     println!("left: {name}");
     mob_saved?;
     player_saved?;
     inventory_saved?;
     experience_saved?;
+    achievements_saved?;
     result
 }
 /// Commands are accepted only from the operating-system console, never from
