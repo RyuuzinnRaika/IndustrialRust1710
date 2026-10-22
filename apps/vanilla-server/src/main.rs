@@ -1,6 +1,7 @@
 //! Vanilla-only Minecraft 1.7.10 / Protocol 5 server proof of concept.
 //! Offline-mode by design: bind to loopback unless you trust every client on your LAN.
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
+mod admin;
 mod anvil_export;
 mod anvil_import;
 mod backup_world;
@@ -30,6 +31,7 @@ mod multiplayer;
 mod navigation;
 mod physics;
 mod player;
+mod security_limits;
 mod server_config;
 mod session_lock;
 mod survival;
@@ -41,6 +43,7 @@ mod whitelist;
 mod world;
 mod worldgen;
 
+use admin::Administration;
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
@@ -54,13 +57,13 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use mobs::Mobs;
-use multiplayer::{Event, Hub, JoinError, ADMIN_TELEPORT_EVENT, MAX_PLAYERS};
+use multiplayer::{Event, Hub, JoinError, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, ErrorKind};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
@@ -71,6 +74,7 @@ use survival::MiningProgress;
 use survival_damage::Hazards;
 use vitals::Vitals;
 use whitelist::Whitelist;
+use security_limits::{ChatLimiter, ConnectionLimiter};
 use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
 
 const MAX_CONNECTIONS: usize = 32;
@@ -582,6 +586,8 @@ struct PlayerSession<'a> {
     hub: &'a Hub,
     entity_id: i32,
     events: &'a Receiver<Event>,
+    administration: &'a Administration,
+    peer_ip: IpAddr,
 }
 fn play(
     s: &mut TcpStream,
@@ -616,6 +622,8 @@ fn play(
         hub,
         entity_id,
         events,
+        administration,
+        peer_ip,
     } = session;
     s.set_read_timeout(Some(Duration::from_millis(50)))?;
     let mut location = (player.x, player.y, player.z);
@@ -634,6 +642,8 @@ fn play(
     let mut last_time_tick: u64 = clock.ticks();
     let mut last_vitals_tick = clock.ticks();
     let mut admission_check = started;
+    let mut permissions = administration.permission(name)?;
+    let mut chat_limiter = ChatLimiter::default();
     let mut saved_at = started;
     // Keep fragmented TCP frames across short receive timeouts.
     let mut packet_reader = BufferedFrameReader::new();
@@ -664,6 +674,14 @@ fn play(
             ));
         }
         while let Ok(event) = events.try_recv() {
+            if event.id == ADMIN_KICK_EVENT {
+                let reason = std::str::from_utf8(&event.body)
+                    .map_err(|_| bad("invalid administrator kick event"))?;
+                let mut payload = Vec::new();
+                write_string(&json!({"text":reason}).to_string(), &mut payload)?;
+                send(s, 0x40, &payload)?;
+                return Ok(());
+            }
             if event.id == ADMIN_TELEPORT_EVENT {
                 if event.body.len() != 24 {
                     return Err(bad("invalid internal teleport payload"));
@@ -808,7 +826,8 @@ fn play(
         if admission_check.elapsed() >= Duration::from_secs(2) {
             // Reload on a bounded interval: file removal, corruption or revocation
             // causes active sessions to be disconnected (fail closed).
-            let allowed = Whitelist::load(whitelist_path).is_ok_and(|list| list.allows(name));
+            let allowed = Whitelist::load(whitelist_path).is_ok_and(|list| list.allows(name))
+                && administration.banned(name, peer_ip).is_ok_and(|reason| reason.is_none());
             if !allowed {
                 let mut reason = Vec::new();
                 write_string(
@@ -818,6 +837,7 @@ fn play(
                 send(s, 0x40, &reason)?;
                 return Ok(());
             }
+            permissions = administration.permission(name)?;
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
@@ -1220,6 +1240,7 @@ fn play(
         }
         match id {
             2 => {
+                if !permissions.interact { continue; }
                 // Protocol 5 C02 Use Entity: target VarInt and action VarInt.
                 let target_id = input.varint()?;
                 let action = input.varint()?;
@@ -1352,31 +1373,34 @@ fn play(
             1 => {
                 let message = input.string(100)?;
                 input.finish()?;
+                if let Err(disconnect) = chat_limiter.check(&message) {
+                    if disconnect {
+                        let mut reason = Vec::new();
+                        write_string(&json!({"text":"Repeated chat spam"}).to_string(), &mut reason)?;
+                        send(s, 0x40, &reason)?;
+                        return Ok(());
+                    }
+                    as_chat(s, "Chat message rejected by spam filter.")?;
+                    continue;
+                }
                 if message == "/help" {
-                    as_chat(s, "Commands: /help, /save, /list. Survival includes mobs, XP, ranged combat, hazards, armor and crafting.")?;
+                    as_chat(s, "Commands: /help, /list. Admin commands are console-only in offline mode.")?;
                 } else if message == "/list" {
-                    as_chat(
-                        s,
-                        &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")),
-                    )?;
-                } else if message == "/save" {
-                    world
-                        .lock()
-                        .map_err(|_| bad("world mutex poisoned"))?
-                        .save(world_path)?;
-                    as_chat(s, "World saved.")?;
-                } else if !message.starts_with('/') {
+                    as_chat(s, &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")))?;
+                } else if message.starts_with('/') {
+                    // Never authorize offline player usernames using ops.json:
+                    // these names can be trivially impersonated.
+                    let _trusted_operator = administration.is_operator(name, false)?;
+                    as_chat(s, "Permission denied or unknown command. Admin commands are console-only.")?;
+                } else if !permissions.chat {
+                    as_chat(s, "Chat permission denied.")?;
+                } else {
                     let mut bytes = Vec::new();
                     write_string(
                         &json!({"text":format!("<{name}> {message}")}).to_string(),
                         &mut bytes,
                     )?;
-                    hub.broadcast(Event {
-                        id: 0x02,
-                        body: bytes,
-                    });
-                } else {
-                    as_chat(s, "Unknown command; try /help")?;
+                    hub.broadcast(Event { id: 0x02, body: bytes });
                 }
             }
             3 => {
@@ -1504,6 +1528,7 @@ fn play(
                 }
             }
             7 => {
+                if !permissions.build { continue; }
                 let action = input.i8()?;
                 let x = input.i32()?;
                 let y = input.u8()? as i32;
@@ -1763,6 +1788,7 @@ fn play(
                 }
             }
             8 => {
+                if !permissions.build { continue; }
                 let x = input.i32()?;
                 let y = input.u8()? as i32;
                 let z = input.i32()?;
@@ -2827,6 +2853,7 @@ struct ServerContext {
     world: Arc<Mutex<World>>,
     path: Arc<PathBuf>,
     whitelist_path: Arc<PathBuf>,
+    administration: Arc<Administration>,
     clock: Arc<Clock>,
     ground_items: Arc<Mutex<GroundItems>>,
     ground_path: Arc<PathBuf>,
@@ -2848,6 +2875,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         world,
         path,
         whitelist_path,
+        administration,
         clock,
         ground_items,
         ground_path,
@@ -2865,6 +2893,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let peer_ip = s.peer_addr()?.ip();
     let (id, data) = receive(&mut s)?;
     if id != 0 {
         return Err(bad("expected handshake"));
@@ -2898,6 +2927,16 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     if !whitelist::valid_name(&name) {
         login_disconnect(&mut s, "Invalid player name.")?;
         return Ok(());
+    }
+    // Recheck bans at Login Start. Missing/corrupt DBs are fail-closed.
+    match administration.banned(&name, peer_ip) {
+        Ok(Some(reason)) => { login_disconnect(&mut s, &reason)?; return Ok(()); }
+        Err(error) => {
+            eprintln!("admin database unavailable: {error}");
+            login_disconnect(&mut s, "Administration database unavailable.")?;
+            return Ok(());
+        }
+        Ok(None) => {}
     }
     // Every new login reads the whitelist from disk: no implicit public access.
     let allowed = match Whitelist::load(&whitelist_path) {
@@ -3045,6 +3084,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             hub: &hub,
             entity_id,
             events: &events,
+            administration: &administration,
+            peer_ip,
         },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
