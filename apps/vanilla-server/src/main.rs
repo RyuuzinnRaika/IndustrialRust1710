@@ -3158,7 +3158,7 @@ fn start_clock_console(
                 eprintln!("ADMIN CONSOLE ERROR: {error}");
             }
         }
-    });
+    })
 }
 
 fn main() -> io::Result<()> {
