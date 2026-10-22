@@ -95,7 +95,7 @@ use std::collections::BTreeSet;
 use std::io::{self, BufRead, ErrorKind};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -4884,7 +4884,8 @@ fn start_clock_console(
     world: Arc<Mutex<World>>,
     world_path: Arc<PathBuf>,
     access: ConsoleAccess,
-) {
+    shutdown: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
     let ConsoleGameData {
         rules,
         rules_path,
@@ -4910,6 +4911,20 @@ fn start_clock_console(
                 continue;
             }
             let args: Vec<_> = line.split_whitespace().collect();
+            if args.as_slice() == ["/stop"] {
+                // A failed final audit must not silently shut down the server.
+                if let Err(error) = administration.audit("CONSOLE", "/stop", "accepted") {
+                    eprintln!("STOP AUDIT FAILED, shutdown refused: {error}");
+                    continue;
+                }
+                shutdown.store(true, Ordering::Release);
+                hub.broadcast(Event {
+                    id: ADMIN_KICK_EVENT,
+                    body: b"Server shutting down".to_vec(),
+                });
+                println!("Server stopping; waiting for players and world workers");
+                break;
+            }
             let result: io::Result<()> = match args.as_slice() {
                 ["/gamerule", key] => (|| -> io::Result<()> {
                     let rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
@@ -5136,7 +5151,7 @@ fn start_clock_console(
                 eprintln!("ADMIN CONSOLE ERROR: {error}");
             }
         }
-    });
+    })
 }
 
 fn main() -> io::Result<()> {
@@ -5823,7 +5838,8 @@ fn main() -> io::Result<()> {
     let limiter = Arc::new(ConnectionLimiter::default());
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
-    start_clock_console(
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let console_thread = start_clock_console(
         Arc::clone(&hub),
         Arc::clone(&clock),
         Arc::clone(&clock_path),
@@ -5840,6 +5856,7 @@ fn main() -> io::Result<()> {
             whitelist_path: Arc::clone(&allow_path),
             online_mode,
         },
+        Arc::clone(&shutdown),
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
@@ -5858,13 +5875,14 @@ fn main() -> io::Result<()> {
     let tnt_mobs = Arc::clone(&mobs);
     let ejection_devices = Arc::clone(&devices);
     let ejection_file = Arc::clone(&device_path);
-    thread::spawn(move || {
+    let tick_shutdown = Arc::clone(&shutdown);
+    let tick_thread = thread::spawn(move || {
         let mut telemetry =
             telemetry::TickTelemetry::new(furnace_world_path.with_extension("metrics.jsonl"));
         let mut last = furnace_clock.ticks();
         let mut last_clock_snapshot = last;
         let mut last_weather = furnace_clock.weather();
-        loop {
+        while !tick_shutdown.load(Ordering::Acquire) {
             let now = furnace_clock.ticks();
             if now > last {
                 let worker_started = Instant::now();
@@ -6191,9 +6209,10 @@ fn main() -> io::Result<()> {
     let hopper_furnaces = Arc::clone(&furnaces);
     let hopper_furnace_file = Arc::clone(&furnace_path);
     let hopper_world_path = Arc::clone(&path);
-    thread::spawn(move || {
+    let hopper_shutdown = Arc::clone(&shutdown);
+    let hopper_thread = thread::spawn(move || {
         let mut last_cycle = hopper_clock.ticks() / 8;
-        loop {
+        while !hopper_shutdown.load(Ordering::Acquire) {
             let cycle = hopper_clock.ticks() / 8;
             if cycle > last_cycle {
                 last_cycle = cycle;
@@ -6233,9 +6252,10 @@ fn main() -> io::Result<()> {
     let brewer_worker = Arc::clone(&brewers);
     let brewer_file = Arc::clone(&brewer_path);
     let brewer_clock = Arc::clone(&clock);
-    thread::spawn(move || {
+    let brewing_shutdown = Arc::clone(&shutdown);
+    let brewing_thread = thread::spawn(move || {
         let mut last = brewer_clock.ticks();
-        loop {
+        while !brewing_shutdown.load(Ordering::Acquire) {
             let now = brewer_clock.ticks();
             if now > last {
                 let steps = (now - last).min(20) as u32;
@@ -6262,9 +6282,10 @@ fn main() -> io::Result<()> {
     let projectile_boats = Arc::clone(&boats);
     let projectile_carts = Arc::clone(&minecarts);
     let projectile_fishing = Arc::clone(&fishing);
-    thread::spawn(move || {
+    let projectile_shutdown = Arc::clone(&shutdown);
+    let projectile_thread = thread::spawn(move || {
         let mut last = projectile_clock.ticks();
-        loop {
+        while !projectile_shutdown.load(Ordering::Acquire) {
             let now = projectile_clock.ticks();
             if now > last {
                 let begin = last.saturating_add(1);
@@ -6329,8 +6350,30 @@ fn main() -> io::Result<()> {
     } else {
         None
     };
-    for accepted in listener.incoming() {
-        let stream = accepted?;
+    listener.set_nonblocking(true)?;
+    let mut client_threads = Vec::new();
+    while !shutdown.load(Ordering::Acquire) {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        // Reap finished connections and retain handles until they have joined.
+        let mut active = Vec::new();
+        for worker in client_threads.drain(..) {
+            if worker.is_finished() {
+                worker.join().map_err(|_| io::Error::other("client thread panicked"))?;
+            } else {
+                active.push(worker);
+            }
+        }
+        client_threads = active;
         let peer_ip = stream.peer_addr()?.ip();
         // Rate limit before accessing disk so repeated banned connections cannot
         // turn into an unlimited JSON parsing workload.
@@ -6379,7 +6422,7 @@ fn main() -> io::Result<()> {
         let map_file = Arc::clone(&map_path);
         let hanging_state = Arc::clone(&hangings);
         let hanging_file = Arc::clone(&hanging_path);
-        thread::spawn(move || {
+        client_threads.push(thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
                 stream,
@@ -6428,8 +6471,50 @@ fn main() -> io::Result<()> {
                     eprintln!("client disconnected: {e}");
                 }
             }
-        });
+        }));
     }
+    // No new sessions are admitted after /stop. Drain active sessions first:
+    // their disconnect paths persist position, inventory and player state.
+    drop(listener);
+    for worker in client_threads {
+        worker.join().map_err(|_| io::Error::other("client worker panicked during shutdown"))?;
+    }
+    tick_thread.join().map_err(|_| io::Error::other("tick worker panicked during shutdown"))?;
+    hopper_thread.join().map_err(|_| io::Error::other("hopper worker panicked during shutdown"))?;
+    brewing_thread.join().map_err(|_| io::Error::other("brewing worker panicked during shutdown"))?;
+    projectile_thread.join().map_err(|_| io::Error::other("projectile worker panicked during shutdown"))?;
+    clock.stop();
+    clock_thread.join().map_err(|_| io::Error::other("clock worker panicked during shutdown"))?;
+    console_thread.join().map_err(|_| io::Error::other("console worker panicked during shutdown"))?;
+    session_guard.lock().map_err(|_| bad("session lock mutex poisoned"))?.verify()?;
+    {
+        let world_guard = world.lock().map_err(|_| bad("world lock poisoned"))?;
+        world_guard.save(&path)?;
+        mobs.lock().map_err(|_| bad("mob lock poisoned"))?.save(&world_guard)?;
+    }
+    // Serialize disjoint files only after gameplay workers and sessions stopped.
+    // Existing journal protocol ensures each small group is crash-recoverable.
+    let journal_path = path.with_extension("pending-txn.json");
+    journal::commit(&journal_path, &[
+        (chest_path.as_ref().as_path(), chests.lock().map_err(|_| bad("chests lock poisoned"))?.encoded()?),
+        (furnace_path.as_ref().as_path(), furnaces.lock().map_err(|_| bad("furnaces lock poisoned"))?.encoded()?),
+        (hopper_path.as_ref().as_path(), hoppers.lock().map_err(|_| bad("hoppers lock poisoned"))?.encoded()?),
+    ])?;
+    journal::commit(&journal_path, &[
+        (brewer_path.as_ref().as_path(), brewers.lock().map_err(|_| bad("brewers lock poisoned"))?.encoded()?),
+        (ground_path.as_ref().as_path(), ground_items.lock().map_err(|_| bad("ground lock poisoned"))?.encoded()?),
+        (device_path.as_ref().as_path(), devices.lock().map_err(|_| bad("devices lock poisoned"))?.encoded()?),
+    ])?;
+    journal::commit(&journal_path, &[
+        (decoration_path.as_ref().as_path(), decorations.lock().map_err(|_| bad("decorations lock poisoned"))?.encoded()?),
+        (map_path.as_ref().as_path(), maps.lock().map_err(|_| bad("maps lock poisoned"))?.encoded()?),
+        (hanging_path.as_ref().as_path(), hangings.lock().map_err(|_| bad("hangings lock poisoned"))?.encoded()?),
+    ])?;
+    world_rules.lock().map_err(|_| bad("rules lock poisoned"))?.save(&rules_path)?;
+    shared_scoreboard.lock().map_err(|_| bad("scoreboard lock poisoned"))?.save(&scoreboard_path)?;
+    clock.save_ticks(&clock_path)?;
+    session_guard.lock().map_err(|_| bad("session lock mutex poisoned"))?.verify()?;
+    println!("Server safely stopped; player sessions, workers and persistent state flushed.");
     Ok(())
 }
 #[cfg(test)]
