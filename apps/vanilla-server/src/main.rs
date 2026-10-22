@@ -945,7 +945,7 @@ fn play(
                 active_hopper = None;
                 active_device = None;
                 active_brewer = None;
-                    active_anvil = None;
+                active_anvil = None;
                 // Game State 3 is Protocol 5's gamemode notification.
                 let mut state = vec![3u8];
                 state.extend_from_slice(&(mode as f32).to_be_bytes());
@@ -3545,10 +3545,16 @@ fn play(
                     && world
                         .lock()
                         .map_err(|_| bad("world mutex poisoned"))?
-                        .get(x, y, z) >> 4 == 145
+                        .get(x, y, z)
+                        >> 4
+                        == 145
                 {
                     active_window = next_window;
-                    next_window = if next_window >= 100 { 1 } else { next_window + 1 };
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
                     active_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
@@ -3892,14 +3898,15 @@ fn play(
                     let still_open = world
                         .lock()
                         .map_err(|_| bad("world mutex poisoned"))?
-                        .get(pos.0, pos.1, pos.2) >> 4 == 145
+                        .get(pos.0, pos.1, pos.2)
+                        >> 4
+                        == 145
                         && near(location, pos.0, pos.1, pos.2);
                     let mut candidate = inventory.clone();
                     let mut next_xp = *experience;
-                    accepted |= still_open && requested_window
-                        && candidate.anvil_click_window(
-                            slot, button, mode, &mut next_xp, survival
-                        );
+                    accepted |= still_open
+                        && requested_window
+                        && candidate.anvil_click_window(slot, button, mode, &mut next_xp, survival);
                     if accepted {
                         let inventory_changed = candidate != *inventory;
                         let xp_changed = next_xp != *experience;
@@ -3908,8 +3915,11 @@ fn play(
                                 &world_path.with_extension("pending-txn.json"),
                                 &[
                                     (inventory_path, candidate.encoded()?),
-                                    (experience_path, serde_json::to_vec(&next_xp)
-                                        .map_err(|_| bad("encode anvil XP"))?),
+                                    (
+                                        experience_path,
+                                        serde_json::to_vec(&next_xp)
+                                            .map_err(|_| bad("encode anvil XP"))?,
+                                    ),
                                 ],
                             )?;
                             *inventory = candidate;
