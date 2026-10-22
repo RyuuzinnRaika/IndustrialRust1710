@@ -1541,9 +1541,7 @@ mod group_b_regression_tests {
         let mut world = World::new();
         // Comparator is attached to the floor in vanilla. On load the
         // support-validation queue correctly breaks unsupported devices.
-        world
-            .update_and_save(&path, 0, 64, 0, 1 << 4)
-            .unwrap();
+        world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
         world
             .update_and_save(&path, -1, 65, 0, (69 << 4) | 8)
             .unwrap();
