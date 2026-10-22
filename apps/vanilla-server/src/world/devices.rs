@@ -671,10 +671,8 @@ mod redstone_regression_tests {
 
     #[test]
     fn door_hinge_uses_adjacent_walls_and_neighboring_doors() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-door-hinge-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-door-hinge-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
         // Facing 0 has side cells at z=-1 and z=+1. A solid wall
