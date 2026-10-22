@@ -3155,7 +3155,10 @@ fn main() -> io::Result<()> {
     // Explicit, offline-only create-if-missing recovery. No network listener,
     // no server.properties parsing, and no silent replacement of a live world.
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
-    if raw_args.first().is_some_and(|arg| arg == "--recover-level-dat") {
+    if raw_args
+        .first()
+        .is_some_and(|arg| arg == "--recover-level-dat")
+    {
         if raw_args.len() != 2 {
             return Err(bad("usage: --recover-level-dat STOPPED_WORLD_DIR"));
         }
