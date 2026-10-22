@@ -1427,13 +1427,17 @@ fn play(
                     );
                     let outcome = if result.is_ok() { "success" } else { "failure" };
                     if administration.audit(name, &message, outcome).is_err() {
-                        eprintln!("CRITICAL: player administrative action could not be audited: {name}");
+                        eprintln!(
+                            "CRITICAL: player administrative action could not be audited: {name}"
+                        );
                         as_chat(s, "Administrative audit write failed.")?;
                         continue;
                     }
                     match result {
                         Ok(outcome) => as_chat(s, &outcome)?,
-                        Err(error) => as_chat(s, &format!("Administrative command rejected: {error}"))?,
+                        Err(error) => {
+                            as_chat(s, &format!("Administrative command rejected: {error}"))?
+                        }
                     }
                 } else if !permissions.chat {
                     as_chat(s, "Chat permission denied.")?;
@@ -3206,29 +3210,41 @@ fn run_player_admin_command(
     let parts: Vec<&str> = message.split_whitespace().collect();
     let minimum_level = match parts.first().copied() {
         Some("/time") | Some("/weather") => 2,
-        Some("/kick") | Some("/ban") | Some("/pardon")
-        | Some("/ban-ip") | Some("/pardon-ip") => 3,
-        Some("/save") | Some("/op") | Some("/deop")
-        | Some("/permission") => 4,
+        Some("/kick") | Some("/ban") | Some("/pardon") | Some("/ban-ip") | Some("/pardon-ip") => 3,
+        Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
         _ => return Err(bad("unknown operator command")),
     };
     if level < minimum_level {
-        return Err(io::Error::new(ErrorKind::PermissionDenied, "insufficient OP level"));
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            "insufficient OP level",
+        ));
     }
     match parts.as_slice() {
         ["/save"] => {
-            world.lock().map_err(|_| bad("world mutex poisoned"))?.save(world_path)?;
+            world
+                .lock()
+                .map_err(|_| bad("world mutex poisoned"))?
+                .save(world_path)?;
             Ok("World saved".into())
         }
         ["/kick", target, reason @ ..] => {
-            let reason = if reason.is_empty() { "Kicked by operator".to_string() } else { reason.join(" ") };
+            let reason = if reason.is_empty() {
+                "Kicked by operator".to_string()
+            } else {
+                reason.join(" ")
+            };
             if !hub.request_admin_kick(target, &reason)? {
                 return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
             }
             Ok(format!("Kicked {target}"))
         }
         ["/ban", target, reason @ ..] => {
-            let reason = if reason.is_empty() { "Banned by operator".to_string() } else { reason.join(" ") };
+            let reason = if reason.is_empty() {
+                "Banned by operator".to_string()
+            } else {
+                reason.join(" ")
+            };
             administration.set_player_ban(target, Some(&reason), true)?;
             let _ = hub.request_admin_kick(target, &reason);
             Ok(format!("Banned {target}"))
@@ -3238,7 +3254,11 @@ fn run_player_admin_command(
             Ok(format!("Unbanned {target}"))
         }
         ["/ban-ip", address, reason @ ..] => {
-            let reason = if reason.is_empty() { "IP banned by operator".to_string() } else { reason.join(" ") };
+            let reason = if reason.is_empty() {
+                "IP banned by operator".to_string()
+            } else {
+                reason.join(" ")
+            };
             administration.set_ip_ban(address, Some(&reason), true)?;
             Ok(format!("IP banned {address}"))
         }
@@ -3264,7 +3284,10 @@ fn run_player_admin_command(
         }
         ["/op", target] => {
             let uuid = hub.uuid_for_online_name(target)?.ok_or_else(|| {
-                io::Error::new(ErrorKind::NotFound, "target must be authenticated and online")
+                io::Error::new(
+                    ErrorKind::NotFound,
+                    "target must be authenticated and online",
+                )
             })?;
             administration.set_op_verified(target, &uuid)?;
             Ok(format!("OP granted to {target}"))
@@ -3373,20 +3396,21 @@ fn start_clock_console(
                     println!("Teleport queued for {name}");
                     Ok(())
                 })(),
-                ["/op", name] => {
-                    (|| -> io::Result<()> {
-                        if online_mode {
-                            let uuid = hub.uuid_for_online_name(name)?.ok_or_else(|| {
-                                io::Error::new(ErrorKind::NotFound, "player must be authenticated and online to grant OP")
-                            })?;
-                            administration.set_op_verified(name, &uuid)?;
-                        } else {
-                            administration.set_op(name, true)?;
-                        }
-                        println!("OP record saved for {name}");
-                        Ok(())
-                    })()
-                }
+                ["/op", name] => (|| -> io::Result<()> {
+                    if online_mode {
+                        let uuid = hub.uuid_for_online_name(name)?.ok_or_else(|| {
+                            io::Error::new(
+                                ErrorKind::NotFound,
+                                "player must be authenticated and online to grant OP",
+                            )
+                        })?;
+                        administration.set_op_verified(name, &uuid)?;
+                    } else {
+                        administration.set_op(name, true)?;
+                    }
+                    println!("OP record saved for {name}");
+                    Ok(())
+                })(),
                 ["/deop", name] => administration.set_op(name, false),
                 ["/ban", name, reason @ ..] => (|| -> io::Result<()> {
                     let reason = if reason.is_empty() {
