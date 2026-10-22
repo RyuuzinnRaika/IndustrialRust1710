@@ -1619,6 +1619,16 @@ fn play(
                         }
                         0 => {
                             let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                            if w.get(x, y, z) >> 4 == 25 && w.get(x, y + 1, z) == 0
+                                && world::in_bounds(x, y, z) && near(location, x, y, z)
+                            {
+                                let pos = (x, y, z);
+                                let pitch = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                                    .note(pos);
+                                hub.broadcast(Event { id: 0x24,
+                                    body: decorations::note_action(pos, decorations::instrument(w.get(x, y - 1, z) >> 4), pitch),
+                                });
+                            }
                             mining = if world::in_bounds(x, y, z) && near(location, x, y, z) {
                                 MiningProgress::start(target, w.get(x, y, z), inventory.held())
                             } else {
@@ -1836,6 +1846,109 @@ fn play(
                         }
                     }
                     continue;
+                }
+                // World-owned decoration interactions precede ordinary item placement.
+                if (0..=5).contains(&face) && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                {
+                    let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let block = w.get(x, y, z);
+                    let pos = (x, y, z);
+                    match block >> 4 {
+                        25 => {
+                            let pitch = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                                .next_note(decoration_path, pos)?;
+                            if w.get(x, y + 1, z) == 0 {
+                                let instrument = decorations::instrument(w.get(x, y - 1, z) >> 4);
+                                hub.broadcast(Event { id: 0x24, body: decorations::note_action(pos, instrument, pitch) });
+                            }
+                            continue;
+                        }
+                        92 => {
+                            if survival && vitals.health > 0.0 && vitals.food < 20 {
+                                let bites = block & 7;
+                                if bites <= 5 {
+                                    let next = if bites == 5 { 0 } else { (92 << 4) | bites + 1 };
+                                    if w.update_and_save(world_path, x, y, z, next)? {
+                                        vitals.food = (vitals.food + 2).min(20);
+                                        vitals.saturation = (vitals.saturation + 0.4).min(vitals.food as f32);
+                                        player.save_state(player_path, *vitals)?;
+                                        send(s, 0x06, &health_packet(*vitals))?;
+                                        hub.broadcast(block_change_event(&w, x, y, z));
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        84 => {
+                            let mut stored = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?;
+                            if let Some(disc) = stored.record(pos) {
+                                let mut candidate = inventory.clone();
+                                if !survival || candidate.receive_stack(Stack { id: disc, count: 1, damage: 0 }).is_some() {
+                                    // Debit the jukebox first, then return the item (loss on crash, not duplication).
+                                    stored.set_record(decoration_path, pos, None)?;
+                                    w.update_and_save(world_path, x, y, z, 84 << 4)?;
+                                    if survival {
+                                        candidate.save(inventory_path)?;
+                                        *inventory = candidate;
+                                        send(s, 0x30, &inventory.window_items())?;
+                                    }
+                                    hub.broadcast(block_change_event(&w, x, y, z));
+                                    hub.broadcast(Event { id: 0x28, body: decorations::disc_event(pos, None) });
+                                }
+                            } else if inventory.can_place(held)
+                                && inventory.held().is_some_and(|item| (2256..=2267).contains(&item.id))
+                            {
+                                let disc = inventory.held().unwrap().id;
+                                let mut candidate = inventory.clone();
+                                if !survival || candidate.consume_held() {
+                                    if survival {
+                                        candidate.save(inventory_path)?;
+                                        *inventory = candidate;
+                                        send(s, 0x30, &inventory.window_items())?;
+                                    }
+                                    stored.set_record(decoration_path, pos, Some(disc))?;
+                                    w.update_and_save(world_path, x, y, z, (84 << 4) | 1)?;
+                                    hub.broadcast(block_change_event(&w, x, y, z));
+                                    hub.broadcast(Event { id: 0x28, body: decorations::disc_event(pos, Some(disc)) });
+                                }
+                            }
+                            continue;
+                        }
+                        140 => {
+                            let mut stored = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?;
+                            if let Some(stack) = stored.pot(pos) {
+                                let mut candidate = inventory.clone();
+                                if !survival || candidate.receive_stack(stack).is_some() {
+                                    stored.set_pot(decoration_path, pos, None)?;
+                                    if survival {
+                                        candidate.save(inventory_path)?;
+                                        *inventory = candidate;
+                                        send(s, 0x30, &inventory.window_items())?;
+                                    }
+                                    hub.broadcast(Event { id: 0x35, body: decorations::pot_packet(pos, None)? });
+                                }
+                            } else if inventory.can_place(held)
+                                && inventory.held().is_some_and(decorations::pot_compatible)
+                            {
+                                let item = inventory.held().unwrap();
+                                let plant = Stack { count: 1, ..item };
+                                let mut candidate = inventory.clone();
+                                if !survival || candidate.consume_held() {
+                                    if survival {
+                                        candidate.save(inventory_path)?;
+                                        *inventory = candidate;
+                                        send(s, 0x30, &inventory.window_items())?;
+                                    }
+                                    stored.set_pot(decoration_path, pos, Some(plant))?;
+                                    hub.broadcast(Event { id: 0x35, body: decorations::pot_packet(pos, Some(plant))? });
+                                }
+                            }
+                            continue;
+                        }
+                        63 | 68 => continue, // signs are editable only immediately after placement
+                        _ => {}
+                    }
                 }
                 // Hoe -> farmland. In Survival, commit tool wear first;
                 // no item is consumed for tilling soil.
