@@ -424,8 +424,12 @@ impl World {
         // or a device one additional block away. Wake only redstone at this
         // distance, not fluid/ecology: O(36) fixed neighborhood probes.
         const FACES: [(i32, i32, i32); 6] = [
-            (1, 0, 0), (-1, 0, 0), (0, 1, 0),
-            (0, -1, 0), (0, 0, 1), (0, 0, -1),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
         ];
         for (dx, dy, dz) in FACES {
             for (ex, ey, ez) in FACES {
@@ -435,7 +439,9 @@ impl World {
                 }
                 let pos = (nx, ny as u8, nz);
                 match self.get(nx, ny, nz) >> 4 {
-                    55 => { self.pending_circuit.insert(pos); }
+                    55 => {
+                        self.pending_circuit.insert(pos);
+                    }
                     27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 => {
                         self.pending_devices.insert(pos);
                     }
@@ -1563,7 +1569,6 @@ mod group_b_regression_tests {
         assert!(!world.can_support(0, 65, 0, 115 << 4));
         assert!(!world.can_support(1, 65, 0, 83 << 4));
     }
-
 
     #[test]
     fn comparator_strength_is_not_rounded_up_to_fifteen_by_dust() {
