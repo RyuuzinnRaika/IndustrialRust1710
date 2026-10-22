@@ -26,6 +26,9 @@ pub enum TntEvent {
     },
 }
 
+type StagedBlockBatch = (World, Vec<(i32, i32, i32)>);
+pub type StagedSpecialItem = (World, Vec<(i32, i32, i32)>, Option<Stack>, bool);
+
 impl World {
     fn spawn_primed_tnt(&mut self, x: i32, y: i32, z: i32, fuse: u64) {
         self.next_tnt_id = if self.next_tnt_id < 10_000_000 {
@@ -49,6 +52,7 @@ impl World {
     }
 
     /// Direct flint/redstone ignition commits removal before entity spawn.
+    #[cfg(test)]
     pub fn ignite_tnt(&mut self, path: &Path, x: i32, y: i32, z: i32) -> io::Result<bool> {
         if self.get(x, y, z) >> 4 != 46 {
             return Ok(false);
@@ -90,7 +94,7 @@ impl World {
     fn stage_special_batch(
         &self,
         changes: &BTreeMap<Position, u16>,
-    ) -> io::Result<(World, Vec<(i32, i32, i32)>)> {
+    ) -> io::Result<StagedBlockBatch> {
         if changes.is_empty() {
             return Ok((self.clone(), Vec::new()));
         }
@@ -125,6 +129,7 @@ impl World {
         Ok((candidate, changed))
     }
 
+    #[cfg(test)]
     pub(super) fn special_batch(
         &mut self,
         path: &Path,
@@ -298,6 +303,7 @@ impl World {
         changes
     }
 
+    #[cfg(test)]
     pub fn insert_end_eye(
         &mut self,
         path: &Path,
@@ -342,17 +348,6 @@ impl World {
         changes
     }
 
-    pub fn apply_bonemeal(
-        &mut self,
-        path: &Path,
-        x: i32,
-        y: i32,
-        z: i32,
-    ) -> io::Result<Vec<(i32, i32, i32)>> {
-        let changes = self.bonemeal_changes(x, y, z);
-        self.special_batch(path, &changes)
-    }
-
     /// Stage a player special-item interaction entirely in memory. The caller
     /// atomically commits inventory and world snapshots through the redo journal
     /// before publishing either state or any TNT spawn packet.
@@ -362,7 +357,7 @@ impl World {
         y: i32,
         z: i32,
         held: Stack,
-    ) -> io::Result<Option<(World, Vec<(i32, i32, i32)>, Option<Stack>, bool)>> {
+    ) -> io::Result<Option<StagedSpecialItem>> {
         if !in_bounds(x, y, z) {
             return Ok(None);
         }
