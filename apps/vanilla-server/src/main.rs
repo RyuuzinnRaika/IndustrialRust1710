@@ -2215,9 +2215,17 @@ fn play(
                             if let Some(stack) = stored.pot(pos) {
                                 let mut candidate = inventory.clone();
                                 if !survival || candidate.receive_stack(stack).is_some() {
-                                    stored.set_pot(decoration_path, pos, None)?;
+                                    let staged = stored.stage_pot(pos, None)?;
+                                    let mut changes = vec![(decoration_path, staged.encoded()?)];
                                     if survival {
-                                        candidate.save(inventory_path)?;
+                                        changes.push((inventory_path, candidate.encoded()?));
+                                    }
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &changes,
+                                    )?;
+                                    *stored = staged;
+                                    if survival {
                                         *inventory = candidate;
                                         send(s, 0x30, &inventory.window_items())?;
                                     }
@@ -2235,12 +2243,20 @@ fn play(
                                 let plant = Stack { count: 1, ..item };
                                 let mut candidate = inventory.clone();
                                 if !survival || candidate.consume_held() {
+                                    let staged = stored.stage_pot(pos, Some(plant))?;
+                                    let mut changes = vec![(decoration_path, staged.encoded()?)];
                                     if survival {
-                                        candidate.save(inventory_path)?;
+                                        changes.push((inventory_path, candidate.encoded()?));
+                                    }
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &changes,
+                                    )?;
+                                    *stored = staged;
+                                    if survival {
                                         *inventory = candidate;
                                         send(s, 0x30, &inventory.window_items())?;
                                     }
-                                    stored.set_pot(decoration_path, pos, Some(plant))?;
                                     hub.broadcast(Event {
                                         id: 0x35,
                                         body: decorations::pot_packet(pos, Some(plant))?,
