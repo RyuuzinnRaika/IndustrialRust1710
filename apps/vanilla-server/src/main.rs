@@ -590,6 +590,7 @@ struct PlayerSession<'a> {
     events: &'a Receiver<Event>,
     administration: &'a Administration,
     peer_ip: IpAddr,
+    verified_uuid: Option<&'a str>,
 }
 fn play(
     s: &mut Connection,
@@ -626,6 +627,7 @@ fn play(
         events,
         administration,
         peer_ip,
+        verified_uuid,
     } = session;
     s.set_read_timeout(Some(Duration::from_millis(50)))?;
     let mut location = (player.x, player.y, player.z);
@@ -1395,7 +1397,7 @@ fn play(
                 if message == "/help" {
                     as_chat(
                         s,
-                        "Commands: /help, /list. Admin commands are console-only in offline mode.",
+                        "Commands: /help, /list. Verified OPs may use /save, /kick, /ban and other level-gated commands.",
                     )?;
                 } else if message == "/list" {
                     as_chat(
@@ -1403,13 +1405,36 @@ fn play(
                         &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")),
                     )?;
                 } else if message.starts_with('/') {
-                    // Never authorize offline player usernames using ops.json:
-                    // these names can be trivially impersonated.
-                    let _trusted_operator = administration.is_operator(name, None)?;
-                    as_chat(
-                        s,
-                        "Permission denied or unknown command. Admin commands are console-only.",
-                    )?;
+                    // Offline names never supply a verified UUID. Refuse all
+                    // administrative mutations before attempting an audit log.
+                    if !administration.is_operator(name, verified_uuid)? {
+                        as_chat(s, "Permission denied: verified operator required.")?;
+                        continue;
+                    }
+                    if administration.audit(name, &message, "attempt").is_err() {
+                        as_chat(s, "Admin audit unavailable; operation refused.")?;
+                        continue;
+                    }
+                    let result = run_player_admin_command(
+                        &message,
+                        administration.operator_level(name, verified_uuid)?,
+                        hub,
+                        world,
+                        world_path,
+                        clock,
+                        administration,
+                        name,
+                    );
+                    let outcome = if result.is_ok() { "success" } else { "failure" };
+                    if administration.audit(name, &message, outcome).is_err() {
+                        eprintln!("CRITICAL: player administrative action could not be audited: {name}");
+                        as_chat(s, "Administrative audit write failed.")?;
+                        continue;
+                    }
+                    match result {
+                        Ok(outcome) => as_chat(s, &outcome)?,
+                        Err(error) => as_chat(s, &format!("Administrative command rejected: {error}"))?,
+                    }
                 } else if !permissions.chat {
                     as_chat(s, "Chat permission denied.")?;
                 } else {
@@ -3145,6 +3170,7 @@ fn handle(
             events: &events,
             administration: &administration,
             peer_ip,
+            verified_uuid: if online_mode { Some(&uuid) } else { None },
         },
     );
     // Save even on a clean disconnect, timeout, or access revocation.
@@ -3166,7 +3192,101 @@ fn handle(
     experience_saved?;
     result
 }
-/// Offline players are unauthenticated, so only the host console can administer.
+/// Authorization is based exclusively on the Mojang-verified session UUID.
+fn run_player_admin_command(
+    message: &str,
+    level: u8,
+    hub: &Hub,
+    world: &Mutex<World>,
+    world_path: &Path,
+    clock: &Clock,
+    administration: &Administration,
+    actor: &str,
+) -> io::Result<String> {
+    let parts: Vec<&str> = message.split_whitespace().collect();
+    let minimum_level = match parts.first().copied() {
+        Some("/time") | Some("/weather") => 2,
+        Some("/kick") | Some("/ban") | Some("/pardon")
+        | Some("/ban-ip") | Some("/pardon-ip") => 3,
+        Some("/save") | Some("/op") | Some("/deop")
+        | Some("/permission") => 4,
+        _ => return Err(bad("unknown operator command")),
+    };
+    if level < minimum_level {
+        return Err(io::Error::new(ErrorKind::PermissionDenied, "insufficient OP level"));
+    }
+    match parts.as_slice() {
+        ["/save"] => {
+            world.lock().map_err(|_| bad("world mutex poisoned"))?.save(world_path)?;
+            Ok("World saved".into())
+        }
+        ["/kick", target, reason @ ..] => {
+            let reason = if reason.is_empty() { "Kicked by operator".to_string() } else { reason.join(" ") };
+            if !hub.request_admin_kick(target, &reason)? {
+                return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+            }
+            Ok(format!("Kicked {target}"))
+        }
+        ["/ban", target, reason @ ..] => {
+            let reason = if reason.is_empty() { "Banned by operator".to_string() } else { reason.join(" ") };
+            administration.set_player_ban(target, Some(&reason), true)?;
+            let _ = hub.request_admin_kick(target, &reason);
+            Ok(format!("Banned {target}"))
+        }
+        ["/pardon", target] => {
+            administration.set_player_ban(target, None, false)?;
+            Ok(format!("Unbanned {target}"))
+        }
+        ["/ban-ip", address, reason @ ..] => {
+            let reason = if reason.is_empty() { "IP banned by operator".to_string() } else { reason.join(" ") };
+            administration.set_ip_ban(address, Some(&reason), true)?;
+            Ok(format!("IP banned {address}"))
+        }
+        ["/pardon-ip", address] => {
+            administration.set_ip_ban(address, None, false)?;
+            Ok(format!("IP unbanned {address}"))
+        }
+        ["/time", "set", ticks] => {
+            let ticks = ticks.parse::<u64>().map_err(|_| bad("invalid time"))?;
+            clock.set_day_time(ticks)?;
+            let mut body = Vec::with_capacity(16);
+            body.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
+            body.extend_from_slice(&clock.day_time().to_be_bytes());
+            hub.broadcast(Event { id: 0x03, body });
+            Ok(format!("Time set by {actor}"))
+        }
+        ["/weather", "set", state] => {
+            clock.set_weather(state)?;
+            for body in clock.weather_packets() {
+                hub.broadcast(Event { id: 0x2b, body });
+            }
+            Ok(format!("Weather set by {actor}"))
+        }
+        ["/op", target] => {
+            let uuid = hub.uuid_for_online_name(target)?.ok_or_else(|| {
+                io::Error::new(ErrorKind::NotFound, "target must be authenticated and online")
+            })?;
+            administration.set_op_verified(target, &uuid)?;
+            Ok(format!("OP granted to {target}"))
+        }
+        ["/deop", target] => {
+            administration.set_op(target, false)?;
+            Ok(format!("OP revoked from {target}"))
+        }
+        ["/permission", target, kind, state] => {
+            let enabled = match *state {
+                "allow" => true,
+                "deny" => false,
+                _ => return Err(bad("permission state must be allow or deny")),
+            };
+            administration.set_permission(target, kind, enabled)?;
+            Ok(format!("Permission updated for {target}"))
+        }
+        _ => Err(bad("invalid operator command")),
+    }
+}
+
+/// Host console can administer even when online identity services are down.
 /// Admin operations always record both intent and final outcome durably.
 fn start_clock_console(
     hub: Arc<Hub>,
@@ -3176,6 +3296,7 @@ fn start_clock_console(
     world_path: Arc<PathBuf>,
     administration: Arc<Administration>,
     whitelist_path: Arc<PathBuf>,
+    online_mode: bool,
 ) {
     thread::spawn(move || {
         let stdin = io::stdin();
@@ -3254,8 +3375,15 @@ fn start_clock_console(
                 })(),
                 ["/op", name] => {
                     (|| -> io::Result<()> {
-                        administration.set_op(name, true)?;
-                        println!("OP record saved for {name} (offline-mode clients do not gain authority)");
+                        if online_mode {
+                            let uuid = hub.uuid_for_online_name(name)?.ok_or_else(|| {
+                                io::Error::new(ErrorKind::NotFound, "player must be authenticated and online to grant OP")
+                            })?;
+                            administration.set_op_verified(name, &uuid)?;
+                        } else {
+                            administration.set_op(name, true)?;
+                        }
+                        println!("OP record saved for {name}");
                         Ok(())
                     })()
                 }
@@ -3837,6 +3965,7 @@ fn main() -> io::Result<()> {
         Arc::clone(&path),
         Arc::clone(&administration),
         Arc::clone(&allow_path),
+        online_mode,
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
