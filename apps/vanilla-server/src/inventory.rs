@@ -375,6 +375,7 @@ impl Inventory {
         self.slots[1..45]
             .iter()
             .chain(self.workbench.iter())
+            .chain(self.anvil_inputs.iter())
             .chain(std::slice::from_ref(&self.cursor))
             .flatten()
             .copied()
@@ -385,6 +386,7 @@ impl Inventory {
     pub fn clear_possessions(&mut self) {
         self.slots[1..45].fill(None);
         self.workbench.fill(None);
+        self.anvil_inputs.fill(None);
         self.cursor = None;
         self.drag = Drag::default();
     }
@@ -1464,6 +1466,13 @@ impl Inventory {
             };
             Self::encode_slot(&mut packet, item);
         }
+        packet
+    }
+
+    pub fn anvil_cost_property(&self, window: u8) -> Vec<u8> {
+        let cost = self.anvil_preview().map_or(0, |plan| plan.levels);
+        let mut packet = vec![window, 0, 0]; // Property 0: repair cost
+        packet.extend_from_slice(&(cost as i16).to_be_bytes());
         packet
     }
 
