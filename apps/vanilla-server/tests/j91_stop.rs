@@ -1,6 +1,6 @@
 //! J91 subprocess acceptance: terminate via real OS console and verify saved world.
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,7 +21,7 @@ fn stop_closes_server_and_persists_readable_world() {
         .arg(&whitelist)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("server subprocess should spawn");
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -51,9 +51,11 @@ fn stop_closes_server_and_persists_readable_world() {
         }
         thread::sleep(Duration::from_millis(50));
     };
+    let mut diagnostic = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut diagnostic).unwrap();
     assert!(
         finished.success(),
-        "server exit status after /stop: {finished}"
+        "server exit status after /stop: {finished}; stderr={diagnostic}"
     );
     let check = Command::new(exe)
         .arg("--verify-world")
