@@ -3,6 +3,7 @@
 //! This is NOT a Forge server, public-server auth, survival engine or Anvil implementation.
 mod achievements;
 mod admin;
+mod admin_state;
 mod anvil_export;
 mod anvil_import;
 mod backup_world;
@@ -79,8 +80,8 @@ use maps::Maps;
 use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
-    Event, Hub, JoinError, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS,
-    PEARL_TELEPORT_EVENT,
+    Event, Hub, JoinError, ADMIN_GAMEMODE_EVENT, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT,
+    MAX_PLAYERS, PEARL_TELEPORT_EVENT,
 };
 use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
@@ -92,7 +93,7 @@ use std::collections::BTreeSet;
 use std::io::{self, BufRead, ErrorKind};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -667,7 +668,7 @@ struct PlayerSession<'a> {
     achievements_path: &'a Path,
     save_path: &'a Path,
     inventory: &'a mut Inventory,
-    inventory_path: &'a Path,
+    inventory_path: &'a mut PathBuf,
     ground_items: &'a Mutex<GroundItems>,
     ground_path: &'a Path,
     mobs: &'a Mutex<Mobs>,
@@ -693,7 +694,7 @@ struct PlayerSession<'a> {
     hanging_path: &'a Path,
     survival: bool,
     hardcore: bool,
-    difficulty: u8,
+    difficulty: &'a AtomicU8,
     game_rules: &'a Mutex<GameRules>,
     scoreboard: &'a Mutex<Scoreboard>,
     scoreboard_path: &'a Path,
@@ -830,7 +831,7 @@ fn play(
         map_path,
         hangings,
         hanging_path,
-        survival,
+        mut survival,
         hardcore,
         difficulty,
         game_rules,
@@ -901,6 +902,58 @@ fn play(
             ));
         }
         while let Ok(event) = events.try_recv() {
+            if event.id == ADMIN_GAMEMODE_EVENT {
+                if event.body.len() != 1 || event.body[0] > 1 {
+                    return Err(bad("invalid internal gamemode"));
+                }
+                let mode = event.body[0];
+                let next_survival = mode == 0;
+                if survival == next_survival {
+                    continue;
+                }
+                // Inventory stores are mode-specific: load the destination
+                // before changing the player mode or client-visible state.
+                let next_file = if next_survival {
+                    player_path.with_extension("survival.inventory.json")
+                } else {
+                    Inventory::location(player_path)
+                };
+                let next_inventory = Inventory::load(&next_file)?;
+                inventory.save(inventory_path.as_path())?;
+                admin_state::write(&player_path.with_extension("gamemode"), mode, 1)?;
+                *inventory = next_inventory;
+                *inventory_path = next_file;
+                survival = next_survival;
+                mining = None;
+                eating = None;
+                bow_start = None;
+                sprinting = false;
+                if active_window != 0 {
+                    send(s, 0x2e, &[active_window])?;
+                }
+                active_window = 0;
+                active_chest = None;
+                active_chest_partner = None;
+                active_furnace = None;
+                active_hopper = None;
+                active_device = None;
+                active_brewer = None;
+                // Game State 3 is Protocol 5's gamemode notification.
+                let mut state = vec![3u8];
+                state.extend_from_slice(&(mode as f32).to_be_bytes());
+                send(s, 0x2b, &state)?;
+                let mut abilities = vec![if survival { 0 } else { 0x0d }];
+                abilities.extend_from_slice(&0.05f32.to_be_bytes());
+                abilities.extend_from_slice(&0.1f32.to_be_bytes());
+                send(s, 0x39, &abilities)?;
+                send(s, 0x30, &inventory.window_items())?;
+                send(s, 0x2f, &inventory.cursor_packet())?;
+                send(s, 0x09, &[inventory.selected()])?;
+                if survival {
+                    send(s, 0x1f, &experience.packet())?;
+                }
+                continue;
+            }
             if event.id == ADMIN_KICK_EVENT {
                 let reason = std::str::from_utf8(&event.body)
                     .map_err(|_| bad("invalid administrator kick event"))?;
@@ -4211,7 +4264,7 @@ fn play(
                     }
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = 0i32.to_be_bytes().to_vec();
-                    respawn.extend_from_slice(&[difficulty, 0]); // configured difficulty, survival
+                    respawn.extend_from_slice(&[difficulty.load(Ordering::Acquire), 0]); // current difficulty, survival
                     write_string("default", &mut respawn)?;
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks and entities on respawn
@@ -4358,7 +4411,7 @@ struct ServerContext {
     hanging_path: Arc<PathBuf>,
     survival: bool,
     hardcore: bool,
-    difficulty: u8,
+    difficulty: Arc<AtomicU8>,
     game_rules: Arc<Mutex<GameRules>>,
     scoreboard: Arc<Mutex<Scoreboard>>,
     scoreboard_path: Arc<PathBuf>,
@@ -4505,6 +4558,12 @@ fn handle(
     } else {
         PlayerPosition::location(&path, &name)
     };
+    let survival = admin_state::read(&player_file.with_extension("gamemode"), 1)?
+        .map_or(survival, |mode| mode == 0);
+    if hardcore && !survival {
+        login_disconnect(&mut s, "Hardcore mode cannot be Creative.")?;
+        return Ok(());
+    }
     let (mut player_state, mut player_vitals) = match PlayerPosition::load_state(&player_file) {
         Ok(state) => state,
         Err(err) => {
@@ -4528,7 +4587,7 @@ fn handle(
     }
     // Separate survival resources from old Creative inventories to prevent
     // player-selected Creative stacks becoming free Survival items.
-    let inventory_file = if survival {
+    let mut inventory_file = if survival {
         player_file.with_extension("survival.inventory.json")
     } else {
         Inventory::location(&player_file)
@@ -4590,7 +4649,7 @@ fn handle(
             vitals: player_vitals,
             survival,
             hardcore,
-            difficulty,
+            difficulty: difficulty.load(Ordering::Acquire),
         },
     )?;
     if survival {
@@ -4689,7 +4748,7 @@ fn handle(
             achievements_path: &achievements_file,
             save_path: &player_file,
             inventory: &mut inventory_state,
-            inventory_path: &inventory_file,
+            inventory_path: &mut inventory_file,
             ground_items: &ground_items,
             ground_path: &ground_path,
             mobs: &mobs,
@@ -4715,7 +4774,7 @@ fn handle(
             hanging_path: &hanging_path,
             survival,
             hardcore,
-            difficulty,
+            difficulty: &difficulty,
             game_rules: &game_rules,
             scoreboard: &scoreboard,
             scoreboard_path: &scoreboard_path,
@@ -4905,6 +4964,10 @@ struct ConsoleGameData {
     rules_path: Arc<PathBuf>,
     scoreboard: Arc<Mutex<Scoreboard>>,
     scoreboard_path: Arc<PathBuf>,
+    difficulty_state: Arc<AtomicU8>,
+    difficulty_path: Arc<PathBuf>,
+    mobs: Arc<Mutex<Mobs>>,
+    hardcore: bool,
 }
 fn start_clock_console(
     hub: Arc<Hub>,
@@ -4920,6 +4983,10 @@ fn start_clock_console(
         rules_path,
         scoreboard,
         scoreboard_path,
+        difficulty_state,
+        difficulty_path,
+        mobs,
+        hardcore,
     } = game_data;
     let ConsoleAccess {
         administration,
@@ -4941,6 +5008,38 @@ fn start_clock_console(
             }
             let args: Vec<_> = line.split_whitespace().collect();
             let result: io::Result<()> = match args.as_slice() {
+                ["/gamemode", requested, target] => (|| -> io::Result<()> {
+                    if hardcore {
+                        return Err(bad("gamemode changes are forbidden in hardcore"));
+                    }
+                    let mode = admin_state::parse_gamemode(requested)?;
+                    if !hub.request_admin_gamemode(target, mode)? {
+                        return Err(io::Error::new(
+                            ErrorKind::NotFound,
+                            "target player not online",
+                        ));
+                    }
+                    println!("Gamemode change queued for {target}: {mode}");
+                    Ok(())
+                })(),
+                ["/difficulty", "query"] => {
+                    println!("Difficulty: {}", difficulty_state.load(Ordering::Acquire));
+                    Ok(())
+                }
+                ["/difficulty", requested] => (|| -> io::Result<()> {
+                    let next = admin_state::parse_difficulty(requested)?;
+                    if hardcore && next != 3 {
+                        return Err(bad("hardcore difficulty must remain hard (3)"));
+                    }
+                    // Do not publish the change until its restart override is
+                    // durable and the mob state is ready to observe it.
+                    let mut state = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    admin_state::write(&difficulty_path, next, 3)?;
+                    state.set_difficulty(next);
+                    difficulty_state.store(next, Ordering::Release);
+                    println!("Difficulty set to {next} (new joins/respawns see updated setting)");
+                    Ok(())
+                })(),
                 ["/gamerule", key] => (|| -> io::Result<()> {
                     let rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
                     let value = rules.get(key).ok_or_else(|| bad("unsupported game rule"))?;
@@ -5700,6 +5799,12 @@ fn main() -> io::Result<()> {
     let clock_path = Arc::new(world_path.with_extension("clock"));
     let restored_clock = Clock::load_state(&clock_path)?;
     let (clock, _clock_thread) = Clock::start_from(restored_clock);
+    let difficulty_path = Arc::new(world_path.with_extension("difficulty"));
+    let difficulty = admin_state::read(&difficulty_path, 3)?.unwrap_or(difficulty);
+    if hardcore && difficulty != 3 {
+        return Err(bad("hardcore difficulty override must remain 3"));
+    }
+    let shared_difficulty = Arc::new(AtomicU8::new(difficulty));
     let rules_path = Arc::new(GameRules::location(&world_path));
     let world_rules = Arc::new(Mutex::new(GameRules::load(&rules_path)?));
     let scoreboard_path = Arc::new(Scoreboard::location(&world_path));
@@ -5761,6 +5866,10 @@ fn main() -> io::Result<()> {
             rules_path: Arc::clone(&rules_path),
             scoreboard: Arc::clone(&shared_scoreboard),
             scoreboard_path: Arc::clone(&scoreboard_path),
+            difficulty_state: Arc::clone(&shared_difficulty),
+            difficulty_path: Arc::clone(&difficulty_path),
+            mobs: Arc::clone(&mobs),
+            hardcore,
         },
         Arc::clone(&world),
         Arc::clone(&path),
@@ -6339,6 +6448,7 @@ fn main() -> io::Result<()> {
         let map_file = Arc::clone(&map_path);
         let hanging_state = Arc::clone(&hangings);
         let hanging_file = Arc::clone(&hanging_path);
+        let peer_difficulty = Arc::clone(&shared_difficulty);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -6375,7 +6485,7 @@ fn main() -> io::Result<()> {
                     hanging_path: hanging_file,
                     survival,
                     hardcore,
-                    difficulty,
+                    difficulty: peer_difficulty,
                     game_rules: rules,
                     scoreboard: board,
                     scoreboard_path: board_path,

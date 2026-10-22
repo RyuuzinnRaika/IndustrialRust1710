@@ -63,6 +63,7 @@ impl NativeServer {
             command.arg("--survival");
         }
         let process = command
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -293,6 +294,78 @@ fn send_fragments(s: &mut TcpStream, packet: &[u8], pieces: &[usize]) {
         thread::sleep(Duration::from_millis(120));
     }
     s.write_all(&packet[index..]).unwrap();
+}
+
+#[test]
+fn console_gamemode_changes_live_protocol5_and_keeps_inventories_isolated() {
+    let mut server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/gamemode creative RustTester\n")
+        .unwrap();
+    let mode = until_packet(&mut client, 0x2b, |data| data == [3, 0x3f, 0x80, 0, 0]);
+    assert_eq!(mode, [3, 0x3f, 0x80, 0, 0]);
+    until_packet(&mut client, 0x30, |body| body.starts_with(&[0, 0, 45]));
+
+    // Creative mode may mint a hotbar item, but the separate Survival
+    // inventory must remain empty even after switching back in one session.
+    let mut creative_stack = 36i16.to_be_bytes().to_vec();
+    creative_stack.extend_from_slice(&1i16.to_be_bytes());
+    creative_stack.push(10);
+    creative_stack.extend_from_slice(&0i16.to_be_bytes());
+    creative_stack.extend_from_slice(&(-1i16).to_be_bytes());
+    client.write_all(&frame(16, &creative_stack)).unwrap();
+    until_packet(&mut client, 0x2f, |body| body.starts_with(&[0, 0, 36]));
+
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/gamemode survival RustTester\n")
+        .unwrap();
+    until_packet(&mut client, 0x2b, |data| data == [3, 0, 0, 0, 0]);
+    let restored = until_packet(&mut client, 0x30, |body| body.starts_with(&[0, 0, 45]));
+    assert_eq!(&restored[3 + 36 * 2..3 + 37 * 2], &(-1i16).to_be_bytes());
+    assert_eq!(
+        fs::read(server.directory.join("players/rusttester.gamemode")).unwrap(),
+        b"0"
+    );
+    let creative_path = server.directory.join("players/rusttester.inventory.json");
+    let saved: Value = serde_json::from_slice(&fs::read(creative_path).unwrap()).unwrap();
+    assert_eq!(saved["slots"][36]["id"], 1);
+    assert_eq!(saved["slots"][36]["count"], 10);
+
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/difficulty hard\n")
+        .unwrap();
+    let difficulty_path = server.directory.join("flat.difficulty");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !difficulty_path.is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "difficulty command was not persisted"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(fs::read(difficulty_path).unwrap(), b"3");
+
+    let mut second = server.connect("Positioner");
+    assert_eq!(receive(&mut second).0, 2);
+    let (id, joined) = receive(&mut second);
+    assert_eq!(id, 1);
+    assert_eq!(joined[6], 3, "new Join Game must contain Hard difficulty");
+    drop(second);
+    drop(client);
+    server.wait_idle();
 }
 
 #[test]

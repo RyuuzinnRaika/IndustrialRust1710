@@ -600,6 +600,13 @@ fn damage_held(held: Option<Stack>) -> i16 {
     }
 }
 impl Mobs {
+    /// Called only after the console has durably recorded the new difficulty.
+    /// The next world tick despawns hostile mobs on Peaceful, while damage and
+    /// natural spawning immediately consult the updated setting.
+    pub fn set_difficulty(&mut self, difficulty: u8) {
+        self.difficulty = Some(difficulty.min(3));
+    }
+
     /// Crash-resilient, bounded entity snapshot scoped to this exact world.
     /// An absent snapshot is a fresh world; a malformed one aborts startup.
     pub fn load_or_new(
