@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod devices;
 mod ecology;
 mod lighting;
+mod special;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
@@ -53,6 +54,7 @@ pub struct World {
     fluid_phase: u64,
     // Set from Clock; the weather simulation has one authoritative owner.
     raining: bool,
+    day_time: i64,
 }
 
 /// A persisted world mutation can create a temporary ground-item event.
@@ -99,7 +101,14 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 44 | 126 // half slabs
             | 53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164 // stairs
             | 149 | 150 // comparator
-            | 70 | 72 // pressure plates
+            | 131 | 132 // tripwire and hook
+            | 151 // daylight detector
+            | 118 // cauldron
+            | 138 // beacon
+            | 120 // end portal frame
+            | 46 // TNT
+            | 78 | 79 // snow layer and ice
+            | 70 | 72 | 147 | 148 // pressure plates
             | 77 | 143 // buttons
             | 29 | 33 // pistons
             | 64 | 71 // doors
@@ -154,6 +163,9 @@ pub fn is_placeable(block_id: u16) -> bool {
 impl World {
     pub fn set_raining(&mut self, raining: bool) {
         self.raining = raining;
+    }
+    pub fn set_day_time(&mut self, value: i64) {
+        self.day_time = value.rem_euclid(24_000);
     }
     /// Tracks which chunk columns contain changes, without allocating a full world.
     pub fn drain_drops(&mut self) -> Vec<WorldDrop> {
@@ -442,7 +454,7 @@ impl World {
             }
             if matches!(
                 id,
-                6 | 18 | 51 | 59 | 60 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
+                2 | 3 | 6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
             ) {
                 self.pending_ecology.insert(pos);
             } else {
@@ -461,6 +473,11 @@ impl World {
                     | 59
                     | 66
                     | 70
+                    | 131
+                    | 132
+                    | 147
+                    | 148
+                    | 151
                     | 72
                     | 75
                     | 76
@@ -476,7 +493,7 @@ impl World {
             ) {
                 self.pending_support.insert(pos);
             }
-            if matches!(id, 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157) {
+            if matches!(id, 27 | 29 | 33 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157) {
                 self.pending_devices.insert(pos);
             } else {
                 self.pending_devices.remove(&pos);
@@ -519,6 +536,7 @@ impl World {
         let supported: Vec<Position> = self.pending_support.iter().take(budget).copied().collect();
         let mut changes: BTreeMap<Position, u16> = self.ecology_changes(budget);
         changes.extend(self.device_changes(budget));
+        changes.extend(self.special_changes(budget));
 
         for &(x, y, z) in &wet {
             let y = i32::from(y);
@@ -990,7 +1008,7 @@ impl World {
             }
             if matches!(
                 block >> 4,
-                6 | 18 | 51 | 59 | 60 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
+                2 | 3 | 6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
             ) {
                 world.pending_ecology.insert((x, y, z));
             }
@@ -1001,6 +1019,11 @@ impl World {
                     | 59
                     | 66
                     | 70
+                    | 131
+                    | 132
+                    | 147
+                    | 148
+                    | 151
                     | 72
                     | 75
                     | 76
@@ -1016,7 +1039,7 @@ impl World {
             ) {
                 world.pending_support.insert((x, y, z));
             }
-            if matches!(block >> 4, 27 | 29 | 33 | 93 | 94 | 149 | 150 | 157) {
+            if matches!(block >> 4, 27 | 29 | 33 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157) {
                 world.pending_devices.insert((x, y, z));
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
