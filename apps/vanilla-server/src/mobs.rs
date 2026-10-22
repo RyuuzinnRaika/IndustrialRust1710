@@ -717,8 +717,7 @@ impl Mobs {
             .values()
             .filter(|mob| {
                 mob.kind == Kind::Zombie
-                    && (mob.bite_tick == 0
-                        || now.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
+                    && (mob.bite_tick == 0 || now.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             })
             .map(|mob| (mob.id, mob.position))
             .collect();
@@ -1522,7 +1521,10 @@ impl Mobs {
                 let target = match (nearest, prey) {
                     (Some(player), Some(villager))
                         if distance_3d(mob.position, villager)
-                            < distance_3d(mob.position, player) => villager,
+                            < distance_3d(mob.position, player) =>
+                    {
+                        villager
+                    }
                     (None, Some(villager)) => villager,
                     (Some(player), _) => player,
                     _ => continue,
@@ -2595,7 +2597,10 @@ mod tests {
             let villager_id = mobs.next_id;
             mobs.insert(
                 Kind::Villager,
-                PlayerPosition { x: at.x + 1.0, ..at },
+                PlayerPosition {
+                    x: at.x + 1.0,
+                    ..at
+                },
                 false,
             );
             mobs.entities.get_mut(&villager_id).unwrap().profession = 2;
@@ -2605,14 +2610,22 @@ mod tests {
             }
             assert!(!mobs.entities.contains_key(&villager_id));
             assert!(all_events.iter().any(|event| event.id == 0x13));
-            let infected: Vec<_> = mobs.entities.values().filter(|mob| mob.zombie_villager).collect();
+            let infected: Vec<_> = mobs
+                .entities
+                .values()
+                .filter(|mob| mob.zombie_villager)
+                .collect();
             assert_eq!(infected.len(), usize::from(convert));
             assert!(mobs.entities.contains_key(&zombie_id));
             if convert {
                 let infected = infected[0];
                 assert!(infected.id != villager_id && infected.id != zombie_id);
                 assert_eq!(infected.profession, 2);
-                assert!(infected.spawn().body.windows(2).any(|entry| entry == [13, 1]));
+                assert!(infected
+                    .spawn()
+                    .body
+                    .windows(2)
+                    .any(|entry| entry == [13, 1]));
             }
         }
         assert!(!zombie_infects_villager(1, 0));
