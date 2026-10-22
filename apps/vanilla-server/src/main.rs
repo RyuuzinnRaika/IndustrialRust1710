@@ -2255,7 +2255,8 @@ fn play(
                         let mut candidate = inventory.clone();
                         if candidate.consume_held() {
                             candidate.save(inventory_path)?;
-                            let spawned = carts.place(&railway, position, now_tick)
+                            let spawned = carts
+                                .place(&railway, position, now_tick)
                                 .ok_or_else(|| bad("minecart vanished after preflight"))?;
                             *inventory = candidate;
                             drop(carts);
