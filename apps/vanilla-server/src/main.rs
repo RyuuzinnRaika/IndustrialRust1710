@@ -6007,7 +6007,7 @@ fn main() -> io::Result<()> {
         let mut last = furnace_clock.ticks();
         let mut last_clock_snapshot = last;
         let mut last_weather = furnace_clock.weather();
-        loop {
+        while !tick_shutdown.load(Ordering::Acquire) {
             let now = furnace_clock.ticks();
             if now > last {
                 let worker_started = Instant::now();
