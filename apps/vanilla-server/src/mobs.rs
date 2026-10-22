@@ -1664,12 +1664,8 @@ impl Mobs {
                 }
                 match dimension {
                     crate::dimensions::Dimension::Overworld => {
-                        if (is_slime_cave_location(
-                            world.natural_seed().unwrap_or(0),
-                            x,
-                            y,
-                            z,
-                        ) && (seed >> 24).is_multiple_of(16))
+                        if (is_slime_cave_location(world.natural_seed().unwrap_or(0), x, y, z)
+                            && (seed >> 24).is_multiple_of(16))
                             || (biome == 6
                                 && (50..=70).contains(&y)
                                 && !sunlight(now)
@@ -2422,9 +2418,7 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
 /// Chunk arithmetic is **signed 32-bit** (Java int), then widened to Java long
 /// with wrapping signed 64-bit addition. The RNG consumes nextInt(10).
 fn is_slime_chunk(world_seed: u64, chunk_x: i32, chunk_z: i32) -> bool {
-    let x_square = chunk_x
-        .wrapping_mul(chunk_x)
-        .wrapping_mul(0x4c1906) as i64;
+    let x_square = chunk_x.wrapping_mul(chunk_x).wrapping_mul(0x4c1906) as i64;
     let x_linear = chunk_x.wrapping_mul(0x5ac0db) as i64;
     let z_square = (chunk_z.wrapping_mul(chunk_z) as i64).wrapping_mul(0x4307a7);
     let z_linear = chunk_z.wrapping_mul(0x5f24f) as i64;
@@ -2923,11 +2917,7 @@ mod tests {
         let attacked = mobs.next_id;
         mobs.insert(Kind::ZombiePigman, at, false);
         let nearby = mobs.next_id;
-        mobs.insert(
-            Kind::ZombiePigman,
-            PlayerPosition { x: 31.5, ..at },
-            false,
-        );
+        mobs.insert(Kind::ZombiePigman, PlayerPosition { x: 31.5, ..at }, false);
         let above = mobs.next_id;
         mobs.insert(
             Kind::ZombiePigman,
@@ -2938,11 +2928,7 @@ mod tests {
             false,
         );
         let distant = mobs.next_id;
-        mobs.insert(
-            Kind::ZombiePigman,
-            PlayerPosition { x: 33.5, ..at },
-            false,
-        );
+        mobs.insert(Kind::ZombiePigman, PlayerPosition { x: 33.5, ..at }, false);
         let other_kind = mobs.next_id;
         mobs.insert(Kind::Cow, at, false);
 
@@ -2979,7 +2965,10 @@ mod tests {
             );
         }
         // A block coordinate of -1 belongs to chunk -1, not chunk 0.
-        assert_eq!(is_slime_cave_location(1, -1, 20, -1), is_slime_chunk(1, -1, -1));
+        assert_eq!(
+            is_slime_cave_location(1, -1, 20, -1),
+            is_slime_chunk(1, -1, -1)
+        );
         assert!(is_slime_cave_location(1, 12 * 16, 39, -3 * 16));
         assert!(!is_slime_cave_location(1, 12 * 16, 40, -3 * 16));
         assert!(!is_slime_cave_location(1, 12 * 16 + 16, 39, -3 * 16));
