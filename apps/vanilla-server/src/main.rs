@@ -3031,7 +3031,11 @@ fn handle(
         let uuid = offline_uuid(&name);
         (name, uuid)
     };
-    let player_file = PlayerPosition::location(&path, &name);
+    let player_file = if online_mode {
+        PlayerPosition::authenticated_location(&path, &uuid)?
+    } else {
+        PlayerPosition::location(&path, &name)
+    };
     let (mut player_state, mut player_vitals) = match PlayerPosition::load_state(&player_file) {
         Ok(state) => state,
         Err(err) => {
