@@ -3,7 +3,7 @@
 //! Backups are staged alongside their final path; failed copies are removed.
 use crate::session_lock::WorldSessionLock;
 use std::fs::{self, File};
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read};
 use std::path::Path;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,6 +21,48 @@ fn sync_directory(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()?;
     #[cfg(not(unix))]
     let _ = path;
+    Ok(())
+}
+
+/// Verify the bytes, not just the lengths, of each offline backup entry.
+fn verify_file_copy(source: &Path, target: &Path, expected_len: u64) -> io::Result<()> {
+    let source_metadata = fs::symlink_metadata(source)?;
+    let target_metadata = fs::symlink_metadata(target)?;
+    if !source_metadata.file_type().is_file()
+        || !target_metadata.file_type().is_file()
+        || source_metadata.len() != expected_len
+        || target_metadata.len() != expected_len
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "backup source or destination changed size or type",
+        ));
+    }
+    let mut source_file = File::open(source)?;
+    let mut target_file = File::open(target)?;
+    let mut left = [0u8; 64 * 1024];
+    let mut right = [0u8; 64 * 1024];
+    loop {
+        let read = source_file.read(&mut left)?;
+        if read == 0 {
+            break;
+        }
+        target_file.read_exact(&mut right[..read])?;
+        if left[..read] != right[..read] {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "backup copy differs from source contents",
+            ));
+        }
+    }
+    if source_file.metadata()?.len() != expected_len
+        || target_file.metadata()?.len() != expected_len
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "backup source or destination changed during verification",
+        ));
+    }
     Ok(())
 }
 
@@ -46,6 +88,7 @@ fn copy_directory(src: &Path, dst: &Path, stats: &mut BackupStats) -> io::Result
                     "file changed while copying the world",
                 ));
             }
+            verify_file_copy(&source, &target, length)?;
             File::open(&target)?.sync_all()?;
             stats.files += 1;
             stats.bytes = stats
@@ -153,6 +196,30 @@ mod tests {
         assert_eq!(fs::read(world.join("flat.irw")).unwrap(), b"IRW1");
         drop(session);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_content_validation_rejects_same_length_mutation() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-backup-integrity-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let source = root.join("original");
+        let target = root.join("snapshot");
+        let bytes = vec![0x55u8; 131_073];
+        fs::write(&source, &bytes).unwrap();
+        fs::copy(&source, &target).unwrap();
+        verify_file_copy(&source, &target, bytes.len() as u64).unwrap();
+        // Equal size does not mean equal bytes.
+        let mut modified = bytes.clone();
+        modified[65_537] = 0x57;
+        fs::write(&source, modified).unwrap();
+        assert_eq!(fs::metadata(&source).unwrap().len(), bytes.len() as u64);
+        assert!(verify_file_copy(&source, &target, bytes.len() as u64).is_err());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
