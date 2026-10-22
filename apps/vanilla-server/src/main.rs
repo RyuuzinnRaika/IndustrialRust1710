@@ -25,6 +25,7 @@ mod legacy_inventory_nbt;
 mod legacy_nbt;
 mod legacy_region;
 mod legacy_world_inspect;
+mod maps;
 mod level_dat;
 mod mobs;
 mod multiplayer;
@@ -51,6 +52,7 @@ use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use ground_items::GroundItems;
 use hoppers::{Hoppers, Position as HopperPosition};
 use inventory::{Inventory, Stack};
+use maps::Maps;
 use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
     PROTOCOL_VERSION,
@@ -603,6 +605,8 @@ struct PlayerSession<'a> {
     brewer_path: &'a Path,
     decorations: &'a Mutex<Decorations>,
     decoration_path: &'a Path,
+    maps: &'a Mutex<Maps>,
+    map_path: &'a Path,
     survival: bool,
     difficulty: u8,
     hub: &'a Hub,
@@ -639,6 +643,8 @@ fn play(
         brewer_path,
         decorations,
         decoration_path,
+        maps,
+        map_path,
         survival,
         difficulty,
         hub,
@@ -687,6 +693,7 @@ fn play(
     let mut last_hazards_tick = clock.ticks();
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
+    let mut last_map_tick = clock.ticks();
     loop {
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
@@ -852,6 +859,18 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
+        if now_tick > last_map_tick && now_tick % 4 == 0 {
+            last_map_tick = now_tick;
+            if let Some(Stack { id: 358, damage, .. }) = inventory.held() {
+                let terrain = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                let packet = maps.lock().map_err(|_| bad("map lock poisoned"))?
+                    .refresh(map_path, &terrain, damage, player.x.floor() as i32,
+                        player.z.floor() as i32, yaw, now_tick / 4)?;
+                if let Some(packet) = packet {
+                    send(s, 0x34, &packet)?;
+                }
+            }
+        }
         // XP orbs belong to the world and are collected by proximity, not by client inventory claims.
         if survival && vitals.health > 0.0 {
             let collected = mobs
@@ -1879,7 +1898,28 @@ fn play(
 
                 // Protocol 5 Use Item: air target is (-1,255,-1), face -1.
                 // Only an authenticated, selected inventory stack can be used.
-                if survival && x == -1 && y == 255 && z == -1 && face == -1 {
+                if x == -1 && y == 255 && z == -1 && face == -1 {
+                    if inventory.can_place(held) && inventory.held().is_some_and(|s| s.id == 395) {
+                        let mut map_storage = maps.lock().map_err(|_| bad("map lock poisoned"))?;
+                        let current_x = player.x.floor() as i32;
+                        let current_z = player.z.floor() as i32;
+                        if let Some((next_maps, new_id)) = map_storage.stage_new(current_x, current_z)? {
+                            let mut remaining = inventory.clone();
+                            let _ = remaining.consume_held();
+                            if remaining.receive_stack(Stack { id: 358, count: 1, damage: new_id }).is_some() {
+                                journal::commit(
+                                    &world_path.with_extension("pending-txn.json"),
+                                    &[(inventory_path, remaining.encoded()?), (map_path, next_maps.encoded()?)],
+                                )?;
+                                *inventory = remaining;
+                                *map_storage = next_maps;
+                                send(s, 0x30, &inventory.window_items())?;
+                            }
+                        }
+                    }
+                    if !survival {
+                        continue;
+                    }
                     if let Some(stack) = inventory.held() {
                         if inventory.can_place(held) {
                             if stack.id == 261 {
@@ -3112,6 +3152,8 @@ struct ServerContext {
     brewer_path: Arc<PathBuf>,
     decorations: Arc<Mutex<Decorations>>,
     decoration_path: Arc<PathBuf>,
+    maps: Arc<Mutex<Maps>>,
+    map_path: Arc<PathBuf>,
     survival: bool,
     difficulty: u8,
 }
@@ -3135,6 +3177,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         brewer_path,
         decorations,
         decoration_path,
+        maps,
+        map_path,
         survival,
         difficulty,
     } = context;
@@ -3323,6 +3367,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             brewer_path: &brewer_path,
             decorations: &decorations,
             decoration_path: &decoration_path,
+            maps: &maps,
+            map_path: &map_path,
             survival,
             difficulty,
             hub: &hub,
@@ -3862,6 +3908,8 @@ fn main() -> io::Result<()> {
         initial.save_new(&world_path)?;
         initial
     };
+    let map_path = Arc::new(Maps::location(&world_path));
+    let maps = Arc::new(Mutex::new(Maps::load(&map_path)?));
     let decoration_path = Arc::new(Decorations::location(&world_path));
     let decorations = Arc::new(Mutex::new(Decorations::load(&decoration_path)?));
     let clock_path = Arc::new(world_path.with_extension("clock"));
@@ -4162,6 +4210,8 @@ fn main() -> io::Result<()> {
         let brewer_file = Arc::clone(&brewer_path);
         let decoration_state = Arc::clone(&decorations);
         let decoration_file = Arc::clone(&decoration_path);
+        let map_state = Arc::clone(&maps);
+        let map_file = Arc::clone(&map_path);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -4185,6 +4235,8 @@ fn main() -> io::Result<()> {
                     brewer_path: brewer_file,
                     decorations: decoration_state,
                     decoration_path: decoration_file,
+                    maps: map_state,
+                    map_path: map_file,
                     survival,
                     difficulty,
                 },
