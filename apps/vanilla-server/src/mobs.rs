@@ -2114,7 +2114,10 @@ mod tests {
     use super::*;
     #[test]
     fn mounted_pig_requires_saddle_and_horse_tames_on_server() {
-        let mut mobs = Mobs { next_id: BASE_ID, ..Mobs::default() };
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
         let at = PlayerPosition::default();
         let pig = mobs.next_id;
         mobs.insert(Kind::Pig, at, false);
@@ -2134,7 +2137,10 @@ mod tests {
 
     #[test]
     fn leash_cannot_attach_to_hostile_or_duplicate_animal() {
-        let mut mobs = Mobs { next_id: BASE_ID, ..Mobs::default() };
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
         let at = PlayerPosition::default();
         let cow = mobs.next_id;
         mobs.insert(Kind::Cow, at, false);
