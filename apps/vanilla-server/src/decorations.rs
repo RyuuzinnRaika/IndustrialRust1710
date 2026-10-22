@@ -212,6 +212,16 @@ impl Decorations {
         }
         Ok(())
     }
+    pub fn pot_packets_in(&self, chunks: &std::collections::BTreeSet<(i32, i32)>) -> io::Result<Vec<Vec<u8>>> {
+        let mut packets = Vec::new();
+        for (key, stack) in &self.pots {
+            let pos = parse_key(key)?;
+            if chunks.contains(&(pos.0.div_euclid(16), pos.2.div_euclid(16))) {
+                packets.push(pot_packet(pos, Some(*stack))?);
+            }
+        }
+        Ok(packets)
+    }
     pub fn sign_packets_in(&self, chunks: &std::collections::BTreeSet<(i32, i32)>) -> io::Result<Vec<Vec<u8>>> {
         let mut packets = Vec::new();
         for (key, lines) in &self.signs {
@@ -267,6 +277,41 @@ pub fn instrument(below: u16) -> u8 {
         1 | 4 | 14 | 15 | 16 | 48 | 49 => 4, // stone/bass drum
         _ => 0, // harp/piano
     }
+}
+/// S35 Update Tile Entity: action 5 = FlowerPot; compressed NBT Short+GZip.
+pub fn pot_packet((x, y, z): Position, stack: Option<Stack>) -> io::Result<Vec<u8>> {
+    use flate2::{write::GzEncoder, Compression};
+    #[derive(Serialize)]
+    struct PotNbt<'a> {
+        id: &'a str,
+        x: i32,
+        y: i32,
+        z: i32,
+        #[serde(rename = "Item")]
+        item: i32,
+        #[serde(rename = "Data")]
+        data: i32,
+    }
+    if !world::in_bounds(x, y, z) || stack.is_some_and(|item| !pot_compatible(item)) {
+        return Err(invalid("invalid pot tile entity"));
+    }
+    let (item, data) = stack.map_or((0, 0), |s| (i32::from(s.id), i32::from(s.damage)));
+    let nbt = fastnbt::to_bytes(&PotNbt { id: "FlowerPot", x, y, z, item, data })
+        .map_err(|_| invalid("invalid pot NBT"))?;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&nbt)?;
+    let gzip = encoder.finish()?;
+    if gzip.len() > i16::MAX as usize {
+        return Err(invalid("oversized pot NBT"));
+    }
+    let mut body = Vec::new();
+    body.extend_from_slice(&x.to_be_bytes());
+    body.extend_from_slice(&(y as i16).to_be_bytes());
+    body.extend_from_slice(&z.to_be_bytes());
+    body.push(5);
+    body.extend_from_slice(&(gzip.len() as i16).to_be_bytes());
+    body.extend_from_slice(&gzip);
+    Ok(body)
 }
 pub fn disc_event((x, y, z): Position, disc: Option<i16>) -> Vec<u8> {
     let mut body = Vec::with_capacity(18);
