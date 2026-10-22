@@ -46,7 +46,7 @@ impl World {
                     _ => 0,
                 };
                 solid(neighbor)
-            },
+            }
             59 | 141 | 142 | 104 | 105 => below == 60,
             115 => below == 88, // Nether wart grows on soul sand.
             81 => {
