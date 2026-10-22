@@ -188,16 +188,24 @@ impl Mob {
             body.push((2 << 5) | 16); // profession integer: farmer (0)
             body.extend_from_slice(&i32::from(self.profession).to_be_bytes());
         }
-        if matches!(self.kind, Kind::EnderDragon | Kind::Wither) {
-            body.push((3 << 5) | 6); // boss health as DataWatcher float
-            body.extend_from_slice(&(f32::from(self.health)).to_be_bytes());
-        }
         if self.kind == Kind::Sheep {
             body.push(16); // sheep colour + sheared bit (byte metadata)
             body.push(if self.sheared { 0x10 } else { 0 });
         }
+        // All living mobs expose health as a float at DataWatcher index 6,
+        // not only bosses. New joiners must observe the current shared HP.
+        body.push((3 << 5) | 6);
+        body.extend_from_slice(&f32::from(self.health).to_be_bytes());
         body.push(0x7f);
         Event { id: 0x0f, body }
+    }
+    /// Protocol 5 Entity Metadata (0x1C): server-authoritative current HP.
+    fn health_metadata(self) -> Event {
+        let mut body = self.id.to_be_bytes().to_vec();
+        body.push((3 << 5) | 6); // DataWatcher index 6, float
+        body.extend_from_slice(&f32::from(self.health.max(0)).to_be_bytes());
+        body.push(0x7f);
+        Event { id: 0x1c, body }
     }
     fn status(self, value: u8) -> Event {
         let mut body = self.id.to_be_bytes().to_vec();
@@ -794,6 +802,9 @@ impl Mobs {
                 if let Some(mob) = self.entities.get_mut(&id) {
                     mob.health -= i16::from(raw);
                     events.push(mob.status(if mob.health <= 0 { 3 } else { 2 }));
+                    if mob.health > 0 {
+                        events.push(mob.health_metadata());
+                    }
                     if mob.health <= 0 {
                         dead.push(id);
                     }
@@ -830,7 +841,7 @@ impl Mobs {
             events: if killed {
                 vec![mob.status(3), multiplayer::destroy(id)]
             } else {
-                vec![mob.status(2)]
+                vec![mob.status(2), mob.health_metadata()]
             },
             drop: if killed { mob.death_drop() } else { None },
             experience: if killed {
@@ -1243,6 +1254,7 @@ impl Mobs {
                         continue;
                     }
                     events.push(mob.status(2));
+                    events.push(mob.health_metadata());
                 }
                 if mob.kind == Kind::Chicken && !mob.baby && now >= mob.next_egg_tick {
                     mob.next_egg_tick = now + 6000 + hash(now ^ mob.id as u64) % 6000;
@@ -1476,6 +1488,9 @@ impl Mobs {
                     if let Some(enemy) = self.entities.get_mut(&victim) {
                         enemy.health -= 7;
                         events.push(enemy.status(if enemy.health <= 0 { 3 } else { 2 }));
+                        if enemy.health > 0 {
+                            events.push(enemy.health_metadata());
+                        }
                         if enemy.health <= 0 {
                             if let Some(drop) = enemy.death_drop() {
                                 self.pending_drops.push(drop);
@@ -1621,6 +1636,7 @@ impl Mobs {
                     }
                 } else {
                     events.push(mob.status(2));
+                    events.push(mob.health_metadata());
                 }
             }
         }
@@ -1772,6 +1788,25 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn living_health_metadata_is_shared_on_spawn_and_after_damage() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition::default();
+        let spawn = mobs.insert(Kind::Cow, at, false);
+        let id = mobs.next_id - 1;
+        assert_eq!(spawn.id, 0x0f);
+        assert!(spawn.body.ends_with(&[0x66, 0x41, 0x20, 0, 0, 0x7f]));
+        let attack = mobs.player_attack(id, at, None, 20).unwrap();
+        assert_eq!(attack.events.len(), 2);
+        let health_packet = &attack.events[1];
+        assert_eq!(health_packet.id, 0x1c);
+        assert_eq!(&health_packet.body[..4], &id.to_be_bytes());
+        assert_eq!(&health_packet.body[4..], &[0x66, 0x41, 0x10, 0, 0, 0x7f]);
+        // Rejoining clients obtain the same current health value.
+        let snapshot = mobs.spawn_events().next().unwrap();
+        assert!(snapshot.body.ends_with(&[0x66, 0x41, 0x10, 0, 0, 0x7f]));
+    }
+
     #[test]
     fn repeated_sessions_do_not_rewind_or_double_advance_world_ticks() {
         let world = World::new();
@@ -2148,7 +2183,7 @@ mod tests {
         let packet = zombie.spawn();
         assert_eq!(packet.id, 0x0f);
         assert_eq!(packet.body[3], 54);
-        assert!(packet.body.ends_with(&[0, 0, 0x7f]));
+        assert!(packet.body.ends_with(&[0x66, 0x41, 0xa0, 0, 0, 0x7f]));
         let position = zombie.position;
         for tick in [100, 111] {
             assert!(mobs
