@@ -96,9 +96,9 @@ fn rails_connected(
     from_ends.iter().any(|&(fx, fy, fz)| {
         fx == to.0
             && fz == to.2
-            && to_ends.iter().any(|&(tx, ty, tz)| {
-                tx == from.0 && tz == from.2 && fy == ty
-            })
+            && to_ends
+                .iter()
+                .any(|&(tx, ty, tz)| tx == from.0 && tz == from.2 && fy == ty)
     })
 }
 
