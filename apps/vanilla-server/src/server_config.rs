@@ -22,6 +22,11 @@ pub struct ServerProperties {
     pub online_mode: bool,
     pub difficulty: u8,
     pub level_name: String,
+    /// Seed for the opt-in IRW3 biome generator, not FLAT terrain.
+    // Also compiled by the standalone vanilla-check-config binary, which does not
+    // currently consume the seed. The full server CLI uses this field.
+    #[allow(dead_code)]
+    pub level_seed: Option<u64>,
 }
 
 fn boolean(map: &BTreeMap<String, String>, key: &str, default: bool) -> io::Result<bool> {
@@ -178,19 +183,38 @@ impl ServerProperties {
                 ));
             }
         }
-        if values
+        let level_seed = values
             .get("level-seed")
-            .is_some_and(|value| !value.is_empty())
-        {
-            return Err(invalid(
-                "level-seed is not yet connected to world generation",
-            ));
-        }
-        if values
+            .filter(|value| !value.is_empty())
+            .map(|seed| {
+                // Java Edition interprets numeric longs directly and strings via Java's UTF-16 hashCode.
+                seed.parse::<i64>()
+                    .map(|number| number as u64)
+                    .unwrap_or_else(|_| {
+                        let hash = seed.encode_utf16().fold(0i32, |hash, code_unit| {
+                            hash.wrapping_mul(31).wrapping_add(i32::from(code_unit))
+                        });
+                        (i64::from(hash)) as u64
+                    })
+            });
+        let level_type = values
             .get("level-type")
-            .is_some_and(|value| value != "FLAT")
-        {
-            return Err(invalid("level-type must be FLAT with legacy IRW storage"));
+            .map(String::as_str)
+            .unwrap_or("FLAT");
+        match (level_type, level_seed) {
+            ("FLAT", None) => {}
+            ("DEFAULT", Some(_)) if survival => {}
+            ("DEFAULT", Some(_)) => {
+                return Err(invalid(
+                    "DEFAULT seeded generation requires survival gamemode",
+                ))
+            }
+            ("FLAT", Some(_)) => {
+                return Err(invalid(
+                    "level-seed is not applied to FLAT; choose level-type=DEFAULT",
+                ))
+            }
+            _ => return Err(invalid("unsupported level-type/level-seed combination")),
         }
         let accepted = [
             "server-port",
@@ -227,6 +251,7 @@ impl ServerProperties {
             online_mode,
             difficulty,
             level_name: level_name.to_string(),
+            level_seed,
         })
     }
 }
@@ -297,6 +322,19 @@ gamemode=1
             assert!(ServerProperties::parse(&bad).is_err(), "{bad}");
         }
         assert!(ServerProperties::parse("level-name=world").is_err());
+    }
+
+    #[test]
+    fn seed_uses_java_long_and_string_hash_without_changing_flat_worlds() {
+        let base = SAFE
+            .replace("level-type=FLAT", "level-type=DEFAULT")
+            .replace("gamemode=1", "gamemode=0");
+        let signed = ServerProperties::parse(&format!("{base}level-seed=-123\n")).unwrap();
+        assert_eq!(signed.level_seed, Some((-123i64) as u64));
+        let hashed = ServerProperties::parse(&format!("{base}level-seed=Hello\n")).unwrap();
+        assert_eq!(hashed.level_seed, Some(69609650));
+        assert!(ServerProperties::parse(&format!("{SAFE}level-seed=123\n")).is_err());
+        assert!(ServerProperties::parse(&format!("{base}level-seed=1\ngamemode=0\n")).is_err());
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod admin;
 mod admin_state;
 mod anvil_export;
 mod anvil_import;
+mod backup_rotation;
 mod backup_world;
 mod books;
 mod brewing;
@@ -36,6 +37,7 @@ mod legacy_region_rewrite;
 mod legacy_world_inspect;
 mod level_dat;
 mod maps;
+mod migration_staging;
 mod minecarts;
 mod mobs;
 mod multiplayer;
@@ -54,6 +56,7 @@ mod telemetry;
 mod terrain;
 mod throwables;
 mod vehicles;
+mod verify_world;
 mod vitals;
 mod whitelist;
 mod world;
@@ -5304,11 +5307,66 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    // Read-only diagnostics never acquire session.lock, create a world or bind TCP.
+    if raw_args.iter().any(|arg| arg == "--verify-world") {
+        if raw_args.len() != 2 || raw_args[0] != "--verify-world" {
+            return Err(bad("usage: --verify-world WORLD_DIR_OR_IRW_FILE"));
+        }
+        let summary = verify_world::inspect(Path::new(&raw_args[1]))?;
+        println!(
+            "World verified (read-only): {} ({} files)",
+            summary.description, summary.files
+        );
+        return Ok(());
+    }
+    if raw_args.iter().any(|arg| arg == "--prepare-anvil-copy") {
+        if raw_args.len() != 3 || raw_args[0] != "--prepare-anvil-copy" {
+            return Err(bad("usage: --prepare-anvil-copy SOURCE_DIR NEW_DEST_DIR"));
+        }
+        let stats = migration_staging::prepare_anvil_copy(
+            Path::new(&raw_args[1]),
+            Path::new(&raw_args[2]),
+        )?;
+        println!(
+            "Verified working copy: {} files ({} bytes); no conversion performed",
+            stats.files, stats.bytes
+        );
+        return Ok(());
+    }
+    if raw_args.iter().any(|arg| arg == "--check-config") {
+        if !(raw_args.len() == 1 && raw_args[0] == "--check-config"
+            || raw_args.len() == 2 && raw_args[0] == "--check-config")
+        {
+            return Err(bad("usage: --check-config [server.properties]"));
+        }
+        let config_file = raw_args
+            .get(1)
+            .map(String::as_str)
+            .unwrap_or("server.properties");
+        let props = server_config::ServerProperties::load_optional(Path::new(config_file))?
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "server.properties not found"))?;
+        server_config::verify_legacy_storage(&props.world_path)?;
+        if !props.bind.ip().is_loopback() && !props.online_mode {
+            return Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "offline-mode on a LAN/public address needs manual security review",
+            ));
+        }
+        println!(
+            "Configuration accepted: bind={}, world={}, difficulty={}, seed={:?} (read-only)",
+            props.bind,
+            props.world_path.display(),
+            props.difficulty,
+            props.level_seed
+        );
+        return Ok(());
+    }
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
     let properties = if std::env::args().any(|arg| {
         arg == "--help"
             || arg == "--backup-world"
+            || arg == "--backup-rotate"
             || arg == "--inspect-player-data"
             || arg == "--inspect-level-dat"
             || arg == "--inspect-anvil-region"
@@ -5335,6 +5393,7 @@ fn main() -> io::Result<()> {
     let mut anvil_export_path: Option<PathBuf> = None;
     let mut anvil_import_path: Option<PathBuf> = None;
     let mut backup_destination: Option<PathBuf> = None;
+    let mut backup_rotation: Option<(PathBuf, usize)> = None;
     let mut explicit_world = false;
     let mut whitelist_path = PathBuf::from("whitelist.json");
     let mut insecure_offline_lan = false;
@@ -5343,14 +5402,14 @@ fn main() -> io::Result<()> {
     let mut online_mode = properties.as_ref().is_some_and(|config| config.online_mode);
     let mut difficulty = properties.as_ref().map_or(2, |config| config.difficulty);
     let mut requested_seed: Option<u64> = None;
-    let mut biome_seed: Option<u64> = None;
+    let mut biome_seed: Option<u64> = properties.as_ref().and_then(|config| config.level_seed);
     let mut expanded_seed: Option<u64> = None;
     let mut expanded_dimension = dimensions::Dimension::Overworld;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--online-mode] [--survival] [--recover-level-dat STOPPED_WORLD_DIR] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--online-mode] [--survival] [--recover-level-dat STOPPED_WORLD_DIR] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--backup-rotate BACKUP_ROOT KEEP] [--verify-world DIR_OR_IRW] [--check-config [FILE]] [--prepare-anvil-copy SOURCE NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Offline usernames can be impersonated; --online-mode validates Mojang accounts and requires encrypted Protocol 5 login."
                 );
@@ -5485,6 +5544,18 @@ fn main() -> io::Result<()> {
                         .ok_or_else(|| bad("missing --inspect-player-data FILE"))?,
                 ));
             }
+            "--backup-rotate" => {
+                let root = PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| bad("missing --backup-rotate directory"))?,
+                );
+                let keep = args
+                    .next()
+                    .ok_or_else(|| bad("missing --backup-rotate retention"))?
+                    .parse::<usize>()
+                    .map_err(|_| bad("invalid backup retention"))?;
+                backup_rotation = Some((root, keep));
+            }
             "--backup-world" => {
                 backup_destination = Some(PathBuf::from(
                     args.next()
@@ -5493,6 +5564,16 @@ fn main() -> io::Result<()> {
             }
             _ => return Err(bad("unknown command-line argument")),
         }
+    }
+    // Rotation must be a standalone offline command with an explicit world path.
+    if backup_rotation.is_some()
+        && !(raw_args.len() == 5
+            && raw_args.iter().any(|arg| arg == "--world")
+            && raw_args.iter().any(|arg| arg == "--backup-rotate"))
+    {
+        return Err(bad(
+            "--backup-rotate requires only --world FILE --backup-rotate ROOT KEEP",
+        ));
     }
     if hardcore && (!survival || difficulty != 3) {
         return Err(bad("hardcore requires survival mode and difficulty 3"));
@@ -5618,6 +5699,36 @@ fn main() -> io::Result<()> {
         }
         let (inventory, ender) = legacy_inventory_nbt::inspect_player(&path)?;
         println!("Legacy 1.7.10 playerdata verified (read-only): {inventory} inventory stacks, {ender} ender stacks");
+        return Ok(());
+    }
+    if let Some((root, keep)) = backup_rotation {
+        if !explicit_world
+            || backup_destination.is_some()
+            || anvil_import_path.is_some()
+            || anvil_export_path.is_some()
+            || requested_seed.is_some()
+            || biome_seed.is_some()
+            || expanded_seed.is_some()
+        {
+            return Err(bad(
+                "--backup-rotate requires only --world with no other file operations",
+            ));
+        }
+        let parent = world_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| bad("world file needs a parent directory"))?;
+        if !world_path.is_file() && !parent.join("level.dat").is_file() {
+            return Err(bad("offline backup source missing"));
+        }
+        let mut lock = session_lock::WorldSessionLock::acquire(parent)?;
+        let (destination, stats) = backup_rotation::rotate(&world_path, &root, keep, &mut lock)?;
+        println!(
+            "Rotated backup: {} files ({} bytes) at {}",
+            stats.files,
+            stats.bytes,
+            destination.display()
+        );
         return Ok(());
     }
     if let Some(destination) = backup_destination {
