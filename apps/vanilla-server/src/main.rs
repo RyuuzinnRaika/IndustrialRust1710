@@ -9,8 +9,8 @@ mod chests;
 mod chunk_pipeline;
 mod clock;
 mod crafting;
-mod dimensions;
 mod decorations;
+mod dimensions;
 #[allow(dead_code)] // B13 staged storage: Protocol 5 activation integration pending.
 mod dispensers;
 mod experience;
@@ -44,8 +44,8 @@ mod worldgen;
 
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
-use decorations::Decorations;
 use clock::Clock;
+use decorations::Decorations;
 use experience::Experience;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use ground_items::GroundItems;
@@ -377,8 +377,13 @@ fn send_visible_signs(
     chunks: &BTreeSet<(i32, i32)>,
 ) -> io::Result<()> {
     let (signs, pots) = {
-        let storage = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?;
-        (storage.sign_packets_in(chunks)?, storage.pot_packets_in(chunks)?)
+        let storage = decorations
+            .lock()
+            .map_err(|_| bad("decorations lock poisoned"))?;
+        (
+            storage.sign_packets_in(chunks)?,
+            storage.pot_packets_in(chunks)?,
+        )
     };
     for body in signs {
         send(s, 0x33, &body)?;
@@ -1250,18 +1255,25 @@ fn play(
                 // Reject unsolicited edits; only the placing player gets S36.
                 let pos = (input.i32()?, input.i16()? as i32, input.i32()?);
                 let lines = [
-                    input.string(15)?, input.string(15)?,
-                    input.string(15)?, input.string(15)?,
+                    input.string(15)?,
+                    input.string(15)?,
+                    input.string(15)?,
+                    input.string(15)?,
                 ];
                 input.finish()?;
                 if pending_sign.take() == Some(pos)
                     && world::in_bounds(pos.0, pos.1, pos.2)
                     && near(location, pos.0, pos.1, pos.2)
                 {
-                    let sign_block = world.lock().map_err(|_| bad("world mutex poisoned"))?
-                        .get(pos.0, pos.1, pos.2) >> 4;
+                    let sign_block = world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(pos.0, pos.1, pos.2)
+                        >> 4;
                     if matches!(sign_block, 63 | 68) {
-                        decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                        decorations
+                            .lock()
+                            .map_err(|_| bad("decorations lock poisoned"))?
                             .set_sign(decoration_path, pos, lines.clone())?;
                         hub.broadcast(Event {
                             id: 0x33,
@@ -1626,14 +1638,23 @@ fn play(
                         }
                         0 => {
                             let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                            if w.get(x, y, z) >> 4 == 25 && w.get(x, y + 1, z) == 0
-                                && world::in_bounds(x, y, z) && near(location, x, y, z)
+                            if w.get(x, y, z) >> 4 == 25
+                                && w.get(x, y + 1, z) == 0
+                                && world::in_bounds(x, y, z)
+                                && near(location, x, y, z)
                             {
                                 let pos = (x, y, z);
-                                let pitch = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                                let pitch = decorations
+                                    .lock()
+                                    .map_err(|_| bad("decorations lock poisoned"))?
                                     .note(pos);
-                                hub.broadcast(Event { id: 0x24,
-                                    body: decorations::note_action(pos, decorations::instrument(w.get(x, y - 1, z) >> 4), pitch),
+                                hub.broadcast(Event {
+                                    id: 0x24,
+                                    body: decorations::note_action(
+                                        pos,
+                                        decorations::instrument(w.get(x, y - 1, z) >> 4),
+                                        pitch,
+                                    ),
                                 });
                             }
                             mining = if world::in_bounds(x, y, z) && near(location, x, y, z) {
@@ -1855,19 +1876,22 @@ fn play(
                     continue;
                 }
                 // World-owned decoration interactions precede ordinary item placement.
-                if (0..=5).contains(&face) && world::in_bounds(x, y, z)
-                    && near(location, x, y, z)
-                {
+                if (0..=5).contains(&face) && world::in_bounds(x, y, z) && near(location, x, y, z) {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let block = w.get(x, y, z);
                     let pos = (x, y, z);
                     match block >> 4 {
                         25 => {
-                            let pitch = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                            let pitch = decorations
+                                .lock()
+                                .map_err(|_| bad("decorations lock poisoned"))?
                                 .next_note(decoration_path, pos)?;
                             if w.get(x, y + 1, z) == 0 {
                                 let instrument = decorations::instrument(w.get(x, y - 1, z) >> 4);
-                                hub.broadcast(Event { id: 0x24, body: decorations::note_action(pos, instrument, pitch) });
+                                hub.broadcast(Event {
+                                    id: 0x24,
+                                    body: decorations::note_action(pos, instrument, pitch),
+                                });
                             }
                             continue;
                         }
@@ -1878,7 +1902,8 @@ fn play(
                                     let next = if bites == 5 { 0 } else { (92 << 4) | bites + 1 };
                                     if w.update_and_save(world_path, x, y, z, next)? {
                                         vitals.food = (vitals.food + 2).min(20);
-                                        vitals.saturation = (vitals.saturation + 0.4).min(vitals.food as f32);
+                                        vitals.saturation =
+                                            (vitals.saturation + 0.4).min(vitals.food as f32);
                                         player.save_state(player_path, *vitals)?;
                                         send(s, 0x06, &health_packet(*vitals))?;
                                         hub.broadcast(block_change_event(&w, x, y, z));
@@ -1888,10 +1913,20 @@ fn play(
                             continue;
                         }
                         84 => {
-                            let mut stored = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?;
+                            let mut stored = decorations
+                                .lock()
+                                .map_err(|_| bad("decorations lock poisoned"))?;
                             if let Some(disc) = stored.record(pos) {
                                 let mut candidate = inventory.clone();
-                                if !survival || candidate.receive_stack(Stack { id: disc, count: 1, damage: 0 }).is_some() {
+                                if !survival
+                                    || candidate
+                                        .receive_stack(Stack {
+                                            id: disc,
+                                            count: 1,
+                                            damage: 0,
+                                        })
+                                        .is_some()
+                                {
                                     // Debit the jukebox first, then return the item (loss on crash, not duplication).
                                     stored.set_record(decoration_path, pos, None)?;
                                     w.update_and_save(world_path, x, y, z, 84 << 4)?;
@@ -1901,10 +1936,15 @@ fn play(
                                         send(s, 0x30, &inventory.window_items())?;
                                     }
                                     hub.broadcast(block_change_event(&w, x, y, z));
-                                    hub.broadcast(Event { id: 0x28, body: decorations::disc_event(pos, None) });
+                                    hub.broadcast(Event {
+                                        id: 0x28,
+                                        body: decorations::disc_event(pos, None),
+                                    });
                                 }
                             } else if inventory.can_place(held)
-                                && inventory.held().is_some_and(|item| (2256..=2267).contains(&item.id))
+                                && inventory
+                                    .held()
+                                    .is_some_and(|item| (2256..=2267).contains(&item.id))
                             {
                                 let disc = inventory.held().unwrap().id;
                                 let mut candidate = inventory.clone();
@@ -1917,13 +1957,18 @@ fn play(
                                     stored.set_record(decoration_path, pos, Some(disc))?;
                                     w.update_and_save(world_path, x, y, z, (84 << 4) | 1)?;
                                     hub.broadcast(block_change_event(&w, x, y, z));
-                                    hub.broadcast(Event { id: 0x28, body: decorations::disc_event(pos, Some(disc)) });
+                                    hub.broadcast(Event {
+                                        id: 0x28,
+                                        body: decorations::disc_event(pos, Some(disc)),
+                                    });
                                 }
                             }
                             continue;
                         }
                         140 => {
-                            let mut stored = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?;
+                            let mut stored = decorations
+                                .lock()
+                                .map_err(|_| bad("decorations lock poisoned"))?;
                             if let Some(stack) = stored.pot(pos) {
                                 let mut candidate = inventory.clone();
                                 if !survival || candidate.receive_stack(stack).is_some() {
@@ -1933,7 +1978,10 @@ fn play(
                                         *inventory = candidate;
                                         send(s, 0x30, &inventory.window_items())?;
                                     }
-                                    hub.broadcast(Event { id: 0x35, body: decorations::pot_packet(pos, None)? });
+                                    hub.broadcast(Event {
+                                        id: 0x35,
+                                        body: decorations::pot_packet(pos, None)?,
+                                    });
                                 }
                             } else if inventory.can_place(held)
                                 && inventory.held().is_some_and(decorations::pot_compatible)
@@ -1948,7 +1996,10 @@ fn play(
                                         send(s, 0x30, &inventory.window_items())?;
                                     }
                                     stored.set_pot(decoration_path, pos, Some(plant))?;
-                                    hub.broadcast(Event { id: 0x35, body: decorations::pot_packet(pos, Some(plant))? });
+                                    hub.broadcast(Event {
+                                        id: 0x35,
+                                        body: decorations::pot_packet(pos, Some(plant))?,
+                                    });
                                 }
                             }
                             continue;
@@ -2334,7 +2385,15 @@ fn play(
                                 362 => 105,                      // melon seeds
                                 372 => 115,                      // Nether wart
                                 351 if stack.damage == 3 => 127, // cocoa beans
-                                323 => if face == 1 { 63 } else if (2..=5).contains(&face) { 68 } else { 0 }, // standing/wall sign
+                                323 => {
+                                    if face == 1 {
+                                        63
+                                    } else if (2..=5).contains(&face) {
+                                        68
+                                    } else {
+                                        0
+                                    }
+                                } // standing/wall sign
                                 354 => 92,                       // cake
                                 390 => 140,                      // flower pot
                                 324 => 64,                       // wooden door
@@ -2477,7 +2536,9 @@ fn play(
                                 let pos = (nx, ny, nz);
                                 // A block change must precede S36 sign editor.
                                 pending_sign = Some(pos);
-                                decorations.lock().map_err(|_| bad("decorations lock poisoned"))?
+                                decorations
+                                    .lock()
+                                    .map_err(|_| bad("decorations lock poisoned"))?
                                     .set_sign(decoration_path, pos, Default::default())?;
                                 send(s, 0x36, &decorations::sign_editor_packet(pos))?;
                             }
@@ -3172,7 +3233,11 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         send(&mut s, 0x1f, &experience_state.packet())?;
     }
     // Chunks do not embed tile entities: replay persisted sign text after joining.
-    send_visible_signs(&mut s, &decorations, &view_chunks(chunk_center(&player_state)))?;
+    send_visible_signs(
+        &mut s,
+        &decorations,
+        &view_chunks(chunk_center(&player_state)),
+    )?;
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
     send(&mut s, self_list.id, &self_list.body)?;
