@@ -1516,7 +1516,10 @@ fn native_protocol5_eight_player_admission_full_and_reconnect() {
     drop(last);
     let deadline = Instant::now() + Duration::from_secs(8);
     while server.status()["players"]["online"] != 7 {
-        assert!(Instant::now() < deadline, "disconnected player stayed in hub");
+        assert!(
+            Instant::now() < deadline,
+            "disconnected player stayed in hub"
+        );
         thread::sleep(Duration::from_millis(40));
     }
     let (rejoined, new_id, position) = server.join("Load7");
