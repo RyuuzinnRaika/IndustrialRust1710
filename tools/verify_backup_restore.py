@@ -55,8 +55,10 @@ def verify_restore_point(server: Path, backup: Path, timeout: int = 120) -> int:
     marker = backup / ".industrial1710-backup"
     if not stat.S_ISREG(marker.lstat().st_mode) or marker.read_bytes() != MARKER:
         raise ValueError("backup ownership marker is missing or invalid")
-    if not ((backup / "flat.irw").is_file() or (backup / "level.dat").is_file()):
-        raise ValueError("no supported IRW or Anvil world in backup")
+    anvil = (backup / "level.dat").is_file()
+    irw_files = sorted(backup.glob("*.irw"))
+    if (anvil and irw_files) or (not anvil and len(irw_files) != 1):
+        raise ValueError("expected one IRW save or one Anvil level.dat, not mixed/ambiguous data")
     before = snapshot_hashes(backup)
     with tempfile.TemporaryDirectory(prefix="industrial1710-restore-drill-") as scratch:
         copy = Path(scratch) / "world"
@@ -65,7 +67,8 @@ def verify_restore_point(server: Path, backup: Path, timeout: int = 120) -> int:
         after = snapshot_hashes(copy)
         if before != after or snapshot_hashes(backup) != before:
             raise ValueError("backup changed during restore drill or files differ")
-        subprocess.run([str(server), "--verify-world", str(copy)],
+        target = copy if anvil else copy / irw_files[0].name
+        subprocess.run([str(server), "--verify-world", str(target)],
                        check=True, timeout=timeout)
         # Detect source mutation even if it occurred while the native verifier ran.
         if snapshot_hashes(backup) != before:
