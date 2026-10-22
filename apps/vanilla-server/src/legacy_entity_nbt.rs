@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn accepts_legacy_entity_and_preserves_unknown_fields() {
         let value = entity("Zombie", vec![-0.5, 65.0, 32.5]);
-        validate_entities(&[value.clone()]).unwrap();
+        validate_entities(std::slice::from_ref(&value)).unwrap();
         let bytes = fastnbt::to_bytes(&value).unwrap();
         let again: Value = fastnbt::from_bytes(&bytes).unwrap();
         assert!(matches!(again, Value::Compound(ref map)
