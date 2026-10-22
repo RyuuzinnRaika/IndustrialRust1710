@@ -162,6 +162,9 @@ struct Mob {
     profession: u8,
     size: u8,
     anger_until: u64,
+    // Added with a default so version-1 Mob JSON snapshots remain readable.
+    #[serde(default)]
+    zombie_villager: bool,
 }
 impl Mob {
     fn spawn(self) -> Event {
@@ -179,6 +182,11 @@ impl Mob {
         if self.baby {
             body.push((2 << 5) | 12); // metadata index 12, type 2 (int)
             body.extend_from_slice(&(-24000i32).to_be_bytes());
+        }
+        if self.kind == Kind::Zombie && self.zombie_villager {
+            // Protocol 5 / Java 1.7.10: zombie DataWatcher byte 13
+            // distinguishes infected villagers from ordinary zombies.
+            body.extend_from_slice(&[13, 1]);
         }
         if self.kind.splitting() {
             body.push(16); // DataWatcher byte index 16: slime/magma cube size
@@ -676,10 +684,98 @@ impl Mobs {
             profession: (hash(self.last_tick ^ id as u64) % 5) as u8,
             size,
             anger_until: 0,
+            zombie_villager: false,
         };
         let event = mob.spawn();
         self.entities.insert(id, mob);
         event
+    }
+    /// Set zombie-villager metadata before sending the authoritative spawn.
+    /// The former villager's age and profession survive for future curing.
+    fn insert_zombie_villager(
+        &mut self,
+        position: PlayerPosition,
+        baby: bool,
+        profession: u8,
+    ) -> Event {
+        let id = self.next_id;
+        let _ = self.insert(Kind::Zombie, position, baby);
+        let mob = self.entities.get_mut(&id).expect("newly inserted zombie");
+        mob.zombie_villager = true;
+        mob.profession = profession;
+        mob.spawn()
+    }
+
+    /// Resolve zombie-on-villager melee on the server. The existing mob tick
+    /// calls this once; each zombie's bite cooldown prevents duplicated hits.
+    fn zombies_attack_villagers(
+        &mut self,
+        now: u64,
+        world: &World,
+        players: &[PlayerPosition],
+        events: &mut Vec<Event>,
+    ) {
+        if self.difficulty == Some(0) {
+            return;
+        }
+        let attackers: Vec<_> = self
+            .entities
+            .values()
+            .filter(|mob| {
+                mob.kind == Kind::Zombie
+                    && mob.health > 0
+                    && (mob.bite_tick == 0 || now.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
+            })
+            .map(|mob| (mob.id, mob.position))
+            .collect();
+        for (zombie_id, origin) in attackers {
+            let victim_id = self
+                .entities
+                .values()
+                .filter(|mob| {
+                    mob.kind == Kind::Villager
+                        && mob.nearby(origin, 1.6)
+                        // A player closer than the villager takes target
+                        // priority; the zombie must not burn its bite cooldown
+                        // by attacking a collocated villager instead.
+                        && !players.iter().any(|player| {
+                            distance_3d(origin, *player)
+                                <= distance_3d(origin, mob.position)
+                        })
+                        && can_see(world, origin, mob.position)
+                })
+                .min_by(|a, b| {
+                    distance_3d(origin, a.position).total_cmp(&distance_3d(origin, b.position))
+                })
+                .map(|mob| mob.id);
+            let Some(victim_id) = victim_id else { continue };
+            if let Some(zombie) = self.entities.get_mut(&zombie_id) {
+                zombie.bite_tick = now;
+            }
+            let Some(villager) = self.entities.get_mut(&victim_id) else {
+                continue;
+            };
+            villager.health -= 3;
+            events.push(villager.status(if villager.health <= 0 { 3 } else { 2 }));
+            if villager.health > 0 {
+                events.push(villager.health_metadata());
+                continue;
+            }
+            // Old entity ID must be destroyed before any replacement is sent
+            // to multiple clients; only the shared next_id allocates new IDs.
+            let victim = self.entities.remove(&victim_id).expect("living victim");
+            events.push(multiplayer::destroy(victim_id));
+            let roll = hash(now ^ zombie_id as u64 ^ victim_id as u64);
+            if zombie_infects_villager(self.difficulty.unwrap_or(2), roll)
+                && self.entities.len() < 128
+            {
+                events.push(self.insert_zombie_villager(
+                    victim.position,
+                    victim.baby,
+                    victim.profession,
+                ));
+            }
+        }
     }
     /// Construct a server-owned boss. External summoning rules must validate
     /// soul sand/skulls or End progression before calling this method.
@@ -1274,7 +1370,11 @@ impl Mobs {
                 continue;
             }
             let baby = kind == Kind::Zombie && (seed >> 21).is_multiple_of(20);
-            events.push(self.insert_sized(kind, spawn_position, baby, size));
+            if kind == Kind::Zombie && (seed >> 26).is_multiple_of(20) {
+                events.push(self.insert_zombie_villager(spawn_position, baby, 0));
+            } else {
+                events.push(self.insert_sized(kind, spawn_position, baby, size));
+            }
             break; // Bound per-cycle packets and CPU.
         }
     }
@@ -1337,6 +1437,12 @@ impl Mobs {
         for _ in 0..steps {
             let mut shots = Vec::new();
             let mut dead = Vec::new();
+            let villagers: Vec<_> = self
+                .entities
+                .values()
+                .filter(|mob| mob.kind == Kind::Villager)
+                .map(|mob| mob.position)
+                .collect();
             for mob in self.entities.values_mut() {
                 if mob.baby {
                     mob.age_ticks = mob.age_ticks.saturating_add(1);
@@ -1411,8 +1517,31 @@ impl Mobs {
                     .min_by(|a, b| {
                         distance(*a, mob.position).total_cmp(&distance(*b, mob.position))
                     });
-                let Some(target) = nearest else {
-                    continue;
+                let prey = (mob.kind == Kind::Zombie)
+                    .then(|| {
+                        villagers
+                            .iter()
+                            .copied()
+                            .filter(|at| {
+                                distance_3d(mob.position, *at) <= 16.0
+                                    && can_see(world, mob.position, *at)
+                            })
+                            .min_by(|a, b| {
+                                distance_3d(mob.position, *a)
+                                    .total_cmp(&distance_3d(mob.position, *b))
+                            })
+                    })
+                    .flatten();
+                let target = match (nearest, prey) {
+                    (Some(player), Some(villager))
+                        if distance_3d(mob.position, villager)
+                            < distance_3d(mob.position, player) =>
+                    {
+                        villager
+                    }
+                    (None, Some(villager)) => villager,
+                    (Some(player), _) => player,
+                    _ => continue,
                 };
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider)
                     && sunlight(now)
@@ -1597,6 +1726,7 @@ impl Mobs {
                     }
                 }
             }
+            self.zombies_attack_villagers(now, world, players, &mut events);
             // Iron golems target nearby hostile mobs, never players or villagers.
             // Resolve after the iteration to avoid mutable aliasing and keep
             // each hit authoritative for all connected clients.
@@ -1924,6 +2054,14 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
         .iter()
         .map(|other| distance_3d(p, *other))
         .fold(f64::INFINITY, f64::min)
+}
+/// Vanilla 1.7.10 villager infection chance by world difficulty.
+fn zombie_infects_villager(difficulty: u8, roll: u64) -> bool {
+    match difficulty {
+        3 => true,
+        2 => roll & 1 == 0,
+        _ => false,
+    }
 }
 /// Respect both the closest *online player* and Overworld world-spawn
 /// exclusion zones. This guard runs for every natural spawn candidate.
@@ -2454,6 +2592,82 @@ mod tests {
         assert!(Mobs::new_with_difficulty(&world, true, 3)
             .entities
             .is_empty());
+    }
+    #[test]
+    fn zombie_attacks_player_before_equally_close_villager() {
+        let at = PlayerPosition::default();
+        let world = World::new();
+        let mut mobs = Mobs {
+            difficulty: Some(2),
+            ..Mobs::default()
+        };
+        mobs.insert(Kind::Zombie, at, false);
+        mobs.insert(Kind::Villager, at, false);
+        let mut packets = Vec::new();
+        mobs.zombies_attack_villagers(20, &world, &[at], &mut packets);
+        assert!(packets.is_empty());
+        assert_eq!(mobs.entities.get(&1).unwrap().health, 20);
+        assert_eq!(mobs.hurt_player(900, at, 21), 3);
+    }
+    #[test]
+    fn zombie_villager_metadata_and_infection_follow_difficulty() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let world = World::new();
+        for (difficulty, convert) in [(1, false), (3, true)] {
+            let mut mobs = Mobs {
+                difficulty: Some(difficulty),
+                ..Mobs::default()
+            };
+            let zombie_id = mobs.next_id;
+            mobs.insert(Kind::Zombie, at, false);
+            let villager_id = mobs.next_id;
+            mobs.insert(
+                Kind::Villager,
+                PlayerPosition {
+                    x: at.x + 1.0,
+                    ..at
+                },
+                false,
+            );
+            mobs.entities.get_mut(&villager_id).unwrap().profession = 2;
+            let mut all_events = Vec::new();
+            for tick in (20..=140).step_by(20) {
+                mobs.zombies_attack_villagers(tick, &world, &[], &mut all_events);
+            }
+            assert!(!mobs.entities.contains_key(&villager_id));
+            assert!(all_events.iter().any(|event| event.id == 0x13));
+            let infected: Vec<_> = mobs
+                .entities
+                .values()
+                .filter(|mob| mob.zombie_villager)
+                .collect();
+            assert_eq!(infected.len(), usize::from(convert));
+            assert!(mobs.entities.contains_key(&zombie_id));
+            if convert {
+                let infected = infected[0];
+                assert!(infected.id != villager_id && infected.id != zombie_id);
+                assert_eq!(infected.profession, 2);
+                assert!(infected
+                    .spawn()
+                    .body
+                    .windows(2)
+                    .any(|entry| entry == [13, 1]));
+            }
+        }
+        let mut previous = Mobs::default();
+        previous.insert(Kind::Zombie, at, false);
+        let mut legacy = serde_json::to_value(previous.entities.get(&0).unwrap()).unwrap();
+        let _ = legacy.as_object_mut().unwrap().remove("zombie_villager");
+        let old: Mob = serde_json::from_value(legacy).unwrap();
+        assert!(!old.zombie_villager);
+        assert!(!zombie_infects_villager(1, 0));
+        assert!(zombie_infects_villager(2, 0));
+        assert!(!zombie_infects_villager(2, 1));
+        assert!(zombie_infects_villager(3, 1));
     }
     #[test]
     fn natural_mobs_spawn_in_protocol5() {
