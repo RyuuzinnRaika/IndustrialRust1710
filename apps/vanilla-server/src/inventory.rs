@@ -2591,8 +2591,8 @@ mod tests {
     }
     #[test]
     fn anvil_insufficient_experience_is_fail_closed() {
-        let mut inv = Inventory::default();
-        inv.anvil_inputs = [
+        let inv = Inventory {
+            anvil_inputs: [
             Some(Stack {
                 id: 257,
                 count: 1,
@@ -2603,7 +2603,9 @@ mod tests {
                 count: 3,
                 damage: 0,
             }),
-        ];
+            ],
+            ..Inventory::default()
+        };
         let previous = inv.clone();
         let mut xp = crate::experience::Experience::default();
         assert!(!inv.anvil_click_window(2, 0, 0, &mut xp, true));
