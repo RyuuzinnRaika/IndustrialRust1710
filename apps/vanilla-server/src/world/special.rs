@@ -414,9 +414,7 @@ impl World {
             if other >> 4 == 132 && other & 8 == 0 {
                 continue;
             }
-            return distance >= 2
-                && other >> 4 == 131
-                && other & 3 == ((state & 3) + 2) % 4;
+            return distance >= 2 && other >> 4 == 131 && other & 3 == ((state & 3) + 2) % 4;
         }
         false
     }
