@@ -65,6 +65,19 @@ impl Default for Achievements {
     }
 }
 impl Achievements {
+    /// Server-confirmed pickup triggers for vanilla 1.7.10 achievements.
+    /// Never award on a client-supplied item snapshot or failed inventory transfer.
+    pub fn collected_item_trigger(item_id: i16) -> Option<&'static str> {
+        match item_id {
+            17 | 162 => Some("mineWood"), // all six log variants
+            265 => Some("acquireIron"),
+            264 => Some("diamonds"),
+            334 => Some("killCow"), // leather
+            369 => Some("blazeRod"),
+            _ => None,
+        }
+    }
+
     pub fn load(path: &Path) -> io::Result<Self> {
         let md = match fs::symlink_metadata(path) {
             Ok(md) => md,
@@ -197,6 +210,17 @@ mod tests {
         assert!(stats.award("openInventory").unwrap().is_some());
         assert!(stats.award("mineWood").unwrap().is_some());
         assert!(stats.award("notAVanillaAchievement").unwrap().is_none());
+        for (item, achievement) in [
+            (17, "mineWood"),
+            (162, "mineWood"),
+            (265, "acquireIron"),
+            (264, "diamonds"),
+            (334, "killCow"),
+            (369, "blazeRod"),
+        ] {
+            assert_eq!(Achievements::collected_item_trigger(item), Some(achievement));
+        }
+        assert_eq!(Achievements::collected_item_trigger(0), None);
     }
 
     #[test]
