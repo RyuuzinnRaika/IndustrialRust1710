@@ -421,6 +421,29 @@ impl Inventory {
         }
         true
     }
+    /// Convert one held empty bucket (325) to milk (335) only when the
+    /// entire resulting inventory fits. In particular, a stacked bucket
+    /// must never lose one unit when there is no free destination slot.
+    pub fn fill_milk_bucket(&mut self) -> bool {
+        if !self.held().is_some_and(|item| item.id == 325) {
+            return false;
+        }
+        let mut next = self.clone();
+        let count = next.held().map_or(0, |item| item.count);
+        let milk = Stack {
+            id: 335,
+            count: 1,
+            damage: 0,
+        };
+        if count == 1 {
+            let slot = next.held_slot() as usize;
+            next.slots[slot] = Some(milk);
+        } else if !next.consume_held() || next.receive_stack(milk).is_none() {
+            return false;
+        }
+        *self = next;
+        true
+    }
     /// Damage one server-held, unenchanted tool on a committed block break.
     /// Returns true only if a real tool was damaged or broke. Hand mining
     /// and ordinary blocks/items do not acquire arbitrary damage metadata.
@@ -2291,6 +2314,54 @@ mod tests {
             })
             .is_none());
     }
+    #[test]
+    fn milking_cow_is_atomic_with_stacked_buckets_and_full_inventory() {
+        let mut inventory = Inventory::default();
+        inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 325,
+                    count: 1,
+                    damage: 0,
+                }),
+            )
+            .unwrap();
+        assert!(inventory.fill_milk_bucket());
+        assert_eq!(inventory.held().unwrap().id, 335);
+        assert!(!inventory.fill_milk_bucket());
+
+        for slot in 9..45 {
+            inventory
+                .creative_set(
+                    slot,
+                    Some(Stack {
+                        id: 1,
+                        count: 64,
+                        damage: 0,
+                    }),
+                )
+                .unwrap();
+        }
+        inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 325,
+                    count: 2,
+                    damage: 0,
+                }),
+            )
+            .unwrap();
+        let full = inventory.clone();
+        assert!(!inventory.fill_milk_bucket());
+        assert_eq!(inventory, full);
+        inventory.creative_set(9, None).unwrap();
+        assert!(inventory.fill_milk_bucket());
+        assert_eq!(inventory.held().unwrap().count, 1);
+        assert_eq!(inventory.slots[9].unwrap().id, 335);
+    }
+
     #[test]
     fn saves_and_fails_closed_on_corruption() {
         let dir = std::env::temp_dir().join(format!("ir1710-inventory-{}", std::process::id()));
