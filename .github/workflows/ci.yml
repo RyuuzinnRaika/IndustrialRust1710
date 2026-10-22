@@ -27,3 +27,5 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build optimized Rust server binaries
         run: cargo build --release -p vanilla-server -p legacy-status-server
+      - name: J92 offline maintenance and restore verification tests
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
