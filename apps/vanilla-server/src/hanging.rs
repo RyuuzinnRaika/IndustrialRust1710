@@ -117,8 +117,13 @@ impl Hanging {
             Kind::Frame { .. } => (1, 1),
             Kind::Painting { width, height, .. } => (i32::from(width), i32::from(height)),
         };
-        occupied_cells((self.at[0], self.at[1], self.at[2]), self.face, width, height)
-            .contains(&pos)
+        occupied_cells(
+            (self.at[0], self.at[1], self.at[2]),
+            self.face,
+            width,
+            height,
+        )
+        .contains(&pos)
     }
     pub fn near(&self, (x, y, z): Position) -> bool {
         // Compare as i64: untrusted player coordinates may be far outside the
@@ -340,7 +345,14 @@ impl Hangings {
             .map(Hanging::destroy)
             .collect()
     }
-    fn painting_fits(&self, world: &World, anchor: Position, face: i8, width: i32, height: i32) -> bool {
+    fn painting_fits(
+        &self,
+        world: &World,
+        anchor: Position,
+        face: i8,
+        width: i32,
+        height: i32,
+    ) -> bool {
         let (dx, dz) = offset(face);
         occupied_cells(anchor, face, width, height)
             .into_iter()
@@ -348,7 +360,10 @@ impl Hangings {
                 world::in_bounds(x, y, z)
                     && world.get(x, y, z) == 0
                     && world.get(x - dx, y, z - dz) != 0
-                    && self.entities.values().all(|entity| !entity.covers((x, y, z)))
+                    && self
+                        .entities
+                        .values()
+                        .all(|entity| !entity.covers((x, y, z)))
             })
     }
     pub fn stage_place(
