@@ -18,6 +18,7 @@ pub struct ServerProperties {
     pub bind: SocketAddr,
     pub world_path: PathBuf,
     pub survival: bool,
+    pub hardcore: bool,
     pub difficulty: u8,
     pub level_name: String,
 }
@@ -145,6 +146,7 @@ impl ServerProperties {
             host.parse::<IpAddr>()
                 .map_err(|_| invalid("invalid server-ip"))?
         };
+        let hardcore = boolean(&values, "hardcore", false)?;
         let survival = match values.get("gamemode").map(String::as_str).unwrap_or("0") {
             "0" | "survival" => true,
             "1" | "creative" => false,
@@ -158,6 +160,9 @@ impl ServerProperties {
             .map_err(|_| invalid("difficulty must be in 0..=3"))?;
         if difficulty > 3 {
             return Err(invalid("difficulty must be in 0..=3"));
+        }
+        if hardcore && (!survival || difficulty != 3) {
+            return Err(invalid("hardcore requires gamemode=survival and difficulty=3"));
         }
         // These settings remain fixed until their runtime subsystems can honour them.
         for (name, only) in [("view-distance", "2"), ("max-players", "8")] {
@@ -186,6 +191,7 @@ impl ServerProperties {
             "server-ip",
             "level-name",
             "gamemode",
+            "hardcore",
             "online-mode",
             "white-list",
             "enable-rcon",
@@ -211,6 +217,7 @@ impl ServerProperties {
             bind: SocketAddr::new(ip, port),
             world_path: PathBuf::from(level_name).join("flat.irw"),
             survival,
+            hardcore,
             difficulty,
             level_name: level_name.to_string(),
         })
@@ -240,6 +247,10 @@ gamemode=1
         assert_eq!(p.bind.to_string(), "127.0.0.1:25580");
         assert_eq!(p.world_path, PathBuf::from("TestWorld/flat.irw"));
         assert!(!p.survival);
+        assert!(!p.hardcore);
+        let hardcore = SAFE.replace("gamemode=1", "gamemode=0").replace("difficulty=1", "difficulty=3");
+        assert!(ServerProperties::parse(&(hardcore.clone() + "hardcore=true\n")).unwrap().hardcore);
+        assert!(ServerProperties::parse(&(SAFE.to_owned() + "hardcore=true\n")).is_err());
         assert_eq!(p.difficulty, 1);
         for difficulty in 0..=3 {
             let text = SAFE.replace("difficulty=1", &format!("difficulty={difficulty}"));
