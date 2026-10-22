@@ -39,7 +39,10 @@ impl NativeServer {
         fs::create_dir_all(&directory).unwrap();
         let whitelist = json!([
             {"name":"RustTester"}, {"name":"Positioner"},
-            {"name":"TwinAlpha"}, {"name":"TwinBeta"}, {"name":"ChunkScout"}
+            {"name":"TwinAlpha"}, {"name":"TwinBeta"}, {"name":"ChunkScout"},
+            {"name":"Load0"}, {"name":"Load1"}, {"name":"Load2"}, {"name":"Load3"},
+            {"name":"Load4"}, {"name":"Load5"}, {"name":"Load6"}, {"name":"Load7"},
+            {"name":"Load8"}
         ]);
         fs::write(
             directory.join("whitelist.json"),
@@ -1476,5 +1479,53 @@ fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
             && body[10] == 15
     });
     drop(client);
+    server.wait_idle();
+}
+
+/// E50: real TCP admission and reconnection regression, not a Java GUI test
+/// and not a substitute for a sustained, measured 8-player soak run.
+#[test]
+fn native_protocol5_eight_player_admission_full_and_reconnect() {
+    let server = NativeServer::start();
+    let mut players = Vec::new();
+    for index in 0..8 {
+        let name = format!("Load{index}");
+        let (socket, entity_id, position) = server.join(&name);
+        assert_eq!(position, [0.5, 65.0, 0.5]);
+        assert!(entity_id > 0);
+        players.push((socket, entity_id));
+    }
+    assert_eq!(server.status()["players"]["online"], 8);
+    assert_eq!(server.status()["players"]["max"], 8);
+
+    // A ninth *whitelisted* login must be rejected by the player-capacity
+    // gate, not by the whitelist. The first packet remains a Login Disconnect.
+    let mut ninth = server.connect("Load8");
+    let (packet_id, response) = receive(&mut ninth);
+    assert_eq!(packet_id, 0, "ninth player must not enter Play state");
+    assert!(
+        String::from_utf8_lossy(&response).contains("Server is full"),
+        "ninth player was rejected for the wrong reason: {response:?}"
+    );
+    drop(ninth);
+    assert_eq!(server.status()["players"]["online"], 8);
+
+    // The disconnect frees capacity without restarting and entity IDs must
+    // never be reused while the other seven sessions are still connected.
+    let (last, old_id) = players.pop().unwrap();
+    drop(last);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while server.status()["players"]["online"] != 7 {
+        assert!(Instant::now() < deadline, "disconnected player stayed in hub");
+        thread::sleep(Duration::from_millis(40));
+    }
+    let (rejoined, new_id, position) = server.join("Load7");
+    assert_eq!(position, [0.5, 65.0, 0.5]);
+    assert!(new_id > old_id, "entity ID reused after reconnection");
+    players.push((rejoined, new_id));
+    assert_eq!(server.status()["players"]["online"], 8);
+
+    // Drop every remaining connection: the status view must converge to zero.
+    drop(players);
     server.wait_idle();
 }
