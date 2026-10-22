@@ -3182,7 +3182,7 @@ fn main() -> io::Result<()> {
             ));
         }
         let file = Path::new(if supplied.len() == 2 {
-            &supplied[1]
+            supplied[1].as_str()
         } else {
             "server.properties"
         });
