@@ -172,9 +172,7 @@ pub fn insert_one<const N: usize>(slots: &mut [Option<Stack>; N], item: Stack) -
     }
     for entry in slots.iter_mut() {
         if let Some(stack) = entry.as_mut() {
-            if stack.id == item.id
-                && stack.damage == item.damage
-                && stack.count < stack.max_count()
+            if stack.id == item.id && stack.damage == item.damage && stack.count < stack.max_count()
             {
                 stack.count += 1;
                 return true;
@@ -196,7 +194,11 @@ mod tests {
 
     #[test]
     fn transfer_merges_or_uses_empty_slot_without_overflow() {
-        let item = Stack { id: 4, count: 1, damage: 0 };
+        let item = Stack {
+            id: 4,
+            count: 1,
+            damage: 0,
+        };
         let mut slots = [None; 3];
         slots[0] = Some(Stack { count: 63, ..item });
         assert!(insert_one(&mut slots, item));
@@ -212,7 +214,14 @@ mod tests {
     #[test]
     fn transfer_rejects_multi_item_batches() {
         let mut slots = [None; 2];
-        assert!(!insert_one(&mut slots, Stack { id: 4, count: 2, damage: 0 }));
+        assert!(!insert_one(
+            &mut slots,
+            Stack {
+                id: 4,
+                count: 2,
+                damage: 0
+            }
+        ));
         assert_eq!(slots, [None; 2]);
     }
 
