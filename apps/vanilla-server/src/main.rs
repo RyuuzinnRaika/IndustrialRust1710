@@ -454,6 +454,19 @@ fn chunk_relight_event(cx: i32, cz: i32) -> Event {
     }
 }
 
+/// Legacy 1.7.10 S24 Block Action: X:Int, Y:Short, Z:Int,
+/// action (0=extend, 1=retract), facing, and block-id VarInt.
+fn piston_action_event(action: world::PistonAction) -> Event {
+    let mut body = Vec::with_capacity(16);
+    body.extend_from_slice(&action.pos.0.to_be_bytes());
+    body.extend_from_slice(&(action.pos.1 as i16).to_be_bytes());
+    body.extend_from_slice(&action.pos.2.to_be_bytes());
+    body.push(u8::from(!action.extending));
+    body.push(action.facing);
+    write_varint(u32::from(action.block_id), &mut body);
+    Event { id: 0x24, body }
+}
+
 fn block_change_event(world: &World, x: i32, y: i32, z: i32) -> Event {
     let block = world.get(x, y, z);
     let mut data = Vec::new();
@@ -5244,6 +5257,9 @@ fn main() -> io::Result<()> {
                     // save all staged block changes with one world-file commit.
                     match gravity_world.block_tick(&furnace_world_path, 64) {
                         Ok(changed) => {
+                            for action in gravity_world.drain_piston_actions() {
+                                furnace_hub.broadcast(piston_action_event(action));
+                            }
                             for (x, y, z) in changed {
                                 furnace_hub.broadcast(block_change_event(&gravity_world, x, y, z));
                             }
@@ -5746,6 +5762,26 @@ mod h_special_item_transaction_tests {
         );
         assert_eq!(World::load(&world_path).unwrap().get(1, 65, 1), 1 << 4);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod piston_action_wire_tests {
+    use super::*;
+
+    #[test]
+    fn protocol5_piston_action_uses_legacy_coordinates() {
+        let packet = piston_action_event(world::PistonAction {
+            pos: (123, 65, -40),
+            block_id: 33,
+            facing: 5,
+            extending: true,
+        });
+        assert_eq!(packet.id, 0x24);
+        assert_eq!(&packet.body[0..4], &123i32.to_be_bytes());
+        assert_eq!(&packet.body[4..6], &65i16.to_be_bytes());
+        assert_eq!(&packet.body[6..10], &(-40i32).to_be_bytes());
+        assert_eq!(&packet.body[10..], &[0, 5, 33]);
     }
 }
 
