@@ -202,7 +202,11 @@ impl Inventory {
                 .iter()
                 .flatten()
                 .any(|stack| !stack.is_valid())
-            || self.anvil_inputs.iter().flatten().any(|stack| !stack.is_valid())
+            || self
+                .anvil_inputs
+                .iter()
+                .flatten()
+                .any(|stack| !stack.is_valid())
             || self.slots.iter().flatten().any(|stack| !stack.is_valid())
             || self.cursor.is_some_and(|stack| !stack.is_valid())
         {
@@ -1447,7 +1451,6 @@ impl Inventory {
         packet
     }
 
-
     /// Compute the server-owned result. Only untagged durability repair is
     /// supported until generic ItemStack NBT exists in Inventory.
     pub fn anvil_preview(&self) -> Option<crate::workstations::Repair> {
@@ -1493,21 +1496,24 @@ impl Inventory {
                 let carried = self.cursor;
                 let (next, cursor) = match (original, carried, button) {
                     (old, None, 0) => (None, old),
-                    (None, Some(hand), 0) if index != 0 || hand.count == 1 => {
-                        (Some(hand), None)
-                    }
+                    (None, Some(hand), 0) if index != 0 || hand.count == 1 => (Some(hand), None),
                     (Some(old), Some(hand), 0) if index != 0 || hand.count == 1 => {
                         (Some(hand), Some(old))
                     }
                     (Some(mut old), None, 1) => {
                         let n = old.count.div_ceil(2);
                         old.count -= n;
-                        ((old.count > 0).then_some(old), Some(Stack { count: n, ..old }))
+                        (
+                            (old.count > 0).then_some(old),
+                            Some(Stack { count: n, ..old }),
+                        )
                     }
                     (None, Some(mut hand), 1) => {
                         hand.count -= 1;
-                        (Some(Stack { count: 1, ..hand }),
-                         (hand.count > 0).then_some(hand))
+                        (
+                            Some(Stack { count: 1, ..hand }),
+                            (hand.count > 0).then_some(hand),
+                        )
                     }
                     _ => return false,
                 };
@@ -1519,7 +1525,9 @@ impl Inventory {
                 true
             }
             2 if mode == 0 && button == 0 => {
-                let Some(plan) = self.anvil_preview() else { return false };
+                let Some(plan) = self.anvil_preview() else {
+                    return false;
+                };
                 if self.cursor.is_some() {
                     return false;
                 }
@@ -2555,9 +2563,17 @@ mod tests {
     fn anvil_repair_debits_only_owned_inputs_and_xp() {
         let mut inv = Inventory::default();
         let mut xp = crate::experience::Experience { total: 34 };
-        inv.cursor = Some(Stack { id: 257, count: 1, damage: 100 });
+        inv.cursor = Some(Stack {
+            id: 257,
+            count: 1,
+            damage: 100,
+        });
         assert!(inv.anvil_click_window(0, 0, 0, &mut xp, true));
-        inv.cursor = Some(Stack { id: 265, count: 3, damage: 0 });
+        inv.cursor = Some(Stack {
+            id: 265,
+            count: 3,
+            damage: 0,
+        });
         assert!(inv.anvil_click_window(1, 0, 0, &mut xp, true));
         let old = inv.anvil_preview().unwrap();
         assert!(!inv.anvil_click_window(2, 0, 1, &mut xp, true));
@@ -2566,8 +2582,10 @@ mod tests {
         assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
         assert_eq!(inv.cursor, Some(old.result));
         assert_eq!(inv.anvil_inputs[0], None);
-        assert_eq!(inv.anvil_inputs[1].map(|item| item.count),
-            (3 > old.consumed).then_some(3 - old.consumed));
+        assert_eq!(
+            inv.anvil_inputs[1].map(|item| item.count),
+            (3 > old.consumed).then_some(3 - old.consumed)
+        );
         assert!(xp.total < 34);
         assert!(inv.encoded().is_ok());
     }
@@ -2575,8 +2593,16 @@ mod tests {
     fn anvil_insufficient_experience_is_fail_closed() {
         let mut inv = Inventory::default();
         inv.anvil_inputs = [
-            Some(Stack { id: 257, count: 1, damage: 100 }),
-            Some(Stack { id: 265, count: 3, damage: 0 }),
+            Some(Stack {
+                id: 257,
+                count: 1,
+                damage: 100,
+            }),
+            Some(Stack {
+                id: 265,
+                count: 3,
+                damage: 0,
+            }),
         ];
         let previous = inv.clone();
         let mut xp = crate::experience::Experience::default();
@@ -2584,5 +2610,4 @@ mod tests {
         assert_eq!(inv, previous);
         assert_eq!(xp.total, 0);
     }
-
 }
