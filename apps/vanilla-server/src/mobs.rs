@@ -2984,6 +2984,76 @@ mod tests {
         assert_eq!(mobs.hurt_player(900, at, 21), 3);
     }
     #[test]
+    fn zombie_villager_infection_survives_restart_and_new_clients() {
+        let world = World::natural(2468);
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust-mobs-{}-infected.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::load_or_new(&world, true, 3, &path).unwrap();
+        let at = PlayerPosition {
+            x: 40.5,
+            y: 200.0,
+            z: 40.5,
+        };
+        let attacker_id = mobs.next_id;
+        mobs.insert(Kind::Zombie, at, false);
+        let original_villager_id = mobs.next_id;
+        mobs.insert(
+            Kind::Villager,
+            PlayerPosition {
+                x: at.x + 1.0,
+                ..at
+            },
+            true,
+        );
+        mobs.entities
+            .get_mut(&original_villager_id)
+            .unwrap()
+            .profession = 4;
+        let mut events = Vec::new();
+        for tick in (20..=140).step_by(20) {
+            mobs.zombies_attack_villagers(tick, &world, &[], &mut events);
+        }
+
+        let infected = *mobs
+            .entities
+            .values()
+            .find(|mob| mob.zombie_villager)
+            .expect("hard difficulty should infect the villager");
+        assert_eq!(events.iter().filter(|event| event.id == 0x13).count(), 1);
+        assert_eq!(events.iter().filter(|event| event.id == 0x0f).count(), 1);
+        assert!(!mobs.entities.contains_key(&original_villager_id));
+        assert!(infected.id > original_villager_id);
+        assert!(infected.baby);
+        assert_eq!(infected.profession, 4);
+        mobs.save(&world).unwrap();
+
+        let restored = Mobs::load_or_new(&world, true, 3, &path).unwrap();
+        assert_eq!(restored.entities.len(), 2);
+        assert!(restored.entities.contains_key(&attacker_id));
+        assert!(!restored.entities.contains_key(&original_villager_id));
+        let rejoined = *restored.entities.get(&infected.id).unwrap();
+        assert_eq!(rejoined.kind, Kind::Zombie);
+        assert!(rejoined.zombie_villager);
+        assert_eq!(rejoined.profession, 4);
+        assert!(rejoined.baby);
+        assert_eq!(rejoined.health, infected.health);
+        assert_eq!(restored.next_id, infected.id + 1);
+        // An observer connecting only after restart sees the infected flag
+        // and the same unique ID through the authoritative spawn snapshot.
+        let snapshot = restored
+            .spawn_events()
+            .find(|event| event.id == 0x0f && event.body.windows(2).any(|w| w == [13, 1]))
+            .expect("new client must receive zombie-villager metadata");
+        let mut expected_id = Vec::new();
+        write_varint(infected.id as u32, &mut expected_id);
+        assert!(snapshot.body.starts_with(&expected_id));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn zombie_villager_metadata_and_infection_follow_difficulty() {
         let at = PlayerPosition {
             x: 0.5,
