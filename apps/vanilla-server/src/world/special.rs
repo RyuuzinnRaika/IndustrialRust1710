@@ -362,6 +362,27 @@ impl World {
                 }
             }
         }
+        // Snow and ice use nearby edited surface columns, never a global
+        // biome/chunk scan. Only a small share of this tick's existing budget.
+        if self.raining {
+            for &(x, y, z) in self.pending_weather.iter().take(budget) {
+                let y = i32::from(y);
+                if !self.is_cold_biome(x, z) || !in_bounds(x, y + 1, z)
+                    || !(y + 1..=255).all(|sy| self.get(x, sy, z) == 0)
+                {
+                    continue;
+                }
+                match self.get(x, y, z) >> 4 {
+                    2 | 3 => {
+                        changes.insert((x, (y + 1) as u8, z), 78 << 4);
+                    }
+                    9 => {
+                        changes.insert((x, y as u8, z), 79 << 4);
+                    }
+                    _ => {}
+                }
+            }
+        }
         // Redstone-powered TNT becomes an entity, not an immediately
         // exploding block. Chain-primed blocks use the shorter legacy fuse.
         for &(x, y, z) in self.pending_devices.iter().take(budget) {

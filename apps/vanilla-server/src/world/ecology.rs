@@ -106,7 +106,7 @@ impl World {
             _ => true,
         }
     }
-    fn is_cold_biome(&self, x: i32, z: i32) -> bool {
+    pub(super) fn is_cold_biome(&self, x: i32, z: i32) -> bool {
         matches!(self.biome_at(x, z), 11 | 12 | 13 | 26 | 30 | 31)
     }
     fn wet_farmland(&self, x: i32, y: i32, z: i32) -> bool {
@@ -256,14 +256,6 @@ impl World {
                 }
                 79 if self.light_at(x, height, z).0 >= 12 => {
                     changes.insert((x, y, z), 9 << 4);
-                }
-                2 | 3 if self.raining && self.is_cold_biome(x, z) => {
-                    if in_bounds(x, height + 1, z)
-                        && self.get(x, height + 1, z) == 0
-                        && (height + 2..=255).all(|sy| self.get(x, sy, z) == 0)
-                    {
-                        changes.insert((x, (height + 1) as u8, z), 78 << 4);
-                    }
                 }
                 60 => {
                     let moisture = block & 7;

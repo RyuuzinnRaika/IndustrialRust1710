@@ -40,6 +40,8 @@ pub struct World {
     pending_circuit: BTreeSet<Position>,
     pending_support: BTreeSet<Position>,
     pending_ecology: BTreeSet<Position>,
+    // Weather surfaces are scheduled separately to avoid disturbing crop ticks.
+    pending_weather: BTreeSet<Position>,
     pending_devices: BTreeSet<Position>,
     pending_repeaters: BTreeMap<Position, (u64, bool)>,
     // Comparator analog output (0..15) is not encoded in block metadata.
@@ -456,10 +458,14 @@ impl World {
             if id == 55 {
                 self.pending_circuit.insert(pos);
             }
+            if matches!(id, 2 | 3 | 8 | 9) {
+                self.pending_weather.insert(pos);
+            } else {
+                self.pending_weather.remove(&pos);
+            }
             if matches!(
                 id,
-                2 | 3
-                    | 6
+                6
                     | 18
                     | 51
                     | 59
@@ -946,6 +952,10 @@ impl World {
         }
         let key = (x, y as u8, z);
         if block == self.base_block(x, y as u8, z) {
+            if self.edits.remove(&key).is_some() {
+                self.wake_gravity(x, y, z);
+                self.wake_block_updates(x, y, z);
+            }
             return Ok(());
         }
         if !self.edits.contains_key(&key) && self.edits.len() >= MAX_EDITS {
@@ -1038,10 +1048,12 @@ impl World {
             if block >> 4 == 55 {
                 world.pending_circuit.insert((x, y, z));
             }
+            if matches!(block >> 4, 2 | 3 | 8 | 9) {
+                world.pending_weather.insert((x, y, z));
+            }
             if matches!(
                 block >> 4,
-                2 | 3
-                    | 6
+                6
                     | 18
                     | 51
                     | 59
