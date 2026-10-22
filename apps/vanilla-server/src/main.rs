@@ -4093,6 +4093,96 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 #[cfg(test)]
+mod h_special_item_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn cauldron_and_inventory_commit_as_one_recoverable_action() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-h-transaction-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let world_path = root.join("world.irw");
+        let inventory_path = root.join("player.inventory");
+        let mut world = World::new();
+        let mut inventory = Inventory::default();
+        world
+            .update_and_save(&world_path, 1, 65, 1, 118 << 4)
+            .unwrap();
+        inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 326,
+                    count: 1,
+                    damage: 0,
+                }),
+            )
+            .unwrap();
+        inventory.save(&inventory_path).unwrap();
+        let changed = use_special_item(
+            &mut world,
+            &world_path,
+            &mut inventory,
+            &inventory_path,
+            true,
+            (1, 65, 1),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(changed, vec![(1, 65, 1)]);
+        let reloaded_world = World::load(&world_path).unwrap();
+        let reloaded_inventory = Inventory::load(&inventory_path).unwrap();
+        assert_eq!(reloaded_world.get(1, 65, 1) & 15, 3);
+        assert_eq!(reloaded_inventory.held().unwrap().id, 325);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bonemeal_noop_does_not_debit_items_or_write_a_world() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-h-bonemeal-noop-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let world_path = root.join("world.irw");
+        let inventory_path = root.join("player.inventory");
+        let mut world = World::new();
+        let mut inventory = Inventory::default();
+        world
+            .update_and_save(&world_path, 1, 65, 1, 1 << 4)
+            .unwrap();
+        inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 351,
+                    count: 2,
+                    damage: 15,
+                }),
+            )
+            .unwrap();
+        inventory.save(&inventory_path).unwrap();
+        let changed = use_special_item(
+            &mut world,
+            &world_path,
+            &mut inventory,
+            &inventory_path,
+            true,
+            (1, 65, 1),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(changed.is_empty());
+        assert_eq!(inventory.held().unwrap().count, 2);
+        assert_eq!(Inventory::load(&inventory_path).unwrap().held().unwrap().count, 2);
+        assert_eq!(World::load(&world_path).unwrap().get(1, 65, 1), 1 << 4);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod sprint_action_tests {
     use super::sprint_action;
 
