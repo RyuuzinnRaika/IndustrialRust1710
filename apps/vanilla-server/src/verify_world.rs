@@ -1,9 +1,10 @@
 //! J93: read-only integrity check; does not create a session lock or replay redo journals.
 //! This validates the formats used by the runtime, not arbitrary modded worlds.
-use crate::{brewing::Brewers, chests::Chests, clock::Clock, experience::Experience,
-    furnaces::Furnaces, ground_items::GroundItems, hoppers::Hoppers,
-    inventory::Inventory, legacy_world_inspect, mobs::Mobs, player::PlayerPosition,
-    world::World};
+use crate::{
+    brewing::Brewers, chests::Chests, clock::Clock, experience::Experience, furnaces::Furnaces,
+    ground_items::GroundItems, hoppers::Hoppers, inventory::Inventory, legacy_world_inspect,
+    mobs::Mobs, player::PlayerPosition, world::World,
+};
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -35,7 +36,9 @@ fn checked_dir(path: &Path) -> io::Result<bool> {
     }
 }
 fn inspect_irw(world_file: &Path) -> io::Result<Summary> {
-    if !checked_file(world_file)? { return Err(invalid("IRW world file missing")); }
+    if !checked_file(world_file)? {
+        return Err(invalid("IRW world file missing"));
+    }
     let parent = world_file.parent().unwrap_or_else(|| Path::new("."));
     let world = World::load(world_file)?;
     let mut count = 1usize;
@@ -46,18 +49,29 @@ fn inspect_irw(world_file: &Path) -> io::Result<Summary> {
         Furnaces::location(world_file).with_extension("pending-txn.json"),
     ] {
         if checked_file(&file)? {
-            return Err(invalid("unfinished transaction journal; offline recovery required"));
+            return Err(invalid(
+                "unfinished transaction journal; offline recovery required",
+            ));
         }
     }
     macro_rules! check {
         ($path:expr, $loader:expr) => {{
             let path: PathBuf = $path;
-            if checked_file(&path)? { $loader?; count += 1; }
+            if checked_file(&path)? {
+                $loader?;
+                count += 1;
+            }
         }};
     }
-    check!(world_file.with_extension("clock"), Clock::load_state(&world_file.with_extension("clock")));
+    check!(
+        world_file.with_extension("clock"),
+        Clock::load_state(&world_file.with_extension("clock"))
+    );
     let mobs_path = world_file.with_extension("mobs.json");
-    check!(mobs_path.clone(), Mobs::load_or_new(&world, false, 1, &mobs_path));
+    check!(
+        mobs_path.clone(),
+        Mobs::load_or_new(&world, false, 1, &mobs_path)
+    );
     let drops = GroundItems::location(world_file);
     check!(drops.clone(), GroundItems::load(&drops));
     let chests = Chests::location(world_file);
@@ -75,11 +89,17 @@ fn inspect_irw(world_file: &Path) -> io::Result<Summary> {
         for entry in fs::read_dir(&player_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if !checked_file(&path)? { return Err(invalid("players folder contains unsupported entry")); }
+            if !checked_file(&path)? {
+                return Err(invalid("players folder contains unsupported entry"));
+            }
             player_files += 1;
-            if player_files > 10_000 { return Err(invalid("too many player files")); }
+            if player_files > 10_000 {
+                return Err(invalid("too many player files"));
+            }
             let name = entry.file_name();
-            let Some(name) = name.to_str() else { return Err(invalid("non-UTF8 player filename")); };
+            let Some(name) = name.to_str() else {
+                return Err(invalid("non-UTF8 player filename"));
+            };
             if name.ends_with(".dat") {
                 let stem = name.trim_end_matches(".dat");
                 if !crate::whitelist::valid_name(stem) || stem != stem.to_ascii_lowercase() {
@@ -96,7 +116,10 @@ fn inspect_irw(world_file: &Path) -> io::Result<Summary> {
             }
         }
     }
-    Ok(Summary { description: "IRW", files: count })
+    Ok(Summary {
+        description: "IRW",
+        files: count,
+    })
 }
 
 /// Inspect the source as either a native Anvil directory or an IRW file/parent.
@@ -113,18 +136,27 @@ pub fn inspect(source: &Path) -> io::Result<Summary> {
             let vanilla = checked_file(&source.join("level.dat"))?;
             let irw = checked_file(&source.join("flat.irw"))?;
             if vanilla && irw {
-                return Err(invalid("mixed Anvil and IRW world: refuse ambiguous storage"));
+                return Err(invalid(
+                    "mixed Anvil and IRW world: refuse ambiguous storage",
+                ));
             }
             if vanilla {
                 let result = legacy_world_inspect::inspect_world(source)?;
-                Ok(Summary { description: "Anvil 1.7.10", files: result.regions + result.player_files + 1 })
+                Ok(Summary {
+                    description: "Anvil 1.7.10",
+                    files: result.regions + result.player_files + 1,
+                })
             } else if irw {
                 inspect_irw(&source.join("flat.irw"))
             } else {
-                Err(invalid("world directory has neither level.dat nor flat.irw"))
+                Err(invalid(
+                    "world directory has neither level.dat nor flat.irw",
+                ))
             }
         }
-        Ok(_) => Err(invalid("world path must be a real directory or regular IRW file")),
+        Ok(_) => Err(invalid(
+            "world path must be a real directory or regular IRW file",
+        )),
         Err(error) => Err(error),
     }
 }

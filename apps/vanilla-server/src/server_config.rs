@@ -171,17 +171,35 @@ impl ServerProperties {
         }
         // Seed is meaningful for the opt-in IRW3 biome generator only.
         // Refuse FLAT + seed rather than silently generate non-flat terrain.
-        let level_seed = values.get("level-seed").filter(|s| !s.is_empty()).map(|seed| {
-            seed.parse::<i64>().map(|number| number as u64).unwrap_or_else(|_| {
-                let hash = seed.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)));
-                (hash as i64) as u64
-            })
-        });
-        let level_type = values.get("level-type").map(String::as_str).unwrap_or("FLAT");
+        let level_seed = values
+            .get("level-seed")
+            .filter(|s| !s.is_empty())
+            .map(|seed| {
+                seed.parse::<i64>()
+                    .map(|number| number as u64)
+                    .unwrap_or_else(|_| {
+                        let hash = seed
+                            .encode_utf16()
+                            .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)));
+                        (hash as i64) as u64
+                    })
+            });
+        let level_type = values
+            .get("level-type")
+            .map(String::as_str)
+            .unwrap_or("FLAT");
         match (level_type, level_seed) {
             ("FLAT", None) | ("DEFAULT", Some(_)) => {}
-            ("FLAT", Some(_)) => return Err(invalid("level-seed with FLAT would be ignored; choose level-type=DEFAULT")),
-            _ => return Err(invalid("only FLAT (unseeded) or DEFAULT (seeded IRW3) are supported")),
+            ("FLAT", Some(_)) => {
+                return Err(invalid(
+                    "level-seed with FLAT would be ignored; choose level-type=DEFAULT",
+                ))
+            }
+            _ => {
+                return Err(invalid(
+                    "only FLAT (unseeded) or DEFAULT (seeded IRW3) are supported",
+                ))
+            }
         }
         let accepted = [
             "server-port",
@@ -273,7 +291,9 @@ gamemode=1
 
     #[test]
     fn seed_matches_java_long_and_string_hash_semantics() {
-        let base = SAFE.replace("level-type=FLAT", "level-type=DEFAULT").replace("gamemode=1", "gamemode=0");
+        let base = SAFE
+            .replace("level-type=FLAT", "level-type=DEFAULT")
+            .replace("gamemode=1", "gamemode=0");
         let signed = ServerProperties::parse(&format!("{base}level-seed=-123\n")).unwrap();
         assert_eq!(signed.level_seed, Some((-123i64) as u64));
         let hashed = ServerProperties::parse(&format!("{base}level-seed=Hello\n")).unwrap();

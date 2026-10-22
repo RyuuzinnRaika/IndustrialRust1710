@@ -36,8 +36,8 @@ mod survival;
 mod survival_damage;
 mod telemetry;
 mod terrain;
-mod vitals;
 mod verify_world;
+mod vitals;
 mod whitelist;
 mod world;
 mod worldgen;
@@ -3085,7 +3085,10 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
 /// Commands are accepted only from the operating-system console, never from
 /// unauthenticated offline-mode players or Protocol 5 chat messages.
 fn start_clock_console(
-    hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf>, shutdown: Arc<AtomicBool>,
+    hub: Arc<Hub>,
+    clock: Arc<Clock>,
+    clock_path: Arc<PathBuf>,
+    shutdown: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let stdin = io::stdin();
@@ -3165,21 +3168,39 @@ fn main() -> io::Result<()> {
             return Err(bad("usage: --verify-world WORLD_DIR_OR_IRW_FILE"));
         }
         let result = verify_world::inspect(Path::new(&supplied[1]))?;
-        println!("World verified (read-only): {} ({})", result.description, result.files);
+        println!(
+            "World verified (read-only): {} ({})",
+            result.description, result.files
+        );
         return Ok(());
     }
     if supplied.iter().any(|arg| arg == "--check-config") {
         if supplied.len() != 1 && !(supplied.len() == 2 && supplied[0] == "--check-config") {
-            return Err(bad("--check-config must be used alone or with a properties file"));
+            return Err(bad(
+                "--check-config must be used alone or with a properties file",
+            ));
         }
-        let file = Path::new(if supplied.len() == 2 { &supplied[1] } else { "server.properties" });
+        let file = Path::new(if supplied.len() == 2 {
+            &supplied[1]
+        } else {
+            "server.properties"
+        });
         let config = server_config::ServerProperties::load_optional(file)?
             .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "server.properties not found"))?;
         server_config::verify_legacy_storage(&config.world_path)?;
         if !config.bind.ip().is_loopback() {
-            return Err(io::Error::new(ErrorKind::PermissionDenied, "offline-mode configuration binds a public or LAN address"));
+            return Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "offline-mode configuration binds a public or LAN address",
+            ));
         }
-        println!("Config validated: {}, world={}, difficulty={}, seed={:?} (no files modified)", config.bind, config.world_path.display(), config.difficulty, config.level_seed);
+        println!(
+            "Config validated: {}, world={}, difficulty={}, seed={:?} (no files modified)",
+            config.bind,
+            config.world_path.display(),
+            config.difficulty,
+            config.level_seed
+        );
         return Ok(());
     }
     // Reading configuration never converts, modifies, or replaces a native
@@ -3375,7 +3396,11 @@ fn main() -> io::Result<()> {
         }
     }
     if (requested_seed.is_some() || biome_seed.is_some() || expanded_seed.is_some())
-        && (!survival && properties.as_ref().and_then(|config| config.level_seed).is_none()
+        && (!survival
+            && properties
+                .as_ref()
+                .and_then(|config| config.level_seed)
+                .is_none()
             || anvil_export_path.is_some()
             || anvil_import_path.is_some()
             || [
@@ -3920,13 +3945,19 @@ fn main() -> io::Result<()> {
             }
             Err(err) => return Err(err),
         };
-        if shutdown.load(Ordering::Acquire) { break; }
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
         // Join completed session workers instead of retaining unbounded thread handles.
         let mut active = Vec::new();
         for worker in client_threads.drain(..) {
             if worker.is_finished() {
-                if worker.join().is_err() { eprintln!("client thread panicked"); }
-            } else { active.push(worker); }
+                if worker.join().is_err() {
+                    eprintln!("client thread panicked");
+                }
+            } else {
+                active.push(worker);
+            }
         }
         client_threads = active;
         if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
@@ -3988,28 +4019,72 @@ fn main() -> io::Result<()> {
     // have released their in-memory states.
     drop(listener);
     for worker in client_threads {
-        worker.join().map_err(|_| io::Error::other("client thread panicked during shutdown"))?;
+        worker
+            .join()
+            .map_err(|_| io::Error::other("client thread panicked during shutdown"))?;
     }
-    tick_thread.join().map_err(|_| io::Error::other("tick thread panicked during shutdown"))?;
-    hopper_thread.join().map_err(|_| io::Error::other("hopper thread panicked during shutdown"))?;
-    brewing_thread.join().map_err(|_| io::Error::other("brewing thread panicked during shutdown"))?;
+    tick_thread
+        .join()
+        .map_err(|_| io::Error::other("tick thread panicked during shutdown"))?;
+    hopper_thread
+        .join()
+        .map_err(|_| io::Error::other("hopper thread panicked during shutdown"))?;
+    brewing_thread
+        .join()
+        .map_err(|_| io::Error::other("brewing thread panicked during shutdown"))?;
     clock.stop();
-    clock_thread.join().map_err(|_| io::Error::other("clock thread panicked during shutdown"))?;
-    console_thread.join().map_err(|_| io::Error::other("console thread panicked during shutdown"))?;
+    clock_thread
+        .join()
+        .map_err(|_| io::Error::other("clock thread panicked during shutdown"))?;
+    console_thread
+        .join()
+        .map_err(|_| io::Error::other("console thread panicked during shutdown"))?;
     session_guard.verify()?;
     {
         let world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
         world.save(&path)?;
-        mobs.lock().map_err(|_| bad("mob mutex poisoned"))?.save(&world)?;
+        mobs.lock()
+            .map_err(|_| bad("mob mutex poisoned"))?
+            .save(&world)?;
     }
     journal::commit(
         &path.with_extension("pending-txn.json"),
         &[
-            (chest_path.as_ref().as_path(), chests.lock().map_err(|_| bad("chest mutex poisoned"))?.encoded()?),
-            (furnace_path.as_ref().as_path(), furnaces.lock().map_err(|_| bad("furnace mutex poisoned"))?.encoded()?),
-            (hopper_path.as_ref().as_path(), hoppers.lock().map_err(|_| bad("hopper mutex poisoned"))?.encoded()?),
-            (brewer_path.as_ref().as_path(), brewers.lock().map_err(|_| bad("brewer mutex poisoned"))?.encoded()?),
-            (ground_path.as_ref().as_path(), ground_items.lock().map_err(|_| bad("ground items mutex poisoned"))?.encoded()?),
+            (
+                chest_path.as_ref().as_path(),
+                chests
+                    .lock()
+                    .map_err(|_| bad("chest mutex poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                furnace_path.as_ref().as_path(),
+                furnaces
+                    .lock()
+                    .map_err(|_| bad("furnace mutex poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                hopper_path.as_ref().as_path(),
+                hoppers
+                    .lock()
+                    .map_err(|_| bad("hopper mutex poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                brewer_path.as_ref().as_path(),
+                brewers
+                    .lock()
+                    .map_err(|_| bad("brewer mutex poisoned"))?
+                    .encoded()?,
+            ),
+            (
+                ground_path.as_ref().as_path(),
+                ground_items
+                    .lock()
+                    .map_err(|_| bad("ground items mutex poisoned"))?
+                    .encoded()?,
+            ),
         ],
     )?;
     clock.save_ticks(&clock_path)?;
