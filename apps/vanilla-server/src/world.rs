@@ -5,6 +5,7 @@ mod devices;
 mod ecology;
 mod lighting;
 mod special;
+pub use special::TntEvent;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
@@ -55,6 +56,9 @@ pub struct World {
     // Set from Clock; the weather simulation has one authoritative owner.
     raining: bool,
     day_time: i64,
+    primed_tnt: BTreeMap<i32, special::PrimedTnt>,
+    next_tnt_id: i32,
+    tnt_events: Vec<special::TntEvent>,
 }
 
 /// A persisted world mutation can create a temporary ground-item event.
@@ -493,7 +497,7 @@ impl World {
             ) {
                 self.pending_support.insert(pos);
             }
-            if matches!(id, 27 | 29 | 33 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157) {
+            if matches!(id, 27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157) {
                 self.pending_devices.insert(pos);
             } else {
                 self.pending_devices.remove(&pos);
@@ -537,6 +541,11 @@ impl World {
         let mut changes: BTreeMap<Position, u16> = self.ecology_changes(budget);
         changes.extend(self.device_changes(budget));
         changes.extend(self.special_changes(budget));
+        // Retain the old block identity until the world snapshot has committed.
+        let primed_on_commit: Vec<_> = changes.iter().filter_map(|(&(x, y, z), &new)| {
+            (new == 0 && self.get(x, i32::from(y), z) >> 4 == 46)
+                .then_some((x, i32::from(y), z))
+        }).collect();
 
         for &(x, y, z) in &wet {
             let y = i32::from(y);
@@ -786,6 +795,7 @@ impl World {
             }
         }
 
+        self.finalize_tnt(&primed_on_commit);
         // Publish analog changes only after the block snapshot committed.
         // Same-output-state comparator strength changes still wake nearby dust.
         let ready = std::mem::take(&mut self.comparator_ready);
@@ -1039,7 +1049,7 @@ impl World {
             ) {
                 world.pending_support.insert((x, y, z));
             }
-            if matches!(block >> 4, 27 | 29 | 33 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157) {
+            if matches!(block >> 4, 27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157) {
                 world.pending_devices.insert((x, y, z));
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
