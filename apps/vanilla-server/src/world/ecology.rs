@@ -164,6 +164,17 @@ impl World {
         if y > 249 || !plantable(self.get(x, y - 1, z) >> 4) {
             return;
         }
+        // Retain the 1.7.10 sapling species in the resulting logs/leaves.
+        // Dark oak requires a 2x2 sapling structure; single-sapling bone
+        // meal is deliberately a no-op until large-tree growth is supported.
+        let (log, log_meta, leaves, leaf_meta) = match self.get(x, y, z) & 7 {
+            0 => (17, 0, 18, 0),  // Oak
+            1 => (17, 1, 18, 1),  // Spruce
+            2 => (17, 2, 18, 2),  // Birch
+            3 => (17, 3, 18, 3),  // Jungle
+            4 => (162, 0, 161, 0), // Acacia
+            _ => return,
+        };
         // First pass checks every eventual occupied cell; tree generation
         // must never overwrite players' buildings or another sapling.
         for dy in 1..=5 {
@@ -177,7 +188,7 @@ impl World {
             }
         }
         for dy in 0..4 {
-            changes.insert((x, (y + dy) as u8, z), 17 << 4);
+            changes.insert((x, (y + dy) as u8, z), (log << 4) | log_meta);
         }
         for dy in 3..=5 {
             let radius: i32 = if dy == 5 { 1 } else { 2 };
@@ -191,7 +202,7 @@ impl World {
                     }
                     let pos = (x + dx, (y + dy) as u8, z + dz);
                     if in_bounds(pos.0, i32::from(pos.1), pos.2) {
-                        changes.insert(pos, 18 << 4);
+                        changes.insert(pos, (leaves << 4) | leaf_meta);
                     }
                 }
             }
@@ -394,7 +405,7 @@ impl World {
                 6 if chance(self.fluid_phase, x, height, z, 4) => {
                     if block & 8 == 0 {
                         changes.insert((x, y, z), block | 8);
-                    } else if block & 7 == 0 {
+                    } else {
                         self.grow_tree(x, height, z, &mut changes);
                     }
                 }
