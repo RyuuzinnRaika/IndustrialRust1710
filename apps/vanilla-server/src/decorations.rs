@@ -424,8 +424,14 @@ mod tests {
         let decoration_path = root.join("world.decorations.json");
         let inventory_path = root.join("reader.inventory.json");
         let log_path = root.join("world.pending-txn.json");
-        let plant = Stack { id: 37, count: 1, damage: 0 };
-        let staged = Decorations::default().stage_pot((0, 64, 0), Some(plant)).unwrap();
+        let plant = Stack {
+            id: 37,
+            count: 1,
+            damage: 0,
+        };
+        let staged = Decorations::default()
+            .stage_pot((0, 64, 0), Some(plant))
+            .unwrap();
         let mut inventory = crate::inventory::Inventory::default();
         inventory.creative_set(36, Some(plant)).unwrap();
         assert!(inventory.consume_held());
@@ -435,9 +441,16 @@ mod tests {
                 (&inventory_path, inventory.encoded().unwrap()),
                 (&decoration_path, staged.encoded().unwrap()),
             ],
-        ).unwrap();
-        assert!(crate::inventory::Inventory::load(&inventory_path).unwrap().held().is_none());
-        assert_eq!(Decorations::load(&decoration_path).unwrap().pot((0, 64, 0)), Some(plant));
+        )
+        .unwrap();
+        assert!(crate::inventory::Inventory::load(&inventory_path)
+            .unwrap()
+            .held()
+            .is_none());
+        assert_eq!(
+            Decorations::load(&decoration_path).unwrap().pot((0, 64, 0)),
+            Some(plant)
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
