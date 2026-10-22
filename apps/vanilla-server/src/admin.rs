@@ -199,10 +199,15 @@ impl Administration {
         validate_permissions(&data)?;
         Ok(data)
     }
-    /// Offline names are forgeable; never promote an offline player to OP.
-    pub fn is_operator(&self, name: &str, authenticated: bool) -> io::Result<bool> {
+    /// Only a session-authenticated UUID can match an OP entry.
+    /// Offline UUIDs and user-supplied names never authorize any command.
+    pub fn is_operator(&self, name: &str, verified_uuid: Option<&str>) -> io::Result<bool> {
         let operators = self.ops()?;
-        Ok(authenticated && operators.iter().any(|e| e.name.eq_ignore_ascii_case(name)))
+        Ok(verified_uuid.is_some_and(|uuid| {
+            operators.iter().any(|entry| {
+                entry.name.eq_ignore_ascii_case(name) && entry.uuid.as_deref() == Some(uuid)
+            })
+        }))
     }
     pub fn banned(&self, name: &str, address: IpAddr) -> io::Result<Option<String>> {
         let by_name = self.banned_players()?;
@@ -312,8 +317,8 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let store = Administration::new(root.clone()).unwrap();
         store.set_op("Operator", true).unwrap();
-        assert!(!store.is_operator("Operator", false).unwrap());
-        assert!(!store.is_operator("Operator", false).unwrap());
+        assert!(!store.is_operator("Operator", None).unwrap());
+        assert!(!store.is_operator("Operator", None).unwrap());
         store.set_player_ban("Spammer", Some("abuse"), true).unwrap();
         assert_eq!(store.banned("spammer", "127.0.0.1".parse().unwrap()).unwrap(), Some("abuse".into()));
         store.set_ip_ban("::ffff:192.0.2.1", None, true).unwrap();
