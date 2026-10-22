@@ -41,6 +41,7 @@ mod vitals;
 mod whitelist;
 mod world;
 mod worldgen;
+mod world_verify;
 
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
@@ -1785,7 +1786,7 @@ fn play(
                 let z = input.i32()?;
                 let face = input.i8()?;
                 let held = input.slot()?;
-                input.take(3)?; // cursor x/y/z
+                let cursor = input.take(3)?; // Protocol 5 cursor x/y/z, 0..15
                 input.finish()?;
 
                 // Protocol 5 Use Item: air target is (-1,255,-1), face -1.
@@ -2201,13 +2202,23 @@ fn play(
                             } else if matches!(block_id, 29 | 33) {
                                 face as u16
                             } else if block_id == 96 {
-                                match face {
+                                let facing = match face {
                                     2 => 1,
                                     3 => 0,
                                     4 => 3,
                                     5 => 2,
                                     _ => 0,
-                                }
+                                };
+                                facing | if cursor[1] >= 8 { 8 } else { 0 }
+                            } else if matches!(block_id, 44 | 126 | 182) {
+                                // Slab variant is an item damage value; upper/lower
+                                // placement is derived from the clicked face and Y.
+                                (stack.damage as u16 & 7)
+                                    | if face == 0 || (face != 1 && cursor[1] >= 8) {
+                                        8
+                                    } else {
+                                        0
+                                    }
                             } else if matches!(block_id, 64 | 71 | 93 | 149) {
                                 ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
                             } else if block_id == 127 {
@@ -2224,8 +2235,20 @@ fn play(
                                 53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164
                             ) {
                                 // 1.7.10 stair orientation and inverted-half bit.
-                                let direction = ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3;
-                                direction | if face == 0 { 4 } else { 0 }
+                                let quadrant =
+                                    ((yaw.rem_euclid(360.0) / 90.0 + 0.5).floor() as u16) & 3;
+                                let direction = match quadrant {
+                                    0 => 2,
+                                    1 => 1,
+                                    2 => 3,
+                                    _ => 0,
+                                };
+                                direction
+                                    | if face == 0 || (face != 1 && cursor[1] >= 8) {
+                                        4
+                                    } else {
+                                        0
+                                    }
                             } else if block_id == 107 {
                                 ((yaw.rem_euclid(360.0) / 90.0).round() as u16) & 3
                             } else if matches!(
@@ -2237,6 +2260,7 @@ fn play(
                                 stack.damage as u16 & 15
                             };
                             if (world::is_placeable(block_id) || block_id == 61)
+                                && (block_id != 96 || (2..=5).contains(&face))
                                 && w.can_support(nx, ny, nz, (block_id << 4) | metadata)
                                 && block_id != 7
                                 && !invalid_chest_merge
@@ -3152,9 +3176,31 @@ fn start_clock_console(hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf
 }
 
 fn main() -> io::Result<()> {
+    // Offline verification must not create session.lock or mutate save data.
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.iter().any(|arg| arg == "--check-config") {
+        if arguments.as_slice() != ["--check-config"] {
+            return Err(bad("--check-config cannot be combined with other arguments"));
+        }
+        let config = server_config::ServerProperties::load_optional(Path::new("server.properties"))?
+            .ok_or_else(|| bad("server.properties not found"))?;
+        server_config::verify_legacy_storage(&config.world_path)?;
+        println!("server.properties validated (read-only): bind={}, world={}, seed={:?}",
+            config.bind, config.world_path.display(), config.level_seed);
+        return Ok(());
+    }
+    if arguments.iter().any(|arg| arg == "--verify-world") {
+        if arguments.len() != 2 || arguments[0] != "--verify-world" {
+            return Err(bad("--verify-world requires exactly one world directory or IRW file"));
+        }
+        let report = world_verify::verify(Path::new(&arguments[1]))?;
+        println!("World verified (read-only): {} format, {} checked file(s), {} region(s), {} chunk(s)",
+            report.format, report.files, report.regions, report.chunks);
+        return Ok(());
+    }
     // Reading configuration never converts, modifies, or replaces a native
     // Minecraft world. Without server.properties old IRW CLI behavior stays.
-    let properties = if std::env::args().any(|arg| {
+    let properties = if arguments.iter().any(|arg| {
         arg == "--help"
             || arg == "--backup-world"
             || arg == "--inspect-player-data"
@@ -3188,15 +3234,15 @@ fn main() -> io::Result<()> {
     let mut insecure_offline_lan = false;
     let mut survival = properties.as_ref().is_some_and(|config| config.survival);
     let mut difficulty = properties.as_ref().map_or(2, |config| config.difficulty);
-    let mut requested_seed: Option<u64> = None;
+    let mut requested_seed: Option<u64> = properties.as_ref().and_then(|value| value.level_seed);
     let mut biome_seed: Option<u64> = None;
     let mut expanded_seed: Option<u64> = None;
     let mut expanded_dimension = dimensions::Dimension::Overworld;
-    let mut args = std::env::args().skip(1);
+    let mut args = arguments.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--survival] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--check-config] [--verify-world WORLD_DIR|WORLD.irw] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
                 println!(
                     "Whitelist is checked by player NAME only; offline accounts can be impersonated. Bind defaults to loopback."
                 );
@@ -3338,6 +3384,11 @@ fn main() -> io::Result<()> {
             }
             _ => return Err(bad("unknown command-line argument")),
         }
+    }
+    if properties.as_ref().is_some_and(|p| p.level_seed.is_some())
+        && (biome_seed.is_some() || expanded_seed.is_some())
+    {
+        return Err(bad("level-seed conflicts with biome/expanded generation"));
     }
     if (requested_seed.is_some() || biome_seed.is_some() || expanded_seed.is_some())
         && (!survival

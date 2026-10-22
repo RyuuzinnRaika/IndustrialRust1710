@@ -20,6 +20,8 @@ pub struct ServerProperties {
     pub survival: bool,
     pub difficulty: u8,
     pub level_name: String,
+    /// Numeric Java long or deterministic Java String.hashCode legacy seed.
+    pub level_seed: Option<u64>,
 }
 
 fn boolean(map: &BTreeMap<String, String>, key: &str, default: bool) -> io::Result<bool> {
@@ -28,6 +30,18 @@ fn boolean(map: &BTreeMap<String, String>, key: &str, default: bool) -> io::Resu
         Some("false") => Ok(false),
         None => Ok(default),
         _ => Err(invalid("server.properties has invalid boolean")),
+    }
+}
+
+/// Match the Minecraft 1.7.10 String-to-seed convention without using
+/// platform-dependent hashing. Integer strings are signed Java longs;
+/// other strings use Java's UTF-16 String.hashCode.
+fn legacy_level_seed(text: &str) -> u64 {
+    match text.parse::<i64>() {
+        Ok(number) => number as u64,
+        Err(_) => text.encode_utf16().fold(0i32, |hash, code_unit| {
+            hash.wrapping_mul(31).wrapping_add(i32::from(code_unit))
+        }) as i64 as u64,
     }
 }
 
@@ -167,19 +181,18 @@ impl ServerProperties {
                 ));
             }
         }
-        if values
-            .get("level-seed")
-            .is_some_and(|value| !value.is_empty())
-        {
-            return Err(invalid(
-                "level-seed is not yet connected to world generation",
-            ));
-        }
-        if values
-            .get("level-type")
-            .is_some_and(|value| value != "FLAT")
-        {
-            return Err(invalid("level-type must be FLAT with legacy IRW storage"));
+        let level_seed = values.get("level-seed").filter(|value| !value.is_empty())
+            .map(|value| legacy_level_seed(value));
+        let level_type = values.get("level-type").map(String::as_str).unwrap_or("FLAT");
+        match level_seed {
+            Some(0) => return Err(invalid("level-seed=0 would generate a random vanilla seed; supply a nonzero seed")),
+            Some(_) if !survival || level_type != "DEFAULT" => {
+                return Err(invalid("level-seed requires survival gamemode and level-type=DEFAULT"));
+            }
+            None if level_type != "FLAT" => {
+                return Err(invalid("unseeded worlds require level-type=FLAT"));
+            }
+            _ => {}
         }
         let accepted = [
             "server-port",
@@ -213,6 +226,7 @@ impl ServerProperties {
             survival,
             difficulty,
             level_name: level_name.to_string(),
+            level_seed,
         })
     }
 }
@@ -241,6 +255,7 @@ gamemode=1
         assert_eq!(p.world_path, PathBuf::from("TestWorld/flat.irw"));
         assert!(!p.survival);
         assert_eq!(p.difficulty, 1);
+        assert_eq!(p.level_seed, None);
         for difficulty in 0..=3 {
             let text = SAFE.replace("difficulty=1", &format!("difficulty={difficulty}"));
             assert_eq!(
@@ -266,6 +281,22 @@ gamemode=1
             assert!(ServerProperties::parse(&bad).is_err(), "{bad}");
         }
         assert!(ServerProperties::parse("level-name=world").is_err());
+    }
+
+    #[test]
+    fn legacy_seed_matches_java_signed_and_utf16_hashing() {
+        assert_eq!(legacy_level_seed("-42"), (-42i64) as u64);
+        assert_eq!(legacy_level_seed("abc"), 96_354);
+        assert_eq!(legacy_level_seed("😀"), 1_772_899);
+        let seeded = SAFE.replace("gamemode=1", "gamemode=0")
+            .replace("level-type=FLAT", "level-type=DEFAULT")
+            + "level-seed=-42\n";
+        let config = ServerProperties::parse(&seeded).unwrap();
+        assert!(config.survival);
+        assert_eq!(config.level_seed, Some((-42i64) as u64));
+        assert!(ServerProperties::parse(&(SAFE.to_string() + "level-seed=42\n")).is_err());
+        assert!(ServerProperties::parse(&seeded.replace("level-seed=-42", "level-seed=0")).is_err());
+        assert!(ServerProperties::parse(&seeded.replace("level-type=DEFAULT", "level-type=FLAT")).is_err());
     }
 
     #[test]
