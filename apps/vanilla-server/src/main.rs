@@ -69,7 +69,10 @@ use legacy_protocol::{
     PROTOCOL_VERSION,
 };
 use mobs::Mobs;
-use multiplayer::{Event, Hub, JoinError, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT};
+use multiplayer::{
+    Event, Hub, JoinError, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS,
+    PEARL_TELEPORT_EVENT,
+};
 use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
