@@ -395,7 +395,10 @@ mod tests {
     fn colliding_minecarts_stop_before_overlapping() {
         let mut world = World::new();
         for x in 0..4 {
-            world.import_block(x, 65, 0, (27 << 4) | 9).unwrap();
+            // Keep the target cart parked on an ordinary rail; powered
+            // rails accelerate even an unridden cart in this simulation.
+            let rail = if x == 2 { (66 << 4) | 1 } else { (27 << 4) | 9 };
+            world.import_block(x, 65, 0, rail).unwrap();
         }
         let mut carts = Minecarts::default();
         let left = PlayerPosition {
