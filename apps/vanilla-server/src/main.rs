@@ -31,6 +31,7 @@ mod multiplayer;
 mod navigation;
 mod physics;
 mod player;
+mod scoreboard;
 mod server_config;
 mod session_lock;
 mod survival;
@@ -59,6 +60,7 @@ use mobs::Mobs;
 use multiplayer::{Event, Hub, JoinError, ADMIN_TELEPORT_EVENT, MAX_PLAYERS};
 use physics::{FallTracker, IdleGravity};
 use player::PlayerPosition;
+use scoreboard::Scoreboard;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, ErrorKind};
@@ -585,6 +587,8 @@ struct PlayerSession<'a> {
     hardcore: bool,
     difficulty: u8,
     game_rules: &'a Mutex<GameRules>,
+    scoreboard: &'a Mutex<Scoreboard>,
+    scoreboard_path: &'a Path,
     hub: &'a Hub,
     entity_id: i32,
     events: &'a Receiver<Event>,
@@ -621,6 +625,8 @@ fn play(
         hardcore,
         difficulty,
         game_rules,
+        scoreboard,
+        scoreboard_path,
         hub,
         entity_id,
         events,
@@ -665,6 +671,7 @@ fn play(
     let mut last_hazards_tick = clock.ticks();
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
+    let mut death_recorded = vitals.health <= 0.0;
     loop {
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
@@ -1188,6 +1195,20 @@ fn play(
         }
         if survival && vitals.health <= 0.0 {
             eating = None;
+            if !death_recorded {
+                // A death is counted exactly once in this session and the
+                // updated shared scoreboard is durable before client notify.
+                let changes = {
+                    let mut board = scoreboard.lock().map_err(|_| bad("scoreboard lock poisoned"))?;
+                    let mut candidate = board.clone();
+                    let changes = candidate.record_death(name)?;
+                    candidate.save(scoreboard_path)?;
+                    *board = candidate;
+                    changes
+                };
+                for change in changes { hub.broadcast(change); }
+                death_recorded = true;
+            }
             let keep_inventory = game_rules
                 .lock().map_err(|_| bad("game rules mutex poisoned"))?.keep_inventory();
             if !keep_inventory {
@@ -2735,6 +2756,7 @@ fn play(
                     origin.save_state(player_path, fresh_vitals)?;
                     *vitals = fresh_vitals;
                     *player = origin;
+                    death_recorded = false;
                     fall = FallTracker::new(origin.y);
                     idle_gravity = IdleGravity::new(now_tick);
                     eating = None;
@@ -2871,6 +2893,8 @@ struct ServerContext {
     hardcore: bool,
     difficulty: u8,
     game_rules: Arc<Mutex<GameRules>>,
+    scoreboard: Arc<Mutex<Scoreboard>>,
+    scoreboard_path: Arc<PathBuf>,
 }
 fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     let ServerContext {
@@ -2894,6 +2918,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
         hardcore,
         difficulty,
         game_rules,
+        scoreboard,
+        scoreboard_path,
     } = context;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -3020,6 +3046,9 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
     if survival {
         send(&mut s, 0x1f, &experience_state.packet())?;
     }
+    for packet in scoreboard.lock().map_err(|_| bad("scoreboard lock poisoned"))?.snapshot()? {
+        send(&mut s, packet.id, &packet.body)?;
+    }
     // 1.7.10 tab list entries precede other player entity spawns.
     let self_list = multiplayer::list_entry(&name, true)?;
     send(&mut s, self_list.id, &self_list.body)?;
@@ -3081,6 +3110,8 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
             hardcore,
             difficulty,
             game_rules: &game_rules,
+            scoreboard: &scoreboard,
+            scoreboard_path: &scoreboard_path,
             hub: &hub,
             entity_id,
             events: &events,
@@ -3110,6 +3141,7 @@ fn handle(mut s: TcpStream, context: ServerContext) -> io::Result<()> {
 fn start_clock_console(
     hub: Arc<Hub>, clock: Arc<Clock>, clock_path: Arc<PathBuf>,
     rules: Arc<Mutex<GameRules>>, rules_path: Arc<PathBuf>,
+    scoreboard: Arc<Mutex<Scoreboard>>, scoreboard_path: Arc<PathBuf>,
 ) {
     thread::spawn(move || {
         let stdin = io::stdin();
@@ -3140,6 +3172,33 @@ fn start_clock_console(
                         clock.set_daylight_cycle(value);
                     }
                     println!("{key} = {value}");
+                    Ok(())
+                })(),
+                ["/scoreboard", operation @ ..] => (|| -> io::Result<()> {
+                    let mut state = scoreboard.lock().map_err(|_| bad("scoreboard lock poisoned"))?;
+                    let mut candidate = state.clone();
+                    let changes = match operation {
+                        ["objectives", "add", name, criterion, display] =>
+                            candidate.add_objective(name, display, criterion)?,
+                        ["objectives", "setdisplay", slot, name] => {
+                            let slot = match *slot {
+                                "list" => 0, "sidebar" => 1, "belowName" => 2,
+                                _ => return Err(bad("invalid scoreboard display slot")),
+                            };
+                            candidate.set_display(slot, if *name == "clear" { None } else { Some(name) })?
+                        }
+                        ["players", "set", holder, objective, value] => {
+                            let value = value.parse::<i32>().map_err(|_| bad("invalid scoreboard score"))?;
+                            candidate.set_score(holder, objective, value)?
+                        }
+                        ["teams", "add", name, display] => candidate.add_team(name, display)?,
+                        ["teams", "join", name, holder] => candidate.add_player_to_team(name, holder)?,
+                        _ => return Err(bad("unsupported scoreboard console command")),
+                    };
+                    candidate.save(&scoreboard_path)?;
+                    *state = candidate;
+                    drop(state);
+                    for event in changes { hub.broadcast(event); }
                     Ok(())
                 })(),
                 ["/time", "query", "daytime"] => {
@@ -3653,6 +3712,8 @@ fn main() -> io::Result<()> {
     let (clock, _clock_thread) = Clock::start_from(restored_clock);
     let rules_path = Arc::new(GameRules::location(&world_path));
     let world_rules = Arc::new(Mutex::new(GameRules::load(&rules_path)?));
+    let scoreboard_path = Arc::new(Scoreboard::location(&world_path));
+    let shared_scoreboard = Arc::new(Mutex::new(Scoreboard::load(&scoreboard_path)?));
     clock.set_daylight_cycle(
         world_rules.lock().map_err(|_| bad("game rules mutex poisoned"))?.daylight_cycle(),
     );
@@ -3696,6 +3757,8 @@ fn main() -> io::Result<()> {
         Arc::clone(&clock_path),
         Arc::clone(&world_rules),
         Arc::clone(&rules_path),
+        Arc::clone(&shared_scoreboard),
+        Arc::clone(&scoreboard_path),
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
@@ -3952,6 +4015,8 @@ fn main() -> io::Result<()> {
         let brewer_storage = Arc::clone(&brewers);
         let brewer_file = Arc::clone(&brewer_path);
         let rules = Arc::clone(&world_rules);
+        let board = Arc::clone(&shared_scoreboard);
+        let board_path = Arc::clone(&scoreboard_path);
         thread::spawn(move || {
             let _connection = admission;
             if let Err(e) = handle(
@@ -3977,6 +4042,8 @@ fn main() -> io::Result<()> {
                     hardcore,
                     difficulty,
                     game_rules: rules,
+                    scoreboard: board,
+                    scoreboard_path: board_path,
                 },
             ) {
                 if e.kind() != ErrorKind::UnexpectedEof {
