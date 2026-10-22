@@ -449,7 +449,11 @@ impl Inventory {
         }
         tool.damage += 1;
         if tool.damage == 25 {
-            *slot = Some(Stack { id: 280, count: 1, damage: 0 }); // consumed carrot, remaining stick
+            *slot = Some(Stack {
+                id: 280,
+                count: 1,
+                damage: 0,
+            }); // consumed carrot, remaining stick
         } else {
             *slot = Some(tool);
         }
