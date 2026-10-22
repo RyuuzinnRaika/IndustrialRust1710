@@ -218,8 +218,16 @@ mod tests {
         let from = (0, 65, 0);
         let to = (1, 65, 0);
         let mut source = [None; DEVICE_SLOTS];
-        source[0] = Some(Stack { id: 1, count: 2, damage: 0 });
-        let full = [Some(Stack { id: 1, count: 64, damage: 0 }); DEVICE_SLOTS];
+        source[0] = Some(Stack {
+            id: 1,
+            count: 2,
+            damage: 0,
+        });
+        let full = [Some(Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+        }); DEVICE_SLOTS];
         let original = Devices::default()
             .staged_update(from, source)
             .unwrap()
@@ -228,13 +236,20 @@ mod tests {
         assert!(original.stage_transfer_one(from, to, 0).unwrap().is_none());
         assert_eq!(original.slots(from)[0].unwrap().count, 2);
         let mut available = full;
-        available[0] = Some(Stack { id: 1, count: 63, damage: 0 });
+        available[0] = Some(Stack {
+            id: 1,
+            count: 63,
+            damage: 0,
+        });
         let original = original.staged_update(to, available).unwrap();
         let transferred = original.stage_transfer_one(from, to, 0).unwrap().unwrap();
         assert_eq!(transferred.slots(from)[0].unwrap().count, 1);
         assert_eq!(transferred.slots(to)[0].unwrap().count, 64);
         assert_eq!(original.slots(from)[0].unwrap().count, 2);
-        assert!(original.stage_transfer_one(from, from, 0).unwrap().is_none());
+        assert!(original
+            .stage_transfer_one(from, from, 0)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
