@@ -855,9 +855,13 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
-        let boat_mount = boats.lock().map_err(|_| bad("boats mutex poisoned"))?
+        let boat_mount = boats
+            .lock()
+            .map_err(|_| bad("boats mutex poisoned"))?
             .rider_position(entity_id);
-        let animal_mount = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?
+        let animal_mount = mobs
+            .lock()
+            .map_err(|_| bad("mob mutex poisoned"))?
             .rider_position(entity_id);
         if let Some(mounted) = boat_mount.or(animal_mount) {
             if mounted.is_valid() && *player != mounted {
@@ -1343,11 +1347,16 @@ fn play(
                         }
                         continue;
                     }
-                    if boats.lock().map_err(|_| bad("boats mutex poisoned"))?
-                        .boat_for(entity_id).is_none()
+                    if boats
+                        .lock()
+                        .map_err(|_| bad("boats mutex poisoned"))?
+                        .boat_for(entity_id)
+                        .is_none()
                     {
                         if let Some(events) = creatures.use_mount(target_id, entity_id, *player) {
-                            for event in events { hub.broadcast(event); }
+                            for event in events {
+                                hub.broadcast(event);
+                            }
                             continue;
                         }
                     }
@@ -1543,9 +1552,14 @@ fn play(
                     send_player_position(s, player)?;
                     continue;
                 }
-                if boats.lock().map_err(|_| bad("boats mutex poisoned"))?
-                    .boat_for(entity_id).is_some()
-                    || mobs.lock().map_err(|_| bad("mob mutex poisoned"))?
+                if boats
+                    .lock()
+                    .map_err(|_| bad("boats mutex poisoned"))?
+                    .boat_for(entity_id)
+                    .is_some()
+                    || mobs
+                        .lock()
+                        .map_err(|_| bad("mob mutex poisoned"))?
                         .is_riding(entity_id)
                 {
                     // Riding position comes from server-side boat physics, never C04/C06.
@@ -1652,19 +1666,26 @@ fn play(
                         hub.broadcast(event);
                     }
                     drop(state);
-                    if let Some(event) = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?
-                        .dismount(entity_id) {
+                    if let Some(event) = mobs
+                        .lock()
+                        .map_err(|_| bad("mob mutex poisoned"))?
+                        .dismount(entity_id)
+                    {
                         hub.broadcast(event);
                     }
                 } else if !state.control(entity_id, sideways, forward, yaw) {
                     drop(state);
                     let carrot = inventory.held().is_some_and(|item| item.id == 398);
                     let collision = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                    let events = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?
+                    let events = mobs
+                        .lock()
+                        .map_err(|_| bad("mob mutex poisoned"))?
                         .steer_rider(entity_id, &collision, forward, yaw, carrot, now_tick);
                     drop(collision);
                     let moved = !events.is_empty();
-                    for event in events { hub.broadcast(event); }
+                    for event in events {
+                        hub.broadcast(event);
+                    }
                     if moved && carrot && now_tick.saturating_sub(last_carrot_wear) >= 40 {
                         let mut candidate = inventory.clone();
                         if candidate.wear_carrot_stick() {
@@ -2026,10 +2047,16 @@ fn play(
                 }
                 // A fence click ties all of this player's nearby lead endpoints.
                 // Re-clicking a tied knot releases the anchored animals.
-                if survival && (0..=5).contains(&face)
-                    && world::in_bounds(x, y, z) && near(location, x, y, z)
-                    && world.lock().map_err(|_| bad("world mutex poisoned"))?
-                        .get(x, y, z) >> 4 == 85
+                if survival
+                    && (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 85
                 {
                     let anchor = [x, y, z];
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
@@ -2037,7 +2064,9 @@ fn play(
                     if effects.is_empty() {
                         effects = creatures.untie_fence(anchor);
                     }
-                    for effect in effects { hub.broadcast(effect); }
+                    for effect in effects {
+                        hub.broadcast(effect);
+                    }
                     continue;
                 }
                 // Boat item 333 places a bounded entity on a water block.
