@@ -302,9 +302,10 @@ mod tests {
     use super::*;
     #[test]
     fn frame_placement_rotation_and_drops() {
-        let world = World::new();
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 1 << 4).unwrap();
         let original = Hangings::default();
-        let (state, frame) = original.stage_place(&world, (0, 63, 0), 3, 389).unwrap().unwrap();
+        let (state, frame) = original.stage_place(&world, (0, 64, 0), 3, 389).unwrap().unwrap();
         assert_eq!(frame.spawn().unwrap()[0].id, 0x0e);
         let item = Stack { id: 260, count: 7, damage: 0 };
         let (state, debit, packet) = state.stage_frame_use(frame.id, Some(item)).unwrap().unwrap();
