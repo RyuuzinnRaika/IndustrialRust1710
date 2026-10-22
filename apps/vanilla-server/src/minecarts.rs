@@ -204,7 +204,11 @@ impl Minecarts {
         // 270=east. Steering direction must follow the rail axis.
         let yaw = heading.rem_euclid(360.0);
         cart.direction = if cart.east_west {
-            if yaw < 180.0 { -1 } else { 1 }
+            if yaw < 180.0 {
+                -1
+            } else {
+                1
+            }
         } else if !(90.0..270.0).contains(&yaw) {
             1
         } else {
@@ -375,7 +379,11 @@ mod tests {
         world.import_block(0, 65, 0, (27 << 4) | 9).unwrap();
         world.import_block(0, 65, 1, (27 << 4) | 8).unwrap();
         let mut east_west = Minecarts::default();
-        let at = PlayerPosition { x: 0.5, y: 65.5, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.5,
+            z: 0.5,
+        };
         east_west.place(&world, at, 0).unwrap();
         east_west.mount(FIRST_ID, 22, at).unwrap();
         assert!(east_west.control(22, 1.0, 90.0));
@@ -384,7 +392,11 @@ mod tests {
         assert_eq!(east_west.carts[&FIRST_ID].direction, 1);
 
         let mut north_south = Minecarts::default();
-        let at = PlayerPosition { x: 0.5, y: 65.5, z: 1.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.5,
+            z: 1.5,
+        };
         north_south.place(&world, at, 0).unwrap();
         north_south.mount(FIRST_ID, 23, at).unwrap();
         assert!(north_south.control(23, 1.0, 0.0));
