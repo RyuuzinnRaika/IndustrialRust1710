@@ -639,9 +639,19 @@ mod tests {
         let y = 80;
         for dx in -1..=1 {
             for (px, pz) in [(dx, -2), (dx, 2), (-2, dx), (2, dx)] {
-                let facing = if pz == -2 { 0 } else if pz == 2 { 2 } else if px == -2 { 3 } else { 1 };
+                let facing = if pz == -2 {
+                    0
+                } else if pz == 2 {
+                    2
+                } else if px == -2 {
+                    3
+                } else {
+                    1
+                };
                 let eye = if (px, pz) == (0, -2) { 0 } else { 4 };
-                world.import_block(px, y, pz, (120 << 4) | facing | eye).unwrap();
+                world
+                    .import_block(px, y, pz, (120 << 4) | facing | eye)
+                    .unwrap();
             }
         }
         world.save(&path).unwrap();
@@ -664,15 +674,29 @@ mod tests {
         let y = 80;
         for dx in -1..=1 {
             for (px, pz) in [(dx, -2), (dx, 2), (-2, dx), (2, dx)] {
-                let facing = if pz == -2 { 0 } else if pz == 2 { 2 } else if px == -2 { 3 } else { 1 };
+                let facing = if pz == -2 {
+                    0
+                } else if pz == 2 {
+                    2
+                } else if px == -2 {
+                    3
+                } else {
+                    1
+                };
                 let facing = if (px, pz) == (1, 2) { 0 } else { facing };
                 let eye = if (px, pz) == (0, -2) { 0 } else { 4 };
-                world.import_block(px, y, pz, (120 << 4) | facing | eye).unwrap();
+                world
+                    .import_block(px, y, pz, (120 << 4) | facing | eye)
+                    .unwrap();
             }
         }
         world.save(&path).unwrap();
         let changed = world.insert_end_eye(&path, 0, y, -2).unwrap();
-        assert_eq!(changed.len(), 1, "only inserted eye, not the invalid portal");
+        assert_eq!(
+            changed.len(),
+            1,
+            "only inserted eye, not the invalid portal"
+        );
         assert_eq!(world.get(0, y, 0), 0);
         fs::remove_file(path).ok();
     }
