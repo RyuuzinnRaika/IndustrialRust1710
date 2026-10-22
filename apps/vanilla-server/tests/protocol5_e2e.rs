@@ -307,9 +307,7 @@ fn console_gamemode_changes_live_protocol5_and_keeps_inventories_isolated() {
         .unwrap()
         .write_all(b"/gamemode creative RustTester\n")
         .unwrap();
-    let mode = until_packet(&mut client, 0x2b, |data| {
-        data == [3, 0x3f, 0x80, 0, 0]
-    });
+    let mode = until_packet(&mut client, 0x2b, |data| data == [3, 0x3f, 0x80, 0, 0]);
     assert_eq!(mode, [3, 0x3f, 0x80, 0, 0]);
     until_packet(&mut client, 0x30, |body| body.starts_with(&[0, 0, 45]));
 
@@ -352,7 +350,10 @@ fn console_gamemode_changes_live_protocol5_and_keeps_inventories_isolated() {
     let difficulty_path = server.directory.join("flat.difficulty");
     let deadline = Instant::now() + Duration::from_secs(8);
     while !difficulty_path.is_file() {
-        assert!(Instant::now() < deadline, "difficulty command was not persisted");
+        assert!(
+            Instant::now() < deadline,
+            "difficulty command was not persisted"
+        );
         thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(fs::read(difficulty_path).unwrap(), b"3");
