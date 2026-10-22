@@ -29,7 +29,12 @@ pub struct GameRules {
 
 impl Default for GameRules {
     fn default() -> Self {
-        Self { values: RULES.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() }
+        Self {
+            values: RULES
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
     }
 }
 
@@ -47,7 +52,9 @@ impl GameRules {
     }
 
     pub fn random_tick_speed(&self) -> u32 {
-        self.get("randomTickSpeed").and_then(|v| v.parse().ok()).unwrap_or(3)
+        self.get("randomTickSpeed")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3)
     }
 
     /// Prevent unknown names and invalid types from silently changing gameplay.
@@ -56,14 +63,23 @@ impl GameRules {
             return Err(io::Error::new(ErrorKind::InvalidInput, "unknown game rule"));
         }
         if rule == "randomTickSpeed" {
-            let number = value.parse::<u32>().map_err(|_| io::Error::new(ErrorKind::InvalidInput, "invalid randomTickSpeed"))?;
+            let number = value
+                .parse::<u32>()
+                .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "invalid randomTickSpeed"))?;
             if number > 4096 {
-                return Err(io::Error::new(ErrorKind::InvalidInput, "randomTickSpeed too large"));
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "randomTickSpeed too large",
+                ));
             }
         } else if value != "true" && value != "false" {
             return Err(io::Error::new(ErrorKind::InvalidInput, "expected boolean"));
         }
-        Ok(self.values.insert(rule.to_owned(), value.to_owned()).as_deref() != Some(value))
+        Ok(self
+            .values
+            .insert(rule.to_owned(), value.to_owned())
+            .as_deref()
+            != Some(value))
     }
 
     pub fn location(world_file: &Path) -> PathBuf {
@@ -75,17 +91,23 @@ impl GameRules {
         let data = match fs::metadata(&path) {
             Ok(meta) => {
                 if meta.len() > MAX_BYTES {
-                    return Err(io::Error::new(ErrorKind::InvalidData, "game rules file too large"));
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "game rules file too large",
+                    ));
                 }
                 fs::read(&path)?
             }
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e),
         };
-        let loaded: Self = serde_json::from_slice(&data).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
+        let loaded: Self =
+            serde_json::from_slice(&data).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
         let mut rules = Self::default();
         for (k, v) in loaded.values {
-            rules.set(&k, &v).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
+            rules
+                .set(&k, &v)
+                .map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
         }
         Ok(rules)
     }
@@ -94,19 +116,27 @@ impl GameRules {
         let path = Self::location(world_file);
         let data = serde_json::to_vec_pretty(self)?;
         if data.len() as u64 > MAX_BYTES {
-            return Err(io::Error::new(ErrorKind::InvalidData, "game rules file too large"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "game rules file too large",
+            ));
         }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let temp = path.with_extension(format!("gamerules.{}.tmp", std::process::id()));
         let write_result = (|| {
-            let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)?;
             file.write_all(&data)?;
             file.sync_all()?;
             fs::rename(&temp, &path)?;
             if let Some(parent) = path.parent() {
-                if let Ok(dir) = File::open(parent) { let _ = dir.sync_all(); }
+                if let Ok(dir) = File::open(parent) {
+                    let _ = dir.sync_all();
+                }
             }
             Ok(())
         })();
