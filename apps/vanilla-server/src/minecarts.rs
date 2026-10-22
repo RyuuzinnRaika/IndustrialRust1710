@@ -17,6 +17,7 @@ struct Cart {
     position: PlayerPosition,
     speed: f64,
     direction: i8,
+    east_west: bool,
     rider: Option<i32>,
     last_tick: u64,
 }
@@ -144,6 +145,7 @@ impl Minecarts {
             position: at,
             speed: 0.0,
             direction: 1,
+            east_west: straight_axis(state >> 4, state & 15).unwrap_or(false),
             rider: None,
             last_tick: tick,
         };
@@ -198,12 +200,16 @@ impl Minecarts {
         let Some(cart) = self.carts.values_mut().find(|c| c.rider == Some(rider)) else {
             return false;
         };
-        let sign = if heading.rem_euclid(360.0) < 180.0 {
+        // Minecraft yaw: 0=south, 90=west, 180=north,
+        // 270=east. Steering direction must follow the rail axis.
+        let yaw = heading.rem_euclid(360.0);
+        cart.direction = if cart.east_west {
+            if yaw < 180.0 { -1 } else { 1 }
+        } else if !(90.0..270.0).contains(&yaw) {
             1
         } else {
             -1
         };
-        cart.direction = sign;
         if forward.abs() > 0.01 {
             cart.speed = (cart.speed + f64::from(forward) * 0.012).clamp(-0.4, 0.4);
         }
@@ -226,6 +232,7 @@ impl Minecarts {
                     break;
                 };
                 cart.position.y = height;
+                cart.east_west = east_west;
                 if id == 27 {
                     if meta & 8 != 0 {
                         let drive = if cart.speed < 0.0 { -1.0 } else { 1.0 };
@@ -360,6 +367,30 @@ mod tests {
         carts.tick(&world, 1);
         assert!((carts.carts[&FIRST_ID].position.x - origin.x).abs() < f64::EPSILON);
         assert_eq!(carts.carts[&FIRST_ID].speed, 0.0);
+    }
+
+    #[test]
+    fn player_yaw_respects_east_west_and_north_south_tracks() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, (27 << 4) | 9).unwrap();
+        world.import_block(0, 65, 1, (27 << 4) | 8).unwrap();
+        let mut east_west = Minecarts::default();
+        let at = PlayerPosition { x: 0.5, y: 65.5, z: 0.5 };
+        east_west.place(&world, at, 0).unwrap();
+        east_west.mount(FIRST_ID, 22, at).unwrap();
+        assert!(east_west.control(22, 1.0, 90.0));
+        assert_eq!(east_west.carts[&FIRST_ID].direction, -1);
+        assert!(east_west.control(22, 1.0, 270.0));
+        assert_eq!(east_west.carts[&FIRST_ID].direction, 1);
+
+        let mut north_south = Minecarts::default();
+        let at = PlayerPosition { x: 0.5, y: 65.5, z: 1.5 };
+        north_south.place(&world, at, 0).unwrap();
+        north_south.mount(FIRST_ID, 23, at).unwrap();
+        assert!(north_south.control(23, 1.0, 0.0));
+        assert_eq!(north_south.carts[&FIRST_ID].direction, 1);
+        assert!(north_south.control(23, 1.0, 180.0));
+        assert_eq!(north_south.carts[&FIRST_ID].direction, -1);
     }
 
     #[test]
