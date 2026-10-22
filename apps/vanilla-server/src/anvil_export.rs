@@ -248,6 +248,7 @@ fn write_snapshot(
 /// Exports only spawn 5x5 and changed chunk columns, never an unbounded map.
 /// The destination must not exist. Failed serialization cleans up the private
 /// staging tree rather than exposing a partially written Minecraft world.
+#[cfg(test)]
 pub fn export(world: &World, dest: &Path) -> io::Result<usize> {
     export_tiles(world, dest, &Default::default())
 }
