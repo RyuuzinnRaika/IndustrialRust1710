@@ -3977,7 +3977,7 @@ fn main() -> io::Result<()> {
         }
     });
     listener.set_nonblocking(true)?;
-    let mut client_threads = Vec::new();
+    let mut client_threads: Vec<thread::JoinHandle<()>> = Vec::new();
     while !shutdown.load(Ordering::Acquire) {
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
