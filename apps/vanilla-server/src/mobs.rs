@@ -757,42 +757,15 @@ impl Mobs {
     }
     /// Natural Survival only, preserving flat E2E world behaviour.
     pub fn new_with_difficulty(world: &World, enabled: bool, difficulty: u8) -> Self {
-        let mut state = Self {
+        // Do not place fixed zombies/skeletons near (0,0) at world creation:
+        // that bypassed all biome, light, player-radius and world-spawn checks.
+        // Only the validated natural-spawn tick may create initial monsters.
+        Self {
             next_id: BASE_ID,
             enabled: enabled && world.is_natural(),
             difficulty: Some(difficulty.min(3)),
             ..Self::default()
-        };
-        if state.enabled {
-            for (n, (x, z)) in [(8, 9), (-8, 7), (7, -8), (-9, -7)].into_iter().enumerate() {
-                let p = PlayerPosition {
-                    x: x as f64 + 0.5,
-                    y: world.natural_seed().map_or(65.0, |seed| {
-                        crate::terrain::surface(seed, x, z) as f64 + 1.0
-                    }),
-                    z: z as f64 + 0.5,
-                };
-                if !physics::collides(world, &p)
-                    && physics::supported(world, &p)
-                    && (difficulty > 0 || n == 2)
-                {
-                    state.insert(
-                        if n == 0 {
-                            Kind::Zombie
-                        } else if n == 1 {
-                            Kind::Skeleton
-                        } else if n == 2 {
-                            Kind::Cow
-                        } else {
-                            Kind::Creeper
-                        },
-                        p,
-                        false,
-                    );
-                }
-            }
         }
-        state
     }
     pub fn spawn_events(&self) -> impl Iterator<Item = Event> + '_ {
         self.entities
@@ -1214,7 +1187,7 @@ impl Mobs {
                 z: z as f64 + 0.5,
             };
             if !position.is_valid()
-                || !(24.0..=128.0).contains(&distance_to_players(position, players))
+                || !natural_spawn_location_ok(world, position, players)
                 || !physics::supported(world, &position)
                 || physics::collides(world, &position)
             {
@@ -1952,6 +1925,28 @@ fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
         .map(|other| distance_3d(p, *other))
         .fold(f64::INFINITY, f64::min)
 }
+/// Respect both the closest *online player* and Overworld world-spawn
+/// exclusion zones. This guard runs for every natural spawn candidate.
+fn natural_spawn_location_ok(
+    world: &World,
+    at: PlayerPosition,
+    players: &[PlayerPosition],
+) -> bool {
+    if !(24.0..=128.0).contains(&distance_to_players(at, players)) {
+        return false;
+    }
+    if world.dimension() == crate::dimensions::Dimension::Overworld {
+        let origin = PlayerPosition {
+            x: 0.5,
+            y: world.spawn_y(),
+            z: 0.5,
+        };
+        if distance_3d(at, origin) < 24.0 {
+            return false;
+        }
+    }
+    true
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2427,10 +2422,36 @@ mod tests {
         assert_eq!(mobs.spawn_events().count(), 0);
     }
     #[test]
+    fn world_spawn_and_player_exclusion_apply_to_all_natural_candidates() {
+        let world = World::natural(42);
+        let y = world.spawn_y();
+        let player = PlayerPosition {
+            x: 60.5,
+            y,
+            z: 0.5,
+        };
+        let candidate = |x| PlayerPosition { x, y, z: 0.5 };
+        assert!(!natural_spawn_location_ok(&world, candidate(24.4), &[player]));
+        assert!(natural_spawn_location_ok(&world, candidate(24.5), &[player]));
+        assert!(!natural_spawn_location_ok(&world, candidate(36.6), &[candidate(40.0)]));
+        assert!(!natural_spawn_location_ok(&world, candidate(200.5), &[player]));
+        assert!(!natural_spawn_location_ok(&world, candidate(45.5), &[]));
+        assert!(Mobs::new_with_difficulty(&world, true, 0).entities.is_empty());
+        assert!(Mobs::new_with_difficulty(&world, true, 3).entities.is_empty());
+    }
+    #[test]
     fn natural_mobs_spawn_in_protocol5() {
         let world = World::natural(42);
         let mut mobs = Mobs::new_with_difficulty(&world, true, 1);
-        assert!(!mobs.entities.is_empty());
+        // Starting a new world never sidesteps the spawn eligibility checks.
+        assert!(mobs.entities.is_empty());
+        assert_eq!(mobs.next_id, BASE_ID);
+        let position = PlayerPosition {
+            x: 32.5,
+            y: world.spawn_y(),
+            z: 32.5,
+        };
+        mobs.insert(Kind::Zombie, position, false);
         let zombie = *mobs.entities.values().next().unwrap();
         assert_eq!(zombie.kind, Kind::Zombie);
         let packet = zombie.spawn();
