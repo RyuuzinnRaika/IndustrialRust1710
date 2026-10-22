@@ -32,8 +32,8 @@ mod legacy_nbt;
 mod legacy_region;
 mod legacy_world_inspect;
 mod level_dat;
-mod minecarts;
 mod maps;
+mod minecarts;
 mod mobs;
 mod multiplayer;
 mod native_tile_export;
@@ -61,8 +61,8 @@ use admin::Administration;
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
-use dispensers::{Devices, Position as DevicePosition};
 use decorations::Decorations;
+use dispensers::{Devices, Position as DevicePosition};
 use experience::Experience;
 use fishing::Fishing;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
@@ -75,8 +75,8 @@ use legacy_protocol::{
     read_frame, read_varint, write_frame, write_string, write_varint, BufferedFrameReader,
     PROTOCOL_VERSION,
 };
-use minecarts::Minecarts;
 use maps::Maps;
+use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
     Event, Hub, JoinError, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, MAX_PLAYERS,
