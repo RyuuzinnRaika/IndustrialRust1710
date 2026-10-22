@@ -71,6 +71,14 @@ impl World {
         Ok(true)
     }
 
+    /// The existing world worker can take a pre-detonation snapshot only
+    /// on a tick that will actually explode TNT. This preserves blast
+    /// occlusion without cloning an entire world on every 20Hz tick.
+    pub fn tnt_detonates_next_tick(&self) -> bool {
+        let next = self.fluid_phase.saturating_add(1);
+        self.primed_tnt.values().any(|tnt| tnt.explode_at <= next)
+    }
+
     /// Publish only events from committed state.
     pub fn drain_tnt_events(&mut self) -> Vec<TntEvent> {
         std::mem::take(&mut self.tnt_events)
@@ -776,6 +784,22 @@ mod tests {
             .drain_tnt_events()
             .iter()
             .any(|event| { matches!(event, TntEvent::Explode { .. }) }));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn tnt_preblast_snapshot_is_only_needed_when_fuse_expires() {
+        let path = file("tnt-snapshot-signal");
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 80, 0, 46 << 4).unwrap();
+        assert!(world.ignite_tnt(&path, 0, 80, 0).unwrap());
+        assert!(!world.tnt_detonates_next_tick());
+        for _ in 0..79 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert!(world.tnt_detonates_next_tick());
+        world.block_tick(&path, 64).unwrap();
+        assert!(!world.tnt_detonates_next_tick());
         fs::remove_file(path).ok();
     }
 
