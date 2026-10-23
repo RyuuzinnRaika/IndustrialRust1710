@@ -1994,9 +1994,7 @@ impl Mobs {
                 }
                 if kind == Kind::Slime
                     && !is_slime_cave_location(world.natural_seed().unwrap_or(0), cx, cy, cz)
-                    && !(world.biome_at(cx, cz) == 6
-                        && (50..=70).contains(&cy)
-                        && !sunlight(now))
+                    && !(world.biome_at(cx, cz) == 6 && (50..=70).contains(&cy) && !sunlight(now))
                 {
                     continue;
                 }
@@ -2817,8 +2815,8 @@ impl Mobs {
 /// The roll is supplied by the server, never by the client.
 fn horse_spawn_weight(biome: u8) -> u64 {
     match biome {
-        1 | 129 => 5,                 // Plains / sunflower plains
-        35 | 36 | 163 | 164 => 1,   // Savanna and variants
+        1 | 129 => 5,             // Plains / sunflower plains
+        35 | 36 | 163 | 164 => 1, // Savanna and variants
         _ => 0,
     }
 }
@@ -3385,7 +3383,9 @@ mod tests {
             (Kind::Witch, 5),
         ] {
             assert_eq!(
-                (0..515).filter(|roll| overworld_monster_kind(*roll) == kind).count(),
+                (0..515)
+                    .filter(|roll| overworld_monster_kind(*roll) == kind)
+                    .count(),
                 expected,
                 "{kind:?}"
             );
@@ -3397,17 +3397,23 @@ mod tests {
             (Kind::Cow, 8),
         ] {
             assert_eq!(
-                (0..40).filter(|roll| overworld_passive_kind(4, *roll) == kind).count(),
+                (0..40)
+                    .filter(|roll| overworld_passive_kind(4, *roll) == kind)
+                    .count(),
                 expected,
                 "{kind:?}"
             );
         }
         assert_eq!(
-            (0..45).filter(|roll| overworld_passive_kind(1, *roll) == Kind::Horse).count(),
+            (0..45)
+                .filter(|roll| overworld_passive_kind(1, *roll) == Kind::Horse)
+                .count(),
             5
         );
         assert_eq!(
-            (0..41).filter(|roll| overworld_passive_kind(35, *roll) == Kind::Horse).count(),
+            (0..41)
+                .filter(|roll| overworld_passive_kind(35, *roll) == Kind::Horse)
+                .count(),
             1
         );
         for biome in [2, 3, 4, 18, 21] {
@@ -3418,10 +3424,17 @@ mod tests {
 
     #[test]
     fn adult_horses_drop_zero_to_two_leather_not_always_one() {
-        let at = PlayerPosition { x: 0.5, y: 65.0, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
         let mut observed = [false; 3];
         for id in BASE_ID..BASE_ID + 256 {
-            let mut state = Mobs { next_id: id, ..Mobs::default() };
+            let mut state = Mobs {
+                next_id: id,
+                ..Mobs::default()
+            };
             state.insert(Kind::Horse, at, false);
             let horse = state.entities[&id];
             if let Some((leather, _)) = horse.death_drop() {
