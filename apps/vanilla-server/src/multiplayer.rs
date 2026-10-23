@@ -336,9 +336,7 @@ impl Hub {
                 let removed = list_entry(&gone.name, false).ok();
                 let entity = destroy(id);
                 for peer in inner.players.values() {
-                    if peer.dimension == gone.dimension
-                        && visible(&peer.position, &gone.position)
-                    {
+                    if peer.dimension == gone.dimension && visible(&peer.position, &gone.position) {
                         enqueue(peer, &entity);
                     }
                     if let Some(item) = &removed {
@@ -404,7 +402,10 @@ impl Hub {
         position: PlayerPosition,
     ) -> io::Result<bool> {
         if !position.is_valid() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid arrival position"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid arrival position",
+            ));
         }
         let mut inner = self.0.lock().map_err(|_| poisoned())?;
         let Some(current) = inner.players.get_mut(&id) else {
@@ -613,13 +614,24 @@ mod tests {
         assert_eq!(alice_rx.try_recv().unwrap().id, 0x38);
         assert!(alice_rx.try_recv().is_err());
         assert!(bob_rx.try_recv().is_err());
-        assert_eq!(hub.positions_in_dimension(Dimension::Overworld).unwrap().len(), 1);
-        assert_eq!(hub.participants_in_dimension(Dimension::Nether).unwrap()[0].0, bob);
+        assert_eq!(
+            hub.positions_in_dimension(Dimension::Overworld)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            hub.participants_in_dimension(Dimension::Nether).unwrap()[0].0,
+            bob
+        );
 
         hub.broadcast_in_dimension_view(
             Dimension::Nether,
             pos,
-            Event { id: 0x22, body: vec![1] },
+            Event {
+                id: 0x22,
+                body: vec![1],
+            },
         );
         assert_eq!(bob_rx.try_recv().unwrap().id, 0x22);
         assert!(alice_rx.try_recv().is_err());
@@ -627,13 +639,24 @@ mod tests {
         assert!(hub.change_dimension(alice, Dimension::Nether, pos).unwrap());
         assert_eq!(bob_rx.try_recv().unwrap().id, 0x0c);
         assert_eq!(alice_rx.try_recv().unwrap().id, 0x0c);
-        assert_eq!(hub.positions_in_dimension(Dimension::Overworld).unwrap().len(), 0);
-        assert_eq!(hub.positions_in_dimension(Dimension::Nether).unwrap().len(), 2);
+        assert_eq!(
+            hub.positions_in_dimension(Dimension::Overworld)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            hub.positions_in_dimension(Dimension::Nether).unwrap().len(),
+            2
+        );
         assert!(hub.change_dimension(alice, Dimension::Nether, pos).is_err());
-        assert!(hub.change_dimension(bob, Dimension::End, PlayerPosition {
-            x: f64::NAN, ..pos
-        }).is_err());
-        assert_eq!(hub.positions_in_dimension(Dimension::Nether).unwrap().len(), 2);
+        assert!(hub
+            .change_dimension(bob, Dimension::End, PlayerPosition { x: f64::NAN, ..pos })
+            .is_err());
+        assert_eq!(
+            hub.positions_in_dimension(Dimension::Nether).unwrap().len(),
+            2
+        );
         hub.remove(alice);
         assert_eq!(bob_rx.try_recv().unwrap().id, 0x13);
     }
