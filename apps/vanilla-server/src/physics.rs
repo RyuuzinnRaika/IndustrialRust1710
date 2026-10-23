@@ -283,34 +283,33 @@ pub fn collides(world: &World, position: &PlayerPosition) -> bool {
         })
     })
 }
-/// A projectile has a 0.25-block collision box, not a player's 0.6x1.8
-/// hitbox. Swept projectile samples must use the smaller box so arrows pass
-/// through one-block openings and do not hit slabs above their flight path.
-pub fn projectile_collides(world: &World, position: &PlayerPosition) -> bool {
-    const HALF_PROJECTILE: f64 = 0.125;
-    let min_x = (position.x - HALF_PROJECTILE + EPS).floor() as i32;
-    let max_x = (position.x + HALF_PROJECTILE - EPS).floor() as i32;
-    let min_y = (position.y - HALF_PROJECTILE + EPS).floor() as i32;
-    let max_y = (position.y + HALF_PROJECTILE - EPS).floor() as i32;
-    let min_z = (position.z - HALF_PROJECTILE + EPS).floor() as i32;
-    let max_z = (position.z + HALF_PROJECTILE - EPS).floor() as i32;
+/// Test a projectile's centered collision box rather than the player's
+/// 0.6x1.8 hitbox. The caller supplies the projectile species' half-size:
+/// arrows are 0.5 wide, small fireballs/potions are narrower.
+pub fn projectile_collides(world: &World, position: &PlayerPosition, half_size: f64) -> bool {
+    let min_x = (position.x - half_size + EPS).floor() as i32;
+    let max_x = (position.x + half_size - EPS).floor() as i32;
+    let min_y = (position.y - half_size + EPS).floor() as i32;
+    let max_y = (position.y + half_size - EPS).floor() as i32;
+    let min_z = (position.z - half_size + EPS).floor() as i32;
+    let max_z = (position.z + half_size - EPS).floor() as i32;
     (min_x..=max_x).any(|x| {
         (min_y..=max_y).any(|y| {
             (min_z..=max_z).any(|z| {
                 shapes_at(world, x, y, z).into_iter().any(|shape| {
                     overlap(
-                        position.x - HALF_PROJECTILE,
-                        position.x + HALF_PROJECTILE,
+                        position.x - half_size,
+                        position.x + half_size,
                         x as f64 + shape.x0,
                         x as f64 + shape.x1,
                     ) && overlap(
-                        position.y - HALF_PROJECTILE,
-                        position.y + HALF_PROJECTILE,
+                        position.y - half_size,
+                        position.y + half_size,
                         y as f64 + shape.y0,
                         y as f64 + shape.y1,
                     ) && overlap(
-                        position.z - HALF_PROJECTILE,
-                        position.z + HALF_PROJECTILE,
+                        position.z - half_size,
+                        position.z + half_size,
                         z as f64 + shape.z0,
                         z as f64 + shape.z1,
                     )
@@ -602,17 +601,17 @@ mod tests {
         let mut world = World::new();
         world.import_block(1, 64, 0, 1 << 4).unwrap();
         // The player-sized box clips the wall, but a 0.25-wide arrow does not.
-        let near_wall = at(0.8, 64.5, 0.5);
+        let near_wall = at(0.72, 64.5, 0.5);
         assert!(collides(&world, &near_wall));
-        assert!(!projectile_collides(&world, &near_wall));
-        assert!(projectile_collides(&world, &at(1.02, 64.5, 0.5)));
+        assert!(!projectile_collides(&world, &near_wall, 0.25));
+        assert!(projectile_collides(&world, &at(1.02, 64.5, 0.5), 0.25));
 
         world.import_block(3, 64, 0, 44 << 4).unwrap();
-        assert!(projectile_collides(&world, &at(3.5, 64.25, 0.5)));
-        assert!(!projectile_collides(&world, &at(3.5, 64.75, 0.5)));
+        assert!(projectile_collides(&world, &at(3.5, 64.25, 0.5), 0.25));
+        assert!(!projectile_collides(&world, &at(3.5, 64.75, 0.5), 0.25));
 
         world.import_block(5, 64, 0, 9 << 4).unwrap();
-        assert!(!projectile_collides(&world, &at(5.5, 64.5, 0.5)));
+        assert!(!projectile_collides(&world, &at(5.5, 64.5, 0.5), 0.25));
     }
 
     #[test]
