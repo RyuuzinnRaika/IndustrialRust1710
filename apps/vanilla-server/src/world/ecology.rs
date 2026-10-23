@@ -22,14 +22,35 @@ fn chance(phase: u64, x: i32, y: i32, z: i32, divisor: u64) -> bool {
 fn plantable(id: u16) -> bool {
     matches!(id, 2 | 3 | 60)
 }
+/// Known combustible vanilla blocks. TNT must be handled by a primed-TNT
+/// entity path rather than silently replaced by ordinary fire.
 fn flammable(id: u16) -> bool {
     matches!(
         id,
-        5 | 6 | 17 | 18 | 35 | 47 | 53 | 58 | 85 | 86 | 103 | 107 | 125 | 126 | 162
+        5 | 6 | 17 | 18 | 31 | 35 | 37..=40 | 47 | 53 | 54 | 58 | 59
+            | 63 | 64 | 68 | 72 | 84..=86 | 91 | 96 | 103..=107
+            | 125..=127 | 134..=136 | 143 | 146 | 161..=164
+            | 170 | 171 | 175
     )
 }
 
 impl World {
+    /// Rain cannot extinguish a fire under a solid roof. Scan at most the
+    /// remaining height of the column (255 blocks) and avoid light-array
+    /// recomputation inside the ecology tick.
+    fn rain_reaches(&self, x: i32, y: i32, z: i32) -> bool {
+        self.raining
+            && self.dimension() == crate::dimensions::Dimension::Overworld
+            && (y + 1..256).all(|above| {
+                matches!(
+                    self.get(x, above, z) >> 4,
+                    0 | 31 | 32 | 37..=40 | 50 | 51 | 55 | 59 | 63
+                        | 65 | 66 | 69 | 70 | 72 | 75..=78 | 83
+                        | 93 | 94 | 106 | 111 | 141..=143 | 157
+                )
+            })
+    }
+
     /// Attachment validity also used to reject impossible placements.
     pub fn can_support(&self, x: i32, y: i32, z: i32, block: u16) -> bool {
         let id = block >> 4;
@@ -439,7 +460,7 @@ impl World {
                     .any(|(nx, ny, nz)| {
                         in_bounds(nx, ny, nz) && matches!(self.get(nx, ny, nz) >> 4, 8 | 9)
                     });
-                    if self.raining || neighboring_water {
+                    if self.rain_reaches(x, height, z) || neighboring_water {
                         changes.insert((x, y, z), 0);
                     } else {
                         let age = block & 15;
@@ -532,6 +553,35 @@ mod regression_tests {
         let changes = world.ecology_changes(64);
         assert_eq!(changes.get(&(0, 65, 0)), Some(&0));
         assert!(!changes.contains_key(&(-1, 65, 0)));
+    }
+
+    #[test]
+    fn a_solid_roof_protects_fire_from_rain() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, 51 << 4).unwrap();
+        world.import_block(0, 66, 0, 20 << 4).unwrap(); // glass roof blocks rain
+        world.import_block(1, 65, 0, 17 << 4).unwrap(); // logs keep fire fueled
+        world.set_raining(true);
+        assert!(!world.rain_reaches(0, 65, 0));
+        let changes = world.ecology_changes(64);
+        assert_ne!(changes.get(&(0, 65, 0)), Some(&0));
+        world.import_block(0, 66, 0, 0).unwrap();
+        assert!(world.rain_reaches(0, 65, 0));
+        assert_eq!(world.ecology_changes(64).get(&(0, 65, 0)), Some(&0));
+    }
+
+    #[test]
+    fn wooden_and_planted_1710_blocks_are_combustible_but_stone_is_not() {
+        for id in [
+            5, 18, 31, 37, 54, 64, 85, 96, 106, 127, 134, 161, 163, 170, 171, 175,
+        ] {
+            assert!(flammable(id), "missing combustible block {id}");
+        }
+        for id in [0, 1, 8, 20, 49, 71] {
+            assert!(!flammable(id), "non-combustible block {id} caught fire");
+        }
+        // TNT ignition requires a separate, safely persisted primed entity.
+        assert!(!flammable(46));
     }
 
     #[test]
