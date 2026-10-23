@@ -317,6 +317,15 @@ impl Mob {
         if self.baby && self.kind.passive() {
             return Vec::new();
         }
+        // Saddles are persistent equipment, not random creature loot. Drop
+        // exactly one on death for both rideable species, never at despawn.
+        if self.saddled && matches!(self.kind, Kind::Pig | Kind::Horse) {
+            return vec![self.drop_stack(Stack {
+                id: 329,
+                count: 1,
+                damage: 0,
+            })];
+        }
         let roll = hash(self.id as u64 ^ self.hit_tick.rotate_left(17) ^ 0xb52c8c91);
         let (id, count) = match self.kind {
             Kind::Cow => (334, (roll % 3) as u8),      // 0–2 leather
@@ -3558,6 +3567,33 @@ mod tests {
         assert!(mobs.fire_arrow(None, at, 0.0, 0.0, 1.0, 1).is_none());
         assert!(mobs.summon_boss(&world, 64, at).is_none());
         assert!(mobs.split(parent).is_empty());
+    }
+
+    #[test]
+    fn saddled_horses_and_pigs_return_one_saddle_on_death() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        for kind in [Kind::Horse, Kind::Pig] {
+            let mut mobs = Mobs {
+                next_id: BASE_ID,
+                ..Mobs::default()
+            };
+            mobs.insert(kind, at, false);
+            let id = mobs.next_id - 1;
+            let animal = mobs.entities.get_mut(&id).unwrap();
+            animal.saddled = true;
+            animal.health = 1;
+            assert!(mobs.player_attack(id, at, None, 20).is_some());
+            let loot = mobs.take_drops();
+            assert_eq!(loot.len(), 1);
+            assert_eq!(loot[0].0.id, 329);
+            assert_eq!(loot[0].0.count, 1);
+            assert!(mobs.player_attack(id, at, None, 40).is_none());
+            assert!(mobs.take_drops().is_empty());
+        }
     }
 
     #[test]
