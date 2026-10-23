@@ -34,6 +34,8 @@ mod legacy_nbt;
 mod legacy_region;
 #[allow(dead_code)] // FS08 offline copy-on-write stage; live Anvil writes disabled.
 mod legacy_region_rewrite;
+#[allow(dead_code)] // E47 safe opt-in TileEntity inventory COW; not wired to live IRW.
+mod legacy_tile_rewrite;
 mod legacy_world_inspect;
 mod level_dat;
 mod maps;

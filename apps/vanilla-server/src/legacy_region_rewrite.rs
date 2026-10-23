@@ -156,6 +156,17 @@ pub(crate) fn rewrite_chunks_under_lock(
     dimension: Dimension,
     replacements: &[((i32, i32), &[u8])],
 ) -> io::Result<()> {
+    rewrite_chunks_under_lock_expected(lock, dimension, replacements, None)
+}
+
+/// Refuse to publish an inventory edit computed from an older region image.
+/// The optional expected bytes are captured before decoding the tile NBT.
+pub(crate) fn rewrite_chunks_under_lock_expected(
+    lock: &mut WorldSessionLock,
+    dimension: Dimension,
+    replacements: &[((i32, i32), &[u8])],
+    expected_source: Option<&[u8]>,
+) -> io::Result<()> {
     lock.verify()?;
     let (first, _) = replacements
         .first()
@@ -180,6 +191,11 @@ pub(crate) fn rewrite_chunks_under_lock(
         return Err(invalid("refusing non-regular or symlinked Anvil region"));
     }
     let before = fs::read(&source)?;
+    if expected_source.is_some_and(|snapshot| snapshot != before.as_slice()) {
+        return Err(invalid(
+            "Anvil region changed since the tile inventory was read",
+        ));
+    }
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(wrap)?
