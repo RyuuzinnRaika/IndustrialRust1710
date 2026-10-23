@@ -644,7 +644,7 @@ mod tests {
         let region_bytes = fs::read(&region).unwrap();
         let original = b"old-chest";
         fs::write(&sidecar, original).unwrap();
-        let updated = b"{\\"chests\\":[]}"; 
+        let updated = br#"{"chests":[]}"#;
         // Model power loss after durable log publication and the first rename.
         let record = Record {
             version: VERSION,
