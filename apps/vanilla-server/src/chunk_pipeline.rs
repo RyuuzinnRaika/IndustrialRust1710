@@ -98,9 +98,8 @@ fn sender() -> &'static SyncSender<Job> {
     WORK.get_or_init(|| {
         let (tx, rx) = mpsc::sync_channel::<Job>(QUEUE_CAPACITY);
         let shared = Arc::new(Mutex::new(rx));
-        let workers = worker_count(
-            thread::available_parallelism().map_or(2, |parallel| parallel.get()),
-        );
+        let workers =
+            worker_count(thread::available_parallelism().map_or(2, |parallel| parallel.get()));
         for index in 0..workers {
             let queue = Arc::clone(&shared);
             thread::Builder::new()
