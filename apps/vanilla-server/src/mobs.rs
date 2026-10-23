@@ -3384,8 +3384,10 @@ mod tests {
                 (Kind::Sheep, 35, 1, 1),
                 (Kind::Wither, 399, 1, 1),
             ] {
-                let mut mobs = Mobs::default();
-                mobs.next_id = id;
+                let mut mobs = Mobs {
+                    next_id: id,
+                    ..Mobs::default()
+                };
                 mobs.insert(kind, at, false);
                 let mob = mobs.entities[&id];
                 let (stack, _) = mob.death_drop().expect("adult primary drop");
@@ -3415,8 +3417,10 @@ mod tests {
             y: 65.0,
             z: 0.5,
         };
-        let mut mobs = Mobs::default();
-        mobs.next_id = BASE_ID;
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
         mobs.insert(Kind::Cow, at, false);
         let id = mobs.next_id - 1;
         mobs.entities.get_mut(&id).unwrap().health = 1;
@@ -3436,8 +3440,10 @@ mod tests {
             y: 65.0,
             z: 0.5,
         };
-        let mut mobs = Mobs::default();
-        mobs.next_id = BASE_ID;
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
         for _ in 0..129 {
             mobs.insert(Kind::Cow, at, false);
         }
