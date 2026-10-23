@@ -71,16 +71,14 @@ fn tracks_connected(
     to_id: u16,
     to_meta: u16,
 ) -> bool {
-    let (Some(first), Some(second)) =
-        (rail_exits(from_id, from_meta), rail_exits(to_id, to_meta))
+    let (Some(first), Some(second)) = (rail_exits(from_id, from_meta), rail_exits(to_id, to_meta))
     else {
         return false;
     };
     first.iter().any(|&(dx, dy, dz)| {
         (from.0 + dx, from.2 + dz) == (to.0, to.2)
             && second.iter().any(|&(rx, ry, rz)| {
-                (to.0 + rx, to.2 + rz) == (from.0, from.2)
-                    && from.1 + dy == to.1 + ry
+                (to.0 + rx, to.2 + rz) == (from.0, from.2) && from.1 + dy == to.1 + ry
             })
     })
 }
@@ -323,7 +321,11 @@ impl Minecarts {
                     } else {
                         f64::from(current_cell.2) + 0.5
                     };
-                    let coordinate = if east_west { cart.position.x } else { cart.position.z };
+                    let coordinate = if east_west {
+                        cart.position.x
+                    } else {
+                        cart.position.z
+                    };
                     let to_center = center - coordinate;
                     // Turn at the center, continuing with any distance left
                     // in this tick along the connected outgoing half-track.
@@ -334,13 +336,18 @@ impl Minecarts {
                         let exits = rail_exits(id, meta).expect("valid corner shape");
                         let entry_sign = -advance.signum() as i32;
                         let has_entry = exits.iter().any(|&(dx, _, dz)| {
-                            if east_west { dx == entry_sign } else { dz == entry_sign }
+                            if east_west {
+                                dx == entry_sign
+                            } else {
+                                dz == entry_sign
+                            }
                         });
                         if !has_entry {
                             cart.speed = 0.0;
                             break;
                         }
-                        let outgoing = exits.iter()
+                        let outgoing = exits
+                            .iter()
                             .find(|&&(dx, _, _)| (dx != 0) != east_west)
                             .expect("corner has a perpendicular exit");
                         let remainder = advance.abs() - to_center.abs();
@@ -562,17 +569,21 @@ mod tests {
 
     #[test]
     fn all_four_vanilla_curves_turn_at_the_center() {
-        for (shape, incoming_x, outgoing_z) in [
-            (6, 1, 1), (7, -1, 1), (8, -1, -1), (9, 1, -1),
-        ] {
+        for (shape, incoming_x, outgoing_z) in [(6, 1, 1), (7, -1, 1), (8, -1, -1), (9, 1, -1)] {
             let mut world = World::new();
             world.import_block(0, 65, 0, (66 << 4) | shape).unwrap();
-            world.import_block(incoming_x, 65, 0, (27 << 4) | 9).unwrap();
+            world
+                .import_block(incoming_x, 65, 0, (27 << 4) | 9)
+                .unwrap();
             for distance in 1..=3 {
-                world.import_block(0, 65, outgoing_z * distance, (27 << 4) | 8).unwrap();
+                world
+                    .import_block(0, 65, outgoing_z * distance, (27 << 4) | 8)
+                    .unwrap();
             }
             let origin = PlayerPosition {
-                x: f64::from(incoming_x) + 0.5, y: 65.5, z: 0.5,
+                x: f64::from(incoming_x) + 0.5,
+                y: 65.5,
+                z: 0.5,
             };
             let mut carts = Minecarts::default();
             carts.place(&world, origin, 0).unwrap();
@@ -585,11 +596,13 @@ mod tests {
             let result = &carts.carts[&FIRST_ID];
             assert!(
                 (result.position.x - 0.5).abs() < 1e-6,
-                "corner {shape} left its centerline: {:?}", result.position
+                "corner {shape} left its centerline: {:?}",
+                result.position
             );
             assert!(
                 (result.position.z - 0.5) * f64::from(outgoing_z) > 0.5,
-                "corner {shape} did not turn: {:?}", result.position
+                "corner {shape} did not turn: {:?}",
+                result.position
             );
             assert_eq!(result.position.y, 65.5);
         }
@@ -600,7 +613,11 @@ mod tests {
         let mut world = World::new();
         world.import_block(-1, 65, 0, (27 << 4) | 9).unwrap();
         world.import_block(0, 65, 0, (66 << 4) | 6).unwrap(); // east and south, no west
-        let at = PlayerPosition { x: -0.2, y: 65.5, z: 0.5 };
+        let at = PlayerPosition {
+            x: -0.2,
+            y: 65.5,
+            z: 0.5,
+        };
         let mut carts = Minecarts::default();
         carts.place(&world, at, 0).unwrap();
         let cart = carts.carts.get_mut(&FIRST_ID).unwrap();
