@@ -192,7 +192,9 @@ pub(crate) fn rewrite_chunks_under_lock_expected(
     }
     let before = fs::read(&source)?;
     if expected_source.is_some_and(|snapshot| snapshot != before.as_slice()) {
-        return Err(invalid("Anvil region changed since the tile inventory was read"));
+        return Err(invalid(
+            "Anvil region changed since the tile inventory was read",
+        ));
     }
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
