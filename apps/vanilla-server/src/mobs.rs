@@ -2633,7 +2633,15 @@ impl Mobs {
                     y: previous.y + (next.y - previous.y) * t,
                     z: previous.z + (next.z - previous.z) * t,
                 };
-                if !sample.is_valid() || physics::projectile_collides(world, &sample) {
+                let half_size = match arrow.kind {
+                    ProjectileKind::Arrow => 0.25,
+                    ProjectileKind::GhastFireball => 0.5,
+                    ProjectileKind::BlazeFireball | ProjectileKind::WitherSkull => 0.15625,
+                    ProjectileKind::WitchPotion => 0.125,
+                };
+                if !sample.is_valid()
+                    || physics::projectile_collides(world, &sample, half_size)
+                {
                     if matches!(
                         arrow.kind,
                         ProjectileKind::GhastFireball | ProjectileKind::WitherSkull
