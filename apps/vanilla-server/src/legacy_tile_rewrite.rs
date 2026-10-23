@@ -110,7 +110,9 @@ pub(crate) fn rewrite_chests_with_sidecar_under_lock(
     }
     for patch in changes {
         if patch.expected_id != "Chest" {
-            return Err(invalid("native chest sidecar cannot store other TileEntity types"));
+            return Err(invalid(
+                "native chest sidecar cannot store other TileEntity types",
+            ));
         }
         let mut expected = [None; crate::chests::CHEST_SLOTS];
         for item in &patch.items {
@@ -119,7 +121,9 @@ pub(crate) fn rewrite_chests_with_sidecar_under_lock(
                 || item.tag.is_some()
                 || !item.extra.is_empty()
             {
-                return Err(invalid("native chest cannot represent NBT item extras or slot"));
+                return Err(invalid(
+                    "native chest cannot represent NBT item extras or slot",
+                ));
             }
             let slot = &mut expected[item.slot as usize];
             if slot.is_some() {
