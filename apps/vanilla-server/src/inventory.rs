@@ -1611,7 +1611,7 @@ impl Inventory {
                 }
                 // Remaining shift-clicks perform ordinary main/hotbar moves,
                 // never client-directed writes into the anvil output slot.
-                if !matches!(mode, 0 | 1 | 2) {
+                if !matches!(mode, 0..=2) {
                     return false;
                 }
                 self.click_window(0, translated, button, mode)
@@ -2698,8 +2698,10 @@ mod tests {
             count: 3,
             damage: 0,
         };
-        let mut inv = Inventory::default();
-        inv.anvil_inputs = [Some(pick), Some(iron)];
+        let mut inv = Inventory {
+            anvil_inputs: [Some(pick), Some(iron)],
+            ..Inventory::default()
+        };
         for slot in 9..45 {
             inv.slots[slot] = Some(Stack {
                 id: 1,
