@@ -1589,35 +1589,25 @@ impl World {
         }
         let sections: Vec<i32> = (0..16).filter(|y| (mask & (1 << y)) != 0).collect();
         let mut bytes = Vec::with_capacity(sections.len() * 10240 + 256);
-        // Section-major IDs across every selected section.
-        for &section in &sections {
-            for y in 0..16 {
-                for z in 0..16 {
-                    for x in 0..16 {
-                        bytes.push(
-                            (self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z) >> 4)
-                                as u8,
-                        );
-                    }
-                }
-            }
-        }
-        // Metadata is a nibble array, two X-adjacent blocks per byte.
+        // Emit IDs and collect metadata in one pass. Generated blocks can
+        // evaluate expensive biome/noise functions, so reading them a second
+        // time for the nibble array doubles that part of chunk snapshot work.
+        // Keep Protocol 5's wire layout unchanged: all IDs, then all metadata.
+        let mut metadata = Vec::with_capacity(sections.len() * 2048);
         for &section in &sections {
             for y in 0..16 {
                 for z in 0..16 {
                     for x in (0..16).step_by(2) {
-                        let a = self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z)
-                            as u8
-                            & 15;
-                        let b = self.get(chunk_x * 16 + x + 1, section * 16 + y, chunk_z * 16 + z)
-                            as u8
-                            & 15;
-                        bytes.push(a | (b << 4));
+                        let a = self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z);
+                        let b = self.get(chunk_x * 16 + x + 1, section * 16 + y, chunk_z * 16 + z);
+                        bytes.push((a >> 4) as u8);
+                        bytes.push((b >> 4) as u8);
+                        metadata.push((a as u8 & 15) | ((b as u8 & 15) << 4));
                     }
                 }
             }
         }
+        bytes.extend_from_slice(&metadata);
         let (block_light, sky_light) = self.light_arrays(chunk_x, chunk_z);
         for channel in [&block_light, &sky_light] {
             for &section in &sections {
@@ -1654,6 +1644,53 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chunk_ids_and_metadata_match_direct_world_samples() {
+        // The optimized single-pass packing must retain section order and
+        // low/high nibble order, including sparse high sections and negatives.
+        let mut world = World::new();
+        for (x, y, z, block) in [
+            (-16, 70, -1, (35 << 4) | 14),
+            (-15, 200, -1, (1 << 4) | 3),
+            (-1, 64, -16, (35 << 4) | 5),
+            (0, 150, 0, (35 << 4) | 7),
+        ] {
+            world.import_block(x, y, z, block).unwrap();
+        }
+        for (cx, cz) in [(-1, -1), (0, 0), (1, -1)] {
+            let (mask, packet) = world.chunk_data(cx, cz);
+            let sections: Vec<i32> = (0..16).filter(|y| mask & (1 << y) != 0).collect();
+            let mut expected_ids = Vec::new();
+            let mut expected_metadata = Vec::new();
+            for &section in &sections {
+                for y in 0..16 {
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let state = world.get(cx * 16 + x, section * 16 + y, cz * 16 + z);
+                            expected_ids.push((state >> 4) as u8);
+                        }
+                    }
+                }
+            }
+            for &section in &sections {
+                for y in 0..16 {
+                    for z in 0..16 {
+                        for x in (0..16).step_by(2) {
+                            let a = world.get(cx * 16 + x, section * 16 + y, cz * 16 + z);
+                            let b = world.get(cx * 16 + x + 1, section * 16 + y, cz * 16 + z);
+                            expected_metadata.push((a as u8 & 15) | ((b as u8 & 15) << 4));
+                        }
+                    }
+                }
+            }
+            let ids = expected_ids.len();
+            let metadata = expected_metadata.len();
+            assert_eq!(&packet[..ids], expected_ids.as_slice());
+            assert_eq!(&packet[ids..ids + metadata], expected_metadata.as_slice());
+            assert_eq!(packet.len(), sections.len() * 10240 + 256);
+        }
+    }
+
     #[test]
     fn generated_spawner_lookup_tracks_removal_and_placement() {
         let seed = 42;
