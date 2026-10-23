@@ -906,8 +906,10 @@ mod tests {
         for color in 0..16 {
             let wool = product(35, 1, color);
             assert_eq!(result(&[wool, wool, None, None], 2), product(171, 3, color));
-            assert_eq!(result(&[None, None, None, wool, wool, None, None, None, None], 3),
-                       product(171, 3, color));
+            assert_eq!(
+                result(&[None, None, None, wool, wool, None, None, None, None], 3),
+                product(171, 3, color)
+            );
         }
         assert_eq!(
             result(&[product(35, 1, 1), product(35, 1, 2), None, None], 2),
