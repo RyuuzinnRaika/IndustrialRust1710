@@ -220,6 +220,16 @@ fn rewrite_inventories_impl(
             if tile.id != patch.expected_id {
                 return Err(invalid("TileEntity type changed since inventory snapshot"));
             }
+            // The native Stack sidecar cannot represent modded NBT fields on
+            // old items. Do not silently discard those fields when mirroring.
+            if paired.is_some()
+                && tile
+                    .items
+                    .as_ref()
+                    .is_some_and(|items| items.iter().any(|item| item.tag.is_some() || !item.extra.is_empty()))
+            {
+                return Err(invalid("cannot mirror chest with unknown existing item tags"));
+            }
             tile.items = Some(patch.items.clone());
             let replacement: Value =
                 fastnbt::from_bytes(&fastnbt::to_bytes(&tile).map_err(wrap)?).map_err(wrap)?;
