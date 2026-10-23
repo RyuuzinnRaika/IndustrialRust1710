@@ -961,7 +961,7 @@ fn play(
                 active_device = None;
                 active_brewer = None;
                 active_anvil = None;
-                    active_enchant = None;
+                active_enchant = None;
                 // Game State 3 is Protocol 5's gamemode notification.
                 let mut state = vec![3u8];
                 state.extend_from_slice(&(mode as f32).to_be_bytes());
@@ -3594,7 +3594,11 @@ fn play(
                         })
                     };
                     active_window = next_window;
-                    next_window = if next_window >= 100 { 1 } else { next_window + 1 };
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
                     active_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
@@ -3993,8 +3997,7 @@ fn play(
                         && requested_window
                         && candidate.enchanting_click_window(slot, button, mode);
                     if accepted && candidate != *inventory {
-                        if candidate.enchanting_input() != inventory.enchanting_input()
-                        {
+                        if candidate.enchanting_input() != inventory.enchanting_input() {
                             enchant_offers = if candidate.enchanting_has_item() {
                                 workstations::enchanting_costs(
                                     enchant_shelves,
