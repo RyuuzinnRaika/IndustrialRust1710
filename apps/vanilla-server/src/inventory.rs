@@ -1483,6 +1483,10 @@ impl Inventory {
         self.enchant_input.is_some()
     }
 
+    pub fn enchanting_input(&self) -> Option<Stack> {
+        self.enchant_input
+    }
+
     /// Return the table's item on close, atomically. If all slots are full,
     /// retain the input in the versioned save instead of dropping it.
     pub fn reclaim_enchanting_input(&mut self) -> bool {
@@ -2754,10 +2758,11 @@ mod tests {
         assert_eq!(inv.cursor.unwrap().count, 3);
         assert_eq!(inv.enchant_input.unwrap().count, 1);
         assert!(!inv.enchanting_click_window(0, 0, 0));
+        inv.slots[9] = inv.cursor.take();
         assert!(inv.enchanting_click_window(0, 0, 1));
         assert_eq!(inv.enchant_input, None);
-        assert_eq!(inv.cursor.unwrap().count, 3);
-        assert_eq!(inv.slots[9].unwrap().id, 340);
+        assert_eq!(inv.cursor.unwrap().count, 1);
+        assert_eq!(inv.slots[9].unwrap().count, 3);
     }
 
     #[test]
