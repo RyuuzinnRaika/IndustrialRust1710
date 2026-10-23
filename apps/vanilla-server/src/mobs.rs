@@ -2390,7 +2390,13 @@ impl Mobs {
                 {
                     mob.waypoint = None;
                 }
-                let waypoint = mob.waypoint.unwrap_or(destination);
+                // Without an A* waypoint retain the old flat pursuit
+                // fallback, rather than demanding a multi-block vertical jump
+                // directly towards a player standing high above the mob.
+                let waypoint = mob.waypoint.unwrap_or(PlayerPosition {
+                    y: mob.position.y,
+                    ..destination
+                });
                 let dx = waypoint.x - mob.position.x;
                 let dz = waypoint.z - mob.position.z;
                 let len = dx.hypot(dz);
@@ -2406,13 +2412,8 @@ impl Mobs {
                 } else {
                     0.11
                 };
-                let candidate = PlayerPosition {
-                    x: mob.position.x + dx / len * speed,
-                    z: mob.position.z + dz / len * speed,
-                    y: mob.position.y,
-                };
-                if physics::valid_movement(world, &mob.position, &candidate)
-                    && physics::supported(world, &candidate)
+                if let Some(candidate) =
+                    navigation::advance_step(world, mob.position, waypoint, speed)
                 {
                     mob.position = candidate;
                     events.push(multiplayer::teleport(mob.id, &candidate, 0.0, 0.0));
