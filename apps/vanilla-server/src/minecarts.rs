@@ -6,10 +6,16 @@ use crate::player::PlayerPosition;
 use crate::vehicles::attachment;
 use crate::world::World;
 use legacy_protocol::write_varint;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
 
 const FIRST_ID: i32 = 1_500_000;
 const MAX_CARTS: usize = 64;
+const SAVE_VERSION: u8 = 1;
+const MAX_SAVE_BYTES: u64 = 64 * 1024;
 
 type RailCell = (i32, i32, i32);
 type RailSample = (u16, u16, f64, bool, RailCell);
@@ -154,13 +160,140 @@ impl Cart {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCart {
+    id: i32,
+    position: PlayerPosition,
+    speed: f64,
+    direction: i8,
+    east_west: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CartSave {
+    version: u8,
+    next: i32,
+    carts: Vec<StoredCart>,
+}
+
+fn invalid(reason: &'static str) -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, reason)
+}
+
+#[derive(Clone, Default)]
 pub struct Minecarts {
     next: i32,
     carts: BTreeMap<i32, Cart>,
 }
 
 impl Minecarts {
+    pub fn location(world_path: &Path) -> PathBuf {
+        world_path.with_extension("minecarts.json")
+    }
+
+    /// Persist only permanent vehicle data. Rider entity IDs are session-local
+    /// and must never attach a new player to a cart after a server restart.
+    pub fn encoded(&self) -> io::Result<Vec<u8>> {
+        if self.carts.len() > MAX_CARTS
+            || self.next < 0
+            || FIRST_ID.checked_add(self.next).is_none()
+        {
+            return Err(invalid("minecart registry exceeds bounds"));
+        }
+        let carts = self
+            .carts
+            .values()
+            .map(|cart| StoredCart {
+                id: cart.id,
+                position: cart.position,
+                speed: cart.speed,
+                direction: cart.direction,
+                east_west: cart.east_west,
+            })
+            .collect();
+        let snapshot = CartSave {
+            version: SAVE_VERSION,
+            next: self.next,
+            carts,
+        };
+        Self::validate_snapshot(&snapshot)?;
+        let bytes = serde_json::to_vec(&snapshot)?;
+        if bytes.len() as u64 > MAX_SAVE_BYTES {
+            return Err(invalid("minecart snapshot is too large"));
+        }
+        Ok(bytes)
+    }
+
+    fn validate_snapshot(snapshot: &CartSave) -> io::Result<()> {
+        if snapshot.version != SAVE_VERSION
+            || snapshot.next < 0
+            || snapshot.carts.len() > MAX_CARTS
+        {
+            return Err(invalid("invalid minecart snapshot metadata"));
+        }
+        let next = FIRST_ID
+            .checked_add(snapshot.next)
+            .ok_or_else(|| invalid("minecart identifier overflow"))?;
+        let mut previous = FIRST_ID - 1;
+        for cart in &snapshot.carts {
+            if cart.id <= previous
+                || cart.id < FIRST_ID
+                || cart.id >= next
+                || !cart.position.is_valid()
+                || !cart.speed.is_finite()
+                || cart.speed.abs() > 0.4
+                || !matches!(cart.direction, -1 | 1)
+            {
+                return Err(invalid("invalid or duplicate saved minecart"));
+            }
+            previous = cart.id;
+        }
+        Ok(())
+    }
+
+    /// Load a bounded versioned snapshot or start empty for old worlds. The
+    /// caller runs journal recovery first; malformed saves fail closed.
+    pub fn load(path: &Path, tick: u64) -> io::Result<Self> {
+        let len = match fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(error),
+        };
+        if len > MAX_SAVE_BYTES {
+            return Err(invalid("minecart file is too large"));
+        }
+        let bytes = fs::read(path)?;
+        if bytes.len() as u64 > MAX_SAVE_BYTES {
+            return Err(invalid("minecart file is too large"));
+        }
+        let snapshot: CartSave = serde_json::from_slice(&bytes)?;
+        Self::validate_snapshot(&snapshot)?;
+        let carts = snapshot
+            .carts
+            .into_iter()
+            .map(|saved| {
+                (
+                    saved.id,
+                    Cart {
+                        id: saved.id,
+                        position: saved.position,
+                        speed: saved.speed,
+                        direction: saved.direction,
+                        east_west: saved.east_west,
+                        rider: None,
+                        last_tick: tick,
+                    },
+                )
+            })
+            .collect();
+        Ok(Self {
+            next: snapshot.next,
+            carts,
+        })
+    }
+
     pub fn can_place(&self, world: &World, at: PlayerPosition) -> bool {
         self.carts.len() < MAX_CARTS
             && self.next.checked_add(FIRST_ID).is_some()
@@ -431,6 +564,53 @@ impl Minecarts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn durable_snapshot_restores_carts_without_reusing_player_attachment() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-carts-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(0, 65, 0, (66 << 4) | 1).unwrap();
+        let position = PlayerPosition {
+            x: 0.5,
+            y: 65.5,
+            z: 0.5,
+        };
+        let mut carts = Minecarts::default();
+        assert!(carts.place(&world, position, 10).is_some());
+        assert!(carts.mount(FIRST_ID, 22, position).is_some());
+        carts.carts.get_mut(&FIRST_ID).unwrap().speed = 0.3;
+        std::fs::write(&path, carts.encoded().unwrap()).unwrap();
+        let mut restored = Minecarts::load(&path, 500).unwrap();
+        let saved = restored.carts.get(&FIRST_ID).unwrap();
+        assert_eq!(saved.speed, 0.3);
+        assert_eq!(saved.position, position);
+        assert_eq!(saved.last_tick, 500);
+        assert_eq!(saved.rider, None);
+        assert!(restored.place(&world, position, 500).is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn corrupted_and_duplicate_cart_entries_fail_closed() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-carts-corrupt-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        for malformed in [
+            r#"{"version":1,"next":1,"carts":[{"id":1500000,"position":{"x":0.5,"y":65.5,"z":0.5},"speed":0.1,"direction":1,"east_west":false},{"id":1500000,"position":{"x":0.5,"y":65.5,"z":0.5},"speed":0.1,"direction":1,"east_west":false}]}"#,
+            r#"{"version":1,"next":1,"carts":[{"id":1500000,"position":{"x":0.5,"y":65.5,"z":0.5},"speed":99.0,"direction":1,"east_west":false}]}"#,
+            r#"{"version":2,"next":0,"carts":[]}"#,
+        ] {
+            std::fs::write(&path, malformed).unwrap();
+            assert!(Minecarts::load(&path, 10).is_err());
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn ascending_east_connects_lower_and_upper_tracks() {
         let mut world = World::new();
