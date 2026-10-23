@@ -73,3 +73,27 @@ Server起動引数（パス/個人情報は伏せる）:
 - E41で固定したPacketのバイト列が正しいことと、E42のクライアント側がGUIを正常描画することは別条件。
 - E45保存トランザクション、E46 Anvil主形式、E47 TileEntity保存互換、E48負荷測定、E50長時間回帰・強制終了試験は、それぞれ独立した受入要件。E42成功だけで完了扱いしない。
 - 「実機検証済み」にするには、実際の実施結果と日時・コミット・証跡をこの文書とは別に追記すること。
+
+
+## 受入結果の機械検証（E42、2026-10-23追加）
+
+本家クライアントのプレイ操作と目視確認は人間が実施し、結果の再現可能性と証跡の有無だけを以下のCLIで検証する。CIの単体テストは本家ゲームを実行しないため**これだけでE42をPASSにはしない**。
+
+まずサーバーの40桁コミットSHA（`git rev-parse HEAD`）を用いて**新しい**未実行の記録を生成する。
+
+```bash
+python3 tools/e42_acceptance.py init \
+  --commit "$(git rev-parse HEAD)" \
+  --output ./e42-test/acceptance.json
+```
+
+`acceptance.json` の `launcher`、`os_java_runtime`、タイムゾーン付き `executed_at`、`connected_clients_peak`、マスク済みサーバー起動引数を埋める。各 `42-01`〜`42-09` に、実施した場合だけ `status: PASS`、画面で確認した `observation`、相対パスの `evidence`（ログ/画像/録画）を記録する。証跡ファイルは指定したルートの中に配置し、秘密情報を必ず削除・マスクする。
+
+```bash
+python3 tools/e42_acceptance.py verify \
+  --report ./e42-test/acceptance.json \
+  --evidence-root ./e42-test \
+  --require-pass
+```
+
+この最終ゲートでは9ケースすべてがPASSで、各観察記録と空でないローカル証跡が存在し、複数人試験は2人以上のクライアントが接続されていたと記録されている場合だけ終了コード0になる。FAIL/BLOCKED/NOT_RUNは合格へ変換しない。検証器は添付ログや録画の真偽、操作内容の妥当性を自動判定できないため、最終承認は実機を操作した検証者が行う。
