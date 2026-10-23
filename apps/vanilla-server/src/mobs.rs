@@ -2922,7 +2922,11 @@ mod tests {
     #[test]
     fn natural_ghast_candidates_can_float_but_cannot_overlap_walls() {
         let mut world = World::new();
-        let air = PlayerPosition { x: 0.5, y: 80.0, z: 0.5 };
+        let air = PlayerPosition {
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
         assert!(!physics::supported(&world, &air));
         assert!(natural_spawn_body_ok(&world, Kind::Ghast, air));
         assert!(!natural_spawn_body_ok(&world, Kind::Skeleton, air));
