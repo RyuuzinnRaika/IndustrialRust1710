@@ -233,8 +233,14 @@ impl World {
         let state = self.get(from.0, from.1, from.2);
         match state >> 4 {
             92 => 14u8.saturating_sub((state as u8 & 7).min(7) * 2), // Cake slices.
-            118 => (state & 3) as u8, // Cauldron water level.
-            120 => if state & 4 != 0 { 15 } else { 0 }, // End portal eye.
+            118 => (state & 3) as u8,                                // Cauldron water level.
+            120 => {
+                if state & 4 != 0 {
+                    15
+                } else {
+                    0
+                }
+            } // End portal eye.
             _ => self.signal_into(from, to),
         }
     }
@@ -704,7 +710,8 @@ mod redstone_regression_tests {
     #[test]
     fn cauldron_level_reaches_comparator_after_two_tick_delay() {
         let path = std::env::temp_dir().join(format!(
-            "ir1710-comparator-cauldron-{}.irw", std::process::id()
+            "ir1710-comparator-cauldron-{}.irw",
+            std::process::id()
         ));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
