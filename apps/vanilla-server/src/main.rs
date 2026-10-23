@@ -795,6 +795,16 @@ fn refresh_entity_tripwires(
     Ok(changed.into_iter().collect())
 }
 
+/// Classic Java 1.7.10 mining penalties apply when the player's *head*
+/// is underwater, not merely when their feet touch a water block.
+fn mining_environment(world: &World, player: &PlayerPosition) -> (bool, bool) {
+    let x = player.x.floor() as i32;
+    let z = player.z.floor() as i32;
+    let head_y = (player.y + 1.62).floor() as i32;
+    let submerged = matches!(world.get(x, head_y, z) >> 4, 8 | 9);
+    (submerged, physics::supported(world, player))
+}
+
 fn play(
     s: &mut Connection,
     world: &Mutex<World>,
@@ -2475,7 +2485,14 @@ fn play(
                                 });
                             }
                             mining = if world::in_bounds(x, y, z) && near(location, x, y, z) {
-                                MiningProgress::start(target, w.get(x, y, z), inventory.held())
+                                let (submerged, grounded) = mining_environment(&w, player);
+                                MiningProgress::start_with_environment(
+                                    target,
+                                    w.get(x, y, z),
+                                    inventory.held(),
+                                    submerged,
+                                    grounded,
+                                )
                             } else {
                                 None
                             };
@@ -2484,8 +2501,16 @@ fn play(
                         2 => {
                             let attempt = mining.take();
                             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                            let result = attempt
-                                .and_then(|m| m.finish(target, w.get(x, y, z), inventory.held()));
+                            let (submerged, grounded) = mining_environment(&w, player);
+                            let result = attempt.and_then(|m| {
+                                m.finish_with_environment(
+                                    target,
+                                    w.get(x, y, z),
+                                    inventory.held(),
+                                    submerged,
+                                    grounded,
+                                )
+                            });
                             let mut changed = false;
                             if world::in_bounds(x, y, z) && near(location, x, y, z) {
                                 if let Some(result) = result {
