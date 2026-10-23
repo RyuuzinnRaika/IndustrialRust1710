@@ -313,7 +313,7 @@ mod tests {
             assert!(legacy_protocol::read_varint(&mut packet).is_ok());
             assert_eq!(packet[0], kind);
             assert_eq!(
-                i32::from_be_bytes(packet[14..18].try_into().unwrap()),
+                i32::from_be_bytes(packet[15..19].try_into().unwrap()),
                 -1
             );
             assert!(at.is_valid());
