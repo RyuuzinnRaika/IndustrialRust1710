@@ -221,7 +221,11 @@ mod tests {
         assert_eq!(rebuilt.read_chunk(1, 0).unwrap().unwrap(), untouched);
         assert!(!fs::read_dir(world.join("region"))
             .unwrap()
-            .any(|entry| entry.unwrap().file_name().to_string_lossy().contains("-cow-")));
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("-cow-")));
         drop(lock);
         fs::remove_dir_all(root).unwrap();
     }
@@ -233,24 +237,16 @@ mod tests {
         let source = world.join("region/r.0.0.mca");
         let original = fs::read(&source).unwrap();
         let mut lock = WorldSessionLock::acquire(&world).unwrap();
-        assert!(rewrite_chunk_under_lock(
-            &mut lock,
-            Dimension::Overworld,
-            0,
-            0,
-            b"invalid NBT"
-        )
-        .is_err());
+        assert!(
+            rewrite_chunk_under_lock(&mut lock, Dimension::Overworld, 0, 0, b"invalid NBT")
+                .is_err()
+        );
         assert_eq!(fs::read(&source).unwrap(), original);
         fs::write(world.join("session.lock"), 0i64.to_be_bytes()).unwrap();
-        assert!(rewrite_chunk_under_lock(
-            &mut lock,
-            Dimension::Overworld,
-            0,
-            0,
-            b"invalid NBT"
-        )
-        .is_err());
+        assert!(
+            rewrite_chunk_under_lock(&mut lock, Dimension::Overworld, 0, 0, b"invalid NBT")
+                .is_err()
+        );
         assert_eq!(fs::read(&source).unwrap(), original);
         drop(lock);
         fs::remove_dir_all(root).unwrap();
@@ -268,9 +264,9 @@ mod tests {
         symlink(&preserved, &source).unwrap();
         let original = fs::read(&preserved).unwrap();
         let mut lock = WorldSessionLock::acquire(&world).unwrap();
-        assert!(rewrite_chunk_under_lock(
-            &mut lock, Dimension::Overworld, 0, 0, b"invalid"
-        ).is_err());
+        assert!(
+            rewrite_chunk_under_lock(&mut lock, Dimension::Overworld, 0, 0, b"invalid").is_err()
+        );
         assert_eq!(fs::read(&preserved).unwrap(), original);
         drop(lock);
         fs::remove_dir_all(root).unwrap();
