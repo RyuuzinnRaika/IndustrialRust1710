@@ -808,6 +808,7 @@ mod tests {
         );
         assert!(!manager.path(Dimension::Overworld).exists());
         fs::remove_dir_all(manager.path(Dimension::End)).unwrap();
+        fs::remove_dir(root.join("DIM1")).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
