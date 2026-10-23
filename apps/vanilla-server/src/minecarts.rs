@@ -227,9 +227,7 @@ impl Minecarts {
     }
 
     fn validate_snapshot(snapshot: &CartSave) -> io::Result<()> {
-        if snapshot.version != SAVE_VERSION
-            || snapshot.next < 0
-            || snapshot.carts.len() > MAX_CARTS
+        if snapshot.version != SAVE_VERSION || snapshot.next < 0 || snapshot.carts.len() > MAX_CARTS
         {
             return Err(invalid("invalid minecart snapshot metadata"));
         }
@@ -566,10 +564,7 @@ mod tests {
     use super::*;
     #[test]
     fn durable_snapshot_restores_carts_without_reusing_player_attachment() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-carts-{}.json",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("ir1710-carts-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut world = World::new();
         world.import_block(0, 65, 0, (66 << 4) | 1).unwrap();
@@ -595,10 +590,8 @@ mod tests {
 
     #[test]
     fn corrupted_and_duplicate_cart_entries_fail_closed() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-carts-corrupt-{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-carts-corrupt-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         for malformed in [
             r#"{"version":1,"next":1,"carts":[{"id":1500000,"position":{"x":0.5,"y":65.5,"z":0.5},"speed":0.1,"direction":1,"east_west":false},{"id":1500000,"position":{"x":0.5,"y":65.5,"z":0.5},"speed":0.1,"direction":1,"east_west":false}]}"#,
