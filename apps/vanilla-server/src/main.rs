@@ -896,6 +896,9 @@ fn play(
     let mut last_device_view = [None; dispensers::DEVICE_SLOTS];
     let mut active_brewer: Option<BrewerPosition> = None;
     let mut active_anvil: Option<(i32, i32, i32)> = None;
+    let mut active_enchant: Option<(i32, i32, i32)> = None;
+    let mut enchant_shelves: u8 = 0;
+    let mut enchant_offers: [u8; 3] = [0; 3];
     let mut last_brewer_view = Brewer::default();
     let mut last_furnace_view = Furnace::default();
     let mut observed_chest_revision: u64 = 0;
@@ -958,6 +961,7 @@ fn play(
                 active_device = None;
                 active_brewer = None;
                 active_anvil = None;
+                    active_enchant = None;
                 // Game State 3 is Protocol 5's gamemode notification.
                 let mut state = vec![3u8];
                 state.extend_from_slice(&(mode as f32).to_be_bytes());
@@ -3370,6 +3374,7 @@ fn play(
                     active_device = None;
                     active_brewer = None;
                     active_anvil = None;
+                    active_enchant = None;
                     let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
                     last_furnace_view = guard.get(pos);
                     drop(guard);
@@ -3416,6 +3421,7 @@ fn play(
                     active_device = None;
                     active_brewer = None;
                     active_anvil = None;
+                    active_enchant = None;
                     let generated_loot = world
                         .lock()
                         .map_err(|_| bad("world mutex poisoned"))?
@@ -3511,6 +3517,7 @@ fn play(
                     active_hopper = None;
                     active_brewer = None;
                     active_anvil = None;
+                    active_enchant = None;
                     let items = inventory.chest_window_items(active_window, &last_device_view);
                     drop(guard);
                     let mut opened = vec![active_window];
@@ -3546,6 +3553,7 @@ fn play(
                     active_device = None;
                     active_brewer = None;
                     active_anvil = None;
+                    active_enchant = None;
                     active_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
@@ -3558,6 +3566,61 @@ fn play(
                     opened.push(5);
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &items)?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 116
+                {
+                    // Enchanting table is a one-slot, non-storage window.
+                    // Enchant buttons remain fail-closed until live ItemStack
+                    // NBT can preserve enchantments and arbitrary other tags.
+                    let shelves = {
+                        let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        workstations::bookshelf_count(|dx, dy, dz| {
+                            let (bx, by, bz) = (x + dx, y + dy, z + dz);
+                            if world::in_bounds(bx, by, bz) {
+                                guard.get(bx, by, bz) >> 4
+                            } else {
+                                0
+                            }
+                        })
+                    };
+                    active_window = next_window;
+                    next_window = if next_window >= 100 { 1 } else { next_window + 1 };
+                    active_chest = None;
+                    active_chest_partner = None;
+                    active_furnace = None;
+                    active_hopper = None;
+                    active_device = None;
+                    active_brewer = None;
+                    active_anvil = None;
+                    active_enchant = Some((x, y, z));
+                    enchant_shelves = shelves;
+                    enchant_offers = if inventory.enchanting_has_item() {
+                        workstations::enchanting_costs(enchant_shelves, rand::random::<u64>())
+                    } else {
+                        [0; 3]
+                    };
+                    let mut opened = vec![active_window];
+                    write_string("minecraft:enchanting_table", &mut opened)?;
+                    write_string(&json!({"text":"Enchant"}).to_string(), &mut opened)?;
+                    opened.push(0);
+                    send(s, 0x2d, &opened)?;
+                    send(s, 0x30, &inventory.enchanting_window_items(active_window))?;
+                    for (property, cost) in enchant_offers.iter().copied().enumerate() {
+                        let mut update = vec![active_window];
+                        update.extend_from_slice(&(property as i16).to_be_bytes());
+                        update.extend_from_slice(&(cost as i16).to_be_bytes());
+                        send(s, 0x31, &update)?;
+                    }
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     continue;
                 }
@@ -3614,6 +3677,7 @@ fn play(
                     active_device = None;
                     active_brewer = None;
                     active_anvil = None;
+                    active_enchant = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -3915,7 +3979,38 @@ fn play(
                     }
                     requested_window = false;
                 }
-                if let Some(pos) = active_anvil {
+                if let Some(pos) = active_enchant {
+                    let still_open = world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(pos.0, pos.1, pos.2)
+                        >> 4
+                        == 116
+                        && near(location, pos.0, pos.1, pos.2);
+                    let mut candidate = inventory.clone();
+                    accepted |= still_open
+                        && requested_window
+                        && candidate.enchanting_click_window(slot, button, mode);
+                    if accepted && candidate != *inventory {
+                        if candidate.enchanting_has_item() != inventory.enchanting_has_item()
+                            || (candidate.enchanting_has_item()
+                                && candidate.enchanting_window_items(active_window)
+                                    != inventory.enchanting_window_items(active_window))
+                        {
+                            enchant_offers = if candidate.enchanting_has_item() {
+                                workstations::enchanting_costs(
+                                    enchant_shelves,
+                                    rand::random::<u64>(),
+                                )
+                            } else {
+                                [0; 3]
+                            };
+                        }
+                        candidate.save(inventory_path)?;
+                        *inventory = candidate;
+                    }
+                    response_items = inventory.enchanting_window_items(active_window);
+                } else if let Some(pos) = active_anvil {
                     let still_open = world
                         .lock()
                         .map_err(|_| bad("world mutex poisoned"))?
@@ -4267,6 +4362,14 @@ fn play(
                 if active_anvil.is_some() {
                     send(s, 0x31, &inventory.anvil_cost_property(active_window))?;
                 }
+                if active_enchant.is_some() {
+                    for (property, cost) in enchant_offers.iter().copied().enumerate() {
+                        let mut update = vec![active_window];
+                        update.extend_from_slice(&(property as i16).to_be_bytes());
+                        update.extend_from_slice(&(cost as i16).to_be_bytes());
+                        send(s, 0x31, &update)?;
+                    }
+                }
                 send(s, 0x2f, &inventory.cursor_packet())?;
             }
             15 => {
@@ -4290,6 +4393,13 @@ fn play(
                             *inventory = staged;
                         }
                     }
+                    if active_enchant.is_some() {
+                        let mut staged = inventory.clone();
+                        if staged.reclaim_enchanting_input() && staged != *inventory {
+                            staged.save(inventory_path)?;
+                            *inventory = staged;
+                        }
+                    }
                     // Keep unused crafting ingredients saved rather than
                     // deleting them when the player closes a crafting window.
                     active_window = 0;
@@ -4300,7 +4410,28 @@ fn play(
                     active_device = None;
                     active_brewer = None;
                     active_anvil = None;
+                    active_enchant = None;
                     send(s, 0x30, &inventory.window_items())?;
+                }
+            }
+            17 => {
+                // C11 Enchant Item has two signed bytes in Protocol 5. Do not
+                // disconnect valid clients for selecting an offer; reject
+                // without consuming XP or the item until NBT is supported.
+                let window = input.i8()?;
+                let choice = input.i8()?;
+                input.finish()?;
+                if active_enchant.is_some()
+                    && window == active_window as i8
+                    && (0..=2).contains(&choice)
+                {
+                    send(s, 0x30, &inventory.enchanting_window_items(active_window))?;
+                    for (property, cost) in enchant_offers.iter().copied().enumerate() {
+                        let mut update = vec![active_window];
+                        update.extend_from_slice(&(property as i16).to_be_bytes());
+                        update.extend_from_slice(&(cost as i16).to_be_bytes());
+                        send(s, 0x31, &update)?;
+                    }
                 }
             }
             22 => {
