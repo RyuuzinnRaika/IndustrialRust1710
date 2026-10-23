@@ -136,6 +136,9 @@ pub(crate) fn rewrite_chunk_under_lock(
         Dimension::Nether => root.join("DIM-1"),
         Dimension::End => root.join("DIM1"),
     };
+    if !fs::symlink_metadata(&dim_root)?.file_type().is_dir() {
+        return Err(invalid("Anvil dimension must be a real directory"));
+    }
     let region_dir = dim_root.join("region");
     if !fs::symlink_metadata(&region_dir)?.file_type().is_dir() {
         return Err(invalid("Anvil region parent must be a real directory"));
@@ -268,6 +271,24 @@ mod tests {
             rewrite_chunk_under_lock(&mut lock, Dimension::Overworld, 0, 0, b"invalid").is_err()
         );
         assert_eq!(fs::read(&preserved).unwrap(), original);
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locked_cow_refuses_symlinked_dimension_parent() {
+        use std::os::unix::fs::symlink;
+        let root = setup();
+        let world = root.join("world");
+        let outside = root.join("outside");
+        fs::create_dir_all(outside.join("region")).unwrap();
+        symlink(&outside, world.join("DIM-1")).unwrap();
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+        assert!(
+            rewrite_chunk_under_lock(&mut lock, Dimension::Nether, 0, 0, b"invalid").is_err()
+        );
+        assert!(!outside.join("region/r.0.0.mca").exists());
         drop(lock);
         fs::remove_dir_all(root).unwrap();
     }
