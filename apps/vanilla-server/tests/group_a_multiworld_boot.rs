@@ -86,7 +86,7 @@ fn three_dimensions_boot_restart_and_reject_seed_mismatch() {
         root.join("DIM-1/nether.irw"),
         root.join("DIM1/end.irw"),
     ];
-    let snapshots = files.map(|path| fs::read(path).unwrap());
+    let snapshots: Vec<_> = files.iter().map(|path| fs::read(path).unwrap()).collect();
 
     let status = Command::new(exe)
         .args([
