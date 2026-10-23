@@ -104,10 +104,7 @@ pub(crate) fn rewrite_chunks_create_only(
         for z in 0..32 {
             for x in 0..32 {
                 if let Some(bytes) = input.read_chunk(x, z).map_err(wrap)? {
-                    let data = overlay
-                        .get(&(x, z))
-                        .copied()
-                        .unwrap_or(bytes.as_slice());
+                    let data = overlay.get(&(x, z)).copied().unwrap_or(bytes.as_slice());
                     output.write_chunk(x, z, data).map_err(wrap)?;
                 }
             }
@@ -369,26 +366,18 @@ mod tests {
         let source = world.join("region/r.0.0.mca");
         let mut original = Region::from_stream(File::open(&source).unwrap()).unwrap();
         let untouched = original.read_chunk(0, 1).unwrap().unwrap();
-        let mut first = legacy_nbt::parse_chunk(
-            &original.read_chunk(0, 0).unwrap().unwrap(),
-            0,
-            0,
-        )
-        .unwrap();
-        first.level.extra.insert(
-            "UnknownBatchA".into(),
-            Value::String("retained-a".into()),
-        );
-        let mut second = legacy_nbt::parse_chunk(
-            &original.read_chunk(1, 0).unwrap().unwrap(),
-            1,
-            0,
-        )
-        .unwrap();
-        second.level.extra.insert(
-            "UnknownBatchB".into(),
-            Value::String("retained-b".into()),
-        );
+        let mut first =
+            legacy_nbt::parse_chunk(&original.read_chunk(0, 0).unwrap().unwrap(), 0, 0).unwrap();
+        first
+            .level
+            .extra
+            .insert("UnknownBatchA".into(), Value::String("retained-a".into()));
+        let mut second =
+            legacy_nbt::parse_chunk(&original.read_chunk(1, 0).unwrap().unwrap(), 1, 0).unwrap();
+        second
+            .level
+            .extra
+            .insert("UnknownBatchB".into(), Value::String("retained-b".into()));
         let a = fastnbt::to_bytes(&first).unwrap();
         let b = fastnbt::to_bytes(&second).unwrap();
         let mut lock = WorldSessionLock::acquire(&world).unwrap();
@@ -416,18 +405,12 @@ mod tests {
         let mut input = Region::from_stream(File::open(&source).unwrap()).unwrap();
         let a = input.read_chunk(0, 0).unwrap().unwrap();
         assert!(rewrite_chunks_create_only(&source, &dest, &[]).is_err());
-        assert!(rewrite_chunks_create_only(
-            &source,
-            &dest,
-            &[((0, 0), &a), ((32, 0), &a)],
-        )
-        .is_err());
-        assert!(rewrite_chunks_create_only(
-            &source,
-            &dest,
-            &[((0, 0), &a), ((0, 0), &a)],
-        )
-        .is_err());
+        assert!(
+            rewrite_chunks_create_only(&source, &dest, &[((0, 0), &a), ((32, 0), &a)],).is_err()
+        );
+        assert!(
+            rewrite_chunks_create_only(&source, &dest, &[((0, 0), &a), ((0, 0), &a)],).is_err()
+        );
         assert!(rewrite_chunks_create_only(
             &source,
             &dest,
@@ -439,5 +422,4 @@ mod tests {
         assert!(!dest.with_extension("creating").exists());
         fs::remove_dir_all(root).unwrap();
     }
-
 }
