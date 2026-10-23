@@ -3647,6 +3647,7 @@ fn play(
                     active_device = None;
                     active_brewer = None;
                     active_anvil = Some((x, y, z));
+                    active_enchant = None;
                     let mut opened = vec![active_window];
                     write_string("minecraft:anvil", &mut opened)?;
                     write_string(&json!({"text":"Repair & Name"}).to_string(), &mut opened)?;
@@ -3992,10 +3993,7 @@ fn play(
                         && requested_window
                         && candidate.enchanting_click_window(slot, button, mode);
                     if accepted && candidate != *inventory {
-                        if candidate.enchanting_has_item() != inventory.enchanting_has_item()
-                            || (candidate.enchanting_has_item()
-                                && candidate.enchanting_window_items(active_window)
-                                    != inventory.enchanting_window_items(active_window))
+                        if candidate.enchanting_input() != inventory.enchanting_input()
                         {
                             enchant_offers = if candidate.enchanting_has_item() {
                                 workstations::enchanting_costs(
