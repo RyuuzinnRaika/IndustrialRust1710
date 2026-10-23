@@ -187,6 +187,22 @@ impl DimensionWorlds {
         self.manager.path(dimension)
     }
 
+    /// Bind all dimension writes to one root-level session lock. The router
+    /// must never keep an unbound secondary world alive while accepting players.
+    /// Each World verifies its own path before publishing a durable mutation.
+    pub fn bind_save_sessions(
+        &self,
+        session: Arc<Mutex<crate::session_lock::WorldSessionLock>>,
+    ) -> io::Result<()> {
+        for dimension in [Dimension::Overworld, Dimension::Nether, Dimension::End] {
+            self.world(dimension)
+                .lock()
+                .map_err(|_| io::Error::other("dimension world mutex poisoned"))?
+                .bind_save_session(&self.path(dimension), Arc::clone(&session))?;
+        }
+        Ok(())
+    }
+
     /// Commit all three IRW4 snapshots as a crash-recoverable transaction.
     /// A caller must quiesce writers before taking snapshots and hold the
     /// server's session lock until commit finishes. If commit fails, stop
@@ -308,7 +324,9 @@ pub fn destination(
     let scale = match (source, target) {
         (Dimension::Overworld, Dimension::Nether) => 1.0 / 8.0,
         (Dimension::Nether, Dimension::Overworld) => 8.0,
-        _ => 1.0,
+        (Dimension::Overworld, Dimension::End) | (Dimension::End, Dimension::Overworld) => 1.0,
+        // There is no direct Nether <-> End travel in Minecraft 1.7.10.
+        _ => return None,
     };
     let (x, y, z) = if target == Dimension::End || source == Dimension::End {
         (0.5, 80.0, 0.5)
@@ -987,5 +1005,51 @@ mod tests {
         }
         assert!(DimensionWorlds::load_all(DimensionManager::new(&root, 418)).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn live_dimension_handles_share_session_lock_and_reject_wrong_save_path() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-shared-dimension-lock-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let manager = DimensionManager::new(&root, 84);
+        let worlds = DimensionWorlds::load_all(manager.clone()).unwrap();
+        let session = Arc::new(Mutex::new(
+            crate::session_lock::WorldSessionLock::acquire(&root).unwrap(),
+        ));
+        worlds.bind_save_sessions(Arc::clone(&session)).unwrap();
+        {
+            let handle = worlds.world(Dimension::Nether);
+            let mut nether = handle.lock().unwrap();
+            assert!(nether
+                .update_and_save(&manager.path(Dimension::Overworld), 5, 75, 5, 49 << 4)
+                .is_err());
+            assert!(nether
+                .update_and_save(&manager.path(Dimension::Nether), 5, 75, 5, 49 << 4)
+                .unwrap());
+        }
+        worlds.save_all().unwrap();
+        assert_eq!(
+            DimensionWorlds::load_all(manager)
+                .unwrap()
+                .world(Dimension::Nether)
+                .lock()
+                .unwrap()
+                .get(5, 75, 5),
+            49 << 4
+        );
+        drop(worlds);
+        drop(session);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_nether_to_end_travel_is_rejected() {
+        assert!(destination(Dimension::Nether, Dimension::End, 0.0, 64.0, 0.0).is_none());
+        assert!(destination(Dimension::End, Dimension::Nether, 0.0, 64.0, 0.0).is_none());
+        assert!(destination(Dimension::Overworld, Dimension::End, 0.0, 64.0, 0.0).is_some());
+        assert!(destination(Dimension::End, Dimension::Overworld, 0.0, 64.0, 0.0).is_some());
     }
 }
