@@ -6164,10 +6164,7 @@ fn main() -> io::Result<()> {
     let throwables = Arc::new(Mutex::new(Throwables::default()));
     let boats = Arc::new(Mutex::new(Boats::default()));
     let minecart_path = Arc::new(Minecarts::location(&world_path));
-    let minecarts = Arc::new(Mutex::new(Minecarts::load(
-        &minecart_path,
-        clock.ticks(),
-    )?));
+    let minecarts = Arc::new(Mutex::new(Minecarts::load(&minecart_path, clock.ticks())?));
     let fishing = Arc::new(Mutex::new(Fishing::default()));
     let ground_path = Arc::new(GroundItems::location(&world_path));
     let ground_items = Arc::new(Mutex::new(if survival {
