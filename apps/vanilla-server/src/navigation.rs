@@ -92,8 +92,7 @@ pub fn advance_step(
             return Some(landing);
         }
     }
-    if physics::valid_movement(world, &from, &horizontal)
-        && physics::supported(world, &horizontal)
+    if physics::valid_movement(world, &from, &horizontal) && physics::supported(world, &horizontal)
     {
         return Some(horizontal);
     }
@@ -197,9 +196,20 @@ mod tests {
     fn climbs_a_one_block_step_without_entering_the_block() {
         let mut world = World::new();
         world.import_block(1, 64, 0, 1 << 4).unwrap();
-        let start = PlayerPosition { x: 0.5, y: 64.0, z: 0.5 };
-        let goal = PlayerPosition { x: 1.5, y: 65.0, z: 0.5 };
-        assert_eq!(next_step(&world, start, goal, 128).map(cell), Some(cell(goal)));
+        let start = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let goal = PlayerPosition {
+            x: 1.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        assert_eq!(
+            next_step(&world, start, goal, 128).map(cell),
+            Some(cell(goal))
+        );
         let stepped = advance_step(&world, start, goal, 0.24).expect("jump onto block");
         assert_eq!(stepped.y, 65.0);
         assert!(stepped.x > start.x);
@@ -211,8 +221,16 @@ mod tests {
     fn descends_only_after_clearing_the_step_edge() {
         let mut world = World::new();
         world.import_block(1, 64, 0, 1 << 4).unwrap();
-        let low = PlayerPosition { x: 0.5, y: 64.0, z: 0.5 };
-        let mut pos = PlayerPosition { x: 1.5, y: 65.0, z: 0.5 };
+        let low = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let mut pos = PlayerPosition {
+            x: 1.5,
+            y: 65.0,
+            z: 0.5,
+        };
         while (pos.x - low.x).abs() > 1e-6 {
             pos = advance_step(&world, pos, low, 0.24).expect("walk off ledge safely");
             assert!(!physics::collides(&world, &pos));
@@ -228,8 +246,16 @@ mod tests {
         for y in 64..=66 {
             world.import_block(1, y, 0, 1 << 4).unwrap();
         }
-        let from = PlayerPosition { x: 0.5, y: 64.0, z: 0.5 };
-        let blocked = PlayerPosition { x: 1.5, y: 65.0, z: 0.5 };
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let blocked = PlayerPosition {
+            x: 1.5,
+            y: 65.0,
+            z: 0.5,
+        };
         assert!(advance_step(&world, from, blocked, 0.24).is_none());
         assert!(!can_transition(&world, cell(from), cell(blocked)));
     }
