@@ -223,15 +223,29 @@ pub struct MiningProgress {
     started: Instant,
     block: u16,
     tool: Option<Stack>,
+    /// Combined classic underwater/head and airborne mining penalty.
+    penalty: u32,
 }
 impl MiningProgress {
+    /// Normal grounded/dry entry point kept for earlier callers and tests.
     pub fn start(target: (i32, i32, i32), block: u16, held: Option<Stack>) -> Option<Self> {
+        Self::start_with_environment(target, block, held, false, true)
+    }
+
+    pub fn start_with_environment(
+        target: (i32, i32, i32),
+        block: u16,
+        held: Option<Stack>,
+        head_submerged: bool,
+        on_ground: bool,
+    ) -> Option<Self> {
         mine_rule(block, held)?;
         Some(Self {
             target,
             started: Instant::now(),
             block,
             tool: held,
+            penalty: environment_penalty(head_submerged, on_ground),
         })
     }
     /// Consume the attempt exactly once. The held tool must remain unchanged
@@ -245,9 +259,34 @@ impl MiningProgress {
         if self.target != target || self.block != current || self.tool != held {
             return None;
         }
-        let (minimum, result) = mine_rule(current, held)?;
-        (self.started.elapsed() >= minimum).then_some(result)
+        self.finish_with_environment(target, current, held, false, true)
     }
+
+    /// Apply the worse of the start/finish penalties, so entering water or
+    /// jumping immediately before finishing never bypasses the server timer.
+    pub fn finish_with_environment(
+        self,
+        target: (i32, i32, i32),
+        current: u16,
+        held: Option<Stack>,
+        head_submerged: bool,
+        on_ground: bool,
+    ) -> Option<MineResult> {
+        if self.target != target || self.block != current || self.tool != held {
+            return None;
+        }
+        let (minimum, result) = mine_rule(current, held)?;
+        let penalty = self
+            .penalty
+            .max(environment_penalty(head_submerged, on_ground));
+        (self.started.elapsed() >= minimum.saturating_mul(penalty)).then_some(result)
+    }
+}
+
+fn environment_penalty(head_submerged: bool, on_ground: bool) -> u32 {
+    let water = if head_submerged { 5 } else { 1 };
+    let airborne = if on_ground { 1 } else { 5 };
+    water * airborne
 }
 #[cfg(test)]
 mod tests {
@@ -324,6 +363,39 @@ mod tests {
         assert_eq!(tool_max_uses(stack(285, 0).unwrap()), Some(32));
         assert_eq!(tool_max_uses(stack(274, 131).unwrap()), None);
     }
+    #[test]
+    fn submerged_and_airborne_mining_penalties_stack_and_cannot_be_skipped() {
+        let target = (0, 64, 0);
+        let block = 1 << 4;
+        let held = stack(257, 0);
+        let base = mine_rule(block, held).unwrap().0;
+        assert_eq!(environment_penalty(false, true), 1);
+        assert_eq!(environment_penalty(true, true), 5);
+        assert_eq!(environment_penalty(false, false), 5);
+        assert_eq!(environment_penalty(true, false), 25);
+
+        let mut in_water =
+            MiningProgress::start_with_environment(target, block, held, true, false).unwrap();
+        in_water.started = Instant::now() - base.saturating_mul(5);
+        assert!(in_water
+            .finish_with_environment(target, block, held, false, true)
+            .is_none());
+        let mut completed =
+            MiningProgress::start_with_environment(target, block, held, true, false).unwrap();
+        completed.started = Instant::now() - base.saturating_mul(26);
+        assert_eq!(
+            completed.finish_with_environment(target, block, held, true, false),
+            mine_rule(block, held).map(|(_, result)| result),
+        );
+
+        let mut enter_water =
+            MiningProgress::start_with_environment(target, block, held, false, true).unwrap();
+        enter_water.started = Instant::now() - base.saturating_mul(2);
+        assert!(enter_water
+            .finish_with_environment(target, block, held, true, true)
+            .is_none());
+    }
+
     #[test]
     fn immediate_finish_or_switched_tool_does_not_break_block() {
         let target = (0, 63, 0);
