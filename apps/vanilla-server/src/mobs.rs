@@ -741,7 +741,7 @@ impl Mobs {
                 .unwrap_or(BASE_ID - 1);
             if value.next_id <= max_id
                 || value.next_id < BASE_ID
-                || value.next_id >= 1_000_000
+                || value.next_id > 1_000_000
                 || value.entities.len() > MAX_LOADED_MOBS
                 // All three entity categories share a single Protocol 5 ID
                 // space. Reject corrupt snapshots that reuse an ID.
@@ -1097,7 +1097,7 @@ impl Mobs {
     }
     /// Spawn a server-owned XP orb. No immediate XP award occurs.
     pub fn spawn_xp(&mut self, at: PlayerPosition, amount: u16) -> Option<Event> {
-        if amount == 0 || self.orbs.len() >= 256 {
+        if amount == 0 || self.orbs.len() >= 256 || self.next_id >= 1_000_000 {
             return None;
         }
         let id = self.next_id;
@@ -1691,6 +1691,7 @@ impl Mobs {
         let food = held?.id;
         if !first.nearby(player, 3.0)
             || self.entities.len() >= MAX_LOADED_MOBS
+            || self.next_id >= 1_000_000
             || self.entities.values().filter(|m| m.kind.passive()).count()
                 >= MAX_NATURAL_PER_CATEGORY
             || !first.kind.passive()
@@ -1722,6 +1723,7 @@ impl Mobs {
         damage: u8,
     ) -> Option<Event> {
         if self.arrows.len() >= ARROW_CAP
+            || self.next_id >= 1_000_000
             || !at.is_valid()
             || !yaw.is_finite()
             || !pitch.is_finite()
@@ -2059,7 +2061,7 @@ impl Mobs {
             return;
         }
         for (x, y, z) in world.nearby_spawners(players) {
-            if self.entities.len() >= MAX_LOADED_MOBS {
+            if self.entities.len() >= MAX_LOADED_MOBS || self.next_id >= 1_000_000 {
                 break;
             }
             let key = format!("{x},{y},{z}");
@@ -3446,6 +3448,8 @@ mod tests {
         mobs.enabled = true;
         mobs.next_id = 1_000_000;
         assert!(mobs.hatch_egg(&world, at).is_none());
+        assert!(mobs.spawn_xp(at, 5).is_none());
+        assert!(mobs.fire_arrow(None, at, 0.0, 0.0, 1.0, 1).is_none());
         assert!(mobs.summon_boss(&world, 64, at).is_none());
         assert!(mobs.split(parent).is_empty());
     }
