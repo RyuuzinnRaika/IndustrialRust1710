@@ -64,7 +64,7 @@ pub(crate) fn inspect_region(path: &Path) -> io::Result<usize> {
 pub(crate) fn inspect_region_bytes(path: &Path, raw: &[u8]) -> io::Result<usize> {
     let (rx, rz) = coordinates(path)?;
     if raw.len() < 2 * SECTOR_SIZE
-        || raw.len() % SECTOR_SIZE != 0
+        || !raw.len().is_multiple_of(SECTOR_SIZE)
         || raw.len() as u64 > MAX_REGION_SIZE
     {
         return Err(invalid("Anvil region has invalid sector alignment"));
