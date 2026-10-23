@@ -572,7 +572,9 @@ mod regression_tests {
 
     #[test]
     fn wooden_and_planted_1710_blocks_are_combustible_but_stone_is_not() {
-        for id in [5, 18, 31, 37, 54, 64, 85, 96, 106, 127, 134, 161, 163, 170, 171, 175] {
+        for id in [
+            5, 18, 31, 37, 54, 64, 85, 96, 106, 127, 134, 161, 163, 170, 171, 175,
+        ] {
             assert!(flammable(id), "missing combustible block {id}");
         }
         for id in [0, 1, 8, 20, 49, 71] {
