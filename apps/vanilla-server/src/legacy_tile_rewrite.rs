@@ -226,7 +226,9 @@ fn rewrite_inventories_impl(
                 && tile
                     .items
                     .as_ref()
-                    .is_some_and(|items| items.iter().any(|item| item.tag.is_some() || !item.extra.is_empty()))
+                    .is_some_and(|items| {
+                        items.iter().any(|item| item.tag.is_some() || !item.extra.is_empty())
+                    })
             {
                 return Err(invalid("cannot mirror chest with unknown existing item tags"));
             }
