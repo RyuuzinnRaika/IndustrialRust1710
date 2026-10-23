@@ -4732,6 +4732,14 @@ fn handle(
             return Ok(());
         }
     };
+    // A disconnect can happen without Close Window. Recover unspent anvil
+    // inputs on the next login, but only if both stacks fit; otherwise retain
+    // their persisted slots until a future recovery can complete.
+    let mut recovered = inventory_state.clone();
+    if recovered.reclaim_anvil_inputs() && recovered != inventory_state {
+        recovered.save(&inventory_file)?;
+        inventory_state = recovered;
+    }
     let experience_file = player_file.with_extension("experience.json");
     let mut experience_state = Experience::load(&experience_file)?;
     let achievements_file = player_file.with_extension("achievements.json");
