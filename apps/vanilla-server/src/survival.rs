@@ -125,7 +125,7 @@ fn rule(block: u16) -> Option<BlockRule> {
             item(id as i16, damage),
         ),
         6 => (0.0, None, 0, false, item(6, damage & 7)),
-        18 => (0.2, None, 0, false, None), // leaf drops handled separately
+        18 | 161 => (0.2, None, 0, false, None), // leaf drops handled separately
         59 => (
             0.0,
             None,
@@ -177,8 +177,9 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
     roll = roll.wrapping_mul(0x94d049bb133111eb);
     roll ^= roll >> 31;
     let (id, count) = match block >> 4 {
-        18 if roll.is_multiple_of(200) => (260, 1), // apple
-        18 if roll.is_multiple_of(20) => (6, 1),    // sapling
+        18 if block & 3 == 0 && roll.is_multiple_of(200) => (260, 1), // Oak apple
+        161 if block & 3 == 1 && roll.is_multiple_of(200) => (260, 1), // Dark oak apple
+        18 | 161 if roll.is_multiple_of(20) => (6, 1), // Matching sapling
         59 if block & 7 == 7 => (295, 1 + (roll % 3) as u8),
         141 if block & 7 == 7 => (391, 1 + (roll % 3) as u8),
         142 if block & 7 == 7 => (392, 1 + (roll % 3) as u8),
@@ -187,7 +188,15 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
     Some(Stack {
         id,
         count,
-        damage: 0,
+        damage: if id == 6 {
+            if block >> 4 == 161 {
+                4 + (block & 1) as i16 // Acacia / dark oak.
+            } else {
+                (block & 3) as i16
+            }
+        } else {
+            0
+        },
     })
 }
 
@@ -352,6 +361,25 @@ mod tests {
         assert_eq!(mine_rule(20 << 4, None).unwrap().1.drop, None);
         assert!(MiningProgress::start((0, 60, 0), 7 << 4, None).is_none());
     }
+    #[test]
+    fn new_leaves_are_mineable_and_drop_matching_species() {
+        assert!(mine_rule(161 << 4, None).is_some());
+        // Deterministically find a non-apple sapling roll to exercise both
+        // leaf families without relying on a random distribution.
+        for block in [(18 << 4) | 2, (161 << 4), (161 << 4) | 1] {
+            let expected = if block >> 4 == 161 {
+                4 + (block & 1) as i16
+            } else {
+                (block & 3) as i16
+            };
+            let sapling = (0..10_000).find_map(|tick| {
+                let drop = additional_drop(block, (1, 65, 2), tick)?;
+                (drop.id == 6).then_some(drop)
+            }).expect("each leaf species should drop its matching sapling");
+            assert_eq!(sapling.damage, expected);
+        }
+    }
+
     #[test]
     fn matching_tools_mine_faster_and_have_correct_durability() {
         let bare = mine_rule(1 << 4, None).unwrap().0;
