@@ -2915,11 +2915,22 @@ fn play(
                     if carts.can_place(&railway, position) {
                         let mut candidate = inventory.clone();
                         if candidate.consume_held() {
-                            candidate.save(inventory_path)?;
-                            let spawned = carts
+                            let mut staged_carts = carts.clone();
+                            let spawned = staged_carts
                                 .place(&railway, position, now_tick)
                                 .ok_or_else(|| bad("minecart vanished after preflight"))?;
+                            let cart_file = Minecarts::location(world_path);
+                            // The item debit and newly placed minecart must be
+                            // committed as one redo-journal transaction.
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (cart_file.as_path(), staged_carts.encoded()?),
+                                ],
+                            )?;
                             *inventory = candidate;
+                            *carts = staged_carts;
                             drop(carts);
                             drop(railway);
                             send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
@@ -6152,7 +6163,11 @@ fn main() -> io::Result<()> {
     }));
     let throwables = Arc::new(Mutex::new(Throwables::default()));
     let boats = Arc::new(Mutex::new(Boats::default()));
-    let minecarts = Arc::new(Mutex::new(Minecarts::default()));
+    let minecart_path = Arc::new(Minecarts::location(&world_path));
+    let minecarts = Arc::new(Mutex::new(Minecarts::load(
+        &minecart_path,
+        clock.ticks(),
+    )?));
     let fishing = Arc::new(Mutex::new(Fishing::default()));
     let ground_path = Arc::new(GroundItems::location(&world_path));
     let ground_items = Arc::new(Mutex::new(if survival {
@@ -6780,10 +6795,14 @@ fn main() -> io::Result<()> {
     let projectile_mobs = Arc::clone(&mobs);
     let projectile_boats = Arc::clone(&boats);
     let projectile_carts = Arc::clone(&minecarts);
+    let projectile_cart_file = Arc::clone(&minecart_path);
+    let projectile_world_file = Arc::clone(&path);
     let projectile_fishing = Arc::clone(&fishing);
     let projectile_shutdown = Arc::clone(&shutdown);
     let projectile_thread = thread::spawn(move || {
         let mut last = projectile_clock.ticks();
+        let mut last_cart_checkpoint = last;
+        let mut last_cart_bytes: Option<Vec<u8>> = None;
         while !projectile_shutdown.load(Ordering::Acquire) {
             let now = projectile_clock.ticks();
             if now > last {
@@ -6810,7 +6829,32 @@ fn main() -> io::Result<()> {
                     Err(_) => return,
                 };
                 let minecart_events = match projectile_carts.lock() {
-                    Ok(mut state) => state.tick(&world, now),
+                    Ok(mut state) => {
+                        let events = state.tick(&world, now);
+                        if now.saturating_sub(last_cart_checkpoint) >= 20 {
+                            // Persist at most once a second. A stationary
+                            // registry does not incur a redundant disk write.
+                            let bytes = match state.encoded() {
+                                Ok(bytes) => bytes,
+                                Err(error) => {
+                                    eprintln!("MINECART ENCODING ERROR: {error}");
+                                    return;
+                                }
+                            };
+                            if last_cart_bytes.as_ref() != Some(&bytes) {
+                                if let Err(error) = journal::commit(
+                                    &projectile_world_file.with_extension("pending-txn.json"),
+                                    &[(&*projectile_cart_file, bytes.clone())],
+                                ) {
+                                    eprintln!("MINECART CHECKPOINT ERROR: {error}");
+                                    return;
+                                }
+                                last_cart_bytes = Some(bytes);
+                            }
+                            last_cart_checkpoint = now;
+                        }
+                        events
+                    }
                     Err(_) => return,
                 };
                 let fishing_events = match projectile_fishing.lock() {
@@ -6841,6 +6885,23 @@ fn main() -> io::Result<()> {
                 }
             }
             thread::sleep(Duration::from_millis(10));
+        }
+        // A normal /stop also checkpoints the final sub-second position.
+        if let Ok(_world) = projectile_world.lock() {
+            if let Ok(state) = projectile_carts.lock() {
+                match state.encoded() {
+                    Ok(bytes) if last_cart_bytes.as_ref() != Some(&bytes) => {
+                        if let Err(error) = journal::commit(
+                            &projectile_world_file.with_extension("pending-txn.json"),
+                            &[(&*projectile_cart_file, bytes)],
+                        ) {
+                            eprintln!("MINECART FINAL CHECKPOINT ERROR: {error}");
+                        }
+                    }
+                    Err(error) => eprintln!("MINECART FINAL ENCODING ERROR: {error}"),
+                    _ => {}
+                }
+            }
         }
     });
     // Initialize once at startup. A failure here prevents any online-mode bind.
