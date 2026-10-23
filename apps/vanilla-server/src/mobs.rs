@@ -524,6 +524,16 @@ fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
     })
 }
 
+/// Flying ghasts must be able to spawn in air. A generic ground-support
+/// test here would discard every valid floating ghast candidate.
+fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition) -> bool {
+    if kind == Kind::Ghast {
+        ghast_has_clearance(world, at)
+    } else {
+        physics::supported(world, &at) && !physics::collides(world, &at)
+    }
+}
+
 /// A bounded, collision-swept aerial step. Ghasts keep their distance and
 /// circle their target while blazes try to gain altitude for ranged attacks.
 /// Flight never requires a supporting ground block.
@@ -1923,8 +1933,7 @@ impl Mobs {
                 };
                 if !candidate.is_valid()
                     || !natural_spawn_location_ok(world, candidate, players)
-                    || !physics::supported(world, &candidate)
-                    || physics::collides(world, &candidate)
+                    || !natural_spawn_body_ok(world, kind, candidate)
                 {
                     continue;
                 }
@@ -1950,9 +1959,6 @@ impl Mobs {
                     continue;
                 }
                 if kind == Kind::Blaze && world.get(cx, cy - 1, cz) >> 4 != 112 {
-                    continue;
-                }
-                if kind == Kind::Ghast && !ghast_has_clearance(world, candidate) {
                     continue;
                 }
                 if kind == Kind::Enderman && world.get(cx, cy + 2, cz) >> 4 != 0 {
@@ -2390,7 +2396,13 @@ impl Mobs {
                 {
                     mob.waypoint = None;
                 }
-                let waypoint = mob.waypoint.unwrap_or(destination);
+                // Without an A* waypoint retain the old flat pursuit
+                // fallback, rather than demanding a multi-block vertical jump
+                // directly towards a player standing high above the mob.
+                let waypoint = mob.waypoint.unwrap_or(PlayerPosition {
+                    y: mob.position.y,
+                    ..destination
+                });
                 let dx = waypoint.x - mob.position.x;
                 let dz = waypoint.z - mob.position.z;
                 let len = dx.hypot(dz);
@@ -2406,13 +2418,8 @@ impl Mobs {
                 } else {
                     0.11
                 };
-                let candidate = PlayerPosition {
-                    x: mob.position.x + dx / len * speed,
-                    z: mob.position.z + dz / len * speed,
-                    y: mob.position.y,
-                };
-                if physics::valid_movement(world, &mob.position, &candidate)
-                    && physics::supported(world, &candidate)
+                if let Some(candidate) =
+                    navigation::advance_step(world, mob.position, waypoint, speed)
                 {
                     mob.position = candidate;
                     events.push(multiplayer::teleport(mob.id, &candidate, 0.0, 0.0));
@@ -2912,6 +2919,21 @@ fn natural_spawn_location_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn natural_ghast_candidates_can_float_but_cannot_overlap_walls() {
+        let mut world = World::new();
+        let air = PlayerPosition {
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        assert!(!physics::supported(&world, &air));
+        assert!(natural_spawn_body_ok(&world, Kind::Ghast, air));
+        assert!(!natural_spawn_body_ok(&world, Kind::Skeleton, air));
+        world.import_block(2, 80, 0, 1 << 4).unwrap();
+        assert!(!natural_spawn_body_ok(&world, Kind::Ghast, air));
+    }
+
     #[test]
     fn flying_mobs_move_without_a_ground_support_block() {
         let world = World::new();
