@@ -59,17 +59,30 @@ impl TickTelemetry {
             }
         }
         if self.started.elapsed() >= REPORT_INTERVAL {
-            if let Err(error) = self.flush(players) {
+            // Keep this window in memory when the filesystem is unavailable.
+            // The next record() or explicit shutdown will retry the write.
+            if let Err(error) = self.finish(players) {
                 eprintln!("METRICS WRITE ERROR: {error}");
             }
-            self.started = Instant::now();
-            self.processed_ticks = 0;
-            self.missed_ticks = 0;
-            self.players_min = None;
-            self.players_peak = 0;
-            self.player_ticks = 0;
-            self.samples_ms.clear();
         }
+    }
+
+    /// Persist the trailing (possibly shorter than ten seconds) window on
+    /// orderly shutdown. Idempotent after a successful write; a failed write
+    /// preserves the window so a later attempt can recover the measurements.
+    pub fn finish(&mut self, players: usize) -> io::Result<()> {
+        if self.processed_ticks == 0 && self.missed_ticks == 0 {
+            return Ok(());
+        }
+        self.flush(players)?;
+        self.started = Instant::now();
+        self.processed_ticks = 0;
+        self.missed_ticks = 0;
+        self.players_min = None;
+        self.players_peak = 0;
+        self.player_ticks = 0;
+        self.samples_ms.clear();
+        Ok(())
     }
 
     fn flush(&self, players: usize) -> io::Result<()> {
@@ -192,5 +205,67 @@ mod tests {
         assert_eq!(t.samples_ms.len(), MAX_SAMPLES);
         assert_eq!(t.processed_ticks, 5000);
         assert_eq!(t.missed_ticks, 12);
+    }
+    #[test]
+    fn finish_persists_short_shutdown_window_exactly_once() {
+        let path = std::env::temp_dir().join(format!(
+            "ir-e48-final-{}-{:?}.jsonl",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut telemetry = TickTelemetry::new(path.clone());
+        // A run shorter than the normal report interval must still be visible.
+        telemetry.record(Duration::from_millis(12), 2, 0, 1);
+        assert!(!path.exists());
+        telemetry.finish(1).unwrap();
+        telemetry.finish(1).unwrap();
+        let rows = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(rows.lines().count(), 1);
+        let row: serde_json::Value = serde_json::from_str(&rows).unwrap();
+        assert_eq!(row["processed_ticks"], 2);
+        assert_eq!(row["players_peak"], 1);
+        assert_eq!(row["mspt_samples"], 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_flush_keeps_window_for_a_retry() {
+        let path = std::env::temp_dir().join(format!(
+            "ir-e48-retry-{}-{:?}.jsonl",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&path);
+        // A directory where a file is expected reliably causes a write error.
+        std::fs::create_dir(&path).unwrap();
+        let mut telemetry = TickTelemetry::new(path.clone());
+        telemetry.record(Duration::from_millis(30), 3, 1, 2);
+        assert!(telemetry.finish(2).is_err());
+        assert_eq!(telemetry.processed_ticks, 3);
+        assert_eq!(telemetry.missed_ticks, 1);
+        assert_eq!(telemetry.samples_ms.len(), 3);
+        std::fs::remove_dir(&path).unwrap();
+        telemetry.finish(2).unwrap();
+        let row: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(row["processed_ticks"], 3);
+        assert_eq!(row["missed_ticks"], 1);
+        assert_eq!(row["mspt_samples"], 3);
+        assert_eq!(telemetry.processed_ticks, 0);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn finish_without_observed_ticks_does_not_create_a_row() {
+        let path = std::env::temp_dir().join(format!(
+            "ir-e48-empty-{}-{:?}.jsonl",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        TickTelemetry::new(path.clone()).finish(0).unwrap();
+        assert!(!path.exists());
     }
 }

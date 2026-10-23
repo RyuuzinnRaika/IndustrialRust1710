@@ -6588,6 +6588,11 @@ fn main() -> io::Result<()> {
             }
             thread::sleep(Duration::from_millis(10));
         }
+        // The timer usually stops between ten-second telemetry reports.
+        // Persist that final partial window before the worker is joined.
+        if let Err(error) = telemetry.finish(furnace_hub.count().unwrap_or(0)) {
+            eprintln!("METRICS FINAL WRITE ERROR: {error}");
+        }
     });
     // Hopper movement is an independent bounded job on the same 20Hz clock.
     // Only a single 8-tick transfer cycle is processed after any scheduler stall.
