@@ -226,6 +226,19 @@ impl World {
         }
     }
 
+    /// Vanilla comparator override inputs are not ordinary power sources:
+    /// do not expose their values to adjacent dust, repeaters or pistons.
+    /// Inventory-backed tile entities are handled separately by the server.
+    fn comparator_rear_input(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
+        let state = self.get(from.0, from.1, from.2);
+        match state >> 4 {
+            92 => 14u8.saturating_sub((state as u8 & 7).min(7) * 2), // Cake slices.
+            118 => (state & 3) as u8, // Cauldron water level.
+            120 => if state & 4 != 0 { 15 } else { 0 }, // End portal eye.
+            _ => self.signal_into(from, to),
+        }
+    }
+
     pub(super) fn power_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> bool {
         self.signal_into(from, to) > 0
     }
@@ -414,7 +427,7 @@ impl World {
                     // Rear input and two side inputs are sampled independently.
                     // Metadata bit 2 chooses subtraction mode; bits 0..1 face.
                     let (dx, dz) = repeater_direction(current);
-                    let rear = self.signal_into((x - dx, y, z - dz), (x, y, z));
+                    let rear = self.comparator_rear_input((x - dx, y, z - dz), (x, y, z));
                     let side = [(-dz, dx), (dz, -dx)]
                         .into_iter()
                         .map(|(sx, sz)| self.signal_into((x + sx, y, z + sz), (x, y, z)))
@@ -666,6 +679,47 @@ mod redstone_regression_tests {
         w.block_tick(&path, 64).unwrap();
         assert_eq!(w.get(1, 64, 0) & 15, 15);
         assert_eq!(w.get(0, 64, 1) & 15, 0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn comparators_read_block_analog_overrides_without_powering_dust() {
+        let mut w = World::new();
+        let rear = (-1, 64, 0);
+        let target = (0, 64, 0);
+        for (block, expected) in [
+            ((92 << 4), 14),
+            ((92 << 4) | 6, 2),
+            ((118 << 4) | 3, 3),
+            ((118 << 4), 0),
+            ((120 << 4) | 4, 15),
+            ((120 << 4), 0),
+        ] {
+            w.import_block(rear.0, rear.1, rear.2, block).unwrap();
+            assert_eq!(w.comparator_rear_input(rear, target), expected);
+            assert_eq!(w.signal_into(rear, target), 0);
+        }
+    }
+
+    #[test]
+    fn cauldron_level_reaches_comparator_after_two_tick_delay() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-comparator-cauldron-{}.irw", std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        w.update_and_save(&path, 0, 64, 0, (149 << 4) | 1).unwrap();
+        w.update_and_save(&path, -1, 64, 0, (118 << 4) | 3).unwrap();
+        for _ in 0..3 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(w.get(0, 64, 0) >> 4, 150);
+        assert_eq!(w.comparator_outputs.get(&(0, 64, 0)), Some(&3));
+        w.update_and_save(&path, -1, 64, 0, (118 << 4) | 1).unwrap();
+        for _ in 0..3 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(w.comparator_outputs.get(&(0, 64, 0)), Some(&1));
         fs::remove_file(path).unwrap();
     }
 
