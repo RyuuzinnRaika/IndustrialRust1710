@@ -275,6 +275,7 @@ impl Hub {
     /// `add_in_dimension` so identical coordinates in other dimensions do
     /// not create ghost player entities.
     #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
     pub fn add(
         &self,
         name: String,
@@ -397,6 +398,7 @@ impl Hub {
     /// Invalid coordinates or same-dimension transitions are rejected without
     /// mutating any player state.
     #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
     pub fn change_dimension(
         &self,
         id: i32,
@@ -444,6 +446,7 @@ impl Hub {
     }
 
     #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
     pub fn positions_in_dimension(&self, dimension: Dimension) -> io::Result<Vec<PlayerPosition>> {
         let inner = self.0.lock().map_err(|_| poisoned())?;
         Ok(inner
@@ -455,6 +458,7 @@ impl Hub {
     }
 
     #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
     pub fn participants_in_dimension(
         &self,
         dimension: Dimension,
@@ -470,6 +474,7 @@ impl Hub {
 
     /// Dimension-aware packet fanout for world-owned game events.
     #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
     pub fn broadcast_in_dimension_view(
         &self,
         dimension: Dimension,
@@ -486,6 +491,7 @@ impl Hub {
     }
 
     #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
     pub fn broadcast_in_dimension(&self, dimension: Dimension, packet: Event) {
         if let Ok(inner) = self.0.lock() {
             for peer in inner.players.values() {
