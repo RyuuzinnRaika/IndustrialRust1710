@@ -6418,7 +6418,9 @@ fn main() -> io::Result<()> {
                                     let device_bytes = match updated.encoded() {
                                         Ok(bytes) => bytes,
                                         Err(error) => {
-                                            eprintln!("DISPENSER PROJECTILE ENCODING ERROR: {error}");
+                                            eprintln!(
+                                                "DISPENSER PROJECTILE ENCODING ERROR: {error}"
+                                            );
                                             return;
                                         }
                                     };
