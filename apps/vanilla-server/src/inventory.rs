@@ -213,7 +213,8 @@ impl Inventory {
                 .flatten()
                 .any(|stack| !stack.is_valid())
             || self.enchant_input.is_some_and(|item| {
-                item.count != 1 || !item.is_valid()
+                item.count != 1
+                    || !item.is_valid()
                     || !crate::items_1710::enchantable_in_table(item.id)
             })
             || self.slots.iter().flatten().any(|stack| !stack.is_valid())
@@ -1507,25 +1508,21 @@ impl Inventory {
     /// The client-provided clicked stack is never trusted.
     pub fn enchanting_click_window(&mut self, slot: i16, button: i8, mode: i8) -> bool {
         match slot {
-            0 if mode == 0 && matches!(button, 0 | 1) => {
-                match (self.enchant_input, self.cursor) {
-                    (Some(item), None) => {
-                        self.enchant_input = None;
-                        self.cursor = Some(item);
-                        true
-                    }
-                    (None, Some(mut item))
-                        if crate::items_1710::enchantable_in_table(item.id) =>
-                    {
-                        self.enchant_input = Some(Stack { count: 1, ..item });
-                        item.count -= 1;
-                        self.cursor = (item.count > 0).then_some(item);
-                        true
-                    }
-                    (None, None) => true,
-                    _ => false,
+            0 if mode == 0 && matches!(button, 0 | 1) => match (self.enchant_input, self.cursor) {
+                (Some(item), None) => {
+                    self.enchant_input = None;
+                    self.cursor = Some(item);
+                    true
                 }
-            }
+                (None, Some(mut item)) if crate::items_1710::enchantable_in_table(item.id) => {
+                    self.enchant_input = Some(Stack { count: 1, ..item });
+                    item.count -= 1;
+                    self.cursor = (item.count > 0).then_some(item);
+                    true
+                }
+                (None, None) => true,
+                _ => false,
+            },
             0 if mode == 1 && matches!(button, 0 | 1) => {
                 let Some(item) = self.enchant_input else {
                     return true;
@@ -2753,7 +2750,11 @@ mod tests {
     #[test]
     fn enchanting_table_keeps_books_and_enforces_single_input() {
         let mut inv = Inventory::default();
-        inv.cursor = Some(Stack { id: 340, count: 4, damage: 0 });
+        inv.cursor = Some(Stack {
+            id: 340,
+            count: 4,
+            damage: 0,
+        });
         assert!(inv.enchanting_click_window(0, 0, 0));
         assert_eq!(inv.cursor.unwrap().count, 3);
         assert_eq!(inv.enchant_input.unwrap().count, 1);
@@ -2768,7 +2769,11 @@ mod tests {
     #[test]
     fn enchanting_table_rejects_non_enchantable_and_invalid_clicks() {
         let mut inv = Inventory::default();
-        inv.cursor = Some(Stack { id: 264, count: 1, damage: 0 });
+        inv.cursor = Some(Stack {
+            id: 264,
+            count: 1,
+            damage: 0,
+        });
         let old = inv.clone();
         assert!(!inv.enchanting_click_window(0, 0, 0));
         assert!(!inv.enchanting_click_window(0, 2, 0));
@@ -2780,9 +2785,17 @@ mod tests {
     #[test]
     fn enchanting_table_close_is_atomic_with_full_player_inventory() {
         let mut inv = Inventory::default();
-        inv.enchant_input = Some(Stack { id: 276, count: 1, damage: 12 });
+        inv.enchant_input = Some(Stack {
+            id: 276,
+            count: 1,
+            damage: 12,
+        });
         for slot in 9..45 {
-            inv.slots[slot] = Some(Stack { id: 264, count: 64, damage: 0 });
+            inv.slots[slot] = Some(Stack {
+                id: 264,
+                count: 64,
+                damage: 0,
+            });
         }
         let previous = inv.clone();
         assert!(!inv.reclaim_enchanting_input());
