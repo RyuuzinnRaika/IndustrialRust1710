@@ -4280,8 +4280,18 @@ fn play(
                 let closed = input.u8()?;
                 input.finish()?;
                 if active_window == closed {
-                    // Keep unused ingredients saved rather than silently
-                    // deleting them if a player closes the crafting window.
+                    // Recover both unused anvil inputs before releasing the
+                    // GUI. If both cannot fit, keep them persisted in the
+                    // session inventory for a future anvil reopen.
+                    if active_anvil.is_some() {
+                        let mut staged = inventory.clone();
+                        if staged.reclaim_anvil_inputs() && staged != *inventory {
+                            staged.save(inventory_path)?;
+                            *inventory = staged;
+                        }
+                    }
+                    // Keep unused crafting ingredients saved rather than
+                    // deleting them when the player closes a crafting window.
                     active_window = 0;
                     active_chest = None;
                     active_chest_partner = None;
@@ -4722,6 +4732,14 @@ fn handle(
             return Ok(());
         }
     };
+    // A disconnect can happen without Close Window. Recover unspent anvil
+    // inputs on the next login, but only if both stacks fit; otherwise retain
+    // their persisted slots until a future recovery can complete.
+    let mut recovered = inventory_state.clone();
+    if recovered.reclaim_anvil_inputs() && recovered != inventory_state {
+        recovered.save(&inventory_file)?;
+        inventory_state = recovered;
+    }
     let experience_file = player_file.with_extension("experience.json");
     let mut experience_state = Experience::load(&experience_file)?;
     let achievements_file = player_file.with_extension("achievements.json");
