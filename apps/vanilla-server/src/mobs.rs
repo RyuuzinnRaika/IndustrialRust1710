@@ -2639,9 +2639,7 @@ impl Mobs {
                     ProjectileKind::BlazeFireball | ProjectileKind::WitherSkull => 0.15625,
                     ProjectileKind::WitchPotion => 0.125,
                 };
-                if !sample.is_valid()
-                    || physics::projectile_collides(world, &sample, half_size)
-                {
+                if !sample.is_valid() || physics::projectile_collides(world, &sample, half_size) {
                     if matches!(
                         arrow.kind,
                         ProjectileKind::GhastFireball | ProjectileKind::WitherSkull
