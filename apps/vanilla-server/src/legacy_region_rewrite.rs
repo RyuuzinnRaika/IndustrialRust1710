@@ -225,7 +225,6 @@ pub(crate) fn rewrite_chunks_under_lock_expected(
     result
 }
 
-
 /// Opt-in E45/E46 bridge: atomically redo one existing .mca region and one
 /// native JSON sidecar after a crash. This is a migration building block; it
 /// is NOT automatically invoked by the active IRW world worker.
@@ -249,15 +248,21 @@ pub(crate) fn rewrite_chunks_with_sidecar_under_lock_expected(
         || world_file.extension() != Some(std::ffi::OsStr::new("irw"))
         || sidecar_file.parent() != Some(root.as_path())
     {
-        return Err(invalid("region transaction must use the locked IRW world root"));
+        return Err(invalid(
+            "region transaction must use the locked IRW world root",
+        ));
     }
     let name = sidecar_file
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| invalid("invalid sidecar name"))?;
     if ![
-        ".chests.json", ".furnaces.json", ".hoppers.json",
-        ".brewers.json", ".dispensers.json", ".inventory.json",
+        ".chests.json",
+        ".furnaces.json",
+        ".hoppers.json",
+        ".brewers.json",
+        ".dispensers.json",
+        ".inventory.json",
     ]
     .iter()
     .any(|suffix| name.ends_with(suffix))
@@ -292,7 +297,9 @@ pub(crate) fn rewrite_chunks_with_sidecar_under_lock_expected(
     }
     let journal_path = world_file.with_extension("pending-txn.json");
     if journal_path.exists() {
-        return Err(invalid("pending redo journal must recover before another save"));
+        return Err(invalid(
+            "pending redo journal must recover before another save",
+        ));
     }
     // Both participants are derived from this one consistent source image.
     let before = fs::read(&source)?;
@@ -313,9 +320,7 @@ pub(crate) fn rewrite_chunks_with_sidecar_under_lock_expected(
         rewrite_chunks_create_only(&source, &destination, replacements)?;
         let rewritten = fs::read(&destination)?;
         lock.verify()?;
-        if !fs::symlink_metadata(&source)?.file_type().is_file()
-            || fs::read(&source)? != before
-        {
+        if !fs::symlink_metadata(&source)?.file_type().is_file() || fs::read(&source)? != before {
             return Err(invalid("source region changed before journal commit"));
         }
         crate::journal::commit(
