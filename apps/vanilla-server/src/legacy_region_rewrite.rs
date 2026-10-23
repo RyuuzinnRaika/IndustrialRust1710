@@ -191,7 +191,7 @@ pub(crate) fn rewrite_chunks_under_lock_expected(
         return Err(invalid("refusing non-regular or symlinked Anvil region"));
     }
     let before = fs::read(&source)?;
-    if expected_source.is_some_and(|snapshot| snapshot != before) {
+    if expected_source.is_some_and(|snapshot| snapshot != before.as_slice()) {
         return Err(invalid("Anvil region changed since the tile inventory was read"));
     }
     let nonce = SystemTime::now()
