@@ -190,9 +190,7 @@ fn apply(journal: &Path, record: &Record) -> io::Result<()> {
     let mut seen = std::collections::HashSet::new();
     for file in &record.files {
         let checked = relative(base, &base.join(&file.relative))?;
-        if !seen.insert(checked)
-            || fingerprint(&file.contents) != file.checksum
-        {
+        if !seen.insert(checked) || fingerprint(&file.contents) != file.checksum {
             return Err(invalid("journal checksum, size or duplicate target"));
         }
         validate_target(&file.relative, &file.contents)?;
@@ -690,10 +688,12 @@ mod tests {
         ] {
             assert!(commit(
                 &journal,
-                &[(path.as_path(), b"invalid region".to_vec()),
-                  (sidecar.as_path(), b"{}"
-                  .to_vec())]
-            ).is_err());
+                &[
+                    (path.as_path(), b"invalid region".to_vec()),
+                    (sidecar.as_path(), b"{}".to_vec())
+                ]
+            )
+            .is_err());
             assert!(!journal.exists());
         }
         fs::remove_dir_all(&root).unwrap();
