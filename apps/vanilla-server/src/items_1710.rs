@@ -128,7 +128,10 @@ mod tests {
             assert!(enchantable_in_table(id), "expected table-compatible: {id}");
         }
         for id in [0, 264, 259, 359, 403, 373, 1] {
-            assert!(!enchantable_in_table(id), "unexpected table-compatible: {id}");
+            assert!(
+                !enchantable_in_table(id),
+                "unexpected table-compatible: {id}"
+            );
         }
     }
     #[test]
