@@ -89,7 +89,14 @@ fn three_dimensions_boot_restart_and_reject_seed_mismatch() {
     let snapshots = files.map(|path| fs::read(path).unwrap());
 
     let status = Command::new(exe)
-        .args(["--bind", "127.0.0.1:0", "--survival", "--expanded-seed", "43", "--dimension-root"])
+        .args([
+            "--bind",
+            "127.0.0.1:0",
+            "--survival",
+            "--expanded-seed",
+            "43",
+            "--dimension-root",
+        ])
         .arg(&root)
         .args(["--whitelist"])
         .arg(&whitelist)
