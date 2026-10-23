@@ -218,8 +218,16 @@ mod tests {
         for z in -1..=1 {
             world.import_block(2, 64, z, 1 << 4).unwrap();
         }
-        let from = PlayerPosition { x: 0.5, y: 64.0, z: 0.5 };
-        let goal = PlayerPosition { x: 6.5, y: 64.0, z: 0.5 };
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let goal = PlayerPosition {
+            x: 6.5,
+            y: 64.0,
+            z: 0.5,
+        };
         let first = next_step(&world, from, goal, 128);
         assert!(first.is_some());
         for _ in 0..32 {
