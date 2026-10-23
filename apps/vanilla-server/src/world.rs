@@ -1246,9 +1246,7 @@ impl World {
         }
         // Vanilla 1.7.10 water bucket evaporation: reject placement before
         // creating a persisted water block in the Nether.
-        if self.dimension() == crate::dimensions::Dimension::Nether
-            && matches!(block >> 4, 8 | 9)
-        {
+        if self.dimension() == crate::dimensions::Dimension::Nether && matches!(block >> 4, 8 | 9) {
             return Ok(false);
         }
         let previous = self.get(x, y, z);
@@ -2187,10 +2185,8 @@ mod tests {
 
     #[test]
     fn nether_rejects_placed_water_and_cleans_imported_water_on_tick() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-nether-water-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-nether-water-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::expanded(42, crate::dimensions::Dimension::Nether);
         assert!(!world.update_and_save(&path, 0, 110, 0, 8 << 4).unwrap());
