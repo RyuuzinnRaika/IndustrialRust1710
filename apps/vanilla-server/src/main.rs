@@ -6223,6 +6223,7 @@ fn main() -> io::Result<()> {
     let wire_mobs = Arc::clone(&mobs);
     let ejection_devices = Arc::clone(&devices);
     let ejection_file = Arc::clone(&device_path);
+    let ejection_throwables = Arc::clone(&throwables);
     let ejection_chests = Arc::clone(&chests);
     let ejection_chest_file = Arc::clone(&chest_path);
     let tick_shutdown = Arc::clone(&shutdown);
@@ -6409,6 +6410,45 @@ fn main() -> io::Result<()> {
                                 }) else {
                                     continue;
                                 };
+                                // Dispensers fire eggs and snowballs as server-owned
+                                // projectiles. Stage the projectile in a detached
+                                // bounded registry so capacity failure cannot debit
+                                // the item; publish only after the inventory journal
+                                // commits. Droppers always eject ordinary items.
+                                if state >> 4 == 23 && matches!(stack.id, 332 | 344) {
+                                    let mut live_projectiles = match ejection_throwables.lock() {
+                                        Ok(value) => value,
+                                        Err(_) => return,
+                                    };
+                                    let mut staged_projectiles = live_projectiles.clone();
+                                    let Some((at, event)) =
+                                        staged_projectiles.launch_dispenser(stack.id, pos, offset)
+                                    else {
+                                        continue;
+                                    };
+                                    let device_bytes = match updated.encoded() {
+                                        Ok(bytes) => bytes,
+                                        Err(error) => {
+                                            eprintln!(
+                                                "DISPENSER PROJECTILE ENCODING ERROR: {error}"
+                                            );
+                                            return;
+                                        }
+                                    };
+                                    if let Err(error) = journal::commit(
+                                        &furnace_world_path.with_extension("pending-txn.json"),
+                                        &[(&*ejection_file, device_bytes)],
+                                    ) {
+                                        eprintln!("DISPENSER PROJECTILE JOURNAL ERROR: {error}");
+                                        return;
+                                    }
+                                    *storage = updated;
+                                    *live_projectiles = staged_projectiles;
+                                    drop(live_projectiles);
+                                    drop(storage);
+                                    furnace_hub.broadcast_in_view(at, event);
+                                    continue;
+                                }
                                 // A 1.7.10 dropper sends one item directly into
                                 // a chest it faces. If the chest is full, do
                                 // not consume or create a ground item.
