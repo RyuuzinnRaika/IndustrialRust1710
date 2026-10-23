@@ -1524,6 +1524,45 @@ impl Inventory {
                 self.cursor = cursor;
                 true
             }
+            0 | 1 if mode == 1 && matches!(button, 0 | 1) => {
+                // Shift-withdraw must fit the *whole* input stack. Any
+                // partially merged player inventory is discarded on failure.
+                let index = slot as usize;
+                let Some(item) = self.anvil_inputs[index] else {
+                    return true;
+                };
+                let mut staged = self.clone();
+                if staged.move_to_player(0, item).is_some() {
+                    return false;
+                }
+                staged.anvil_inputs[index] = None;
+                *self = staged;
+                true
+            }
+            2 if mode == 1 && matches!(button, 0 | 1) => {
+                // A Shift-click must commit exactly one repair and its full
+                // inventory insertion together with the XP debit. Partial
+                // insertion or insufficient levels leaves both untouched.
+                let Some(plan) = self.anvil_preview() else {
+                    return false;
+                };
+                let mut staged = self.clone();
+                if staged.move_to_player(0, plan.result).is_some() {
+                    return false;
+                }
+                let mut next_xp = *experience;
+                if survival && !next_xp.spend_levels(plan.levels) {
+                    return false;
+                }
+                staged.anvil_inputs[0] = None;
+                if let Some(mut used) = staged.anvil_inputs[1] {
+                    used.count -= plan.consumed;
+                    staged.anvil_inputs[1] = (used.count != 0).then_some(used);
+                }
+                *self = staged;
+                *experience = next_xp;
+                true
+            }
             2 if mode == 0 && button == 0 => {
                 let Some(plan) = self.anvil_preview() else {
                     return false;
@@ -1545,10 +1584,34 @@ impl Inventory {
             // Player's 36 slots are shared with window zero, offset by six.
             3..=38 => {
                 let translated = slot + 6;
-                // Only ordinary pickup and number-key swaps. Shift-transfer
-                // must be implemented separately so no item enters an input
-                // slot via an incorrect crafting-window mapping.
-                if !matches!(mode, 0 | 2) {
+                if mode == 1 && matches!(button, 0 | 1) {
+                    if let Some(item) = self.slots[translated as usize] {
+                        // 1.7.10 Shift-click places a repairable tool into
+                        // the first input slot, or compatible material into
+                        // the second. Until ItemStack NBT is supported, only
+                        // untagged durability-repair combinations qualify.
+                        if self.anvil_inputs[0].is_none()
+                            && item.count == 1
+                            && crate::items_1710::max_durability(item.id).is_some()
+                        {
+                            self.anvil_inputs[0] = Some(item);
+                            self.slots[translated as usize] = None;
+                            return true;
+                        }
+                        if self.anvil_inputs[1].is_none()
+                            && self.anvil_inputs[0].is_some_and(|left| {
+                                crate::workstations::repair(left, item).is_some()
+                            })
+                        {
+                            self.anvil_inputs[1] = Some(item);
+                            self.slots[translated as usize] = None;
+                            return true;
+                        }
+                    }
+                }
+                // Remaining shift-clicks perform ordinary main/hotbar moves,
+                // never client-directed writes into the anvil output slot.
+                if !matches!(mode, 0..=2) {
                     return false;
                 }
                 self.click_window(0, translated, button, mode)
@@ -2576,7 +2639,8 @@ mod tests {
         });
         assert!(inv.anvil_click_window(1, 0, 0, &mut xp, true));
         let old = inv.anvil_preview().unwrap();
-        assert!(!inv.anvil_click_window(2, 0, 1, &mut xp, true));
+        // Right-clicking result is still unsupported; Shift-click is now implemented.
+        assert!(!inv.anvil_click_window(2, 1, 0, &mut xp, true));
         assert_eq!(xp.total, 34);
         assert_eq!(inv.cursor, None);
         assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
@@ -2588,6 +2652,99 @@ mod tests {
         );
         assert!(xp.total < 34);
         assert!(inv.encoded().is_ok());
+    }
+    #[test]
+    fn anvil_shift_repair_charges_xp_once_and_preserves_remaining_material() {
+        let mut inv = Inventory::default();
+        let pick = Stack {
+            id: 257,
+            count: 1,
+            damage: 100,
+        };
+        let iron = Stack {
+            id: 265,
+            count: 4,
+            damage: 0,
+        };
+        inv.slots[9] = Some(pick);
+        inv.slots[10] = Some(iron);
+        let mut xp = crate::experience::Experience { total: 300 };
+        assert!(inv.anvil_click_window(3, 0, 1, &mut xp, true));
+        assert_eq!(inv.anvil_inputs[0], Some(pick));
+        assert_eq!(inv.slots[9], None);
+        assert!(inv.anvil_click_window(4, 0, 1, &mut xp, true));
+        assert_eq!(inv.anvil_inputs[1], Some(iron));
+        assert_eq!(inv.slots[10], None);
+        let plan = inv.anvil_preview().unwrap();
+        let previous_xp = xp.total;
+        assert!(inv.anvil_click_window(2, 0, 1, &mut xp, true));
+        assert_eq!(inv.slots[9], Some(plan.result));
+        assert!(xp.total < previous_xp);
+        assert_eq!(inv.anvil_inputs[0], None);
+        assert_eq!(
+            inv.anvil_inputs[1].map(|item| item.count),
+            (iron.count > plan.consumed).then_some(iron.count - plan.consumed),
+        );
+    }
+    #[test]
+    fn anvil_shift_output_is_atomic_when_inventory_is_full_or_xp_is_short() {
+        let pick = Stack {
+            id: 257,
+            count: 1,
+            damage: 100,
+        };
+        let iron = Stack {
+            id: 265,
+            count: 3,
+            damage: 0,
+        };
+        let mut inv = Inventory {
+            anvil_inputs: [Some(pick), Some(iron)],
+            ..Inventory::default()
+        };
+        for slot in 9..45 {
+            inv.slots[slot] = Some(Stack {
+                id: 1,
+                count: 64,
+                damage: 0,
+            });
+        }
+        let mut xp = crate::experience::Experience { total: 100 };
+        let old = inv.clone();
+        assert!(!inv.anvil_click_window(2, 0, 1, &mut xp, true));
+        assert_eq!(inv, old);
+        assert_eq!(xp.total, 100);
+        inv.slots[9] = None;
+        xp.total = 0;
+        let old = inv.clone();
+        assert!(!inv.anvil_click_window(2, 0, 1, &mut xp, true));
+        assert_eq!(inv, old);
+        assert_eq!(xp.total, 0);
+    }
+    #[test]
+    fn anvil_shift_withdraw_keeps_stack_when_player_slots_are_full() {
+        let mut inv = Inventory::default();
+        let iron = Stack {
+            id: 265,
+            count: 3,
+            damage: 0,
+        };
+        inv.anvil_inputs[1] = Some(iron);
+        for slot in 9..45 {
+            inv.slots[slot] = Some(Stack {
+                id: 1,
+                count: 64,
+                damage: 0,
+            });
+        }
+        let old = inv.clone();
+        let mut xp = crate::experience::Experience { total: 0 };
+        assert!(!inv.anvil_click_window(1, 0, 1, &mut xp, true));
+        assert_eq!(inv, old);
+        inv.slots[9] = None;
+        assert!(inv.anvil_click_window(1, 0, 1, &mut xp, true));
+        assert_eq!(inv.anvil_inputs[1], None);
+        assert_eq!(inv.slots[9], Some(iron));
     }
     #[test]
     fn anvil_insufficient_experience_is_fail_closed() {
