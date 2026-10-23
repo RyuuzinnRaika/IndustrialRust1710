@@ -1,6 +1,6 @@
 //! B14: bounded, server-authoritative rideable minecart foundation.
-//! Straight and sloped rails and powered acceleration are supported first;
-//! junction switching, curves, minecart collisions and durable NBT remain TODO.
+//! Straight/sloped rails, corners and collision guards are supported.
+//! Junction switching, vanilla momentum exchange and durable NBT remain TODO.
 use crate::multiplayer::{self, Event};
 use crate::player::PlayerPosition;
 use crate::vehicles::attachment;
@@ -10,6 +10,9 @@ use std::collections::BTreeMap;
 
 const FIRST_ID: i32 = 1_500_000;
 const MAX_CARTS: usize = 64;
+
+type RailCell = (i32, i32, i32);
+type RailSample = (u16, u16, f64, bool, RailCell);
 
 #[derive(Clone, Debug)]
 struct Cart {
@@ -41,6 +44,48 @@ fn straight_axis(id: u16, meta: u16) -> Option<bool> {
     }
 }
 
+/** Each rail end points to a neighboring cell (with an elevation offset).
+ * Only the ordinary rail block (66) supports curves 6..=9 in 1.7.10.
+ */
+fn rail_exits(id: u16, meta: u16) -> Option<[(i32, i32, i32); 2]> {
+    let shape = if id == 66 { meta } else { meta & 7 };
+    Some(match shape {
+        0 => [(0, 0, -1), (0, 0, 1)],
+        1 => [(-1, 0, 0), (1, 0, 0)],
+        2 => [(-1, 0, 0), (1, 1, 0)],
+        3 => [(-1, 1, 0), (1, 0, 0)],
+        4 => [(0, 1, -1), (0, 0, 1)],
+        5 => [(0, 0, -1), (0, 1, 1)],
+        6 if id == 66 => [(0, 0, 1), (1, 0, 0)],
+        7 if id == 66 => [(0, 0, 1), (-1, 0, 0)],
+        8 if id == 66 => [(0, 0, -1), (-1, 0, 0)],
+        9 if id == 66 => [(0, 0, -1), (1, 0, 0)],
+        _ => return None,
+    })
+}
+
+/// Validate both reciprocal endpoints and matching heights before crossing
+/// a cell boundary; contact with an unconnected perpendicular rail is unsafe.
+fn tracks_connected(
+    from: (i32, i32, i32),
+    from_id: u16,
+    from_meta: u16,
+    to: (i32, i32, i32),
+    to_id: u16,
+    to_meta: u16,
+) -> bool {
+    let (Some(first), Some(second)) = (rail_exits(from_id, from_meta), rail_exits(to_id, to_meta))
+    else {
+        return false;
+    };
+    first.iter().any(|&(dx, dy, dz)| {
+        (from.0 + dx, from.2 + dz) == (to.0, to.2)
+            && second.iter().any(|&(rx, ry, rz)| {
+                (to.0 + rx, to.2 + rz) == (from.0, from.2) && from.1 + dy == to.1 + ry
+            })
+    })
+}
+
 /// Rail center height in world coordinates. Ascending rails climb one
 /// block over the width of the rail cell. Player-position Y is rail
 /// baseline + 0.5, consistent with normal minecart placement.
@@ -60,36 +105,39 @@ fn rail_height(y: i32, id: u16, meta: u16, x: f64, z: f64) -> f64 {
 /// Find the actual rail in a column, including a high end of a slope
 /// whose rail block is one Y below the cart's current feet position.
 /// Refuse transitions with a vertical gap or a perpendicular rail.
-fn straight_track(
-    world: &World,
-    at: PlayerPosition,
-    axis: Option<bool>,
-) -> Option<(u16, u16, f64, bool)> {
+fn straight_track(world: &World, at: PlayerPosition, axis: Option<bool>) -> Option<RailSample> {
     let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
     let base = (at.y - 0.5).floor() as i32;
-    let mut selected: Option<(u16, u16, f64, bool, f64)> = None;
+    let mut selected: Option<(RailSample, f64)> = None;
     for y in [base, base - 1, base + 1] {
         let block = world.get(x, y, z);
         let (id, meta) = (block >> 4, block & 15);
         if !matches!(id, 27 | 28 | 66 | 157) {
             continue;
         }
-        let Some(east_west) = straight_axis(id, meta) else {
-            continue;
+        let curved = id == 66 && (6..=9).contains(&meta);
+        let east_west = if curved {
+            // A corner has both axes: preserve the current one until its center.
+            axis.unwrap_or(true)
+        } else {
+            let Some(straight) = straight_axis(id, meta) else {
+                continue;
+            };
+            if axis.is_some_and(|wanted| wanted != straight) {
+                continue;
+            }
+            straight
         };
-        if axis.is_some_and(|wanted| wanted != east_west) {
-            continue;
-        }
         let height = rail_height(y, id, meta, at.x, at.z);
         let distance = (height - at.y).abs();
         if distance > 0.51 {
             continue;
         }
-        if selected.is_none_or(|candidate| distance < candidate.4) {
-            selected = Some((id, meta, height, east_west, distance));
+        if selected.is_none_or(|candidate| distance < candidate.1) {
+            selected = Some(((id, meta, height, east_west, (x, y, z)), distance));
         }
     }
-    selected.map(|(id, meta, y, axis, _)| (id, meta, y, axis))
+    selected.map(|(sample, _)| sample)
 }
 
 impl Cart {
@@ -236,8 +284,8 @@ impl Minecarts {
             }
             cart.last_tick = now;
             for _ in 0..steps {
-                let Some((id, meta, height, east_west)) =
-                    straight_track(world, cart.position, None)
+                let Some((id, meta, height, east_west, current_cell)) =
+                    straight_track(world, cart.position, Some(cart.east_west))
                 else {
                     cart.speed = 0.0;
                     break;
@@ -259,19 +307,76 @@ impl Minecarts {
                     break;
                 }
                 let advance = cart.speed * f64::from(cart.direction);
-                let next = PlayerPosition {
+                let mut next = PlayerPosition {
                     x: cart.position.x + if east_west { advance } else { 0.0 },
                     z: cart.position.z + if east_west { 0.0 } else { advance },
                     ..cart.position
                 };
-                // Sample the destination rail at its interpolated elevation.
+                let mut next_axis = east_west;
+                let mut next_direction = cart.direction;
+                if id == 66 && (6..=9).contains(&meta) {
+                    let center = if east_west {
+                        f64::from(current_cell.0) + 0.5
+                    } else {
+                        f64::from(current_cell.2) + 0.5
+                    };
+                    let coordinate = if east_west {
+                        cart.position.x
+                    } else {
+                        cart.position.z
+                    };
+                    let to_center = center - coordinate;
+                    // Turn at the center, continuing with any distance left
+                    // in this tick along the connected outgoing half-track.
+                    if to_center.abs() > 1e-9
+                        && to_center.signum() == advance.signum()
+                        && to_center.abs() <= advance.abs()
+                    {
+                        let exits = rail_exits(id, meta).expect("valid corner shape");
+                        let entry_sign = -advance.signum() as i32;
+                        let has_entry = exits.iter().any(|&(dx, _, dz)| {
+                            if east_west {
+                                dx == entry_sign
+                            } else {
+                                dz == entry_sign
+                            }
+                        });
+                        if !has_entry {
+                            cart.speed = 0.0;
+                            break;
+                        }
+                        let outgoing = exits
+                            .iter()
+                            .find(|&&(dx, _, _)| (dx != 0) != east_west)
+                            .expect("corner has a perpendicular exit");
+                        let remainder = advance.abs() - to_center.abs();
+                        next = cart.position;
+                        if east_west {
+                            next.x = center;
+                            next.z += f64::from(outgoing.2) * remainder;
+                        } else {
+                            next.z = center;
+                            next.x += f64::from(outgoing.0) * remainder;
+                        }
+                        next_axis = !east_west;
+                        let outbound = if next_axis { outgoing.0 } else { outgoing.2 };
+                        next_direction = (f64::from(outbound) * cart.speed.signum()) as i8;
+                    }
+                }
                 // Uphill/downhill transitions must physically meet; a rail
-                // that is a full block above or below cannot teleport the cart.
-                let Some((_, _, next_height, _)) = straight_track(world, next, Some(east_west))
+                // one block above or below cannot teleport the cart.
+                let Some((next_id, next_meta, next_height, _, next_cell)) =
+                    straight_track(world, next, Some(next_axis))
                 else {
                     cart.speed = 0.0;
                     break;
                 };
+                if current_cell != next_cell
+                    && !tracks_connected(current_cell, id, meta, next_cell, next_id, next_meta)
+                {
+                    cart.speed = 0.0;
+                    break;
+                }
                 if (next_height - cart.position.y).abs() > 0.51 {
                     cart.speed = 0.0;
                     break;
@@ -295,6 +400,8 @@ impl Minecarts {
                     break;
                 }
                 cart.position = next;
+                cart.east_west = next_axis;
+                cart.direction = next_direction;
                 occupied.insert(cart.id, next);
             }
             events.push((
@@ -457,6 +564,76 @@ mod tests {
         assert_eq!(north_south.carts[&FIRST_ID].direction, 1);
         assert!(north_south.control(23, 1.0, 180.0));
         assert_eq!(north_south.carts[&FIRST_ID].direction, -1);
+    }
+
+    #[test]
+    fn all_four_vanilla_curves_turn_at_the_center() {
+        for (shape, incoming_x, outgoing_z) in [(6, 1, 1), (7, -1, 1), (8, -1, -1), (9, 1, -1)] {
+            let mut world = World::new();
+            world.import_block(0, 65, 0, (66 << 4) | shape).unwrap();
+            world
+                .import_block(incoming_x, 65, 0, (27 << 4) | 9)
+                .unwrap();
+            for distance in 1..=3 {
+                world
+                    .import_block(0, 65, outgoing_z * distance, (27 << 4) | 8)
+                    .unwrap();
+            }
+            let origin = PlayerPosition {
+                x: f64::from(incoming_x) + 0.5,
+                y: 65.5,
+                z: 0.5,
+            };
+            let mut carts = Minecarts::default();
+            carts.place(&world, origin, 0).unwrap();
+            let cart = carts.carts.get_mut(&FIRST_ID).unwrap();
+            cart.speed = 0.4;
+            cart.direction = -incoming_x as i8;
+            for tick in 1..8 {
+                carts.tick(&world, tick);
+            }
+            let result = &carts.carts[&FIRST_ID];
+            assert!(
+                (result.position.x - 0.5).abs() < 1e-6,
+                "corner {shape} left its centerline: {:?}",
+                result.position
+            );
+            assert!(
+                (result.position.z - 0.5) * f64::from(outgoing_z) > 0.5,
+                "corner {shape} did not turn: {:?}",
+                result.position
+            );
+            assert_eq!(result.position.y, 65.5);
+        }
+    }
+
+    #[test]
+    fn curve_rejects_nonreciprocal_neighbor() {
+        let mut world = World::new();
+        world.import_block(-1, 65, 0, (27 << 4) | 9).unwrap();
+        world.import_block(0, 65, 0, (66 << 4) | 6).unwrap(); // east and south, no west
+        let at = PlayerPosition {
+            x: -0.2,
+            y: 65.5,
+            z: 0.5,
+        };
+        let mut carts = Minecarts::default();
+        carts.place(&world, at, 0).unwrap();
+        let cart = carts.carts.get_mut(&FIRST_ID).unwrap();
+        cart.speed = 0.35;
+        cart.direction = 1;
+        carts.tick(&world, 1);
+        assert_eq!(carts.carts[&FIRST_ID].position.x, at.x);
+        assert_eq!(carts.carts[&FIRST_ID].speed, 0.0);
+    }
+
+    #[test]
+    fn only_ordinary_rails_support_curves() {
+        assert!(rail_exits(66, 6).is_some());
+        assert!(rail_exits(66, 9).is_some());
+        assert!(rail_exits(27, 6).is_none());
+        assert!(rail_exits(28, 7).is_none());
+        assert!(rail_exits(157, 6).is_none());
     }
 
     #[test]
