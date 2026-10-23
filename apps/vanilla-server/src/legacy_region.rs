@@ -52,14 +52,19 @@ fn decompress(chunk: &[u8], compression: u8) -> io::Result<Vec<u8>> {
 /// Check all chunk sector mappings (including unused sectors), their coordinate
 /// claims and legacy numeric block/NBT layouts without modifying the input.
 pub(crate) fn inspect_region(path: &Path) -> io::Result<usize> {
-    let (rx, rz) = coordinates(path)?;
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_REGION_SIZE {
         return Err(invalid("Anvil region is not a bounded regular file"));
     }
-    let raw = fs::read(path)?;
+    inspect_region_bytes(path, &fs::read(path)?)
+}
+
+/// Validate an in-memory region image *before* a transactional journal is
+/// published. The exact same sector and NBT checks apply to crash recovery.
+pub(crate) fn inspect_region_bytes(path: &Path, raw: &[u8]) -> io::Result<usize> {
+    let (rx, rz) = coordinates(path)?;
     if raw.len() < 2 * SECTOR_SIZE
-        || raw.len() % SECTOR_SIZE != 0
+        || !raw.len().is_multiple_of(SECTOR_SIZE)
         || raw.len() as u64 > MAX_REGION_SIZE
     {
         return Err(invalid("Anvil region has invalid sector alignment"));

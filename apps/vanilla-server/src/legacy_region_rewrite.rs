@@ -225,6 +225,116 @@ pub(crate) fn rewrite_chunks_under_lock_expected(
     result
 }
 
+/// Opt-in E45/E46 bridge: atomically redo one existing .mca region and one
+/// native JSON sidecar after a crash. This is a migration building block; it
+/// is NOT automatically invoked by the active IRW world worker.
+///
+/// The journal lives next to the world's IRW identity and is recovered by the
+/// existing startup path before containers or world state are loaded.
+/// If commit fails after journal publication, the caller MUST stop writing and
+/// let normal startup recovery finish the transaction.
+pub(crate) fn rewrite_chunks_with_sidecar_under_lock_expected(
+    lock: &mut WorldSessionLock,
+    dimension: Dimension,
+    replacements: &[((i32, i32), &[u8])],
+    expected_source: Option<&[u8]>,
+    world_file: &Path,
+    sidecar_file: &Path,
+    sidecar_json: &[u8],
+) -> io::Result<()> {
+    lock.verify()?;
+    let root = lock.world_dir().to_path_buf();
+    if world_file.parent() != Some(root.as_path())
+        || world_file.extension() != Some(std::ffi::OsStr::new("irw"))
+        || sidecar_file.parent() != Some(root.as_path())
+    {
+        return Err(invalid(
+            "region transaction must use the locked IRW world root",
+        ));
+    }
+    let name = sidecar_file
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| invalid("invalid sidecar name"))?;
+    if ![
+        ".chests.json",
+        ".furnaces.json",
+        ".hoppers.json",
+        ".brewers.json",
+        ".dispensers.json",
+        ".inventory.json",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+    {
+        return Err(invalid("unsupported TileEntity transaction sidecar"));
+    }
+    serde_json::from_slice::<serde_json::Value>(sidecar_json)
+        .map_err(|_| invalid("sidecar is not JSON"))?;
+    let (first, _) = replacements
+        .first()
+        .ok_or_else(|| invalid("region transaction cannot be empty"))?;
+    let dim_root = match dimension {
+        Dimension::Overworld => root.clone(),
+        Dimension::Nether => root.join("DIM-1"),
+        Dimension::End => root.join("DIM1"),
+    };
+    if !fs::symlink_metadata(&dim_root)?.file_type().is_dir() {
+        return Err(invalid("invalid Anvil dimension directory"));
+    }
+    let regions = dim_root.join("region");
+    if !fs::symlink_metadata(&regions)?.file_type().is_dir() {
+        return Err(invalid("invalid Anvil region directory"));
+    }
+    let filename = format!(
+        "r.{}.{}.mca",
+        first.0.div_euclid(32),
+        first.1.div_euclid(32)
+    );
+    let source = regions.join(&filename);
+    if !fs::symlink_metadata(&source)?.file_type().is_file() {
+        return Err(invalid("invalid or symlinked Anvil source"));
+    }
+    let journal_path = world_file.with_extension("pending-txn.json");
+    if journal_path.exists() {
+        return Err(invalid(
+            "pending redo journal must recover before another save",
+        ));
+    }
+    // Both participants are derived from this one consistent source image.
+    let before = fs::read(&source)?;
+    if expected_source.is_some_and(|bytes| bytes != before.as_slice()) {
+        return Err(invalid("stale source region before staged transaction"));
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(wrap)?
+        .as_nanos();
+    let stage = regions.join(format!(
+        ".industrial1710-journal-stage-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&stage)?;
+    let destination = stage.join(&filename);
+    let result = (|| -> io::Result<()> {
+        rewrite_chunks_create_only(&source, &destination, replacements)?;
+        let rewritten = fs::read(&destination)?;
+        lock.verify()?;
+        if !fs::symlink_metadata(&source)?.file_type().is_file() || fs::read(&source)? != before {
+            return Err(invalid("source region changed before journal commit"));
+        }
+        crate::journal::commit(
+            &journal_path,
+            &[
+                (source.as_path(), rewritten),
+                (sidecar_file, sidecar_json.to_vec()),
+            ],
+        )
+    })();
+    let _ = fs::remove_dir_all(&stage);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

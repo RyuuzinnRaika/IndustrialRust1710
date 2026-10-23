@@ -11,9 +11,12 @@ use std::sync::{Mutex, OnceLock};
 const VERSION: u8 = 1;
 // JSON stores payload bytes as integer arrays (up to four characters per
 // byte); keep an explicit on-disk limit for four bounded participants.
-const MAX_RECORD_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TRANSACTION_FILES: usize = 4;
 const MAX_TARGET_BYTES: usize = 1024 * 1024;
+// Region images are larger than player JSON. A separate bounded cap applies;
+// the serialized, committed redo record still has a 64MiB aggregate limit.
+const MAX_REGION_TARGET_BYTES: usize = 8 * 1024 * 1024;
 static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Serialize, Deserialize)]
@@ -37,6 +40,53 @@ fn fingerprint(bytes: &[u8]) -> u64 {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
     })
 }
+/// Only canonical region names in their vanilla dimension directory are
+/// accepted. No path supplied through a committed record can escape its world.
+fn is_anvil_region(relative: &Path) -> bool {
+    use std::ffi::OsStr;
+    let parts: Vec<_> = relative.iter().collect();
+    let region_name = match parts.as_slice() {
+        [directory, filename] if *directory == OsStr::new("region") => *filename,
+        [dimension, directory, filename]
+            if (*dimension == OsStr::new("DIM-1") || *dimension == OsStr::new("DIM1"))
+                && *directory == OsStr::new("region") =>
+        {
+            *filename
+        }
+        _ => return false,
+    };
+    let Some(name) = region_name.to_str() else {
+        return false;
+    };
+    let fields: Vec<_> = name.split('.').collect();
+    if let ["r", x, z, "mca"] = fields.as_slice() {
+        match (x.parse::<i32>(), z.parse::<i32>()) {
+            (Ok(rx), Ok(rz)) => name == format!("r.{rx}.{rz}.mca"),
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
+fn target_limit(relative: &Path) -> usize {
+    if is_anvil_region(relative) {
+        MAX_REGION_TARGET_BYTES
+    } else {
+        MAX_TARGET_BYTES
+    }
+}
+
+fn validate_target(relative: &Path, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() > target_limit(relative) {
+        return Err(invalid("journal target too big"));
+    }
+    if is_anvil_region(relative) {
+        crate::legacy_region::inspect_region_bytes(relative, bytes)?;
+    }
+    Ok(())
+}
+
 fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
     let rel = target
         .strip_prefix(root)
@@ -64,7 +114,8 @@ fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
         || name.ends_with(".maps.json")
         || name.ends_with(".hanging.json")
         || name.ends_with(".drops.json")
-        || name.ends_with(".irw"))
+        || name.ends_with(".irw")
+        || is_anvil_region(rel))
     {
         return Err(invalid("journal target type not allowed"));
     }
@@ -139,12 +190,10 @@ fn apply(journal: &Path, record: &Record) -> io::Result<()> {
     let mut seen = std::collections::HashSet::new();
     for file in &record.files {
         let checked = relative(base, &base.join(&file.relative))?;
-        if !seen.insert(checked)
-            || file.contents.len() > MAX_TARGET_BYTES
-            || fingerprint(&file.contents) != file.checksum
-        {
+        if !seen.insert(checked) || fingerprint(&file.contents) != file.checksum {
             return Err(invalid("journal checksum, size or duplicate target"));
         }
+        validate_target(&file.relative, &file.contents)?;
     }
     for file in &record.files {
         let destination = base.join(&file.relative);
@@ -205,11 +254,10 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
     let files: Vec<Target> = changes
         .iter()
         .map(|(path, bytes)| {
-            if bytes.len() > MAX_TARGET_BYTES {
-                return Err(invalid("journal target too big"));
-            }
+            let checked = relative(base, path)?;
+            validate_target(&checked, bytes)?;
             Ok(Target {
-                relative: relative(base, path)?,
+                relative: checked,
                 contents: bytes.clone(),
                 checksum: fingerprint(bytes),
             })
@@ -575,5 +623,79 @@ mod tests {
         assert!(recover(&journal).is_err());
         assert!(journal.exists());
         fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn anvil_region_and_chest_sidecar_recover_as_one_commit() {
+        use crate::{anvil_export, world::World};
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-anvil-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        anvil_export::export(&World::new(), &home.join("world")).unwrap();
+        let root = home.join("world");
+        let region = root.join("region/r.0.0.mca");
+        let sidecar = root.join("flat.chests.json");
+        let journal = root.join("flat.pending-txn.json");
+        let region_bytes = fs::read(&region).unwrap();
+        let original = b"old-chest";
+        fs::write(&sidecar, original).unwrap();
+        let updated = br#"{"chests":[]}"#;
+        // Model power loss after durable log publication and the first rename.
+        let record = Record {
+            version: VERSION,
+            files: vec![
+                Target {
+                    relative: relative(&root, &region).unwrap(),
+                    contents: region_bytes.clone(),
+                    checksum: fingerprint(&region_bytes),
+                },
+                Target {
+                    relative: relative(&root, &sidecar).unwrap(),
+                    contents: updated.to_vec(),
+                    checksum: fingerprint(updated),
+                },
+            ],
+        };
+        fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::write(&sidecar, b"partially-updated").unwrap();
+        recover(&journal).unwrap();
+        assert_eq!(fs::read(&region).unwrap(), region_bytes);
+        assert_eq!(fs::read(&sidecar).unwrap(), updated);
+        assert!(!journal.exists());
+        recover(&journal).unwrap(); // Idempotent after replay.
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn anvil_journal_rejects_invalid_region_and_unsafe_region_path() {
+        let root = std::env::temp_dir().join(format!(
+            "ir-journal-reject-region-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("region")).unwrap();
+        fs::create_dir_all(root.join("untrusted")).unwrap();
+        let sidecar = root.join("flat.chests.json");
+        let journal = root.join("flat.pending-txn.json");
+        for path in [
+            root.join("untrusted/r.0.0.mca"),
+            root.join("region/r.01.0.mca"),
+            root.join("region/r.0.0.mca"),
+        ] {
+            assert!(commit(
+                &journal,
+                &[
+                    (path.as_path(), b"invalid region".to_vec()),
+                    (sidecar.as_path(), b"{}".to_vec())
+                ]
+            )
+            .is_err());
+            assert!(!journal.exists());
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 }
