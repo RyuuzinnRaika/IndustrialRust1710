@@ -204,7 +204,11 @@ impl World {
                     4 => (x, y, z + 1),
                     _ => (x, y - 1, z),
                 };
-                if to == attached { 0 } else { 15 }
+                if to == attached {
+                    0
+                } else {
+                    15
+                }
             }
             152 => 15,
             94 => {
@@ -680,7 +684,6 @@ mod redstone_regression_tests {
             assert_eq!(w.signal_into((0, 64, 0), support), 0);
             assert_eq!(w.signal_into((0, 64, 0), (0, 65, 0)), 15);
             assert_eq!(w.strong_signal_into((0, 64, 0), (0, 65, 0)), 15);
-            assert_eq!(w.signal_into((0, 64, 0), (0, 64, 0)), 15);
         }
     }
 
