@@ -67,6 +67,19 @@ cargo run --release -p vanilla-server -- --bind 127.0.0.1:25565 --whitelist ./wh
 | `crates/industrial-core` | Tick・工業ネットワーク計算の核 | ゲーム本体とは別の研究基盤 |
 | `apps/industrial-bench` | 合成負荷のベンチマーク | 実サーバーのTPS測定ではない |
 
+## 複数ディメンションの起動（A10・試験機能）
+
+IRW4の3ディメンションを1つのワールドルートにまとめて管理する場合は、`--expanded-seed` と `--dimension-root` を併用します。
+
+```bash
+cargo run -p vanilla-server -- --survival --expanded-seed 42 --dimension-root ./worlds/demo --dimension overworld
+```
+
+- `./worlds/demo/overworld.irw`、`DIM-1/nether.irw`、`DIM1/end.irw` を同じシードで事前検査し、未作成の次元のみ生成します。
+- 3つのワールドは独立した共有ハンドルで維持され、ルートの `session.lock` が各次元の書き込みを保護します。停止時には全次元のIRW4スナップショットをredo journal経由でまとめて保存します。
+- `--dimension` で指定した1つの次元だけが、現段階のネットワークゲームセッションとTickの対象です。**プレイヤーがポータルに入って次元を切り替える処理は、まだ動作しません。** 同じワールドルートで複数プロセスを同時起動することもできません。
+- `--dimension-root` は従来の `--world` とは併用不可です。既存のIRW1～IRW3やバニラのAnvilワールドには使用せず、開発用の新しいディレクトリに設定してください。
+
 ## 保存形式と開発上の安全性
 
 - ライブゲームには独自の`IRW1〜IRW4`系ワールド保存と、プレイヤー・各装置等の個別データファイルを使います。

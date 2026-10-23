@@ -5552,12 +5552,13 @@ fn main() -> io::Result<()> {
     let mut requested_seed: Option<u64> = None;
     let mut biome_seed: Option<u64> = properties.as_ref().and_then(|config| config.level_seed);
     let mut expanded_seed: Option<u64> = None;
+    let mut dimension_root: Option<PathBuf> = None;
     let mut expanded_dimension = dimensions::Dimension::Overworld;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" => {
-                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--online-mode] [--survival] [--recover-level-dat STOPPED_WORLD_DIR] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--backup-rotate BACKUP_ROOT KEEP] [--verify-world DIR_OR_IRW] [--check-config [FILE]] [--prepare-anvil-copy SOURCE NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end]");
+                println!("Usage: vanilla-server [--bind IP:PORT] [--world PATH] [--whitelist FILE] [--insecure-offline-lan] [--online-mode] [--survival] [--recover-level-dat STOPPED_WORLD_DIR] [--creative] [--export-anvil NEW_DIR] [--import-anvil SOURCE_DIR] [--backup-world NEW_DIR] [--backup-rotate BACKUP_ROOT KEEP] [--verify-world DIR_OR_IRW] [--check-config [FILE]] [--prepare-anvil-copy SOURCE NEW_DIR] [--inspect-player-data FILE] [--inspect-level-dat FILE] [--inspect-anvil-region FILE] [--inspect-anvil-world DIR] [--inspect-anvil-chunk DIR overworld|nether|end CX CZ] [--terrain-seed U64] [--biome-seed U64] [--expanded-seed U64] [--dimension overworld|nether|end] [--dimension-root DIR]");
                 println!(
                     "Offline usernames can be impersonated; --online-mode validates Mojang accounts and requires encrypted Protocol 5 login."
                 );
@@ -5620,6 +5621,12 @@ fn main() -> io::Result<()> {
                         .parse()
                         .map_err(|_| bad("invalid expanded seed"))?,
                 );
+            }
+            "--dimension-root" => {
+                dimension_root = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| bad("missing --dimension-root directory"))?,
+                ));
             }
             "--dimension" => {
                 expanded_dimension = match args
@@ -5746,6 +5753,30 @@ fn main() -> io::Result<()> {
     }
     if expanded_dimension != dimensions::Dimension::Overworld && expanded_seed.is_none() {
         return Err(bad("--dimension requires --expanded-seed"));
+    }
+    if let Some(root) = dimension_root.as_ref() {
+        if root.as_os_str().is_empty()
+            || expanded_seed.is_none()
+            || explicit_world
+            || chunk_inspect.is_some()
+            || world_inspect_path.is_some()
+            || region_inspect_path.is_some()
+            || level_inspect_path.is_some()
+            || player_inspect_path.is_some()
+            || anvil_import_path.is_some()
+            || anvil_export_path.is_some()
+            || backup_destination.is_some()
+            || backup_rotation.is_some()
+        {
+            return Err(bad(
+                "--dimension-root requires --expanded-seed and cannot combine with --world or offline operations",
+            ));
+        }
+        world_path = dimensions::DimensionManager::new(
+            root,
+            expanded_seed.ok_or_else(|| bad("missing --expanded-seed"))?,
+        )
+        .path(expanded_dimension);
     }
     if anvil_export_path.is_some() && anvil_import_path.is_some() {
         return Err(bad(
@@ -5971,7 +6002,9 @@ fn main() -> io::Result<()> {
     // Absolute --world paths are isolated deployments (also used by parallel
     // integration tests). Keep their admin files next to that world instead
     // of sharing mutable JSON files in the build/test working directory.
-    let administration_root = if world_path.is_absolute() {
+    let administration_root = if let Some(root) = dimension_root.as_ref() {
+        root.clone()
+    } else if world_path.is_absolute() {
         world_path
             .parent()
             .ok_or_else(|| bad("world path has no parent"))?
@@ -5986,9 +6019,13 @@ fn main() -> io::Result<()> {
     );
     // Acquire a 1.7.10-compatible session.lock before reading or creating
     // world state. The guard remains held until the server process exits.
-    let world_directory = world_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
+    let world_directory = dimension_root
+        .as_deref()
+        .or_else(|| {
+            world_path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+        })
         .unwrap_or_else(|| Path::new("."));
     let session_guard = Arc::new(Mutex::new(session_lock::WorldSessionLock::acquire(
         world_directory,
@@ -6004,6 +6041,16 @@ fn main() -> io::Result<()> {
     // Accept older independent log locations for one-time migration.
     journal::recover(&Chests::location(&world_path).with_extension("pending-txn.json"))?;
     journal::recover(&Furnaces::location(&world_path).with_extension("pending-txn.json"))?;
+    let dimension_worlds = if let Some(root) = dimension_root.as_ref() {
+        Some(dimensions::DimensionWorlds::load_all(
+            dimensions::DimensionManager::new(
+                root,
+                expanded_seed.ok_or_else(|| bad("missing --expanded-seed"))?,
+            ),
+        )?)
+    } else {
+        None
+    };
     books::initialize(&world_path)?;
     let mut loaded_world = if world_path.exists() {
         let existing = World::load(&world_path)?;
@@ -6076,8 +6123,13 @@ fn main() -> io::Result<()> {
             .map_err(|_| bad("game rules mutex poisoned"))?
             .daylight_cycle(),
     );
-    loaded_world.bind_save_session(&world_path, Arc::clone(&session_guard))?;
-    let world = Arc::new(Mutex::new(loaded_world));
+    let world = if let Some(worlds) = dimension_worlds.as_ref() {
+        worlds.bind_save_sessions(Arc::clone(&session_guard))?;
+        worlds.world(expanded_dimension)
+    } else {
+        loaded_world.bind_save_session(&world_path, Arc::clone(&session_guard))?;
+        Arc::new(Mutex::new(loaded_world))
+    };
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
         Mobs::load_or_new(
@@ -6999,6 +7051,11 @@ fn main() -> io::Result<()> {
         .map_err(|_| bad("scoreboard lock poisoned"))?
         .save(&scoreboard_path)?;
     clock.save_ticks(&clock_path)?;
+    if let Some(worlds) = dimension_worlds.as_ref() {
+        // All live world handles are now quiescent. Persist all dimensions
+        // together under the root's session.lock after per-world sidecars.
+        worlds.save_all()?;
+    }
     session_guard
         .lock()
         .map_err(|_| bad("session lock mutex poisoned"))?
