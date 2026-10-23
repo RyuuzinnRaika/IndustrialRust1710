@@ -1479,6 +1479,24 @@ impl Inventory {
         packet
     }
 
+    /// Return both unspent anvil inputs to the player's inventory on GUI close.
+    ///
+    /// This is all-or-nothing: a full inventory must never cause a partial
+    /// recovery, destroy an input, or overwrite a carried stack. If recovery
+    /// cannot fit, both inputs stay in the versioned, persisted inventory for
+    /// a later reopening of an anvil (instead of being silently dropped).
+    pub fn reclaim_anvil_inputs(&mut self) -> bool {
+        let mut staged = self.clone();
+        for item in self.anvil_inputs.into_iter().flatten() {
+            if staged.move_to_player(0, item).is_some() {
+                return false;
+            }
+        }
+        staged.anvil_inputs = [None; 2];
+        *self = staged;
+        true
+    }
+
     /// Input and output transactions do not trust the client's advertised
     /// result or XP balance. The caller journals changed Inventory and XP.
     pub fn anvil_click_window(
@@ -1563,7 +1581,8 @@ impl Inventory {
                 *experience = next_xp;
                 true
             }
-            2 if mode == 0 && button == 0 => {
+            // Vanilla takes the whole output on either left or right click.
+            2 if mode == 0 && matches!(button, 0 | 1) => {
                 let Some(plan) = self.anvil_preview() else {
                     return false;
                 };
@@ -2639,8 +2658,8 @@ mod tests {
         });
         assert!(inv.anvil_click_window(1, 0, 0, &mut xp, true));
         let old = inv.anvil_preview().unwrap();
-        // Right-clicking result is still unsupported; Shift-click is now implemented.
-        assert!(!inv.anvil_click_window(2, 1, 0, &mut xp, true));
+        // Invalid click modes cannot forge a free result.
+        assert!(!inv.anvil_click_window(2, 1, 2, &mut xp, true));
         assert_eq!(xp.total, 34);
         assert_eq!(inv.cursor, None);
         assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
@@ -2769,4 +2788,69 @@ mod tests {
         assert_eq!(inv, previous);
         assert_eq!(xp.total, 0);
     }
+    #[test]
+    fn anvil_close_returns_both_inputs_without_item_loss() {
+        let pick = Stack { id: 257, count: 1, damage: 100 };
+        let ingots = Stack { id: 265, count: 3, damage: 0 };
+        let mut inv = Inventory {
+            anvil_inputs: [Some(pick), Some(ingots)],
+            ..Inventory::default()
+        };
+        let original = inv.possessions();
+        assert!(inv.reclaim_anvil_inputs());
+        assert_eq!(inv.anvil_inputs, [None; 2]);
+        assert_eq!(inv.slots[9], Some(pick));
+        assert_eq!(inv.slots[10], Some(ingots));
+        assert_eq!(inv.possessions().len(), original.len());
+        // Repeated close is idempotent and cannot create a second copy.
+        let recovered = inv.clone();
+        assert!(inv.reclaim_anvil_inputs());
+        assert_eq!(inv, recovered);
+    }
+
+    #[test]
+    fn anvil_close_preserves_inputs_when_only_one_would_fit() {
+        let pick = Stack { id: 257, count: 1, damage: 100 };
+        let ingots = Stack { id: 265, count: 3, damage: 0 };
+        let mut inv = Inventory {
+            anvil_inputs: [Some(pick), Some(ingots)],
+            ..Inventory::default()
+        };
+        for slot in 9..45 {
+            inv.slots[slot] = Some(Stack { id: 1, count: 64, damage: 0 });
+        }
+        // Exactly one available slot is insufficient for two distinct inputs.
+        inv.slots[9] = None;
+        let original = inv.clone();
+        assert!(!inv.reclaim_anvil_inputs());
+        assert_eq!(inv, original);
+        // A second free slot makes the entire recovery succeed.
+        inv.slots[10] = None;
+        assert!(inv.reclaim_anvil_inputs());
+        assert_eq!(inv.anvil_inputs, [None; 2]);
+        assert_eq!(inv.slots[9], Some(pick));
+        assert_eq!(inv.slots[10], Some(ingots));
+    }
+
+    #[test]
+    fn anvil_result_right_click_pays_xp_and_consumes_once() {
+        let pick = Stack { id: 257, count: 1, damage: 100 };
+        let ingots = Stack { id: 265, count: 3, damage: 0 };
+        let mut inv = Inventory {
+            anvil_inputs: [Some(pick), Some(ingots)],
+            ..Inventory::default()
+        };
+        let result = inv.anvil_preview().unwrap();
+        let mut xp = crate::experience::Experience { total: 300 };
+        let before = xp.total;
+        assert!(inv.anvil_click_window(2, 1, 0, &mut xp, true));
+        assert_eq!(inv.cursor, Some(result.result));
+        assert_eq!(inv.anvil_inputs[0], None);
+        assert_eq!(inv.anvil_inputs[1].map(|x| x.count), Some(3 - result.consumed));
+        assert!(xp.total < before);
+        let spent = xp.total;
+        assert!(!inv.anvil_click_window(2, 1, 0, &mut xp, true));
+        assert_eq!(xp.total, spent);
+    }
+
 }
