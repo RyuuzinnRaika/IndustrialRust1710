@@ -227,7 +227,8 @@ pub struct MiningProgress {
     penalty: u32,
 }
 impl MiningProgress {
-    /// Normal grounded/dry entry point kept for earlier callers and tests.
+    /// Normal grounded/dry entry point for earlier unit test callers.
+    #[cfg(test)]
     pub fn start(target: (i32, i32, i32), block: u16, held: Option<Stack>) -> Option<Self> {
         Self::start_with_environment(target, block, held, false, true)
     }
@@ -250,6 +251,7 @@ impl MiningProgress {
     }
     /// Consume the attempt exactly once. The held tool must remain unchanged
     /// between starting and finishing a dig, preventing fast-tool switching.
+    #[cfg(test)]
     pub fn finish(
         self,
         target: (i32, i32, i32),
