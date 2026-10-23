@@ -25,6 +25,16 @@ impl Kind {
             _ => None,
         }
     }
+    /// Vanilla dispensers fire eggs and snowballs. Ender pearls are
+    /// dropped as items and must not teleport an arbitrary player.
+    fn from_dispenser_item(id: i16) -> Option<Self> {
+        match id {
+            332 => Some(Self::Snowball),
+            344 => Some(Self::Egg),
+            _ => None,
+        }
+    }
+
     fn object_type(self) -> u8 {
         match self {
             Self::Snowball => 61,
@@ -61,7 +71,7 @@ impl Thrown {
         Event { id: 0x0e, body }
     }
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Throwables {
     next_id: i32,
     active: BTreeMap<i32, Thrown>,
@@ -73,6 +83,71 @@ pub struct TickResult {
     pub egg_hatches: Vec<PlayerPosition>,
 }
 impl Throwables {
+    /// Pure validation for a device activation. No inventory or entity state
+    /// is changed until the caller durably commits the selected item debit.
+    pub fn can_launch_dispenser(
+        &self,
+        item_id: i16,
+        position: (i32, i32, i32),
+        direction: (i32, i32, i32),
+    ) -> bool {
+        let (dx, dy, dz) = direction;
+        let distance = dx.abs() + dy.abs() + dz.abs();
+        let at = PlayerPosition {
+            x: f64::from(position.0) + 0.5 + f64::from(dx) * 0.7,
+            y: f64::from(position.1) + 0.5 + f64::from(dy) * 0.7,
+            z: f64::from(position.2) + 0.5 + f64::from(dz) * 0.7,
+        };
+        Kind::from_dispenser_item(item_id).is_some()
+            && distance == 1
+            && crate::world::in_bounds(position.0, position.1, position.2)
+            && at.is_valid()
+            && self.active.len() < CAP
+            && self.next_id.checked_add(START_ID).is_some()
+            && self.next_id.checked_add(1).is_some()
+    }
+
+    /// Stage a dispenser projectile in an owned Throwables snapshot. The
+    /// world worker replaces the live snapshot only after the inventory
+    /// journal has committed, and then broadcasts the spawn packet.
+    pub fn launch_dispenser(
+        &mut self,
+        item_id: i16,
+        position: (i32, i32, i32),
+        direction: (i32, i32, i32),
+    ) -> Option<(PlayerPosition, Event)> {
+        if !self.can_launch_dispenser(item_id, position, direction) {
+            return None;
+        }
+        let kind = Kind::from_dispenser_item(item_id)?;
+        let (dx, dy, dz) = direction;
+        let at = PlayerPosition {
+            x: f64::from(position.0) + 0.5 + f64::from(dx) * 0.7,
+            y: f64::from(position.1) + 0.5 + f64::from(dy) * 0.7,
+            z: f64::from(position.2) + 0.5 + f64::from(dz) * 0.7,
+        };
+        let id = START_ID.checked_add(self.next_id)?;
+        self.next_id = self.next_id.checked_add(1)?;
+        let object = Thrown {
+            id,
+            // Protocol 5 uses a nonzero data field to carry velocity.
+            // -1 is a non-player projectile source.
+            owner_entity: -1,
+            owner_name: String::new(),
+            kind,
+            at,
+            velocity: [
+                f64::from(dx) * 1.1,
+                f64::from(dy) * 1.1,
+                f64::from(dz) * 1.1,
+            ],
+            age: 0,
+        };
+        let packet = object.spawn();
+        self.active.insert(id, object);
+        Some((at, packet))
+    }
+
     pub fn can_launch(
         &self,
         item_id: i16,
@@ -224,6 +299,46 @@ impl Throwables {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dispenser_uses_correct_object_types_and_has_no_player_owner() {
+        let mut objects = Throwables::default();
+        let origin = (0, 70, 0);
+        for (id, kind, direction) in [
+            (332, 61u8, (1, 0, 0)),
+            (344, 62u8, (0, 0, -1)),
+        ] {
+            let (at, spawn) = objects.launch_dispenser(id, origin, direction).unwrap();
+            let mut packet = spawn.body.as_slice();
+            assert_eq!(spawn.id, 0x0e);
+            assert!(legacy_protocol::read_varint(&mut packet).is_ok());
+            assert_eq!(packet[0], kind);
+            assert_eq!(
+                i32::from_be_bytes(packet[14..18].try_into().unwrap()),
+                -1
+            );
+            assert!(at.is_valid());
+        }
+        assert_eq!(objects.snapshot(PlayerPosition {
+            x: 0.5,
+            y: 70.0,
+            z: 0.5,
+        }).len(), 2);
+        assert!(!objects.can_launch_dispenser(368, origin, (1, 0, 0)));
+        assert!(!objects.can_launch_dispenser(332, origin, (1, 1, 0)));
+        assert!(!objects.can_launch_dispenser(344, origin, (0, 0, 0)));
+    }
+
+    #[test]
+    fn dispenser_rejects_full_registry_without_mutation() {
+        let mut objects = Throwables::default();
+        for _ in 0..CAP {
+            assert!(objects.launch_dispenser(332, (0, 70, 0), (1, 0, 0)).is_some());
+        }
+        let count = objects.active.len();
+        assert!(objects.launch_dispenser(344, (0, 70, 0), (0, 1, 0)).is_none());
+        assert_eq!(objects.active.len(), count);
+    }
+
     #[test]
     fn objects_are_bounded_and_encode_protocol5_types() {
         let mut state = Throwables::default();
