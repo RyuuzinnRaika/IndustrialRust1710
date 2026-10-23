@@ -596,7 +596,7 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
 
     // Mine from within reach but outside the pickup radius. The drop must
     // exist on the ground before a player actually moves within pickup range.
-    send_position(&mut client, 4.5, 65.0, 0.5);
+    send_position(&mut client, 4.5, 64.0, 0.5);
     client.write_all(&frame(7, &dig)).unwrap();
     thread::sleep(Duration::from_millis(900));
     client.write_all(&frame(7, &finish)).unwrap();
@@ -1096,7 +1096,7 @@ fn survival_shovel_mining_wears_out_last_use_and_persists_dirt_drop() {
     )
     .unwrap();
     let (mut client, _, _) = server.join("RustTester");
-    send_position(&mut client, 4.5, 65.0, 0.5);
+    send_position(&mut client, 4.5, 64.0, 0.5);
     let mut start = vec![0]; // begin digging
     start.extend_from_slice(&0i32.to_be_bytes());
     start.push(63);
