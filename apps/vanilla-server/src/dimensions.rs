@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 use crate::world::{World, WORLD_LIMIT};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -131,6 +131,35 @@ impl DimensionWorlds {
         Ok(())
     }
 
+    /// Validate the block *and* its intact source frame before attempting travel.
+    /// The caller owns packet sequencing, per-dimension entity routing and the
+    /// player's durable inventory/session checkpoint. No state is changed here.
+    pub fn resolve_portal(
+        &self,
+        source: Dimension,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> io::Result<Option<PortalDestination>> {
+        let target = {
+            let source_world = self.world(source);
+            let guard = source_world
+                .lock()
+                .map_err(|_| io::Error::other("dimension world mutex poisoned"))?;
+            portal_target(&guard, x, y, z)
+        };
+        match target {
+            Some(target) => self.resolve_arrival(
+                source,
+                target,
+                f64::from(x) + 0.5,
+                f64::from(y),
+                f64::from(z) + 0.5,
+            ),
+            None => Ok(None),
+        }
+    }
+
     /// Resolve a portal destination against the actual target world, without
     /// touching source world state. None means that the transition must be
     /// rejected; never teleport to a solid, liquid or out-of-bounds block.
@@ -183,6 +212,9 @@ pub fn destination(
     y: f64,
     z: f64,
 ) -> Option<PortalDestination> {
+    if source == target {
+        return None;
+    }
     let limit = WORLD_LIMIT as f64;
     if !x.is_finite()
         || !y.is_finite()
@@ -230,7 +262,12 @@ pub fn safe_arrival(world: &World, anchor: PortalDestination) -> Option<PortalDe
                 let (x, z) = (cx + dx, cz + dz);
                 for offset in 0..=112 {
                     for y in [desired_y - offset, desired_y + offset] {
-                        if !(2..=254).contains(&y) || !crate::world::in_bounds(x, y, z) {
+                        // The Nether bedrock ceiling is not a safe arrival
+                        // platform even if its top has two blocks of air.
+                        if !(2..=254).contains(&y)
+                            || (anchor.dimension == Dimension::Nether && y > 120)
+                            || !crate::world::in_bounds(x, y, z)
+                        {
                             continue;
                         }
                         // Conservative, full-footprint ground: never accept
@@ -261,6 +298,124 @@ pub fn safe_arrival(world: &World, anchor: PortalDestination) -> Option<PortalDe
     }
     None
 }
+/// A Nether portal is an obsidian-bordered rectangle of 2..=21 portal
+/// blocks wide and 3..=21 tall. Test both possible horizontal orientations;
+/// inspecting only a portal block is insufficient because it may be orphaned
+/// by a frame break. Reads are bounded and never generate or edit a world.
+fn valid_nether_frame(world: &World, x: i32, y: i32, z: i32, dx: i32, dz: i32) -> bool {
+    let id = |u, v| world.get(x + u * dx, v, z + u * dz) >> 4;
+    if id(0, y) != 90 {
+        return false;
+    }
+    let mut left = 0;
+    while left < 21 && id(-left - 1, y) == 90 {
+        left += 1;
+    }
+    let mut down = 0;
+    while down < 21 && id(0, y - down - 1) == 90 {
+        down += 1;
+    }
+    let (origin, floor) = (-left, y - down);
+    let mut width = 0;
+    while width < 22 && id(origin + width, floor) == 90 {
+        width += 1;
+    }
+    let mut height = 0;
+    while height < 22 && id(origin, floor + height) == 90 {
+        height += 1;
+    }
+    if !(2..=21).contains(&width) || !(3..=21).contains(&height) {
+        return false;
+    }
+    for u in -1..=width {
+        for v in -1..=height {
+            // Minecraft 1.7.10 allows the four decorative frame corners
+            // to be absent; only edges along the interior are mandatory.
+            if (u == -1 || u == width) && (v == -1 || v == height) {
+                continue;
+            }
+            let block = id(origin + u, floor + v);
+            let expected = if u == -1 || u == width || v == -1 || v == height {
+                49 // Obsidian frame
+            } else {
+                90 // Portal interior
+            };
+            if block != expected {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The 1.7.10 End gateway from the Overworld uses a 3x3 portal plane and
+/// twelve surrounding End Portal Frame blocks with filled eyes (metadata 4).
+fn valid_end_entry(world: &World, x: i32, y: i32, z: i32) -> bool {
+    if world.get(x, y, z) >> 4 != 119 {
+        return false;
+    }
+    for offset_x in 0..3 {
+        for offset_z in 0..3 {
+            let min_x = x - offset_x;
+            let min_z = z - offset_z;
+            let mut intact = true;
+            for dx in 0..3 {
+                for dz in 0..3 {
+                    intact &= world.get(min_x + dx, y, min_z + dz) >> 4 == 119;
+                }
+            }
+            for i in 0..3 {
+                for (fx, fz) in [
+                    (min_x - 1, min_z + i),
+                    (min_x + 3, min_z + i),
+                    (min_x + i, min_z - 1),
+                    (min_x + i, min_z + 3),
+                ] {
+                    let state = world.get(fx, y, fz);
+                    intact &= state >> 4 == 120 && state & 4 != 0;
+                }
+            }
+            if intact {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Recognize a physically intact source portal. This only resolves where a
+/// transition *could* go; a server must not emit a Respawn packet until the
+/// destination world and the per-player state have both been prepared.
+pub fn portal_target(world: &World, x: i32, y: i32, z: i32) -> Option<Dimension> {
+    if !crate::world::in_bounds(x, y, z) {
+        return None;
+    }
+    let kind = world.get(x, y, z) >> 4;
+    match (world.dimension(), kind) {
+        (Dimension::Overworld, 90)
+            if valid_nether_frame(world, x, y, z, 1, 0)
+                || valid_nether_frame(world, x, y, z, 0, 1) =>
+        {
+            Some(Dimension::Nether)
+        }
+        (Dimension::Nether, 90)
+            if valid_nether_frame(world, x, y, z, 1, 0)
+                || valid_nether_frame(world, x, y, z, 0, 1) =>
+        {
+            Some(Dimension::Overworld)
+        }
+        (Dimension::Overworld, 119) if valid_end_entry(world, x, y, z) => Some(Dimension::End),
+        // The return portal is constructed from bedrock after the dragon dies.
+        // Restrict recognition to the central island and supporting bedrock.
+        (Dimension::End, 119)
+            if x.abs() <= 8 && z.abs() <= 8 && world.get(x, y - 1, z) >> 4 == 7 =>
+        {
+            Some(Dimension::Overworld)
+        }
+        _ => None,
+    }
+}
+
 /// Durable travel checkpoint for the session/router layer. The session must
 /// save player inventory/vitals and send S07 Respawn before changing worlds.
 /// The checkpoint never replaces a player.dat (it is supplemental).
@@ -278,11 +433,20 @@ impl TravelCheckpoint {
         })
     }
     pub fn load(path: &Path) -> io::Result<Option<Self>> {
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
+        let meta = match fs::symlink_metadata(path) {
+            Ok(meta) => meta,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
+        // Never follow a substituted checkpoint symlink or read an unbounded
+        // attacker-created file into memory before validating its size.
+        if !meta.file_type().is_file() || meta.len() > 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsafe or oversized travel checkpoint",
+            ));
+        }
+        let bytes = fs::read(path)?;
         if bytes.len() > 1024 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -310,7 +474,12 @@ impl TravelCheckpoint {
             fs::create_dir_all(parent)?;
         }
         let staging = path.with_extension("dimension.tmp");
-        let mut file = File::create(&staging)?;
+        // create_new refuses a pre-existing staging file (including symlinks).
+        // A stale file from a crash must be investigated, not overwritten.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
         file.write_all(&serde_json::to_vec(self)?)?;
         file.sync_all()?;
         drop(file);
@@ -320,6 +489,88 @@ impl TravelCheckpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn portal_detection_rejects_orphaned_and_broken_nether_frames() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-portal-frame-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let mut world = World::expanded(7, Dimension::Overworld);
+        world.save_new(&path).unwrap();
+
+        // X-aligned, two-block-wide and three-high interior, with obsidian ring.
+        for u in -1..=2 {
+            for v in -1..=3 {
+                let block = if u == -1 || u == 2 || v == -1 || v == 3 {
+                    49
+                } else {
+                    90
+                };
+                world
+                    .update_and_save(&path, u, 80 + v, 0, block << 4)
+                    .unwrap();
+            }
+        }
+        assert_eq!(portal_target(&world, 0, 81, 0), Some(Dimension::Nether));
+        // A missing corner does not invalidate a legitimate 1.7.10 portal.
+        world.update_and_save(&path, -1, 79, 0, 0).unwrap();
+        assert_eq!(portal_target(&world, 0, 81, 0), Some(Dimension::Nether));
+        world.update_and_save(&path, -1, 81, 0, 0).unwrap();
+        assert_eq!(portal_target(&world, 0, 81, 0), None);
+        assert_eq!(portal_target(&world, 0, -1, 0), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn end_entry_requires_all_twelve_filled_frames() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-end-frame-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let mut world = World::expanded(19, Dimension::Overworld);
+        world.save_new(&path).unwrap();
+        for x in 0..3 {
+            for z in 0..3 {
+                world.update_and_save(&path, x, 75, z, 119 << 4).unwrap();
+            }
+        }
+        for i in 0..3 {
+            for (x, z) in [(-1, i), (3, i), (i, -1), (i, 3)] {
+                world
+                    .update_and_save(&path, x, 75, z, (120 << 4) | 4)
+                    .unwrap();
+            }
+        }
+        assert_eq!(portal_target(&world, 1, 75, 1), Some(Dimension::End));
+        world.update_and_save(&path, -1, 75, 1, 120 << 4).unwrap();
+        assert_eq!(portal_target(&world, 1, 75, 1), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nether_arrival_never_uses_bedrock_roof() {
+        let nether = World::expanded(17, Dimension::Nether);
+        let arrival = safe_arrival(
+            &nether,
+            PortalDestination {
+                dimension: Dimension::Nether,
+                x: 0.5,
+                y: 120.0,
+                z: 0.5,
+            },
+        );
+        assert!(arrival.is_none_or(|position| position.y <= 120.0));
+        assert!(destination(Dimension::Overworld, Dimension::Overworld, 0.0, 64.0, 0.0).is_none());
+    }
+
     #[test]
     fn nether_overworld_scale_and_bounds() {
         let p = destination(Dimension::Overworld, Dimension::Nether, 160.0, 75.0, -80.0).unwrap();
@@ -395,6 +646,36 @@ mod tests {
         )
         .is_none());
     }
+    #[test]
+    fn checkpoint_refuses_oversized_input_without_parsing() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-checkpoint-bounds-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("pending.json");
+        fs::write(&path, vec![0u8; 2048]).unwrap();
+        assert_eq!(
+            TravelCheckpoint::load(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            fs::remove_file(&path).unwrap();
+            let target = root.join("target.json");
+            fs::write(&target, "{}").unwrap();
+            symlink(&target, &path).unwrap();
+            assert_eq!(
+                TravelCheckpoint::load(&path).unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn checkpoint_roundtrip() {
         let file = std::env::temp_dir().join(format!("ir1710-travel-{}.json", std::process::id()));
