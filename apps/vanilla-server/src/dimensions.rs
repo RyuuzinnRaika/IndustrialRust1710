@@ -58,21 +58,60 @@ impl DimensionManager {
             Dimension::End => self.root.join("DIM1").join("end.irw"),
         }
     }
-    pub fn load_or_create(&self, dimension: Dimension) -> io::Result<World> {
-        let path = self.path(dimension);
-        if path.exists() {
-            let loaded = World::load(&path)?;
-            if loaded.extended_identity() != Some((self.seed, dimension)) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "IRW4 dimension identity/seed mismatch",
-                ));
+    /// Inspect an existing dimension without creating any missing files.
+    /// Symlinks (including broken links) and non-regular world files are
+    /// rejected before World::load can follow them. The server must hold a
+    /// session lock on this root while loading and creating dimensions.
+    fn inspect_existing(&self, dimension: Dimension) -> io::Result<Option<World>> {
+        let invalid = |reason| io::Error::new(io::ErrorKind::InvalidData, reason);
+        match fs::symlink_metadata(&self.root) {
+            Ok(meta) if !meta.file_type().is_dir() => {
+                return Err(invalid("dimension root is not a real directory"));
             }
-            Ok(loaded)
-        } else {
-            let fresh = World::expanded(self.seed, dimension);
-            fresh.save_new(&path)?;
-            Ok(fresh)
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        // Never create prototype files alongside a real Minecraft level.
+        crate::server_config::verify_legacy_storage(&self.path(Dimension::Overworld))?;
+        let path = self.path(dimension);
+        if let Some(parent) = path.parent() {
+            match fs::symlink_metadata(parent) {
+                Ok(meta) if !meta.file_type().is_dir() => {
+                    return Err(invalid("dimension parent is not a real directory"));
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        // Current IRW4 limits: at most 65,536 block edits and 4,096 TNT
+        // records. Reject excessive input before loading it into memory.
+        if !meta.file_type().is_file() || meta.len() > 1_048_576 {
+            return Err(invalid("unsafe or oversized IRW4 dimension file"));
+        }
+        let loaded = World::load(&path)?;
+        if loaded.extended_identity() != Some((self.seed, dimension)) {
+            return Err(invalid("IRW4 dimension identity/seed mismatch"));
+        }
+        Ok(Some(loaded))
+    }
+
+    fn create_new(&self, dimension: Dimension) -> io::Result<World> {
+        let fresh = World::expanded(self.seed, dimension);
+        fresh.save_new(&self.path(dimension))?;
+        Ok(fresh)
+    }
+
+    pub fn load_or_create(&self, dimension: Dimension) -> io::Result<World> {
+        match self.inspect_existing(dimension)? {
+            Some(world) => Ok(world),
+            None => self.create_new(dimension),
         }
     }
 }
@@ -94,11 +133,40 @@ pub struct DimensionWorlds {
 
 impl DimensionWorlds {
     pub fn load_all(manager: DimensionManager) -> io::Result<Self> {
-        // Keep each world separate even when they have the same coordinates.
-        // Fail closed on any seed/identity mismatch.
-        let overworld = manager.load_or_create(Dimension::Overworld)?;
-        let nether = manager.load_or_create(Dimension::Nether)?;
-        let end = manager.load_or_create(Dimension::End)?;
+        // Recover a pending three-dimension save before looking at any
+        // world snapshot. The server is responsible for holding session.lock.
+        // Reject prototype storage inside native Anvil level directories.
+        crate::server_config::verify_legacy_storage(&manager.path(Dimension::Overworld))?;
+        match fs::symlink_metadata(&manager.root) {
+            Ok(meta) if !meta.file_type().is_dir() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "dimension root is not a real directory",
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        crate::journal::recover(&manager.root.join("dimensions.pending-txn.json"))?;
+        // Preflight all existing dimensions *before* writing any new one.
+        // A corrupt End must not leave a newly created Overworld or Nether
+        // behind after an otherwise failed server startup.
+        let existing_overworld = manager.inspect_existing(Dimension::Overworld)?;
+        let existing_nether = manager.inspect_existing(Dimension::Nether)?;
+        let existing_end = manager.inspect_existing(Dimension::End)?;
+        let overworld = match existing_overworld {
+            Some(world) => world,
+            None => manager.create_new(Dimension::Overworld)?,
+        };
+        let nether = match existing_nether {
+            Some(world) => world,
+            None => manager.create_new(Dimension::Nether)?,
+        };
+        let end = match existing_end {
+            Some(world) => world,
+            None => manager.create_new(Dimension::End)?,
+        };
         Ok(Self {
             manager,
             overworld: Arc::new(Mutex::new(overworld)),
@@ -119,16 +187,28 @@ impl DimensionWorlds {
         self.manager.path(dimension)
     }
 
-    /// Persist each dimension to its own file. A session lock must cover all
-    /// three paths at the server level; this is not a cross-file transaction.
+    /// Commit all three IRW4 snapshots as a crash-recoverable transaction.
+    /// A caller must quiesce writers before taking snapshots and hold the
+    /// server's session lock until commit finishes. If commit fails, stop
+    /// further writes and let load_all replay the prepared redo journal.
     pub fn save_all(&self) -> io::Result<()> {
-        for dimension in [Dimension::Overworld, Dimension::Nether, Dimension::End] {
-            self.world(dimension)
+        let dimensions = [Dimension::Overworld, Dimension::Nether, Dimension::End];
+        let paths = dimensions.map(|dim| self.manager.path(dim));
+        let snapshots = dimensions.map(|dim| {
+            self.world(dim)
                 .lock()
                 .map_err(|_| io::Error::other("dimension world mutex poisoned"))?
-                .save(&self.manager.path(dimension))?;
-        }
-        Ok(())
+                .encoded()
+        });
+        let [overworld, nether, end] = snapshots;
+        crate::journal::commit(
+            &self.manager.root.join("dimensions.pending-txn.json"),
+            &[
+                (paths[0].as_path(), overworld?),
+                (paths[1].as_path(), nether?),
+                (paths[2].as_path(), end?),
+            ],
+        )
     }
 
     /// Validate the block *and* its intact source frame before attempting travel.
@@ -524,7 +604,6 @@ mod tests {
         assert_eq!(portal_target(&world, 0, -1, 0), None);
         fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn end_entry_requires_all_twelve_filled_frames() {
         let root = std::env::temp_dir().join(format!(
@@ -554,7 +633,6 @@ mod tests {
         assert_eq!(portal_target(&world, 1, 75, 1), None);
         fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn nether_arrival_never_uses_bedrock_roof() {
         let nether = World::expanded(17, Dimension::Nether);
@@ -570,7 +648,6 @@ mod tests {
         assert!(arrival.is_none_or(|position| position.y <= 120.0));
         assert!(destination(Dimension::Overworld, Dimension::Overworld, 0.0, 64.0, 0.0).is_none());
     }
-
     #[test]
     fn nether_overworld_scale_and_bounds() {
         let p = destination(Dimension::Overworld, Dimension::Nether, 160.0, 75.0, -80.0).unwrap();
@@ -675,7 +752,6 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn checkpoint_roundtrip() {
         let file = std::env::temp_dir().join(format!("ir1710-travel-{}.json", std::process::id()));
@@ -709,6 +785,164 @@ mod tests {
         }
     }
 
+    #[test]
+    fn preflight_rejects_corrupt_end_before_creating_other_dimensions() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-preflight-end-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let wrong_seed = DimensionManager::new(&root, 9);
+        wrong_seed.load_or_create(Dimension::End).unwrap();
+        let expected = DimensionManager::new(&root, 10);
+        assert_eq!(
+            DimensionWorlds::load_all(expected.clone())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!expected.path(Dimension::Overworld).exists());
+        assert!(!expected.path(Dimension::Nether).exists());
+        assert!(expected.path(Dimension::End).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn preflight_rejects_unsafe_paths_and_vanilla_world_without_writes() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-preflight-path-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let manager = DimensionManager::new(&root, 42);
+        fs::write(root.join("level.dat"), b"vanilla").unwrap();
+        assert!(DimensionWorlds::load_all(manager.clone()).is_err());
+        assert!(!manager.path(Dimension::Overworld).exists());
+        fs::remove_file(root.join("level.dat")).unwrap();
+        fs::create_dir_all(manager.path(Dimension::End)).unwrap();
+        assert_eq!(
+            DimensionWorlds::load_all(manager.clone())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!manager.path(Dimension::Overworld).exists());
+        fs::remove_dir_all(manager.path(Dimension::End)).unwrap();
+        fs::remove_dir(root.join("DIM1")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(
+                root.join("missing-world"),
+                manager.path(Dimension::Overworld),
+            )
+            .unwrap();
+            assert_eq!(
+                DimensionWorlds::load_all(manager.clone())
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+            fs::remove_file(manager.path(Dimension::Overworld)).unwrap();
+            symlink(&root, root.join("DIM1")).unwrap();
+            assert_eq!(
+                DimensionWorlds::load_all(manager.clone())
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+            fs::remove_file(root.join("DIM1")).unwrap();
+        }
+        assert!(!manager.path(Dimension::Overworld).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn preflight_loads_existing_world_and_creates_only_missing_dimensions() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-preflight-mixed-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let manager = DimensionManager::new(&root, 42);
+        let mut nether = manager.load_or_create(Dimension::Nether).unwrap();
+        nether
+            .update_and_save(&manager.path(Dimension::Nether), 8, 65, 8, 49 << 4)
+            .unwrap();
+        let worlds = DimensionWorlds::load_all(manager.clone()).unwrap();
+        assert_eq!(
+            worlds
+                .world(Dimension::Nether)
+                .lock()
+                .unwrap()
+                .get(8, 65, 8),
+            49 << 4
+        );
+        for dim in [Dimension::Overworld, Dimension::Nether, Dimension::End] {
+            assert!(worlds.path(dim).is_file());
+            assert_eq!(
+                worlds.world(dim).lock().unwrap().extended_identity(),
+                Some((42, dim))
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pending_dimension_save_recovers_all_three_worlds_before_loading() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-dim-recovery-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let manager = DimensionManager::new(&root, 1234);
+        drop(DimensionWorlds::load_all(manager.clone()).unwrap());
+        let dims = [Dimension::Overworld, Dimension::Nether, Dimension::End];
+        let fingerprint = |bytes: &[u8]| {
+            bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+            })
+        };
+        let mut files = Vec::new();
+        for (i, dimension) in dims.into_iter().enumerate() {
+            let mut world = World::expanded(1234, dimension);
+            world.import_block(4, 75, 4, ((i + 1) as u16) << 4).unwrap();
+            let bytes = world.encoded().unwrap();
+            let relative = match dimension {
+                Dimension::Overworld => "overworld.irw",
+                Dimension::Nether => "DIM-1/nether.irw",
+                Dimension::End => "DIM1/end.irw",
+            };
+            files.push(serde_json::json!({
+                "relative": relative,
+                "checksum": fingerprint(&bytes),
+                "contents": bytes,
+            }));
+        }
+        // Simulate a crash after the redo record was published but before
+        // any of its three snapshots was replaced.
+        fs::write(
+            root.join("dimensions.pending-txn.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "files": files,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let recovered = DimensionWorlds::load_all(manager).unwrap();
+        for (i, dimension) in dims.into_iter().enumerate() {
+            assert_eq!(
+                recovered.world(dimension).lock().unwrap().get(4, 75, 4),
+                ((i + 1) as u16) << 4
+            );
+        }
+        assert!(!root.join("dimensions.pending-txn.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn multi_world_handles_are_isolated_and_survive_reload() {
         let root = std::env::temp_dir().join(format!(
