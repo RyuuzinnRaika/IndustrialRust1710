@@ -693,6 +693,9 @@ mod tests {
         assert!(cara_rx.try_recv().is_err());
         hub.remove(alice);
         assert_eq!(bob_rx.try_recv().unwrap().id, 0x13);
+        // The global player tab-list must still notify other dimensions.
+        assert_eq!(bob_rx.try_recv().unwrap().id, 0x38);
+        assert_eq!(cara_rx.try_recv().unwrap().id, 0x38);
         assert!(cara_rx.try_recv().is_err());
     }
     #[test]
