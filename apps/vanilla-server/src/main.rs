@@ -4280,8 +4280,18 @@ fn play(
                 let closed = input.u8()?;
                 input.finish()?;
                 if active_window == closed {
-                    // Keep unused ingredients saved rather than silently
-                    // deleting them if a player closes the crafting window.
+                    // Recover both unused anvil inputs before releasing the
+                    // GUI. If both cannot fit, keep them persisted in the
+                    // session inventory for a future anvil reopen.
+                    if active_anvil.is_some() {
+                        let mut staged = inventory.clone();
+                        if staged.reclaim_anvil_inputs() && staged != *inventory {
+                            staged.save(inventory_path)?;
+                            *inventory = staged;
+                        }
+                    }
+                    // Keep unused crafting ingredients saved rather than
+                    // deleting them when the player closes a crafting window.
                     active_window = 0;
                     active_chest = None;
                     active_chest_partner = None;
