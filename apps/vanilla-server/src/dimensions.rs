@@ -392,13 +392,15 @@ pub fn portal_target(world: &World, x: i32, y: i32, z: i32) -> Option<Dimension>
     }
     let kind = world.get(x, y, z) >> 4;
     match (world.dimension(), kind) {
-        (Dimension::Overworld, 90) if valid_nether_frame(world, x, y, z, 1, 0)
-            || valid_nether_frame(world, x, y, z, 0, 1) =>
+        (Dimension::Overworld, 90)
+            if valid_nether_frame(world, x, y, z, 1, 0)
+                || valid_nether_frame(world, x, y, z, 0, 1) =>
         {
             Some(Dimension::Nether)
         }
-        (Dimension::Nether, 90) if valid_nether_frame(world, x, y, z, 1, 0)
-            || valid_nether_frame(world, x, y, z, 0, 1) =>
+        (Dimension::Nether, 90)
+            if valid_nether_frame(world, x, y, z, 1, 0)
+                || valid_nether_frame(world, x, y, z, 0, 1) =>
         {
             Some(Dimension::Overworld)
         }
@@ -406,9 +408,7 @@ pub fn portal_target(world: &World, x: i32, y: i32, z: i32) -> Option<Dimension>
         // The return portal is constructed from bedrock after the dragon dies.
         // Restrict recognition to the central island and supporting bedrock.
         (Dimension::End, 119)
-            if x.abs() <= 8
-                && z.abs() <= 8
-                && world.get(x, y - 1, z) >> 4 == 7 =>
+            if x.abs() <= 8 && z.abs() <= 8 && world.get(x, y - 1, z) >> 4 == 7 =>
         {
             Some(Dimension::Overworld)
         }
@@ -510,7 +510,9 @@ mod tests {
                 } else {
                     90
                 };
-                world.update_and_save(&path, u, 80 + v, 0, block << 4).unwrap();
+                world
+                    .update_and_save(&path, u, 80 + v, 0, block << 4)
+                    .unwrap();
             }
         }
         assert_eq!(portal_target(&world, 0, 81, 0), Some(Dimension::Nether));
@@ -542,7 +544,9 @@ mod tests {
         }
         for i in 0..3 {
             for (x, z) in [(-1, i), (3, i), (i, -1), (i, 3)] {
-                world.update_and_save(&path, x, 75, z, (120 << 4) | 4).unwrap();
+                world
+                    .update_and_save(&path, x, 75, z, (120 << 4) | 4)
+                    .unwrap();
             }
         }
         assert_eq!(portal_target(&world, 1, 75, 1), Some(Dimension::End));
@@ -554,10 +558,15 @@ mod tests {
     #[test]
     fn nether_arrival_never_uses_bedrock_roof() {
         let nether = World::expanded(17, Dimension::Nether);
-        let arrival = safe_arrival(&nether, PortalDestination {
-            dimension: Dimension::Nether,
-            x: 0.5, y: 120.0, z: 0.5,
-        });
+        let arrival = safe_arrival(
+            &nether,
+            PortalDestination {
+                dimension: Dimension::Nether,
+                x: 0.5,
+                y: 120.0,
+                z: 0.5,
+            },
+        );
         assert!(arrival.is_none_or(|position| position.y <= 120.0));
         assert!(destination(Dimension::Overworld, Dimension::Overworld, 0.0, 64.0, 0.0).is_none());
     }
