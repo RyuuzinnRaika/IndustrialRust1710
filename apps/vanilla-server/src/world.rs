@@ -174,6 +174,9 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 154 // hopper
             | 56 // diamond ore
             | 57
+            | 47 // bookshelf: used by the enchanting table
+            | 116 // enchanting table
+            | 145 // anvil
             | 58 // crafting table: opens workbench window when used
             | 73 // redstone ore
             | 80

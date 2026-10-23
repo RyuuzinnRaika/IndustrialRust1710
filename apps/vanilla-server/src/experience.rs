@@ -53,6 +53,19 @@ impl Experience {
         self.total = self.total.saturating_add(amount).min(MAX_XP);
         true
     }
+    /// Spend complete XP levels, preserving points already earned within the
+    /// current level. Reject insufficient balance without changing the account.
+    pub fn spend_levels(&mut self, levels: u16) -> bool {
+        let (current, _) = self.level_and_fraction();
+        if current < levels {
+            return false;
+        }
+        let points: u32 = ((current - levels)..current)
+            .map(|level| required(u32::from(level)))
+            .sum();
+        self.total -= points;
+        true
+    }
     pub fn level_and_fraction(&self) -> (u16, f32) {
         let mut remaining = self.total;
         let mut level = 0u32;
@@ -93,5 +106,17 @@ mod tests {
         assert_eq!(e.level_and_fraction().0, 15);
         e.total = 825;
         assert_eq!(e.level_and_fraction().0, 30);
+    }
+    #[test]
+    fn spend_levels_is_atomic_and_does_not_mint_xp() {
+        let mut xp = Experience { total: 50 };
+        assert_eq!(xp.level_and_fraction().0, 2);
+        assert!(!xp.spend_levels(3));
+        assert_eq!(xp.total, 50);
+        assert!(xp.spend_levels(2));
+        assert_eq!(xp.total, 16);
+        assert_eq!(xp.level_and_fraction().0, 0);
+        assert!(xp.spend_levels(0));
+        assert_eq!(xp.total, 16);
     }
 }

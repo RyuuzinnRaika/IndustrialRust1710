@@ -59,6 +59,7 @@ mod vehicles;
 mod verify_world;
 mod vitals;
 mod whitelist;
+mod workstations;
 mod world;
 mod worldgen;
 
@@ -882,6 +883,7 @@ fn play(
     let mut active_device: Option<DevicePosition> = None;
     let mut last_device_view = [None; dispensers::DEVICE_SLOTS];
     let mut active_brewer: Option<BrewerPosition> = None;
+    let mut active_anvil: Option<(i32, i32, i32)> = None;
     let mut last_brewer_view = Brewer::default();
     let mut last_furnace_view = Furnace::default();
     let mut observed_chest_revision: u64 = 0;
@@ -943,6 +945,7 @@ fn play(
                 active_hopper = None;
                 active_device = None;
                 active_brewer = None;
+                active_anvil = None;
                 // Game State 3 is Protocol 5's gamemode notification.
                 let mut state = vec![3u8];
                 state.extend_from_slice(&(mode as f32).to_be_bytes());
@@ -3339,6 +3342,7 @@ fn play(
                     active_hopper = None;
                     active_device = None;
                     active_brewer = None;
+                    active_anvil = None;
                     let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
                     last_furnace_view = guard.get(pos);
                     drop(guard);
@@ -3384,6 +3388,7 @@ fn play(
                     active_hopper = None;
                     active_device = None;
                     active_brewer = None;
+                    active_anvil = None;
                     let generated_loot = world
                         .lock()
                         .map_err(|_| bad("world mutex poisoned"))?
@@ -3478,6 +3483,7 @@ fn play(
                     active_furnace = None;
                     active_hopper = None;
                     active_brewer = None;
+                    active_anvil = None;
                     let items = inventory.chest_window_items(active_window, &last_device_view);
                     drop(guard);
                     let mut opened = vec![active_window];
@@ -3512,6 +3518,7 @@ fn play(
                     active_hopper = Some(pos);
                     active_device = None;
                     active_brewer = None;
+                    active_anvil = None;
                     active_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
@@ -3535,6 +3542,39 @@ fn play(
                         .map_err(|_| bad("world mutex poisoned"))?
                         .get(x, y, z)
                         >> 4
+                        == 145
+                {
+                    active_window = next_window;
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
+                    active_chest = None;
+                    active_chest_partner = None;
+                    active_furnace = None;
+                    active_hopper = None;
+                    active_device = None;
+                    active_brewer = None;
+                    active_anvil = Some((x, y, z));
+                    let mut opened = vec![active_window];
+                    write_string("minecraft:anvil", &mut opened)?;
+                    write_string(&json!({"text":"Repair & Name"}).to_string(), &mut opened)?;
+                    opened.push(0); // fixed 3-slot anvil, not a chest inventory
+                    send(s, 0x2d, &opened)?;
+                    send(s, 0x30, &inventory.anvil_window_items(active_window))?;
+                    send(s, 0x31, &inventory.anvil_cost_property(active_window))?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
                         == 58
                 {
                     // The 1.7.10 crafting table is a non-storage window.
@@ -3546,6 +3586,7 @@ fn play(
                     active_hopper = None;
                     active_device = None;
                     active_brewer = None;
+                    active_anvil = None;
                     next_window = if next_window >= 100 {
                         1
                     } else {
@@ -3847,7 +3888,49 @@ fn play(
                     }
                     requested_window = false;
                 }
-                if let Some(pos) = active_furnace {
+                if let Some(pos) = active_anvil {
+                    let still_open = world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(pos.0, pos.1, pos.2)
+                        >> 4
+                        == 145
+                        && near(location, pos.0, pos.1, pos.2);
+                    let mut candidate = inventory.clone();
+                    let mut next_xp = *experience;
+                    accepted |= still_open
+                        && requested_window
+                        && candidate.anvil_click_window(slot, button, mode, &mut next_xp, survival);
+                    if accepted {
+                        let inventory_changed = candidate != *inventory;
+                        let xp_changed = next_xp != *experience;
+                        if inventory_changed && xp_changed {
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (
+                                        experience_path,
+                                        serde_json::to_vec(&next_xp)
+                                            .map_err(|_| bad("encode anvil XP"))?,
+                                    ),
+                                ],
+                            )?;
+                            *inventory = candidate;
+                            *experience = next_xp;
+                        } else if inventory_changed {
+                            candidate.save(inventory_path)?;
+                            *inventory = candidate;
+                        } else if xp_changed {
+                            next_xp.save(experience_path)?;
+                            *experience = next_xp;
+                        }
+                        if xp_changed {
+                            send(s, 0x1f, &experience.packet())?;
+                        }
+                    }
+                    response_items = inventory.anvil_window_items(active_window);
+                } else if let Some(pos) = active_furnace {
                     let still_open = matches!(
                         world
                             .lock()
@@ -4154,6 +4237,9 @@ fn play(
                 if active_brewer.is_some() {
                     send(s, 0x31, &last_brewer_view.property(active_window))?;
                 }
+                if active_anvil.is_some() {
+                    send(s, 0x31, &inventory.anvil_cost_property(active_window))?;
+                }
                 send(s, 0x2f, &inventory.cursor_packet())?;
             }
             15 => {
@@ -4176,6 +4262,7 @@ fn play(
                     active_hopper = None;
                     active_device = None;
                     active_brewer = None;
+                    active_anvil = None;
                     send(s, 0x30, &inventory.window_items())?;
                 }
             }

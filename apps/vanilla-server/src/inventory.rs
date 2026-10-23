@@ -71,6 +71,10 @@ pub struct Inventory {
     cursor: Option<Stack>,
     #[serde(default)]
     workbench: [Option<Stack>; 9],
+    /// Session-local anvil input slots survive disconnects; no item is
+    /// discarded if a client closes the transient GUI or a save is replayed.
+    #[serde(default)]
+    anvil_inputs: [Option<Stack>; 2],
     #[serde(skip)]
     drag: Drag,
     #[serde(default)]
@@ -84,6 +88,7 @@ impl Default for Inventory {
             slots: vec![None; SLOT_COUNT],
             cursor: None,
             workbench: [None; 9],
+            anvil_inputs: [None; 2],
             drag: Drag::default(),
             bed_spawn: None,
         }
@@ -194,6 +199,11 @@ impl Inventory {
                 .any(|(index, stack)| stack.is_some_and(|s| !Self::armor_compatible(index + 5, s)))
             || self
                 .workbench
+                .iter()
+                .flatten()
+                .any(|stack| !stack.is_valid())
+            || self
+                .anvil_inputs
                 .iter()
                 .flatten()
                 .any(|stack| !stack.is_valid())
@@ -369,6 +379,7 @@ impl Inventory {
         self.slots[1..45]
             .iter()
             .chain(self.workbench.iter())
+            .chain(self.anvil_inputs.iter())
             .chain(std::slice::from_ref(&self.cursor))
             .flatten()
             .copied()
@@ -379,6 +390,7 @@ impl Inventory {
     pub fn clear_possessions(&mut self) {
         self.slots[1..45].fill(None);
         self.workbench.fill(None);
+        self.anvil_inputs.fill(None);
         self.cursor = None;
         self.drag = Drag::default();
     }
@@ -1439,6 +1451,112 @@ impl Inventory {
         packet
     }
 
+    /// Compute the server-owned result. Only untagged durability repair is
+    /// supported until generic ItemStack NBT exists in Inventory.
+    pub fn anvil_preview(&self) -> Option<crate::workstations::Repair> {
+        crate::workstations::repair(self.anvil_inputs[0]?, self.anvil_inputs[1]?)
+    }
+
+    /// Protocol 5 anvil GUI: two inputs, read-only result, 36 player slots.
+    pub fn anvil_window_items(&self, window: u8) -> Vec<u8> {
+        let mut packet = vec![window];
+        packet.extend_from_slice(&39i16.to_be_bytes());
+        for slot in 0..39 {
+            let item = match slot {
+                0 | 1 => self.anvil_inputs[slot as usize],
+                2 => self.anvil_preview().map(|plan| plan.result),
+                _ => self.slots[(slot + 6) as usize],
+            };
+            Self::encode_slot(&mut packet, item);
+        }
+        packet
+    }
+
+    pub fn anvil_cost_property(&self, window: u8) -> Vec<u8> {
+        let cost = self.anvil_preview().map_or(0, |plan| plan.levels);
+        let mut packet = vec![window, 0, 0]; // Property 0: repair cost
+        packet.extend_from_slice(&(cost as i16).to_be_bytes());
+        packet
+    }
+
+    /// Input and output transactions do not trust the client's advertised
+    /// result or XP balance. The caller journals changed Inventory and XP.
+    pub fn anvil_click_window(
+        &mut self,
+        slot: i16,
+        button: i8,
+        mode: i8,
+        experience: &mut crate::experience::Experience,
+        survival: bool,
+    ) -> bool {
+        match slot {
+            0 | 1 if mode == 0 && matches!(button, 0 | 1) => {
+                let index = slot as usize;
+                let original = self.anvil_inputs[index];
+                let carried = self.cursor;
+                let (next, cursor) = match (original, carried, button) {
+                    (old, None, 0) => (None, old),
+                    (None, Some(hand), 0) if index != 0 || hand.count == 1 => (Some(hand), None),
+                    (Some(old), Some(hand), 0) if index != 0 || hand.count == 1 => {
+                        (Some(hand), Some(old))
+                    }
+                    (Some(mut old), None, 1) => {
+                        let n = old.count.div_ceil(2);
+                        old.count -= n;
+                        (
+                            (old.count > 0).then_some(old),
+                            Some(Stack { count: n, ..old }),
+                        )
+                    }
+                    (None, Some(mut hand), 1) => {
+                        hand.count -= 1;
+                        (
+                            Some(Stack { count: 1, ..hand }),
+                            (hand.count > 0).then_some(hand),
+                        )
+                    }
+                    _ => return false,
+                };
+                if index == 0 && next.is_some_and(|item| item.count != 1) {
+                    return false;
+                }
+                self.anvil_inputs[index] = next;
+                self.cursor = cursor;
+                true
+            }
+            2 if mode == 0 && button == 0 => {
+                let Some(plan) = self.anvil_preview() else {
+                    return false;
+                };
+                if self.cursor.is_some() {
+                    return false;
+                }
+                if survival && !experience.spend_levels(plan.levels) {
+                    return false;
+                }
+                self.anvil_inputs[0] = None;
+                if let Some(mut used) = self.anvil_inputs[1] {
+                    used.count -= plan.consumed;
+                    self.anvil_inputs[1] = (used.count != 0).then_some(used);
+                }
+                self.cursor = Some(plan.result);
+                true
+            }
+            // Player's 36 slots are shared with window zero, offset by six.
+            3..=38 => {
+                let translated = slot + 6;
+                // Only ordinary pickup and number-key swaps. Shift-transfer
+                // must be implemented separately so no item enters an input
+                // slot via an incorrect crafting-window mapping.
+                if !matches!(mode, 0 | 2) {
+                    return false;
+                }
+                self.click_window(0, translated, button, mode)
+            }
+            _ => false,
+        }
+    }
+
     /// Clientbound Set Slot (0x2F): window -1, slot -1 represents the cursor.
     pub fn cursor_packet(&self) -> Vec<u8> {
         let mut out = vec![255, 255, 255];
@@ -2440,5 +2558,58 @@ mod tests {
         fs::write(&path, b"[]").unwrap();
         assert!(Inventory::load(&path).is_err());
         fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn anvil_repair_debits_only_owned_inputs_and_xp() {
+        let mut inv = Inventory::default();
+        let mut xp = crate::experience::Experience { total: 34 };
+        inv.cursor = Some(Stack {
+            id: 257,
+            count: 1,
+            damage: 100,
+        });
+        assert!(inv.anvil_click_window(0, 0, 0, &mut xp, true));
+        inv.cursor = Some(Stack {
+            id: 265,
+            count: 3,
+            damage: 0,
+        });
+        assert!(inv.anvil_click_window(1, 0, 0, &mut xp, true));
+        let old = inv.anvil_preview().unwrap();
+        assert!(!inv.anvil_click_window(2, 0, 1, &mut xp, true));
+        assert_eq!(xp.total, 34);
+        assert_eq!(inv.cursor, None);
+        assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
+        assert_eq!(inv.cursor, Some(old.result));
+        assert_eq!(inv.anvil_inputs[0], None);
+        assert_eq!(
+            inv.anvil_inputs[1].map(|item| item.count),
+            (3 > old.consumed).then_some(3 - old.consumed)
+        );
+        assert!(xp.total < 34);
+        assert!(inv.encoded().is_ok());
+    }
+    #[test]
+    fn anvil_insufficient_experience_is_fail_closed() {
+        let mut inv = Inventory {
+            anvil_inputs: [
+                Some(Stack {
+                    id: 257,
+                    count: 1,
+                    damage: 100,
+                }),
+                Some(Stack {
+                    id: 265,
+                    count: 3,
+                    damage: 0,
+                }),
+            ],
+            ..Inventory::default()
+        };
+        let previous = inv.clone();
+        let mut xp = crate::experience::Experience::default();
+        assert!(!inv.anvil_click_window(2, 0, 0, &mut xp, true));
+        assert_eq!(inv, previous);
+        assert_eq!(xp.total, 0);
     }
 }
