@@ -329,6 +329,11 @@ fn valid_nether_frame(world: &World, x: i32, y: i32, z: i32, dx: i32, dz: i32) -
     }
     for u in -1..=width {
         for v in -1..=height {
+            // Minecraft 1.7.10 allows the four decorative frame corners
+            // to be absent; only edges along the interior are mandatory.
+            if (u == -1 || u == width) && (v == -1 || v == height) {
+                continue;
+            }
             let block = id(origin + u, floor + v);
             let expected = if u == -1 || u == width || v == -1 || v == height {
                 49 // Obsidian frame
@@ -494,6 +499,9 @@ mod tests {
                 world.update_and_save(&path, u, 80 + v, 0, block << 4).unwrap();
             }
         }
+        assert_eq!(portal_target(&world, 0, 81, 0), Some(Dimension::Nether));
+        // A missing corner does not invalidate a legitimate 1.7.10 portal.
+        world.update_and_save(&path, -1, 79, 0, 0).unwrap();
         assert_eq!(portal_target(&world, 0, 81, 0), Some(Dimension::Nether));
         world.update_and_save(&path, -1, 81, 0, 0).unwrap();
         assert_eq!(portal_target(&world, 0, 81, 0), None);
