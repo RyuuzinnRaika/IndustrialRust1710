@@ -2749,12 +2749,14 @@ mod tests {
     }
     #[test]
     fn enchanting_table_keeps_books_and_enforces_single_input() {
-        let mut inv = Inventory::default();
-        inv.cursor = Some(Stack {
-            id: 340,
-            count: 4,
-            damage: 0,
-        });
+        let mut inv = Inventory {
+            cursor: Some(Stack {
+                id: 340,
+                count: 4,
+                damage: 0,
+            }),
+            ..Inventory::default()
+        };
         assert!(inv.enchanting_click_window(0, 0, 0));
         assert_eq!(inv.cursor.unwrap().count, 3);
         assert_eq!(inv.enchant_input.unwrap().count, 1);
@@ -2770,12 +2772,14 @@ mod tests {
 
     #[test]
     fn enchanting_table_rejects_non_enchantable_and_invalid_clicks() {
-        let mut inv = Inventory::default();
-        inv.cursor = Some(Stack {
-            id: 264,
-            count: 1,
-            damage: 0,
-        });
+        let mut inv = Inventory {
+            cursor: Some(Stack {
+                id: 264,
+                count: 1,
+                damage: 0,
+            }),
+            ..Inventory::default()
+        };
         let old = inv.clone();
         assert!(!inv.enchanting_click_window(0, 0, 0));
         assert!(!inv.enchanting_click_window(0, 2, 0));
@@ -2786,12 +2790,14 @@ mod tests {
 
     #[test]
     fn enchanting_table_close_is_atomic_with_full_player_inventory() {
-        let mut inv = Inventory::default();
-        inv.enchant_input = Some(Stack {
-            id: 276,
-            count: 1,
-            damage: 12,
-        });
+        let mut inv = Inventory {
+            enchant_input: Some(Stack {
+                id: 276,
+                count: 1,
+                damage: 12,
+            }),
+            ..Inventory::default()
+        };
         for slot in 9..45 {
             inv.slots[slot] = Some(Stack {
                 id: 264,
