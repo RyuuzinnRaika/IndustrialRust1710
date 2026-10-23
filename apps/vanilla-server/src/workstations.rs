@@ -64,7 +64,11 @@ pub fn enchanting_costs(shelves: u8, seed: u64) -> [u8; 3] {
             _ => base.max(2 * shelves),
         };
         // Vanilla hides an offer below the minimum for its row.
-        *cost = if level < option as u32 + 1 { 0 } else { level as u8 };
+        *cost = if level < option as u32 + 1 {
+            0
+        } else {
+            level as u8
+        };
     }
 }
 
