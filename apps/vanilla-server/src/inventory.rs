@@ -2790,8 +2790,16 @@ mod tests {
     }
     #[test]
     fn anvil_close_returns_both_inputs_without_item_loss() {
-        let pick = Stack { id: 257, count: 1, damage: 100 };
-        let ingots = Stack { id: 265, count: 3, damage: 0 };
+        let pick = Stack {
+            id: 257,
+            count: 1,
+            damage: 100,
+        };
+        let ingots = Stack {
+            id: 265,
+            count: 3,
+            damage: 0,
+        };
         let mut inv = Inventory {
             anvil_inputs: [Some(pick), Some(ingots)],
             ..Inventory::default()
@@ -2810,14 +2818,26 @@ mod tests {
 
     #[test]
     fn anvil_close_preserves_inputs_when_only_one_would_fit() {
-        let pick = Stack { id: 257, count: 1, damage: 100 };
-        let ingots = Stack { id: 265, count: 3, damage: 0 };
+        let pick = Stack {
+            id: 257,
+            count: 1,
+            damage: 100,
+        };
+        let ingots = Stack {
+            id: 265,
+            count: 3,
+            damage: 0,
+        };
         let mut inv = Inventory {
             anvil_inputs: [Some(pick), Some(ingots)],
             ..Inventory::default()
         };
         for slot in 9..45 {
-            inv.slots[slot] = Some(Stack { id: 1, count: 64, damage: 0 });
+            inv.slots[slot] = Some(Stack {
+                id: 1,
+                count: 64,
+                damage: 0,
+            });
         }
         // Exactly one available slot is insufficient for two distinct inputs.
         inv.slots[9] = None;
@@ -2834,8 +2854,16 @@ mod tests {
 
     #[test]
     fn anvil_result_right_click_pays_xp_and_consumes_once() {
-        let pick = Stack { id: 257, count: 1, damage: 100 };
-        let ingots = Stack { id: 265, count: 3, damage: 0 };
+        let pick = Stack {
+            id: 257,
+            count: 1,
+            damage: 100,
+        };
+        let ingots = Stack {
+            id: 265,
+            count: 3,
+            damage: 0,
+        };
         let mut inv = Inventory {
             anvil_inputs: [Some(pick), Some(ingots)],
             ..Inventory::default()
@@ -2846,11 +2874,13 @@ mod tests {
         assert!(inv.anvil_click_window(2, 1, 0, &mut xp, true));
         assert_eq!(inv.cursor, Some(result.result));
         assert_eq!(inv.anvil_inputs[0], None);
-        assert_eq!(inv.anvil_inputs[1].map(|x| x.count), Some(3 - result.consumed));
+        assert_eq!(
+            inv.anvil_inputs[1].map(|x| x.count),
+            Some(3 - result.consumed)
+        );
         assert!(xp.total < before);
         let spent = xp.total;
         assert!(!inv.anvil_click_window(2, 1, 0, &mut xp, true));
         assert_eq!(xp.total, spent);
     }
-
 }
