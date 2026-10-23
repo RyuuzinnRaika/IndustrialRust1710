@@ -105,11 +105,7 @@ fn rail_height(y: i32, id: u16, meta: u16, x: f64, z: f64) -> f64 {
 /// Find the actual rail in a column, including a high end of a slope
 /// whose rail block is one Y below the cart's current feet position.
 /// Refuse transitions with a vertical gap or a perpendicular rail.
-fn straight_track(
-    world: &World,
-    at: PlayerPosition,
-    axis: Option<bool>,
-) -> Option<RailSample> {
+fn straight_track(world: &World, at: PlayerPosition, axis: Option<bool>) -> Option<RailSample> {
     let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
     let base = (at.y - 0.5).floor() as i32;
     let mut selected: Option<(RailSample, f64)> = None;
