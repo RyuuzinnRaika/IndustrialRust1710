@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 use crate::world::{World, WORLD_LIMIT};
 use serde::{Deserialize, Serialize};
-use std::fs::{self};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
