@@ -194,7 +194,19 @@ impl World {
                 }
             }
             147 | 148 | 151 => (block & 15) as u8,
-            76 | 152 => 15,
+            76 => {
+                // A redstone torch weakly powers every adjacent face except
+                // the block supporting it. Its strong output points up only.
+                let attached = match block & 7 {
+                    1 => (x - 1, y, z),
+                    2 => (x + 1, y, z),
+                    3 => (x, y, z - 1),
+                    4 => (x, y, z + 1),
+                    _ => (x, y - 1, z),
+                };
+                if to == attached { 0 } else { 15 }
+            }
+            152 => 15,
             94 => {
                 let (dx, dz) = repeater_direction(block);
                 if to == (x + dx, y, z + dz) {
@@ -652,6 +664,24 @@ mod redstone_regression_tests {
         assert!(w.powered_near(1, 64, 0));
         assert!(!w.powered_near(-1, 64, 0));
         assert!(!w.powered_near(0, 64, 1));
+    }
+
+    #[test]
+    fn redstone_torch_does_not_weakly_power_its_support() {
+        let mut w = World::new();
+        for (meta, support) in [
+            (1, (-1, 64, 0)),
+            (2, (1, 64, 0)),
+            (3, (0, 64, -1)),
+            (4, (0, 64, 1)),
+            (5, (0, 63, 0)),
+        ] {
+            w.import_block(0, 64, 0, (76 << 4) | meta).unwrap();
+            assert_eq!(w.signal_into((0, 64, 0), support), 0);
+            assert_eq!(w.signal_into((0, 64, 0), (0, 65, 0)), 15);
+            assert_eq!(w.strong_signal_into((0, 64, 0), (0, 65, 0)), 15);
+            assert_eq!(w.signal_into((0, 64, 0), (0, 64, 0)), 15);
+        }
     }
 
     #[test]
