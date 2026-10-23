@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 use crate::world::{World, WORLD_LIMIT};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
+use std::fs::{self};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -433,11 +433,20 @@ impl TravelCheckpoint {
         })
     }
     pub fn load(path: &Path) -> io::Result<Option<Self>> {
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
+        let meta = match fs::symlink_metadata(path) {
+            Ok(meta) => meta,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
+        // Never follow a substituted checkpoint symlink or read an unbounded
+        // attacker-created file into memory before validating its size.
+        if !meta.file_type().is_file() || meta.len() > 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsafe or oversized travel checkpoint",
+            ));
+        }
+        let bytes = fs::read(path)?;
         if bytes.len() > 1024 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -465,7 +474,12 @@ impl TravelCheckpoint {
             fs::create_dir_all(parent)?;
         }
         let staging = path.with_extension("dimension.tmp");
-        let mut file = File::create(&staging)?;
+        // create_new refuses a pre-existing staging file (including symlinks).
+        // A stale file from a crash must be investigated, not overwritten.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
         file.write_all(&serde_json::to_vec(self)?)?;
         file.sync_all()?;
         drop(file);
@@ -623,6 +637,36 @@ mod tests {
         )
         .is_none());
     }
+    #[test]
+    fn checkpoint_refuses_oversized_input_without_parsing() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-checkpoint-bounds-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("pending.json");
+        fs::write(&path, vec![0u8; 2048]).unwrap();
+        assert_eq!(
+            TravelCheckpoint::load(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            fs::remove_file(&path).unwrap();
+            let target = root.join("target.json");
+            fs::write(&target, "{}").unwrap();
+            symlink(&target, &path).unwrap();
+            assert_eq!(
+                TravelCheckpoint::load(&path).unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn checkpoint_roundtrip() {
         let file = std::env::temp_dir().join(format!("ir1710-travel-{}.json", std::process::id()));
