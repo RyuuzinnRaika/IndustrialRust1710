@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/prune-merged-branches.yml
+      - scripts/prune_merged_pr_branches.py
   workflow_dispatch:
 permissions:
   contents: write
@@ -19,7 +20,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Safely remove branches already merged into main
+      - name: Safely remove merged and explicitly retired PR branches
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
