@@ -3,7 +3,8 @@
 use crate::physics;
 use crate::player::PlayerPosition;
 use crate::world::World;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 
 type Cell = (i32, i32, i32);
 const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
@@ -129,15 +130,17 @@ pub fn next_step(
     if start == goal {
         return None;
     }
-    let mut open = BTreeSet::new();
-    let mut scores = BTreeMap::new();
-    let mut parents = BTreeMap::new();
-    open.insert((heuristic(start, goal), 0i32, start));
+    // BinaryHeap keeps the same tuple ordering as the old BTreeSet frontier,
+    // while HashMap avoids tree lookups in the tight expansion loop. Reverse
+    // maintains min-f / min-cost / lexicographic-cell deterministic tie breaks.
+    let mut open = BinaryHeap::new();
+    let mut scores = HashMap::new();
+    let mut parents = HashMap::new();
+    open.push(Reverse((heuristic(start, goal), 0i32, start)));
     scores.insert(start, 0i32);
     let mut best = start;
     let mut expansions = 0;
-    while let Some(&(f, cost, here)) = open.iter().next() {
-        open.remove(&(f, cost, here));
+    while let Some(Reverse((_f, cost, here))) = open.pop() {
         if scores.get(&here) != Some(&cost) {
             continue;
         }
@@ -170,11 +173,11 @@ pub fn next_step(
                 }
                 scores.insert(neighbour, next_cost);
                 parents.insert(neighbour, here);
-                open.insert((
+                open.push(Reverse((
                     next_cost + heuristic(neighbour, goal) * 10,
                     next_cost,
                     neighbour,
-                ));
+                )));
             }
         }
     }
@@ -192,6 +195,38 @@ pub fn next_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn frontier_priority_is_stable_on_equal_path_costs() {
+        let mut open = BinaryHeap::new();
+        for candidate in [
+            (20, 10, (1, 64, 1)),
+            (20, 10, (1, 64, -1)),
+            (30, 10, (0, 64, 0)),
+            (10, 0, (0, 64, 0)),
+        ] {
+            open.push(Reverse(candidate));
+        }
+        assert_eq!(open.pop(), Some(Reverse((10, 0, (0, 64, 0)))));
+        assert_eq!(open.pop(), Some(Reverse((20, 10, (1, 64, -1)))));
+        assert_eq!(open.pop(), Some(Reverse((20, 10, (1, 64, 1)))));
+        assert_eq!(open.pop(), Some(Reverse((30, 10, (0, 64, 0)))));
+    }
+
+    #[test]
+    fn symmetric_routes_stay_deterministic_with_bounded_expansions() {
+        let mut world = World::new();
+        for z in -1..=1 {
+            world.import_block(2, 64, z, 1 << 4).unwrap();
+        }
+        let from = PlayerPosition { x: 0.5, y: 64.0, z: 0.5 };
+        let goal = PlayerPosition { x: 6.5, y: 64.0, z: 0.5 };
+        let first = next_step(&world, from, goal, 128);
+        assert!(first.is_some());
+        for _ in 0..32 {
+            assert_eq!(next_step(&world, from, goal, 128), first);
+        }
+        assert!(next_step(&world, from, goal, 0).is_none());
+    }
     #[test]
     fn climbs_a_one_block_step_without_entering_the_block() {
         let mut world = World::new();
