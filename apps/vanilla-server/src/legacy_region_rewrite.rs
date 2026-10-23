@@ -17,9 +17,7 @@ fn wrap(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
-/// Copy every source chunk's uncompressed NBT while replacing exactly one
-/// existing chunk. Compression may change; unknown NBT tags are not parsed
-/// away from untouched chunks. Neither source nor target can be overwritten.
+/// Backwards-compatible single-chunk create-only entrypoint.
 pub(crate) fn rewrite_chunk_create_only(
     source: &Path,
     destination: &Path,
@@ -27,7 +25,27 @@ pub(crate) fn rewrite_chunk_create_only(
     cz: i32,
     replacement_nbt: &[u8],
 ) -> io::Result<()> {
-    let file_name = format!("r.{}.{}.mca", cx.div_euclid(32), cz.div_euclid(32));
+    rewrite_chunks_create_only(source, destination, &[((cx, cz), replacement_nbt)])
+}
+
+/// Rebuild one EXISTING Anvil region while replacing several existing chunks
+/// in a single create-only publication. The caller must not mix region files.
+/// Every unchanged chunk retains its uncompressed NBT bytes, including unknown
+/// tags; validation and full-region verification finish before publication.
+pub(crate) fn rewrite_chunks_create_only(
+    source: &Path,
+    destination: &Path,
+    replacements: &[((i32, i32), &[u8])],
+) -> io::Result<()> {
+    let (first, _) = replacements
+        .first()
+        .ok_or_else(|| invalid("Anvil region update must contain chunks"))?;
+    if replacements.len() > 1024 {
+        return Err(invalid("too many Anvil chunks in one region update"));
+    }
+    let (cx, cz) = *first;
+    let region = (cx.div_euclid(32), cz.div_euclid(32));
+    let file_name = format!("r.{}.{}.mca", region.0, region.1);
     if source.file_name().and_then(|name| name.to_str()) != Some(file_name.as_str())
         || destination.file_name().and_then(|name| name.to_str()) != Some(file_name.as_str())
     {
@@ -35,10 +53,9 @@ pub(crate) fn rewrite_chunk_create_only(
             "Anvil region name does not match replacement chunk",
         ));
     }
-    // The existing read-only inspector validates ALL sector allocations and
-    // chunk NBT, not just the modified chunk.
-    crate::legacy_region::inspect_region(source)?;
-    crate::legacy_nbt::parse_chunk(replacement_nbt, cx, cz)?;
+    if !fs::symlink_metadata(source)?.file_type().is_file() {
+        return Err(invalid("source Anvil region is not a regular file"));
+    }
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     if !fs::symlink_metadata(parent)?.file_type().is_dir() {
         return Err(invalid("destination parent is not a directory"));
@@ -53,13 +70,28 @@ pub(crate) fn rewrite_chunk_create_only(
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let local_x = cx.rem_euclid(32) as usize;
-    let local_z = cz.rem_euclid(32) as usize;
+    let mut overlay = std::collections::BTreeMap::new();
+    for &((x, z), nbt) in replacements {
+        if (x.div_euclid(32), z.div_euclid(32)) != region {
+            return Err(invalid("Anvil batch crosses region boundary"));
+        }
+        crate::legacy_nbt::parse_chunk(nbt, x, z)?;
+        if overlay
+            .insert((x.rem_euclid(32) as usize, z.rem_euclid(32) as usize), nbt)
+            .is_some()
+        {
+            return Err(invalid("duplicate Anvil chunk in batch"));
+        }
+    }
+    // Reject malformed source sectors or NBT before any filesystem mutation.
+    crate::legacy_region::inspect_region(source)?;
     let mut input = Region::from_stream(File::open(source)?).map_err(wrap)?;
-    if input.read_chunk(local_x, local_z).map_err(wrap)?.is_none() {
-        return Err(invalid(
-            "source chunk does not exist; new generation is separate",
-        ));
+    for &(x, z) in overlay.keys() {
+        if input.read_chunk(x, z).map_err(wrap)?.is_none() {
+            return Err(invalid(
+                "source chunk does not exist; new generation is separate",
+            ));
+        }
     }
     let staging = destination.with_extension("creating");
     let stage_file = OpenOptions::new()
@@ -72,11 +104,10 @@ pub(crate) fn rewrite_chunk_create_only(
         for z in 0..32 {
             for x in 0..32 {
                 if let Some(bytes) = input.read_chunk(x, z).map_err(wrap)? {
-                    let data = if (x, z) == (local_x, local_z) {
-                        replacement_nbt
-                    } else {
-                        &bytes
-                    };
+                    let data = overlay
+                        .get(&(x, z))
+                        .copied()
+                        .unwrap_or(bytes.as_slice());
                     output.write_chunk(x, z, data).map_err(wrap)?;
                 }
             }
@@ -86,24 +117,20 @@ pub(crate) fn rewrite_chunk_create_only(
         file.set_len(length)?;
         file.sync_all()?;
         drop(file);
-        // Verify all emitted chunks by comparing uncompressed NBT directly.
-        // This catches write/truncation bugs without relying on NBT reordering.
         let mut verify = Region::from_stream(File::open(&staging)?).map_err(wrap)?;
         for z in 0..32 {
             for x in 0..32 {
                 let observed = verify.read_chunk(x, z).map_err(wrap)?;
-                let expected = if (x, z) == (local_x, local_z) {
-                    Some(replacement_nbt.to_vec())
-                } else {
-                    input.read_chunk(x, z).map_err(wrap)?
+                let expected = match overlay.get(&(x, z)) {
+                    Some(bytes) => Some(bytes.to_vec()),
+                    None => input.read_chunk(x, z).map_err(wrap)?,
                 };
                 if observed != expected {
                     return Err(invalid("reconstructed region lost an original chunk"));
                 }
             }
         }
-        // Atomic, create-only publication: hard_link fails if destination
-        // exists even if another writer races between preflight and publish.
+        // hard_link is create-only even if another process wins the race.
         fs::hard_link(&staging, destination)?;
         #[cfg(unix)]
         File::open(parent)?.sync_all()?;
@@ -113,15 +140,7 @@ pub(crate) fn rewrite_chunk_create_only(
     written
 }
 
-/// Rewrite one existing Anvil region atomically under the SAME world session
-/// lock used by the Rust server. This is an opt-in FS08 building block, not the
-/// active game's IRW save path. Unknown tags in untouched chunks survive as
-/// their original uncompressed NBT bytes.
-///
-/// The source is never written in place. Build and validate a same-filesystem
-/// replacement; refuse symlinks and changes to the original before publishing.
-/// The session lock coordinates cooperative writers; an external Java server
-/// that ignores the Rust advisory lock cannot be made race-free by this API.
+/// Backwards-compatible single-chunk session-locked entrypoint.
 pub(crate) fn rewrite_chunk_under_lock(
     lock: &mut WorldSessionLock,
     dimension: Dimension,
@@ -129,7 +148,22 @@ pub(crate) fn rewrite_chunk_under_lock(
     cz: i32,
     replacement_nbt: &[u8],
 ) -> io::Result<()> {
+    rewrite_chunks_under_lock(lock, dimension, &[((cx, cz), replacement_nbt)])
+}
+
+/// Atomically publish a batch of chunks within ONE EXISTING region under a
+/// valid world session lock. This remains an opt-in FS08 building block; it
+/// does NOT enable live Anvil saving or cross-region transactions.
+pub(crate) fn rewrite_chunks_under_lock(
+    lock: &mut WorldSessionLock,
+    dimension: Dimension,
+    replacements: &[((i32, i32), &[u8])],
+) -> io::Result<()> {
     lock.verify()?;
+    let (first, _) = replacements
+        .first()
+        .ok_or_else(|| invalid("Anvil region update must contain chunks"))?;
+    let (cx, cz) = *first;
     let root = lock.world_dir().to_path_buf();
     let dim_root = match dimension {
         Dimension::Overworld => root,
@@ -148,7 +182,6 @@ pub(crate) fn rewrite_chunk_under_lock(
     if !fs::symlink_metadata(&source)?.file_type().is_file() {
         return Err(invalid("refusing non-regular or symlinked Anvil region"));
     }
-    crate::legacy_region::inspect_region(&source)?;
     let before = fs::read(&source)?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -158,11 +191,10 @@ pub(crate) fn rewrite_chunk_under_lock(
         ".industrial1710-region-cow-{}-{nonce}",
         std::process::id()
     ));
-    // create_dir must fail if a stale/malicious stage already exists.
     fs::create_dir(&stage)?;
     let destination = stage.join(&filename);
     let result = (|| -> io::Result<()> {
-        rewrite_chunk_create_only(&source, &destination, cx, cz, replacement_nbt)?;
+        rewrite_chunks_create_only(&source, &destination, replacements)?;
         lock.verify()?;
         let current = fs::symlink_metadata(&source)?;
         if !current.file_type().is_file()
@@ -171,8 +203,6 @@ pub(crate) fn rewrite_chunk_under_lock(
         {
             return Err(invalid("Anvil source changed during copy-on-write rewrite"));
         }
-        // Rename is atomic inside a filesystem; the old file is never
-        // truncated in place. On unsupported filesystems/OS this fails closed.
         fs::rename(&destination, &source)?;
         #[cfg(unix)]
         File::open(&region_dir)?.sync_all()?;
@@ -332,4 +362,82 @@ mod tests {
         assert!(!destination.with_extension("creating").exists());
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn locked_batch_updates_two_chunks_and_preserves_unmodified_nbt() {
+        let root = setup();
+        let world = root.join("world");
+        let source = world.join("region/r.0.0.mca");
+        let mut original = Region::from_stream(File::open(&source).unwrap()).unwrap();
+        let untouched = original.read_chunk(0, 1).unwrap().unwrap();
+        let mut first = legacy_nbt::parse_chunk(
+            &original.read_chunk(0, 0).unwrap().unwrap(),
+            0,
+            0,
+        )
+        .unwrap();
+        first.level.extra.insert(
+            "UnknownBatchA".into(),
+            Value::String("retained-a".into()),
+        );
+        let mut second = legacy_nbt::parse_chunk(
+            &original.read_chunk(1, 0).unwrap().unwrap(),
+            1,
+            0,
+        )
+        .unwrap();
+        second.level.extra.insert(
+            "UnknownBatchB".into(),
+            Value::String("retained-b".into()),
+        );
+        let a = fastnbt::to_bytes(&first).unwrap();
+        let b = fastnbt::to_bytes(&second).unwrap();
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+        rewrite_chunks_under_lock(
+            &mut lock,
+            Dimension::Overworld,
+            &[((0, 0), &a), ((1, 0), &b)],
+        )
+        .unwrap();
+        let mut actual = Region::from_stream(File::open(&source).unwrap()).unwrap();
+        assert_eq!(actual.read_chunk(0, 0).unwrap().unwrap(), a);
+        assert_eq!(actual.read_chunk(1, 0).unwrap().unwrap(), b);
+        assert_eq!(actual.read_chunk(0, 1).unwrap().unwrap(), untouched);
+        assert!(lock.verify().is_ok());
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_preflight_rejects_cross_region_duplicate_and_bad_nbt() {
+        let root = setup();
+        let source = root.join("world/region/r.0.0.mca");
+        let dest = root.join("out/r.0.0.mca");
+        let before = fs::read(&source).unwrap();
+        let mut input = Region::from_stream(File::open(&source).unwrap()).unwrap();
+        let a = input.read_chunk(0, 0).unwrap().unwrap();
+        assert!(rewrite_chunks_create_only(&source, &dest, &[]).is_err());
+        assert!(rewrite_chunks_create_only(
+            &source,
+            &dest,
+            &[((0, 0), &a), ((32, 0), &a)],
+        )
+        .is_err());
+        assert!(rewrite_chunks_create_only(
+            &source,
+            &dest,
+            &[((0, 0), &a), ((0, 0), &a)],
+        )
+        .is_err());
+        assert!(rewrite_chunks_create_only(
+            &source,
+            &dest,
+            &[((0, 0), &a), ((1, 0), b"invalid NBT")],
+        )
+        .is_err());
+        assert_eq!(fs::read(&source).unwrap(), before);
+        assert!(!dest.exists());
+        assert!(!dest.with_extension("creating").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }
