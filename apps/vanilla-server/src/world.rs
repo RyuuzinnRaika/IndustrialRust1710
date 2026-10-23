@@ -825,6 +825,13 @@ impl World {
                 10 | 11 => 10,
                 _ => continue,
             };
+            // Water cannot be placed normally in the Nether. Remove any
+            // imported or leftover flowing water during the next bounded
+            // fluid update without allowing it to spread first.
+            if id == 8 && self.dimension() == crate::dimensions::Dimension::Nether {
+                changes.insert((x, y as u8, z), 0);
+                continue;
+            }
             let mut level = block & 15;
             // One level per horizontal step in the Nether; two for lava
             // elsewhere, and one for water in every dimension.
@@ -1236,6 +1243,11 @@ impl World {
         block: u16,
     ) -> io::Result<bool> {
         if !in_bounds(x, y, z) || block >> 4 > 255 {
+            return Ok(false);
+        }
+        // Vanilla 1.7.10 water bucket evaporation: reject placement before
+        // creating a persisted water block in the Nether.
+        if self.dimension() == crate::dimensions::Dimension::Nether && matches!(block >> 4, 8 | 9) {
             return Ok(false);
         }
         let previous = self.get(x, y, z);
@@ -2169,6 +2181,23 @@ mod tests {
         w.block_tick(&path, 64).unwrap();
         assert_eq!(w.get(12, 64, 0), 0);
         assert_eq!(World::load(&path).unwrap().get(0, 64, 0), (59 << 4) | 7);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn nether_rejects_placed_water_and_cleans_imported_water_on_tick() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-nether-water-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Nether);
+        assert!(!world.update_and_save(&path, 0, 110, 0, 8 << 4).unwrap());
+        assert!(!path.exists(), "rejected water must not cause a disk write");
+
+        world.import_block(0, 110, 0, 9 << 4).unwrap();
+        let changed = world.block_tick(&path, 64).unwrap();
+        assert!(changed.contains(&(0, 110, 0)));
+        assert_eq!(world.get(0, 110, 0), 0);
+        assert_eq!(World::load(&path).unwrap().get(0, 110, 0), 0);
         fs::remove_file(path).unwrap();
     }
 
