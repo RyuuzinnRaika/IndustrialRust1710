@@ -2656,15 +2656,15 @@ mod tests {
     fn anvil_shift_repair_charges_xp_once_and_preserves_remaining_material() {
         let mut inv = Inventory::default();
         let pick = Stack {
-                id: 257,
-                count: 1,
-                damage: 100,
-            };
+            id: 257,
+            count: 1,
+            damage: 100,
+        };
         let iron = Stack {
-                id: 265,
-                count: 4,
-                damage: 0,
-            };
+            id: 265,
+            count: 4,
+            damage: 0,
+        };
         inv.slots[9] = Some(pick);
         inv.slots[10] = Some(iron);
         let mut xp = crate::experience::Experience { total: 300 };
@@ -2688,15 +2688,15 @@ mod tests {
     #[test]
     fn anvil_shift_output_is_atomic_when_inventory_is_full_or_xp_is_short() {
         let pick = Stack {
-                id: 257,
-                count: 1,
-                damage: 100,
-            };
+            id: 257,
+            count: 1,
+            damage: 100,
+        };
         let iron = Stack {
-                id: 265,
-                count: 3,
-                damage: 0,
-            };
+            id: 265,
+            count: 3,
+            damage: 0,
+        };
         let mut inv = Inventory::default();
         inv.anvil_inputs = [Some(pick), Some(iron)];
         for slot in 9..45 {
@@ -2722,10 +2722,10 @@ mod tests {
     fn anvil_shift_withdraw_keeps_stack_when_player_slots_are_full() {
         let mut inv = Inventory::default();
         let iron = Stack {
-                id: 265,
-                count: 3,
-                damage: 0,
-            };
+            id: 265,
+            count: 3,
+            damage: 0,
+        };
         inv.anvil_inputs[1] = Some(iron);
         for slot in 9..45 {
             inv.slots[slot] = Some(Stack {
