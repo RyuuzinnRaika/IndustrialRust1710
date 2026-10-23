@@ -4,7 +4,7 @@ use super::{in_bounds, Position, World};
 use std::collections::BTreeMap;
 
 fn solid(id: u16) -> bool {
-    !matches!(id, 0 | 6 | 8..=11 | 18 | 20 | 31 | 37..=40 | 50 | 55 | 59
+    !matches!(id, 0 | 6 | 8..=11 | 18 | 20 | 161 | 31 | 37..=40 | 50 | 55 | 59
         | 63 | 66 | 69 | 70 | 72 | 75..=78 | 83 | 93 | 94 | 96
         | 104 | 105 | 107 | 115 | 127 | 141 | 142 | 143 | 149 | 150)
 }
@@ -184,7 +184,7 @@ impl World {
                 let next = (px + dx, py + dy, pz + dz);
                 match self.get(next.0, next.1, next.2) >> 4 {
                     17 | 162 => return true,
-                    18 if depth < 3 && seen.insert(next) => {
+                    18 | 161 if depth < 3 && seen.insert(next) => {
                         queue.push_back((next.0, next.1, next.2, depth + 1));
                     }
                     _ => {}
@@ -508,7 +508,8 @@ impl World {
                         self.grow_tree(x, height, z, &mut changes);
                     }
                 }
-                18 if !self.leaf_connected(x, height, z) => {
+                // Bit 3 marks player-placed / persistent leaves in 1.7.10.
+                18 | 161 if block & 8 == 0 && !self.leaf_connected(x, height, z) => {
                     changes.insert((x, y, z), 0);
                 }
                 _ => {}
@@ -542,6 +543,31 @@ mod regression_tests {
         }
         too_far.import_block(5, 65, 0, 17 << 4).unwrap();
         assert!(!too_far.leaf_connected(0, 65, 0));
+    }
+
+    #[test]
+    fn new_leaves_decay_and_both_leaf_species_share_log_paths() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, 161 << 4).unwrap();
+        world.import_block(1, 65, 0, 18 << 4).unwrap();
+        world.import_block(2, 65, 0, 162 << 4).unwrap();
+        assert!(world.leaf_connected(0, 65, 0));
+        assert!(world.leaf_connected(1, 65, 0));
+        world.import_block(2, 65, 0, 0).unwrap();
+        assert!(!world.leaf_connected(0, 65, 0));
+        assert_eq!(world.ecology_changes(64).get(&(0, 65, 0)), Some(&0));
+        assert_eq!(world.ecology_changes(64).get(&(1, 65, 0)), Some(&0));
+    }
+
+    #[test]
+    fn persistent_legacy_and_new_leaves_never_decay_without_logs() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, (18 << 4) | 8).unwrap();
+        world.import_block(1, 65, 0, (161 << 4) | 9).unwrap();
+        let changes = world.ecology_changes(64);
+        assert!(!changes.contains_key(&(0, 65, 0)));
+        assert!(!changes.contains_key(&(1, 65, 0)));
+        assert!(!solid(161), "new leaves must not support solid attachments");
     }
 
     #[test]

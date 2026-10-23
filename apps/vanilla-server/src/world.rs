@@ -658,7 +658,7 @@ impl World {
             }
             if matches!(
                 id,
-                6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
+                6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142 | 161
             ) {
                 self.pending_ecology.insert(pos);
             } else {
@@ -748,7 +748,7 @@ impl World {
             for dz in -4..=4 {
                 for dy in -4..=4 {
                     let (nx, ny, nz) = (x + dx, y + dy, z + dz);
-                    if in_bounds(nx, ny, nz) && self.get(nx, ny, nz) >> 4 == 18 {
+                    if in_bounds(nx, ny, nz) && matches!(self.get(nx, ny, nz) >> 4, 18 | 161) {
                         self.pending_ecology.insert((nx, ny as u8, nz));
                     }
                 }
@@ -1021,7 +1021,7 @@ impl World {
                         64 if old & 8 == 0 => 324,
                         71 if old & 8 == 0 => 330,
                         96 => 96,
-                        18 => {
+                        18 | 161 => {
                             return crate::survival::additional_drop(old, pos, self.fluid_phase)
                                 .map(|stack| WorldDrop { pos, stack });
                         }
@@ -1141,15 +1141,16 @@ impl World {
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
             }
-        } else if tnt_changed
+        } else if !self.comparator_ready.is_empty()
+            || tnt_changed
             || (!self.primed_tnt.is_empty() && self.fluid_phase.is_multiple_of(20))
         {
-            // Persist the fuse once per second even without terrain edits;
-            // also durably remove TNT that exploded in otherwise empty air.
-            // This uses the existing 20TPS block_tick, never a second loop.
+            // Analog-only updates need a successful save even when the
+            // comparator's on/off block ID has not changed.
             if let Err(error) = self.save(path) {
                 self.primed_tnt = primed_before;
                 self.tnt_events.truncate(tnt_events_before);
+                self.comparator_ready.clear();
                 return Err(error);
             }
         }
@@ -1426,7 +1427,7 @@ impl World {
             }
             if matches!(
                 block >> 4,
-                6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142
+                6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142 | 161
             ) {
                 world.pending_ecology.insert((x, y, z));
             }
