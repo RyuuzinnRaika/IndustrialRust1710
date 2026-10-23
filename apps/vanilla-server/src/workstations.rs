@@ -35,30 +35,37 @@ pub fn bookshelf_count(mut block: impl FnMut(i32, i32, i32) -> u16) -> u8 {
     found.min(15)
 }
 
-/// Deterministic 1.7.10 enchanting cost offers. The caller owns the seed:
-/// each reroll must be server-originated; clients cannot choose level costs.
-/// This is NOT an enchantment writer. It only computes the three displayed costs.
-#[allow(dead_code)] // D35 GUI/enchanted-item binding follows generic NBT support
+/// Three 1.7.10 enchanting offer levels using java.util.Random's 48-bit
+/// LCG and nextInt(bound), not a substitute xorshift distribution.
+/// Seed is server-owned; this does NOT create enchanted ItemStack NBT.
 pub fn enchanting_costs(shelves: u8, seed: u64) -> [u8; 3] {
-    let n = u32::from(shelves.min(15));
-    let mut state = seed;
-    let mut sample = |limit: u32| {
-        // Fast deterministic, bounded xorshift sequence; not security-sensitive.
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        ((state >> 16) as u32) % (limit + 1)
+    let shelves = u32::from(shelves.min(15));
+    let mut state = (seed ^ 0x5DEECE66Du64) & ((1u64 << 48) - 1);
+    let mut next_int = |bound: u32| -> u32 {
+        assert!(bound > 0);
+        loop {
+            state = state.wrapping_mul(0x5DEECE66D).wrapping_add(11) & ((1u64 << 48) - 1);
+            let bits = (state >> 17) as u32; // Java Random.next(31)
+            if bound.is_power_of_two() {
+                return ((u64::from(bits) * u64::from(bound)) >> 31) as u32;
+            }
+            let value = bits % bound;
+            if u64::from(bits - value) + u64::from(bound - 1) <= i32::MAX as u64 {
+                return value;
+            }
+        }
     };
     let mut costs = [0u8; 3];
     for (option, cost) in costs.iter_mut().enumerate() {
-        let base = 1 + sample(7) + (n >> 1) + sample(n);
-        *cost = match option {
+        let base = 1 + next_int(8) + (shelves >> 1) + next_int(shelves + 1);
+        let level = match option {
             0 => (base / 3).max(1),
             1 => 2 * base / 3 + 1,
-            _ => base.max(2 * n),
-        } as u8;
+            _ => base.max(2 * shelves),
+        };
+        // Vanilla hides an offer below the minimum for its row.
+        *cost = if level < option as u32 + 1 { 0 } else { level as u8 };
     }
-    costs
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,6 +175,14 @@ mod tests {
             }
         };
         assert_eq!(bookshelf_count(all), 15);
+    }
+    #[test]
+    fn java_random_enchant_offer_vectors_match_1710_rule() {
+        assert_eq!(enchanting_costs(0, 0), [2, 2, 6]);
+        assert_eq!(enchanting_costs(15, 42), [4, 9, 30]);
+        assert_eq!(enchanting_costs(15, 0), [8, 13, 30]);
+        assert_eq!(enchanting_costs(4, 12345), [1, 9, 13]);
+        assert_eq!(enchanting_costs(1, 10), [2, 3, 0]);
     }
     #[test]
     fn costs_are_bounded_and_repeatable() {
