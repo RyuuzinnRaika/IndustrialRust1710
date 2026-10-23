@@ -34,14 +34,22 @@ pub(crate) struct TileInventoryPatch {
 fn supported_container(id: &str) -> bool {
     matches!(
         id,
-        "Chest" | "Trap" | "Dispenser" | "Dropper" | "Furnace"
-            | "Hopper" | "BrewingStand" | "Cauldron"
+        "Chest"
+            | "Trap"
+            | "Dispenser"
+            | "Dropper"
+            | "Furnace"
+            | "Hopper"
+            | "BrewingStand"
+            | "Cauldron"
     )
 }
 
 fn checked_dir(path: &Path) -> io::Result<()> {
     if !fs::symlink_metadata(path)?.file_type().is_dir() {
-        return Err(invalid("Anvil dimension or region path is not a real directory"));
+        return Err(invalid(
+            "Anvil dimension or region path is not a real directory",
+        ));
     }
     Ok(())
 }
@@ -98,7 +106,9 @@ pub(crate) fn rewrite_inventories_under_lock(
             || patch.z.unsigned_abs() > 30_000_000
             || !supported_container(&patch.expected_id)
         {
-            return Err(invalid("invalid or unsupported TileEntity inventory identity"));
+            return Err(invalid(
+                "invalid or unsupported TileEntity inventory identity",
+            ));
         }
         if (patch.x.div_euclid(512), patch.z.div_euclid(512)) != expected_region {
             return Err(invalid("TileEntity update crosses Anvil region boundary"));
@@ -218,18 +228,24 @@ mod tests {
     fn seed(root: &Path, lock: &mut WorldSessionLock) -> Value {
         let region_path = root.join("world/region/r.0.0.mca");
         let mut region = Region::from_stream(File::open(region_path).unwrap()).unwrap();
-        let mut c0 = legacy_nbt::parse_chunk(&region.read_chunk(0, 0).unwrap().unwrap(), 0, 0)
-            .unwrap();
-        let mut c1 = legacy_nbt::parse_chunk(&region.read_chunk(1, 0).unwrap().unwrap(), 1, 0)
-            .unwrap();
+        let mut c0 =
+            legacy_nbt::parse_chunk(&region.read_chunk(0, 0).unwrap().unwrap(), 0, 0).unwrap();
+        let mut c1 =
+            legacy_nbt::parse_chunk(&region.read_chunk(1, 0).unwrap().unwrap(), 1, 0).unwrap();
         let untouched = tile("CustomTile", 1, 65, 0, "custom-must-survive");
-        c0.level.tile_entities = vec![tile("Chest", 0, 64, 0, "chest-must-survive"), untouched.clone()];
+        c0.level.tile_entities = vec![
+            tile("Chest", 0, 64, 0, "chest-must-survive"),
+            untouched.clone(),
+        ];
         c1.level.tile_entities = vec![tile("Furnace", 16, 64, 0, "furnace-must-survive")];
         let a = fastnbt::to_bytes(&c0).unwrap();
         let b = fastnbt::to_bytes(&c1).unwrap();
         crate::legacy_region_rewrite::rewrite_chunks_under_lock(
-            lock, Dimension::Overworld, &[((0, 0), &a), ((1, 0), &b)],
-        ).unwrap();
+            lock,
+            Dimension::Overworld,
+            &[((0, 0), &a), ((1, 0), &b)],
+        )
+        .unwrap();
         untouched
     }
 
@@ -251,12 +267,20 @@ mod tests {
         assert_eq!(c0.level.tile_entities[1], untouched);
         for (original, id, slot, marker) in [
             (&c0.level.tile_entities[0], "Chest", 2, "chest-must-survive"),
-            (&c1.level.tile_entities[0], "Furnace", 1, "furnace-must-survive"),
+            (
+                &c1.level.tile_entities[0],
+                "Furnace",
+                1,
+                "furnace-must-survive",
+            ),
         ] {
             let decoded = decode_tile(original).unwrap();
             assert_eq!(decoded.id, id);
             assert_eq!(decoded.items.unwrap()[0].slot, slot);
-            assert_eq!(decoded.extra.get("UnknownModTag"), Some(&Value::String(marker.into())));
+            assert_eq!(
+                decoded.extra.get("UnknownModTag"),
+                Some(&Value::String(marker.into()))
+            );
         }
         assert!(lock.verify().is_ok());
         drop(region);
@@ -280,9 +304,9 @@ mod tests {
             vec![patch("CustomTile", 1, 65, 0, 0)],
         ];
         for patches in bad_cases {
-            assert!(rewrite_inventories_under_lock(
-                &mut lock, Dimension::Overworld, &patches
-            ).is_err());
+            assert!(
+                rewrite_inventories_under_lock(&mut lock, Dimension::Overworld, &patches).is_err()
+            );
             assert_eq!(fs::read(&source).unwrap(), before);
         }
         // Java-style session.lock tampering rejects even a valid edit.
@@ -291,7 +315,8 @@ mod tests {
             &mut lock,
             Dimension::Overworld,
             &[patch("Chest", 0, 64, 0, 2)],
-        ).is_err());
+        )
+        .is_err());
         assert_eq!(fs::read(&source).unwrap(), before);
         drop(lock);
         fs::remove_dir_all(root).unwrap();
