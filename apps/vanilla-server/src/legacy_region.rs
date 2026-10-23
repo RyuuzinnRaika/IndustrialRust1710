@@ -52,7 +52,6 @@ fn decompress(chunk: &[u8], compression: u8) -> io::Result<Vec<u8>> {
 /// Check all chunk sector mappings (including unused sectors), their coordinate
 /// claims and legacy numeric block/NBT layouts without modifying the input.
 pub(crate) fn inspect_region(path: &Path) -> io::Result<usize> {
-    let (rx, rz) = coordinates(path)?;
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_REGION_SIZE {
         return Err(invalid("Anvil region is not a bounded regular file"));
