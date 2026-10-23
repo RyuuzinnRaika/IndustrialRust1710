@@ -1598,10 +1598,8 @@ impl World {
             for y in 0..16 {
                 for z in 0..16 {
                     for x in (0..16).step_by(2) {
-                        let a =
-                            self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z);
-                        let b =
-                            self.get(chunk_x * 16 + x + 1, section * 16 + y, chunk_z * 16 + z);
+                        let a = self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z);
+                        let b = self.get(chunk_x * 16 + x + 1, section * 16 + y, chunk_z * 16 + z);
                         bytes.push((a >> 4) as u8);
                         bytes.push((b >> 4) as u8);
                         metadata.push((a as u8 & 15) | ((b as u8 & 15) << 4));
