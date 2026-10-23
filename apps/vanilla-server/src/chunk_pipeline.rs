@@ -1,4 +1,4 @@
-//! Bounded, two-worker 1.7.10 chunk compression pipeline.
+//! Bounded, CPU-adaptive (one to four worker) 1.7.10 chunk compression pipeline.
 //! Raw world snapshots are produced under the world lock by the caller;
 //! CPU-intensive zlib compression never holds that lock.
 use flate2::write::ZlibEncoder;
