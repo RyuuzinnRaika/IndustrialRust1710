@@ -91,6 +91,73 @@ pub(crate) fn rewrite_inventories_under_lock(
     dimension: Dimension,
     changes: &[TileInventoryPatch],
 ) -> io::Result<()> {
+    rewrite_inventories_impl(lock, dimension, changes, None)
+}
+
+/// Atomically persist an existing chest's Anvil inventory with the typed
+/// native chest sidecar. This opt-in bridge rejects NBT tags that the native
+/// Stack representation cannot preserve and requires identical inventory
+/// contents in both formats. It is not wired to live world saves.
+pub(crate) fn rewrite_chests_with_sidecar_under_lock(
+    lock: &mut WorldSessionLock,
+    dimension: Dimension,
+    world_file: &Path,
+    native_chests: &crate::chests::Chests,
+    changes: &[TileInventoryPatch],
+) -> io::Result<()> {
+    if changes.is_empty() {
+        return Err(invalid("chest transaction cannot be empty"));
+    }
+    for patch in changes {
+        if patch.expected_id != "Chest" {
+            return Err(invalid("native chest sidecar cannot store other TileEntity types"));
+        }
+        let mut expected = [None; crate::chests::CHEST_SLOTS];
+        for item in &patch.items {
+            if item.slot < 0
+                || item.slot as usize >= expected.len()
+                || item.tag.is_some()
+                || !item.extra.is_empty()
+            {
+                return Err(invalid("native chest cannot represent NBT item extras or slot"));
+            }
+            let slot = &mut expected[item.slot as usize];
+            if slot.is_some() {
+                return Err(invalid("duplicate chest slot"));
+            }
+            if item.count <= 0 {
+                return Err(invalid("invalid chest item count"));
+            }
+            let stack = crate::inventory::Stack {
+                id: item.id,
+                count: item.count as u8,
+                damage: item.damage,
+            };
+            if !stack.is_valid() {
+                return Err(invalid("invalid native chest stack"));
+            }
+            *slot = Some(stack);
+        }
+        if native_chests.slots((patch.x, patch.y, patch.z)) != expected {
+            return Err(invalid("Anvil and native chest snapshot mismatch"));
+        }
+    }
+    let encoded = native_chests.encoded()?;
+    let sidecar = crate::chests::Chests::location(world_file);
+    rewrite_inventories_impl(
+        lock,
+        dimension,
+        changes,
+        Some((world_file, sidecar.as_path(), encoded.as_slice())),
+    )
+}
+
+fn rewrite_inventories_impl(
+    lock: &mut WorldSessionLock,
+    dimension: Dimension,
+    changes: &[TileInventoryPatch],
+    paired: Option<(&Path, &Path, &[u8])>,
+) -> io::Result<()> {
     let first = changes
         .first()
         .ok_or_else(|| invalid("TileEntity update cannot be empty"))?;
@@ -163,12 +230,24 @@ pub(crate) fn rewrite_inventories_under_lock(
         .iter()
         .map(|(coords, bytes)| (*coords, bytes.as_slice()))
         .collect();
-    crate::legacy_region_rewrite::rewrite_chunks_under_lock_expected(
-        lock,
-        dimension,
-        &refs,
-        Some(&expected_bytes),
-    )
+    if let Some((world_file, sidecar, serialized)) = paired {
+        crate::legacy_region_rewrite::rewrite_chunks_with_sidecar_under_lock_expected(
+            lock,
+            dimension,
+            &refs,
+            Some(&expected_bytes),
+            world_file,
+            sidecar,
+            serialized,
+        )
+    } else {
+        crate::legacy_region_rewrite::rewrite_chunks_under_lock_expected(
+            lock,
+            dimension,
+            &refs,
+            Some(&expected_bytes),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +397,77 @@ mod tests {
         )
         .is_err());
         assert_eq!(fs::read(&source).unwrap(), before);
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn anvil_chest_and_native_sidecar_commit_together_without_unknown_tag_loss() {
+        use crate::chests::Chests;
+        use crate::inventory::Stack;
+        let root = fixture_root();
+        let world = root.join("world");
+        let world_file = world.join("flat.irw");
+        World::new().save_new(&world_file).unwrap();
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+        seed(&root, &mut lock);
+        let mut updated = [None; crate::chests::CHEST_SLOTS];
+        updated[2] = Some(Stack {
+            id: 264,
+            count: 3,
+            damage: 0,
+        });
+        let native = Chests::default()
+            .staged_update((0, 64, 0), updated)
+            .unwrap();
+        let patch = TileInventoryPatch {
+            x: 0,
+            y: 64,
+            z: 0,
+            expected_id: "Chest".into(),
+            items: vec![SlotItem {
+                slot: 2,
+                id: 264,
+                count: 3,
+                damage: 0,
+                tag: None,
+                extra: BTreeMap::new(),
+            }],
+        };
+        let region = world.join("region/r.0.0.mca");
+        let before = fs::read(&region).unwrap();
+        let sidecar = Chests::location(&world_file);
+        // Reject mismatched snapshots without altering either participant.
+        assert!(rewrite_chests_with_sidecar_under_lock(
+            &mut lock,
+            Dimension::Overworld,
+            &world_file,
+            &Chests::default(),
+            std::slice::from_ref(&patch),
+        )
+        .is_err());
+        assert_eq!(fs::read(&region).unwrap(), before);
+        assert!(!sidecar.exists());
+
+        rewrite_chests_with_sidecar_under_lock(
+            &mut lock,
+            Dimension::Overworld,
+            &world_file,
+            &native,
+            &[patch],
+        )
+        .unwrap();
+        assert_eq!(Chests::load(&sidecar).unwrap().slots((0, 64, 0)), updated);
+        let mut opened = Region::from_stream(File::open(&region).unwrap()).unwrap();
+        let chunk =
+            legacy_nbt::parse_chunk(&opened.read_chunk(0, 0).unwrap().unwrap(), 0, 0).unwrap();
+        let tile = decode_tile(&chunk.level.tile_entities[0]).unwrap();
+        assert_eq!(tile.items.unwrap()[0].slot, 2);
+        assert_eq!(
+            tile.extra.get("UnknownModTag"),
+            Some(&Value::String("chest-must-survive".into()))
+        );
+        assert!(!world_file.with_extension("pending-txn.json").exists());
+        drop(opened);
         drop(lock);
         fs::remove_dir_all(root).unwrap();
     }
