@@ -318,9 +318,9 @@ impl Mob {
         }
         let roll = hash(self.id as u64 ^ self.hit_tick.rotate_left(17) ^ 0xb52c8c91);
         let (id, count) = match self.kind {
-            Kind::Cow => (334, (roll % 3) as u8),       // 0–2 leather
-            Kind::Chicken => (288, (roll % 3) as u8),   // 0–2 feathers
-            Kind::Skeleton => (262, (roll % 3) as u8),  // 0–2 arrows
+            Kind::Cow => (334, (roll % 3) as u8),      // 0–2 leather
+            Kind::Chicken => (288, (roll % 3) as u8),  // 0–2 feathers
+            Kind::Skeleton => (262, (roll % 3) as u8), // 0–2 arrows
             _ => return Vec::new(),
         };
         if count == 0 {
@@ -3443,6 +3443,7 @@ mod tests {
         mobs.insert_sized(Kind::Slime, at, false, 4);
         let parent = mobs.entities.remove(&(mobs.next_id - 1)).unwrap();
         assert!(!mobs.split(parent).is_empty());
+        mobs.enabled = true;
         mobs.next_id = 1_000_000;
         assert!(mobs.hatch_egg(&world, at).is_none());
         assert!(mobs.summon_boss(&world, 64, at).is_none());
