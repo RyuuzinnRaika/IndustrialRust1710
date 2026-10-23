@@ -70,6 +70,7 @@ pub fn enchanting_costs(shelves: u8, seed: u64) -> [u8; 3] {
             level as u8
         };
     }
+    costs
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
