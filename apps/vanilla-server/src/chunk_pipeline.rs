@@ -16,7 +16,12 @@ const SUBMIT_TIMEOUT: Duration = Duration::from_millis(100);
 /// Cap wall-clock time spent on a batch of compressed chunks for one client.
 /// The session is disconnected on expiry, instead of hanging on a dead worker.
 pub const BATCH_DEADLINE: Duration = Duration::from_secs(15);
-const WORKERS: usize = 2;
+// Chunk zlib jobs run outside the World lock. Bound parallel compression to
+// avoid starving the 20Hz world thread or inflating in-flight memory on large hosts.
+const MAX_WORKERS: usize = 4;
+fn worker_count(available: usize) -> usize {
+    available.clamp(1, MAX_WORKERS)
+}
 const MAX_RAW_CHUNK_BYTES: usize = 16 * 10_240 + 256;
 static WORK: OnceLock<SyncSender<Job>> = OnceLock::new();
 
@@ -93,7 +98,9 @@ fn sender() -> &'static SyncSender<Job> {
     WORK.get_or_init(|| {
         let (tx, rx) = mpsc::sync_channel::<Job>(QUEUE_CAPACITY);
         let shared = Arc::new(Mutex::new(rx));
-        for index in 0..WORKERS {
+        let workers =
+            worker_count(thread::available_parallelism().map_or(2, |parallel| parallel.get()));
+        for index in 0..workers {
             let queue = Arc::clone(&shared);
             thread::Builder::new()
                 .name(format!("ir-chunk-encoder-{index}"))
@@ -250,6 +257,15 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap().x, 1); // No eviction/reordering.
         enqueue(&tx, make_job(3), Duration::ZERO).unwrap();
         assert_eq!(rx.try_recv().unwrap().x, 3);
+    }
+
+    #[test]
+    fn adaptive_workers_remain_bounded_by_cpu_and_memory_budget() {
+        assert_eq!(worker_count(0), 1);
+        assert_eq!(worker_count(1), 1);
+        assert_eq!(worker_count(2), 2);
+        assert_eq!(worker_count(4), 4);
+        assert_eq!(worker_count(128), MAX_WORKERS);
     }
 
     #[test]
