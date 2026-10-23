@@ -2639,7 +2639,8 @@ mod tests {
         });
         assert!(inv.anvil_click_window(1, 0, 0, &mut xp, true));
         let old = inv.anvil_preview().unwrap();
-        assert!(!inv.anvil_click_window(2, 0, 1, &mut xp, true));
+        // Right-clicking result is still unsupported; Shift-click is now implemented.
+        assert!(!inv.anvil_click_window(2, 1, 0, &mut xp, true));
         assert_eq!(xp.total, 34);
         assert_eq!(inv.cursor, None);
         assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
