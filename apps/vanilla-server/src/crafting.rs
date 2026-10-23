@@ -529,6 +529,20 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[86], &[50]]) {
         return product(91, 1, 0); // jack o'lantern
     }
+    if matches(&[&[287, 287], &[287, 287]]) {
+        return product(35, 1, 0); // four string produce undyed white wool
+    }
+    if w == 2 && h == 1 {
+        if let (Some(left), Some(right)) = (at(0, 0), at(1, 0)) {
+            if left.id == 35
+                && right.id == 35
+                && (0..=15).contains(&left.damage)
+                && left.damage == right.damage
+            {
+                return product(171, 3, left.damage); // matching wool -> colored carpet
+            }
+        }
+    }
     if matches(&[&[336, 336], &[336, 336]]) {
         return product(45, 1, 0); // brick block
     }
@@ -886,6 +900,26 @@ mod tests {
             product(278, 1, 0)
         );
     }
+    #[test]
+    fn java_1710_wool_and_carpet_preserve_legacy_color_metadata() {
+        assert_eq!(result(&[item(287); 4], 2), product(35, 1, 0));
+        for color in 0..16 {
+            let wool = product(35, 1, color);
+            assert_eq!(result(&[wool, wool, None, None], 2), product(171, 3, color));
+            assert_eq!(result(&[None, None, None, wool, wool, None, None, None, None], 3),
+                       product(171, 3, color));
+        }
+        assert_eq!(
+            result(&[product(35, 1, 1), product(35, 1, 2), None, None], 2),
+            None
+        );
+        assert_eq!(
+            result(&[product(35, 1, 16), product(35, 1, 16), None, None], 2),
+            None
+        );
+        assert_eq!(result(&[item(287), item(287), None, None], 2), None);
+    }
+
     #[test]
     fn java_1710_recipes_conserve_items_and_reject_modern_patterns() {
         let iron_door = [
