@@ -6,6 +6,10 @@
 
 # Never commit private server access lists or worlds.
 /whitelist.json
+/ops.json
+/banned-players.json
+/banned-ips.json
+/player-permissions.json
 /world/
 
 # Mojang game files / generated worlds / server identities; never redistribute.
