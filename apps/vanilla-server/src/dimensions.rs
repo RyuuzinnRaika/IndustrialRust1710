@@ -604,7 +604,6 @@ mod tests {
         assert_eq!(portal_target(&world, 0, -1, 0), None);
         fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn end_entry_requires_all_twelve_filled_frames() {
         let root = std::env::temp_dir().join(format!(
@@ -634,7 +633,6 @@ mod tests {
         assert_eq!(portal_target(&world, 1, 75, 1), None);
         fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn nether_arrival_never_uses_bedrock_roof() {
         let nether = World::expanded(17, Dimension::Nether);
@@ -650,7 +648,6 @@ mod tests {
         assert!(arrival.is_none_or(|position| position.y <= 120.0));
         assert!(destination(Dimension::Overworld, Dimension::Overworld, 0.0, 64.0, 0.0).is_none());
     }
-
     #[test]
     fn nether_overworld_scale_and_bounds() {
         let p = destination(Dimension::Overworld, Dimension::Nether, 160.0, 75.0, -80.0).unwrap();
@@ -755,7 +752,6 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn checkpoint_roundtrip() {
         let file = std::env::temp_dir().join(format!("ir1710-travel-{}.json", std::process::id()));
@@ -789,7 +785,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn preflight_rejects_corrupt_end_before_creating_other_dimensions() {
         let root = std::env::temp_dir().join(format!(
@@ -812,7 +807,6 @@ mod tests {
         assert!(expected.path(Dimension::End).exists());
         fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn preflight_rejects_unsafe_paths_and_vanilla_world_without_writes() {
         let root = std::env::temp_dir().join(format!(
@@ -840,7 +834,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
-            symlink(root.join("missing-world"), manager.path(Dimension::Overworld)).unwrap();
+            symlink(
+                root.join("missing-world"),
+                manager.path(Dimension::Overworld),
+            )
+            .unwrap();
             assert_eq!(
                 DimensionWorlds::load_all(manager.clone())
                     .unwrap_err()
@@ -860,7 +858,6 @@ mod tests {
         assert!(!manager.path(Dimension::Overworld).exists());
         fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn preflight_loads_existing_world_and_creates_only_missing_dimensions() {
         let root = std::env::temp_dir().join(format!(
@@ -875,7 +872,14 @@ mod tests {
             .update_and_save(&manager.path(Dimension::Nether), 8, 65, 8, 49 << 4)
             .unwrap();
         let worlds = DimensionWorlds::load_all(manager.clone()).unwrap();
-        assert_eq!(worlds.world(Dimension::Nether).lock().unwrap().get(8, 65, 8), 49 << 4);
+        assert_eq!(
+            worlds
+                .world(Dimension::Nether)
+                .lock()
+                .unwrap()
+                .get(8, 65, 8),
+            49 << 4
+        );
         for dim in [Dimension::Overworld, Dimension::Nether, Dimension::End] {
             assert!(worlds.path(dim).is_file());
             assert_eq!(
@@ -885,7 +889,6 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
-
 
     #[test]
     fn pending_dimension_save_recovers_all_three_worlds_before_loading() {
@@ -940,7 +943,6 @@ mod tests {
         assert!(!root.join("dimensions.pending-txn.json").exists());
         fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn multi_world_handles_are_isolated_and_survive_reload() {
         let root = std::env::temp_dir().join(format!(
