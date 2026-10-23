@@ -303,26 +303,25 @@ mod tests {
     fn dispenser_uses_correct_object_types_and_has_no_player_owner() {
         let mut objects = Throwables::default();
         let origin = (0, 70, 0);
-        for (id, kind, direction) in [
-            (332, 61u8, (1, 0, 0)),
-            (344, 62u8, (0, 0, -1)),
-        ] {
+        for (id, kind, direction) in [(332, 61u8, (1, 0, 0)), (344, 62u8, (0, 0, -1))] {
             let (at, spawn) = objects.launch_dispenser(id, origin, direction).unwrap();
             let mut packet = spawn.body.as_slice();
             assert_eq!(spawn.id, 0x0e);
             assert!(legacy_protocol::read_varint(&mut packet).is_ok());
             assert_eq!(packet[0], kind);
-            assert_eq!(
-                i32::from_be_bytes(packet[15..19].try_into().unwrap()),
-                -1
-            );
+            assert_eq!(i32::from_be_bytes(packet[15..19].try_into().unwrap()), -1);
             assert!(at.is_valid());
         }
-        assert_eq!(objects.snapshot(PlayerPosition {
-            x: 0.5,
-            y: 70.0,
-            z: 0.5,
-        }).len(), 2);
+        assert_eq!(
+            objects
+                .snapshot(PlayerPosition {
+                    x: 0.5,
+                    y: 70.0,
+                    z: 0.5,
+                })
+                .len(),
+            2
+        );
         assert!(!objects.can_launch_dispenser(368, origin, (1, 0, 0)));
         assert!(!objects.can_launch_dispenser(332, origin, (1, 1, 0)));
         assert!(!objects.can_launch_dispenser(344, origin, (0, 0, 0)));
@@ -332,10 +331,14 @@ mod tests {
     fn dispenser_rejects_full_registry_without_mutation() {
         let mut objects = Throwables::default();
         for _ in 0..CAP {
-            assert!(objects.launch_dispenser(332, (0, 70, 0), (1, 0, 0)).is_some());
+            assert!(objects
+                .launch_dispenser(332, (0, 70, 0), (1, 0, 0))
+                .is_some());
         }
         let count = objects.active.len();
-        assert!(objects.launch_dispenser(344, (0, 70, 0), (0, 1, 0)).is_none());
+        assert!(objects
+            .launch_dispenser(344, (0, 70, 0), (0, 1, 0))
+            .is_none());
         assert_eq!(objects.active.len(), count);
     }
 
