@@ -285,9 +285,7 @@ mod tests {
         fs::create_dir_all(outside.join("region")).unwrap();
         symlink(&outside, world.join("DIM-1")).unwrap();
         let mut lock = WorldSessionLock::acquire(&world).unwrap();
-        assert!(
-            rewrite_chunk_under_lock(&mut lock, Dimension::Nether, 0, 0, b"invalid").is_err()
-        );
+        assert!(rewrite_chunk_under_lock(&mut lock, Dimension::Nether, 0, 0, b"invalid").is_err());
         assert!(!outside.join("region/r.0.0.mca").exists());
         drop(lock);
         fs::remove_dir_all(root).unwrap();
