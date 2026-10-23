@@ -138,7 +138,9 @@ impl Kind {
             Self::MagmaCube if size > 1 => return None,
             Self::MagmaCube => 378,
             Self::IronGolem => 265,
-            Self::Villager | Self::EnderDragon | Self::Wither => return None,
+            // Vanilla 1.7.10 Wither boss always drops one Nether Star.
+            Self::Wither => 399,
+            Self::Villager | Self::EnderDragon => return None,
         };
         Some(Stack {
             id,
@@ -3432,6 +3434,24 @@ mod tests {
                 .iter()
                 .any(|packet| packet.id == 0x0e && packet.body.contains(&kind.protocol())));
         }
+    }
+
+    #[test]
+    fn wither_death_drops_exactly_one_nether_star() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        mobs.insert(Kind::Wither, at, false);
+        let wither = *mobs.entities.values().next().unwrap();
+        let (star, position) = wither.death_drop().expect("Nether Star reward");
+        assert_eq!(star.id, 399);
+        assert_eq!(star.count, 1);
+        assert_eq!(position, (0, 65, 0));
+        assert_eq!(wither.experience_on_player_kill(), 50);
+        assert!(Kind::EnderDragon.drop(1).is_none());
     }
 
     #[test]
