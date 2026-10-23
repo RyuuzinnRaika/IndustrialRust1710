@@ -274,6 +274,7 @@ impl Hub {
     /// Legacy single-world admission. Explicit multiworld routing must call
     /// `add_in_dimension` so identical coordinates in other dimensions do
     /// not create ghost player entities.
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
     pub fn add(
         &self,
         name: String,
@@ -395,6 +396,7 @@ impl Hub {
     /// this only manages peer visibility. Global tab-list entries remain.
     /// Invalid coordinates or same-dimension transitions are rejected without
     /// mutating any player state.
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
     pub fn change_dimension(
         &self,
         id: i32,
@@ -441,6 +443,7 @@ impl Hub {
         Ok(true)
     }
 
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
     pub fn positions_in_dimension(&self, dimension: Dimension) -> io::Result<Vec<PlayerPosition>> {
         let inner = self.0.lock().map_err(|_| poisoned())?;
         Ok(inner
@@ -451,6 +454,7 @@ impl Hub {
             .collect())
     }
 
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
     pub fn participants_in_dimension(
         &self,
         dimension: Dimension,
@@ -465,6 +469,7 @@ impl Hub {
     }
 
     /// Dimension-aware packet fanout for world-owned game events.
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
     pub fn broadcast_in_dimension_view(
         &self,
         dimension: Dimension,
@@ -480,6 +485,7 @@ impl Hub {
         }
     }
 
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
     pub fn broadcast_in_dimension(&self, dimension: Dimension, packet: Event) {
         if let Ok(inner) = self.0.lock() {
             for peer in inner.players.values() {
