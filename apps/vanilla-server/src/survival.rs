@@ -179,7 +179,7 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
     let (id, count) = match block >> 4 {
         18 if block & 3 == 0 && roll.is_multiple_of(200) => (260, 1), // Oak apple
         161 if block & 3 == 1 && roll.is_multiple_of(200) => (260, 1), // Dark oak apple
-        18 | 161 if roll.is_multiple_of(20) => (6, 1), // Matching sapling
+        18 | 161 if roll.is_multiple_of(20) => (6, 1),                // Matching sapling
         59 if block & 7 == 7 => (295, 1 + (roll % 3) as u8),
         141 if block & 7 == 7 => (391, 1 + (roll % 3) as u8),
         142 if block & 7 == 7 => (392, 1 + (roll % 3) as u8),
@@ -372,10 +372,12 @@ mod tests {
             } else {
                 (block & 3) as i16
             };
-            let sapling = (0..10_000).find_map(|tick| {
-                let drop = additional_drop(block, (1, 65, 2), tick)?;
-                (drop.id == 6).then_some(drop)
-            }).expect("each leaf species should drop its matching sapling");
+            let sapling = (0..10_000)
+                .find_map(|tick| {
+                    let drop = additional_drop(block, (1, 65, 2), tick)?;
+                    (drop.id == 6).then_some(drop)
+                })
+                .expect("each leaf species should drop its matching sapling");
             assert_eq!(sapling.damage, expected);
         }
     }
