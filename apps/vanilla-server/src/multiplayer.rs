@@ -1,6 +1,7 @@
 //! Small bounded multiplayer state for Minecraft Java 1.7.10 / Protocol 5.
 //! Wire packet structure is independently encoded from the public 1.7 protocol.
 //! No Pumpkin code is copied or linked.
+use crate::dimensions::Dimension;
 use crate::player::PlayerPosition;
 use crate::world::VIEW_DISTANCE;
 use legacy_protocol::{write_string, write_varint};
@@ -31,6 +32,8 @@ pub struct Peer {
     pub name: String,
     pub uuid: String,
     pub position: PlayerPosition,
+    /// Entity visibility is isolated by dimension, not by coordinates alone.
+    pub dimension: Dimension,
     tx: SyncSender<Event>,
     overloaded: Arc<AtomicBool>,
 }
@@ -268,11 +271,26 @@ impl Hub {
             .map(|peer| (peer.id, peer.position))
             .collect())
     }
+    /// Legacy single-world admission. Explicit multiworld routing must call
+    /// `add_in_dimension` so identical coordinates in other dimensions do
+    /// not create ghost player entities.
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
     pub fn add(
         &self,
         name: String,
         uuid: String,
         position: PlayerPosition,
+    ) -> Result<(i32, Receiver<Event>, Vec<Peer>), JoinError> {
+        self.add_in_dimension(name, uuid, position, Dimension::Overworld)
+    }
+
+    pub fn add_in_dimension(
+        &self,
+        name: String,
+        uuid: String,
+        position: PlayerPosition,
+        dimension: Dimension,
     ) -> Result<(i32, Receiver<Event>, Vec<Peer>), JoinError> {
         let mut inner = self.0.lock().map_err(|_| JoinError::Full)?;
         if inner.players.len() >= MAX_PLAYERS {
@@ -298,6 +316,7 @@ impl Hub {
             name,
             uuid,
             position,
+            dimension,
             tx,
             overloaded: Arc::new(AtomicBool::new(false)),
         };
@@ -306,7 +325,7 @@ impl Hub {
         let entity = spawn(&peer).map_err(|_| JoinError::Full)?;
         for other in &existing {
             enqueue(other, &presence);
-            if visible(&other.position, &peer.position) {
+            if other.dimension == peer.dimension && visible(&other.position, &peer.position) {
                 enqueue(other, &entity);
             }
         }
@@ -319,7 +338,7 @@ impl Hub {
                 let removed = list_entry(&gone.name, false).ok();
                 let entity = destroy(id);
                 for peer in inner.players.values() {
-                    if visible(&peer.position, &gone.position) {
+                    if peer.dimension == gone.dimension && visible(&peer.position, &gone.position) {
                         enqueue(peer, &entity);
                     }
                     if let Some(item) = &removed {
@@ -339,7 +358,7 @@ impl Hub {
                 let appeared = spawn(&moved).ok();
                 let vanished = destroy(id);
                 for other in inner.players.values() {
-                    if other.id == id {
+                    if other.id == id || other.dimension != moved.dimension {
                         continue;
                     }
                     // Notify *both* directions of the visibility transition.
@@ -372,9 +391,120 @@ impl Hub {
             }
         }
     }
-    /// Broadcast ephemeral entity/projectile effects only to clients whose
-    /// loaded 5x5 chunk view includes the originating position. Persistent
-    /// entities still require a separate spawn/despawn interest index.
+    /// Atomically move the server's player-interest membership across
+    /// dimensions. The session layer MUST prepare the destination world,
+    /// persist player state and send Protocol 5 Respawn/chunks independently;
+    /// this only manages peer visibility. Global tab-list entries remain.
+    /// Invalid coordinates or same-dimension transitions are rejected without
+    /// mutating any player state.
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
+    pub fn change_dimension(
+        &self,
+        id: i32,
+        dimension: Dimension,
+        position: PlayerPosition,
+    ) -> io::Result<bool> {
+        if !position.is_valid() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid arrival position",
+            ));
+        }
+        let mut inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(current) = inner.players.get_mut(&id) else {
+            return Ok(false);
+        };
+        if current.dimension == dimension {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "source and destination dimensions match",
+            ));
+        }
+        let departing = current.clone();
+        current.dimension = dimension;
+        current.position = position;
+        let arriving = current.clone();
+        let arrival_spawn = spawn(&arriving)?;
+        let departure_destroy = destroy(id);
+        for other in inner.players.values() {
+            if other.id == id {
+                continue;
+            }
+            if other.dimension == departing.dimension
+                && visible(&other.position, &departing.position)
+            {
+                enqueue(other, &departure_destroy);
+                enqueue(&arriving, &destroy(other.id));
+            }
+            if other.dimension == dimension && visible(&other.position, &position) {
+                enqueue(other, &arrival_spawn);
+                enqueue(&arriving, &spawn(other)?);
+            }
+        }
+        Ok(true)
+    }
+
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
+    pub fn positions_in_dimension(&self, dimension: Dimension) -> io::Result<Vec<PlayerPosition>> {
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        Ok(inner
+            .players
+            .values()
+            .filter(|peer| peer.dimension == dimension)
+            .map(|peer| peer.position)
+            .collect())
+    }
+
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
+    pub fn participants_in_dimension(
+        &self,
+        dimension: Dimension,
+    ) -> io::Result<Vec<(i32, PlayerPosition)>> {
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        Ok(inner
+            .players
+            .values()
+            .filter(|peer| peer.dimension == dimension)
+            .map(|peer| (peer.id, peer.position))
+            .collect())
+    }
+
+    /// Dimension-aware packet fanout for world-owned game events.
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
+    pub fn broadcast_in_dimension_view(
+        &self,
+        dimension: Dimension,
+        origin: PlayerPosition,
+        packet: Event,
+    ) {
+        if let Ok(inner) = self.0.lock() {
+            for peer in inner.players.values() {
+                if peer.dimension == dimension && visible(&peer.position, &origin) {
+                    enqueue(peer, &packet);
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
+    #[allow(dead_code)] // Staged API until live multiworld session routing is connected.
+    pub fn broadcast_in_dimension(&self, dimension: Dimension, packet: Event) {
+        if let Ok(inner) = self.0.lock() {
+            for peer in inner.players.values() {
+                if peer.dimension == dimension {
+                    enqueue(peer, &packet);
+                }
+            }
+        }
+    }
+
+    /// Single-world compatibility fanout. A multiworld loop must use the
+    /// explicit dimension-aware variant to avoid leaking entity packets.
+    /// Persistent entities still require a separate spawn/despawn index.
     pub fn broadcast_in_view(&self, origin: PlayerPosition, packet: Event) {
         if let Ok(inner) = self.0.lock() {
             for peer in inner.players.values() {
@@ -481,6 +611,105 @@ mod tests {
         assert!(b_rx.try_recv().is_err());
     }
 
+    #[test]
+    fn dimension_membership_isolates_entities_but_not_global_tab_list() {
+        let hub = Hub::default();
+        let pos = PlayerPosition::default();
+        let (alice, alice_rx, _) = hub
+            .add_in_dimension("Alice".into(), "uuid-a".into(), pos, Dimension::Overworld)
+            .unwrap();
+        let (bob, bob_rx, seen) = hub
+            .add_in_dimension("Bob".into(), "uuid-b".into(), pos, Dimension::Nether)
+            .unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].dimension, Dimension::Overworld);
+        assert_eq!(alice_rx.try_recv().unwrap().id, 0x38);
+        assert!(alice_rx.try_recv().is_err());
+        assert!(bob_rx.try_recv().is_err());
+        assert_eq!(
+            hub.positions_in_dimension(Dimension::Overworld)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            hub.participants_in_dimension(Dimension::Nether).unwrap()[0].0,
+            bob
+        );
+
+        hub.broadcast_in_dimension_view(
+            Dimension::Nether,
+            pos,
+            Event {
+                id: 0x22,
+                body: vec![1],
+            },
+        );
+        assert_eq!(bob_rx.try_recv().unwrap().id, 0x22);
+        assert!(alice_rx.try_recv().is_err());
+
+        assert!(hub.change_dimension(alice, Dimension::Nether, pos).unwrap());
+        assert_eq!(bob_rx.try_recv().unwrap().id, 0x0c);
+        assert_eq!(alice_rx.try_recv().unwrap().id, 0x0c);
+        assert_eq!(
+            hub.positions_in_dimension(Dimension::Overworld)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            hub.positions_in_dimension(Dimension::Nether).unwrap().len(),
+            2
+        );
+        assert!(hub.change_dimension(alice, Dimension::Nether, pos).is_err());
+        assert!(hub
+            .change_dimension(bob, Dimension::End, PlayerPosition { x: f64::NAN, ..pos })
+            .is_err());
+        assert_eq!(
+            hub.positions_in_dimension(Dimension::Nether).unwrap().len(),
+            2
+        );
+        hub.remove(alice);
+        assert_eq!(bob_rx.try_recv().unwrap().id, 0x13);
+    }
+
+    #[test]
+    fn dimension_change_destroys_old_visible_peers_and_spawns_new_peers() {
+        let hub = Hub::default();
+        let pos = PlayerPosition::default();
+        let (alice, alice_rx, _) = hub
+            .add_in_dimension("Alice".into(), "a".into(), pos, Dimension::Overworld)
+            .unwrap();
+        let (_cara, cara_rx, _) = hub
+            .add_in_dimension("Cara".into(), "c".into(), pos, Dimension::Overworld)
+            .unwrap();
+        // Clear Cara's initial spawn packet for Alice, and Alice's initial
+        // tab-list + Cara entity packets.
+        assert_eq!(alice_rx.try_recv().unwrap().id, 0x38);
+        assert_eq!(alice_rx.try_recv().unwrap().id, 0x0c);
+        let (_bob, bob_rx, _) = hub
+            .add_in_dimension("Bob".into(), "b".into(), pos, Dimension::Nether)
+            .unwrap();
+        assert_eq!(alice_rx.try_recv().unwrap().id, 0x38);
+        assert_eq!(cara_rx.try_recv().unwrap().id, 0x38);
+        assert!(hub.change_dimension(alice, Dimension::Nether, pos).unwrap());
+        assert_eq!(cara_rx.try_recv().unwrap().id, 0x13);
+        assert_eq!(alice_rx.try_recv().unwrap().id, 0x13);
+        assert_eq!(alice_rx.try_recv().unwrap().id, 0x0c);
+        assert_eq!(bob_rx.try_recv().unwrap().id, 0x0c);
+        assert!(cara_rx.try_recv().is_err());
+        assert!(bob_rx.try_recv().is_err());
+
+        hub.move_player(alice, PlayerPosition { x: 1.5, ..pos }, 0.0, 0.0);
+        assert_eq!(bob_rx.try_recv().unwrap().id, 0x18);
+        assert!(cara_rx.try_recv().is_err());
+        hub.remove(alice);
+        assert_eq!(bob_rx.try_recv().unwrap().id, 0x13);
+        // The global player tab-list must still notify other dimensions.
+        assert_eq!(bob_rx.try_recv().unwrap().id, 0x38);
+        assert_eq!(cara_rx.try_recv().unwrap().id, 0x38);
+        assert!(cara_rx.try_recv().is_err());
+    }
     #[test]
     fn queue_overflow_marks_session_unhealthy_instead_of_silent_desync() {
         let hub = Hub::default();
