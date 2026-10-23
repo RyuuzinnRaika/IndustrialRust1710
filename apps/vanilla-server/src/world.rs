@@ -1,6 +1,6 @@
 //! Bounded, sparse, deterministic flat world streamed by chunk.
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod devices;
 mod ecology;
 mod lighting;
@@ -18,6 +18,9 @@ pub const VIEW_DISTANCE: i32 = 2; // Send a 5x5 chunk window per connected playe
 pub const MIN_CHUNK: i32 = -WORLD_LIMIT / 16;
 pub const MAX_CHUNK: i32 = WORLD_LIMIT / 16 - 1;
 const MAX_EDITS: usize = 65_536;
+// A loaded 5x5 view contains at most 6_400 surface columns per player.
+// Keep weather observations bounded even after prolonged exploration.
+const MAX_WEATHER_COLUMNS: usize = 16_384;
 const MAGIC: &[u8; 4] = b"IRW1";
 const NATURAL_MAGIC: &[u8; 4] = b"IRW2";
 const BIOME_MAGIC: &[u8; 4] = b"IRW3";
@@ -43,6 +46,9 @@ pub struct World {
     pending_ecology: BTreeSet<Position>,
     // Weather surfaces are scheduled separately to avoid disturbing crop ticks.
     pending_weather: BTreeSet<Position>,
+    // FIFO eviction prevents long-running servers from retaining every
+    // cold column a player has ever loaded; does not create a new scheduler.
+    pending_weather_order: VecDeque<Position>,
     pending_devices: BTreeSet<Position>,
     pending_repeaters: BTreeMap<Position, (u64, bool)>,
     // Comparator analog output (0..15) is not encoded in block metadata.
@@ -433,6 +439,25 @@ impl World {
             Generation::Expanded(_, _) => None,
         }
     }
+    fn register_weather_column(&mut self, pos: Position) {
+        if self.pending_weather.contains(&pos) {
+            return;
+        }
+        if self.pending_weather.len() == MAX_WEATHER_COLUMNS {
+            if let Some(oldest) = self.pending_weather_order.pop_front() {
+                self.pending_weather.remove(&oldest);
+            }
+        }
+        self.pending_weather.insert(pos);
+        self.pending_weather_order.push_back(pos);
+    }
+
+    fn unregister_weather_column(&mut self, pos: Position) {
+        if self.pending_weather.remove(&pos) {
+            self.pending_weather_order.retain(|&stored| stored != pos);
+        }
+    }
+
     /// Keep natural, unedited weather columns near loaded client chunks
     /// eligible for snow/ice updates. The existing 20TPS world tick is the
     /// only scheduler; observing a chunk does not write or mutate its blocks.
@@ -464,11 +489,18 @@ impl World {
                     self.get(x, top, z) >> 4,
                     1 | 2 | 3 | 4 | 5 | 8 | 9 | 12 | 13 | 24 | 80
                 ) {
-                    self.pending_weather.insert((x, top as u8, z));
+                    self.register_weather_column((x, top as u8, z));
                 }
             }
         }
     }
+    /// Weather slots are bounded and evicted in observation order, without
+    /// affecting persistent terrain data or active redstone processing.
+    #[cfg(test)]
+    fn weather_tracking_len(&self) -> usize {
+        self.pending_weather.len()
+    }
+
     pub fn spawn_y(&self) -> f64 {
         match self.generation {
             Generation::Natural(seed) => f64::from(crate::terrain::surface(seed, 0, 0) + 1),
@@ -620,9 +652,9 @@ impl World {
                 self.pending_circuit.insert(pos);
             }
             if matches!(id, 2 | 3 | 8 | 9) {
-                self.pending_weather.insert(pos);
+                self.register_weather_column(pos);
             } else {
-                self.pending_weather.remove(&pos);
+                self.unregister_weather_column(pos);
             }
             if matches!(
                 id,
@@ -1390,7 +1422,7 @@ impl World {
                 world.pending_circuit.insert((x, y, z));
             }
             if matches!(block >> 4, 2 | 3 | 8 | 9) {
-                world.pending_weather.insert((x, y, z));
+                world.register_weather_column((x, y, z));
             }
             if matches!(
                 block >> 4,
@@ -2350,5 +2382,44 @@ mod group_b_regression_tests {
         assert_eq!(world.get(0, 65, 0), 0);
         assert_eq!(World::load(&path).unwrap().get(0, 65, 0), 0);
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod weather_observation_limits_tests {
+    use super::*;
+
+    #[test]
+    fn old_weather_columns_are_evicted_and_revisited_columns_are_recorded() {
+        let mut world = World::new();
+        // Exercise the actual legal coordinate range around zero.
+        let first_x = -(MAX_WEATHER_COLUMNS as i32) / 2;
+        for offset in 0..(MAX_WEATHER_COLUMNS as i32 + 20) {
+            world.register_weather_column((first_x + offset, 64, 0));
+        }
+        assert_eq!(world.weather_tracking_len(), MAX_WEATHER_COLUMNS);
+        assert_eq!(world.pending_weather_order.len(), MAX_WEATHER_COLUMNS);
+        assert!(!world.pending_weather.contains(&(first_x, 64, 0)));
+        assert!(world.pending_weather.contains(&(
+            first_x + MAX_WEATHER_COLUMNS as i32 + 19,
+            64,
+            0
+        )));
+        world.register_weather_column((first_x, 64, 0));
+        assert!(world.pending_weather.contains(&(first_x, 64, 0)));
+        assert!(!world.pending_weather.contains(&(first_x + 20, 64, 0)));
+    }
+
+    #[test]
+    fn block_replacement_removes_weather_registration_and_order_entry() {
+        let mut world = World::new();
+        world.register_weather_column((0, 64, 0));
+        world.register_weather_column((1, 64, 0));
+        world.unregister_weather_column((0, 64, 0));
+        assert_eq!(world.weather_tracking_len(), 1);
+        assert_eq!(world.pending_weather_order.len(), 1);
+        world.register_weather_column((0, 64, 0));
+        assert_eq!(world.pending_weather_order.len(), 2);
+        assert_eq!(world.pending_weather_order[0], (1, 64, 0));
     }
 }
