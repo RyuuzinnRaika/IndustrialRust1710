@@ -285,16 +285,53 @@ impl Mob {
         if (self.baby && self.kind.passive()) || (self.kind == Kind::Sheep && self.sheared) {
             return None;
         }
-        self.kind.drop(self.size).map(|stack| {
+        let mut stack = self.kind.drop(self.size)?;
+        // Vanilla 1.7.10 drops are not a guaranteed one item for every mob.
+        // Use a reproducible roll from the server-owned entity and death tick.
+        // Looting, rare drops and cooked loot are tracked separately in C26.
+        let roll = hash(self.id as u64 ^ self.hit_tick.rotate_left(17) ^ 0x2f56a163);
+        stack.count = match self.kind {
+            Kind::Cow | Kind::Pig => (1 + roll % 3) as u8,
+            Kind::Zombie | Kind::Skeleton | Kind::Creeper | Kind::Spider | Kind::CaveSpider => {
+                ((roll >> 4) % 3) as u8
+            }
+            Kind::Enderman | Kind::Ghast | Kind::Blaze => ((roll >> 6) % 2) as u8,
+            _ => stack.count,
+        };
+        (stack.count > 0).then_some(self.drop_stack(stack))
+    }
+    fn drop_stack(self, stack: Stack) -> (Stack, (i32, i32, i32)) {
+        (
+            stack,
             (
-                stack,
-                (
-                    self.position.x.floor() as i32,
-                    self.position.y.floor() as i32,
-                    self.position.z.floor() as i32,
-                ),
-            )
-        })
+                self.position.x.floor() as i32,
+                self.position.y.floor() as i32,
+                self.position.z.floor() as i32,
+            ),
+        )
+    }
+    /// Secondary common drops are separate server-owned stacks, never an
+    /// overwrite of the primary drop. Babies cannot produce adult loot.
+    fn extra_death_drops(self) -> Vec<(Stack, (i32, i32, i32))> {
+        if self.baby && self.kind.passive() {
+            return Vec::new();
+        }
+        let roll = hash(self.id as u64 ^ self.hit_tick.rotate_left(17) ^ 0xb52c8c91);
+        let (id, count) = match self.kind {
+            Kind::Cow => (334, (roll % 3) as u8),       // 0–2 leather
+            Kind::Chicken => (288, (roll % 3) as u8),   // 0–2 feathers
+            Kind::Skeleton => (262, (roll % 3) as u8),  // 0–2 arrows
+            _ => return Vec::new(),
+        };
+        if count == 0 {
+            Vec::new()
+        } else {
+            vec![self.drop_stack(Stack {
+                id,
+                count,
+                damage: 0,
+            })]
+        }
     }
     fn experience_on_player_kill(self) -> u16 {
         if self.baby && self.kind.passive() {
@@ -850,7 +887,11 @@ impl Mobs {
     }
     /// An egg impact may spawn one baby chicken, under the existing Mob cap.
     pub fn hatch_egg(&mut self, world: &World, at: PlayerPosition) -> Option<Event> {
-        if self.entities.len() >= 128 || !at.is_valid() || physics::collides(world, &at) {
+        if self.entities.len() >= MAX_LOADED_MOBS
+            || self.next_id >= 1_000_000
+            || !at.is_valid()
+            || physics::collides(world, &at)
+        {
             return None;
         }
         Some(self.insert(Kind::Chicken, at, true))
@@ -932,7 +973,8 @@ impl Mobs {
             events.push(multiplayer::destroy(victim_id));
             let roll = hash(now ^ zombie_id as u64 ^ victim_id as u64);
             if zombie_infects_villager(self.difficulty.unwrap_or(2), roll)
-                && self.entities.len() < 128
+                && self.entities.len() < MAX_LOADED_MOBS
+                && self.next_id < 1_000_000
             {
                 events.push(self.insert_zombie_villager(
                     victim.position,
@@ -957,6 +999,8 @@ impl Mobs {
         };
         if !position.is_valid()
             || !self.enabled
+            || self.entities.len() >= MAX_LOADED_MOBS
+            || self.next_id >= 1_000_000
             || self.difficulty == Some(0)
             || self.entities.values().any(|entity| entity.kind == creature)
             || (creature == Kind::EnderDragon
@@ -1001,7 +1045,7 @@ impl Mobs {
         let count = 2 + (hash(parent.id as u64 ^ self.last_tick) % 3) as usize;
         let mut events = Vec::new();
         for index in 0..count {
-            if self.entities.len() >= 128 {
+            if self.entities.len() >= MAX_LOADED_MOBS || self.next_id >= 1_000_000 {
                 break;
             }
             let angle = (index as f64) * std::f64::consts::TAU / count as f64;
@@ -1136,6 +1180,7 @@ impl Mobs {
                     if let Some(drop) = mob.death_drop() {
                         self.pending_drops.push(drop);
                     }
+                    self.pending_drops.extend(mob.extra_death_drops());
                     events.push(multiplayer::destroy(id));
                     events.extend(self.split(mob));
                 }
@@ -1173,6 +1218,7 @@ impl Mobs {
         };
         let mut result = result;
         if killed {
+            self.pending_drops.extend(mob.extra_death_drops());
             if let Some(parent) = self.entities.remove(&id) {
                 if parent.kind == Kind::EnderDragon {
                     self.dragon_defeated = true;
@@ -2198,6 +2244,7 @@ impl Mobs {
                         if let Some(drop) = mob.death_drop() {
                             self.pending_drops.push(drop);
                         }
+                        self.pending_drops.extend(mob.extra_death_drops());
                         events.push(mob.status(3));
                         dead.push(mob.id);
                         continue;
@@ -2488,6 +2535,7 @@ impl Mobs {
                             if let Some(drop) = enemy.death_drop() {
                                 self.pending_drops.push(drop);
                             }
+                            self.pending_drops.extend(enemy.extra_death_drops());
                             dead.push(victim);
                         }
                     }
@@ -2627,6 +2675,7 @@ impl Mobs {
                     if let Some(drop) = mob.death_drop() {
                         self.pending_drops.push(drop);
                     }
+                    self.pending_drops.extend(mob.extra_death_drops());
                     if player_shot {
                         earned_xp.push((mob.position, mob.experience_on_player_kill()));
                     }
@@ -3314,6 +3363,90 @@ mod tests {
         assert_eq!(natural_spawn_capacity(&[a, distant], 70), 140);
         assert_eq!(natural_spawn_capacity(&[a, distant], 10), 20);
         assert_eq!(natural_spawn_capacity(&[a, a], 70), 70);
+    }
+
+    #[test]
+    fn adult_loot_varies_with_entity_but_respects_vanilla_common_ranges() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut observed_cow_leather = false;
+        let mut observed_chicken_feathers = false;
+        for id in 500_000..500_080 {
+            for (kind, item_id, low, high) in [
+                (Kind::Cow, 363, 1, 3),
+                (Kind::Pig, 319, 1, 3),
+                (Kind::Chicken, 365, 1, 1),
+                (Kind::Sheep, 35, 1, 1),
+                (Kind::Wither, 399, 1, 1),
+            ] {
+                let mut mobs = Mobs::default();
+                mobs.next_id = id;
+                mobs.insert(kind, at, false);
+                let mob = mobs.entities[&id];
+                let (stack, _) = mob.death_drop().expect("adult primary drop");
+                assert_eq!(stack.id, item_id);
+                assert!((low..=high).contains(&stack.count));
+                for (extra, _) in mob.extra_death_drops() {
+                    assert!(extra.count >= 1 && extra.count <= 2);
+                    if kind == Kind::Cow {
+                        assert_eq!(extra.id, 334);
+                        observed_cow_leather = true;
+                    }
+                    if kind == Kind::Chicken {
+                        assert_eq!(extra.id, 288);
+                        observed_chicken_feathers = true;
+                    }
+                }
+            }
+        }
+        assert!(observed_cow_leather);
+        assert!(observed_chicken_feathers);
+    }
+
+    #[test]
+    fn a_player_kill_enqueues_secondary_loot_exactly_once() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.next_id = BASE_ID;
+        mobs.insert(Kind::Cow, at, false);
+        let id = mobs.next_id - 1;
+        mobs.entities.get_mut(&id).unwrap().health = 1;
+        let expected = mobs.entities[&id].extra_death_drops().len();
+        let hit = mobs.player_attack(id, at, None, 10).unwrap();
+        assert!(hit.drop.is_some());
+        assert_eq!(mobs.take_drops().len(), expected);
+        assert!(mobs.player_attack(id, at, None, 20).is_none());
+        assert!(mobs.take_drops().is_empty());
+    }
+
+    #[test]
+    fn eggs_and_slime_splits_share_the_current_loaded_mob_limit() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.next_id = BASE_ID;
+        for _ in 0..129 {
+            mobs.insert(Kind::Cow, at, false);
+        }
+        assert!(mobs.hatch_egg(&world, at).is_some());
+        mobs.insert_sized(Kind::Slime, at, false, 4);
+        let parent = mobs.entities.remove(&(mobs.next_id - 1)).unwrap();
+        assert!(!mobs.split(parent).is_empty());
+        mobs.next_id = 1_000_000;
+        assert!(mobs.hatch_egg(&world, at).is_none());
+        assert!(mobs.summon_boss(&world, 64, at).is_none());
+        assert!(mobs.split(parent).is_empty());
     }
 
     #[test]
