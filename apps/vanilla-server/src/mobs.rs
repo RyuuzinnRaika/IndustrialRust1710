@@ -292,6 +292,7 @@ impl Mob {
         let roll = hash(self.id as u64 ^ self.hit_tick.rotate_left(17) ^ 0x2f56a163);
         stack.count = match self.kind {
             Kind::Cow | Kind::Pig => (1 + roll % 3) as u8,
+            Kind::Horse => ((roll >> 4) % 3) as u8, // 0-2 leather, not guaranteed
             Kind::Zombie | Kind::Skeleton | Kind::Creeper | Kind::Spider | Kind::CaveSpider => {
                 ((roll >> 4) % 3) as u8
             }
@@ -315,6 +316,15 @@ impl Mob {
     fn extra_death_drops(self) -> Vec<(Stack, (i32, i32, i32))> {
         if self.baby && self.kind.passive() {
             return Vec::new();
+        }
+        // Saddles are persistent equipment, not random creature loot. Drop
+        // exactly one on death for both rideable species, never at despawn.
+        if self.saddled && matches!(self.kind, Kind::Pig | Kind::Horse) {
+            return vec![self.drop_stack(Stack {
+                id: 329,
+                count: 1,
+                damage: 0,
+            })];
         }
         let roll = hash(self.id as u64 ^ self.hit_tick.rotate_left(17) ^ 0xb52c8c91);
         let (id, count) = match self.kind {
@@ -1882,37 +1892,14 @@ impl Mobs {
                 {
                     continue;
                 }
-                match seed % 8 {
-                    0 | 1 => Kind::Cow,
-                    2 => Kind::Pig,
-                    3 | 4 => Kind::Sheep,
-                    5 if matches!(biome, 1 | 3 | 4 | 18) => Kind::Horse,
-                    _ => Kind::Chicken,
-                }
+                overworld_passive_kind(biome, hash(seed ^ 0x31acb4105ff327ab))
             } else {
                 if self.difficulty == Some(0) || hostile >= hostile_cap {
                     continue;
                 }
                 match dimension {
                     crate::dimensions::Dimension::Overworld => {
-                        if (is_slime_cave_location(world.natural_seed().unwrap_or(0), x, y, z)
-                            && (seed >> 24).is_multiple_of(16))
-                            || (biome == 6
-                                && (50..=70).contains(&y)
-                                && !sunlight(now)
-                                && (seed >> 25).is_multiple_of(12))
-                        {
-                            Kind::Slime
-                        } else {
-                            match seed % 16 {
-                                0..=4 => Kind::Zombie,
-                                5..=8 => Kind::Skeleton,
-                                9..=11 => Kind::Creeper,
-                                12..=13 => Kind::Spider,
-                                14 => Kind::Enderman,
-                                _ => Kind::Witch,
-                            }
-                        }
+                        overworld_monster_kind(hash(seed ^ 0xd1a7c4b500137e6d))
                     }
                     crate::dimensions::Dimension::Nether => {
                         // Blaze spawning is limited to the existing fortress substrate.
@@ -1955,7 +1942,7 @@ impl Mobs {
             // Once a species is selected, attempt a bounded same-species
             // pack. Recheck every proposed position: one safe center does not
             // make nearby blocks/biomes/light levels safe. This preserves the
-            // older server's CPU and snapshot guards (at most four per cycle).
+            // older server's CPU and snapshot guards (at most six per cycle).
             for member in 0..natural_pack_attempts(kind, seed) {
                 if self.entities.len() >= MAX_LOADED_MOBS || self.next_id >= 1_000_000 {
                     break;
@@ -2016,8 +2003,13 @@ impl Mobs {
                 }
                 if kind == Kind::Slime
                     && !is_slime_cave_location(world.natural_seed().unwrap_or(0), cx, cy, cz)
-                    && !(world.biome_at(cx, cz) == 6 && (50..=70).contains(&cy))
+                    && !(world.biome_at(cx, cz) == 6 && (50..=70).contains(&cy) && !sunlight(now))
                 {
+                    continue;
+                }
+                // A pack cannot extend a plains/savanna-only horse spawn into
+                // an adjacent forest or mountain biome.
+                if kind == Kind::Horse && horse_spawn_weight(world.biome_at(cx, cz)) == 0 {
                     continue;
                 }
                 let current_category = self
@@ -2827,14 +2819,52 @@ impl Mobs {
         }
     }
 }
-/// Java 1.7.10 commonly attempts packs of up to four, while the witch
-/// and ghast spawn lists are solitary. Keep the attempt budget deterministic
-/// and independent of the number of connected players.
+/// Minecraft 1.7.10 BiomeGenBase spawn entries: sheep/pig/chicken/cow
+/// weights 12/10/10/8. Plains add horses (weight 5); savannas (weight 1).
+/// The roll is supplied by the server, never by the client.
+fn horse_spawn_weight(biome: u8) -> u64 {
+    match biome {
+        1 | 129 => 5,             // Plains / sunflower plains
+        35 | 36 | 163 | 164 => 1, // Savanna and variants
+        _ => 0,
+    }
+}
+
+fn overworld_passive_kind(biome: u8, roll: u64) -> Kind {
+    let weight = horse_spawn_weight(biome);
+    match roll % (40 + weight) {
+        0..=11 => Kind::Sheep,
+        12..=21 => Kind::Pig,
+        22..=31 => Kind::Chicken,
+        32..=39 => Kind::Cow,
+        _ => Kind::Horse,
+    }
+}
+
+/// Minecraft 1.7.10 default hostile list: four common monsters and Slime
+/// each weight 100, Enderman weight 10, Witch weight 5 (total 515).
+/// A selected slime must still pass its chunk/swamp and light checks; an
+/// invalid species is not silently replaced with another kind.
+fn overworld_monster_kind(roll: u64) -> Kind {
+    match roll % 515 {
+        0..=99 => Kind::Spider,
+        100..=199 => Kind::Zombie,
+        200..=299 => Kind::Skeleton,
+        300..=399 => Kind::Creeper,
+        400..=499 => Kind::Slime,
+        500..=509 => Kind::Enderman,
+        _ => Kind::Witch,
+    }
+}
+
+/// Attempt the species-specific 1.7.10 pack size. Every attempt independently
+/// checks collision, biome, distance, light and both resource limits.
 fn natural_pack_attempts(kind: Kind, seed: u64) -> usize {
-    if matches!(kind, Kind::Witch | Kind::Ghast) {
-        1
-    } else {
-        1 + ((seed >> 40) % 4) as usize
+    match kind {
+        Kind::Witch | Kind::Ghast => 1,
+        Kind::Enderman => 1 + ((seed >> 40) % 4) as usize,
+        Kind::Horse => 2 + ((seed >> 40) % 5) as usize,
+        _ => 4,
     }
 }
 
@@ -3339,13 +3369,92 @@ mod tests {
     #[test]
     fn natural_pack_attempts_are_bounded_and_species_specific() {
         for seed in [0, 1u64 << 40, 2u64 << 40, 3u64 << 40, u64::MAX] {
-            assert!((1..=4).contains(&natural_pack_attempts(Kind::Zombie, seed)));
-            assert!((1..=4).contains(&natural_pack_attempts(Kind::Sheep, seed)));
+            assert_eq!(natural_pack_attempts(Kind::Zombie, seed), 4);
+            assert_eq!(natural_pack_attempts(Kind::Sheep, seed), 4);
+            assert!((1..=4).contains(&natural_pack_attempts(Kind::Enderman, seed)));
+            assert!((2..=6).contains(&natural_pack_attempts(Kind::Horse, seed)));
             assert_eq!(natural_pack_attempts(Kind::Ghast, seed), 1);
             assert_eq!(natural_pack_attempts(Kind::Witch, seed), 1);
         }
-        assert_eq!(natural_pack_attempts(Kind::Zombie, 0), 1);
-        assert_eq!(natural_pack_attempts(Kind::Zombie, 3u64 << 40), 4);
+        assert_eq!(natural_pack_attempts(Kind::Horse, 0), 2);
+        assert_eq!(natural_pack_attempts(Kind::Horse, 4u64 << 40), 6);
+    }
+
+    #[test]
+    fn overworld_spawn_entries_use_species_weights_not_uniform_selection() {
+        for (kind, expected) in [
+            (Kind::Spider, 100),
+            (Kind::Zombie, 100),
+            (Kind::Skeleton, 100),
+            (Kind::Creeper, 100),
+            (Kind::Slime, 100),
+            (Kind::Enderman, 10),
+            (Kind::Witch, 5),
+        ] {
+            assert_eq!(
+                (0..515)
+                    .filter(|roll| overworld_monster_kind(*roll) == kind)
+                    .count(),
+                expected,
+                "{kind:?}"
+            );
+        }
+        for (kind, expected) in [
+            (Kind::Sheep, 12),
+            (Kind::Pig, 10),
+            (Kind::Chicken, 10),
+            (Kind::Cow, 8),
+        ] {
+            assert_eq!(
+                (0..40)
+                    .filter(|roll| overworld_passive_kind(4, *roll) == kind)
+                    .count(),
+                expected,
+                "{kind:?}"
+            );
+        }
+        assert_eq!(
+            (0..45)
+                .filter(|roll| overworld_passive_kind(1, *roll) == Kind::Horse)
+                .count(),
+            5
+        );
+        assert_eq!(
+            (0..41)
+                .filter(|roll| overworld_passive_kind(35, *roll) == Kind::Horse)
+                .count(),
+            1
+        );
+        for biome in [2, 3, 4, 18, 21] {
+            assert_eq!(horse_spawn_weight(biome), 0);
+            assert!((0..256).all(|roll| overworld_passive_kind(biome, roll) != Kind::Horse));
+        }
+    }
+
+    #[test]
+    fn adult_horses_drop_zero_to_two_leather_not_always_one() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut observed = [false; 3];
+        for id in BASE_ID..BASE_ID + 256 {
+            let mut state = Mobs {
+                next_id: id,
+                ..Mobs::default()
+            };
+            state.insert(Kind::Horse, at, false);
+            let horse = state.entities[&id];
+            if let Some((leather, _)) = horse.death_drop() {
+                assert_eq!(leather.id, 334);
+                assert!((1..=2).contains(&leather.count));
+                observed[leather.count as usize] = true;
+            } else {
+                observed[0] = true;
+            }
+        }
+        assert!(observed.iter().all(|seen| *seen));
     }
 
     #[test]
@@ -3458,6 +3567,33 @@ mod tests {
         assert!(mobs.fire_arrow(None, at, 0.0, 0.0, 1.0, 1).is_none());
         assert!(mobs.summon_boss(&world, 64, at).is_none());
         assert!(mobs.split(parent).is_empty());
+    }
+
+    #[test]
+    fn saddled_horses_and_pigs_return_one_saddle_on_death() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        for kind in [Kind::Horse, Kind::Pig] {
+            let mut mobs = Mobs {
+                next_id: BASE_ID,
+                ..Mobs::default()
+            };
+            mobs.insert(kind, at, false);
+            let id = mobs.next_id - 1;
+            let animal = mobs.entities.get_mut(&id).unwrap();
+            animal.saddled = true;
+            animal.health = 1;
+            assert!(mobs.player_attack(id, at, None, 20).is_some());
+            let loot = mobs.take_drops();
+            assert_eq!(loot.len(), 1);
+            assert_eq!(loot[0].0.id, 329);
+            assert_eq!(loot[0].0.count, 1);
+            assert!(mobs.player_attack(id, at, None, 40).is_none());
+            assert!(mobs.take_drops().is_empty());
+        }
     }
 
     #[test]
