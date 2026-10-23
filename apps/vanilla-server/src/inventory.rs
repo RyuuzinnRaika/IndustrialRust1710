@@ -2760,7 +2760,9 @@ mod tests {
         assert_eq!(inv.enchant_input.unwrap().count, 1);
         assert!(!inv.enchanting_click_window(0, 0, 0));
         inv.slots[9] = inv.cursor.take();
-        assert!(inv.enchanting_click_window(0, 1, 0));
+        // Normal pickup returns the escrowed book to the cursor;
+        // shift-click instead places it in player inventory.
+        assert!(inv.enchanting_click_window(0, 0, 0));
         assert_eq!(inv.enchant_input, None);
         assert_eq!(inv.cursor.unwrap().count, 1);
         assert_eq!(inv.slots[9].unwrap().count, 3);
