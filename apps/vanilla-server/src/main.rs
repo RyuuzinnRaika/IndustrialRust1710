@@ -4744,7 +4744,16 @@ fn handle(
     let mut experience_state = Experience::load(&experience_file)?;
     let achievements_file = player_file.with_extension("achievements.json");
     let mut achievements_state = Achievements::load(&achievements_file)?;
-    let (entity_id, events, previous) = match hub.add(name.clone(), uuid.clone(), player_state) {
+    let admission_dimension = world
+        .lock()
+        .map_err(|_| bad("world mutex poisoned"))?
+        .dimension();
+    let (entity_id, events, previous) = match hub.add_in_dimension(
+        name.clone(),
+        uuid.clone(),
+        player_state,
+        admission_dimension,
+    ) {
         Ok(result) => result,
         Err(JoinError::Full) => {
             login_disconnect(&mut s, "Server is full.")?;
@@ -4819,7 +4828,9 @@ fn handle(
     for other in &previous {
         let list = multiplayer::list_entry(&other.name, true)?;
         send(&mut s, list.id, &list.body)?;
-        if multiplayer::visible(&player_state, &other.position) {
+        if other.dimension == admission_dimension
+            && multiplayer::visible(&player_state, &other.position)
+        {
             let spawn = multiplayer::spawn(other)?;
             send(&mut s, spawn.id, &spawn.body)?;
         }
