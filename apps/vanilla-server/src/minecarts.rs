@@ -11,6 +11,9 @@ use std::collections::BTreeMap;
 const FIRST_ID: i32 = 1_500_000;
 const MAX_CARTS: usize = 64;
 
+type RailCell = (i32, i32, i32);
+type RailSample = (u16, u16, f64, bool, RailCell);
+
 #[derive(Clone, Debug)]
 struct Cart {
     id: i32,
@@ -106,10 +109,10 @@ fn straight_track(
     world: &World,
     at: PlayerPosition,
     axis: Option<bool>,
-) -> Option<(u16, u16, f64, bool, (i32, i32, i32))> {
+) -> Option<RailSample> {
     let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
     let base = (at.y - 0.5).floor() as i32;
-    let mut selected: Option<(u16, u16, f64, bool, (i32, i32, i32), f64)> = None;
+    let mut selected: Option<(RailSample, f64)> = None;
     for y in [base, base - 1, base + 1] {
         let block = world.get(x, y, z);
         let (id, meta) = (block >> 4, block & 15);
@@ -134,11 +137,11 @@ fn straight_track(
         if distance > 0.51 {
             continue;
         }
-        if selected.is_none_or(|candidate| distance < candidate.5) {
-            selected = Some((id, meta, height, east_west, (x, y, z), distance));
+        if selected.is_none_or(|candidate| distance < candidate.1) {
+            selected = Some(((id, meta, height, east_west, (x, y, z)), distance));
         }
     }
-    selected.map(|(id, meta, height, axis, cell, _)| (id, meta, height, axis, cell))
+    selected.map(|(sample, _)| sample)
 }
 
 impl Cart {
