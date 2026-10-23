@@ -213,7 +213,7 @@ mod tests {
         world.import_block(1, 64, 0, 1 << 4).unwrap();
         let low = PlayerPosition { x: 0.5, y: 64.0, z: 0.5 };
         let mut pos = PlayerPosition { x: 1.5, y: 65.0, z: 0.5 };
-        for _ in 0..8 {
+        while (pos.x - low.x).abs() > 1e-6 {
             pos = advance_step(&world, pos, low, 0.24).expect("walk off ledge safely");
             assert!(!physics::collides(&world, &pos));
             assert!(physics::supported(&world, &pos));
