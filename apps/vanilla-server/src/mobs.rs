@@ -665,31 +665,61 @@ fn sky_exposed(world: &World, p: PlayerPosition) -> bool {
 /// Sample nine rays across a target's body. Solid blocks attenuate the
 /// exposure before damage is distributed to players and mobs.
 fn blast_exposure(world: &World, from: PlayerPosition, to: PlayerPosition) -> f64 {
+    // Sample all three axes of a standing entity, not a single X/Y plane.
+    // A shielding wall to the north/south must attenuate damage just like
+    // a corresponding east/west wall. Bound the work to 27 short rays.
     let mut clear = 0u8;
     for ox in [-0.3, 0.0, 0.3] {
-        for height in [0.1, 0.9, 1.6] {
-            let target = PlayerPosition {
-                x: to.x + ox,
-                y: to.y + height,
-                z: to.z,
-            };
-            let span = distance_3d(from, target);
-            let steps = (span * 3.0).ceil().max(1.0) as usize;
-            let blocked = (1..steps).any(|n| {
-                let t = n as f64 / steps as f64;
-                let (x, y, z) = (
-                    (from.x + (target.x-from.x)*t).floor() as i32,
-                    (from.y + (target.y-from.y)*t).floor() as i32,
-                    (from.z + (target.z-from.z)*t).floor() as i32,
-                );
-                !matches!(world.get(x,y,z) >> 4, 0 | 6 | 8..=11 | 18 | 30 | 31 | 37..=40 | 50 | 55 | 59 | 63 | 65 | 66 | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 83 | 90 | 106 | 111)
-            });
-            if !blocked {
-                clear += 1;
+        for oz in [-0.3, 0.0, 0.3] {
+            for height in [0.1, 0.9, 1.6] {
+                let target = PlayerPosition {
+                    x: to.x + ox,
+                    y: to.y + height,
+                    z: to.z + oz,
+                };
+                let span = distance_3d(from, target);
+                let steps = (span * 3.0).ceil().max(1.0) as usize;
+                let blocked = (1..steps).any(|n| {
+                    let t = n as f64 / steps as f64;
+                    let (x, y, z) = (
+                        (from.x + (target.x - from.x) * t).floor() as i32,
+                        (from.y + (target.y - from.y) * t).floor() as i32,
+                        (from.z + (target.z - from.z) * t).floor() as i32,
+                    );
+                    !matches!(
+                        world.get(x, y, z) >> 4,
+                        0 | 6
+                            | 8..=11
+                            | 18
+                            | 30
+                            | 31
+                            | 37..=40
+                            | 50
+                            | 55
+                            | 59
+                            | 63
+                            | 65
+                            | 66
+                            | 69
+                            | 70
+                            | 72
+                            | 75
+                            | 76
+                            | 77
+                            | 78
+                            | 83
+                            | 90
+                            | 106
+                            | 111
+                    )
+                });
+                if !blocked {
+                    clear += 1;
+                }
             }
         }
     }
-    f64::from(clear) / 9.0
+    f64::from(clear) / 27.0
 }
 fn blast_damage(world: &World, blast: &Explosion, target: PlayerPosition) -> u8 {
     let dist = distance_3d(blast.position, target);
@@ -2603,7 +2633,7 @@ impl Mobs {
                     y: previous.y + (next.y - previous.y) * t,
                     z: previous.z + (next.z - previous.z) * t,
                 };
-                if !sample.is_valid() || physics::collides(world, &sample) {
+                if !sample.is_valid() || physics::projectile_collides(world, &sample) {
                     if matches!(
                         arrow.kind,
                         ProjectileKind::GhastFireball | ProjectileKind::WitherSkull
@@ -4437,6 +4467,33 @@ mod tests {
         }
         assert!(blast_damage(&world, &blast, target) < clear);
     }
+    #[test]
+    fn explosion_exposure_samples_both_horizontal_axes_symmetrically() {
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 66.0,
+            z: 0.5,
+        };
+        let east = PlayerPosition { x: 4.5, ..from };
+        let south = PlayerPosition { z: 4.5, ..from };
+        let clear = World::new();
+        assert_eq!(blast_exposure(&clear, from, east), 1.0);
+        assert_eq!(blast_exposure(&clear, from, south), 1.0);
+
+        let mut east_wall = World::new();
+        let mut south_wall = World::new();
+        for y in 66..=68 {
+            for offset in -1..=1 {
+                east_wall.import_block(2, y, offset, 1 << 4).unwrap();
+                south_wall.import_block(offset, y, 2, 1 << 4).unwrap();
+            }
+        }
+        let east_exposure = blast_exposure(&east_wall, from, east);
+        let south_exposure = blast_exposure(&south_wall, from, south);
+        assert!(east_exposure < 1.0);
+        assert_eq!(east_exposure, south_exposure);
+    }
+
     #[test]
     fn sheep_shearing_is_single_use_and_shared_with_joiners() {
         let mut mobs = Mobs::default();
