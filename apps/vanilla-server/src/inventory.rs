@@ -75,6 +75,10 @@ pub struct Inventory {
     /// discarded if a client closes the transient GUI or a save is replayed.
     #[serde(default)]
     anvil_inputs: [Option<Stack>; 2],
+    /// Enchanting-table input is a single item; kept in the save until it can
+    /// be returned to the player so disconnect/full inventory cannot erase it.
+    #[serde(default)]
+    enchant_input: Option<Stack>,
     #[serde(skip)]
     drag: Drag,
     #[serde(default)]
@@ -89,6 +93,7 @@ impl Default for Inventory {
             cursor: None,
             workbench: [None; 9],
             anvil_inputs: [None; 2],
+            enchant_input: None,
             drag: Drag::default(),
             bed_spawn: None,
         }
@@ -207,6 +212,11 @@ impl Inventory {
                 .iter()
                 .flatten()
                 .any(|stack| !stack.is_valid())
+            || self.enchant_input.is_some_and(|item| {
+                item.count != 1
+                    || !item.is_valid()
+                    || !crate::items_1710::enchantable_in_table(item.id)
+            })
             || self.slots.iter().flatten().any(|stack| !stack.is_valid())
             || self.cursor.is_some_and(|stack| !stack.is_valid())
         {
@@ -380,6 +390,7 @@ impl Inventory {
             .iter()
             .chain(self.workbench.iter())
             .chain(self.anvil_inputs.iter())
+            .chain(std::slice::from_ref(&self.enchant_input))
             .chain(std::slice::from_ref(&self.cursor))
             .flatten()
             .copied()
@@ -391,6 +402,7 @@ impl Inventory {
         self.slots[1..45].fill(None);
         self.workbench.fill(None);
         self.anvil_inputs.fill(None);
+        self.enchant_input = None;
         self.cursor = None;
         self.drag = Drag::default();
     }
@@ -1449,6 +1461,100 @@ impl Inventory {
             Self::encode_slot(&mut packet, self.furnace_stack(furnace, slot));
         }
         packet
+    }
+
+    /// Protocol 5 enchanting table has exactly one input plus 36 inventory
+    /// slots. It must never offer a fake enchanted output when the live stack
+    /// model cannot represent enchantment NBT.
+    pub fn enchanting_window_items(&self, window: u8) -> Vec<u8> {
+        let mut packet = vec![window];
+        packet.extend_from_slice(&37i16.to_be_bytes());
+        for slot in 0..37 {
+            let item = if slot == 0 {
+                self.enchant_input
+            } else {
+                self.slots[(slot + 8) as usize]
+            };
+            Self::encode_slot(&mut packet, item);
+        }
+        packet
+    }
+
+    pub fn enchanting_has_item(&self) -> bool {
+        self.enchant_input.is_some()
+    }
+
+    pub fn enchanting_input(&self) -> Option<Stack> {
+        self.enchant_input
+    }
+
+    /// Return the table's item on close, atomically. If all slots are full,
+    /// retain the input in the versioned save instead of dropping it.
+    pub fn reclaim_enchanting_input(&mut self) -> bool {
+        let Some(item) = self.enchant_input else {
+            return true;
+        };
+        let mut next = self.clone();
+        if next.move_to_player(0, item).is_some() {
+            return false;
+        }
+        next.enchant_input = None;
+        *self = next;
+        true
+    }
+
+    /// Enchanting-table inventory transport only. C11 enchant selections are
+    /// deliberately rejected until arbitrary ItemStack NBT is supported.
+    /// The client-provided clicked stack is never trusted.
+    pub fn enchanting_click_window(&mut self, slot: i16, button: i8, mode: i8) -> bool {
+        match slot {
+            0 if mode == 0 && matches!(button, 0 | 1) => match (self.enchant_input, self.cursor) {
+                (Some(item), None) => {
+                    self.enchant_input = None;
+                    self.cursor = Some(item);
+                    true
+                }
+                (None, Some(mut item)) if crate::items_1710::enchantable_in_table(item.id) => {
+                    self.enchant_input = Some(Stack { count: 1, ..item });
+                    item.count -= 1;
+                    self.cursor = (item.count > 0).then_some(item);
+                    true
+                }
+                (None, None) => true,
+                _ => false,
+            },
+            0 if mode == 1 && matches!(button, 0 | 1) => {
+                let Some(item) = self.enchant_input else {
+                    return true;
+                };
+                let mut next = self.clone();
+                if next.move_to_player(0, item).is_some() {
+                    return false;
+                }
+                next.enchant_input = None;
+                *self = next;
+                true
+            }
+            1..=36 => {
+                let index = (slot + 8) as usize;
+                if mode == 1 && matches!(button, 0 | 1) && self.enchant_input.is_none() {
+                    if let Some(mut item) = self.slots[index] {
+                        if crate::items_1710::enchantable_in_table(item.id) {
+                            self.enchant_input = Some(Stack { count: 1, ..item });
+                            item.count -= 1;
+                            self.slots[index] = (item.count > 0).then_some(item);
+                            return true;
+                        }
+                    }
+                }
+                if matches!(mode, 0..=2) {
+                    self.click_window(0, slot + 8, button, mode)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
     }
 
     /// Compute the server-owned result. Only untagged durability repair is
@@ -2641,6 +2747,74 @@ mod tests {
         assert!(Inventory::load(&path).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
+    #[test]
+    fn enchanting_table_keeps_books_and_enforces_single_input() {
+        let mut inv = Inventory {
+            cursor: Some(Stack {
+                id: 340,
+                count: 4,
+                damage: 0,
+            }),
+            ..Inventory::default()
+        };
+        assert!(inv.enchanting_click_window(0, 0, 0));
+        assert_eq!(inv.cursor.unwrap().count, 3);
+        assert_eq!(inv.enchant_input.unwrap().count, 1);
+        assert!(!inv.enchanting_click_window(0, 0, 0));
+        inv.slots[9] = inv.cursor.take();
+        // Normal pickup returns the escrowed book to the cursor;
+        // shift-click instead places it in player inventory.
+        assert!(inv.enchanting_click_window(0, 0, 0));
+        assert_eq!(inv.enchant_input, None);
+        assert_eq!(inv.cursor.unwrap().count, 1);
+        assert_eq!(inv.slots[9].unwrap().count, 3);
+    }
+
+    #[test]
+    fn enchanting_table_rejects_non_enchantable_and_invalid_clicks() {
+        let mut inv = Inventory {
+            cursor: Some(Stack {
+                id: 264,
+                count: 1,
+                damage: 0,
+            }),
+            ..Inventory::default()
+        };
+        let old = inv.clone();
+        assert!(!inv.enchanting_click_window(0, 0, 0));
+        assert!(!inv.enchanting_click_window(0, 2, 0));
+        assert!(!inv.enchanting_click_window(0, 0, 5));
+        assert_eq!(inv, old);
+        assert_eq!(&inv.enchanting_window_items(3)[0..3], &[3, 0, 37]);
+    }
+
+    #[test]
+    fn enchanting_table_close_is_atomic_with_full_player_inventory() {
+        let mut inv = Inventory {
+            enchant_input: Some(Stack {
+                id: 276,
+                count: 1,
+                damage: 12,
+            }),
+            ..Inventory::default()
+        };
+        for slot in 9..45 {
+            inv.slots[slot] = Some(Stack {
+                id: 264,
+                count: 64,
+                damage: 0,
+            });
+        }
+        let previous = inv.clone();
+        assert!(!inv.reclaim_enchanting_input());
+        assert_eq!(inv, previous);
+        inv.slots[15] = None;
+        assert!(inv.reclaim_enchanting_input());
+        assert_eq!(inv.slots[15], previous.enchant_input);
+        assert_eq!(inv.enchant_input, None);
+        assert!(inv.reclaim_enchanting_input());
+    }
+
     #[test]
     fn anvil_repair_debits_only_owned_inputs_and_xp() {
         let mut inv = Inventory::default();

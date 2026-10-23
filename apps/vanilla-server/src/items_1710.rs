@@ -45,6 +45,17 @@ pub fn max_count(id: i16) -> u8 {
     }
 }
 
+/// The pre-1.8 enchanting table only accepts items with standard enchantment
+/// rules, plus books. Repairable items such as shears and flint-and-steel
+/// require an anvil or an enchanted book, not table enchanting.
+pub fn enchantable_in_table(id: i16) -> bool {
+    matches!(
+        id,
+        340 | 261 | 346 | 256..=258 | 267..=279 | 283..=286
+            | 290..=294 | 298..=317
+    )
+}
+
 /// Vanilla material-specific damage limits. A fully worn item may arrive from
 /// creative or disk, but live wear logic is responsible for breaking it.
 pub fn max_durability(id: i16) -> Option<i16> {
@@ -111,6 +122,18 @@ pub fn valid_stack(id: i16, count: u8, damage: i16) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn enchanting_table_accepts_only_vanilla_enchantable_items() {
+        for id in [340, 261, 346, 256, 276, 314, 317] {
+            assert!(enchantable_in_table(id), "expected table-compatible: {id}");
+        }
+        for id in [0, 264, 259, 359, 403, 373, 1] {
+            assert!(
+                !enchantable_in_table(id),
+                "unexpected table-compatible: {id}"
+            );
+        }
+    }
     #[test]
     fn vanilla_id_bounds_reject_unregistered_and_modern_items() {
         for id in [1, 5, 164, 170, 175, 256, 373, 408, 417, 422, 2256, 2267] {
