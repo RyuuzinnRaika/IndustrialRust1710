@@ -203,7 +203,13 @@ fn inspect_irw(world_file: &Path) -> io::Result<Summary> {
                 return Err(invalid("unexpected directory or link inside players"));
             }
         }
-        inspect_player_directory(world_file, &player_dir.join("verified"), true, &mut count, false)?;
+        inspect_player_directory(
+            world_file,
+            &player_dir.join("verified"),
+            true,
+            &mut count,
+            false,
+        )?;
         // Offline files live beside the verified namespace; inspect them separately.
         // A temporary collection is unnecessary: just inspect regular root entries.
         inspect_player_directory(world_file, &player_dir, false, &mut count, true)?;
@@ -385,5 +391,4 @@ mod tests {
         assert!(inspect(&root).is_err());
         fs::remove_dir_all(root).unwrap();
     }
-
 }
