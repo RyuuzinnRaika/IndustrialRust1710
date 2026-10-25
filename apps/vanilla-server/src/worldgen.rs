@@ -465,6 +465,18 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
             None
         };
     }
+    // Connect each house doorway to the central east-west road. Without
+    // these short paths, local terrain can leave the doors inaccessible.
+    // Roads have priority above; the paths stop before the house walls.
+    if (dx == -17 && (-4..=-2).contains(&dz)) || (dx == 17 && (2..=4).contains(&dz)) {
+        return if y == base {
+            Some(b(13))
+        } else if (base + 1..=base + 4).contains(&y) {
+            Some(AIR)
+        } else {
+            None
+        };
+    }
     // Two houses with a doorway toward the road.
     for (hx, hz) in [(-17, -9), (17, 9)] {
         let a = dx - hx;
@@ -828,6 +840,43 @@ mod tests {
             }
         }
         assert!(tested_negative && tested_positive);
+    }
+    #[test]
+    fn village_house_doors_have_clear_paths_to_the_road() {
+        let seed = 42u64;
+        let mut villages_checked = 0;
+        for gx in -4..=4 {
+            for gz in -4..=4 {
+                if !hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4) {
+                    continue;
+                }
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                if !matches!(biome(seed, cx, cz), 1 | 2 | 35 | 4) {
+                    continue;
+                }
+                villages_checked += 1;
+                let base = height(seed, cx, cz);
+                for (dx, start_z, end_z, doorway_z) in [(-17, -4, -2, -5), (17, 2, 4, 5)] {
+                    // The house doorway remains open, and every path block
+                    // is gravel with four clear blocks of headroom.
+                    assert_eq!(village(seed, cx + dx, base + 1, cz + doorway_z), Some(AIR));
+                    for dz in start_z..=end_z {
+                        assert_eq!(
+                            block(seed, Dimension::Overworld, cx + dx, base, cz + dz),
+                            b(13)
+                        );
+                        for dy in 1..=4 {
+                            assert_eq!(
+                                block(seed, Dimension::Overworld, cx + dx, base + dy, cz + dz),
+                                AIR
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(villages_checked > 0);
     }
     #[test]
     fn generated_dungeons_have_spawner_and_loot() {
