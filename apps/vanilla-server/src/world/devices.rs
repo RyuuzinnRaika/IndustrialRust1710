@@ -124,6 +124,10 @@ impl World {
         let (x, y, z) = from;
         let block = self.get(x, y, z);
         match block >> 4 {
+            // Vanilla dust strongly powers the supporting block beneath it.
+            // Other faces receive only its ordinary weak power; treating all
+            // faces as strong would incorrectly energize adjacent conductors.
+            55 if to == (x, y - 1, z) => (block & 15) as u8,
             152 => 15,
             76 if to == (x, y + 1, z) => 15,
             94 => {
@@ -656,6 +660,21 @@ impl World {
 mod redstone_regression_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn redstone_dust_strongly_powers_its_support_but_not_side_blocks() {
+        let mut w = World::new();
+        w.import_block(0, 64, 0, (55 << 4) | 9).unwrap();
+        w.import_block(0, 63, 0, 1 << 4).unwrap();
+        assert_eq!(w.strong_signal_into((0, 64, 0), (0, 63, 0)), 9);
+        assert_eq!(w.signal_into((0, 63, 0), (1, 63, 0)), 9);
+        for target in [(1, 64, 0), (-1, 64, 0), (0, 64, 1), (0, 64, -1), (0, 65, 0)] {
+            assert_eq!(w.strong_signal_into((0, 64, 0), target), 0);
+        }
+        // Signal strength still determines the current carried through a cube.
+        w.import_block(0, 64, 0, 55 << 4).unwrap();
+        assert_eq!(w.signal_into((0, 63, 0), (1, 63, 0)), 0);
+    }
 
     #[test]
     fn powered_repeater_only_outputs_in_its_facing_direction() {
