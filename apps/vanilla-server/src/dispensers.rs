@@ -269,17 +269,37 @@ mod tests {
     fn device_comparator_signal_respects_stack_caps_and_empty_slots() {
         let mut slots = [None; DEVICE_SLOTS];
         assert_eq!(comparator_strength(&slots), 0);
-        slots[0] = Some(Stack { id: 1, count: 1, damage: 0 });
+        slots[0] = Some(Stack {
+            id: 1,
+            count: 1,
+            damage: 0,
+        });
         assert_eq!(comparator_strength(&slots), 1);
-        slots[0] = Some(Stack { id: 1, count: 64, damage: 0 });
+        slots[0] = Some(Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+        });
         assert_eq!(comparator_strength(&slots), 2);
-        slots.fill(Some(Stack { id: 1, count: 64, damage: 0 }));
+        slots.fill(Some(Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+        }));
         assert_eq!(comparator_strength(&slots), 15);
         slots[0] = None;
         assert_eq!(comparator_strength(&slots), 13);
-        slots.fill(Some(Stack { id: 267, count: 1, damage: 0 }));
+        slots.fill(Some(Stack {
+            id: 267,
+            count: 1,
+            damage: 0,
+        }));
         assert_eq!(comparator_strength(&slots), 15);
-        slots.fill(Some(Stack { id: 323, count: 16, damage: 0 }));
+        slots.fill(Some(Stack {
+            id: 323,
+            count: 16,
+            damage: 0,
+        }));
         assert_eq!(comparator_strength(&slots), 15);
     }
 
@@ -292,9 +312,15 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let mut world = world::World::new();
         world.update_and_save(&path, -1, 64, 0, 23 << 4).unwrap();
-        world.update_and_save(&path, 0, 64, 0, (149 << 4) | 1).unwrap();
+        world
+            .update_and_save(&path, 0, 64, 0, (149 << 4) | 1)
+            .unwrap();
         let pos = (-1, 64, 0);
-        let full = [Some(Stack { id: 1, count: 64, damage: 0 }); DEVICE_SLOTS];
+        let full = [Some(Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+        }); DEVICE_SLOTS];
         let storage = Devices::default().staged_update(pos, full).unwrap();
         world.set_device_comparator_inputs(storage.comparator_inputs());
         for _ in 0..3 {
