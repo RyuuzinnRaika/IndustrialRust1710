@@ -552,26 +552,29 @@ fn distance(a: PlayerPosition, b: PlayerPosition) -> f64 {
 fn distance_3d(a: PlayerPosition, b: PlayerPosition) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
 }
-/// Choose a reachable-side approach point for an intact generated house door.
-/// Re-read the authoritative world on each decision: removed/replaced doors
-/// must not remain AI goals. This is bounded to the two generated doors and
-/// does not yet discover player-built doors or model a dynamic village.
+/// Choose a live wooden door inside the generated village footprint.
+/// Generated and player-built doors share the same lower-half facing metadata.
+/// Re-read the authoritative world each tick so removed doors are not AI goals.
 fn villager_door_destination(world: &World, at: PlayerPosition) -> Option<PlayerPosition> {
     if !at.is_valid() {
         return None;
     }
-    let doors = world.live_village_house_doors(at.x.floor() as i32, at.z.floor() as i32)?;
+    let doors = world.village_doors_including_player_edits(at.x.floor() as i32, at.z.floor() as i32)?;
     doors
         .into_iter()
-        .enumerate()
-        .filter_map(|(index, door)| {
-            let [x, y, z] = door?;
-            // Both generated house entrances face the village road. Approach
-            // from outside rather than pathfinding into a closed door block.
+        .filter_map(|[x, y, z]| {
+            // 1.7.10 lower-half metadata bits 0..1 encode door facing.
+            // Approach from the exterior side rather than the closed door.
+            let (tx, tz) = match world.get(x, y, z) & 3 {
+                0 => (f64::from(x) + 0.5, f64::from(z) + 1.5),
+                1 => (f64::from(x) - 0.5, f64::from(z) + 0.5),
+                2 => (f64::from(x) + 0.5, f64::from(z) - 0.5),
+                _ => (f64::from(x) + 1.5, f64::from(z) + 0.5),
+            };
             let target = PlayerPosition {
-                x: f64::from(x) + 0.5,
+                x: tx,
                 y: f64::from(y),
-                z: f64::from(z) + if index == 0 { 1.5 } else { -0.5 },
+                z: tz,
             };
             (distance_3d(at, target) <= 32.0).then_some(target)
         })
@@ -4560,6 +4563,27 @@ mod tests {
             .import_block(first[0], first[1], first[2], original_lower)
             .unwrap();
         assert_eq!(villager_door_destination(&world, middle), Some(first_goal));
+
+        // A newly placed wooden door becomes a live village goal. The same
+        // lower/upper-half validation rejects it after either half is removed.
+        world.import_block(first[0], first[1], first[2], 0).unwrap();
+        let added = [cx, first[1], cz + 8];
+        world.import_block(added[0], added[1], added[2], 64 << 4).unwrap();
+        world
+            .import_block(added[0], added[1] + 1, added[2], 64 << 4 | 8)
+            .unwrap();
+        assert_eq!(
+            villager_door_destination(&world, middle),
+            Some(PlayerPosition {
+                x: f64::from(cx) + 0.5,
+                y: f64::from(first[1]),
+                z: f64::from(cz) + 9.5,
+            })
+        );
+        world
+            .import_block(added[0], added[1] + 1, added[2], 0)
+            .unwrap();
+        assert_eq!(villager_door_destination(&world, middle), None);
         assert_eq!(
             villager_door_destination(
                 &World::expanded(42, crate::dimensions::Dimension::Nether),
