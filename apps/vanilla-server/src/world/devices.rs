@@ -49,10 +49,10 @@ fn comparator_strength(rear: u8, side: u8, subtract: bool) -> u8 {
 fn full_conductor(id: u16) -> bool {
     matches!(
         id,
-        1..=5 | 7 | 12..=17 | 19 | 22..=25 | 41..=43 | 45..=49
+        1..=5 | 7 | 12..=17 | 19 | 22..=25 | 35 | 41..=43 | 45..=49
             | 56..=58 | 61 | 62 | 73 | 74 | 80 | 82 | 86..=89
-            | 98..=100 | 103 | 110 | 112 | 121 | 129 | 133
-            | 137 | 152 | 155 | 159 | 173
+            | 98..=100 | 103 | 110 | 112 | 121 | 125 | 129 | 133
+            | 137 | 152 | 153 | 155 | 159 | 162 | 170 | 172 | 173
     )
 }
 
@@ -732,6 +732,32 @@ mod redstone_regression_tests {
         // Signal strength still determines the current carried through a cube.
         w.import_block(0, 64, 0, 55 << 4).unwrap();
         assert_eq!(w.signal_into((0, 63, 0), (1, 63, 0)), 0);
+    }
+
+    #[test]
+    fn vanilla_full_cubes_conduct_strong_redstone_but_partial_blocks_do_not() {
+        let mut w = World::new();
+        // Wool, double wooden slabs, quartz ore, newer logs, hay bales and
+        // uncolored hardened clay are full opaque cubes in Java 1.7.10.
+        // They must relay strong power just like stone.
+        w.import_block(0, 65, 0, 152 << 4).unwrap();
+        for id in [1u16, 35, 125, 153, 162, 170, 172] {
+            w.import_block(0, 64, 0, id << 4).unwrap();
+            assert_eq!(
+                w.signal_into((0, 64, 0), (1, 64, 0)),
+                15,
+                "full opaque block {id} should relay strong power"
+            );
+        }
+        // Glass, wooden stairs and single slabs cannot relay it.
+        for id in [20u16, 53, 44] {
+            w.import_block(0, 64, 0, id << 4).unwrap();
+            assert_eq!(
+                w.signal_into((0, 64, 0), (1, 64, 0)),
+                0,
+                "non-full block {id} must not relay strong power"
+            );
+        }
     }
 
     #[test]
