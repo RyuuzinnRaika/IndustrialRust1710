@@ -621,9 +621,8 @@ fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
     let y = p.y.floor() as i32;
     let z = p.z.floor() as i32;
     (x - 2..=x + 2).all(|bx| {
-        (y - 2..=y + 2).all(|by| {
-            (z - 2..=z + 2).all(|bz| matches!(world.get(bx, by, bz) >> 4, 0 | 6))
-        })
+        (y - 2..=y + 2)
+            .all(|by| (z - 2..=z + 2).all(|bz| matches!(world.get(bx, by, bz) >> 4, 0 | 6)))
     })
 }
 
