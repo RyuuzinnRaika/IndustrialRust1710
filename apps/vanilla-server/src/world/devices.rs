@@ -33,6 +33,18 @@ fn repeater_direction(meta: u16) -> (i32, i32) {
     }
 }
 
+/// Comparator compare mode preserves rear input only when it is at least
+/// the strongest side input. Subtract mode removes that side strength.
+fn comparator_strength(rear: u8, side: u8, subtract: bool) -> u8 {
+    if subtract {
+        rear.saturating_sub(side)
+    } else if rear >= side {
+        rear
+    } else {
+        0
+    }
+}
+
 /// Full opaque cubes can pass weak current after a *strong* input.
 fn full_conductor(id: u16) -> bool {
     matches!(
@@ -459,13 +471,7 @@ impl World {
                         .map(|(sx, sz)| self.signal_into((x + sx, y, z + sz), (x, y, z)))
                         .max()
                         .unwrap_or(0);
-                    let desired = if current & 4 != 0 {
-                        rear.saturating_sub(side)
-                    } else if rear >= side {
-                        rear
-                    } else {
-                        0
-                    };
+                    let desired = comparator_strength(rear, side, current & 4 != 0);
                     let pos = (x, y as u8, z);
                     let output = self.comparator_outputs.get(&pos).copied().unwrap_or(0);
                     if desired == output {
@@ -757,6 +763,64 @@ mod redstone_regression_tests {
             assert_eq!(w.comparator_rear_input(rear, target), expected);
             assert_eq!(w.signal_into(rear, target), 0);
         }
+    }
+
+    #[test]
+    fn comparator_compare_and_subtract_modes_preserve_analog_strength() {
+        // Every vanilla redstone strength must be handled without wrapping.
+        for rear in 0..=15u8 {
+            for side in 0..=15u8 {
+                assert_eq!(
+                    comparator_strength(rear, side, false),
+                    if rear >= side { rear } else { 0 }
+                );
+                assert_eq!(
+                    comparator_strength(rear, side, true),
+                    rear.saturating_sub(side)
+                );
+            }
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-comparator-modes-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        // Facing east: rear is west, and the side input is south.
+        // Use a pre-energized weighted pressure plate as a stable side input.
+        // Unpowered dust decays, while daylight sensors are recalculated by
+        // the day/night cycle; neither holds an arbitrary analog test value.
+        w.update_and_save(&path, 0, 64, 0, (149 << 4) | 1).unwrap();
+        w.update_and_save(&path, -1, 64, 0, 92 << 4).unwrap(); // Whole cake: 14.
+        w.update_and_save(&path, 0, 64, 1, (147 << 4) | 5).unwrap();
+        for _ in 0..3 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(w.comparator_outputs.get(&(0, 64, 0)), Some(&14));
+
+        // Interacting with the comparator switches it to subtraction mode.
+        assert_eq!(
+            w.interact_device(&path, 0, 64, 0).unwrap(),
+            vec![(0, 64, 0)]
+        );
+        for _ in 0..3 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(w.comparator_outputs.get(&(0, 64, 0)), Some(&9));
+
+        // Stronger side input must turn the comparator off in subtract mode.
+        w.update_and_save(&path, 0, 64, 1, (147 << 4) | 15).unwrap();
+        for _ in 0..3 {
+            w.block_tick(&path, 64).unwrap();
+        }
+        // Zero-strength outputs may be omitted from the sparse output map.
+        assert_eq!(
+            w.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0),
+            0
+        );
+        assert_eq!(w.get(0, 64, 0) >> 4, 149);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
