@@ -355,18 +355,12 @@ impl World {
     /// A future villager AI can consume this bounded two-door lookup without
     /// caching stale generated blocks.
     #[allow(dead_code)] // Villager AI integration is a separate A07 step.
-    pub fn live_village_house_doors(
-        &self,
-        x: i32,
-        z: i32,
-    ) -> Option<[Option<[i32; 3]>; 2]> {
+    pub fn live_village_house_doors(&self, x: i32, z: i32) -> Option<[Option<[i32; 3]>; 2]> {
         let (seed, dimension) = self.extended_identity()?;
         if dimension != crate::dimensions::Dimension::Overworld {
             return None;
         }
-        crate::worldgen::village_live_house_doors(seed, x, z, |dx, dy, dz| {
-            self.get(dx, dy, dz)
-        })
+        crate::worldgen::village_live_house_doors(seed, x, z, |dx, dy, dz| self.get(dx, dy, dz))
     }
     /// Bounded lookup of intact dungeon spawners close to active players.
     /// IRW4 generated sites are indexed by their 64-block feature cells so
@@ -1774,10 +1768,7 @@ mod tests {
                 let upper = world.get(dx, dy + 1, dz);
 
                 world.import_block(dx, dy, dz, 0).unwrap();
-                assert_eq!(
-                    world.live_village_house_doors(x, z),
-                    Some([None, second])
-                );
+                assert_eq!(world.live_village_house_doors(x, z), Some([None, second]));
                 world.import_block(dx, dy, dz, lower).unwrap();
 
                 // Opening a door and changing its upper-half hinge metadata
@@ -1787,10 +1778,7 @@ mod tests {
                 assert_eq!(world.live_village_house_doors(x, z), Some(doors));
 
                 world.import_block(dx, dy + 1, dz, 71 << 4 | 8).unwrap();
-                assert_eq!(
-                    world.live_village_house_doors(x, z),
-                    Some([None, second])
-                );
+                assert_eq!(world.live_village_house_doors(x, z), Some([None, second]));
                 world.import_block(dx, dy, dz, lower).unwrap();
                 world.import_block(dx, dy + 1, dz, upper).unwrap();
                 assert_eq!(world.live_village_house_doors(x, z), Some(doors));
