@@ -447,12 +447,15 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
     // bounded to the four blocks below the structure.
     if y < base {
         let road = dz.abs() <= 1 && dx.abs() <= 29;
+        // The well extends two blocks beyond the road on both axes. Its
+        // corner floor blocks also need support over shallow terrain gaps.
+        let well = dx.abs() <= 2 && dz.abs() <= 2;
         let path = (dx == -17 && (-4..=-2).contains(&dz)) || (dx == 17 && (2..=4).contains(&dz));
         let house = [(-17, -9), (17, 9)]
             .iter()
             .any(|&(hx, hz)| (dx - hx).abs() <= 4 && (dz - hz).abs() <= 4);
         let farm = (9..=20).contains(&dx) && (-22..=-13).contains(&dz);
-        if (road || path || house || farm) && y > height(seed, x, z) {
+        if (road || well || path || house || farm) && y > height(seed, x, z) {
             return Some(if farm && dx != 15 { b(3) } else { b(4) });
         }
     }
@@ -964,6 +967,9 @@ mod tests {
                 // and farmland have different footprints and support blocks.
                 for (dx, dz, support) in [
                     (5, 0, b(4)),
+                    // Well corners fall outside the central road footprint.
+                    (-2, -2, b(4)),
+                    (2, 2, b(4)),
                     (-17, -3, b(4)),
                     (17, 3, b(4)),
                     (-17, -9, b(4)),
