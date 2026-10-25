@@ -634,10 +634,24 @@ fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
 /// test here would discard every valid floating ghast candidate.
 fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition) -> bool {
     if kind == Kind::Ghast {
-        ghast_has_clearance(world, at)
-    } else {
-        physics::supported(world, &at) && !physics::collides(world, &at)
+        return ghast_has_clearance(world, at);
     }
+    if !physics::supported(world, &at) || physics::collides(world, &at) {
+        return false;
+    }
+    // Fluids do not have solid collision boxes. Vanilla's natural-spawn
+    // eligibility separately rejects liquid inside a land mob's body.
+    // Check the occupied vertical cells; Endermen need a third head cell,
+    // while spiders are shorter than one block.
+    let x = at.x.floor() as i32;
+    let y = at.y.floor() as i32;
+    let z = at.z.floor() as i32;
+    let body_height = match kind {
+        Kind::Enderman => 3,
+        Kind::Spider | Kind::CaveSpider => 1,
+        _ => 2,
+    };
+    (0..body_height).all(|dy| !matches!(world.get(x, y + dy, z) >> 4, 8..=11))
 }
 
 /// A bounded, collision-swept aerial step. Ghasts keep their distance and
@@ -3301,6 +3315,36 @@ mod tests {
                 "fluid {fluid} must block ghast spawning"
             );
             assert!(!natural_spawn_body_ok(&world, Kind::Ghast, at));
+        }
+    }
+
+    #[test]
+    fn natural_land_mobs_reject_water_and_lava_in_their_body() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        for fluid in [8u16, 9, 10, 11] {
+            for body_y in [65, 66] {
+                let mut world = World::new();
+                world.import_block(0, 64, 0, 1 << 4).unwrap();
+                assert!(natural_spawn_body_ok(&world, Kind::Zombie, at));
+                assert!(natural_spawn_body_ok(&world, Kind::Cow, at));
+                world.import_block(0, body_y, 0, fluid << 4).unwrap();
+                for kind in [Kind::Zombie, Kind::Cow, Kind::Slime] {
+                    assert!(
+                        !natural_spawn_body_ok(&world, kind, at),
+                        "{kind:?} must not spawn in fluid {fluid} at y={body_y}"
+                    );
+                }
+            }
+            // The Enderman's third block is part of its spawn body too.
+            let mut world = World::new();
+            world.import_block(0, 64, 0, 1 << 4).unwrap();
+            assert!(natural_spawn_body_ok(&world, Kind::Enderman, at));
+            world.import_block(0, 67, 0, fluid << 4).unwrap();
+            assert!(!natural_spawn_body_ok(&world, Kind::Enderman, at));
         }
     }
 
