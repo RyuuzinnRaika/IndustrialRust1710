@@ -258,28 +258,43 @@ impl World {
         }
     }
 
-    /// Vanilla comparator override inputs are not ordinary power sources:
-    /// do not expose their values to adjacent dust, repeaters or pistons.
-    /// Inventory-backed tile entities are handled separately by the server.
-    fn comparator_rear_input(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
-        let state = self.get(from.0, from.1, from.2);
+    /// Read a vanilla comparator override without treating it as redstone power.
+    /// Only the comparator's rear input is allowed to consume these values.
+    fn comparator_override_at(&self, pos: (i32, i32, i32)) -> Option<u8> {
+        let state = self.get(pos.0, pos.1, pos.2);
         match state >> 4 {
-            23 | 158 => self
-                .device_comparator_inputs
-                .get(&(from.0, from.1 as u8, from.2))
-                .copied()
-                .unwrap_or(0), // Dispenser/dropper contents are not ordinary power.
-            92 => 14u8.saturating_sub((state as u8 & 7).min(7) * 2), // Cake slices.
-            118 => (state & 3) as u8,                                // Cauldron water level.
-            120 => {
-                if state & 4 != 0 {
-                    15
-                } else {
-                    0
-                }
-            } // End portal eye.
-            _ => self.signal_into(from, to),
+            23 | 158 => Some(
+                self.device_comparator_inputs
+                    .get(&(pos.0, pos.1 as u8, pos.2))
+                    .copied()
+                    .unwrap_or(0),
+            ),
+            92 => Some(14u8.saturating_sub((state as u8 & 7).min(7) * 2)),
+            118 => Some((state & 3) as u8),
+            120 => Some(if state & 4 != 0 { 15 } else { 0 }),
+            _ => None,
         }
+    }
+
+    /// A comparator can read an inventory/analog override through exactly one
+    /// full opaque block behind it, unless that block already supplies power 15.
+    /// The intermediate block does not become an ordinary analog power source.
+    fn comparator_rear_input(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
+        if let Some(strength) = self.comparator_override_at(from) {
+            return strength;
+        }
+        let power = self.signal_into(from, to);
+        if power < 15 && full_conductor(self.get(from.0, from.1, from.2) >> 4) {
+            let behind = (
+                from.0 + (from.0 - to.0),
+                from.1 + (from.1 - to.1),
+                from.2 + (from.2 - to.2),
+            );
+            if let Some(strength) = self.comparator_override_at(behind) {
+                return strength;
+            }
+        }
+        power
     }
 
     /// Refresh analog overrides from committed dispenser/dropper inventories.
@@ -810,6 +825,50 @@ mod redstone_regression_tests {
             assert_eq!(w.comparator_rear_input(rear, target), expected);
             assert_eq!(w.signal_into(rear, target), 0);
         }
+    }
+
+    #[test]
+    fn comparator_reads_override_through_one_solid_block_only() {
+        let mut w = World::new();
+        let comparator = (0, 64, 0);
+        let intermediate = (-1, 64, 0);
+        let inventory = (-2, 64, 0);
+        w.import_block(intermediate.0, intermediate.1, intermediate.2, 1 << 4)
+            .unwrap();
+        w.import_block(inventory.0, inventory.1, inventory.2, 23 << 4)
+            .unwrap();
+        w.device_comparator_inputs.insert((-2, 64, 0), 9);
+        assert_eq!(w.comparator_rear_input(intermediate, comparator), 9);
+        // Inventory overrides never power ordinary dust through stone.
+        assert_eq!(w.signal_into(inventory, intermediate), 0);
+
+        // A transparent block cannot bridge the comparator to an inventory.
+        w.import_block(intermediate.0, intermediate.1, intermediate.2, 20 << 4)
+            .unwrap();
+        assert_eq!(w.comparator_rear_input(intermediate, comparator), 0);
+
+        // A second opaque block does not extend the override lookup.
+        w.import_block(intermediate.0, intermediate.1, intermediate.2, 1 << 4)
+            .unwrap();
+        w.import_block(inventory.0, inventory.1, inventory.2, 1 << 4)
+            .unwrap();
+        w.import_block(-3, 64, 0, 23 << 4).unwrap();
+        w.device_comparator_inputs.insert((-3, 64, 0), 11);
+        assert_eq!(w.comparator_rear_input(intermediate, comparator), 0);
+    }
+
+    #[test]
+    fn comparator_direct_analog_override_takes_precedence_over_redstone() {
+        let mut w = World::new();
+        let comparator = (0, 64, 0);
+        let rear = (-1, 64, 0);
+        w.import_block(rear.0, rear.1, rear.2, (118 << 4) | 2)
+            .unwrap();
+        assert_eq!(w.comparator_rear_input(rear, comparator), 2);
+        w.import_block(rear.0, rear.1, rear.2, 23 << 4)
+            .unwrap();
+        w.device_comparator_inputs.insert((-1, 64, 0), 6);
+        assert_eq!(w.comparator_rear_input(rear, comparator), 6);
     }
 
     #[test]
