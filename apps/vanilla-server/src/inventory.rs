@@ -48,7 +48,12 @@ pub struct Stack {
     pub id: i16,
     pub count: u8,
     pub damage: i16,
-    #[serde(default, skip_serializing_if = "Option::is_none", serialize_with = "crate::item_nbt::serialize", deserialize_with = "crate::item_nbt::deserialize")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::item_nbt::serialize",
+        deserialize_with = "crate::item_nbt::deserialize"
+    )]
     pub nbt: Option<u64>,
 }
 impl Stack {
@@ -842,7 +847,8 @@ impl Inventory {
                     (item, None, 0) => (None, item),
                     (None, item, 0) => (item, None),
                     (Some(mut target), Some(mut hand), 0)
-                        if target.id == hand.id && target.damage == hand.damage
+                        if target.id == hand.id
+                            && target.damage == hand.damage
                             && target.nbt == hand.nbt =>
                     {
                         let n = (target.max_count() - target.count).min(hand.count);
@@ -917,7 +923,7 @@ impl Inventory {
                     if let Some(mut existing) = self.lookup(window, target) {
                         if existing.id == moving.id
                             && existing.damage == moving.damage
-                        && existing.nbt == moving.nbt
+                            && existing.nbt == moving.nbt
                             && existing.count < existing.max_count()
                         {
                             let amount = (existing.max_count() - existing.count).min(moving.count);
@@ -1168,7 +1174,8 @@ impl Inventory {
                     (item, None, 0) => (None, item),
                     (None, item, 0) => (item, None),
                     (Some(mut target), Some(mut hand), 0)
-                        if target.id == hand.id && target.damage == hand.damage
+                        if target.id == hand.id
+                            && target.damage == hand.damage
                             && target.nbt == hand.nbt =>
                     {
                         let count = (target.max_count() - target.count).min(hand.count);
@@ -1228,7 +1235,7 @@ impl Inventory {
                     if let Some(mut existing) = self.chest_stack(chest, target) {
                         if existing.id == moving.id
                             && existing.damage == moving.damage
-                        && existing.nbt == moving.nbt
+                            && existing.nbt == moving.nbt
                             && existing.count < existing.max_count()
                         {
                             let count = (existing.max_count() - existing.count).min(moving.count);
@@ -1339,7 +1346,9 @@ impl Inventory {
                 return Some(ChestDirection::InventoryOnly);
             };
             let existing = furnace.slots[target];
-            if existing.is_some_and(|v| v.id != stack.id || v.damage != stack.damage || v.nbt != stack.nbt) {
+            if existing
+                .is_some_and(|v| v.id != stack.id || v.damage != stack.damage || v.nbt != stack.nbt)
+            {
                 return Some(ChestDirection::InventoryOnly);
             }
             // Non-stackable fuels (notably lava buckets) must never merge
@@ -1504,7 +1513,8 @@ impl Inventory {
     }
     /// Already enchanted items remain withdrawable but cannot receive a new offer.
     pub fn enchanting_available(&self) -> bool {
-        self.enchant_input.is_some_and(crate::enchanting::can_enchant)
+        self.enchant_input
+            .is_some_and(crate::enchanting::can_enchant)
     }
     /// The C11 packet contains only the row number. All item, cost and XP
     /// state comes from the server. The caller journals both changed states.
@@ -1516,10 +1526,16 @@ impl Inventory {
         experience: &mut crate::experience::Experience,
         survival: bool,
     ) -> bool {
-        let Some(cost) = usize::try_from(choice).ok()
+        let Some(cost) = usize::try_from(choice)
+            .ok()
             .and_then(|index| offers.get(index).copied())
-            .filter(|cost| *cost > 0) else { return false };
-        let Some(item) = self.enchant_input else { return false };
+            .filter(|cost| *cost > 0)
+        else {
+            return false;
+        };
+        let Some(item) = self.enchant_input else {
+            return false;
+        };
         let mut next_xp = *experience;
         if survival && !next_xp.spend_levels(u16::from(cost)) {
             return false;
@@ -1800,7 +1816,11 @@ impl Inventory {
                 out.extend_from_slice(&value.id.to_be_bytes());
                 out.push(value.count);
                 out.extend_from_slice(&value.damage.to_be_bytes());
-                if let Some(nbt) = value.nbt.and_then(crate::item_nbt::wire).or_else(|| crate::books::wire_nbt(value)) {
+                if let Some(nbt) = value
+                    .nbt
+                    .and_then(crate::item_nbt::wire)
+                    .or_else(|| crate::books::wire_nbt(value))
+                {
                     out.extend_from_slice(&(nbt.len() as i16).to_be_bytes());
                     out.extend_from_slice(&nbt);
                 } else {
@@ -2855,19 +2875,26 @@ mod tests {
     #[test]
     fn enchant_choice_debits_exact_xp_and_survives_save_reload() {
         let mut inv = Inventory::default();
-        inv.enchant_input = Some(Stack { id: 257, count: 1, damage: 12, nbt: None });
+        inv.enchant_input = Some(Stack {
+            id: 257,
+            count: 1,
+            damage: 12,
+            nbt: None,
+        });
         let mut xp = crate::experience::Experience { total: 2000 };
         let old = inv.clone();
         let old_xp = xp;
-        assert!(!inv.enchant_choice(2, [1, 2, 30], 42, &mut xp, true)
-            || xp.total < old_xp.total);
+        assert!(!inv.enchant_choice(2, [1, 2, 30], 42, &mut xp, true) || xp.total < old_xp.total);
         if inv != old {
             let tagged = inv.enchant_input.unwrap();
             assert!(tagged.nbt.is_some());
             let bytes = inv.encoded().unwrap();
             let again: Inventory = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(again.enchant_input, inv.enchant_input);
-            assert_eq!(crate::item_nbt::wire(tagged.nbt.unwrap()), crate::item_nbt::wire(again.enchant_input.unwrap().nbt.unwrap()));
+            assert_eq!(
+                crate::item_nbt::wire(tagged.nbt.unwrap()),
+                crate::item_nbt::wire(again.enchant_input.unwrap().nbt.unwrap())
+            );
             let snapshot = inv.clone();
             assert!(!inv.enchant_choice(2, [1, 2, 30], 42, &mut xp, true));
             assert_eq!(inv, snapshot);

@@ -3,7 +3,12 @@
 use crate::inventory::Stack;
 
 fn product(id: i16, count: u8, damage: i16) -> Option<Stack> {
-    Some(Stack { id, count, damage, nbt: None })
+    Some(Stack {
+        id,
+        count,
+        damage,
+        nbt: None,
+    })
 }
 fn plank(item: Option<Stack>) -> bool {
     item.is_some_and(|s| s.id == 5)

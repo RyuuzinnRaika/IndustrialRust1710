@@ -55,7 +55,10 @@ pub fn intern(bytes: &[u8]) -> io::Result<u64> {
     if state.bytes.saturating_add(bytes.len()) > MAX_ARENA {
         return Err(invalid("ItemStack NBT arena full"));
     }
-    state.next = state.next.checked_add(1).ok_or_else(|| invalid("NBT handle overflow"))?;
+    state.next = state
+        .next
+        .checked_add(1)
+        .ok_or_else(|| invalid("NBT handle overflow"))?;
     let id = state.next;
     state.bytes += bytes.len();
     state.ids.insert(bytes.to_vec(), id);
@@ -66,7 +69,9 @@ pub fn wire(handle: u64) -> Option<Vec<u8>> {
     arena().lock().ok()?.blobs.get(&handle).cloned()
 }
 pub fn is_live(handle: u64) -> bool {
-    arena().lock().is_ok_and(|state| state.blobs.contains_key(&handle))
+    arena()
+        .lock()
+        .is_ok_and(|state| state.blobs.contains_key(&handle))
 }
 pub fn value(handle: u64) -> io::Result<Value> {
     decoded(&wire(handle).ok_or_else(|| invalid("unknown NBT handle"))?)
@@ -109,11 +114,17 @@ mod tests {
     fn unknown_nested_tags_and_arrays_keep_identical_wire_bytes() {
         let mut compound = HashMap::new();
         compound.insert("Strange".into(), Value::String("stay".into()));
-        compound.insert("Scores".into(), Value::IntArray(fastnbt::IntArray::new(vec![7, -1, 99])));
-        compound.insert("nested".into(), Value::Compound(HashMap::from([
-            ("id".into(), Value::Short(34)),
-            ("lvl".into(), Value::Short(2)),
-        ])));
+        compound.insert(
+            "Scores".into(),
+            Value::IntArray(fastnbt::IntArray::new(vec![7, -1, 99])),
+        );
+        compound.insert(
+            "nested".into(),
+            Value::Compound(HashMap::from([
+                ("id".into(), Value::Short(34)),
+                ("lvl".into(), Value::Short(2)),
+            ])),
+        );
         let id = from_value(&Value::Compound(compound)).unwrap();
         let original = wire(id).unwrap();
         assert_eq!(intern(&original).unwrap(), id);

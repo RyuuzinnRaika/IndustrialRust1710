@@ -57,7 +57,12 @@ impl GroundItem {
         metadata.extend_from_slice(&self.stack.id.to_be_bytes());
         metadata.push(self.stack.count);
         metadata.extend_from_slice(&self.stack.damage.to_be_bytes());
-        if let Some(nbt) = self.stack.nbt.and_then(crate::item_nbt::wire).or_else(|| crate::books::wire_nbt(self.stack)) {
+        if let Some(nbt) = self
+            .stack
+            .nbt
+            .and_then(crate::item_nbt::wire)
+            .or_else(|| crate::books::wire_nbt(self.stack))
+        {
             metadata.extend_from_slice(&(nbt.len() as i16).to_be_bytes());
             metadata.extend_from_slice(&nbt);
         } else {

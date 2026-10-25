@@ -17,6 +17,7 @@ mod crafting;
 mod decorations;
 mod dimensions;
 mod dispensers;
+mod enchanting;
 mod experience;
 mod fishing;
 mod furnaces;
@@ -26,7 +27,6 @@ mod hanging;
 mod hoppers;
 mod inventory;
 mod item_nbt;
-mod enchanting;
 mod items_1710;
 mod journal;
 mod legacy_chunk_store;
@@ -183,7 +183,12 @@ impl<'a> Input<'a> {
         } else {
             None
         };
-        let stack = Stack { id, count, damage, nbt };
+        let stack = Stack {
+            id,
+            count,
+            damage,
+            nbt,
+        };
         if !stack.is_valid() {
             return Err(bad("invalid item ID, count or damage"));
         }
@@ -4449,17 +4454,29 @@ fn play(
                         let still_open = world
                             .lock()
                             .map_err(|_| bad("world mutex poisoned"))?
-                            .get(pos.0, pos.1, pos.2) >> 4 == 116
+                            .get(pos.0, pos.1, pos.2)
+                            >> 4
+                            == 116
                             && near(location, pos.0, pos.1, pos.2);
                         if still_open {
                             let mut candidate = inventory.clone();
                             let mut next_xp = *experience;
-                            if candidate.enchant_choice(choice, enchant_offers, enchant_seed, &mut next_xp, survival) {
+                            if candidate.enchant_choice(
+                                choice,
+                                enchant_offers,
+                                enchant_seed,
+                                &mut next_xp,
+                                survival,
+                            ) {
                                 journal::commit(
                                     &world_path.with_extension("pending-txn.json"),
                                     &[
                                         (inventory_path, candidate.encoded()?),
-                                        (experience_path, serde_json::to_vec(&next_xp).map_err(|_| bad("encode enchanting XP"))?),
+                                        (
+                                            experience_path,
+                                            serde_json::to_vec(&next_xp)
+                                                .map_err(|_| bad("encode enchanting XP"))?,
+                                        ),
                                     ],
                                 )?;
                                 *inventory = candidate;
