@@ -216,7 +216,7 @@ impl PlayerPosition {
         if !pos.is_valid() {
             return Err(invalid("player location outside loaded world"));
         }
-        if !matches!(nbt.dimension, -1 | 0 | 1) {
+        if !matches!(nbt.dimension, -1..=1) {
             return Err(invalid("unsupported saved player dimension"));
         }
         let vitals = Vitals {
@@ -233,6 +233,7 @@ impl PlayerPosition {
         Ok((pos, vitals, nbt.dimension))
     }
 
+    #[allow(dead_code)] // Backward-compatible Overworld-only API for legacy callers/tests.
     pub fn save_state(&self, path: &Path, vitals: Vitals) -> io::Result<()> {
         self.save_state_in_dimension(path, vitals, 0)
     }
@@ -244,7 +245,7 @@ impl PlayerPosition {
         vitals: Vitals,
         dimension: i32,
     ) -> io::Result<()> {
-        if !matches!(dimension, -1 | 0 | 1) {
+        if !matches!(dimension, -1..=1) {
             return Err(invalid("unsupported player dimension"));
         }
         if !vitals.valid() {
