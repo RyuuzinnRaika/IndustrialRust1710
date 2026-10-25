@@ -160,6 +160,7 @@ impl Chests {
                     id,
                     count,
                     damage: 0,
+                    nbt: None,
                 };
                 if !stack.is_valid() {
                     return Err(invalid("invalid generated loot stack"));
@@ -271,6 +272,7 @@ mod tests {
             id: 3,
             count: 7,
             damage: 0,
+            nbt: None,
         });
         let pos = (2, 64, -1);
         chests.update(&file, pos, slots).unwrap();

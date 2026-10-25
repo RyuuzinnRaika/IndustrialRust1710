@@ -150,7 +150,9 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
 mod tests {
     use super::*;
     fn stack(id: i16, count: u8, damage: i16) -> Stack {
-        Stack { id, count, damage }
+        Stack { id, count, damage },
+        nbt: None,
+    None }
     }
     #[test]
     fn bookshelf_gap_and_cap_are_server_calculated() {

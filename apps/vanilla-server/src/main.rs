@@ -25,6 +25,7 @@ mod ground_items;
 mod hanging;
 mod hoppers;
 mod inventory;
+mod item_nbt;
 mod items_1710;
 mod journal;
 mod legacy_chunk_store;
@@ -172,15 +173,16 @@ impl<'a> Input<'a> {
         let count = self.u8()?;
         let damage = self.i16()?;
         let nbt_length = self.i16()?;
-        // Use-Item sends the held Slot. Book data is not trusted here: C17
-        // carries edits and the server-held book record determines its content.
-        if nbt_length != -1 {
-            if !matches!(id, 386 | 387) || nbt_length < 0 {
-                return Err(bad("unsupported item NBT"));
-            }
-            self.take(nbt_length as usize)?;
+        // Parse the claimed NBT without granting it authority over inventory.
+        if nbt_length < -1 {
+            return Err(bad("invalid item NBT length"));
         }
-        let stack = Stack { id, count, damage };
+        let nbt = if nbt_length >= 0 {
+            Some(item_nbt::intern(self.take(nbt_length as usize)?)?)
+        } else {
+            None
+        };
+        let stack = Stack { id, count, damage, nbt };
         if !stack.is_valid() {
             return Err(bad("invalid item ID, count or damage"));
         }
@@ -1550,6 +1552,7 @@ fn play(
                                         id: 374,
                                         count: 1,
                                         damage: 0,
+                                        nbt: None,
                                     })
                                     .is_some()
                             {
@@ -1594,6 +1597,7 @@ fn play(
                                     id: 325,
                                     count: 1,
                                     damage: 0,
+                                    nbt: None,
                                 })
                                 .is_some()
                         {
@@ -1622,6 +1626,7 @@ fn play(
                                             id: 281,
                                             count: 1,
                                             damage: 0,
+                                            nbt: None,
                                         })
                                         .is_some();
                                 if container_returned {
@@ -2602,6 +2607,7 @@ fn play(
                                                             id: drop.id,
                                                             count: 1,
                                                             damage: drop.damage,
+                                                            nbt: None,
                                                         };
                                                         // A crash after world save and
                                                         // before entity persistence can
@@ -2754,6 +2760,7 @@ fn play(
                                     id: 358,
                                     count: 1,
                                     damage: new_id,
+                                    nbt: None,
                                 })
                                 .is_some()
                             {
@@ -3100,6 +3107,7 @@ fn play(
                                             id: disc,
                                             count: 1,
                                             damage: 0,
+                                            nbt: None,
                                         })
                                         .is_some()
                                 {
@@ -3838,6 +3846,7 @@ fn play(
                                                 id: 325,
                                                 count: 1,
                                                 damage: 0,
+                                                nbt: None,
                                             })
                                             .is_some()
                                     } else {
@@ -7329,6 +7338,7 @@ mod h_special_item_transaction_tests {
                     id: 326,
                     count: 1,
                     damage: 0,
+                    nbt: None,
                 }),
             )
             .unwrap();
@@ -7370,6 +7380,7 @@ mod h_special_item_transaction_tests {
                     id: 351,
                     count: 2,
                     damage: 15,
+                    nbt: None,
                 }),
             )
             .unwrap();
@@ -7484,7 +7495,8 @@ mod tests {
             Some(Stack {
                 id: 1,
                 count: 1,
-                damage: 0
+                damage: 0,
+                nbt: None,
             })
         );
         none.finish().unwrap();
