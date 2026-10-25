@@ -6444,10 +6444,18 @@ fn main() -> io::Result<()> {
                 // Gravity uses the same monotonic 20Hz tick clock.
                 // Advance at most 20 accumulated ticks after a stalled worker,
                 // avoiding unbounded catch-up or a world-wide block scan.
+                // Take a committed inventory snapshot before locking World.
+                // Never hold the device mutex while taking the world mutex:
+                // rising-edge ejection uses the opposite lock order.
+                let device_comparator_inputs = match ejection_devices.lock() {
+                    Ok(storage) => storage.comparator_inputs(),
+                    Err(_) => return,
+                };
                 let mut gravity_world = match furnace_world.lock() {
                     Ok(v) => v,
                     Err(_) => break,
                 };
+                gravity_world.set_device_comparator_inputs(device_comparator_inputs);
                 // Fire uses the same clock/weather source as client rain packets.
                 gravity_world.set_raining(weather.0);
                 gravity_world.set_day_time(furnace_clock.day_time());

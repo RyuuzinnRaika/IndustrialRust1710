@@ -120,6 +120,19 @@ impl Devices {
             .unwrap_or([None; DEVICE_SLOTS])
     }
 
+    /// Snapshot only nonempty, validated analog sources for the world tick.
+    /// Empty or removed inventories are absent, so stale signals are cleared.
+    pub fn comparator_inputs(&self) -> BTreeMap<(i32, u8, i32), u8> {
+        self.entries
+            .iter()
+            .filter_map(|(key, slots)| {
+                let pos = parse_key(key).ok()?;
+                let strength = comparator_strength(slots);
+                (strength > 0).then_some(((pos.0, pos.1 as u8, pos.2), strength))
+            })
+            .collect()
+    }
+
     /// Stage a validated update. Existing state is untouched until commit.
     pub fn staged_update(
         &self,
@@ -205,6 +218,25 @@ impl Devices {
     }
 }
 
+/// Vanilla 1.7.10 comparator override for a nine-slot device:
+/// floor(14 * average slot fullness) + 1 when any slot is occupied.
+/// All supported item stack caps (1, 16, 64) divide 64 exactly.
+fn comparator_strength(slots: &[Option<Stack>; DEVICE_SLOTS]) -> u8 {
+    let mut scaled_fill = 0u32;
+    let mut occupied = false;
+    for stack in slots.iter().flatten() {
+        if stack.is_valid() {
+            occupied = true;
+            scaled_fill += u32::from(stack.count) * 64 / u32::from(stack.max_count());
+        }
+    }
+    if occupied {
+        1 + ((14 * scaled_fill) / (64 * DEVICE_SLOTS as u32)) as u8
+    } else {
+        0
+    }
+}
+
 /// Insert exactly one item into a destination container, preferring
 /// compatible partial stacks. Returns false without mutating if it is full.
 pub fn insert_one<const N: usize>(slots: &mut [Option<Stack>; N], item: Stack) -> bool {
@@ -232,6 +264,81 @@ pub fn insert_one<const N: usize>(slots: &mut [Option<Stack>; N], item: Stack) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_comparator_signal_respects_stack_caps_and_empty_slots() {
+        let mut slots = [None; DEVICE_SLOTS];
+        assert_eq!(comparator_strength(&slots), 0);
+        slots[0] = Some(Stack {
+            id: 1,
+            count: 1,
+            damage: 0,
+        });
+        assert_eq!(comparator_strength(&slots), 1);
+        slots[0] = Some(Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+        });
+        assert_eq!(comparator_strength(&slots), 2);
+        slots.fill(Some(Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+        }));
+        assert_eq!(comparator_strength(&slots), 15);
+        slots[0] = None;
+        assert_eq!(comparator_strength(&slots), 13);
+        slots.fill(Some(Stack {
+            id: 267,
+            count: 1,
+            damage: 0,
+        }));
+        assert_eq!(comparator_strength(&slots), 15);
+        slots.fill(Some(Stack {
+            id: 323,
+            count: 16,
+            damage: 0,
+        }));
+        assert_eq!(comparator_strength(&slots), 15);
+    }
+
+    #[test]
+    fn device_inventory_changes_reach_comparator_after_delay() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-device-comparator-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = world::World::new();
+        world.update_and_save(&path, -1, 64, 0, 23 << 4).unwrap();
+        world
+            .update_and_save(&path, 0, 64, 0, (149 << 4) | 1)
+            .unwrap();
+        let pos = (-1, 64, 0);
+        let full = [Some(Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+        }); DEVICE_SLOTS];
+        let storage = Devices::default().staged_update(pos, full).unwrap();
+        world.set_device_comparator_inputs(storage.comparator_inputs());
+        for _ in 0..3 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(0, 64, 0) >> 4, 150);
+        assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 15);
+        assert_eq!(world.signal_into((-1, 64, 0), (0, 64, 0)), 0);
+
+        let empty = storage.staged_update(pos, [None; DEVICE_SLOTS]).unwrap();
+        world.set_device_comparator_inputs(empty.comparator_inputs());
+        for _ in 0..3 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(0, 64, 0) >> 4, 149);
+        assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 0);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn device_to_device_transfer_is_atomic_when_destination_is_full() {

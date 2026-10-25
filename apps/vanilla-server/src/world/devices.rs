@@ -183,7 +183,7 @@ impl World {
 
     /// Directional analog redstone strength; repeaters/comparators have a
     /// single output face. Dust propagates its stored 0..15 strength.
-    pub(super) fn signal_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
+    pub(crate) fn signal_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
         let (x, y, z) = from;
         let block = self.get(x, y, z);
         match block >> 4 {
@@ -264,6 +264,11 @@ impl World {
     fn comparator_rear_input(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
         let state = self.get(from.0, from.1, from.2);
         match state >> 4 {
+            23 | 158 => self
+                .device_comparator_inputs
+                .get(&(from.0, from.1 as u8, from.2))
+                .copied()
+                .unwrap_or(0), // Dispenser/dropper contents are not ordinary power.
             92 => 14u8.saturating_sub((state as u8 & 7).min(7) * 2), // Cake slices.
             118 => (state & 3) as u8,                                // Cauldron water level.
             120 => {
@@ -275,6 +280,23 @@ impl World {
             } // End portal eye.
             _ => self.signal_into(from, to),
         }
+    }
+
+    /// Refresh analog overrides from committed dispenser/dropper inventories.
+    /// Wake adjacent comparators only when a source's strength changes.
+    pub fn set_device_comparator_inputs(&mut self, inputs: BTreeMap<Position, u8>) {
+        let positions: std::collections::BTreeSet<_> = self
+            .device_comparator_inputs
+            .keys()
+            .chain(inputs.keys())
+            .copied()
+            .collect();
+        for pos in positions {
+            if self.device_comparator_inputs.get(&pos) != inputs.get(&pos) {
+                self.wake_block_updates(pos.0, i32::from(pos.1), pos.2);
+            }
+        }
+        self.device_comparator_inputs = inputs;
     }
 
     pub(super) fn power_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> bool {

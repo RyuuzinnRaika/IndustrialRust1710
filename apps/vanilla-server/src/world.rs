@@ -54,6 +54,8 @@ pub struct World {
     // Comparator analog output (0..15) is not encoded in block metadata.
     // Reconstructed by queued evaluation after loading IRW snapshots.
     comparator_outputs: BTreeMap<Position, u8>,
+    // Live committed device inventories; never serialize analog cache into IRW.
+    device_comparator_inputs: BTreeMap<Position, u8>,
     pending_comparators: BTreeMap<Position, (u64, u8)>,
     comparator_ready: BTreeMap<Position, u8>,
     pending_buttons: BTreeMap<Position, u64>,
