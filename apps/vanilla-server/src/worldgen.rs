@@ -447,8 +447,7 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
     // bounded to the four blocks below the structure.
     if y < base {
         let road = dz.abs() <= 1 && dx.abs() <= 29;
-        let path = (dx == -17 && (-4..=-2).contains(&dz))
-            || (dx == 17 && (2..=4).contains(&dz));
+        let path = (dx == -17 && (-4..=-2).contains(&dz)) || (dx == 17 && (2..=4).contains(&dz));
         let house = [(-17, -9), (17, 9)]
             .iter()
             .any(|&(hx, hz)| (dx - hx).abs() <= 4 && (dz - hz).abs() <= 4);
