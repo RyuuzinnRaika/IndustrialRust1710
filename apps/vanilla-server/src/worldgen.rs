@@ -440,6 +440,22 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
     if !(base - 4..=base + 7).contains(&y) {
         return None;
     }
+    // Fill shallow gaps below village structures when the local terrain is
+    // lower than the village datum. Without this, gravel paths, house floors,
+    // and farmland can float above uneven terrain or shallow cave mouths.
+    // Do not overwrite naturally existing terrain, and keep the support
+    // bounded to the four blocks below the structure.
+    if y < base {
+        let road = dz.abs() <= 1 && dx.abs() <= 29;
+        let path = (dx == -17 && (-4..=-2).contains(&dz)) || (dx == 17 && (2..=4).contains(&dz));
+        let house = [(-17, -9), (17, 9)]
+            .iter()
+            .any(|&(hx, hz)| (dx - hx).abs() <= 4 && (dz - hz).abs() <= 4);
+        let farm = (9..=20).contains(&dx) && (-22..=-13).contains(&dz);
+        if (road || path || house || farm) && y > height(seed, x, z) {
+            return Some(if farm && dx != 15 { b(3) } else { b(4) });
+        }
+    }
     // The central well must take precedence over the crossing road.
     // Otherwise the road replaces the cobblestone floor with gravel and
     // clears the water at z=-1..=1, leaving a dry, broken well.
@@ -922,6 +938,58 @@ mod tests {
             }
         }
         assert!(tested_negative && tested_positive);
+    }
+    #[test]
+    fn village_foundations_support_shallow_gaps_without_replacing_terrain() {
+        let seed = 42u64;
+        let mut checked_villages = 0usize;
+        let mut checked_supports = 0usize;
+        let mut tested_negative = false;
+        let mut tested_positive = false;
+        for gx in -8..=8 {
+            for gz in -8..=8 {
+                if !hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4) {
+                    continue;
+                }
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                if !matches!(biome(seed, cx, cz), 1 | 2 | 35 | 4) {
+                    continue;
+                }
+                checked_villages += 1;
+                tested_negative |= gx < 0 && gz < 0;
+                tested_positive |= gx > 0 && gz > 0;
+                let base = height(seed, cx, cz);
+                // Road, both door paths, both houses, the irrigation trench,
+                // and farmland have different footprints and support blocks.
+                for (dx, dz, support) in [
+                    (5, 0, b(4)),
+                    (-17, -3, b(4)),
+                    (17, 3, b(4)),
+                    (-17, -9, b(4)),
+                    (17, 9, b(4)),
+                    (15, -18, b(4)),
+                    (14, -18, b(3)),
+                ] {
+                    let x = cx + dx;
+                    let z = cz + dz;
+                    let natural_top = height(seed, x, z);
+                    for y in base - 4..base {
+                        if y > natural_top {
+                            assert_eq!(
+                                block(seed, Dimension::Overworld, x, y, z),
+                                support,
+                                "missing support at ({x}, {y}, {z})"
+                            );
+                            checked_supports += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked_villages > 0);
+        assert!(tested_negative && tested_positive);
+        assert!(checked_supports > 0);
     }
     #[test]
     fn village_house_doors_have_clear_paths_to_the_road() {
