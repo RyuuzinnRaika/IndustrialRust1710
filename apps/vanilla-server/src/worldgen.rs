@@ -134,21 +134,27 @@ pub fn biome(seed: u64, x: i32, z: i32) -> u8 {
         1
     }
 }
-/// Temperature and precipitation used by client-side sky/precipitation logic.
+/// Fixed legacy 1.7.10 biome temperature / rainfall values for the IRW4
+/// generator's supported biome IDs. This is not the full GenLayer pipeline.
+/// In particular, ordinary Taiga is a freezing biome, while Cold Taiga is
+/// colder; their previous shared value also misclassified snowfall.
 #[allow(dead_code)] // Reserved for future precipitation/weather integration.
 pub fn climate(id: u8) -> (f32, f32) {
     match id {
-        0 | 24 => (0.5, 0.5),
-        2 | 17 | 37 => (2.0, 0.0),
-        3 | 25 => (0.2, 0.3),
-        4 | 18 | 27 => (0.7, 0.8),
-        5 | 30 => (-0.25, 0.8),
-        6 => (0.8, 0.9),
-        7 => (0.5, 0.5),
-        10 | 11 | 12 | 13 | 26 => (-0.5, 0.5),
-        16 => (0.8, 0.4),
-        21 => (0.95, 0.9),
-        35 => (1.2, 0.0),
+        0 | 24 => (0.5, 0.5),     // ocean / deep ocean
+        2 | 17 | 37 => (2.0, 0.0), // desert / hills / mesa
+        3 | 25 => (0.2, 0.3),     // extreme hills / stone beach
+        4 | 18 => (0.7, 0.8),     // forest / hills
+        5 => (0.05, 0.8),        // taiga
+        6 => (0.8, 0.9),         // swamp
+        7 => (0.5, 0.5),         // river
+        10 | 11 | 12 | 13 => (0.0, 0.5), // frozen water / ice plains / ice mountains
+        16 => (0.8, 0.4),        // beach
+        21 => (1.2, 0.9),        // jungle
+        26 => (0.05, 0.3),       // cold beach
+        27 => (0.6, 0.6),        // birch forest
+        30 => (-0.5, 0.4),       // cold taiga
+        35 => (1.2, 0.0),        // savanna
         _ => (0.8, 0.4),
     }
 }
@@ -513,7 +519,7 @@ fn aboveground(seed: u64, x: i32, y: i32, z: i32, top: i32, id: u8) -> u16 {
         if matches!(id, 6 | 21) && choice.is_multiple_of(48) {
             return b(if choice & 1 == 0 { 39 } else { 40 });
         }
-        if matches!(id, 1 | 4 | 5 | 12 | 27 | 30 | 35) {
+        if matches!(id, 1 | 4 | 27 | 35) {
             if choice.is_multiple_of(29) {
                 return state(38, (choice % 9) as u16);
             }
@@ -561,7 +567,17 @@ fn aboveground(seed: u64, x: i32, y: i32, z: i32, top: i32, id: u8) -> u16 {
         }
     }
     if top < SEA && y <= SEA {
-        b(9)
+        // Freeze the exposed water surface, not every water source below it.
+        // Keeping lower levels as water preserves liquid behavior and caves.
+        if matches!(id, 10 | 11) && y == SEA {
+            b(79) // ice
+        } else {
+            b(9) // still water
+        }
+    } else if y == top + 1 && top >= SEA && matches!(id, 5 | 10 | 11 | 12 | 13 | 26 | 30) {
+        // Snow is a separate layer above exposed ground, except where a
+        // generated trunk/canopy already occupied the coordinate.
+        b(78)
     } else {
         AIR
     }
@@ -768,6 +784,37 @@ mod tests {
         assert!(seen.contains(&0) && seen.contains(&1) && seen.contains(&7));
         assert!(seen.len() > 5);
     }
+    #[test]
+    fn supported_legacy_biome_climate_values_are_distinct() {
+        assert_eq!(climate(5), (0.05, 0.8));
+        assert_eq!(climate(30), (-0.5, 0.4));
+        assert_eq!(climate(10), (0.0, 0.5));
+        assert_eq!(climate(11), (0.0, 0.5));
+        assert_eq!(climate(26), (0.05, 0.3));
+        assert_eq!(climate(27), (0.6, 0.6));
+        assert_eq!(climate(21), (1.2, 0.9));
+    }
+
+    #[test]
+    fn frozen_water_has_surface_ice_and_lower_water_layers() {
+        for biome_id in [10, 11] {
+            // A submerged column must never be packed full of solid ice.
+            assert_eq!(aboveground(42, 0, SEA, 0, SEA - 3, biome_id), b(79));
+            assert_eq!(aboveground(42, 0, SEA - 1, 0, SEA - 3, biome_id), b(9));
+            assert_eq!(aboveground(42, 0, SEA - 2, 0, SEA - 3, biome_id), b(9));
+        }
+        assert_eq!(aboveground(42, 0, SEA, 0, SEA - 3, 7), b(9));
+    }
+
+    #[test]
+    fn snowy_surfaces_use_a_layer_instead_of_tall_grass() {
+        for biome_id in [5, 10, 11, 12, 13, 26, 30] {
+            assert_eq!(aboveground(42, 0, SEA + 1, 0, SEA, biome_id), b(78));
+        }
+        // Never put snow on the bed of a submerged cold river.
+        assert_eq!(aboveground(42, 0, SEA - 1, 0, SEA - 3, 11), b(9));
+    }
+
     #[test]
     fn nether_and_end_have_distinct_base_blocks() {
         assert_eq!(block(9, Dimension::Nether, 0, 0, 0), b(7));
