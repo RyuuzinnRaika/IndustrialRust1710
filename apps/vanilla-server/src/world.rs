@@ -349,6 +349,19 @@ impl World {
             _ => None,
         }
     }
+    /// Resolve generated village doors against the authoritative live block state.
+    /// Unlike static worldgen coordinates, this excludes doors removed or
+    /// replaced by players. Only IRW4 Overworld villages have this layout.
+    /// A future villager AI can consume this bounded two-door lookup without
+    /// caching stale generated blocks.
+    #[allow(dead_code)] // Villager AI integration is a separate A07 step.
+    pub fn live_village_house_doors(&self, x: i32, z: i32) -> Option<[Option<[i32; 3]>; 2]> {
+        let (seed, dimension) = self.extended_identity()?;
+        if dimension != crate::dimensions::Dimension::Overworld {
+            return None;
+        }
+        crate::worldgen::village_live_house_doors(seed, x, z, |dx, dy, dz| self.get(dx, dy, dz))
+    }
     /// Bounded lookup of intact dungeon spawners close to active players.
     /// IRW4 generated sites are indexed by their 64-block feature cells so
     /// this never walks ungenerated chunks or scans a large 3D volume.
@@ -1728,6 +1741,62 @@ mod tests {
             assert_eq!(&packet[ids..ids + metadata], expected_metadata.as_slice());
             assert_eq!(packet.len(), sections.len() * 10240 + 256);
         }
+    }
+
+    #[test]
+    fn live_village_doors_follow_world_edits_and_ignore_other_dimensions() {
+        let seed = 42;
+        let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+        let mut negative_checked = false;
+        let mut positive_checked = false;
+        for gx in -8..=8 {
+            for gz in -8..=8 {
+                let x = gx * 192 + 48;
+                let z = gz * 192 + 48;
+                let negative = gx < 0 && gz < 0 && !negative_checked;
+                let positive = gx > 0 && gz > 0 && !positive_checked;
+                if !negative && !positive {
+                    continue;
+                }
+                let Some(doors) = world.live_village_house_doors(x, z) else {
+                    continue;
+                };
+                let [first, second] = doors;
+                let [dx, dy, dz] = first.expect("generated first house door");
+                assert!(second.is_some(), "generated second house door");
+                let lower = world.get(dx, dy, dz);
+                let upper = world.get(dx, dy + 1, dz);
+
+                world.import_block(dx, dy, dz, 0).unwrap();
+                assert_eq!(world.live_village_house_doors(x, z), Some([None, second]));
+                world.import_block(dx, dy, dz, lower).unwrap();
+
+                // Opening a door and changing its upper-half hinge metadata
+                // must not make an otherwise intact wooden door disappear.
+                world.import_block(dx, dy, dz, lower ^ 4).unwrap();
+                world.import_block(dx, dy + 1, dz, upper ^ 1).unwrap();
+                assert_eq!(world.live_village_house_doors(x, z), Some(doors));
+
+                world.import_block(dx, dy + 1, dz, 71 << 4 | 8).unwrap();
+                assert_eq!(world.live_village_house_doors(x, z), Some([None, second]));
+                world.import_block(dx, dy, dz, lower).unwrap();
+                world.import_block(dx, dy + 1, dz, upper).unwrap();
+                assert_eq!(world.live_village_house_doors(x, z), Some(doors));
+                if negative {
+                    negative_checked = true;
+                } else {
+                    positive_checked = true;
+                }
+            }
+        }
+        assert!(negative_checked && positive_checked);
+        assert_eq!(world.live_village_house_doors(i32::MIN, 0), None);
+        assert_eq!(World::new().live_village_house_doors(0, 0), None);
+        assert_eq!(
+            World::expanded(seed, crate::dimensions::Dimension::Nether)
+                .live_village_house_doors(0, 0),
+            None
+        );
     }
 
     #[test]
