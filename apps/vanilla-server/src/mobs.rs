@@ -1983,8 +1983,11 @@ impl Mobs {
             let open = sky_exposed(world, position);
             let (block_light, sky_light) = world.light_at(x, y, z);
             let overworld = dimension == crate::dimensions::Dimension::Overworld;
-            let is_passive =
-                overworld && grass && open && now.is_multiple_of(400) && natural_spawn_passive_roll(seed);
+            let is_passive = overworld
+                && grass
+                && open
+                && now.is_multiple_of(400)
+                && natural_spawn_passive_roll(seed);
             if overworld && !spawn_light_ok(block_light, sky_light, now, is_passive) {
                 continue;
             }
@@ -2973,8 +2976,6 @@ fn natural_pack_attempts(kind: Kind, seed: u64) -> usize {
     }
 }
 
-/// Unique 17x17 eligible chunk union. Vanilla's mob cap scales with this
-/// area, not with raw online player count or the protocol render distance.
 /// Use separate random bits for the horizontal spawn side and the passive
 /// spawn attempt. Reusing bit zero for both makes passive packs spawn only
 /// east of players, leaving the western half of eligible terrain empty.
@@ -2990,6 +2991,8 @@ fn natural_spawn_passive_roll(seed: u64) -> bool {
     seed & 2 == 0
 }
 
+/// Unique 17x17 eligible chunk union. Vanilla's mob cap scales with this
+/// area, not with raw online player count or the protocol render distance.
 fn natural_spawn_capacity(players: &[PlayerPosition], base: usize) -> usize {
     natural_mob_cap(players, base).min(MAX_NATURAL_PER_CATEGORY)
 }
