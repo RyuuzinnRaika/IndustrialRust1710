@@ -1983,6 +1983,13 @@ impl Mobs {
                 continue;
             }
             let biome = world.biome_at(x, z);
+            // Mushroom islands have no ordinary animal/monster spawn entries
+            // in Java 1.7.10. Mooshrooms need their own species implementation.
+            if dimension == crate::dimensions::Dimension::Overworld
+                && !overworld_biome_allows_natural_spawn(biome)
+            {
+                continue;
+            }
             let grass = world.get(x, y - 1, z) >> 4 == 2;
             let open = sky_exposed(world, position);
             let (block_light, sky_light) = world.light_at(x, y, z);
@@ -2087,6 +2094,11 @@ impl Mobs {
                     candidate.y.floor() as i32,
                     candidate.z.floor() as i32,
                 );
+                // Pack members can cross a biome boundary. Validate their
+                // biome independently, not just the initial pack origin.
+                if overworld && !overworld_biome_allows_natural_spawn(world.biome_at(cx, cz)) {
+                    continue;
+                }
                 if overworld {
                     let (block, sky) = world.light_at(cx, cy, cz);
                     if !spawn_light_ok(block, sky, now, is_passive) {
@@ -2946,6 +2958,13 @@ fn horse_spawn_weight(biome: u8) -> u64 {
     }
 }
 
+/// Mushroom Island and Mushroom Island Shore (IDs 14/15) clear the vanilla
+/// ordinary creature and monster lists. The special Mooshroom entry is not
+/// represented by the current Kind enum; never substitute a cow or hostile mob.
+fn overworld_biome_allows_natural_spawn(biome: u8) -> bool {
+    !matches!(biome, 14 | 15)
+}
+
 fn overworld_passive_kind(biome: u8, roll: u64) -> Kind {
     let weight = horse_spawn_weight(biome);
     match roll % (40 + weight) {
@@ -3742,6 +3761,17 @@ mod tests {
                 assert_eq!((dx, dz), (-32, 24 * sign));
             }
             assert_eq!(natural_spawn_passive_roll(seed), seed & 2 == 0);
+        }
+    }
+
+    #[test]
+    fn mushroom_islands_exclude_ordinary_natural_mobs_and_pack_members() {
+        // Both the origin and each proposed pack member use this predicate.
+        for biome in [14, 15] {
+            assert!(!overworld_biome_allows_natural_spawn(biome));
+        }
+        for biome in [0, 1, 6, 35, 129] {
+            assert!(overworld_biome_allows_natural_spawn(biome));
         }
     }
 
