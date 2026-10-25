@@ -434,8 +434,7 @@ impl World {
         let mut doors: BTreeSet<[i32; 3]> = core.iter().copied().collect();
         let mut annex = Vec::new();
         for (&(dx, dy, dz), &lower) in self.edits.range(
-            (cx.saturating_sub(47), 0u8, i32::MIN)
-                ..=(cx.saturating_add(47), u8::MAX, i32::MAX),
+            (cx.saturating_sub(47), 0u8, i32::MIN)..=(cx.saturating_add(47), u8::MAX, i32::MAX),
         ) {
             if doors.len() >= 128 {
                 break;
@@ -2017,7 +2016,10 @@ mod tests {
         let anchor = world.live_village_house_doors(cx, cz).unwrap()[1].unwrap();
         let annex = [anchor[0] + 15, anchor[1], anchor[2]];
         let disconnected = [anchor[0] + 17, anchor[1], anchor[2]];
-        assert_eq!(world.village_doors_with_bounded_annex(annex[0], annex[2]), None);
+        assert_eq!(
+            world.village_doors_with_bounded_annex(annex[0], annex[2]),
+            None
+        );
         for door in [annex, disconnected] {
             world
                 .import_block(door[0], door[1], door[2], 64 << 4 | 2)
@@ -2037,10 +2039,8 @@ mod tests {
             .contains(&annex));
         assert_eq!(world.village_doors_with_bounded_annex(cx + 48, cz), None);
 
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-village-annex-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-village-annex-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         world.save(&path).unwrap();
         let mut restored = World::load(&path).unwrap();
