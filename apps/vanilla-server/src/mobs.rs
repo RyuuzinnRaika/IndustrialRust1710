@@ -180,7 +180,9 @@ impl Kind {
         match self {
             Self::Cow | Self::Sheep => held == 296,
             Self::Pig => held == 391,
-            Self::Horse => matches!(held, 260 | 296 | 353),
+            // Java 1.7.10 horses enter love mode only with golden apples
+            // or golden carrots; ordinary apples, wheat and sugar heal/tame.
+            Self::Horse => matches!(held, 322 | 396),
             Self::Chicken => matches!(held, 295 | 361 | 362),
             _ => false,
         }
@@ -1792,6 +1794,7 @@ impl Mobs {
             || !first.kind.passive()
             || first.baby
             || !first.kind.breeding_food(food)
+            || (first.kind == Kind::Horse && !first.tamed)
             || (first.breed_tick != 0 && tick.saturating_sub(first.breed_tick) < 6000)
             || tick < first.love_until
         {
@@ -1807,6 +1810,7 @@ impl Mobs {
             .find(|mate| {
                 mate.id != id
                     && mate.kind == first.kind
+                    && (mate.kind != Kind::Horse || mate.tamed)
                     && !mate.baby
                     && mate.love_until > tick
                     && (mate.breed_tick == 0 || tick.saturating_sub(mate.breed_tick) >= 6000)
@@ -3562,6 +3566,43 @@ mod tests {
             assert_eq!(horse_spawn_weight(biome), 0);
             assert!((0..256).all(|roll| overworld_passive_kind(biome, roll) != Kind::Horse));
         }
+    }
+
+    #[test]
+    fn horse_breeding_requires_taming_and_golden_food() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Horse, at, false);
+        let first = mobs.next_id - 1;
+        mobs.insert(Kind::Horse, PlayerPosition { x: 2.5, ..at }, false);
+        let second = mobs.next_id - 1;
+        let held = |id| Some(Stack {
+            id,
+            count: 1,
+            damage: 0,
+        });
+
+        // Golden food cannot breed an untamed horse.
+        assert!(mobs.feed(first, at, held(396), 100).is_none());
+        mobs.entities.get_mut(&first).unwrap().tamed = true;
+        for id in [260, 296, 353] {
+            assert!(mobs.feed(first, at, held(id), 100).is_none());
+        }
+        assert!(mobs.feed(first, at, held(396), 100).is_some());
+        // The untamed second horse cannot be put into love mode.
+        assert!(mobs.feed(second, at, held(322), 101).is_none());
+        assert_eq!(mobs.entities.len(), 2);
+
+        mobs.entities.get_mut(&second).unwrap().tamed = true;
+        assert!(mobs.feed(second, at, held(322), 102).is_some());
+        assert_eq!(mobs.entities.len(), 3);
+        assert!(mobs.entities.values().any(|mob| mob.kind == Kind::Horse && mob.baby));
+        assert_eq!(mobs.entities[&first].breed_tick, 102);
+        assert_eq!(mobs.entities[&second].breed_tick, 102);
     }
 
     #[test]
