@@ -4008,11 +4008,11 @@ mod tests {
         assert!(full_moon_successes > 0);
         assert!(half_moon_successes > 0);
         assert!(half_moon_successes < full_moon_successes);
-        // The cave predicate has no moon-phase dependency.
-        assert_eq!(
-            is_slime_cave_location(0, 0, 39, 0),
-            is_slime_cave_location(0, 0, 39, 0)
-        );
+        // Underground slime chunks remain valid at Y=39 independently of
+        // the lunar phase; Y=40 is outside the cave-only exemption.
+        let chunk_x = (0..64).find(|&x| is_slime_chunk(0, x, 0)).unwrap();
+        assert!(is_slime_cave_location(0, chunk_x * 16, 39, 0));
+        assert!(!is_slime_cave_location(0, chunk_x * 16, 40, 0));
     }
 
     #[test]
