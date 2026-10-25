@@ -384,6 +384,11 @@ impl World {
         block: u16,
         changes: &mut BTreeMap<Position, u16>,
     ) {
+        // Only metadata 0..=5 denotes a piston face in 1.7.10.
+        // Corrupt/unknown facings 6 and 7 must not default to east.
+        if block & 7 > 5 {
+            return;
+        }
         let (dx, dy, dz) = facing(block);
         let extended = block & 8 != 0;
         // Pistons in 1.7.10 are also quasi-connected by power at the
@@ -1092,6 +1097,33 @@ mod redstone_regression_tests {
                     !changes.values().any(|block| block >> 4 == liquid_id),
                     "piston must displace liquid {liquid_id}, not push it"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_piston_facing_never_pushes_or_retracts_blocks() {
+        for piston_id in [29u16, 33] {
+            for orientation in [6u16, 7] {
+                for extended in [false, true] {
+                    for powered in [false, true] {
+                        let mut world = World::new();
+                        let extended_bit = if extended { 8 } else { 0 };
+                        let piston = (piston_id << 4) | orientation | extended_bit;
+                        world.import_block(0, 64, 0, piston).unwrap();
+                        world.import_block(1, 64, 0, 1 << 4).unwrap();
+                        if powered {
+                            world.import_block(-1, 64, 0, (69 << 4) | 8).unwrap();
+                        }
+
+                        let mut changes = BTreeMap::new();
+                        world.push_piston(0, 64, 0, piston, &mut changes);
+                        assert!(
+                            changes.is_empty(),
+                            "piston {piston_id} with invalid facing {orientation} must not act"
+                        );
+                    }
+                }
             }
         }
     }
