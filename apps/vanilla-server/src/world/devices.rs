@@ -422,7 +422,10 @@ impl World {
             changes.insert((head.0, head.1 as u8, head.2), (34 << 4) | (block & 7));
             changes.insert((x, y as u8, z), block | 8);
         } else {
-            if self.get(head.0, head.1, head.2) >> 4 == 34 {
+            // A neighboring piston's head may occupy this cell. Only retract
+            // the head that points in the same direction as this piston.
+            let head_block = self.get(head.0, head.1, head.2);
+            if head_block >> 4 == 34 && (head_block & 7) == (block & 7) {
                 changes.insert((head.0, head.1 as u8, head.2), 0);
                 if block >> 4 == 29 {
                     let far = (head.0 + dx, head.1 + dy, head.2 + dz);
@@ -1002,6 +1005,40 @@ mod redstone_regression_tests {
                 "piston must not overwrite or displace portal block {id}"
             );
         }
+    }
+
+    #[test]
+    fn piston_retraction_does_not_erase_a_foreign_facing_head() {
+        for piston_id in [29u16, 33] {
+            let mut world = World::new();
+            let piston = (piston_id << 4) | 13;
+            world.import_block(0, 64, 0, piston).unwrap();
+            // The adjacent head belongs to a different orientation.
+            world.import_block(1, 64, 0, (34 << 4) | 2).unwrap();
+            world.import_block(2, 64, 0, 1 << 4).unwrap();
+
+            let mut changes = BTreeMap::new();
+            world.push_piston(0, 64, 0, piston, &mut changes);
+            assert_eq!(changes.len(), 1);
+            assert_eq!(changes.get(&(0, 64, 0)), Some(&((piston_id << 4) | 5)));
+            assert!(!changes.contains_key(&(1, 64, 0)));
+            assert!(!changes.contains_key(&(2, 64, 0)));
+        }
+    }
+
+    #[test]
+    fn sticky_piston_retraction_still_pulls_through_matching_head() {
+        let mut world = World::new();
+        let piston = (29 << 4) | 13;
+        world.import_block(0, 64, 0, piston).unwrap();
+        world.import_block(1, 64, 0, (34 << 4) | 5).unwrap();
+        world.import_block(2, 64, 0, 1 << 4).unwrap();
+
+        let mut changes = BTreeMap::new();
+        world.push_piston(0, 64, 0, piston, &mut changes);
+        assert_eq!(changes.get(&(0, 64, 0)), Some(&((29 << 4) | 5)));
+        assert_eq!(changes.get(&(1, 64, 0)), Some(&(1 << 4)));
+        assert_eq!(changes.get(&(2, 64, 0)), Some(&0));
     }
 
     #[test]
