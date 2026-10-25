@@ -435,6 +435,77 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn chest_sidecar_and_two_regions_share_one_committed_generation() {
+        use crate::chests::Chests;
+        use crate::inventory::Stack;
+        let base = fixture_root();
+        let root = base.join("world");
+        let world_file = root.join("flat.irw");
+        World::new().save_new(&world_file).unwrap();
+        let mut lock = WorldSessionLock::acquire(&root).unwrap();
+        seed(&base, &mut lock);
+
+        // A second chest lies across the x=0 region boundary; both regions
+        // must be updated together with one native JSON inventory image.
+        let negative_region = root.join("region/r.-1.0.mca");
+        let mut region = Region::from_stream(File::open(&negative_region).unwrap()).unwrap();
+        let mut negative = legacy_nbt::parse_chunk(
+            &region.read_chunk(31, 0).unwrap().unwrap(), -1, 0
+        ).unwrap();
+        negative.level.tile_entities =
+            vec![tile("Chest", -1, 64, 0, "negative-unknown-tag")];
+        let nbt = fastnbt::to_bytes(&negative).unwrap();
+        crate::legacy_region_rewrite::rewrite_chunk_under_lock(
+            &mut lock, Dimension::Overworld, -1, 0, &nbt
+        ).unwrap();
+        drop(region);
+        let slots = |slot: usize| {
+            let mut items = [None; crate::chests::CHEST_SLOTS];
+            items[slot] = Some(Stack { id: 264, count: 3, damage: 0 });
+            items
+        };
+        let native = Chests::default()
+            .staged_update((0, 64, 0), slots(2)).unwrap()
+            .staged_update((-1, 64, 0), slots(5)).unwrap();
+        let make_patch = |x: i32, slot: i8| TileInventoryPatch {
+            x, y: 64, z: 0, expected_id: "Chest".into(),
+            items: vec![SlotItem {
+                slot, id: 264, count: 3, damage: 0,
+                tag: None, extra: BTreeMap::new(),
+            }],
+        };
+        let patches = [make_patch(0, 2), make_patch(-1, 5)];
+        rewrite_chests_with_sidecar_under_lock(
+            &mut lock, Dimension::Overworld, &world_file, &native, &patches,
+        ).unwrap();
+
+        let sidecar = Chests::location(&world_file);
+        let persisted = Chests::load(&sidecar).unwrap();
+        assert_eq!(persisted.slots((0, 64, 0)), slots(2));
+        assert_eq!(persisted.slots((-1, 64, 0)), slots(5));
+        for (region_name, cx, x, slot, tag) in [
+            ("r.0.0.mca", 0, 0, 2, "chest-must-survive"),
+            ("r.-1.0.mca", -1, -1, 5, "negative-unknown-tag"),
+        ] {
+            let source = root.join("region").join(region_name);
+            let mut opened = Region::from_stream(File::open(source).unwrap()).unwrap();
+            let chunk = legacy_nbt::parse_chunk(
+                &opened.read_chunk(cx.rem_euclid(32) as usize, 0).unwrap().unwrap(),
+                cx, 0
+            ).unwrap();
+            let matching = chunk.level.tile_entities.iter()
+                .map(|value| decode_tile(value).unwrap())
+                .find(|value| (value.x, value.y, value.z) == (x, 64, 0))
+                .unwrap();
+            assert_eq!(matching.items.unwrap()[0].slot, slot);
+            assert_eq!(matching.extra.get("UnknownModTag"), Some(&Value::String(tag.into())));
+        }
+        assert!(!world_file.with_extension("pending-txn.json").exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn anvil_chest_and_native_sidecar_commit_together_without_unknown_tag_loss() {
         use crate::chests::Chests;
         use crate::inventory::Stack;
