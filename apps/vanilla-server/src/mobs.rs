@@ -4127,7 +4127,10 @@ mod tests {
         mobs.insert(Kind::Zombie, at, false);
         let id = mobs.next_id - 1;
         let mut saved = serde_json::to_value(mobs.entities[&id]).unwrap();
-        saved.as_object_mut().unwrap().remove("far_from_player_ticks");
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("far_from_player_ticks");
         let restored: Mob = serde_json::from_value(saved).unwrap();
         assert_eq!(restored.far_from_player_ticks, 0);
     }
