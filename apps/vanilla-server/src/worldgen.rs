@@ -554,7 +554,12 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
                 }
                 return Some(AIR);
             }
-            if a == 0 && c == if hz < 0 { 4 } else { -4 } && y < base + 3 {
+            if a == 0
+                && y < base + 3
+                && village_house_doors(seed, x, z).is_some_and(|doors| {
+                    doors.iter().any(|door| door[0] == x && door[2] == z)
+                })
+            {
                 // Wooden doors use a lower half with facing metadata and an
                 // upper half marked with bit 3 in Minecraft 1.7.10.
                 return Some(if y == base + 1 {
