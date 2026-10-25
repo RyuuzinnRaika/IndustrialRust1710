@@ -6525,7 +6525,7 @@ fn main() -> io::Result<()> {
                                         Ok(value) => value,
                                         Err(error) => {
                                             eprintln!("DROPPER DEVICE TRANSFER ERROR: {error}");
-                                            return;
+                                            continue;
                                         }
                                     };
                                     if let Some(updated) = staged {
@@ -6533,7 +6533,7 @@ fn main() -> io::Result<()> {
                                             Ok(value) => value,
                                             Err(error) => {
                                                 eprintln!("DROPPER DEVICE ENCODING ERROR: {error}");
-                                                return;
+                                                continue;
                                             }
                                         };
                                         if let Err(error) = journal::commit(
@@ -6541,7 +6541,7 @@ fn main() -> io::Result<()> {
                                             &[(&*ejection_file, bytes)],
                                         ) {
                                             eprintln!("DROPPER DEVICE JOURNAL ERROR: {error}");
-                                            return;
+                                            continue;
                                         }
                                         *storage = updated;
                                     }
@@ -6551,7 +6551,7 @@ fn main() -> io::Result<()> {
                                     Ok(result) => result,
                                     Err(error) => {
                                         eprintln!("DEVICE EJECTION ERROR: {error}");
-                                        return;
+                                        continue;
                                     }
                                 }) else {
                                     continue;
@@ -6578,7 +6578,7 @@ fn main() -> io::Result<()> {
                                             eprintln!(
                                                 "DISPENSER PROJECTILE ENCODING ERROR: {error}"
                                             );
-                                            return;
+                                            continue;
                                         }
                                     };
                                     if let Err(error) = journal::commit(
@@ -6586,7 +6586,7 @@ fn main() -> io::Result<()> {
                                         &[(&*ejection_file, device_bytes)],
                                     ) {
                                         eprintln!("DISPENSER PROJECTILE JOURNAL ERROR: {error}");
-                                        return;
+                                        continue;
                                     }
                                     *storage = updated;
                                     *live_projectiles = staged_projectiles;
@@ -6611,7 +6611,7 @@ fn main() -> io::Result<()> {
                                             Ok(value) => value,
                                             Err(error) => {
                                                 eprintln!("DROPPER CHEST TRANSFER ERROR: {error}");
-                                                return;
+                                                continue;
                                             }
                                         };
                                         let result = (|| -> io::Result<()> {
@@ -6627,7 +6627,7 @@ fn main() -> io::Result<()> {
                                         })();
                                         if let Err(error) = result {
                                             eprintln!("DROPPER TRANSFER JOURNAL ERROR: {error}");
-                                            return;
+                                            continue;
                                         }
                                         *storage = updated;
                                         *chests = next_chest;
@@ -6646,21 +6646,21 @@ fn main() -> io::Result<()> {
                                         Ok(result) => result,
                                         Err(error) => {
                                             eprintln!("DEVICE GROUND ITEM ERROR: {error}");
-                                            return;
+                                            continue;
                                         }
                                     };
                                 let device_bytes = match updated.encoded() {
                                     Ok(bytes) => bytes,
                                     Err(error) => {
                                         eprintln!("DEVICE INVENTORY ENCODING ERROR: {error}");
-                                        return;
+                                        continue;
                                     }
                                 };
                                 let ground_bytes = match next_ground.encoded() {
                                     Ok(bytes) => bytes,
                                     Err(error) => {
                                         eprintln!("DEVICE ITEM ENCODING ERROR: {error}");
-                                        return;
+                                        continue;
                                     }
                                 };
                                 if let Err(error) = journal::commit(
@@ -6671,7 +6671,7 @@ fn main() -> io::Result<()> {
                                     ],
                                 ) {
                                     eprintln!("DEVICE EJECTION JOURNAL ERROR: {error}");
-                                    return;
+                                    continue;
                                 }
                                 *storage = updated;
                                 *ground = next_ground;
