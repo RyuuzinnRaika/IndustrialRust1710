@@ -719,6 +719,54 @@ mod tests {
     }
 
     #[test]
+    fn crash_between_two_regions_and_sidecar_replays_a_single_generation() {
+        use crate::{anvil_export, world::World};
+        let parent = std::env::temp_dir().join(format!(
+            "ir-journal-multi-anvil-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&parent).unwrap();
+        let root = parent.join("world");
+        anvil_export::export(&World::new(), &root).unwrap();
+        let east = root.join("region/r.0.0.mca");
+        let west = root.join("region/r.-1.0.mca");
+        let sidecar = root.join("flat.chests.json");
+        let journal = root.join("flat.pending-txn.json");
+        let east_bytes = fs::read(&east).unwrap();
+        let west_bytes = fs::read(&west).unwrap();
+        let after_chests = br#"{"chests":[]}"#;
+        let record = Record {
+            version: VERSION,
+            files: [
+                (east.as_path(), east_bytes.as_slice()),
+                (west.as_path(), west_bytes.as_slice()),
+                (sidecar.as_path(), after_chests.as_slice()),
+            ]
+            .into_iter()
+            .map(|(path, data)| Target {
+                relative: relative(&root, path).unwrap(),
+                checksum: fingerprint(data),
+                contents: data.to_vec(),
+            })
+            .collect(),
+        };
+        fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
+        // A power loss after the first region publication can leave the
+        // remaining targets inconsistent until startup redo completes.
+        fs::write(&west, b"power-loss-torn-region").unwrap();
+        fs::write(&sidecar, b"old").unwrap();
+        recover(&journal).unwrap();
+        assert_eq!(fs::read(&east).unwrap(), east_bytes);
+        assert_eq!(fs::read(&west).unwrap(), west_bytes);
+        assert_eq!(fs::read(&sidecar).unwrap(), after_chests);
+        assert!(!journal.exists());
+        recover(&journal).unwrap();
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
     fn anvil_journal_rejects_invalid_region_and_unsafe_region_path() {
         let root = std::env::temp_dir().join(format!(
             "ir-journal-reject-region-{}-{:?}",
