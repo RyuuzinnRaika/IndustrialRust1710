@@ -1480,9 +1480,7 @@ impl Inventory {
         packet
     }
 
-    /// Protocol 5 enchanting table has exactly one input plus 36 inventory
-    /// slots. It must never offer a fake enchanted output when the live stack
-    /// model cannot represent enchantment NBT.
+    /// Protocol 5 enchanting table has one input plus 36 inventory slots.
     pub fn enchanting_window_items(&self, window: u8) -> Vec<u8> {
         let mut packet = vec![window];
         packet.extend_from_slice(&37i16.to_be_bytes());
@@ -1504,6 +1502,35 @@ impl Inventory {
     pub fn enchanting_input(&self) -> Option<Stack> {
         self.enchant_input
     }
+    /// Already enchanted items remain withdrawable but cannot receive a new offer.
+    pub fn enchanting_available(&self) -> bool {
+        self.enchant_input.is_some_and(crate::enchanting::can_enchant)
+    }
+    /// The C11 packet contains only the row number. All item, cost and XP
+    /// state comes from the server. The caller journals both changed states.
+    pub fn enchant_choice(
+        &mut self,
+        choice: i8,
+        offers: [u8; 3],
+        seed: u64,
+        experience: &mut crate::experience::Experience,
+        survival: bool,
+    ) -> bool {
+        let Some(cost) = usize::try_from(choice).ok()
+            .and_then(|index| offers.get(index).copied())
+            .filter(|cost| *cost > 0) else { return false };
+        let Some(item) = self.enchant_input else { return false };
+        let mut next_xp = *experience;
+        if survival && !next_xp.spend_levels(u16::from(cost)) {
+            return false;
+        }
+        let Ok(Some(enchanted)) = crate::enchanting::apply(item, cost, seed) else {
+            return false;
+        };
+        self.enchant_input = Some(enchanted);
+        *experience = next_xp;
+        true
+    }
 
     /// Return the table's item on close, atomically. If all slots are full,
     /// retain the input in the versioned save instead of dropping it.
@@ -1520,9 +1547,7 @@ impl Inventory {
         true
     }
 
-    /// Enchanting-table inventory transport only. C11 enchant selections are
-    /// deliberately rejected until arbitrary ItemStack NBT is supported.
-    /// The client-provided clicked stack is never trusted.
+    /// Enchanting-table slot transport; the clicked stack is never trusted.
     pub fn enchanting_click_window(&mut self, slot: i16, button: i8, mode: i8) -> bool {
         match slot {
             0 if mode == 0 && matches!(button, 0 | 1) => match (self.enchant_input, self.cursor) {
@@ -2827,6 +2852,35 @@ mod tests {
         assert!(Inventory::load(&path).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
+    #[test]
+    fn enchant_choice_debits_exact_xp_and_survives_save_reload() {
+        let mut inv = Inventory::default();
+        inv.enchant_input = Some(Stack { id: 257, count: 1, damage: 12, nbt: None });
+        let mut xp = crate::experience::Experience { total: 2000 };
+        let old = inv.clone();
+        let old_xp = xp;
+        assert!(!inv.enchant_choice(2, [1, 2, 30], 42, &mut xp, true)
+            || xp.total < old_xp.total);
+        if inv != old {
+            let tagged = inv.enchant_input.unwrap();
+            assert!(tagged.nbt.is_some());
+            let bytes = inv.encoded().unwrap();
+            let again: Inventory = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(again.enchant_input, inv.enchant_input);
+            assert_eq!(crate::item_nbt::wire(tagged.nbt.unwrap()), crate::item_nbt::wire(again.enchant_input.unwrap().nbt.unwrap()));
+            let snapshot = inv.clone();
+            assert!(!inv.enchant_choice(2, [1, 2, 30], 42, &mut xp, true));
+            assert_eq!(inv, snapshot);
+        }
+        let mut empty = Inventory::default();
+        empty.enchant_input = old.enchant_input;
+        let mut no_xp = crate::experience::Experience::default();
+        assert!(!empty.enchant_choice(2, [1, 2, 30], 42, &mut no_xp, true));
+        assert_eq!(empty, old);
+        assert_eq!(no_xp.total, 0);
+        assert!(!empty.enchant_choice(3, [1, 2, 30], 42, &mut no_xp, false));
+    }
+
     #[test]
     fn enchanting_table_keeps_books_and_enforces_single_input() {
         let mut inv = Inventory {

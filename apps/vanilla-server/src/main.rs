@@ -26,6 +26,7 @@ mod hanging;
 mod hoppers;
 mod inventory;
 mod item_nbt;
+mod enchanting;
 mod items_1710;
 mod journal;
 mod legacy_chunk_store;
@@ -901,6 +902,7 @@ fn play(
     let mut active_enchant: Option<(i32, i32, i32)> = None;
     let mut enchant_shelves: u8 = 0;
     let mut enchant_offers: [u8; 3] = [0; 3];
+    let mut enchant_seed: u64 = rand::random();
     let mut last_brewer_view = Brewer::default();
     let mut last_furnace_view = Furnace::default();
     let mut observed_chest_revision: u64 = 0;
@@ -3629,8 +3631,9 @@ fn play(
                     active_anvil = None;
                     active_enchant = Some((x, y, z));
                     enchant_shelves = shelves;
-                    enchant_offers = if inventory.enchanting_has_item() {
-                        workstations::enchanting_costs(enchant_shelves, rand::random::<u64>())
+                    enchant_seed = rand::random();
+                    enchant_offers = if inventory.enchanting_available() {
+                        workstations::enchanting_costs(enchant_shelves, enchant_seed)
                     } else {
                         [0; 3]
                     };
@@ -4020,11 +4023,9 @@ fn play(
                         && candidate.enchanting_click_window(slot, button, mode);
                     if accepted && candidate != *inventory {
                         if candidate.enchanting_input() != inventory.enchanting_input() {
-                            enchant_offers = if candidate.enchanting_has_item() {
-                                workstations::enchanting_costs(
-                                    enchant_shelves,
-                                    rand::random::<u64>(),
-                                )
+                            enchant_seed = rand::random();
+                            enchant_offers = if candidate.enchanting_available() {
+                                workstations::enchanting_costs(enchant_shelves, enchant_seed)
                             } else {
                                 [0; 3]
                             };
@@ -4438,22 +4439,43 @@ fn play(
                 }
             }
             17 => {
-                // C11 Enchant Item has two signed bytes in Protocol 5. Do not
-                // disconnect valid clients for selecting an offer; reject
-                // without consuming XP or the item until NBT is supported.
+                // Protocol 5 Enchant Item (C11) contains window and selected row.
+                // Never use a client-supplied stack, candidate or experience total.
                 let window = input.i8()?;
                 let choice = input.i8()?;
                 input.finish()?;
-                if active_enchant.is_some()
-                    && window == active_window as i8
-                    && (0..=2).contains(&choice)
-                {
-                    send(s, 0x30, &inventory.enchanting_window_items(active_window))?;
-                    for (property, cost) in enchant_offers.iter().copied().enumerate() {
-                        let mut update = vec![active_window];
-                        update.extend_from_slice(&(property as i16).to_be_bytes());
-                        update.extend_from_slice(&(cost as i16).to_be_bytes());
-                        send(s, 0x31, &update)?;
+                if let Some(pos) = active_enchant {
+                    if window == active_window as i8 && (0..=2).contains(&choice) {
+                        let still_open = world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(pos.0, pos.1, pos.2) >> 4 == 116
+                            && near(location, pos.0, pos.1, pos.2);
+                        if still_open {
+                            let mut candidate = inventory.clone();
+                            let mut next_xp = *experience;
+                            if candidate.enchant_choice(choice, enchant_offers, enchant_seed, &mut next_xp, survival) {
+                                journal::commit(
+                                    &world_path.with_extension("pending-txn.json"),
+                                    &[
+                                        (inventory_path, candidate.encoded()?),
+                                        (experience_path, serde_json::to_vec(&next_xp).map_err(|_| bad("encode enchanting XP"))?),
+                                    ],
+                                )?;
+                                *inventory = candidate;
+                                *experience = next_xp;
+                                enchant_offers = [0; 3]; // enchanted input stays withdrawable
+                                send(s, 0x1f, &experience.packet())?;
+                            }
+                        }
+                        send(s, 0x30, &inventory.enchanting_window_items(active_window))?;
+                        for (property, cost) in enchant_offers.iter().copied().enumerate() {
+                            let mut update = vec![active_window];
+                            update.extend_from_slice(&(property as i16).to_be_bytes());
+                            update.extend_from_slice(&(cost as i16).to_be_bytes());
+                            send(s, 0x31, &update)?;
+                        }
+                        send(s, 0x2f, &inventory.cursor_packet())?;
                     }
                 }
             }
