@@ -1499,7 +1499,6 @@ fn native_protocol5_light_refresh_restreams_a_chunk_after_torch_placement() {
 fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
     let server = NativeServer::start();
     let (mut client, _, _) = server.join("RustTester");
-    {
     let mut place = |id: i16, x: i32| {
         let mut creative = 36i16.to_be_bytes().to_vec();
         creative.extend_from_slice(&id.to_be_bytes());
@@ -1530,7 +1529,6 @@ fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
     place(69, -4); // lever
     place(331, -3); // redstone dust item -> wire block55
     place(8, 5); // source water supported by grass
-    } // release closure's mutable TcpStream borrow
     until_packet(&mut client, 0x23, |body| {
         body.len() == 11
             && body[0..4] == 6i32.to_be_bytes()
