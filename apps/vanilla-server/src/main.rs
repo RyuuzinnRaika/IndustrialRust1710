@@ -2007,7 +2007,7 @@ fn play(
                             continue;
                         }
                     }
-                    if let Some(event) =
+                    if let Some(events) =
                         creatures.feed(target_id, *player, inventory.held(), now_tick)
                     {
                         let mut candidate = inventory.clone();
@@ -2015,7 +2015,9 @@ fn play(
                             candidate.save(inventory_path)?;
                             *inventory = candidate;
                             send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                            hub.broadcast(event);
+                            for event in events {
+                                hub.broadcast(event);
+                            }
                         }
                     }
                 }
