@@ -2024,7 +2024,7 @@ impl Mobs {
             // Select the species before applying light rules: slime-chunk
             // cave spawns are legal even at light level 15.
             let kind = if is_passive {
-                if passive >= passive_cap || matches!(biome, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24)
+                if passive >= passive_cap || !overworld_biome_allows_passive_spawn(biome)
                 {
                     continue;
                 }
@@ -2136,10 +2136,7 @@ impl Mobs {
                 }
                 if is_passive
                     && (world.get(cx, cy - 1, cz) >> 4 != 2
-                        || matches!(
-                            world.biome_at(cx, cz),
-                            0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24
-                        ))
+                        || !overworld_biome_allows_passive_spawn(world.biome_at(cx, cz)))
                 {
                     continue;
                 }
@@ -3002,6 +2999,18 @@ fn horse_spawn_weight(biome: u8) -> u64 {
 /// represented by the current Kind enum; never substitute a cow or hostile mob.
 fn overworld_biome_allows_natural_spawn(biome: u8) -> bool {
     !matches!(biome, 14 | 15)
+}
+
+/// Vanilla 1.7.10 Desert and Snow biome constructors clear the inherited
+/// passive creature list. Apply the same filter to the pack origin and each
+/// member: a pack from adjacent plains must not spawn cows in Ice Plains or
+/// Desert Hills. Mutated Desert (130) and Ice Plains Spikes (140) inherit
+/// their parent biome's empty passive list.
+fn overworld_biome_allows_passive_spawn(biome: u8) -> bool {
+    !matches!(
+        biome,
+        0 | 2 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 24 | 130 | 140
+    )
 }
 
 fn overworld_passive_kind(biome: u8, roll: u64) -> Kind {
@@ -3929,6 +3938,26 @@ mod tests {
         }
         for biome in [0, 1, 6, 35, 129] {
             assert!(overworld_biome_allows_natural_spawn(biome));
+        }
+    }
+
+    #[test]
+    fn snow_and_desert_variants_reject_passive_spawns_at_origin_and_pack_edges() {
+        // Both origin selection and pack-member validation use this filter.
+        // These biomes clear the ordinary passive spawn list in Java 1.7.10.
+        for biome in [2, 12, 13, 17, 130, 140] {
+            assert!(
+                !overworld_biome_allows_passive_spawn(biome),
+                "biome {biome} must not spawn ordinary passive mobs"
+            );
+        }
+        // Plains, sunflower plains, taiga and savanna retain passive entries.
+        for biome in [1, 4, 5, 6, 35, 129] {
+            assert!(overworld_biome_allows_passive_spawn(biome));
+        }
+        for biome in [14, 15] {
+            assert!(!overworld_biome_allows_passive_spawn(biome));
+            assert!(!overworld_biome_allows_natural_spawn(biome));
         }
     }
 
