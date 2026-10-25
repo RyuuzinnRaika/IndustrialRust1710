@@ -865,8 +865,7 @@ mod redstone_regression_tests {
         w.import_block(rear.0, rear.1, rear.2, (118 << 4) | 2)
             .unwrap();
         assert_eq!(w.comparator_rear_input(rear, comparator), 2);
-        w.import_block(rear.0, rear.1, rear.2, 23 << 4)
-            .unwrap();
+        w.import_block(rear.0, rear.1, rear.2, 23 << 4).unwrap();
         w.device_comparator_inputs.insert((-1, 64, 0), 6);
         assert_eq!(w.comparator_rear_input(rear, comparator), 6);
     }
