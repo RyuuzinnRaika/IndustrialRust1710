@@ -876,11 +876,23 @@ mod tests {
                         Some(state(64, 8))
                     );
                     assert_eq!(
-                        block(seed, Dimension::Overworld, cx + dx, base + 1, cz + doorway_z),
+                        block(
+                            seed,
+                            Dimension::Overworld,
+                            cx + dx,
+                            base + 1,
+                            cz + doorway_z
+                        ),
                         lower_door
                     );
                     assert_eq!(
-                        block(seed, Dimension::Overworld, cx + dx, base + 2, cz + doorway_z),
+                        block(
+                            seed,
+                            Dimension::Overworld,
+                            cx + dx,
+                            base + 2,
+                            cz + doorway_z
+                        ),
                         state(64, 8)
                     );
                     for dz in start_z..=end_z {
