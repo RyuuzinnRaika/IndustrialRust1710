@@ -455,6 +455,32 @@ pub fn village_house_doors(seed: u64, x: i32, z: i32) -> Option<[[i32; 3]; 2]> {
         [cx.checked_add(17)?, y, cz.checked_add(5)?],
     ])
 }
+/// Return the generated house doors that still exist in the live world.
+/// The block lookup must read current authoritative world state, including
+/// player edits, rather than the static world generator. A complete wooden
+/// door needs a lower half (metadata bit 3 clear) and an upper half (bit 3 set).
+/// The remaining metadata bits may change when the door opens or its hinge
+/// changes. Missing or replaced halves are excluded independently.
+/// This is a geometry/validation helper; villager AI integration is pending.
+#[allow(dead_code)] // Live world callers are not yet wired to villager AI.
+pub fn village_live_house_doors(
+    seed: u64,
+    x: i32,
+    z: i32,
+    mut block_at: impl FnMut(i32, i32, i32) -> u16,
+) -> Option<[Option<[i32; 3]>; 2]> {
+    let doors = village_house_doors(seed, x, z)?;
+    Some(doors.map(|[dx, dy, dz]| {
+        let upper_y = dy.checked_add(1)?;
+        let lower = block_at(dx, dy, dz);
+        let upper = block_at(dx, upper_y, dz);
+        ((lower >> 4 == 64)
+            && (lower & 8 == 0)
+            && (upper >> 4 == 64)
+            && (upper & 8 != 0))
+            .then_some([dx, dy, dz])
+    }))
+}
 /// Fixed-region village foundation: roads, simple houses, farms and a central
 /// well. Their footprints cross chunks naturally. Villager spawning is separate.
 fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
@@ -990,6 +1016,59 @@ mod tests {
         }
         assert!(tested_negative && tested_positive);
         assert_eq!(village_house_doors(seed, i32::MIN, 0), None);
+    }
+    #[test]
+    fn village_live_doors_respect_player_edits_and_door_metadata() {
+        let seed = 42u64;
+        let mut tested_negative = false;
+        let mut tested_positive = false;
+        for gx in -8..=8 {
+            for gz in -8..=8 {
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                let Some(doors) = village_house_doors(seed, cx, cz) else {
+                    continue;
+                };
+                let generated = |x, y, z| village(seed, x, y, z).unwrap_or(AIR);
+                assert_eq!(
+                    village_live_house_doors(seed, cx, cz, generated),
+                    Some([Some(doors[0]), Some(doors[1])])
+                );
+                let first = doors[0];
+                let second = doors[1];
+                assert_eq!(
+                    village_live_house_doors(seed, cx, cz, |x, y, z| {
+                        if [x, y, z] == first {
+                            AIR // A player broke the lower half.
+                        } else if [x, y, z] == [second[0], second[1] + 1, second[2]] {
+                            b(1) // A player replaced the upper half with stone.
+                        } else {
+                            generated(x, y, z)
+                        }
+                    }),
+                    Some([None, None])
+                );
+                assert_eq!(
+                    village_live_house_doors(seed, cx, cz, |x, y, z| {
+                        if [x, y, z] == first {
+                            state(64, 4) // Open lower half.
+                        } else if [x, y, z] == [first[0], first[1] + 1, first[2]] {
+                            state(64, 9) // Upper half with hinge bit set.
+                        } else {
+                            generated(x, y, z)
+                        }
+                    }),
+                    Some([Some(first), Some(second)])
+                );
+                tested_negative |= gx < 0 && gz < 0;
+                tested_positive |= gx > 0 && gz > 0;
+            }
+        }
+        assert!(tested_negative && tested_positive);
+        assert_eq!(
+            village_live_house_doors(seed, i32::MIN, 0, |_, _, _| b(64)),
+            None
+        );
     }
     #[test]
     fn village_well_is_not_overwritten_by_crossing_road() {
