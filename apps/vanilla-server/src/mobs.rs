@@ -599,16 +599,13 @@ fn spawn_light_ok(block: u8, sky: u8, now: u64, passive: bool) -> bool {
 fn natural_spawn_species_light_ok(
     kind: Kind,
     world_seed: u64,
-    x: i32,
-    y: i32,
-    z: i32,
-    block: u8,
-    sky: u8,
+    at: (i32, i32, i32),
+    light: (u8, u8),
     now: u64,
     passive: bool,
 ) -> bool {
-    (kind == Kind::Slime && is_slime_cave_location(world_seed, x, y, z))
-        || spawn_light_ok(block, sky, now, passive)
+    (kind == Kind::Slime && is_slime_cave_location(world_seed, at.0, at.1, at.2))
+        || spawn_light_ok(light.0, light.1, now, passive)
 }
 /// Ghasts are four blocks wide and tall. Reusing the player's narrow
 /// collision hull lets them clip through fortress walls, so the conservative
@@ -2120,11 +2117,8 @@ impl Mobs {
                     if !natural_spawn_species_light_ok(
                         kind,
                         world.natural_seed().unwrap_or(0),
-                        cx,
-                        cy,
-                        cz,
-                        block,
-                        sky,
+                        (cx, cy, cz),
+                        (block, sky),
                         now,
                         is_passive,
                     ) {
@@ -3806,55 +3800,40 @@ mod tests {
         assert!(natural_spawn_species_light_ok(
             Kind::Slime,
             seed,
-            sx,
-            30,
-            8,
-            15,
-            15,
+            (sx, 30, 8),
+            (15, 15),
             now,
             false
         ));
         assert!(!natural_spawn_species_light_ok(
             Kind::Slime,
             seed,
-            ox,
-            30,
-            8,
-            15,
-            15,
+            (ox, 30, 8),
+            (15, 15),
             now,
             false
         ));
         assert!(!natural_spawn_species_light_ok(
             Kind::Slime,
             seed,
-            sx,
-            40,
-            8,
-            15,
-            15,
+            (sx, 40, 8),
+            (15, 15),
             now,
             false
         ));
         assert!(!natural_spawn_species_light_ok(
             Kind::Zombie,
             seed,
-            sx,
-            30,
-            8,
-            15,
-            15,
+            (sx, 30, 8),
+            (15, 15),
             now,
             false
         ));
         assert!(natural_spawn_species_light_ok(
             Kind::Cow,
             seed,
-            sx,
-            65,
-            8,
-            15,
-            15,
+            (sx, 65, 8),
+            (15, 15),
             now,
             true
         ));
