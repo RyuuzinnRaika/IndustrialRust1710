@@ -456,7 +456,11 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
             .any(|&(hx, hz)| (dx - hx).abs() <= 4 && (dz - hz).abs() <= 4);
         let farm = (9..=20).contains(&dx) && (-22..=-13).contains(&dz);
         if (road || well || path || house || farm) && y > height(seed, x, z) {
-            return Some(if farm && dx != 15 { b(3) } else { b(4) });
+            return Some(if farm && !matches!(dx, 11 | 15 | 19) {
+                b(3)
+            } else {
+                b(4)
+            });
         }
     }
     // The central well must take precedence over the crossing road.
@@ -539,12 +543,14 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
         }
         return None;
     }
-    // Farm with water channel and mature wheat; no global RNG.
+    // Farm with three irrigation channels: every farmland row is within
+    // four blocks of source water, as required for 1.7.10 hydration.
+    // No global RNG is used.
     if (9..=20).contains(&dx) && (-22..=-13).contains(&dz) {
         if y == base {
             // Cap the irrigation trench at both ends so source water cannot
             // spill into surrounding terrain when fluid updates run.
-            return Some(if dx == 15 {
+            return Some(if matches!(dx, 11 | 15 | 19) {
                 if dz == -22 || dz == -13 {
                     b(4)
                 } else {
@@ -555,7 +561,11 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
             });
         }
         if y == base + 1 {
-            return Some(if dx == 15 { AIR } else { state(59, 7) });
+            return Some(if matches!(dx, 11 | 15 | 19) {
+                AIR
+            } else {
+                state(59, 7)
+            });
         }
     }
     None
@@ -916,24 +926,32 @@ mod tests {
                 }
                 let base = height(seed, cx, cz);
                 for dz in -22..=-13 {
-                    let expected = if dz == -22 || dz == -13 { b(4) } else { b(9) };
-                    assert_eq!(
-                        block(seed, Dimension::Overworld, cx + 15, base, cz + dz),
-                        expected
-                    );
-                    assert_eq!(
-                        block(seed, Dimension::Overworld, cx + 15, base + 1, cz + dz),
-                        AIR
-                    );
-                    for dx in [14, 16] {
+                    for dx in 9..=20 {
+                        let channel = matches!(dx, 11 | 15 | 19);
+                        let expected_ground = if channel {
+                            if dz == -22 || dz == -13 {
+                                b(4)
+                            } else {
+                                b(9)
+                            }
+                        } else {
+                            state(60, 7)
+                        };
                         assert_eq!(
                             block(seed, Dimension::Overworld, cx + dx, base, cz + dz),
-                            state(60, 7)
+                            expected_ground
                         );
                         assert_eq!(
                             block(seed, Dimension::Overworld, cx + dx, base + 1, cz + dz),
-                            state(59, 7)
+                            if channel { AIR } else { state(59, 7) }
                         );
+                        if !channel {
+                            // At least one channel must hydrate every crop,
+                            // including both outer edges of the farm.
+                            assert!([11_i32, 15, 19]
+                                .iter()
+                                .any(|&water_x| (dx - water_x).abs() <= 4));
+                        }
                     }
                 }
                 tested_negative |= gx < 0 && gz < 0;
