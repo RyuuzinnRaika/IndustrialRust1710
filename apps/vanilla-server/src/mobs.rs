@@ -3580,11 +3580,13 @@ mod tests {
         let first = mobs.next_id - 1;
         mobs.insert(Kind::Horse, PlayerPosition { x: 2.5, ..at }, false);
         let second = mobs.next_id - 1;
-        let held = |id| Some(Stack {
-            id,
-            count: 1,
-            damage: 0,
-        });
+        let held = |id| {
+            Some(Stack {
+                id,
+                count: 1,
+                damage: 0,
+            })
+        };
 
         // Golden food cannot breed an untamed horse.
         assert!(mobs.feed(first, at, held(396), 100).is_none());
@@ -3600,7 +3602,10 @@ mod tests {
         mobs.entities.get_mut(&second).unwrap().tamed = true;
         assert!(mobs.feed(second, at, held(322), 102).is_some());
         assert_eq!(mobs.entities.len(), 3);
-        assert!(mobs.entities.values().any(|mob| mob.kind == Kind::Horse && mob.baby));
+        assert!(mobs
+            .entities
+            .values()
+            .any(|mob| mob.kind == Kind::Horse && mob.baby));
         assert_eq!(mobs.entities[&first].breed_tick, 102);
         assert_eq!(mobs.entities[&second].breed_tick, 102);
     }
