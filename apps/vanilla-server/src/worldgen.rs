@@ -567,6 +567,12 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
                 state(59, 7)
             });
         }
+        // Clear natural hillside blocks above the wheat and irrigation
+        // channels. Otherwise a farm placed below the nearby terrain
+        // datum can grow wheat inside dirt or stone.
+        if (base + 2..=base + 3).contains(&y) {
+            return Some(AIR);
+        }
     }
     None
 }
@@ -958,6 +964,44 @@ mod tests {
                 tested_positive |= gx > 0 && gz > 0;
             }
         }
+        assert!(tested_negative && tested_positive);
+    }
+    #[test]
+    fn village_farms_clear_headroom_above_wheat_and_water() {
+        let seed = 42u64;
+        let mut checked_villages = 0usize;
+        let mut tested_negative = false;
+        let mut tested_positive = false;
+        for gx in -8..=8 {
+            for gz in -8..=8 {
+                if !hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4) {
+                    continue;
+                }
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                if !matches!(biome(seed, cx, cz), 1 | 2 | 35 | 4) {
+                    continue;
+                }
+                checked_villages += 1;
+                tested_negative |= gx < 0 && gz < 0;
+                tested_positive |= gx > 0 && gz > 0;
+                let base = height(seed, cx, cz);
+                for dx in 9..=20 {
+                    for dz in -22..=-13 {
+                        let x = cx + dx;
+                        let z = cz + dz;
+                        for y in base + 2..=base + 3 {
+                            assert_eq!(
+                                block(seed, Dimension::Overworld, x, y, z),
+                                AIR,
+                                "farm headroom obstructed at ({x}, {y}, {z})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked_villages > 0);
         assert!(tested_negative && tested_positive);
     }
     #[test]
