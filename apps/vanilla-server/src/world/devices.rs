@@ -77,12 +77,14 @@ fn movable(block: u16) -> bool {
                 | 75
                 | 76
                 | 84 // jukebox (tile entity)
+                | 90 // nether portal (immovable)
                 | 93
                 | 94
                 | 96
                 | 116
                 | 117
-                | 120
+                | 119 // end portal (immovable)
+                | 120 // end portal frame (immovable)
                 | 127 // attached cocoa
                 | 130
                 | 137 // command block
@@ -982,6 +984,24 @@ mod redstone_regression_tests {
         }
         assert!(movable(1 << 4));
         assert!(movable(5 << 4));
+    }
+
+    #[test]
+    fn piston_does_not_move_portals_or_end_portal_frames() {
+        for id in [90u16, 119, 120] {
+            let mut world = World::new();
+            world.import_block(-2, 64, 0, (69 << 4) | 8).unwrap();
+            world.import_block(-1, 64, 0, (33 << 4) | 5).unwrap();
+            world.import_block(0, 64, 0, id << 4).unwrap();
+
+            assert!(!movable(id << 4), "portal block {id} must not move");
+            let mut changes = BTreeMap::new();
+            world.push_piston(-1, 64, 0, (33 << 4) | 5, &mut changes);
+            assert!(
+                changes.is_empty(),
+                "piston must not overwrite or displace portal block {id}"
+            );
+        }
     }
 
     #[test]
