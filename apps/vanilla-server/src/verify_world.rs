@@ -1,12 +1,11 @@
 //! J93: read-only integrity check; does not create a session lock or replay redo journals.
 //! This validates the formats used by the runtime, not arbitrary modded worlds.
 use crate::{
-    achievements::Achievements, admin_state, brewing::Brewers, chests::Chests, clock::Clock,
+    achievements::Achievements, admin_state, books, brewing::Brewers, chests::Chests, clock::Clock,
     decorations::Decorations, dispensers::Devices, experience::Experience, furnaces::Furnaces,
-    game_rules::GameRules, hanging::Hangings, maps::Maps, minecarts::Minecarts,
-    scoreboard::Scoreboard,
-    ground_items::GroundItems, hoppers::Hoppers, inventory::Inventory, legacy_world_inspect,
-    mobs::Mobs, player::PlayerPosition, world::World,
+    game_rules::GameRules, ground_items::GroundItems, hanging::Hangings, hoppers::Hoppers,
+    inventory::Inventory, legacy_world_inspect, maps::Maps, minecarts::Minecarts, mobs::Mobs,
+    player::PlayerPosition, scoreboard::Scoreboard, world::World,
 };
 use std::fs;
 use std::io::{self, ErrorKind};
@@ -170,21 +169,26 @@ fn inspect_irw(world_file: &Path) -> io::Result<Summary> {
     check!(hoppers.clone(), Hoppers::load(&hoppers));
     let brewers = Brewers::location(world_file);
     check!(brewers.clone(), Brewers::load(&brewers));
+    // Check every sidecar loaded by the live server rather than reporting a
+    // healthy world while a different persisted subsystem cannot start.
     let devices = Devices::location(world_file);
     check!(devices.clone(), Devices::load(&devices));
     let decorations = Decorations::location(world_file);
     check!(decorations.clone(), Decorations::load(&decorations));
-    let hanging = Hangings::location(world_file);
-    check!(hanging.clone(), Hangings::load(&hanging));
-    let minecarts = Minecarts::location(world_file);
-    check!(minecarts.clone(), Minecarts::load(&minecarts, 0));
-    let score = Scoreboard::location(world_file);
-    check!(score.clone(), Scoreboard::load(&score));
-    let rules = GameRules::location(world_file);
-    check!(rules.clone(), GameRules::load(&rules));
+    let hangings = Hangings::location(world_file);
+    check!(hangings.clone(), Hangings::load(&hangings));
     let maps = Maps::location(world_file);
     check!(maps.clone(), Maps::load(&maps));
-
+    let minecarts = Minecarts::location(world_file);
+    check!(minecarts.clone(), Minecarts::load(&minecarts, 0));
+    let rules = GameRules::location(world_file);
+    check!(rules.clone(), GameRules::load(&rules));
+    let scoreboard = Scoreboard::location(world_file);
+    check!(scoreboard.clone(), Scoreboard::load(&scoreboard));
+    let book_path = world_file.with_extension("books.json");
+    check!(book_path, books::inspect_save(world_file));
+    let difficulty = world_file.with_extension("difficulty");
+    check!(difficulty.clone(), admin_state::read(&difficulty, 3));
 
     let player_dir = parent.join("players");
     if checked_dir(&player_dir)? {
@@ -252,6 +256,60 @@ pub fn inspect(source: &Path) -> io::Result<Summary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspect_checks_every_sidecar_and_online_player_namespace() {
+        let root = std::env::temp_dir().join(format!(
+            "j93-verified-sidecars-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let world = root.join("flat.irw");
+        World::new().save_new(&world).unwrap();
+        let uuid = "00000000-0000-0000-0000-000000000001";
+        let player = PlayerPosition::authenticated_location(&world, uuid).unwrap();
+        PlayerPosition::default()
+            .save_state(&player, crate::vitals::Vitals::default())
+            .unwrap();
+        assert_eq!(inspect(&root).unwrap().files, 2);
+        for extension in [
+            "books.json",
+            "decorations.json",
+            "dispensers.json",
+            "hanging.json",
+            "maps.json",
+            "minecarts.json",
+            "gamerules.json",
+            "scoreboard.json",
+            "difficulty",
+        ] {
+            let path = world.with_extension(extension);
+            fs::write(&path, b"corrupt").unwrap();
+            assert!(inspect(&root).is_err(), "accepted corrupt {extension}");
+            fs::remove_file(path).unwrap();
+            assert_eq!(inspect(&root).unwrap().files, 2);
+        }
+        for extension in ["achievements.json", "gamemode"] {
+            let path = player.with_extension(extension);
+            fs::write(&path, b"corrupt").unwrap();
+            assert!(
+                inspect(&root).is_err(),
+                "accepted corrupt player {extension}"
+            );
+            fs::remove_file(path).unwrap();
+        }
+        let bad_name = player.with_file_name("BAD-uuid.dat");
+        PlayerPosition::default()
+            .save_state(&bad_name, crate::vitals::Vitals::default())
+            .unwrap();
+        assert!(inspect(&root).is_err());
+        fs::remove_file(bad_name).unwrap();
+        assert_eq!(inspect(&root).unwrap().files, 2);
+        assert!(!root.join("session.lock").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn inspect_detects_corruption_without_creating_session_lock() {

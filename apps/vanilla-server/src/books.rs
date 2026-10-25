@@ -118,6 +118,12 @@ struct Service {
 }
 static SERVICE: OnceLock<Service> = OnceLock::new();
 
+/// Validate the persisted book records without initializing the global runtime
+/// service. Offline world verification must never mutate process-wide state.
+pub fn inspect_save(world_path: &Path) -> io::Result<()> {
+    Store::load(&world_path.with_extension("books.json")).map(|_| ())
+}
+
 pub fn initialize(world_path: &Path) -> io::Result<()> {
     let path = world_path.with_extension("books.json");
     let state = Store::load(&path)?;
