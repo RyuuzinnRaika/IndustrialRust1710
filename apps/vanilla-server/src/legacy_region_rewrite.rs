@@ -335,7 +335,6 @@ pub(crate) fn rewrite_chunks_with_sidecar_under_lock_expected(
     result
 }
 
-
 /// E45/E46 foundation: publish edits to multiple EXISTING Anvil regions and
 /// native sidecars in one crash-recoverable redo generation. The caller must
 /// supply the *exact* bytes observed when computing every chunk replacement.
@@ -357,11 +356,15 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
     if world_file.parent() != Some(root.as_path())
         || world_file.extension() != Some(std::ffi::OsStr::new("irw"))
     {
-        return Err(invalid("region transaction must use the locked IRW world root"));
+        return Err(invalid(
+            "region transaction must use the locked IRW world root",
+        ));
     }
     let journal_path = world_file.with_extension("pending-txn.json");
     if journal_path.exists() {
-        return Err(invalid("pending redo journal must recover before another save"));
+        return Err(invalid(
+            "pending redo journal must recover before another save",
+        ));
     }
     let dim_root = match dimension {
         Dimension::Overworld => root.clone(),
@@ -391,14 +394,26 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
         || grouped.len() + sidecars.len() > 8
         || replacements.len() > 2048
     {
-        return Err(invalid("invalid number of regions or transaction participants"));
+        return Err(invalid(
+            "invalid number of regions or transaction participants",
+        ));
     }
     for (path, bytes) in sidecars {
-        let name = path.file_name().and_then(|s| s.to_str()).ok_or_else(|| invalid("sidecar name"))?;
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| invalid("sidecar name"))?;
         let root_sidecar = path.parent() == Some(root.as_path())
-            && [".chests.json", ".furnaces.json", ".hoppers.json",
-                ".brewers.json", ".dispensers.json", ".inventory.json"]
-                .iter().any(|extension| name.ends_with(extension));
+            && [
+                ".chests.json",
+                ".furnaces.json",
+                ".hoppers.json",
+                ".brewers.json",
+                ".dispensers.json",
+                ".inventory.json",
+            ]
+            .iter()
+            .any(|extension| name.ends_with(extension));
         let player_inventory = path.parent() == Some(root.join("players").as_path())
             && name.ends_with(".inventory.json");
         if !root_sidecar && !player_inventory {
@@ -416,8 +431,7 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
             .get(&(rx, rz))
             .ok_or_else(|| invalid("missing source region snapshot"))?;
         let source = regions.join(format!("r.{rx}.{rz}.mca"));
-        if !fs::symlink_metadata(&source)?.file_type().is_file()
-            || fs::read(&source)? != *expected
+        if !fs::symlink_metadata(&source)?.file_type().is_file() || fs::read(&source)? != *expected
         {
             return Err(invalid("source Anvil region changed since snapshot"));
         }
@@ -491,29 +505,34 @@ mod tests {
         let mut positive = Region::from_stream(File::open(&pos).unwrap()).unwrap();
         let mut negative = Region::from_stream(File::open(&neg).unwrap()).unwrap();
         let untouched = positive.read_chunk(1, 0).unwrap().unwrap();
-        let mut chunk_pos = legacy_nbt::parse_chunk(
-            &positive.read_chunk(0, 0).unwrap().unwrap(), 0, 0
-        ).unwrap();
-        let mut chunk_neg = legacy_nbt::parse_chunk(
-            &negative.read_chunk(31, 0).unwrap().unwrap(), -1, 0
-        ).unwrap();
-        chunk_pos.level.extra.insert("ModdedPos".into(), Value::String("preserve".into()));
-        chunk_neg.level.extra.insert("ModdedNeg".into(), Value::String("preserve".into()));
+        let mut chunk_pos =
+            legacy_nbt::parse_chunk(&positive.read_chunk(0, 0).unwrap().unwrap(), 0, 0).unwrap();
+        let mut chunk_neg =
+            legacy_nbt::parse_chunk(&negative.read_chunk(31, 0).unwrap().unwrap(), -1, 0).unwrap();
+        chunk_pos
+            .level
+            .extra
+            .insert("ModdedPos".into(), Value::String("preserve".into()));
+        chunk_neg
+            .level
+            .extra
+            .insert("ModdedNeg".into(), Value::String("preserve".into()));
         let changed_pos = fastnbt::to_bytes(&chunk_pos).unwrap();
         let changed_neg = fastnbt::to_bytes(&chunk_neg).unwrap();
         let sidecar = root.join("flat.chests.json");
         let world_file = root.join("flat.irw");
         let sidecar_bytes = br#"{"chests":[]}"#.to_vec();
-        let sources = BTreeMap::from([
-            ((0, 0), before_pos),
-            ((-1, 0), before_neg),
-        ]);
+        let sources = BTreeMap::from([((0, 0), before_pos), ((-1, 0), before_neg)]);
         let mut lock = WorldSessionLock::acquire(&root).unwrap();
         rewrite_regions_with_sidecars_under_lock_expected(
-            &mut lock, Dimension::Overworld,
+            &mut lock,
+            Dimension::Overworld,
             &[((0, 0), &changed_pos), ((-1, 0), &changed_neg)],
-            &sources, &world_file, &[(sidecar.as_path(), sidecar_bytes.clone())],
-        ).unwrap();
+            &sources,
+            &world_file,
+            &[(sidecar.as_path(), sidecar_bytes.clone())],
+        )
+        .unwrap();
         let mut written_pos = Region::from_stream(File::open(&pos).unwrap()).unwrap();
         let mut written_neg = Region::from_stream(File::open(&neg).unwrap()).unwrap();
         assert_eq!(written_pos.read_chunk(0, 0).unwrap().unwrap(), changed_pos);
@@ -546,10 +565,14 @@ mod tests {
         ]);
         let mut lock = WorldSessionLock::acquire(&root).unwrap();
         assert!(rewrite_regions_with_sidecars_under_lock_expected(
-            &mut lock, Dimension::Overworld,
+            &mut lock,
+            Dimension::Overworld,
             &[((0, 0), &nbt_pos), ((-1, 0), &nbt_neg)],
-            &sources, &world_file, &[(sidecar.as_path(), b"{}".to_vec())],
-        ).is_err());
+            &sources,
+            &world_file,
+            &[(sidecar.as_path(), b"{}".to_vec())],
+        )
+        .is_err());
         assert_eq!(fs::read(&pos).unwrap(), before_pos);
         assert_eq!(fs::read(&neg).unwrap(), before_neg);
         assert!(!sidecar.exists());
