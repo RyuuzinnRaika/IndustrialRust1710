@@ -1108,9 +1108,8 @@ mod redstone_regression_tests {
                 for extended in [false, true] {
                     for powered in [false, true] {
                         let mut world = World::new();
-                        let piston = (piston_id << 4)
-                            | orientation
-                            | (if extended { 8 } else { 0 });
+                        let extended_bit = if extended { 8 } else { 0 };
+                        let piston = (piston_id << 4) | orientation | extended_bit;
                         world.import_block(0, 64, 0, piston).unwrap();
                         world.import_block(1, 64, 0, 1 << 4).unwrap();
                         if powered {
