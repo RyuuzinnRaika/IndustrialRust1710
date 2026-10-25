@@ -664,7 +664,7 @@ fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition, size: u8
     if kind == Kind::Ghast {
         return ghast_has_clearance(world, at);
     }
-    if !physics::supported(world, &at) || physics::collides(world, &at) {
+    if !physics::supported(world, &at) {
         return false;
     }
     // Fluids have no solid collision boxes. Test the horizontal extent of
@@ -693,6 +693,11 @@ fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition, size: u8
             _ => 2.0,
         }
     };
+    // The player-sized physics collision check misses solid blocks intersecting
+    // wide spiders/horses or the upper part of a large slime/enderman.
+    if physics::collides_sized(world, &at, half_width, body_height) {
+        return false;
+    }
     let max_y = (at.y + body_height).ceil() as i32;
     let min_x = (at.x - half_width).floor() as i32;
     let max_x = (at.x + half_width).floor() as i32;
@@ -3458,6 +3463,43 @@ mod tests {
         assert!(natural_spawn_body_ok(&world, Kind::Spider, negative, 1));
         world.import_block(-1, 65, 0, 9 << 4).unwrap();
         assert!(!natural_spawn_body_ok(&world, Kind::Spider, negative, 1));
+    }
+
+    #[test]
+    fn natural_mob_solid_clearance_uses_species_width_and_height() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 1 << 4).unwrap();
+        for kind in [Kind::Zombie, Kind::Spider, Kind::Horse, Kind::Enderman] {
+            assert!(natural_spawn_body_ok(&world, kind, at, 1));
+        }
+        // An adjacent solid wall misses a player's AABB but clips wide mobs.
+        world.import_block(1, 65, 0, 1 << 4).unwrap();
+        assert!(natural_spawn_body_ok(&world, Kind::Zombie, at, 1));
+        for kind in [Kind::Spider, Kind::Horse, Kind::IronGolem] {
+            assert!(!natural_spawn_body_ok(&world, kind, at, 1));
+        }
+        for kind in [Kind::Slime, Kind::MagmaCube] {
+            assert!(natural_spawn_body_ok(&world, kind, at, 1));
+            assert!(!natural_spawn_body_ok(&world, kind, at, 2));
+            assert!(!natural_spawn_body_ok(&world, kind, at, 4));
+        }
+
+        // Tall Endermen must also reject a ceiling above a zombie's head.
+        world.import_block(1, 65, 0, 0).unwrap();
+        world.import_block(0, 67, 0, 1 << 4).unwrap();
+        assert!(natural_spawn_body_ok(&world, Kind::Zombie, at, 1));
+        assert!(!natural_spawn_body_ok(&world, Kind::Enderman, at, 1));
+
+        // A half slab only collides when its shape intersects the actual body.
+        world.import_block(0, 67, 0, 0).unwrap();
+        world.import_block(1, 65, 0, 44 << 4).unwrap();
+        assert!(!natural_spawn_body_ok(&world, Kind::Spider, at, 1));
+        assert!(natural_spawn_body_ok(&world, Kind::Zombie, at, 1));
     }
 
     #[test]
