@@ -392,8 +392,12 @@ mod tests {
         });
         let devices = Devices::default().staged_update(source, slots).unwrap();
         assert!(devices.stage_eject(invalid_position, 0).is_err());
-        assert!(devices.stage_transfer_one(source, invalid_position, 0).is_err());
-        assert!(devices.stage_transfer_one(invalid_position, source, 0).is_err());
+        assert!(devices
+            .stage_transfer_one(source, invalid_position, 0)
+            .is_err());
+        assert!(devices
+            .stage_transfer_one(invalid_position, source, 0)
+            .is_err());
         assert_eq!(devices.slots(source), slots);
     }
 
