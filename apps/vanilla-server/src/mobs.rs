@@ -3404,7 +3404,11 @@ mod tests {
                 assert!(natural_spawn_body_ok(&world, Kind::Cow, at, 1));
                 world.import_block(0, body_y, 0, fluid << 4).unwrap();
                 for kind in [Kind::Zombie, Kind::Cow, Kind::Slime] {
-                    let size = if kind == Kind::Slime && body_y == 66 { 4 } else { 1 };
+                    let size = if kind == Kind::Slime && body_y == 66 {
+                        4
+                    } else {
+                        1
+                    };
                     assert!(
                         !natural_spawn_body_ok(&world, kind, at, size),
                         "{kind:?} must not spawn in fluid {fluid} at y={body_y}"
