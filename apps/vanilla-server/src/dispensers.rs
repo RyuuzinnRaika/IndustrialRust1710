@@ -142,8 +142,9 @@ impl Devices {
 
     /// Return a staged inventory and one emitted item. The caller owns the
     /// world/entity journal and must not publish the item before persistence.
-    /// Deterministic slot selection is a safe foundation; vanilla random
-    /// selection can be introduced when the world RNG is integrated.
+    /// The caller supplies a tick seed; mix in all three coordinates to avoid
+    /// selecting the same slot on every activation of nearby devices. This is
+    /// deterministic for redo-journal replay, not Java Random compatibility.
     pub fn stage_eject(&self, pos: Position, seed: u64) -> io::Result<Option<(Self, Stack)>> {
         let slots = self.slots(pos);
         let filled: Vec<usize> = slots
@@ -154,7 +155,18 @@ impl Devices {
         if filled.is_empty() {
             return Ok(None);
         }
-        let index = filled[(seed as usize) % filled.len()];
+        // Mix sequential tick seeds before reducing to an occupied slot.
+        // Multiply-high avoids the low-bit cycles of seed % slot_count.
+        let mut random = seed
+            ^ (pos.0 as u64).wrapping_mul(0x9e3779b97f4a7c15)
+            ^ (pos.1 as u64).wrapping_mul(0xbf58476d1ce4e5b9)
+            ^ (pos.2 as u64).wrapping_mul(0x94d049bb133111eb);
+        random = random.wrapping_add(0x9e3779b97f4a7c15);
+        random = (random ^ (random >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        random = (random ^ (random >> 27)).wrapping_mul(0x94d049bb133111eb);
+        random ^= random >> 31;
+        let choice = ((u128::from(random) * filled.len() as u128) >> 64) as usize;
+        let index = filled[choice];
         let mut updated = slots;
         let mut stack = updated[index].ok_or_else(|| invalid("missing stack"))?;
         let emitted = Stack { count: 1, ..stack };
@@ -311,6 +323,53 @@ mod tests {
             1
         );
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn ejection_uses_only_occupied_slots_and_varies_across_tick_seeds() {
+        let pos = (12, 64, -7);
+        let mut slots = [None; DEVICE_SLOTS];
+        for index in [0, 4, 8] {
+            slots[index] = Some(Stack {
+                id: (index + 1) as i16,
+                count: 2,
+                damage: 0,
+            });
+        }
+        let devices = Devices::default().staged_update(pos, slots).unwrap();
+        let mut seen = [false; DEVICE_SLOTS];
+        for seed in 0..512 {
+            let (next, emitted) = devices.stage_eject(pos, seed).unwrap().unwrap();
+            let selected = [0, 4, 8]
+                .into_iter()
+                .find(|&index| next.slots(pos)[index] != slots[index])
+                .unwrap();
+            assert_eq!(emitted.id, (selected + 1) as i16);
+            assert_eq!(emitted.count, 1);
+            assert_eq!(next.slots(pos)[selected].unwrap().count, 1);
+            for (index, slot) in slots.iter().enumerate() {
+                if index != selected {
+                    assert_eq!(next.slots(pos)[index], *slot);
+                }
+            }
+            // Selection must be reproducible for the same redo-journal seed.
+            assert_eq!(
+                next.slots(pos),
+                devices
+                    .stage_eject(pos, seed)
+                    .unwrap()
+                    .unwrap()
+                    .0
+                    .slots(pos)
+            );
+            seen[selected] = true;
+        }
+        assert!(seen[0] && seen[4] && seen[8]);
+        assert!(seen
+            .iter()
+            .enumerate()
+            .all(|(index, hit)| [0, 4, 8].contains(&index) || !hit));
+        assert_eq!(devices.slots(pos), slots);
     }
 
     #[test]
