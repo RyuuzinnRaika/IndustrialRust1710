@@ -788,9 +788,11 @@ mod redstone_regression_tests {
         let _ = fs::remove_file(&path);
         let mut w = World::new();
         // Facing east: rear is west, and the side input is south.
+        // Use a stable daylight-sensor analog output: unpowered redstone dust
+        // decays to zero during block ticks and cannot hold strength five.
         w.update_and_save(&path, 0, 64, 0, (149 << 4) | 1).unwrap();
         w.update_and_save(&path, -1, 64, 0, 92 << 4).unwrap(); // Whole cake: 14.
-        w.update_and_save(&path, 0, 64, 1, (55 << 4) | 5).unwrap();
+        w.update_and_save(&path, 0, 64, 1, (151 << 4) | 5).unwrap();
         for _ in 0..3 {
             w.block_tick(&path, 64).unwrap();
         }
@@ -807,7 +809,7 @@ mod redstone_regression_tests {
         assert_eq!(w.comparator_outputs.get(&(0, 64, 0)), Some(&9));
 
         // Stronger side input must turn the comparator off in subtract mode.
-        w.update_and_save(&path, 0, 64, 1, (55 << 4) | 15).unwrap();
+        w.update_and_save(&path, 0, 64, 1, (151 << 4) | 15).unwrap();
         for _ in 0..3 {
             w.block_tick(&path, 64).unwrap();
         }
