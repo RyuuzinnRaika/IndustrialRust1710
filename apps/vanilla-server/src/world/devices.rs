@@ -407,7 +407,9 @@ impl World {
                     return;
                 }
                 let found = self.get(target.0, target.1, target.2);
-                if found == 0 {
+                // Pistons replace water/lava in their path instead of
+                // treating the liquid as an immovable solid block.
+                if found == 0 || matches!(found >> 4, 8..=11) {
                     break;
                 }
                 if occupied.len() >= 12 || !movable(found) {
@@ -1060,6 +1062,38 @@ mod redstone_regression_tests {
         assert_eq!(changes.get(&(0, 64, 0)), Some(&((29 << 4) | 5)));
         assert_eq!(changes.get(&(1, 64, 0)), Some(&(1 << 4)));
         assert_eq!(changes.get(&(2, 64, 0)), Some(&0));
+    }
+
+    #[test]
+    fn piston_displaces_liquids_without_moving_them_as_solid_blocks() {
+        for liquid_id in [8u16, 9, 10, 11] {
+            for blocks_before_liquid in [0, 1] {
+                let mut world = World::new();
+                let piston = (33 << 4) | 5; // Facing east.
+                world.import_block(-2, 64, 0, (69 << 4) | 8).unwrap();
+                world.import_block(-1, 64, 0, piston).unwrap();
+                if blocks_before_liquid == 1 {
+                    world.import_block(0, 64, 0, 1 << 4).unwrap();
+                }
+                world
+                    .import_block(blocks_before_liquid, 64, 0, liquid_id << 4)
+                    .unwrap();
+
+                let mut changes = BTreeMap::new();
+                world.push_piston(-1, 64, 0, piston, &mut changes);
+                assert_eq!(changes.get(&(-1, 64, 0)), Some(&(piston | 8)));
+                assert_eq!(changes.get(&(0, 64, 0)), Some(&((34 << 4) | 5)));
+                if blocks_before_liquid == 1 {
+                    assert_eq!(changes.get(&(1, 64, 0)), Some(&(1 << 4)));
+                } else {
+                    assert!(!changes.contains_key(&(1, 64, 0)));
+                }
+                assert!(
+                    !changes.values().any(|block| block >> 4 == liquid_id),
+                    "piston must displace liquid {liquid_id}, not push it"
+                );
+            }
+        }
     }
 
     #[test]
