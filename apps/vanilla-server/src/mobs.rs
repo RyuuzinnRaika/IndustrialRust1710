@@ -614,15 +614,15 @@ fn natural_spawn_species_light_ok(
         || spawn_light_ok(light.0, light.1, now, passive)
 }
 /// Ghasts are four blocks wide and tall. Reusing the player's narrow
-/// collision hull lets them clip through fortress walls, so the conservative
-/// volume test rejects solid blocks throughout their body.
+/// collision hull lets them clip through fortress walls or spawn inside
+/// water/lava, so the conservative volume test requires a dry body volume.
 fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
     let x = p.x.floor() as i32;
     let y = p.y.floor() as i32;
     let z = p.z.floor() as i32;
     (x - 2..=x + 2).all(|bx| {
         (y - 2..=y + 2).all(|by| {
-            (z - 2..=z + 2).all(|bz| matches!(world.get(bx, by, bz) >> 4, 0 | 6 | 8..=11))
+            (z - 2..=z + 2).all(|bz| matches!(world.get(bx, by, bz) >> 4, 0 | 6))
         })
     })
 }
@@ -3213,6 +3213,25 @@ mod tests {
         assert!(!natural_spawn_body_ok(&world, Kind::Skeleton, air));
         world.import_block(2, 80, 0, 1 << 4).unwrap();
         assert!(!natural_spawn_body_ok(&world, Kind::Ghast, air));
+    }
+
+    #[test]
+    fn ghast_spawn_clearance_rejects_water_and_lava() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        for fluid in [8u16, 9, 10, 11] {
+            let mut world = World::new();
+            assert!(ghast_has_clearance(&world, at));
+            world.import_block(1, 80, 0, fluid << 4).unwrap();
+            assert!(
+                !ghast_has_clearance(&world, at),
+                "fluid {fluid} must block ghast spawning"
+            );
+            assert!(!natural_spawn_body_ok(&world, Kind::Ghast, at));
+        }
     }
 
     #[test]
