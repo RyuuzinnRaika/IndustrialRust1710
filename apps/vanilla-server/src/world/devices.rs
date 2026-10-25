@@ -797,7 +797,10 @@ mod redstone_regression_tests {
         assert_eq!(w.comparator_outputs.get(&(0, 64, 0)), Some(&14));
 
         // Interacting with the comparator switches it to subtraction mode.
-        assert_eq!(w.interact_device(&path, 0, 64, 0).unwrap(), vec![(0, 64, 0)]);
+        assert_eq!(
+            w.interact_device(&path, 0, 64, 0).unwrap(),
+            vec![(0, 64, 0)]
+        );
         for _ in 0..3 {
             w.block_tick(&path, 64).unwrap();
         }
