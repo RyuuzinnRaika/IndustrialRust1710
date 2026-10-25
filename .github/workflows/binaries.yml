@@ -39,6 +39,15 @@ jobs:
           cargo test --workspace --all-targets --locked
       - name: Build release binaries from locked dependencies
         run: cargo build --release --locked -p vanilla-server -p legacy-status-server
+      - name: Smoke-test packaged server executable
+        shell: pwsh
+        env:
+          BINARY_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $server = 'target/release/vanilla-server' + $env:BINARY_SUFFIX
+          & "./$server" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "vanilla-server --help failed on runner" }
       - name: Bundle provenance, dependency graph and SHA256 checksums
         shell: pwsh
         env:
