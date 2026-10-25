@@ -1403,6 +1403,7 @@ impl Inventory {
                     Some(mut current)
                         if current.id == output.id
                             && current.damage == output.damage
+                            && current.nbt == output.nbt
                             && u16::from(current.count) + u16::from(output.count)
                                 <= u16::from(output.max_count()) =>
                     {
@@ -2873,6 +2874,31 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
+    fn d31_tagged_items_never_merge_with_distinct_nbt() {
+        use fastnbt::Value;
+        use std::collections::HashMap;
+        let a = crate::item_nbt::from_value(&Value::Compound(HashMap::from([
+            ("Unique".into(), Value::String("alpha".into())),
+        ]))).unwrap();
+        let b = crate::item_nbt::from_value(&Value::Compound(HashMap::from([
+            ("Unique".into(), Value::String("beta".into())),
+        ]))).unwrap();
+        let alpha = Stack { id: 1, count: 10, damage: 0, nbt: Some(a) };
+        let beta = Stack { id: 1, count: 5, damage: 0, nbt: Some(b) };
+        let mut inv = Inventory::default();
+        inv.slots[36] = Some(alpha);
+        assert_eq!(inv.receive_stack(beta), Some(vec![37]));
+        assert_eq!(inv.slots[36], Some(alpha));
+        assert_eq!(inv.slots[37], Some(beta));
+        let saved = inv.encoded().unwrap();
+        let loaded: Inventory = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(loaded.slots[36], Some(alpha));
+        assert_eq!(loaded.slots[37], Some(beta));
+        assert_eq!(crate::item_nbt::wire(a), loaded.slots[36].unwrap().nbt.and_then(crate::item_nbt::wire));
+        assert_eq!(crate::item_nbt::wire(b), loaded.slots[37].unwrap().nbt.and_then(crate::item_nbt::wire));
+    }
+
+    #[test]
     fn enchant_choice_debits_exact_xp_and_survives_save_reload() {
         let mut inv = Inventory::default();
         inv.enchant_input = Some(Stack {
@@ -2884,7 +2910,8 @@ mod tests {
         let mut xp = crate::experience::Experience { total: 2000 };
         let old = inv.clone();
         let old_xp = xp;
-        assert!(!inv.enchant_choice(2, [1, 2, 30], 42, &mut xp, true) || xp.total < old_xp.total);
+        assert!(inv.enchant_choice(2, [1, 2, 30], 42, &mut xp, true));
+        assert!(xp.total < old_xp.total);
         if inv != old {
             let tagged = inv.enchant_input.unwrap();
             assert!(tagged.nbt.is_some());
