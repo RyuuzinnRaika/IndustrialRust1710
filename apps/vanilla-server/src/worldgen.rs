@@ -474,10 +474,7 @@ pub fn village_live_house_doors(
         let upper_y = dy.checked_add(1)?;
         let lower = block_at(dx, dy, dz);
         let upper = block_at(dx, upper_y, dz);
-        ((lower >> 4 == 64)
-            && (lower & 8 == 0)
-            && (upper >> 4 == 64)
-            && (upper & 8 != 0))
+        ((lower >> 4 == 64) && (lower & 8 == 0) && (upper >> 4 == 64) && (upper & 8 != 0))
             .then_some([dx, dy, dz])
     }))
 }
