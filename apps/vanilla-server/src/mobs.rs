@@ -3508,9 +3508,19 @@ mod tests {
             y: 65.0,
             z: 0.5,
         };
-        assert!(natural_spawn_entity_clearance(&mobs.entities, Kind::Zombie, at, 1));
+        assert!(natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Zombie,
+            at,
+            1
+        ));
         mobs.insert(Kind::Zombie, at, false);
-        assert!(!natural_spawn_entity_clearance(&mobs.entities, Kind::Zombie, at, 1));
+        assert!(!natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Zombie,
+            at,
+            1
+        ));
         // Touching faces are not overlapping bodies.
         assert!(natural_spawn_entity_clearance(
             &mobs.entities,
@@ -3546,17 +3556,33 @@ mod tests {
         ));
 
         // A ghast's stored Y is its center: Y=70 spans [68,72].
-        mobs.insert(Kind::Ghast, PlayerPosition { x: 12.5, y: 70.0, ..at }, false);
+        mobs.insert(
+            Kind::Ghast,
+            PlayerPosition {
+                x: 12.5,
+                y: 70.0,
+                ..at
+            },
+            false,
+        );
         assert!(!natural_spawn_entity_clearance(
             &mobs.entities,
             Kind::Zombie,
-            PlayerPosition { x: 12.5, y: 67.0, ..at },
+            PlayerPosition {
+                x: 12.5,
+                y: 67.0,
+                ..at
+            },
             1
         ));
         assert!(natural_spawn_entity_clearance(
             &mobs.entities,
             Kind::Zombie,
-            PlayerPosition { x: 12.5, y: 65.0, ..at },
+            PlayerPosition {
+                x: 12.5,
+                y: 65.0,
+                ..at
+            },
             1
         ));
     }
