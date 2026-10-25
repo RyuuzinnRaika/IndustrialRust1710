@@ -2024,8 +2024,7 @@ impl Mobs {
             // Select the species before applying light rules: slime-chunk
             // cave spawns are legal even at light level 15.
             let kind = if is_passive {
-                if passive >= passive_cap || !overworld_biome_allows_passive_spawn(biome)
-                {
+                if passive >= passive_cap || !overworld_biome_allows_passive_spawn(biome) {
                     continue;
                 }
                 overworld_passive_kind(biome, hash(seed ^ 0x31acb4105ff327ab))
