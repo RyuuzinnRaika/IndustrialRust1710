@@ -815,7 +815,10 @@ mod redstone_regression_tests {
             w.block_tick(&path, 64).unwrap();
         }
         // Zero-strength outputs may be omitted from the sparse output map.
-        assert_eq!(w.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0), 0);
+        assert_eq!(
+            w.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0),
+            0
+        );
         assert_eq!(w.get(0, 64, 0) >> 4, 149);
         fs::remove_file(path).unwrap();
     }
