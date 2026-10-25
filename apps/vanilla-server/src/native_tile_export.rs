@@ -68,7 +68,9 @@ fn items(slots: &[Option<Stack>]) -> io::Result<Vec<SlotItem>> {
             // to Anvil. Legacy books without an attached tag use world-owned
             // reference IDs rather than vanilla Damage and must fail closed.
             if matches!(stack.id, 386 | 387) && stack.damage > 0 && stack.nbt.is_none() {
-                return Err(invalid("legacy book reference cannot be exported as vanilla NBT"));
+                return Err(invalid(
+                    "legacy book reference cannot be exported as vanilla NBT",
+                ));
             }
             let tag = stack.nbt.map(crate::item_nbt::value).transpose()?;
             Ok(SlotItem {
