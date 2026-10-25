@@ -2,7 +2,9 @@
 //! This validates the formats used by the runtime, not arbitrary modded worlds.
 use crate::{
     achievements::Achievements, admin_state, brewing::Brewers, chests::Chests, clock::Clock,
-    experience::Experience, furnaces::Furnaces,
+    decorations::Decorations, dispensers::Devices, experience::Experience, furnaces::Furnaces,
+    game_rules::GameRules, hanging::Hangings, maps::Maps, minecarts::Minecarts,
+    scoreboard::Scoreboard,
     ground_items::GroundItems, hoppers::Hoppers, inventory::Inventory, legacy_world_inspect,
     mobs::Mobs, player::PlayerPosition, world::World,
 };
@@ -168,6 +170,21 @@ fn inspect_irw(world_file: &Path) -> io::Result<Summary> {
     check!(hoppers.clone(), Hoppers::load(&hoppers));
     let brewers = Brewers::location(world_file);
     check!(brewers.clone(), Brewers::load(&brewers));
+    let devices = Devices::location(world_file);
+    check!(devices.clone(), Devices::load(&devices));
+    let decorations = Decorations::location(world_file);
+    check!(decorations.clone(), Decorations::load(&decorations));
+    let hanging = Hangings::location(world_file);
+    check!(hanging.clone(), Hangings::load(&hanging));
+    let minecarts = Minecarts::location(world_file);
+    check!(minecarts.clone(), Minecarts::load(&minecarts, 0));
+    let score = Scoreboard::location(world_file);
+    check!(score.clone(), Scoreboard::load(&score));
+    let rules = GameRules::location(world_file);
+    check!(rules.clone(), GameRules::load(&rules));
+    let maps = Maps::location(world_file);
+    check!(maps.clone(), Maps::load(&maps));
+
 
     let player_dir = parent.join("players");
     if checked_dir(&player_dir)? {
@@ -291,6 +308,23 @@ mod tests {
             std::os::unix::fs::symlink("/tmp", root.join("players/verified/link")).unwrap();
             assert!(inspect(&root).is_err());
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn world_sidecars_are_loaded_and_corruption_is_rejected() {
+        let root = std::env::temp_dir().join(format!("f56-sidecars-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("flat.irw");
+        World::new().save_new(&file).unwrap();
+        let score = Scoreboard::location(&file);
+        fs::write(&score, b"invalid scoreboard").unwrap();
+        assert!(inspect(&root).is_err());
+        fs::remove_file(&score).unwrap();
+        let map = Maps::location(&file);
+        fs::write(&map, b"invalid map").unwrap();
+        assert!(inspect(&root).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
