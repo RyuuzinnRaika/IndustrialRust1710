@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(persisted.slots((0, 64, 0)), slots(2));
         assert_eq!(persisted.slots((-1, 64, 0)), slots(5));
         for (region_name, cx, x, slot, tag) in [
-            ("r.0.0.mca", 0, 0, 2, "chest-must-survive"),
+            ("r.0.0.mca", 0i32, 0, 2, "chest-must-survive"),
             ("r.-1.0.mca", -1, -1, 5, "negative-unknown-tag"),
         ] {
             let source = root.join("region").join(region_name);
