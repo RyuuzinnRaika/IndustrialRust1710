@@ -3804,19 +3804,59 @@ mod tests {
         let now = 6000; // Daytime, so ordinary hostile light rules reject 15.
         assert!(!spawn_light_ok(15, 15, now, false));
         assert!(natural_spawn_species_light_ok(
-            Kind::Slime, seed, sx, 30, 8, 15, 15, now, false
+            Kind::Slime,
+            seed,
+            sx,
+            30,
+            8,
+            15,
+            15,
+            now,
+            false
         ));
         assert!(!natural_spawn_species_light_ok(
-            Kind::Slime, seed, ox, 30, 8, 15, 15, now, false
+            Kind::Slime,
+            seed,
+            ox,
+            30,
+            8,
+            15,
+            15,
+            now,
+            false
         ));
         assert!(!natural_spawn_species_light_ok(
-            Kind::Slime, seed, sx, 40, 8, 15, 15, now, false
+            Kind::Slime,
+            seed,
+            sx,
+            40,
+            8,
+            15,
+            15,
+            now,
+            false
         ));
         assert!(!natural_spawn_species_light_ok(
-            Kind::Zombie, seed, sx, 30, 8, 15, 15, now, false
+            Kind::Zombie,
+            seed,
+            sx,
+            30,
+            8,
+            15,
+            15,
+            now,
+            false
         ));
         assert!(natural_spawn_species_light_ok(
-            Kind::Cow, seed, sx, 65, 8, 15, 15, now, true
+            Kind::Cow,
+            seed,
+            sx,
+            65,
+            8,
+            15,
+            15,
+            now,
+            true
         ));
     }
 
