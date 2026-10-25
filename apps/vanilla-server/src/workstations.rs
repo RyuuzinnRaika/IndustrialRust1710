@@ -351,7 +351,10 @@ mod tests {
     fn d31_d35_enchantment_keeps_unknown_item_and_nested_nbt_fields() {
         use fastnbt::Value;
         use std::collections::BTreeMap;
-        let mut tags = Default::default();
+        let mut tags = match Value::Compound(Default::default()) {
+            Value::Compound(tags) => tags,
+            _ => unreachable!(),
+        };
         tags.insert(
             "CustomUnknown".to_string(),
             Value::List(vec![Value::Int(17), Value::Int(29)]),
