@@ -3855,7 +3855,10 @@ mod tests {
         world.import_block(3, 70, 2, 50 << 4).unwrap(); // torch
         assert!(!sky_exposed(&world, at));
         let (block, sky) = world.light_at(2, 70, 2);
-        assert!(block >= 9, "torch must illuminate the roofed spawn location");
+        assert!(
+            block >= 9,
+            "torch must illuminate the roofed spawn location"
+        );
         assert!(natural_passive_habitat_ok(2, block, sky, 6000));
         assert!(natural_passive_habitat_ok(2, block, sky, 18000));
         assert!(!natural_passive_habitat_ok(1, block, sky, 6000));
