@@ -2742,10 +2742,13 @@ impl Mobs {
                         break;
                     }
                 }
-                // Hostile projectiles also hit other mobs (including a
-                // skeleton's unintended target). The shooter remains exempt.
+                // Skeleton arrows can hit a different mob. Preserve
+                // existing special-projectile splash handling separately,
+                // and never collide with the firing entity.
                 if let Some(mob) = self.entities.values().find(|mob| {
-                    mob.id != arrow.shooter.unwrap_or(-1) && projectile_hits_mob(mob, sample)
+                    arrow.kind == ProjectileKind::Arrow
+                        && mob.id != arrow.shooter.unwrap_or(-1)
+                        && projectile_hits_mob(mob, sample)
                 }) {
                     arrow_hits.push((
                         mob.id,
