@@ -595,7 +595,7 @@ fn spawn_light_ok(block: u8, sky: u8, now: u64, passive: bool) -> bool {
 
 /// Vanilla animals need grass and sufficient *combined* light, not direct
 /// access to the sky. A roofed, torch-lit grass enclosure remains eligible.
-fn natural_passive_habitat_ok(ground: u8, block: u8, sky: u8, now: u64) -> bool {
+fn natural_passive_habitat_ok(ground: u16, block: u8, sky: u8, now: u64) -> bool {
     ground == 2 && spawn_light_ok(block, sky, now, true)
 }
 
