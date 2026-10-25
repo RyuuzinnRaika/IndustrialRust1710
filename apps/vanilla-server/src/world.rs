@@ -407,10 +407,7 @@ impl World {
             let gx = cx.div_euclid(4);
             let gz = cz.div_euclid(4);
             let (x, y, z) = crate::worldgen::dungeon_spawner_in_cell(seed, gx, gz);
-            if x.div_euclid(16) == cx
-                && z.div_euclid(16) == cz
-                && self.get(x, y, z) >> 4 == 52
-            {
+            if x.div_euclid(16) == cx && z.div_euclid(16) == cz && self.get(x, y, z) >> 4 == 52 {
                 found.insert((x, y, z));
             }
         }
