@@ -661,7 +661,7 @@ fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
 
 /// Flying ghasts must be able to spawn in air. A generic ground-support
 /// test here would discard every valid floating ghast candidate.
-fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition) -> bool {
+fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition, size: u8) -> bool {
     if kind == Kind::Ghast {
         return ghast_has_clearance(world, at);
     }
@@ -671,19 +671,30 @@ fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition) -> bool 
     // Fluids have no solid collision boxes. Test the horizontal extent of
     // the species' body, not just the center column: a spider/horse can
     // overlap liquid in the next block while its feet remain on dry ground.
-    let half_width = match kind {
-        Kind::Spider | Kind::Horse | Kind::IronGolem => 0.7,
-        Kind::Cow | Kind::Pig | Kind::Sheep => 0.45,
-        Kind::CaveSpider => 0.35,
-        Kind::Chicken => 0.2,
-        _ => 0.3,
+    // EntitySlime#setSlimeSize uses a 0.6 * size cube in Java 1.7.10.
+    // The selected natural-spawn size must be used before inserting it.
+    let half_width = if kind.splitting() {
+        0.3 * f64::from(size)
+    } else {
+        match kind {
+            Kind::Spider | Kind::Horse | Kind::IronGolem => 0.7,
+            Kind::Cow | Kind::Pig | Kind::Sheep => 0.45,
+            Kind::CaveSpider => 0.35,
+            Kind::Chicken => 0.2,
+            _ => 0.3,
+        }
     };
     let y = at.y.floor() as i32;
-    let body_height = match kind {
-        Kind::Enderman | Kind::IronGolem => 3,
-        Kind::Spider | Kind::CaveSpider | Kind::Chicken => 1,
-        _ => 2,
+    let body_height = if kind.splitting() {
+        0.6 * f64::from(size)
+    } else {
+        match kind {
+            Kind::Enderman | Kind::IronGolem => 3.0,
+            Kind::Spider | Kind::CaveSpider | Kind::Chicken => 1.0,
+            _ => 2.0,
+        }
     };
+    let max_y = (at.y + body_height).ceil() as i32;
     let min_x = (at.x - half_width).floor() as i32;
     let max_x = (at.x + half_width).floor() as i32;
     let min_z = (at.z - half_width).floor() as i32;
@@ -699,7 +710,7 @@ fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition) -> bool 
             {
                 return true;
             }
-            (0..body_height).all(|dy| !matches!(world.get(x, y + dy, z) >> 4, 8..=11))
+            (y..max_y).all(|by| !matches!(world.get(x, by, z) >> 4, 8..=11))
         })
     })
 }
@@ -2170,7 +2181,7 @@ impl Mobs {
                 };
                 if !candidate.is_valid()
                     || !natural_spawn_location_ok(world, candidate, players)
-                    || !natural_spawn_body_ok(world, kind, candidate)
+                    || !natural_spawn_body_ok(world, kind, candidate, size)
                 {
                     continue;
                 }
@@ -3353,10 +3364,10 @@ mod tests {
             z: 0.5,
         };
         assert!(!physics::supported(&world, &air));
-        assert!(natural_spawn_body_ok(&world, Kind::Ghast, air));
-        assert!(!natural_spawn_body_ok(&world, Kind::Skeleton, air));
+        assert!(natural_spawn_body_ok(&world, Kind::Ghast, air, 1));
+        assert!(!natural_spawn_body_ok(&world, Kind::Skeleton, air, 1));
         world.import_block(2, 80, 0, 1 << 4).unwrap();
-        assert!(!natural_spawn_body_ok(&world, Kind::Ghast, air));
+        assert!(!natural_spawn_body_ok(&world, Kind::Ghast, air, 1));
     }
 
     #[test]
@@ -3374,7 +3385,7 @@ mod tests {
                 !ghast_has_clearance(&world, at),
                 "fluid {fluid} must block ghast spawning"
             );
-            assert!(!natural_spawn_body_ok(&world, Kind::Ghast, at));
+            assert!(!natural_spawn_body_ok(&world, Kind::Ghast, at, 1));
         }
     }
 
@@ -3389,12 +3400,17 @@ mod tests {
             for body_y in [65, 66] {
                 let mut world = World::new();
                 world.import_block(0, 64, 0, 1 << 4).unwrap();
-                assert!(natural_spawn_body_ok(&world, Kind::Zombie, at));
-                assert!(natural_spawn_body_ok(&world, Kind::Cow, at));
+                assert!(natural_spawn_body_ok(&world, Kind::Zombie, at, 1));
+                assert!(natural_spawn_body_ok(&world, Kind::Cow, at, 1));
                 world.import_block(0, body_y, 0, fluid << 4).unwrap();
                 for kind in [Kind::Zombie, Kind::Cow, Kind::Slime] {
+                    let size = if kind == Kind::Slime && body_y == 66 {
+                        4
+                    } else {
+                        1
+                    };
                     assert!(
-                        !natural_spawn_body_ok(&world, kind, at),
+                        !natural_spawn_body_ok(&world, kind, at, size),
                         "{kind:?} must not spawn in fluid {fluid} at y={body_y}"
                     );
                 }
@@ -3402,9 +3418,9 @@ mod tests {
             // The Enderman's third block is part of its spawn body too.
             let mut world = World::new();
             world.import_block(0, 64, 0, 1 << 4).unwrap();
-            assert!(natural_spawn_body_ok(&world, Kind::Enderman, at));
+            assert!(natural_spawn_body_ok(&world, Kind::Enderman, at, 1));
             world.import_block(0, 67, 0, fluid << 4).unwrap();
-            assert!(!natural_spawn_body_ok(&world, Kind::Enderman, at));
+            assert!(!natural_spawn_body_ok(&world, Kind::Enderman, at, 1));
         }
     }
 
@@ -3419,17 +3435,17 @@ mod tests {
             let mut world = World::new();
             world.import_block(0, 64, 0, 1 << 4).unwrap();
             for kind in [Kind::Spider, Kind::Horse, Kind::IronGolem] {
-                assert!(natural_spawn_body_ok(&world, kind, center));
+                assert!(natural_spawn_body_ok(&world, kind, center, 1));
             }
             world.import_block(1, 65, 0, fluid << 4).unwrap();
             // Wide mobs overlap x=1 even though their center is in x=0.
             for kind in [Kind::Spider, Kind::Horse, Kind::IronGolem] {
-                assert!(!natural_spawn_body_ok(&world, kind, center));
+                assert!(!natural_spawn_body_ok(&world, kind, center, 1));
             }
             // A 0.6-wide zombie at the center does not overlap x=1.
-            assert!(natural_spawn_body_ok(&world, Kind::Zombie, center));
+            assert!(natural_spawn_body_ok(&world, Kind::Zombie, center, 1));
             let edge = PlayerPosition { x: 0.85, ..center };
-            assert!(!natural_spawn_body_ok(&world, Kind::Cow, edge));
+            assert!(!natural_spawn_body_ok(&world, Kind::Cow, edge, 1));
         }
 
         // Negative coordinates and the Z axis use the same AABB logic.
@@ -3440,9 +3456,40 @@ mod tests {
             y: 65.0,
             z: -0.5,
         };
-        assert!(natural_spawn_body_ok(&world, Kind::Spider, negative));
+        assert!(natural_spawn_body_ok(&world, Kind::Spider, negative, 1));
         world.import_block(-1, 65, 0, 9 << 4).unwrap();
-        assert!(!natural_spawn_body_ok(&world, Kind::Spider, negative));
+        assert!(!natural_spawn_body_ok(&world, Kind::Spider, negative, 1));
+    }
+
+    #[test]
+    fn natural_slimes_and_magma_cubes_use_selected_size_for_fluid_clearance() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        for kind in [Kind::Slime, Kind::MagmaCube] {
+            for fluid in [8u16, 9, 10, 11] {
+                let mut world = World::new();
+                world.import_block(0, 64, 0, 1 << 4).unwrap();
+                for size in [1, 2, 4] {
+                    assert!(natural_spawn_body_ok(&world, kind, at, size));
+                }
+                // Size 1 is 0.6 wide, while size 2 already reaches x=1.
+                world.import_block(1, 65, 0, fluid << 4).unwrap();
+                assert!(natural_spawn_body_ok(&world, kind, at, 1));
+                assert!(!natural_spawn_body_ok(&world, kind, at, 2));
+                assert!(!natural_spawn_body_ok(&world, kind, at, 4));
+
+                let mut world = World::new();
+                world.import_block(0, 64, 0, 1 << 4).unwrap();
+                // Size 4 is 2.4 tall; size 1 and 2 do not reach y=67.
+                world.import_block(0, 67, 0, fluid << 4).unwrap();
+                assert!(natural_spawn_body_ok(&world, kind, at, 1));
+                assert!(natural_spawn_body_ok(&world, kind, at, 2));
+                assert!(!natural_spawn_body_ok(&world, kind, at, 4));
+            }
+        }
     }
 
     #[test]
@@ -5368,8 +5415,8 @@ mod tests {
         let player = PlayerPosition { x: 0.5, ..floating };
         assert!(!physics::supported(&world, &floating));
         assert!(natural_spawn_origin_ok(&world, floating, &[player]));
-        assert!(natural_spawn_body_ok(&world, Kind::Ghast, floating));
-        assert!(!natural_spawn_body_ok(&world, Kind::Skeleton, floating));
+        assert!(natural_spawn_body_ok(&world, Kind::Ghast, floating, 1));
+        assert!(!natural_spawn_body_ok(&world, Kind::Skeleton, floating, 1));
     }
 
     #[test]
