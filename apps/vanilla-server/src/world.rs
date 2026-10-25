@@ -1328,7 +1328,10 @@ impl World {
             .map_err(|err| {
                 io::Error::new(
                     err.kind(),
-                    format!("failed to create new world staging file {}: {err}", staging.display()),
+                    format!(
+                        "failed to create new world staging file {}: {err}",
+                        staging.display()
+                    ),
                 )
             })?;
         let written = self.write_to(&mut file).and_then(|_| file.sync_all());
@@ -1337,7 +1340,10 @@ impl World {
             let _ = fs::remove_file(&staging);
             return Err(io::Error::new(
                 err.kind(),
-                format!("failed to write new world staging file {}: {err}", staging.display()),
+                format!(
+                        "failed to write new world staging file {}: {err}",
+                        staging.display()
+                    ),
             ));
         }
         let published = fs::hard_link(&staging, path).map_err(|err| {
