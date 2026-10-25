@@ -45,6 +45,13 @@ jobs:
         run: cargo test --workspace --all-targets --locked
       - name: Build release executables
         run: cargo build --release --locked -p vanilla-server --bins -p legacy-status-server
+      - name: Smoke-test built Linux/Windows server startup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $server = Join-Path 'target/release' '${{ matrix.executable }}'
+          & "./$server" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "vanilla-server --help failed on runner" }
       - name: Collect executable hashes and build metadata
         shell: pwsh
         run: |
