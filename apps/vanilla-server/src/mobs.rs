@@ -2979,7 +2979,11 @@ fn natural_pack_attempts(kind: Kind, seed: u64) -> usize {
 /// spawn attempt. Reusing bit zero for both makes passive packs spawn only
 /// east of players, leaving the western half of eligible terrain empty.
 fn natural_spawn_x_sign(seed: u64) -> i32 {
-    if seed & 1 == 0 { 1 } else { -1 }
+    if seed & 1 == 0 {
+        1
+    } else {
+        -1
+    }
 }
 
 fn natural_spawn_passive_roll(seed: u64) -> bool {
