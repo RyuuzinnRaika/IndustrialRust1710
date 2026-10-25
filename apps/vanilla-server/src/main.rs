@@ -5638,9 +5638,7 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
     if raw_args.iter().any(|arg| arg == "--check-config") {
-        if !((raw_args.len() == 1 || raw_args.len() == 2)
-            && raw_args[0] == "--check-config")
-        {
+        if !((raw_args.len() == 1 || raw_args.len() == 2) && raw_args[0] == "--check-config") {
             return Err(bad("usage: --check-config [server.properties]"));
         }
         let config_file = raw_args
