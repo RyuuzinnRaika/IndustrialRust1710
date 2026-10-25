@@ -146,8 +146,6 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
     None
 }
 
-
-
 /// Candidate enchantments by vanilla 1.7.10 numeric enchantment ID.
 /// This is a conservative, one-enchantment baseline rather than the complete
 /// weighted/multiple-enchantment vanilla enchantment algorithm. Keeping it
@@ -156,12 +154,42 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
 fn enchantment_candidates(item: i16) -> &'static [(i16, i16)] {
     // (enchantment ID, maximum level)
     const ARMOR: &[(i16, i16)] = &[(0, 4), (1, 4), (3, 4), (4, 4), (7, 3), (34, 3)];
-    const HELMETS: &[(i16, i16)] = &[(0, 4), (1, 4), (3, 4), (4, 4), (5, 3), (6, 1), (7, 3), (34, 3)];
+    const HELMETS: &[(i16, i16)] = &[
+        (0, 4),
+        (1, 4),
+        (3, 4),
+        (4, 4),
+        (5, 3),
+        (6, 1),
+        (7, 3),
+        (34, 3),
+    ];
     const BOOTS: &[(i16, i16)] = &[(0, 4), (1, 4), (2, 4), (3, 4), (4, 4), (7, 3), (34, 3)];
-    const SWORDS: &[(i16, i16)] = &[(16, 5), (17, 5), (18, 5), (19, 2), (20, 2), (21, 3), (34, 3)];
+    const SWORDS: &[(i16, i16)] = &[
+        (16, 5),
+        (17, 5),
+        (18, 5),
+        (19, 2),
+        (20, 2),
+        (21, 3),
+        (34, 3),
+    ];
     const TOOLS: &[(i16, i16)] = &[(32, 5), (33, 1), (34, 3), (35, 3)];
     const BOWS: &[(i16, i16)] = &[(48, 5), (49, 2), (50, 1), (51, 1), (34, 3)];
-    const BOOKS: &[(i16, i16)] = &[(0, 4), (2, 4), (5, 3), (16, 5), (19, 2), (21, 3), (32, 5), (33, 1), (34, 3), (35, 3), (48, 5), (50, 1)];
+    const BOOKS: &[(i16, i16)] = &[
+        (0, 4),
+        (2, 4),
+        (5, 3),
+        (16, 5),
+        (19, 2),
+        (21, 3),
+        (32, 5),
+        (33, 1),
+        (34, 3),
+        (35, 3),
+        (48, 5),
+        (50, 1),
+    ];
     match item {
         340 => BOOKS,
         261 => BOWS,
@@ -189,7 +217,9 @@ pub(crate) fn enchant_nbt_item(
 ) -> Option<crate::legacy_inventory_nbt::SlotItem> {
     use fastnbt::Value;
 
-    if offer_cost == 0 || offer_cost > 30 || input.count != 1
+    if offer_cost == 0
+        || offer_cost > 30
+        || input.count != 1
         || !items_1710::enchantable_in_table(input.id)
     {
         return None;
@@ -201,7 +231,8 @@ pub(crate) fn enchant_nbt_item(
 
     // Deterministic and wholly server-owned. No client-provided enchantment
     // ID or level is accepted.
-    let mixed = server_seed ^ (u64::from(offer_cost) << 24)
+    let mixed = server_seed
+        ^ (u64::from(offer_cost) << 24)
         ^ (input.id as u16 as u64).wrapping_mul(0x9E3779B97F4A7C15);
     let mixed = mixed ^ (mixed >> 30);
     let mixed = mixed.wrapping_mul(0xBF58476D1CE4E5B9);
@@ -221,13 +252,22 @@ pub(crate) fn enchant_nbt_item(
     if tags.contains_key("ench") || tags.contains_key("StoredEnchantments") {
         return None;
     }
-    let entry = Value::Compound([
-        ("id".to_string(), Value::Short(enchant_id)),
-        ("lvl".to_string(), Value::Short(level)),
-    ].into_iter().collect());
+    let entry = Value::Compound(
+        [
+            ("id".to_string(), Value::Short(enchant_id)),
+            ("lvl".to_string(), Value::Short(level)),
+        ]
+        .into_iter()
+        .collect(),
+    );
     let is_book = input.id == 340;
     tags.insert(
-        (if is_book { "StoredEnchantments" } else { "ench" }).to_string(),
+        (if is_book {
+            "StoredEnchantments"
+        } else {
+            "ench"
+        })
+        .to_string(),
         Value::List(vec![entry]),
     );
     let mut output = input.clone();
@@ -312,21 +352,32 @@ mod tests {
         use fastnbt::Value;
         use std::collections::BTreeMap;
         let mut tags = Default::default();
-        tags.insert("CustomUnknown".to_string(), Value::List(vec![
-            Value::Int(17), Value::Int(29),
-        ]));
+        tags.insert(
+            "CustomUnknown".to_string(),
+            Value::List(vec![Value::Int(17), Value::Int(29)]),
+        );
         let mut extra = BTreeMap::new();
         extra.insert("ModItemField".into(), Value::String("keep me".into()));
         let input = crate::legacy_inventory_nbt::SlotItem {
-            slot: 0, id: 276, count: 1, damage: 14,
-            tag: Some(Value::Compound(tags)), extra,
+            slot: 0,
+            id: 276,
+            count: 1,
+            damage: 14,
+            tag: Some(Value::Compound(tags)),
+            extra,
         };
         let enchanted = enchant_nbt_item(&input, 30, 42).unwrap();
         assert_eq!(enchanted.id, 276);
         assert_eq!(enchanted.damage, 14);
-        assert!(matches!(enchanted.extra.get("ModItemField"), Some(Value::String(s)) if s == "keep me"));
-        let Value::Compound(ref tag) = enchanted.tag.as_ref().unwrap() else { panic!("compound") };
-        assert!(matches!(tag.get("CustomUnknown"), Some(Value::List(v)) if v == &vec![Value::Int(17), Value::Int(29)]));
+        assert!(
+            matches!(enchanted.extra.get("ModItemField"), Some(Value::String(s)) if s == "keep me")
+        );
+        let Value::Compound(ref tag) = enchanted.tag.as_ref().unwrap() else {
+            panic!("compound")
+        };
+        assert!(
+            matches!(tag.get("CustomUnknown"), Some(Value::List(v)) if v == &vec![Value::Int(17), Value::Int(29)])
+        );
         assert!(matches!(tag.get("ench"), Some(Value::List(v)) if v.len() == 1));
         let bytes = fastnbt::to_bytes(&enchanted).unwrap();
         let back: crate::legacy_inventory_nbt::SlotItem = fastnbt::from_bytes(&bytes).unwrap();
@@ -340,7 +391,11 @@ mod tests {
     #[test]
     fn d35_book_enchantment_and_invalid_offers_are_fail_closed() {
         let book = crate::legacy_inventory_nbt::SlotItem {
-            slot: 2, id: 340, count: 1, damage: 0, tag: None,
+            slot: 2,
+            id: 340,
+            count: 1,
+            damage: 0,
+            tag: None,
             extra: Default::default(),
         };
         let result = enchant_nbt_item(&book, 11, 123).unwrap();
@@ -356,5 +411,4 @@ mod tests {
         invalid.tag = Some(fastnbt::Value::String("not a compound".into()));
         assert!(enchant_nbt_item(&invalid, 10, 2).is_none());
     }
-
 }
