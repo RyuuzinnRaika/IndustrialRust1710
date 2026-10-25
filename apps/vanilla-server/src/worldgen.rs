@@ -493,7 +493,13 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
                 return Some(AIR);
             }
             if a == 0 && c == if hz < 0 { 4 } else { -4 } && y < base + 3 {
-                return Some(AIR);
+                // Wooden doors use a lower half with facing metadata and an
+                // upper half marked with bit 3 in Minecraft 1.7.10.
+                return Some(if y == base + 1 {
+                    state(64, if hz < 0 { 0 } else { 2 })
+                } else {
+                    state(64, 8)
+                });
             }
             return Some(if a.abs() == 4 && c.abs() == 4 {
                 b(17)
@@ -858,9 +864,25 @@ mod tests {
                 villages_checked += 1;
                 let base = height(seed, cx, cz);
                 for (dx, start_z, end_z, doorway_z) in [(-17, -4, -2, -5), (17, 2, 4, 5)] {
-                    // The house doorway remains open, and every path block
-                    // is gravel with four clear blocks of headroom.
-                    assert_eq!(village(seed, cx + dx, base + 1, cz + doorway_z), Some(AIR));
+                    // Each doorway has a complete two-block wooden door,
+                    // followed by gravel with four blocks of open headroom.
+                    let lower_door = state(64, if dx < 0 { 0 } else { 2 });
+                    assert_eq!(
+                        village(seed, cx + dx, base + 1, cz + doorway_z),
+                        Some(lower_door)
+                    );
+                    assert_eq!(
+                        village(seed, cx + dx, base + 2, cz + doorway_z),
+                        Some(state(64, 8))
+                    );
+                    assert_eq!(
+                        block(seed, Dimension::Overworld, cx + dx, base + 1, cz + doorway_z),
+                        lower_door
+                    );
+                    assert_eq!(
+                        block(seed, Dimension::Overworld, cx + dx, base + 2, cz + doorway_z),
+                        state(64, 8)
+                    );
                     for dz in start_z..=end_z {
                         assert_eq!(
                             block(seed, Dimension::Overworld, cx + dx, base, cz + dz),
