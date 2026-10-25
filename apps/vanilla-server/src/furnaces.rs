@@ -97,6 +97,7 @@ impl Furnace {
             Some(existing)
                 if existing.id == result.id
                     && existing.damage == result.damage
+                    && existing.nbt == result.nbt
                     && existing.count <= 63 =>
             {
                 Some(result)

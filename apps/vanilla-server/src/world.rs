@@ -1042,6 +1042,7 @@ impl World {
                         } else {
                             0
                         },
+                        nbt: None,
                     };
                     Some(WorldDrop { pos, stack })
                 })

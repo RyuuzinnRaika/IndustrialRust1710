@@ -61,7 +61,7 @@ fn move_one(src: &mut [Option<Stack>], dst: &mut [Option<Stack>]) -> bool {
             .iter()
             .position(|target| {
                 target.is_some_and(|s| {
-                    s.id == stack.id && s.damage == stack.damage && s.count < s.max_count()
+                    s.id == stack.id && s.damage == stack.damage && s.nbt == stack.nbt && s.count < s.max_count()
                 })
             })
             .or_else(|| dst.iter().position(Option::is_none));

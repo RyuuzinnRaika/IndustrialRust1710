@@ -389,6 +389,7 @@ mod tests {
             id: 4,
             count: 7,
             damage: 0,
+            nbt: None,
         };
         let mut chest_slots = [None; CHEST_SLOTS];
         chest_slots[26] = Some(stack);
@@ -421,6 +422,7 @@ mod tests {
                     id: 373,
                     count: 1,
                     damage: 0,
+                    nbt: None,
                 }),
                 None,
                 None,
@@ -487,6 +489,7 @@ mod tests {
             id: 4,
             count: 1,
             damage: 0,
+            nbt: None,
         });
         let state = Chests::default().staged_update((1, 64, 1), slots).unwrap();
         fs::write(Chests::location(&source), state.encoded().unwrap()).unwrap();
