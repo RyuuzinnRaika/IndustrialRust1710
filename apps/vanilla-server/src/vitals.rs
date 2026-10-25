@@ -212,6 +212,7 @@ mod tests {
             id,
             damage,
             count: 1,
+            nbt: None,
         };
         assert_eq!(food_side_effects(food(365, 0), 29)[0].kind, 17);
         assert!(food_side_effects(food(365, 0), 30).is_empty());
@@ -299,6 +300,7 @@ mod tests {
                 id,
                 count: 1,
                 damage: 0,
+                nbt: None,
             };
             let mut vitals = Vitals {
                 food: 5,
@@ -322,7 +324,8 @@ mod tests {
         assert!(v.eat(Stack {
             id: 396,
             count: 1,
-            damage: 0
+            damage: 0,
+            nbt: None,
         }));
         assert_eq!(v.food, 16);
         assert!((v.saturation - 14.4).abs() < 0.001);
@@ -334,7 +337,8 @@ mod tests {
         assert!(salmon.eat(Stack {
             id: 350,
             count: 1,
-            damage: 1
+            damage: 1,
+            nbt: None,
         }));
         assert_eq!(salmon.food, 16);
         assert!((salmon.saturation - 9.6).abs() < 0.001);
@@ -358,6 +362,9 @@ mod tests {
             id,
             count: 1,
             damage: 0,
+        },
+        nbt: None,
+    t: None,
         }
     }
     #[test]

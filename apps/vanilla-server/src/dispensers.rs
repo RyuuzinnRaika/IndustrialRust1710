@@ -222,11 +222,13 @@ mod tests {
             id: 1,
             count: 2,
             damage: 0,
+            nbt: None,
         });
         let full = [Some(Stack {
             id: 1,
             count: 64,
             damage: 0,
+            nbt: None,
         }); DEVICE_SLOTS];
         let original = Devices::default()
             .staged_update(from, source)
@@ -240,6 +242,7 @@ mod tests {
             id: 1,
             count: 63,
             damage: 0,
+            nbt: None,
         });
         let original = original.staged_update(to, available).unwrap();
         let transferred = original.stage_transfer_one(from, to, 0).unwrap().unwrap();
@@ -258,6 +261,7 @@ mod tests {
             id: 4,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         let mut slots = [None; 3];
         slots[0] = Some(Stack { count: 63, ..item });
@@ -279,7 +283,8 @@ mod tests {
             Stack {
                 id: 4,
                 count: 2,
-                damage: 0
+                damage: 0,
+                nbt: None,
             }
         ));
         assert_eq!(slots, [None; 2]);
@@ -296,6 +301,7 @@ mod tests {
             id: 4,
             count: 2,
             damage: 0,
+            nbt: None,
         });
         let storage = Devices::default().staged_update(pos, slots).unwrap();
         storage.save(&path).unwrap();

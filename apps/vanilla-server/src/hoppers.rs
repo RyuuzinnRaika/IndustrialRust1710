@@ -296,6 +296,7 @@ mod tests {
             id: 373,
             count: 1,
             damage: 8194,
+            nbt: None,
         };
         let mut source = [Some(potion)];
         let mut target = [Some(potion); 5];
@@ -321,11 +322,13 @@ mod tests {
             id: 4,
             count: 3,
             damage: 0,
+            nbt: None,
         }); 5];
         let mut target = [Some(Stack {
             id: 4,
             count: 63,
             damage: 0,
+            nbt: None,
         }); 27];
         assert!(move_one(&mut src, &mut target));
         assert_eq!(src[0].unwrap().count, 2);
