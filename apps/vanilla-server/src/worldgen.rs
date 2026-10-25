@@ -440,7 +440,22 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
     if !(base - 4..=base + 7).contains(&y) {
         return None;
     }
-    // Roads and a small central well.
+    // The central well must take precedence over the crossing road.
+    // Otherwise the road replaces the cobblestone floor with gravel and
+    // clears the water at z=-1..=1, leaving a dry, broken well.
+    if dx.abs() <= 2 && dz.abs() <= 2 {
+        if y == base {
+            return Some(b(4));
+        }
+        if y == base + 1 {
+            return Some(if dx.abs() == 2 && dz.abs() == 2 {
+                b(4)
+            } else {
+                b(9)
+            });
+        }
+    }
+    // Keep the remaining road open for player movement.
     if dz.abs() <= 1 && dx.abs() <= 29 {
         return if y == base {
             Some(b(13))
@@ -449,17 +464,6 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
         } else {
             None
         };
-    }
-    if dx.abs() <= 2 && dz.abs() <= 2 {
-        if y == base {
-            return Some(b(4));
-        }
-        if y == base + 1 && dx.abs() == 2 && dz.abs() == 2 {
-            return Some(b(4));
-        }
-        if y == base + 1 {
-            return Some(b(9));
-        }
     }
     // Two houses with a doorway toward the road.
     for (hx, hz) in [(-17, -9), (17, 9)] {
@@ -789,6 +793,41 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn village_well_is_not_overwritten_by_crossing_road() {
+        // Find valid villages in both positive and negative generation cells.
+        // Use the public block lookup too: village() is only one layer of
+        // the complete overworld generator.
+        let seed = 42u64;
+        let mut tested_negative = false;
+        let mut tested_positive = false;
+        for gx in -8..=8 {
+            for gz in -8..=8 {
+                if !hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4) {
+                    continue;
+                }
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                if !matches!(biome(seed, cx, cz), 1 | 2 | 35 | 4) {
+                    continue;
+                }
+                let base = height(seed, cx, cz);
+                assert_eq!(village(seed, cx, base, cz), Some(b(4)));
+                assert_eq!(village(seed, cx, base + 1, cz), Some(b(9)));
+                assert_eq!(block(seed, Dimension::Overworld, cx, base, cz), b(4));
+                assert_eq!(block(seed, Dimension::Overworld, cx, base + 1, cz), b(9));
+                assert_eq!(village(seed, cx + 5, base, cz), Some(b(13)));
+                assert_eq!(village(seed, cx + 5, base + 1, cz), Some(AIR));
+                if gx < 0 && gz < 0 {
+                    tested_negative = true;
+                }
+                if gx > 0 && gz > 0 {
+                    tested_positive = true;
+                }
+            }
+        }
+        assert!(tested_negative && tested_positive);
     }
     #[test]
     fn generated_dungeons_have_spawner_and_loot() {
