@@ -543,7 +543,10 @@ mod tests {
         let too_many: Vec<_> = (0..9)
             .map(|index| (paths[index % 8].as_path(), b"ignored".to_vec()))
             .collect();
-        assert_eq!(commit(&journal, &too_many).unwrap_err().kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            commit(&journal, &too_many).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
         assert!(!journal.exists());
         let record = Record {
             version: VERSION,
