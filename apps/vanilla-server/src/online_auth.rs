@@ -239,8 +239,14 @@ fn verify_has_joined(username: &str, hash: &str) -> io::Result<VerifiedProfile> 
     if response_body.len() > 16_384 {
         return Err(invalid("oversized session response"));
     }
+    parse_verified_profile(username, &response_body)
+}
+
+// Session-server parsing is a separate, network-free authorization boundary.
+// This permits malformed replies and identity substitution to be regression-tested.
+fn parse_verified_profile(username: &str, body: &[u8]) -> io::Result<VerifiedProfile> {
     let object: serde_json::Value =
-        serde_json::from_slice(&response_body).map_err(|_| invalid("invalid session response"))?;
+        serde_json::from_slice(body).map_err(|_| invalid("invalid session response"))?;
     let name = object
         .get("name")
         .and_then(|v| v.as_str())
@@ -284,6 +290,18 @@ mod tests {
         }
         assert_eq!(encrypted, plain);
     }
+    #[test]
+    fn session_profile_accepts_only_matching_name_and_strict_uuid() {
+        let bytes = br#"{"name":"Notch","id":"069a79f444e94726a5befca90e38aaf5"}"#;
+        let valid = parse_verified_profile("Notch", bytes).unwrap();
+        assert_eq!(valid.name, "Notch");
+        assert_eq!(valid.uuid, "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        assert!(parse_verified_profile("OtherUser", bytes).is_err());
+        assert!(parse_verified_profile("Notch", br#"{"name":"Notch","id":"../../etc"}"#).is_err());
+        assert!(parse_verified_profile("Notch", br#"{"name":"Notch"}"#).is_err());
+        assert!(parse_verified_profile("Notch", b"not-json").is_err());
+    }
+
     #[test]
     fn minecraft_signed_hash_uses_java_twos_complement_format() {
         let mut sha = Sha1::new();
