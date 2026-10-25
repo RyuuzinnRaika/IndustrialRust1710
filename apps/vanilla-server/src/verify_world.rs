@@ -274,7 +274,10 @@ mod tests {
         for extension in ["achievements.json", "gamemode"] {
             let path = player.with_extension(extension);
             fs::write(&path, b"corrupt").unwrap();
-            assert!(inspect(&root).is_err(), "accepted corrupt player {extension}");
+            assert!(
+                inspect(&root).is_err(),
+                "accepted corrupt player {extension}"
+            );
             fs::remove_file(path).unwrap();
         }
         let bad_name = player.with_file_name("BAD-uuid.dat");
