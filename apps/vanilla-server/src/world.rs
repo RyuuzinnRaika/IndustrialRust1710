@@ -362,6 +362,44 @@ impl World {
         }
         crate::worldgen::village_live_house_doors(seed, x, z, |dx, dy, dz| self.get(dx, dy, dz))
     }
+    /// Resolve intact generated and player-built wooden doors inside a generated
+    /// village footprint. This is a live, bounded lookup, not a persistent
+    /// village registry: only edited lower halves are scanned and each candidate
+    /// must have an intact upper half. Iron doors are not villager houses.
+    ///
+    /// The BTreeMap x-range avoids scanning edits in unrelated villages. The
+    /// 128-door limit bounds work for a densely edited village.
+    pub fn village_doors_including_player_edits(&self, x: i32, z: i32) -> Option<Vec<[i32; 3]>> {
+        let (seed, dimension) = self.extended_identity()?;
+        if dimension != crate::dimensions::Dimension::Overworld {
+            return None;
+        }
+        let (cx, _, cz) = crate::worldgen::village_center(seed, x, z)?;
+        let mut doors: BTreeSet<[i32; 3]> = self
+            .live_village_house_doors(x, z)?
+            .into_iter()
+            .flatten()
+            .collect();
+        for (&(dx, dy, dz), &lower) in self.edits.range(
+            (cx.saturating_sub(31), 0u8, i32::MIN)..=(cx.saturating_add(31), u8::MAX, i32::MAX),
+        ) {
+            if doors.len() >= 128 {
+                break;
+            }
+            if (i64::from(dz) - i64::from(cz)).abs() > 26
+                || dy == u8::MAX
+                || lower >> 4 != 64
+                || lower & 8 != 0
+            {
+                continue;
+            }
+            let upper = self.get(dx, i32::from(dy) + 1, dz);
+            if upper >> 4 == 64 && upper & 8 != 0 {
+                doors.insert([dx, i32::from(dy), dz]);
+            }
+        }
+        Some(doors.into_iter().collect())
+    }
     /// Bounded lookup of intact dungeon spawners close to active players.
     /// IRW4 generated sites are indexed by their 64-block feature cells so
     /// this never walks ungenerated chunks or scans a large 3D volume.
@@ -1797,6 +1835,96 @@ mod tests {
                 .live_village_house_doors(0, 0),
             None
         );
+    }
+
+    #[test]
+    fn player_built_village_doors_follow_edits_and_survive_restart() {
+        let seed = 42;
+        let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+        let (cx, base, cz) = (-8..=8)
+            .flat_map(|gx| (-8..=8).map(move |gz| (gx * 192 + 48, gz * 192 + 48)))
+            .find_map(|(x, z)| crate::worldgen::village_center(seed, x, z))
+            .expect("seed 42 has a generated village");
+        let generated = world.live_village_house_doors(cx, cz).unwrap();
+        let placed = [cx, base + 1, cz + 8];
+        let outside = [cx + 32, base + 1, cz];
+        let mut expected: BTreeSet<[i32; 3]> = generated.into_iter().flatten().collect();
+        assert_eq!(
+            world.village_doors_including_player_edits(cx, cz),
+            Some(expected.iter().copied().collect())
+        );
+        // A lone lower half is never a valid door.
+        world
+            .import_block(placed[0], placed[1], placed[2], 64 << 4)
+            .unwrap();
+        assert!(!world
+            .village_doors_including_player_edits(cx, cz)
+            .unwrap()
+            .contains(&placed));
+        world
+            .import_block(placed[0], placed[1] + 1, placed[2], 64 << 4 | 8)
+            .unwrap();
+        expected.insert(placed);
+        assert_eq!(
+            world.village_doors_including_player_edits(cx, cz),
+            Some(expected.iter().copied().collect())
+        );
+        // Upper-half replacement, including an iron door, invalidates it.
+        world
+            .import_block(placed[0], placed[1] + 1, placed[2], 71 << 4 | 8)
+            .unwrap();
+        assert!(!world
+            .village_doors_including_player_edits(cx, cz)
+            .unwrap()
+            .contains(&placed));
+        world
+            .import_block(placed[0], placed[1] + 1, placed[2], 64 << 4 | 9)
+            .unwrap();
+        world
+            .import_block(outside[0], outside[1], outside[2], 64 << 4)
+            .unwrap();
+        world
+            .import_block(outside[0], outside[1] + 1, outside[2], 64 << 4 | 8)
+            .unwrap();
+        assert!(!world
+            .village_doors_including_player_edits(cx, cz)
+            .unwrap()
+            .contains(&outside));
+        // Removing a generated door must also remove it from the combined set.
+        let removed = generated[0].unwrap();
+        world
+            .import_block(removed[0], removed[1], removed[2], 0)
+            .unwrap();
+        expected.remove(&removed);
+        assert_eq!(
+            world.village_doors_including_player_edits(cx, cz),
+            Some(expected.iter().copied().collect())
+        );
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-player-village-doors-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        world.save(&path).unwrap();
+        let restored = World::load(&path).unwrap();
+        assert_eq!(
+            restored.village_doors_including_player_edits(cx, cz),
+            Some(expected.into_iter().collect())
+        );
+        assert_eq!(
+            restored.village_doors_including_player_edits(cx + 32, cz),
+            None
+        );
+        assert_eq!(
+            restored.village_doors_including_player_edits(i32::MIN, 0),
+            None
+        );
+        assert_eq!(
+            World::expanded(seed, crate::dimensions::Dimension::Nether)
+                .village_doors_including_player_edits(cx, cz),
+            None
+        );
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
