@@ -1809,8 +1809,7 @@ impl Mobs {
                     && mate.kind == first.kind
                     && !mate.baby
                     && mate.love_until > tick
-                    && (mate.breed_tick == 0
-                        || tick.saturating_sub(mate.breed_tick) >= 6000)
+                    && (mate.breed_tick == 0 || tick.saturating_sub(mate.breed_tick) >= 6000)
                     && distance_3d(mate.position, first.position) < 7.0
             })
             .map(|mate| mate.id);
@@ -2117,9 +2116,7 @@ impl Mobs {
                 let current_category = self
                     .entities
                     .values()
-                    .filter(|mob| {
-                        mob.kind.counts_toward_natural_cap(is_passive)
-                    })
+                    .filter(|mob| mob.kind.counts_toward_natural_cap(is_passive))
                     .count();
                 if current_category >= if is_passive { passive_cap } else { hostile_cap } {
                     break;
@@ -2744,17 +2741,12 @@ impl Mobs {
                         impacted = true;
                         break;
                     }
-                } 
+                }
                 // Hostile projectiles also hit other mobs (including a
                 // skeleton's unintended target). The shooter remains exempt.
-                if let Some(mob) = self
-                    .entities
-                    .values()
-                    .find(|mob| {
-                        mob.id != arrow.shooter.unwrap_or(-1)
-                            && projectile_hits_mob(mob, sample)
-                    })
-                {
+                if let Some(mob) = self.entities.values().find(|mob| {
+                    mob.id != arrow.shooter.unwrap_or(-1) && projectile_hits_mob(mob, sample)
+                }) {
                     arrow_hits.push((
                         mob.id,
                         arrow.damage,
@@ -3089,11 +3081,7 @@ fn zombie_infects_villager(difficulty: u8, roll: u64) -> bool {
 }
 /// Natural-spawn origin checks are independent of entity shape: a Ghast may
 /// be selected while floating above a valid Nether candidate floor.
-fn natural_spawn_origin_ok(
-    world: &World,
-    at: PlayerPosition,
-    players: &[PlayerPosition],
-) -> bool {
+fn natural_spawn_origin_ok(world: &World, at: PlayerPosition, players: &[PlayerPosition]) -> bool {
     at.is_valid() && natural_spawn_location_ok(world, at, players)
 }
 /// Respect both the closest *online player* and Overworld world-spawn
@@ -4459,9 +4447,20 @@ mod tests {
     fn passive_animals_require_two_feedings_and_obey_breeding_cooldown() {
         let mut mobs = Mobs::default();
         let at = PlayerPosition::default();
-        let wheat = Some(Stack { id: 296, count: 1, damage: 0 });
+        let wheat = Some(Stack {
+            id: 296,
+            count: 1,
+            damage: 0,
+        });
         mobs.insert(Kind::Cow, at, false);
-        mobs.insert(Kind::Cow, PlayerPosition { x: at.x + 1.0, ..at }, false);
+        mobs.insert(
+            Kind::Cow,
+            PlayerPosition {
+                x: at.x + 1.0,
+                ..at
+            },
+            false,
+        );
         let first = mobs.feed(0, at, wheat, 100).unwrap();
         assert_eq!(first.len(), 1); // heart effect only
         assert!(!mobs.entities.values().any(|m| m.baby));
@@ -4476,7 +4475,12 @@ mod tests {
 
     #[test]
     fn natural_cap_excludes_persistent_villagers_guardians_and_bosses() {
-        for species in [Kind::Villager, Kind::IronGolem, Kind::Wither, Kind::EnderDragon] {
+        for species in [
+            Kind::Villager,
+            Kind::IronGolem,
+            Kind::Wither,
+            Kind::EnderDragon,
+        ] {
             assert!(!species.counts_toward_natural_cap(true));
             assert!(!species.counts_toward_natural_cap(false));
         }
@@ -4488,7 +4492,11 @@ mod tests {
     #[test]
     fn natural_ghast_origin_does_not_require_ground_support() {
         let world = World::new();
-        let floating = PlayerPosition { x: 64.5, y: 80.0, z: 0.5 };
+        let floating = PlayerPosition {
+            x: 64.5,
+            y: 80.0,
+            z: 0.5,
+        };
         let player = PlayerPosition { x: 0.5, ..floating };
         assert!(!physics::supported(&world, &floating));
         assert!(natural_spawn_origin_ok(&world, floating, &[player]));
@@ -4499,12 +4507,20 @@ mod tests {
     #[test]
     fn hostile_arrows_can_hit_other_mobs_without_hitting_the_shooter() {
         let mut mobs = Mobs::default();
-        let at = PlayerPosition { x: 0.5, y: 70.0, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 70.0,
+            z: 0.5,
+        };
         mobs.insert(Kind::Skeleton, at, false);
         mobs.insert(Kind::Cow, PlayerPosition { x: 2.5, ..at }, false);
         mobs.fire_arrow(Some(0), at, 0.0, 0.0, 1.5, 3).unwrap();
         let projectile = mobs.arrows.values_mut().next().unwrap();
-        projectile.position = PlayerPosition { x: 1.6, y: 71.3, z: 0.5 };
+        projectile.position = PlayerPosition {
+            x: 1.6,
+            y: 71.3,
+            z: 0.5,
+        };
         projectile.velocity = [1.0, 0.0, 0.0];
         let mut events = Vec::new();
         mobs.tick_arrows(&World::new(), &[], 10, &mut events);
