@@ -947,6 +947,7 @@ mod tests {
         let seed = 42u64;
         let mut checked_villages = 0usize;
         let mut checked_supports = 0usize;
+        let mut checked_well_supports = 0usize;
         let mut tested_negative = false;
         let mut tested_positive = false;
         for gx in -8..=8 {
@@ -988,6 +989,9 @@ mod tests {
                                 "missing support at ({x}, {y}, {z})"
                             );
                             checked_supports += 1;
+                            if dx.abs() == 2 && dz.abs() == 2 {
+                                checked_well_supports += 1;
+                            }
                         }
                     }
                 }
@@ -996,6 +1000,9 @@ mod tests {
         assert!(checked_villages > 0);
         assert!(tested_negative && tested_positive);
         assert!(checked_supports > 0);
+        // At least one tested well corner must actually span a shallow gap;
+        // otherwise the well-specific regression would never exercise it.
+        assert!(checked_well_supports > 0);
     }
     #[test]
     fn village_house_doors_have_clear_paths_to_the_road() {
