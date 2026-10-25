@@ -2314,6 +2314,23 @@ impl Mobs {
                         events.push(Event { id: 0x1c, body });
                     }
                 }
+                // Egg laying is a timed biological action, not wandering AI.
+                // Leashed or fence-anchored adult chickens must keep laying.
+                if mob.kind == Kind::Chicken && !mob.baby && now >= mob.next_egg_tick {
+                    mob.next_egg_tick = now + 6000 + hash(now ^ mob.id as u64) % 6000;
+                    self.pending_drops.push((
+                        Stack {
+                            id: 344,
+                            count: 1,
+                            damage: 0,
+                        },
+                        (
+                            mob.position.x.floor() as i32,
+                            mob.position.y.floor() as i32,
+                            mob.position.z.floor() as i32,
+                        ),
+                    ));
+                }
                 if mob.rider.is_some() || mob.leash_holder.is_some() || mob.fence_anchor.is_some() {
                     continue; // Mounted or leashed animals never wander independently.
                 }
@@ -2347,21 +2364,6 @@ impl Mobs {
                     }
                     events.push(mob.status(2));
                     events.push(mob.health_metadata());
-                }
-                if mob.kind == Kind::Chicken && !mob.baby && now >= mob.next_egg_tick {
-                    mob.next_egg_tick = now + 6000 + hash(now ^ mob.id as u64) % 6000;
-                    self.pending_drops.push((
-                        Stack {
-                            id: 344,
-                            count: 1,
-                            damage: 0,
-                        },
-                        (
-                            mob.position.x.floor() as i32,
-                            mob.position.y.floor() as i32,
-                            mob.position.z.floor() as i32,
-                        ),
-                    ));
                 }
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     let p = mob.position;
@@ -3566,6 +3568,50 @@ mod tests {
             assert_eq!(horse_spawn_weight(biome), 0);
             assert!((0..256).all(|roll| overworld_passive_kind(biome, roll) != Kind::Horse));
         }
+    }
+
+    #[test]
+    fn tethered_adult_chickens_lay_eggs_without_duplicate_ticks() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 10.5,
+            y: 65.0,
+            z: 12.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Chicken, at, false);
+        let adult_id = mobs.next_id - 1;
+        mobs.insert(Kind::Chicken, at, true);
+        let baby_id = mobs.next_id - 1;
+
+        // Leashing suppresses wandering but not an adult's egg timer.
+        let adult = mobs.entities.get_mut(&adult_id).unwrap();
+        adult.leash_holder = Some(42);
+        adult.next_egg_tick = 1;
+        let baby = mobs.entities.get_mut(&baby_id).unwrap();
+        baby.fence_anchor = Some([10, 65, 12]);
+        baby.next_egg_tick = 1;
+
+        mobs.tick(1, &world, &[]);
+        let drops = mobs.take_drops();
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].0.id, 344);
+        assert_eq!(drops[0].0.count, 1);
+        assert_eq!(drops[0].1, (10, 65, 12));
+
+        // Repeated polls and later ticks before the cooldown never duplicate.
+        mobs.tick(1, &world, &[]);
+        mobs.tick(2, &world, &[]);
+        assert!(mobs.take_drops().is_empty());
+
+        // A fence anchor must also leave egg laying enabled.
+        let adult = mobs.entities.get_mut(&adult_id).unwrap();
+        adult.leash_holder = None;
+        adult.fence_anchor = Some([10, 65, 12]);
+        adult.next_egg_tick = 3;
+        mobs.tick(3, &world, &[]);
+        assert_eq!(mobs.take_drops().len(), 1);
+        assert!(mobs.entities[&baby_id].baby);
     }
 
     #[test]
