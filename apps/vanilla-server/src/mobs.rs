@@ -593,6 +593,12 @@ fn spawn_light_ok(block: u8, sky: u8, now: u64, passive: bool) -> bool {
     }
 }
 
+/// Vanilla animals need grass and sufficient *combined* light, not direct
+/// access to the sky. A roofed, torch-lit grass enclosure remains eligible.
+fn natural_passive_habitat_ok(ground: u16, block: u8, sky: u8, now: u64) -> bool {
+    ground == 2 && spawn_light_ok(block, sky, now, true)
+}
+
 /// Vanilla 1.7.10 slime chunks allow underground slimes at Y < 40
 /// regardless of light level. Swamp surface slimes and every other species
 /// still obey the ordinary spawn-light check.
@@ -2005,14 +2011,12 @@ impl Mobs {
             {
                 continue;
             }
-            let grass = world.get(x, y - 1, z) >> 4 == 2;
-            let open = sky_exposed(world, position);
             let overworld = dimension == crate::dimensions::Dimension::Overworld;
+            let (block, sky) = world.light_at(x, y, z);
             let is_passive = overworld
-                && grass
-                && open
                 && now.is_multiple_of(400)
-                && natural_spawn_passive_roll(seed);
+                && natural_spawn_passive_roll(seed)
+                && natural_passive_habitat_ok(world.get(x, y - 1, z) >> 4, block, sky, now);
             // Select the species before applying light rules: slime-chunk
             // cave spawns are legal even at light level 15.
             let kind = if is_passive {
@@ -2127,7 +2131,6 @@ impl Mobs {
                 }
                 if is_passive
                     && (world.get(cx, cy - 1, cz) >> 4 != 2
-                        || !sky_exposed(world, candidate)
                         || matches!(
                             world.biome_at(cx, cz),
                             0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24
@@ -3837,6 +3840,30 @@ mod tests {
             now,
             true
         ));
+    }
+
+    #[test]
+    fn torchlit_roofed_grass_remains_eligible_for_passive_spawning() {
+        let mut world = World::new();
+        let at = PlayerPosition {
+            x: 2.5,
+            y: 70.0,
+            z: 2.5,
+        };
+        world.import_block(2, 69, 2, 2 << 4).unwrap(); // grass
+        world.import_block(2, 72, 2, 1 << 4).unwrap(); // roof
+        world.import_block(3, 70, 2, 50 << 4).unwrap(); // torch
+        assert!(!sky_exposed(&world, at));
+        let (block, sky) = world.light_at(2, 70, 2);
+        assert!(
+            block >= 9,
+            "torch must illuminate the roofed spawn location"
+        );
+        assert!(natural_passive_habitat_ok(2, block, sky, 6000));
+        assert!(natural_passive_habitat_ok(2, block, sky, 18000));
+        assert!(!natural_passive_habitat_ok(1, block, sky, 6000));
+        assert!(!natural_passive_habitat_ok(2, 8, 0, 6000));
+        assert!(natural_passive_habitat_ok(2, 0, 15, 6000));
     }
 
     #[test]
