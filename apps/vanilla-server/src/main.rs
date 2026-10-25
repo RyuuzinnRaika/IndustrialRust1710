@@ -4663,7 +4663,9 @@ fn play(
                     let origin = {
                         let fallback = safe_spawn(respawn_world)?;
                         if let Some((x, y, z)) = inventory.bed_spawn() {
-                            let guard = respawn_world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                            let guard = respawn_world
+                                .lock()
+                                .map_err(|_| bad("world mutex poisoned"))?;
                             if guard.get(x, y, z) >> 4 == 26
                                 && world::in_bounds(x, y + 1, z)
                                 && guard.get(x, y + 1, z) == 0
@@ -4727,7 +4729,9 @@ fn play(
                         }
                     }
                     location = (origin.x, origin.y, origin.z);
-                    let mut respawn = (respawn_dimension.protocol_id() as i32).to_be_bytes().to_vec();
+                    let mut respawn = (respawn_dimension.protocol_id() as i32)
+                        .to_be_bytes()
+                        .to_vec();
                     respawn.extend_from_slice(&[difficulty.load(Ordering::Acquire), 0]); // current difficulty, survival
                     write_string("default", &mut respawn)?;
                     send(s, 0x07, &respawn)?;
