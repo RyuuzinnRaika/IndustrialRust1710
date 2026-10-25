@@ -293,7 +293,9 @@ impl World {
         let (dx, dz) = repeater_direction(meta);
         for (sx, sz) in [(-dz, dx), (dz, -dx)] {
             let source = (x + sx, y, z + sz);
-            if self.get(source.0, source.1, source.2) >> 4 == 94
+            // Vanilla repeaters can also be locked by an active comparator
+            // facing into either side, not just by another repeater.
+            if matches!(self.get(source.0, source.1, source.2) >> 4, 94 | 150)
                 && self.power_into(source, (x, y, z))
             {
                 return true;
@@ -721,6 +723,29 @@ mod redstone_regression_tests {
         w.import_block(0, 64, 1, 93 << 4).unwrap();
         assert!(!w.repeater_locked(0, 64, 0, 1));
         w.import_block(0, 64, 1, (94 << 4) | 2).unwrap();
+        assert!(!w.repeater_locked(0, 64, 0, 1));
+    }
+
+    #[test]
+    fn comparator_side_output_locks_repeater_only_when_facing_and_powered() {
+        let mut w = World::new();
+        // East-facing repeater: its south-side comparator must face north.
+        w.import_block(0, 64, 0, (93 << 4) | 1).unwrap();
+        w.import_block(0, 64, 1, 150 << 4).unwrap();
+        w.comparator_outputs.insert((0, 64, 1), 9);
+        assert!(w.repeater_locked(0, 64, 0, 1));
+
+        // A zero-strength comparator does not lock, even if its block is on.
+        w.comparator_outputs.insert((0, 64, 1), 0);
+        assert!(!w.repeater_locked(0, 64, 0, 1));
+
+        // Comparator output pointing away from the repeater cannot lock it.
+        w.comparator_outputs.insert((0, 64, 1), 9);
+        w.import_block(0, 64, 1, (150 << 4) | 2).unwrap();
+        assert!(!w.repeater_locked(0, 64, 0, 1));
+
+        // An unpowered comparator does not lock the repeater.
+        w.import_block(0, 64, 1, 149 << 4).unwrap();
         assert!(!w.repeater_locked(0, 64, 0, 1));
     }
 
