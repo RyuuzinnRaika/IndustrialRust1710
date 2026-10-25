@@ -195,6 +195,15 @@ def stable_summary(rows: list[dict], count: int) -> dict:
     rss = [r["process_rss_bytes"] for r in selected
            if isinstance(r.get("process_rss_bytes"), int)
            and r["process_rss_bytes"] >= 0]
+    # Long-run F60 trend indicators are computed only from stable peer windows.
+    # A positive RSS delta suggests retained memory, but does not by itself
+    # prove a leak. Short runs (< 6 windows) are inconclusive.
+    enough_trend = len(selected) >= 6
+    first = selected[:len(selected) // 2]
+    second = selected[len(selected) // 2:]
+    def half_tps(windows: list[dict]) -> float:
+        return sum(r["processed_ticks"] for r in windows) / sum(
+            r["window_seconds"] for r in windows)
     return {
         "players": count,
         "stable_windows": len(selected),
@@ -203,6 +212,12 @@ def stable_summary(rows: list[dict], count: int) -> dict:
         "tick_delivery_ratio": ticks / (ticks + missed) if ticks + missed else 0,
         "mspt_p99_worst_window": max(r["mspt_p99"] for r in selected),
         "process_rss_peak_bytes": max(rss) if rss else None,
+        "process_rss_growth_bytes": (rss[-1] - rss[0])
+        if enough_trend and len(rss) == len(selected) else None,
+        "tps_first_half": half_tps(first) if enough_trend else None,
+        "tps_second_half": half_tps(second) if enough_trend else None,
+        "mspt_p99_first_half": max(r["mspt_p99"] for r in first) if enough_trend else None,
+        "mspt_p99_second_half": max(r["mspt_p99"] for r in second) if enough_trend else None,
         "processed_ticks": ticks,
         "missed_ticks": missed,
     }
@@ -350,11 +365,21 @@ def main() -> int:
                         help="initial full-peer warmup per profile (10..120)")
     parser.add_argument("--inject-crash", action="store_true",
                         help="kill/restart only the 8-peer phase before read-only verification")
+    parser.add_argument("--max-rss-growth-mib", type=float, default=None,
+                        help="F60: fail if observed stable-window RSS growth exceeds this MiB; requires >= 6 windows")
+    parser.add_argument("--min-tps", type=float, default=None,
+                        help="F60: fail if stable processed TPS falls below this value")
     args = parser.parse_args()
     if (not math.isfinite(args.seconds) or not 20 <= args.seconds <= 86400
             or not math.isfinite(args.warmup_seconds)
             or not 10 <= args.warmup_seconds <= 120):
         parser.error("load duration must be 20..86400s; warmup must be 10..120s")
+    if args.max_rss_growth_mib is not None and (
+            not math.isfinite(args.max_rss_growth_mib) or args.max_rss_growth_mib < 0):
+        parser.error("--max-rss-growth-mib must be a finite non-negative number")
+    if args.min_tps is not None and (
+            not math.isfinite(args.min_tps) or not 0 < args.min_tps <= 20):
+        parser.error("--min-tps must be in (0, 20]")
     server = args.server.resolve(strict=True)
     if not server.is_file():
         parser.error("--server is not an executable file")
@@ -376,6 +401,14 @@ def main() -> int:
             summary = run_phase(server, output, count, args.seconds,
                                 args.warmup_seconds, args.inject_crash and count == 8)
             report["profiles"].append(summary)
+            if args.min_tps is not None and summary["tps_processed"] < args.min_tps:
+                raise RuntimeError(f"{count} peers: stable TPS below threshold")
+            if args.max_rss_growth_mib is not None:
+                growth = summary["process_rss_growth_bytes"]
+                if growth is None:
+                    raise RuntimeError(f"{count} peers: insufficient stable RSS trend evidence")
+                if growth > args.max_rss_growth_mib * 1024 * 1024:
+                    raise RuntimeError(f"{count} peers: observed RSS growth above threshold")
             (output / "manifest.json").write_text(
                 json.dumps(report, indent=2) + "\n", encoding="utf-8",
             )
