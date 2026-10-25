@@ -80,6 +80,19 @@ class TelemetryValidationTests(unittest.TestCase):
         self.assertEqual(result["mspt_p99_worst_window"], 21.0)
         self.assertEqual(result["process_rss_peak_bytes"], 1024)
 
+    def test_soak_trends_require_six_complete_stable_windows(self):
+        rows = [self.row() for _ in range(6)]
+        for index, row in enumerate(rows):
+            row["process_rss_bytes"] = (10 + index) * 1024 * 1024
+            row["processed_ticks"] = 200 if index < 3 else 180
+        result = module.stable_summary(rows, 4)
+        self.assertEqual(result["process_rss_growth_bytes"], 5 * 1024 * 1024)
+        self.assertAlmostEqual(result["tps_first_half"], 20.0)
+        self.assertAlmostEqual(result["tps_second_half"], 18.0)
+        self.assertIsNone(module.stable_summary(rows[:5], 4)["process_rss_growth_bytes"])
+        del rows[2]["process_rss_bytes"]
+        self.assertIsNone(module.stable_summary(rows, 4)["process_rss_growth_bytes"])
+
     def test_no_stable_window_is_not_a_performance_pass(self):
         with self.assertRaisesRegex(ValueError, "no complete"):
             module.stable_summary([self.row(1, 4)], 4)
