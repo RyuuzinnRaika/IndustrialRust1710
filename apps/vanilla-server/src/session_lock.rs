@@ -42,9 +42,8 @@ fn windows_file_identity(file: &File) -> io::Result<(u32, u64)> {
     let mut information = MaybeUninit::<WindowsFileInformation>::uninit();
     // SAFETY: `file` is an open handle and `information` points to a writable
     // buffer with the layout expected by GetFileInformationByHandle.
-    let succeeded = unsafe {
-        GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr())
-    };
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
     if succeeded == 0 {
         return Err(io::Error::last_os_error());
     }
