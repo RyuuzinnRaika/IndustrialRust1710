@@ -552,7 +552,7 @@ fn distance(a: PlayerPosition, b: PlayerPosition) -> f64 {
 fn distance_3d(a: PlayerPosition, b: PlayerPosition) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
 }
-/// Choose a live wooden door inside the generated village footprint.
+/// Choose a live wooden door in a generated village or its bounded annex.
 /// Generated and player-built doors share the same lower-half facing metadata.
 /// Re-read the authoritative world each tick so removed doors are not AI goals.
 fn villager_door_destination(world: &World, at: PlayerPosition) -> Option<PlayerPosition> {
@@ -560,7 +560,7 @@ fn villager_door_destination(world: &World, at: PlayerPosition) -> Option<Player
         return None;
     }
     let doors =
-        world.village_doors_including_player_edits(at.x.floor() as i32, at.z.floor() as i32)?;
+        world.village_doors_with_bounded_annex(at.x.floor() as i32, at.z.floor() as i32)?;
     doors
         .into_iter()
         .filter_map(|[x, y, z]| {
@@ -4634,6 +4634,36 @@ mod tests {
             .import_block(added[0], added[1] + 1, added[2], 0)
             .unwrap();
         assert_eq!(villager_door_destination(&world, middle), None);
+        // A player-built door one block outside the static footprint can
+        // extend a village only when connected to a live core door.
+        world
+            .import_block(second[0], second[1], second[2], 64 << 4 | 2)
+            .unwrap();
+        let annex = [second[0] + 15, second[1], second[2]];
+        let outside = PlayerPosition {
+            x: f64::from(annex[0]) + 0.5,
+            y: f64::from(annex[1]),
+            z: f64::from(annex[2]) + 0.5,
+        };
+        assert_eq!(villager_door_destination(&world, outside), None);
+        world
+            .import_block(annex[0], annex[1], annex[2], 64 << 4 | 2)
+            .unwrap();
+        world
+            .import_block(annex[0], annex[1] + 1, annex[2], 64 << 4 | 8)
+            .unwrap();
+        assert_eq!(
+            villager_door_destination(&world, outside),
+            Some(PlayerPosition {
+                x: f64::from(annex[0]) + 0.5,
+                y: f64::from(annex[1]),
+                z: f64::from(annex[2]) - 0.5,
+            })
+        );
+        world
+            .import_block(annex[0], annex[1], annex[2], 0)
+            .unwrap();
+        assert_eq!(villager_door_destination(&world, outside), None);
         assert_eq!(
             villager_door_destination(
                 &World::expanded(42, crate::dimensions::Dimension::Nether),
