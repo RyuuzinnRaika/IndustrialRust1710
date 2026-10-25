@@ -1505,10 +1505,6 @@ impl Inventory {
         packet
     }
 
-    pub fn enchanting_has_item(&self) -> bool {
-        self.enchant_input.is_some()
-    }
-
     pub fn enchanting_input(&self) -> Option<Stack> {
         self.enchant_input
     }
