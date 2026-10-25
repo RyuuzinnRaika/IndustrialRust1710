@@ -4649,10 +4649,21 @@ fn play(
                     // position. XP orbs belong beside the dropped inventory,
                     // never at a distant bed or fallback world spawn.
                     let death_position = *player;
+                    // Death in the Nether or End must respawn in the Overworld.
+                    let respawn_dimension = if dimension_worlds.is_some() {
+                        dimensions::Dimension::Overworld
+                    } else {
+                        *session_dimension
+                    };
+                    let respawn_world = if let Some(worlds) = dimension_worlds {
+                        worlds.world_ref(respawn_dimension)
+                    } else {
+                        world
+                    };
                     let origin = {
-                        let fallback = safe_spawn(world)?;
+                        let fallback = safe_spawn(respawn_world)?;
                         if let Some((x, y, z)) = inventory.bed_spawn() {
-                            let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                            let guard = respawn_world.lock().map_err(|_| bad("world mutex poisoned"))?;
                             if guard.get(x, y, z) >> 4 == 26
                                 && world::in_bounds(x, y + 1, z)
                                 && guard.get(x, y + 1, z) == 0
@@ -4673,8 +4684,20 @@ fn play(
                     origin.save_state_in_dimension(
                         player_path,
                         fresh_vitals,
-                        session_dimension.protocol_id() as i32,
+                        respawn_dimension.protocol_id() as i32,
                     )?;
+                    if respawn_dimension != *session_dimension {
+                        if !hub.change_dimension(entity_id, respawn_dimension, origin)? {
+                            return Err(bad("respawning player no longer in hub"));
+                        }
+                        if let Some(worlds) = dimension_worlds {
+                            world = worlds.world_ref(respawn_dimension);
+                            world_path = worlds.path_ref(respawn_dimension);
+                        }
+                        *session_dimension = respawn_dimension;
+                        portal_since = None;
+                        portal_cooldown_until = now_tick.saturating_add(100);
+                    }
                     *vitals = fresh_vitals;
                     *player = origin;
                     death_recorded = false;
@@ -4704,7 +4727,7 @@ fn play(
                         }
                     }
                     location = (origin.x, origin.y, origin.z);
-                    let mut respawn = 0i32.to_be_bytes().to_vec();
+                    let mut respawn = (respawn_dimension.protocol_id() as i32).to_be_bytes().to_vec();
                     respawn.extend_from_slice(&[difficulty.load(Ordering::Acquire), 0]); // current difficulty, survival
                     write_string("default", &mut respawn)?;
                     send(s, 0x07, &respawn)?;
