@@ -1928,9 +1928,9 @@ impl Mobs {
                 now ^ index.wrapping_mul(0x9e3779b97f4a7c15) ^ world.natural_seed().unwrap_or(0),
             );
             let player = players[(seed as usize) % players.len()];
-            let radius = 24 + (seed % 65) as i32;
-            let x = player.x.floor() as i32 + natural_spawn_x_sign(seed) * radius;
-            let z = player.z.floor() as i32 + (((seed >> 8) % 65) as i32 - 32);
+            let (offset_x, offset_z) = natural_spawn_horizontal_offset(seed);
+            let x = player.x.floor() as i32 + offset_x;
+            let z = player.z.floor() as i32 + offset_z;
             // Overworld has a heightmap; Nether and End have ceilings/islands
             // instead, so seek a bounded standable cavern floor.
             let height = world.surface_height_at(x, z);
@@ -2995,6 +2995,21 @@ fn natural_spawn_x_sign(seed: u64) -> i32 {
     }
 }
 
+/// Keep the bounded origin search symmetric across all four cardinal
+/// directions. Previously the long offset was always on X, so candidates
+/// could never be far north or south of a player. Low bits choose direction
+/// independently of the passive/hostile attempt; the radius uses higher bits.
+fn natural_spawn_horizontal_offset(seed: u64) -> (i32, i32) {
+    let radius = 24 + ((seed >> 3) % 65) as i32;
+    let lateral = ((seed >> 8) % 65) as i32 - 32;
+    let long_offset = natural_spawn_x_sign(seed) * radius;
+    if seed & 4 == 0 {
+        (long_offset, lateral)
+    } else {
+        (lateral, long_offset)
+    }
+}
+
 fn natural_spawn_passive_roll(seed: u64) -> bool {
     seed & 2 == 0
 }
@@ -3715,17 +3730,27 @@ mod tests {
     }
 
     #[test]
-    fn passive_spawn_roll_does_not_depend_on_east_or_west_side() {
-        // Low bit chooses side; the next bit independently chooses whether
-        // this is a passive attempt. Both sides must permit passive packs.
-        for (seed, sign, passive) in [
-            (0_u64, 1, true),
-            (1_u64, -1, true),
-            (2_u64, 1, false),
-            (3_u64, -1, false),
-        ] {
-            assert_eq!(natural_spawn_x_sign(seed), sign);
-            assert_eq!(natural_spawn_passive_roll(seed), passive);
+    fn passive_spawn_roll_is_independent_of_all_four_spawn_directions() {
+        // Bit zero chooses positive/negative; bit two chooses X/Z as the
+        // long axis; bit one chooses the passive attempt independently.
+        for seed in 0_u64..8 {
+            let sign = if seed & 1 == 0 { 1 } else { -1 };
+            let (dx, dz) = natural_spawn_horizontal_offset(seed);
+            if seed & 4 == 0 {
+                assert_eq!((dx, dz), (24 * sign, -32));
+            } else {
+                assert_eq!((dx, dz), (-32, 24 * sign));
+            }
+            assert_eq!(natural_spawn_passive_roll(seed), seed & 2 == 0);
+        }
+    }
+
+    #[test]
+    fn natural_spawn_offsets_stay_inside_the_bounded_search_radius() {
+        for seed in 0_u64..2048 {
+            let (dx, dz) = natural_spawn_horizontal_offset(seed);
+            let horizontal_distance = f64::from(dx).hypot(f64::from(dz));
+            assert!((24.0..=128.0).contains(&horizontal_distance));
         }
     }
 
