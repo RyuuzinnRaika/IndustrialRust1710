@@ -1925,7 +1925,7 @@ impl Mobs {
             );
             let player = players[(seed as usize) % players.len()];
             let radius = 24 + (seed % 65) as i32;
-            let x = player.x.floor() as i32 + if seed & 1 == 0 { radius } else { -radius };
+            let x = player.x.floor() as i32 + natural_spawn_x_sign(seed) * radius;
             let z = player.z.floor() as i32 + (((seed >> 8) % 65) as i32 - 32);
             // Overworld has a heightmap; Nether and End have ceilings/islands
             // instead, so seek a bounded standable cavern floor.
@@ -1983,8 +1983,11 @@ impl Mobs {
             let open = sky_exposed(world, position);
             let (block_light, sky_light) = world.light_at(x, y, z);
             let overworld = dimension == crate::dimensions::Dimension::Overworld;
-            let is_passive =
-                overworld && grass && open && now.is_multiple_of(400) && (seed & 1 == 0);
+            let is_passive = overworld
+                && grass
+                && open
+                && now.is_multiple_of(400)
+                && natural_spawn_passive_roll(seed);
             if overworld && !spawn_light_ok(block_light, sky_light, now, is_passive) {
                 continue;
             }
@@ -2973,6 +2976,21 @@ fn natural_pack_attempts(kind: Kind, seed: u64) -> usize {
     }
 }
 
+/// Use separate random bits for the horizontal spawn side and the passive
+/// spawn attempt. Reusing bit zero for both makes passive packs spawn only
+/// east of players, leaving the western half of eligible terrain empty.
+fn natural_spawn_x_sign(seed: u64) -> i32 {
+    if seed & 1 == 0 {
+        1
+    } else {
+        -1
+    }
+}
+
+fn natural_spawn_passive_roll(seed: u64) -> bool {
+    seed & 2 == 0
+}
+
 /// Unique 17x17 eligible chunk union. Vanilla's mob cap scales with this
 /// area, not with raw online player count or the protocol render distance.
 fn natural_spawn_capacity(players: &[PlayerPosition], base: usize) -> usize {
@@ -3565,6 +3583,21 @@ mod tests {
             }
         }
         assert!(observed.iter().all(|seen| *seen));
+    }
+
+    #[test]
+    fn passive_spawn_roll_does_not_depend_on_east_or_west_side() {
+        // Low bit chooses side; the next bit independently chooses whether
+        // this is a passive attempt. Both sides must permit passive packs.
+        for (seed, sign, passive) in [
+            (0_u64, 1, true),
+            (1_u64, -1, true),
+            (2_u64, 1, false),
+            (3_u64, -1, false),
+        ] {
+            assert_eq!(natural_spawn_x_sign(seed), sign);
+            assert_eq!(natural_spawn_passive_roll(seed), passive);
+        }
     }
 
     #[test]
