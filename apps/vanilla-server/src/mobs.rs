@@ -559,8 +559,7 @@ fn villager_door_destination(world: &World, at: PlayerPosition) -> Option<Player
     if !at.is_valid() {
         return None;
     }
-    let doors =
-        world.village_doors_with_bounded_annex(at.x.floor() as i32, at.z.floor() as i32)?;
+    let doors = world.village_doors_with_bounded_annex(at.x.floor() as i32, at.z.floor() as i32)?;
     doors
         .into_iter()
         .filter_map(|[x, y, z]| {
@@ -4660,9 +4659,7 @@ mod tests {
                 z: f64::from(annex[2]) - 0.5,
             })
         );
-        world
-            .import_block(annex[0], annex[1], annex[2], 0)
-            .unwrap();
+        world.import_block(annex[0], annex[1], annex[2], 0).unwrap();
         assert_eq!(villager_door_destination(&world, outside), None);
         assert_eq!(
             villager_door_destination(
