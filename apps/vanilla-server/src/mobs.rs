@@ -195,6 +195,10 @@ struct Mob {
     position: PlayerPosition,
     health: i16,
     hit_tick: u64,
+    /// Consecutive simulated ticks outside every player's 32-block safe zone.
+    /// Missing in older snapshots, so default to a fresh despawn grace period.
+    #[serde(default)]
+    far_from_player_ticks: u32,
     bite_tick: u64,
     fuse: u8,
     breed_tick: u64,
@@ -968,6 +972,7 @@ impl Mobs {
                 kind.health()
             },
             hit_tick: 0,
+            far_from_player_ticks: 0,
             bite_tick: 0,
             fuse: 0,
             breed_tick: 0,
@@ -2393,13 +2398,20 @@ impl Mobs {
                     dead.push(mob.id);
                     continue;
                 }
-                if mob.kind.despawnable()
-                    && nearest_distance > 32.0
-                    && now.saturating_sub(mob.hit_tick) > 600
-                    && hash(now ^ mob.id as u64).is_multiple_of(800)
-                {
-                    dead.push(mob.id);
-                    continue;
+                // The 1/800 random despawn roll starts only after this mob
+                // has spent 600 simulated ticks outside the 32-block zone.
+                // Server uptime or the last combat hit is not the mob's age.
+                // A nearby player resets the timer, matching vanilla behavior.
+                if nearest_distance <= 32.0 {
+                    mob.far_from_player_ticks = 0;
+                } else if mob.kind.despawnable() {
+                    mob.far_from_player_ticks = mob.far_from_player_ticks.saturating_add(1);
+                    if mob.far_from_player_ticks > 600
+                        && hash(now ^ mob.id as u64).is_multiple_of(800)
+                    {
+                        dead.push(mob.id);
+                        continue;
+                    }
                 }
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     let p = mob.position;
@@ -4068,6 +4080,59 @@ mod tests {
         let sheep = mobs.next_id - 1;
         mobs.entities.get_mut(&sheep).unwrap().sheared = true;
         assert!(mobs.entities[&sheep].death_drop().is_none());
+    }
+
+    #[test]
+    fn newly_spawned_hostiles_get_a_full_far_player_despawn_grace_period() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let far = PlayerPosition { x: 64.5, ..at };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, at, false);
+        let id = mobs.next_id - 1;
+        // At this uptime the old hit_tick=0 logic immediately despawned
+        // a newly inserted mob on its first eligible 1/800 random roll.
+        let first_roll = (1000_u64..100_000)
+            .find(|tick| hash(*tick ^ id as u64).is_multiple_of(800))
+            .unwrap();
+        mobs.tick(first_roll, &world, &[far]);
+        assert!(mobs.entities.contains_key(&id));
+        assert_eq!(mobs.entities[&id].far_from_player_ticks, 4);
+
+        // Re-entering the safe radius clears the accumulated far-away age.
+        mobs.tick(first_roll + 1, &world, &[at]);
+        assert_eq!(mobs.entities[&id].far_from_player_ticks, 0);
+
+        // Once 600 distant ticks have elapsed, a matching roll can despawn.
+        mobs.entities.get_mut(&id).unwrap().far_from_player_ticks = 600;
+        let eligible_roll = (first_roll + 2..first_roll + 100_000)
+            .find(|tick| hash(*tick ^ id as u64).is_multiple_of(800))
+            .unwrap();
+        mobs.tick(eligible_roll, &world, &[far]);
+        assert!(!mobs.entities.contains_key(&id));
+    }
+
+    #[test]
+    fn legacy_mob_snapshots_default_missing_far_player_age_to_zero() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        mobs.insert(Kind::Zombie, at, false);
+        let id = mobs.next_id - 1;
+        let mut saved = serde_json::to_value(mobs.entities[&id]).unwrap();
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("far_from_player_ticks");
+        let restored: Mob = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored.far_from_player_ticks, 0);
     }
 
     #[test]
