@@ -559,7 +559,8 @@ fn villager_door_destination(world: &World, at: PlayerPosition) -> Option<Player
     if !at.is_valid() {
         return None;
     }
-    let doors = world.village_doors_including_player_edits(at.x.floor() as i32, at.z.floor() as i32)?;
+    let doors =
+        world.village_doors_including_player_edits(at.x.floor() as i32, at.z.floor() as i32)?;
     doors
         .into_iter()
         .filter_map(|[x, y, z]| {
@@ -4568,7 +4569,9 @@ mod tests {
         // lower/upper-half validation rejects it after either half is removed.
         world.import_block(first[0], first[1], first[2], 0).unwrap();
         let added = [cx, first[1], cz + 8];
-        world.import_block(added[0], added[1], added[2], 64 << 4).unwrap();
+        world
+            .import_block(added[0], added[1], added[2], 64 << 4)
+            .unwrap();
         world
             .import_block(added[0], added[1] + 1, added[2], 64 << 4 | 8)
             .unwrap();
