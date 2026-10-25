@@ -442,6 +442,19 @@ pub fn village_center(seed: u64, x: i32, z: i32) -> Option<(i32, i32, i32)> {
     }
     Some((cx, height(seed, cx, cz), cz))
 }
+/// Lower-half block coordinates of both doors in a generated village.
+///
+/// This describes the static house layout only: callers must query live world
+/// blocks before treating a door as present, open, or usable by villagers.
+/// Returns None outside a generated village footprint.
+pub fn village_house_doors(seed: u64, x: i32, z: i32) -> Option<[[i32; 3]; 2]> {
+    let (cx, base, cz) = village_center(seed, x, z)?;
+    let y = base.checked_add(1)?;
+    Some([
+        [cx.checked_sub(17)?, y, cz.checked_sub(5)?],
+        [cx.checked_add(17)?, y, cz.checked_add(5)?],
+    ])
+}
 /// Fixed-region village foundation: roads, simple houses, farms and a central
 /// well. Their footprints cross chunks naturally. Villager spawning is separate.
 fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
@@ -541,7 +554,11 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
                 }
                 return Some(AIR);
             }
-            if a == 0 && c == if hz < 0 { 4 } else { -4 } && y < base + 3 {
+            if a == 0
+                && y < base + 3
+                && village_house_doors(seed, x, z)
+                    .is_some_and(|doors| doors.iter().any(|door| door[0] == x && door[2] == z))
+            {
                 // Wooden doors use a lower half with facing metadata and an
                 // upper half marked with bit 3 in Minecraft 1.7.10.
                 return Some(if y == base + 1 {
@@ -941,6 +958,38 @@ mod tests {
         assert!(checked_non_village);
         assert_eq!(village_center(seed, i32::MIN, 0), None);
         assert_eq!(village_center(seed, 0, i32::MIN), None);
+    }
+    #[test]
+    fn village_house_doors_match_generated_door_blocks_and_bounds() {
+        let seed = 42u64;
+        let mut tested_negative = false;
+        let mut tested_positive = false;
+        for gx in -8..=8 {
+            for gz in -8..=8 {
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                let Some((_, base, _)) = village_center(seed, cx, cz) else {
+                    continue;
+                };
+                let doors = village_house_doors(seed, cx, cz).unwrap();
+                assert_eq!(
+                    doors,
+                    [[cx - 17, base + 1, cz - 5], [cx + 17, base + 1, cz + 5]]
+                );
+                for (index, [x, y, z]) in doors.into_iter().enumerate() {
+                    let facing = if index == 0 { 0 } else { 2 };
+                    assert_eq!(village(seed, x, y, z), Some(state(64, facing)));
+                    assert_eq!(village(seed, x, y + 1, z), Some(state(64, 8)));
+                    assert_eq!(village_house_doors(seed, x, z), Some(doors));
+                }
+                assert_eq!(village_house_doors(seed, cx + 32, cz), None);
+                assert_eq!(village_house_doors(seed, cx, cz - 27), None);
+                tested_negative |= gx < 0 && gz < 0;
+                tested_positive |= gx > 0 && gz > 0;
+            }
+        }
+        assert!(tested_negative && tested_positive);
+        assert_eq!(village_house_doors(seed, i32::MIN, 0), None);
     }
     #[test]
     fn village_well_is_not_overwritten_by_crossing_road() {
