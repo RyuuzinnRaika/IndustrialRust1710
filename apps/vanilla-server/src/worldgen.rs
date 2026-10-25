@@ -141,20 +141,20 @@ pub fn biome(seed: u64, x: i32, z: i32) -> u8 {
 #[allow(dead_code)] // Reserved for future precipitation/weather integration.
 pub fn climate(id: u8) -> (f32, f32) {
     match id {
-        0 | 24 => (0.5, 0.5),            // ocean / deep ocean
-        2 | 17 | 37 => (2.0, 0.0),       // desert / hills / mesa
-        3 | 25 => (0.2, 0.3),            // extreme hills / stone beach
-        4 | 18 => (0.7, 0.8),            // forest / hills
-        5 => (0.05, 0.8),                // taiga
-        6 => (0.8, 0.9),                 // swamp
-        7 => (0.5, 0.5),                 // river
-        10 | 11 | 12 | 13 => (0.0, 0.5), // frozen water / ice plains / ice mountains
-        16 => (0.8, 0.4),                // beach
-        21 => (1.2, 0.9),                // jungle
-        26 => (0.05, 0.3),               // cold beach
-        27 => (0.6, 0.6),                // birch forest
-        30 => (-0.5, 0.4),               // cold taiga
-        35 => (1.2, 0.0),                // savanna
+        0 | 24 => (0.5, 0.5),
+        2 | 17 | 37 => (2.0, 0.0),
+        3 | 25 => (0.2, 0.3),
+        4 | 18 => (0.7, 0.8),
+        5 => (0.05, 0.8),
+        6 => (0.8, 0.9),
+        7 => (0.5, 0.5),
+        10..=13 => (0.0, 0.5),
+        16 => (0.8, 0.4),
+        21 => (1.2, 0.9),
+        26 => (0.05, 0.3),
+        27 => (0.6, 0.6),
+        30 => (-0.5, 0.4),
+        35 => (1.2, 0.0),
         _ => (0.8, 0.4),
     }
 }
