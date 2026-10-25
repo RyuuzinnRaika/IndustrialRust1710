@@ -381,8 +381,7 @@ impl World {
             .flatten()
             .collect();
         for (&(dx, dy, dz), &lower) in self.edits.range(
-            (cx.saturating_sub(31), 0u8, i32::MIN)
-                ..=(cx.saturating_add(31), u8::MAX, i32::MAX),
+            (cx.saturating_sub(31), 0u8, i32::MIN)..=(cx.saturating_add(31), u8::MAX, i32::MAX),
         ) {
             if doors.len() >= 128 {
                 break;
@@ -1855,7 +1854,9 @@ mod tests {
             Some(expected.iter().copied().collect())
         );
         // A lone lower half is never a valid door.
-        world.import_block(placed[0], placed[1], placed[2], 64 << 4).unwrap();
+        world
+            .import_block(placed[0], placed[1], placed[2], 64 << 4)
+            .unwrap();
         assert!(!world
             .village_doors_including_player_edits(cx, cz)
             .unwrap()
@@ -1879,7 +1880,9 @@ mod tests {
         world
             .import_block(placed[0], placed[1] + 1, placed[2], 64 << 4 | 9)
             .unwrap();
-        world.import_block(outside[0], outside[1], outside[2], 64 << 4).unwrap();
+        world
+            .import_block(outside[0], outside[1], outside[2], 64 << 4)
+            .unwrap();
         world
             .import_block(outside[0], outside[1] + 1, outside[2], 64 << 4 | 8)
             .unwrap();
@@ -1889,7 +1892,9 @@ mod tests {
             .contains(&outside));
         // Removing a generated door must also remove it from the combined set.
         let removed = generated[0].unwrap();
-        world.import_block(removed[0], removed[1], removed[2], 0).unwrap();
+        world
+            .import_block(removed[0], removed[1], removed[2], 0)
+            .unwrap();
         expected.remove(&removed);
         assert_eq!(
             world.village_doors_including_player_edits(cx, cz),
@@ -1906,8 +1911,14 @@ mod tests {
             restored.village_doors_including_player_edits(cx, cz),
             Some(expected.into_iter().collect())
         );
-        assert_eq!(restored.village_doors_including_player_edits(cx + 32, cz), None);
-        assert_eq!(restored.village_doors_including_player_edits(i32::MIN, 0), None);
+        assert_eq!(
+            restored.village_doors_including_player_edits(cx + 32, cz),
+            None
+        );
+        assert_eq!(
+            restored.village_doors_including_player_edits(i32::MIN, 0),
+            None
+        );
         assert_eq!(
             World::expanded(seed, crate::dimensions::Dimension::Nether)
                 .village_doors_including_player_edits(cx, cz),
