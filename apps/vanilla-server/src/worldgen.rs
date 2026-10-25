@@ -547,6 +547,12 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
         if y == base + 5 {
             return Some(b(5));
         }
+        // Keep the roof accessible above surrounding hills. Without this
+        // clearance, natural terrain and generated foliage can bury a house
+        // even when its walls, door, and roof were placed correctly.
+        if (base + 6..=base + 7).contains(&y) {
+            return Some(AIR);
+        }
         return None;
     }
     // Farm with three irrigation channels: every farmland row is within
@@ -1200,6 +1206,47 @@ mod tests {
             }
         }
         assert!(checked > 0);
+    }
+    #[test]
+    fn village_house_roofs_clear_overburden_without_changing_adjacent_terrain() {
+        let seed = 42u64;
+        let mut tested_negative = false;
+        let mut tested_positive = false;
+        for gx in -4..=4 {
+            for gz in -4..=4 {
+                if !hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4) {
+                    continue;
+                }
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                if !matches!(biome(seed, cx, cz), 1 | 2 | 35 | 4) {
+                    continue;
+                }
+                tested_negative |= gx < 0 && gz < 0;
+                tested_positive |= gx > 0 && gz > 0;
+                let base = height(seed, cx, cz);
+                for (hx, hz) in [(-17, -9), (17, 9)] {
+                    // Sample corners, walls and the middle of each roof via
+                    // the public block API, including cross-chunk villages.
+                    for (a, c) in [(-4, -4), (-4, 0), (0, 0), (4, 0), (4, 4)] {
+                        let x = cx + hx + a;
+                        let z = cz + hz + c;
+                        assert_eq!(block(seed, Dimension::Overworld, x, base + 5, z), b(5));
+                        for y in base + 6..=base + 7 {
+                            assert_eq!(village(seed, x, y, z), Some(AIR));
+                            assert_eq!(
+                                block(seed, Dimension::Overworld, x, y, z),
+                                AIR,
+                                "house roof obstructed at ({x}, {y}, {z})"
+                            );
+                        }
+                    }
+                    // No clearing is applied outside the house footprint.
+                    assert_eq!(village(seed, cx + hx + 5, base + 6, cz + hz), None);
+                }
+            }
+        }
+        assert!(tested_negative && tested_positive);
     }
     #[test]
     fn generated_dungeons_have_spawner_and_loot() {
