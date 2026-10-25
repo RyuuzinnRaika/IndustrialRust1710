@@ -533,6 +533,12 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
         if (base + 1..=base + 4).contains(&y) {
             let boundary = a.abs() == 4 || c.abs() == 4;
             if !boundary {
+                // Standing torches on the plank floor provide fixed interior
+                // fixtures without obstructing the central route to the door.
+                // Metadata 5 is the floor-mounted torch in Protocol 5.
+                if y == base + 1 && c == 0 && a.abs() == 2 {
+                    return Some(state(50, 5));
+                }
                 return Some(AIR);
             }
             if a == 0 && c == if hz < 0 { 4 } else { -4 } && y < base + 3 {
@@ -1213,6 +1219,56 @@ mod tests {
             }
         }
         assert!(villages_checked > 0);
+    }
+    #[test]
+    fn village_houses_have_floor_torches_and_clear_doorways() {
+        let seed = 42u64;
+        let mut tested_negative = false;
+        let mut tested_positive = false;
+        for gx in -4..=4 {
+            for gz in -4..=4 {
+                if !hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4) {
+                    continue;
+                }
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                if !matches!(biome(seed, cx, cz), 1 | 2 | 35 | 4) {
+                    continue;
+                }
+                tested_negative |= gx < 0 && gz < 0;
+                tested_positive |= gx > 0 && gz > 0;
+                let base = height(seed, cx, cz);
+                for (hx, hz) in [(-17, -9), (17, 9)] {
+                    for a in [-2, 2] {
+                        let x = cx + hx + a;
+                        let z = cz + hz;
+                        assert_eq!(
+                            block(seed, Dimension::Overworld, x, base, z),
+                            b(5),
+                            "torch must have a plank floor at ({x}, {z})"
+                        );
+                        assert_eq!(
+                            block(seed, Dimension::Overworld, x, base + 1, z),
+                            state(50, 5),
+                            "missing floor torch at ({x}, {z})"
+                        );
+                        assert_eq!(
+                            block(seed, Dimension::Overworld, x, base + 2, z),
+                            AIR
+                        );
+                    }
+                    // Keep the central aisle clear from the entrance to the
+                    // back of both houses, even after furnishing the rooms.
+                    for c in -3..=3 {
+                        assert_eq!(
+                            block(seed, Dimension::Overworld, cx + hx, base + 1, cz + hz + c),
+                            AIR
+                        );
+                    }
+                }
+            }
+        }
+        assert!(tested_negative && tested_positive);
     }
     #[test]
     fn village_houses_have_glass_windows_without_overwriting_doors_or_posts() {
