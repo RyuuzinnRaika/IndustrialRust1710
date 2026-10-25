@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -15,13 +16,33 @@ import time
 from pathlib import Path
 
 
+def backup_names(root: Path) -> set[str]:
+    """Snapshot direct entries without following links or trusting markers."""
+    try:
+        children = list(root.iterdir())
+    except FileNotFoundError:
+        return set()
+    if not stat.S_ISDIR(root.lstat().st_mode):
+        raise RuntimeError("backup root must be a real directory")
+    return {entry.name for entry in children if entry.name.startswith("backup-")}
+
+
 def maintenance(server: Path, world: Path, backups: Path, keep: int) -> None:
-    """Fail closed: only publish a backup after world validation succeeds."""
+    """Fail closed: stop, verify, rotate, restore-drill, then allow restart."""
     subprocess.run([str(server), "--verify-world", str(world)], check=True)
+    before = backup_names(backups)
     subprocess.run(
         [str(server), "--world", str(world), "--backup-rotate", str(backups), str(keep)],
         check=True,
     )
+    created = backup_names(backups) - before
+    if len(created) != 1:
+        raise RuntimeError("cannot uniquely identify the new backup for restore drill")
+    restored = backups / created.pop()
+    subprocess.run([
+        sys.executable, str(Path(__file__).with_name("verify_backup_restore.py")),
+        "--server", str(server), "--backup", str(restored),
+    ], check=True)
 
 
 class Supervisor:
@@ -93,7 +114,7 @@ class Supervisor:
                     self.halt.wait(min(remaining, 1.0))
                     continue
                 self._stop(child)
-                print("[maintenance] validating and rotating offline world", flush=True)
+                print("[maintenance] validating, rotating and restore-drilling offline world", flush=True)
                 maintenance(self.server, self.world, self.backups, self.keep)
                 child = self._launch()
                 next_backup = time.monotonic() + self.interval
