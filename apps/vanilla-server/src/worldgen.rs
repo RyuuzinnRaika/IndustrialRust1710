@@ -250,8 +250,8 @@ pub const ORES: [OreSpec; 7] = [
     },
     OreSpec {
         id: 21,
-        min_y: 1,
-        max_y: 31,
+        min_y: 0,
+        max_y: 30,
         attempts_per_chunk: 1,
         vein_size: 6,
     },
@@ -303,12 +303,12 @@ fn in_vein(shape: u64, x: i32, y: i32, z: i32, size: u8) -> bool {
 
 // Vanilla 1.7.10 selects the lapis vein height by adding two independent
 // uniform 0..15 draws. Its convolution peaks at Y=15/16 rather than a
-// uniform distribution; translate that triangular law to our stateless cells.
+// uniform distribution; translate its Y=15 peak to our stateless cells.
 fn lapis_layer_weight(y: i32) -> u64 {
-    if !(1..=31).contains(&y) {
+    if !(0..=30).contains(&y) {
         return 0;
     }
-    (16 - (y - 16).abs()) as u64
+    (16 - (y - 15).abs()) as u64
 }
 
 fn ore(seed: u64, x: i32, y: i32, z: i32, is_hills: bool) -> u16 {
@@ -722,14 +722,14 @@ mod tests {
     use super::*;
     #[test]
     fn lapis_ores_use_a_triangular_height_distribution() {
-        assert_eq!(lapis_layer_weight(0), 0);
-        assert_eq!(lapis_layer_weight(32), 0);
-        assert_eq!(lapis_layer_weight(16), 16);
-        assert_eq!(lapis_layer_weight(1), lapis_layer_weight(31));
-        assert!(lapis_layer_weight(16) > lapis_layer_weight(8));
-        assert_eq!((1..=31).map(lapis_layer_weight).sum::<u64>(), 256);
+        assert_eq!(lapis_layer_weight(-1), 0);
+        assert_eq!(lapis_layer_weight(31), 0);
+        assert_eq!(lapis_layer_weight(15), 16);
+        assert_eq!(lapis_layer_weight(0), lapis_layer_weight(30));
+        assert!(lapis_layer_weight(15) > lapis_layer_weight(8));
+        assert_eq!((0..=30).map(lapis_layer_weight).sum::<u64>(), 256);
         let spec = ORES.iter().find(|spec| spec.id == 21).unwrap();
-        assert_eq!((spec.min_y, spec.max_y), (1, 31));
+        assert_eq!((spec.min_y, spec.max_y), (0, 30));
     }
 
     #[test]
