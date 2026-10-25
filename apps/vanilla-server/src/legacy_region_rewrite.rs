@@ -378,7 +378,8 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
     if !fs::symlink_metadata(&regions)?.file_type().is_dir() {
         return Err(invalid("invalid Anvil region directory"));
     }
-    let mut grouped: BTreeMap<(i32, i32), Vec<((i32, i32), &[u8])>> = BTreeMap::new();
+    type RegionReplacements<'a> = BTreeMap<(i32, i32), Vec<((i32, i32), &'a [u8])>>;
+    let mut grouped: RegionReplacements<'_> = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for &((cx, cz), nbt) in replacements {
         if !seen.insert((cx, cz)) {
@@ -426,7 +427,7 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
     // Preflight *all* region images before creating any staging file. Refuse
     // changed originals and symlinked paths, including negative coordinates.
     let mut sources = Vec::with_capacity(grouped.len());
-    for (&(rx, rz), _) in &grouped {
+    for &(rx, rz) in grouped.keys() {
         let expected = expected_sources
             .get(&(rx, rz))
             .ok_or_else(|| invalid("missing source region snapshot"))?;
