@@ -171,8 +171,8 @@ fn rewrite_inventories_impl(
     let mut seen = BTreeSet::new();
     // Group by both region and chunk: all touched regions must be published in
     // the same redo generation when a native sidecar participates.
-    let mut grouped: BTreeMap<(i32, i32), BTreeMap<(i32, i32), Vec<&TileInventoryPatch>>> =
-        BTreeMap::new();
+    type ChunkPatches<'a> = BTreeMap<(i32, i32), Vec<&'a TileInventoryPatch>>;
+    let mut grouped: BTreeMap<(i32, i32), ChunkPatches<'_>> = BTreeMap::new();
     for patch in changes {
         if !(0..=255).contains(&patch.y)
             || patch.x.unsigned_abs() > 30_000_000
