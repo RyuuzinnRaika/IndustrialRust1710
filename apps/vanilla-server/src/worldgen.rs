@@ -448,7 +448,10 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
             return Some(b(4));
         }
         if y == base + 1 {
-            return Some(if dx.abs() == 2 && dz.abs() == 2 {
+            // A solid cobblestone rim keeps the 3x3 well water contained.
+            // Leaving only the four corners solid allows water to flow
+            // into the surrounding village road when chunks are ticked.
+            return Some(if dx.abs() == 2 || dz.abs() == 2 {
                 b(4)
             } else {
                 b(9)
@@ -840,6 +843,21 @@ mod tests {
                 assert_eq!(village(seed, cx, base + 1, cz), Some(b(9)));
                 assert_eq!(block(seed, Dimension::Overworld, cx, base, cz), b(4));
                 assert_eq!(block(seed, Dimension::Overworld, cx, base + 1, cz), b(9));
+                // The perimeter must be solid on all four sides, while the
+                // inner 3x3 remains water, including negative village cells.
+                for dx in -2i32..=2 {
+                    for dz in -2i32..=2 {
+                        let expected = if dx.abs() == 2 || dz.abs() == 2 {
+                            b(4)
+                        } else {
+                            b(9)
+                        };
+                        assert_eq!(
+                            block(seed, Dimension::Overworld, cx + dx, base + 1, cz + dz),
+                            expected
+                        );
+                    }
+                }
                 assert_eq!(village(seed, cx + 5, base, cz), Some(b(13)));
                 assert_eq!(village(seed, cx + 5, base + 1, cz), Some(AIR));
                 if gx < 0 && gz < 0 {
