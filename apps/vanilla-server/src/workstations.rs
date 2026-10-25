@@ -146,6 +146,100 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
     None
 }
 
+
+
+/// Candidate enchantments by vanilla 1.7.10 numeric enchantment ID.
+/// This is a conservative, one-enchantment baseline rather than the complete
+/// weighted/multiple-enchantment vanilla enchantment algorithm. Keeping it
+/// separate from the live GUI prevents an incomplete ItemStack model from
+/// stripping client-visible NBT.
+fn enchantment_candidates(item: i16) -> &'static [(i16, i16)] {
+    // (enchantment ID, maximum level)
+    const ARMOR: &[(i16, i16)] = &[(0, 4), (1, 4), (3, 4), (4, 4), (7, 3), (34, 3)];
+    const HELMETS: &[(i16, i16)] = &[(0, 4), (1, 4), (3, 4), (4, 4), (5, 3), (6, 1), (7, 3), (34, 3)];
+    const BOOTS: &[(i16, i16)] = &[(0, 4), (1, 4), (2, 4), (3, 4), (4, 4), (7, 3), (34, 3)];
+    const SWORDS: &[(i16, i16)] = &[(16, 5), (17, 5), (18, 5), (19, 2), (20, 2), (21, 3), (34, 3)];
+    const TOOLS: &[(i16, i16)] = &[(32, 5), (33, 1), (34, 3), (35, 3)];
+    const BOWS: &[(i16, i16)] = &[(48, 5), (49, 2), (50, 1), (51, 1), (34, 3)];
+    const BOOKS: &[(i16, i16)] = &[(0, 4), (2, 4), (5, 3), (16, 5), (19, 2), (21, 3), (32, 5), (33, 1), (34, 3), (35, 3), (48, 5), (50, 1)];
+    match item {
+        340 => BOOKS,
+        261 => BOWS,
+        267 | 268 | 272 | 276 | 283 => SWORDS,
+        256..=258 | 269..=271 | 273..=275 | 277..=279 | 284..=286 | 290..=294 => TOOLS,
+        298 | 302 | 306 | 310 | 314 => HELMETS,
+        301 | 305 | 309 | 313 | 317 => BOOTS,
+        299 | 300 | 303 | 304 | 307 | 308 | 311 | 312 | 315 | 316 => ARMOR,
+        _ => &[],
+    }
+}
+
+/// Applies one server-selected enchantment to the NBT-capable *legacy*
+/// ItemStack, preserving all unknown fields and nested existing tags.
+///
+/// Returns None rather than overwriting malformed NBT or an existing enchant.
+/// The live inventory::Stack still lacks an arbitrary NBT field, so callers
+/// MUST NOT convert this value back to that lossy representation.
+/// This function is an isolated D31/D35 migration primitive, not the GUI handler.
+pub(crate) fn enchant_nbt_item(
+    input: &crate::legacy_inventory_nbt::SlotItem,
+    offer_cost: u8,
+    server_seed: u64,
+) -> Option<crate::legacy_inventory_nbt::SlotItem> {
+    use fastnbt::Value;
+
+    if offer_cost == 0 || offer_cost > 30 || input.count != 1
+        || !items_1710::enchantable_in_table(input.id)
+    {
+        return None;
+    }
+    let candidates = enchantment_candidates(input.id);
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Deterministic and wholly server-owned. No client-provided enchantment
+    // ID or level is accepted.
+    let mixed = server_seed ^ (u64::from(offer_cost) << 24)
+        ^ (input.id as u16 as u64).wrapping_mul(0x9E3779B97F4A7C15);
+    let mixed = mixed ^ (mixed >> 30);
+    let mixed = mixed.wrapping_mul(0xBF58476D1CE4E5B9);
+    let mixed = mixed ^ (mixed >> 27);
+    let mixed = mixed.wrapping_mul(0x94D049BB133111EB);
+    let mixed = mixed ^ (mixed >> 31);
+    let (enchant_id, max_level) = candidates[(mixed as usize) % candidates.len()];
+    let level = ((i16::from(offer_cost) + 6) / 7).clamp(1, max_level);
+
+    let mut tags = match &input.tag {
+        None => Default::default(),
+        Some(Value::Compound(tags)) => tags.clone(),
+        Some(_) => return None,
+    };
+    // Never replace custom/modded enchant data, even when vanilla tags have
+    // an unexpected type; a repair tool must handle that situation explicitly.
+    if tags.contains_key("ench") || tags.contains_key("StoredEnchantments") {
+        return None;
+    }
+    let entry = Value::Compound([
+        ("id".to_string(), Value::Short(enchant_id)),
+        ("lvl".to_string(), Value::Short(level)),
+    ].into_iter().collect());
+    let is_book = input.id == 340;
+    tags.insert(
+        (if is_book { "StoredEnchantments" } else { "ench" }).to_string(),
+        Value::List(vec![entry]),
+    );
+    let mut output = input.clone();
+    output.id = if is_book { 403 } else { input.id };
+    output.tag = Some(Value::Compound(tags));
+    // Bounded serialized NBT is a prerequisite for later Protocol 5 packets.
+    let bytes = fastnbt::to_bytes(output.tag.as_ref()?).ok()?;
+    if bytes.len() > 32 * 1024 {
+        return None;
+    }
+    Some(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,4 +306,51 @@ mod tests {
         assert!(repair(stack(257, 1, 0), stack(265, 3, 0)).is_none());
         assert!(repair(stack(257, 1, 100), stack(264, 3, 0)).is_none());
     }
+    #[test]
+    fn d31_d35_enchantment_keeps_unknown_item_and_nested_nbt_fields() {
+        use fastnbt::Value;
+        use std::collections::BTreeMap;
+        let mut tags = Default::default();
+        tags.insert("CustomUnknown".to_string(), Value::List(vec![
+            Value::Int(17), Value::Int(29),
+        ]));
+        let mut extra = BTreeMap::new();
+        extra.insert("ModItemField".into(), Value::String("keep me".into()));
+        let input = crate::legacy_inventory_nbt::SlotItem {
+            slot: 0, id: 276, count: 1, damage: 14,
+            tag: Some(Value::Compound(tags)), extra,
+        };
+        let enchanted = enchant_nbt_item(&input, 30, 42).unwrap();
+        assert_eq!(enchanted.id, 276);
+        assert_eq!(enchanted.damage, 14);
+        assert!(matches!(enchanted.extra.get("ModItemField"), Some(Value::String(s)) if s == "keep me"));
+        let Value::Compound(ref tag) = enchanted.tag.as_ref().unwrap() else { panic!("compound") };
+        assert!(matches!(tag.get("CustomUnknown"), Some(Value::List(v)) if v == &vec![Value::Int(17), Value::Int(29)]));
+        assert!(matches!(tag.get("ench"), Some(Value::List(v)) if v.len() == 1));
+        let bytes = fastnbt::to_bytes(&enchanted).unwrap();
+        let back: crate::legacy_inventory_nbt::SlotItem = fastnbt::from_bytes(&bytes).unwrap();
+        assert_eq!(fastnbt::to_bytes(&back).unwrap(), bytes);
+        assert!(enchant_nbt_item(&back, 30, 42).is_none()); // never overwrite
+    }
+
+    #[test]
+    fn d35_book_enchantment_and_invalid_offers_are_fail_closed() {
+        let book = crate::legacy_inventory_nbt::SlotItem {
+            slot: 2, id: 340, count: 1, damage: 0, tag: None,
+            extra: Default::default(),
+        };
+        let result = enchant_nbt_item(&book, 11, 123).unwrap();
+        assert_eq!(result.id, 403);
+        assert!(matches!(result.tag, Some(fastnbt::Value::Compound(ref tag))
+            if tag.contains_key("StoredEnchantments") && !tag.contains_key("ench")));
+        assert!(enchant_nbt_item(&book, 0, 2).is_none());
+        assert!(enchant_nbt_item(&book, 31, 2).is_none());
+        let mut stacked = book.clone();
+        stacked.count = 2;
+        assert!(enchant_nbt_item(&stacked, 10, 2).is_none());
+        let mut invalid = book.clone();
+        invalid.tag = Some(fastnbt::Value::String("not a compound".into()));
+        assert!(enchant_nbt_item(&invalid, 10, 2).is_none());
+    }
+
 }
