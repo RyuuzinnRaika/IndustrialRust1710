@@ -418,16 +418,20 @@ pub fn dungeon_loot(seed: u64, x: i32, y: i32, z: i32) -> Option<[(i16, u8); 3]>
         (candidates[((r >> 19) % 8) as usize], 1),
     ])
 }
-/// Fixed-region village foundation: roads, simple houses, farms and a central
-/// well. Their footprints cross chunks naturally. Villager spawning is separate.
-fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
+/// Return the deterministic center and ground level of the village whose
+/// structure footprint contains (x, z). Villager AI and door detection can
+/// reuse this lookup instead of guessing the center from nearby buildings.
+/// This describes generated village geometry, not a live villager population.
+pub fn village_center(seed: u64, x: i32, z: i32) -> Option<(i32, i32, i32)> {
     let gx = x.div_euclid(192);
     let gz = z.div_euclid(192);
+    // The leftmost generation cell cannot be represented as a center in
+    // i32 coordinates. Reject it instead of overflowing in debug builds.
+    let cx = gx.checked_mul(192)?.checked_add(48)?;
+    let cz = gz.checked_mul(192)?.checked_add(48)?;
     if !hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4) {
         return None;
     }
-    let cx = gx * 192 + 48;
-    let cz = gz * 192 + 48;
     if !matches!(biome(seed, cx, cz), 1 | 2 | 35 | 4) {
         return None;
     }
@@ -436,7 +440,14 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
     if dx.abs() > 31 || dz.abs() > 26 {
         return None;
     }
-    let base = height(seed, cx, cz);
+    Some((cx, height(seed, cx, cz), cz))
+}
+/// Fixed-region village foundation: roads, simple houses, farms and a central
+/// well. Their footprints cross chunks naturally. Villager spawning is separate.
+fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
+    let (cx, base, cz) = village_center(seed, x, z)?;
+    let dx = x - cx;
+    let dz = z - cz;
     if !(base - 4..=base + 7).contains(&y) {
         return None;
     }
@@ -876,6 +887,57 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn village_center_matches_structure_footprints_across_negative_cells() {
+        let seed = 42u64;
+        let mut tested_negative = false;
+        let mut tested_positive = false;
+        for gx in -8..=8 {
+            for gz in -8..=8 {
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                if !hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4)
+                    || !matches!(biome(seed, cx, cz), 1 | 2 | 35 | 4)
+                {
+                    continue;
+                }
+                let base = height(seed, cx, cz);
+                for (dx, dz) in [(0, 0), (-31, -26), (-31, 26), (31, -26), (31, 26)] {
+                    assert_eq!(
+                        village_center(seed, cx + dx, cz + dz),
+                        Some((cx, base, cz))
+                    );
+                }
+                for (dx, dz) in [(-32, 0), (32, 0), (0, -27), (0, 27)] {
+                    assert_eq!(village_center(seed, cx + dx, cz + dz), None);
+                }
+                tested_negative |= gx < 0 && gz < 0;
+                tested_positive |= gx > 0 && gz > 0;
+            }
+        }
+        assert!(tested_negative && tested_positive);
+    }
+    #[test]
+    fn village_center_rejects_non_villages_and_overflowing_cells() {
+        let seed = 42u64;
+        let mut checked_non_village = false;
+        for gx in -8..=8 {
+            for gz in -8..=8 {
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                if hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4)
+                    && matches!(biome(seed, cx, cz), 1 | 2 | 35 | 4)
+                {
+                    continue;
+                }
+                assert_eq!(village_center(seed, cx, cz), None);
+                checked_non_village = true;
+            }
+        }
+        assert!(checked_non_village);
+        assert_eq!(village_center(seed, i32::MIN, 0), None);
+        assert_eq!(village_center(seed, 0, i32::MIN), None);
     }
     #[test]
     fn village_well_is_not_overwritten_by_crossing_road() {
