@@ -501,6 +501,11 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
                     state(64, 8)
                 });
             }
+            // Glazed windows on both side walls and the rear wall. Keep
+            // corner logs, the doorway and the roof unchanged.
+            if y == base + 3 && ((a.abs() == 4 && c == 0) || (c.abs() == 4 && a.abs() == 2)) {
+                return Some(b(20));
+            }
             return Some(if a.abs() == 4 && c.abs() == 4 {
                 b(17)
             } else {
@@ -911,6 +916,58 @@ mod tests {
             }
         }
         assert!(villages_checked > 0);
+    }
+    #[test]
+    fn village_houses_have_glass_windows_without_overwriting_doors_or_posts() {
+        let seed = 42u64;
+        let mut checked = 0;
+        for gx in -4..=4 {
+            for gz in -4..=4 {
+                if !hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4) {
+                    continue;
+                }
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                if !matches!(biome(seed, cx, cz), 1 | 2 | 35 | 4) {
+                    continue;
+                }
+                checked += 1;
+                let base = height(seed, cx, cz);
+                for (hx, hz) in [(-17, -9), (17, 9)] {
+                    for (a, c) in [(-4, 0), (4, 0), (-2, -4), (2, -4), (-2, 4), (2, 4)] {
+                        let x = cx + hx + a;
+                        let z = cz + hz + c;
+                        assert_eq!(village(seed, x, base + 3, z), Some(b(20)));
+                        assert_eq!(block(seed, Dimension::Overworld, x, base + 3, z), b(20));
+                    }
+                    // Log corner posts remain intact, and the doorway is not
+                    // replaced by glass at either half of the wooden door.
+                    for (a, c) in [(-4, -4), (-4, 4), (4, -4), (4, 4)] {
+                        assert_eq!(
+                            block(
+                                seed,
+                                Dimension::Overworld,
+                                cx + hx + a,
+                                base + 3,
+                                cz + hz + c
+                            ),
+                            b(17)
+                        );
+                    }
+                    let door_z = cz + hz + if hz < 0 { 4 } else { -4 };
+                    let door_x = cx + hx;
+                    assert_eq!(
+                        block(seed, Dimension::Overworld, door_x, base + 1, door_z),
+                        state(64, if hz < 0 { 0 } else { 2 })
+                    );
+                    assert_eq!(
+                        block(seed, Dimension::Overworld, door_x, base + 2, door_z),
+                        state(64, 8)
+                    );
+                }
+            }
+        }
+        assert!(checked > 0);
     }
     #[test]
     fn generated_dungeons_have_spawner_and_loot() {
