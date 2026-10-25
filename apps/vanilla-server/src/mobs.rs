@@ -3971,14 +3971,32 @@ mod tests {
         // The cap includes 17x17 chunks; spawning only uses the 15x15
         // interior. Negative coordinates must use floor division.
         assert_eq!(natural_mob_cap(&[player], 70), 79);
-        assert!(natural_spawn_chunk_eligible(candidate(127.5, 0.5), &[player]));
-        assert!(natural_spawn_chunk_eligible(candidate(-111.5, 0.5), &[player]));
-        assert!(!natural_spawn_chunk_eligible(candidate(128.5, 0.5), &[player]));
-        assert!(!natural_spawn_chunk_eligible(candidate(-112.5, 0.5), &[player]));
-        assert!(!natural_spawn_chunk_eligible(candidate(0.5, -112.5), &[player]));
+        assert!(natural_spawn_chunk_eligible(
+            candidate(127.5, 0.5),
+            &[player]
+        ));
+        assert!(natural_spawn_chunk_eligible(
+            candidate(-111.5, 0.5),
+            &[player]
+        ));
+        assert!(!natural_spawn_chunk_eligible(
+            candidate(128.5, 0.5),
+            &[player]
+        ));
+        assert!(!natural_spawn_chunk_eligible(
+            candidate(-112.5, 0.5),
+            &[player]
+        ));
+        assert!(!natural_spawn_chunk_eligible(
+            candidate(0.5, -112.5),
+            &[player]
+        ));
         // A chunk on one player's border may be interior to another.
         let second = candidate(-128.5, 0.5);
-        assert!(natural_spawn_chunk_eligible(candidate(-112.5, 0.5), &[player, second]));
+        assert!(natural_spawn_chunk_eligible(
+            candidate(-112.5, 0.5),
+            &[player, second]
+        ));
         assert!(!natural_spawn_chunk_eligible(candidate(0.5, 0.5), &[]));
     }
 
@@ -3986,7 +4004,11 @@ mod tests {
     fn natural_spawn_location_rejects_border_even_within_distance_limit() {
         let world = World::natural(42);
         let y = world.spawn_y();
-        let player = PlayerPosition { x: 400.5, y, z: 0.5 };
+        let player = PlayerPosition {
+            x: 400.5,
+            y,
+            z: 0.5,
+        };
         // Player chunk 25, candidate chunk 17: exactly eight chunks west.
         // Its 113-block distance passes the radius check, but not the
         // 1.7.10 interior-chunk eligibility check.
