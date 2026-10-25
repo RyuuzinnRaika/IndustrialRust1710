@@ -347,9 +347,9 @@ mod tests {
             assert_eq!(emitted.id, (selected + 1) as i16);
             assert_eq!(emitted.count, 1);
             assert_eq!(next.slots(pos)[selected].unwrap().count, 1);
-            for index in 0..DEVICE_SLOTS {
+            for (index, slot) in slots.iter().enumerate() {
                 if index != selected {
-                    assert_eq!(next.slots(pos)[index], slots[index]);
+                    assert_eq!(next.slots(pos)[index], *slot);
                 }
             }
             // Selection must be reproducible for the same redo-journal seed.
