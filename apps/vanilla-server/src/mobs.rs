@@ -2991,8 +2991,10 @@ fn natural_spawn_passive_roll(seed: u64) -> bool {
     seed & 2 == 0
 }
 
-/// Unique 17x17 eligible chunk union. Vanilla's mob cap scales with this
-/// area, not with raw online player count or the protocol render distance.
+/// Unique 17x17 eligible chunk union. Java 1.7.10 counts the entire
+/// 289-chunk square, but divides by 256 (not 289) when scaling the mob cap.
+/// Modern Java versions use 289; retaining the legacy divisor is important
+/// for a single player's 79-monster/11-animal caps.
 fn natural_spawn_capacity(players: &[PlayerPosition], base: usize) -> usize {
     natural_mob_cap(players, base).min(MAX_NATURAL_PER_CATEGORY)
 }
@@ -3008,7 +3010,10 @@ fn natural_mob_cap(players: &[PlayerPosition], base: usize) -> usize {
             }
         }
     }
-    base.saturating_mul(chunks.len()) / 289
+    // Java Edition 1.7.10 SpawnerAnimals: cap * eligibleChunks / 256.
+    // The 17x17 border chunks count toward the cap even when not eligible
+    // as actual pack-spawn origins.
+    base.saturating_mul(chunks.len()) / 256
 }
 fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
     players
@@ -3608,15 +3613,21 @@ mod tests {
             z: 0.5,
         };
         let b = PlayerPosition { x: 16.5, ..a };
-        assert_eq!(natural_mob_cap(&[a], 70), 70);
-        assert_eq!(natural_mob_cap(&[a, a], 70), 70);
-        assert!(natural_mob_cap(&[a, b], 70) > 70);
+        // 1.7.10 uses 17x17 counted chunks but a 256 divisor.
+        assert_eq!(natural_mob_cap(&[a], 70), 79);
+        assert_eq!(natural_mob_cap(&[a], 10), 11);
+        assert_eq!(natural_mob_cap(&[a, a], 70), 79);
+        // One-chunk X offset adds 17 previously uncounted chunks.
+        assert_eq!(natural_mob_cap(&[a, b], 70), 83);
         assert_eq!(natural_mob_cap(&[], 70), 0);
         let distant = PlayerPosition { x: 512.5, ..a };
-        // Two disjoint 17x17 areas must allow 140 hostiles, not 70 globally.
-        assert_eq!(natural_spawn_capacity(&[a, distant], 70), 140);
-        assert_eq!(natural_spawn_capacity(&[a, distant], 10), 20);
-        assert_eq!(natural_spawn_capacity(&[a, a], 70), 70);
+        // Two disjoint 17x17 areas must count all 578 chunks once.
+        assert_eq!(natural_spawn_capacity(&[a, distant], 70), 158);
+        assert_eq!(natural_spawn_capacity(&[a, distant], 10), 22);
+        assert_eq!(natural_spawn_capacity(&[a, a], 70), 79);
+        // Negative block coordinates must floor to the correct chunk.
+        let west = PlayerPosition { x: -0.5, ..a };
+        assert_eq!(natural_mob_cap(&[a, west], 70), 83);
     }
 
     #[test]
