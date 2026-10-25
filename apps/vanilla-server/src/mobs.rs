@@ -4449,9 +4449,7 @@ mod tests {
             for gz in -8..=8 {
                 let x = gx * 192 + 48;
                 let z = gz * 192 + 48;
-                if let Some([Some(first), Some(second)]) =
-                    world.live_village_house_doors(x, z)
-                {
+                if let Some([Some(first), Some(second)]) = world.live_village_house_doors(x, z) {
                     village = Some((x, z, first, second));
                     break 'search;
                 }
@@ -4493,7 +4491,9 @@ mod tests {
         let original_lower = world.get(first[0], first[1], first[2]);
         world.import_block(first[0], first[1], first[2], 0).unwrap();
         assert_eq!(villager_door_destination(&world, middle), Some(second_goal));
-        world.import_block(second[0], second[1], second[2], 1 << 4).unwrap();
+        world
+            .import_block(second[0], second[1], second[2], 1 << 4)
+            .unwrap();
         assert_eq!(villager_door_destination(&world, middle), None);
         let before = mobs.entities.get(&id).unwrap().position;
         mobs.tick(2, &world, &[]);
