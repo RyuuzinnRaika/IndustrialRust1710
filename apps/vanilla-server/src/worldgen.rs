@@ -1252,10 +1252,7 @@ mod tests {
                             state(50, 5),
                             "missing floor torch at ({x}, {z})"
                         );
-                        assert_eq!(
-                            block(seed, Dimension::Overworld, x, base + 2, z),
-                            AIR
-                        );
+                        assert_eq!(block(seed, Dimension::Overworld, x, base + 2, z), AIR);
                     }
                     // Keep the central aisle clear from the entrance to the
                     // back of both houses, even after furnishing the rooms.
