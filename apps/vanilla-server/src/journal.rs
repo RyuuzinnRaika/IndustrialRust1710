@@ -10,9 +10,9 @@ use std::sync::{Mutex, OnceLock};
 
 const VERSION: u8 = 1;
 // JSON stores payload bytes as integer arrays (up to four characters per
-// byte); keep an explicit on-disk limit for four bounded participants.
+// byte); keep an explicit on-disk limit for bounded participants.
 const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_TRANSACTION_FILES: usize = 4;
+const MAX_TRANSACTION_FILES: usize = 8;
 const MAX_TARGET_BYTES: usize = 1024 * 1024;
 // Region images are larger than player JSON. A separate bounded cap applies;
 // the serialized, committed redo record still has a 64MiB aggregate limit.
@@ -237,7 +237,7 @@ pub fn recover(journal: &Path) -> io::Result<()> {
         serde_json::from_slice(&bytes).map_err(|_| invalid("corrupt transaction journal"))?;
     apply(journal, &record)
 }
-/// Durable two-file commit. An error must stop further writes; recovery on
+/// Durable bounded multi-file commit. An error must stop further writes; recovery on
 /// restart completes the *new* state for all files (redo journal semantics).
 pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
     let _lock = SERIAL
@@ -248,7 +248,7 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
         return Err(invalid("unrecovered transaction: restart required"));
     }
     if changes.len() < 2 || changes.len() > MAX_TRANSACTION_FILES {
-        return Err(invalid("expected 2 to 4 transaction participants"));
+        return Err(invalid("expected 2 to 8 transaction participants"));
     }
     let base = root(journal);
     let files: Vec<Target> = changes
@@ -515,6 +515,55 @@ mod tests {
         for (path, data) in &updates {
             assert_eq!(&fs::read(path).unwrap(), data);
         }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn eight_participants_commit_and_crash_recovery_are_bounded() {
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-eight-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let paths: Vec<_> = (0..8)
+            .map(|index| home.join(format!("world-{index}.chests.json")))
+            .collect();
+        let journal = home.join("world.pending-txn.json");
+        let updates: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (path.as_path(), format!("updated-{index}").into_bytes()))
+            .collect();
+        commit(&journal, &updates).unwrap();
+        for (path, bytes) in &updates {
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+        }
+        let too_many: Vec<_> = (0..9)
+            .map(|index| (paths[index % 8].as_path(), b"ignored".to_vec()))
+            .collect();
+        assert_eq!(commit(&journal, &too_many).unwrap_err().kind(), ErrorKind::InvalidData);
+        assert!(!journal.exists());
+        let record = Record {
+            version: VERSION,
+            files: updates
+                .iter()
+                .map(|(path, bytes)| Target {
+                    relative: relative(&home, path).unwrap(),
+                    contents: bytes.clone(),
+                    checksum: fingerprint(bytes),
+                })
+                .collect(),
+        };
+        fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::write(&paths[0], b"torn-save").unwrap();
+        fs::write(&paths[7], b"torn-save").unwrap();
+        recover(&journal).unwrap();
+        for (path, bytes) in &updates {
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+        }
+        assert!(!journal.exists());
         fs::remove_dir_all(home).unwrap();
     }
 
