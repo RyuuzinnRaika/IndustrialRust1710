@@ -72,6 +72,34 @@ fn copy_tree(source: &Path, dest: &Path, depth: usize, stats: &mut CopyStats) ->
     Ok(())
 }
 
+// Files may change *after* their initial copy completed. Rewalk both
+// namespaces and compare all bytes immediately before publishing the stage.
+fn verify_tree_exact(source: &Path, destination: &Path, depth: usize) -> io::Result<()> {
+    if depth > MAX_DEPTH {
+        return Err(invalid("Anvil copy verification nesting too deep"));
+    }
+    let mut entries = 0usize;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        entries += 1;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        let src_type = fs::symlink_metadata(&from)?.file_type();
+        let dest_type = fs::symlink_metadata(&to)?.file_type();
+        if src_type.is_dir() && dest_type.is_dir() {
+            verify_tree_exact(&from, &to, depth + 1)?;
+        } else if src_type.is_file() && dest_type.is_file() {
+            compare_files(&from, &to)?;
+        } else {
+            return Err(invalid("source/copy type changed during migration staging"));
+        }
+    }
+    if entries != fs::read_dir(destination)?.count() {
+        return Err(invalid("source/copy filenames differ"));
+    }
+    Ok(())
+}
+
 /// Inspect source without ever creating a lock there; produce a separately
 /// validated, byte-for-byte copy. No transformation to IRW is implied.
 pub fn prepare_anvil_copy(source: &Path, destination: &Path) -> io::Result<CopyStats> {
@@ -114,6 +142,7 @@ pub fn prepare_anvil_copy(source: &Path, destination: &Path) -> io::Result<CopyS
         if before != after || before != verified {
             return Err(invalid("Anvil structural summary changed while copying"));
         }
+        verify_tree_exact(source, &staging, 0)?;
         if fs::symlink_metadata(destination).is_ok() {
             return Err(io::Error::new(
                 ErrorKind::AlreadyExists,
@@ -121,6 +150,8 @@ pub fn prepare_anvil_copy(source: &Path, destination: &Path) -> io::Result<CopyS
             ));
         }
         fs::rename(&staging, destination)?;
+        #[cfg(unix)]
+        File::open(parent)?.sync_all()?;
         Ok(stats)
     })();
     if work.is_err() {
@@ -164,4 +195,23 @@ mod tests {
         assert!(!destination.exists());
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn detects_mutation_after_copy_even_when_file_size_is_unchanged() {
+        let root = std::env::temp_dir().join(format!("f57-recheck-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("source")).unwrap();
+        fs::create_dir_all(root.join("copy")).unwrap();
+        let from = root.join("source/example.dat");
+        let to = root.join("copy/example.dat");
+        fs::write(&from, b"valid-data").unwrap();
+        fs::copy(&from, &to).unwrap();
+        verify_tree_exact(&root.join("source"), &root.join("copy"), 0).unwrap();
+        fs::write(&from, b"other-data").unwrap();
+        assert!(verify_tree_exact(&root.join("source"), &root.join("copy"), 0).is_err());
+        fs::copy(&from, &to).unwrap();
+        fs::write(root.join("copy/unexpected"), b"bad").unwrap();
+        assert!(verify_tree_exact(&root.join("source"), &root.join("copy"), 0).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }
