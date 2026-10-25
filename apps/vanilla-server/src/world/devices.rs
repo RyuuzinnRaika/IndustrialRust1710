@@ -183,7 +183,7 @@ impl World {
 
     /// Directional analog redstone strength; repeaters/comparators have a
     /// single output face. Dust propagates its stored 0..15 strength.
-    pub(super) fn signal_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
+    pub(crate) fn signal_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
         let (x, y, z) = from;
         let block = self.get(x, y, z);
         match block >> 4 {
