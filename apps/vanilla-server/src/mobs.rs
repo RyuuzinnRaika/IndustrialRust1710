@@ -82,6 +82,34 @@ impl Kind {
             Self::Cow | Self::Pig | Self::Horse | Self::Sheep | Self::Chicken | Self::Villager
         )
     }
+    /// Vanilla natural-spawn caps count animals and monsters, not villagers,
+    /// golems or constructed/summoned bosses. Keeping this distinct from
+    /// peaceful-safe/despawnable prevents persistent entities consuming a
+    /// player's natural spawn budget.
+    fn counts_toward_natural_cap(self, passive: bool) -> bool {
+        if passive {
+            matches!(
+                self,
+                Self::Cow | Self::Pig | Self::Horse | Self::Sheep | Self::Chicken
+            )
+        } else {
+            matches!(
+                self,
+                Self::Zombie
+                    | Self::Skeleton
+                    | Self::Creeper
+                    | Self::Spider
+                    | Self::CaveSpider
+                    | Self::Enderman
+                    | Self::Slime
+                    | Self::Witch
+                    | Self::Ghast
+                    | Self::Blaze
+                    | Self::ZombiePigman
+                    | Self::MagmaCube
+            )
+        }
+    }
     fn peaceful_safe(self) -> bool {
         self.passive() || matches!(self, Self::IronGolem)
     }
@@ -168,6 +196,9 @@ struct Mob {
     bite_tick: u64,
     fuse: u8,
     breed_tick: u64,
+    /// The 600-tick vanilla love window; absent in older snapshots.
+    #[serde(default)]
+    love_until: u64,
     baby: bool,
     age_ticks: u32,
     waypoint: Option<PlayerPosition>,
@@ -732,6 +763,27 @@ fn blast_damage(world: &World, blast: &Explosion, target: PlayerPosition) -> u8 
         .floor()
         .clamp(0.0, 255.0) as u8
 }
+/// Projectile collisions must intersect the mob's body, not its feet.
+fn projectile_hits_mob(mob: &Mob, point: PlayerPosition) -> bool {
+    let (radius, height) = match mob.kind {
+        Kind::Ghast => (2.0, 4.0),
+        Kind::EnderDragon => (4.0, 8.0),
+        Kind::Wither => (0.9, 3.5),
+        Kind::IronGolem => (0.7, 2.7),
+        Kind::Enderman => (0.45, 2.9),
+        Kind::Slime | Kind::MagmaCube => {
+            let edge = f64::from(mob.size) * 0.51;
+            (edge, edge * 2.0)
+        }
+        Kind::Spider | Kind::CaveSpider => (0.7, 0.9),
+        Kind::Chicken => (0.3, 0.7),
+        Kind::Cow | Kind::Pig | Kind::Sheep => (0.55, 1.4),
+        _ => (0.45, if mob.baby { 1.0 } else { 1.95 }),
+    };
+    (point.x - mob.position.x).hypot(point.z - mob.position.z) <= radius
+        && point.y >= mob.position.y - 0.25
+        && point.y <= mob.position.y + height + 0.25
+}
 fn damage_held(held: Option<Stack>) -> i16 {
     match held.map(|s| s.id) {
         Some(268) | Some(283) => 4,
@@ -897,6 +949,7 @@ impl Mobs {
             bite_tick: 0,
             fuse: 0,
             breed_tick: 0,
+            love_until: 0,
             baby,
             age_ticks: 0,
             waypoint: None,
@@ -1720,37 +1773,56 @@ impl Mobs {
         events
     }
     /// Animal breeding consumes feed only if a nearby same-kind partner exists.
+    /// Each parent must be fed independently within a 600-tick love window.
+    /// A single feeding produces hearts, NOT a calf; after breeding, both
+    /// parents have the vanilla 6,000-tick cooldown. The caller debits only
+    /// successful feed operations and broadcasts all authoritative events.
     pub fn feed(
         &mut self,
         id: i32,
         player: PlayerPosition,
         held: Option<Stack>,
         tick: u64,
-    ) -> Option<Event> {
+    ) -> Option<Vec<Event>> {
         let first = *self.entities.get(&id)?;
         let food = held?.id;
         if !first.nearby(player, 3.0)
             || self.entities.len() >= MAX_LOADED_MOBS
             || self.next_id >= 1_000_000
-            || self.entities.values().filter(|m| m.kind.passive()).count()
-                >= MAX_NATURAL_PER_CATEGORY
             || !first.kind.passive()
             || first.baby
             || !first.kind.breeding_food(food)
-            || (first.breed_tick != 0 && tick.saturating_sub(first.breed_tick) < 600)
+            || (first.breed_tick != 0 && tick.saturating_sub(first.breed_tick) < 6000)
+            || tick < first.love_until
         {
             return None;
         }
-        let mate = self.entities.values().copied().find(|m| {
-            m.id != id
-                && m.kind == first.kind
-                && !m.baby
-                && (m.breed_tick == 0 || tick.saturating_sub(m.breed_tick) >= 600)
-                && distance(m.position, first.position) < 7.0
-        })?;
-        self.entities.get_mut(&id)?.breed_tick = tick;
-        self.entities.get_mut(&mate.id)?.breed_tick = tick;
-        Some(self.insert(first.kind, first.position, true))
+
+        // Vanilla love lasts 600 ticks, even when no mate is present.
+        self.entities.get_mut(&id)?.love_until = tick.saturating_add(600);
+        let mut events = vec![first.status(18)];
+        let mate_id = self
+            .entities
+            .values()
+            .find(|mate| {
+                mate.id != id
+                    && mate.kind == first.kind
+                    && !mate.baby
+                    && mate.love_until > tick
+                    && (mate.breed_tick == 0 || tick.saturating_sub(mate.breed_tick) >= 6000)
+                    && distance_3d(mate.position, first.position) < 7.0
+            })
+            .map(|mate| mate.id);
+        if let Some(mate_id) = mate_id {
+            for parent_id in [id, mate_id] {
+                if let Some(parent) = self.entities.get_mut(&parent_id) {
+                    parent.love_until = 0;
+                    parent.breed_tick = tick;
+                }
+            }
+            events.push(self.insert(first.kind, first.position, true));
+        }
+        Some(events)
     }
     /// Charging and ammunition are managed by the player session before this call.
     pub fn fire_arrow(
@@ -1837,12 +1909,12 @@ impl Mobs {
         let passive = self
             .entities
             .values()
-            .filter(|mob| mob.kind.passive())
+            .filter(|mob| mob.kind.counts_toward_natural_cap(true))
             .count();
         let hostile = self
             .entities
             .values()
-            .filter(|m| !m.kind.peaceful_safe())
+            .filter(|m| m.kind.counts_toward_natural_cap(false))
             .count();
         let hostile_cap = natural_spawn_capacity(players, VANILLA_HOSTILE_CAP);
         let passive_cap = natural_spawn_capacity(players, VANILLA_PASSIVE_CAP);
@@ -1900,11 +1972,10 @@ impl Mobs {
                 y: y as f64,
                 z: z as f64 + 0.5,
             };
-            if !position.is_valid()
-                || !natural_spawn_location_ok(world, position, players)
-                || !physics::supported(world, &position)
-                || physics::collides(world, &position)
-            {
+            // Species has not been chosen yet: demanding ground support here
+            // silently excludes every otherwise valid flying Ghast. Validate
+            // the selected species' body below for each attempted pack member.
+            if !natural_spawn_origin_ok(world, position, players) {
                 continue;
             }
             let biome = world.biome_at(x, z);
@@ -2045,13 +2116,7 @@ impl Mobs {
                 let current_category = self
                     .entities
                     .values()
-                    .filter(|mob| {
-                        if is_passive {
-                            mob.kind.passive()
-                        } else {
-                            !mob.kind.peaceful_safe()
-                        }
-                    })
+                    .filter(|mob| mob.kind.counts_toward_natural_cap(is_passive))
                     .count();
                 if current_category >= if is_passive { passive_cap } else { hostile_cap } {
                     break;
@@ -2676,11 +2741,15 @@ impl Mobs {
                         impacted = true;
                         break;
                     }
-                } else if let Some(mob) = self
-                    .entities
-                    .values()
-                    .find(|mob| mob.id != arrow.shooter.unwrap_or(-1) && mob.nearby(sample, 0.9))
-                {
+                }
+                // Skeleton arrows can hit a different mob. Preserve
+                // existing special-projectile splash handling separately,
+                // and never collide with the firing entity.
+                if let Some(mob) = self.entities.values().find(|mob| {
+                    arrow.kind == ProjectileKind::Arrow
+                        && mob.id != arrow.shooter.unwrap_or(-1)
+                        && projectile_hits_mob(mob, sample)
+                }) {
                     arrow_hits.push((
                         mob.id,
                         arrow.damage,
@@ -3012,6 +3081,11 @@ fn zombie_infects_villager(difficulty: u8, roll: u64) -> bool {
         2 => roll & 1 == 0,
         _ => false,
     }
+}
+/// Natural-spawn origin checks are independent of entity shape: a Ghast may
+/// be selected while floating above a valid Nether candidate floor.
+fn natural_spawn_origin_ok(world: &World, at: PlayerPosition, players: &[PlayerPosition]) -> bool {
+    at.is_valid() && natural_spawn_location_ok(world, at, players)
 }
 /// Respect both the closest *online player* and Overworld world-spawn
 /// exclusion zones. This guard runs for every natural spawn candidate.
@@ -4373,9 +4447,14 @@ mod tests {
         );
     }
     #[test]
-    fn passive_animals_breed_once_per_cooldown() {
+    fn passive_animals_require_two_feedings_and_obey_breeding_cooldown() {
         let mut mobs = Mobs::default();
         let at = PlayerPosition::default();
+        let wheat = Some(Stack {
+            id: 296,
+            count: 1,
+            damage: 0,
+        });
         mobs.insert(Kind::Cow, at, false);
         mobs.insert(
             Kind::Cow,
@@ -4385,32 +4464,74 @@ mod tests {
             },
             false,
         );
-        assert!(mobs
-            .feed(
-                0,
-                at,
-                Some(Stack {
-                    id: 296,
-                    count: 1,
-                    damage: 0
-                }),
-                100
-            )
-            .is_some());
-        assert!(mobs.entities.values().any(|m| m.baby));
-        assert!(mobs
-            .feed(
-                1,
-                at,
-                Some(Stack {
-                    id: 296,
-                    count: 1,
-                    damage: 0
-                }),
-                101
-            )
-            .is_none());
+        let first = mobs.feed(0, at, wheat, 100).unwrap();
+        assert_eq!(first.len(), 1); // heart effect only
+        assert!(!mobs.entities.values().any(|m| m.baby));
+        assert!(mobs.feed(0, at, wheat, 101).is_none()); // no repeated payment
+        let second = mobs.feed(1, at, wheat, 102).unwrap();
+        assert_eq!(second.len(), 2); // hearts plus authoritative calf
+        assert_eq!(mobs.entities.values().filter(|m| m.baby).count(), 1);
+        assert!(mobs.feed(0, at, wheat, 103).is_none());
+        assert!(mobs.feed(1, at, wheat, 6101).is_none());
+        assert!(mobs.feed(0, at, wheat, 6102).is_some());
     }
+
+    #[test]
+    fn natural_cap_excludes_persistent_villagers_guardians_and_bosses() {
+        for species in [
+            Kind::Villager,
+            Kind::IronGolem,
+            Kind::Wither,
+            Kind::EnderDragon,
+        ] {
+            assert!(!species.counts_toward_natural_cap(true));
+            assert!(!species.counts_toward_natural_cap(false));
+        }
+        assert!(Kind::Cow.counts_toward_natural_cap(true));
+        assert!(Kind::Ghast.counts_toward_natural_cap(false));
+        assert!(!Kind::Ghast.counts_toward_natural_cap(true));
+    }
+
+    #[test]
+    fn natural_ghast_origin_does_not_require_ground_support() {
+        let world = World::new();
+        let floating = PlayerPosition {
+            x: 64.5,
+            y: 80.0,
+            z: 0.5,
+        };
+        let player = PlayerPosition { x: 0.5, ..floating };
+        assert!(!physics::supported(&world, &floating));
+        assert!(natural_spawn_origin_ok(&world, floating, &[player]));
+        assert!(natural_spawn_body_ok(&world, Kind::Ghast, floating));
+        assert!(!natural_spawn_body_ok(&world, Kind::Skeleton, floating));
+    }
+
+    #[test]
+    fn hostile_arrows_can_hit_other_mobs_without_hitting_the_shooter() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 70.0,
+            z: 0.5,
+        };
+        mobs.insert(Kind::Skeleton, at, false);
+        mobs.insert(Kind::Cow, PlayerPosition { x: 2.5, ..at }, false);
+        mobs.fire_arrow(Some(0), at, 0.0, 0.0, 1.5, 3).unwrap();
+        let projectile = mobs.arrows.values_mut().next().unwrap();
+        projectile.position = PlayerPosition {
+            x: 1.6,
+            y: 71.3,
+            z: 0.5,
+        };
+        projectile.velocity = [1.0, 0.0, 0.0];
+        let mut events = Vec::new();
+        mobs.tick_arrows(&World::new(), &[], 10, &mut events);
+        assert_eq!(mobs.entities.get(&0).unwrap().health, 20);
+        assert_eq!(mobs.entities.get(&1).unwrap().health, 7);
+        assert!(mobs.arrows.is_empty());
+    }
+
     #[test]
     fn natural_spawn_checks_propagated_light_and_night() {
         let mut world = World::new();
