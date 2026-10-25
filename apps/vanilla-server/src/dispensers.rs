@@ -402,6 +402,30 @@ mod tests {
     }
 
     #[test]
+    fn failed_device_staging_preserves_the_next_valid_activation() {
+        let valid = (1, 64, 1);
+        let invalid = (1, -1, 1);
+        let mut slots = [None; DEVICE_SLOTS];
+        slots[0] = Some(Stack {
+            id: 4,
+            count: 2,
+            damage: 0,
+        });
+        let devices = Devices::default().staged_update(valid, slots).unwrap();
+
+        // The worker must skip a failed activation, not abort its 20TPS loop.
+        assert!(devices.stage_eject(invalid, 7).is_err());
+        assert!(devices.stage_transfer_one(valid, invalid, 7).is_err());
+        assert_eq!(devices.slots(valid), slots);
+
+        let (next, emitted) = devices.stage_eject(valid, 8).unwrap().unwrap();
+        assert_eq!(emitted.id, 4);
+        assert_eq!(emitted.count, 1);
+        assert_eq!(next.slots(valid)[0].unwrap().count, 1);
+        assert_eq!(devices.slots(valid), slots);
+    }
+
+    #[test]
     fn empty_ejection_cannot_create_items() {
         assert!(Devices::default()
             .stage_eject((0, 64, 0), 0)
