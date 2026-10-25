@@ -268,6 +268,55 @@ fn contact(
         bz as f64 + shape.z1,
     )
 }
+/// Reject collisions against the actual entity AABB rather than assuming
+/// every mob has the player's 0.6 x 1.8 collision box. The shared block-shape
+/// resolver handles slabs, stairs, doors, fences and piston sweep volumes.
+pub fn collides_sized(
+    world: &World,
+    position: &PlayerPosition,
+    half_width: f64,
+    height: f64,
+) -> bool {
+    if !position.is_valid()
+        || !half_width.is_finite()
+        || half_width <= 0.0
+        || !height.is_finite()
+        || height <= 0.0
+    {
+        return true;
+    }
+    let min_x = (position.x - half_width + EPS).floor() as i32;
+    let max_x = (position.x + half_width - EPS).floor() as i32;
+    let min_z = (position.z - half_width + EPS).floor() as i32;
+    let max_z = (position.z + half_width - EPS).floor() as i32;
+    let min_y = position.y.floor() as i32 - 1;
+    let max_y = (position.y + height).ceil() as i32;
+    (min_x..=max_x).any(|x| {
+        (min_z..=max_z).any(|z| {
+            (min_y..=max_y).any(|y| {
+                shapes_at(world, x, y, z).into_iter().any(|shape| {
+                    overlap(
+                        position.x - half_width,
+                        position.x + half_width,
+                        x as f64 + shape.x0,
+                        x as f64 + shape.x1,
+                    ) && overlap(
+                        position.y,
+                        position.y + height,
+                        y as f64 + shape.y0,
+                        y as f64 + shape.y1,
+                    ) && overlap(
+                        position.z - half_width,
+                        position.z + half_width,
+                        z as f64 + shape.z0,
+                        z as f64 + shape.z1,
+                    )
+                })
+            })
+        })
+    })
+}
+
 /// Reject AABB intersections with solid, half-height and stair shapes.
 pub fn collides(world: &World, position: &PlayerPosition) -> bool {
     let (min_x, max_x, min_z, max_z) = horizontal_box(position);
