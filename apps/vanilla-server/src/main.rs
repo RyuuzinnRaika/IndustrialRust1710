@@ -173,7 +173,7 @@ impl<'a> Input<'a> {
         let count = self.u8()?;
         let damage = self.i16()?;
         let nbt_length = self.i16()?;
-        // Parse the claimed NBT without granting it authority over inventory.
+        // A client snapshot is parsed, but never authorizes inventory mutation.
         if nbt_length < -1 {
             return Err(bad("invalid item NBT length"));
         }
