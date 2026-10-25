@@ -105,9 +105,7 @@ impl Vitals {
 
     pub fn can_eat(&self, stack: Stack) -> bool {
         // Golden apples can be eaten even at full hunger in Java 1.7.10.
-        self.health > 0.0
-            && (self.food < 20 || stack.id == 322)
-            && Self::nutrition(stack).is_some()
+        self.health > 0.0 && (self.food < 20 || stack.id == 322) && Self::nutrition(stack).is_some()
     }
 
     /// Apply food only after the inventory was durably charged.
