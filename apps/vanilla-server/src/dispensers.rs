@@ -193,7 +193,10 @@ pub fn insert_one<const N: usize>(slots: &mut [Option<Stack>; N], item: Stack) -
     }
     for entry in slots.iter_mut() {
         if let Some(stack) = entry.as_mut() {
-            if stack.id == item.id && stack.damage == item.damage && stack.nbt == item.nbt && stack.count < stack.max_count()
+            if stack.id == item.id
+                && stack.damage == item.damage
+                && stack.nbt == item.nbt
+                && stack.count < stack.max_count()
             {
                 stack.count += 1;
                 return true;
