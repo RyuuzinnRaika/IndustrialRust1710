@@ -126,6 +126,7 @@ impl DimensionManager {
 #[derive(Debug)]
 pub struct DimensionWorlds {
     manager: DimensionManager,
+    paths: [PathBuf; 3],
     overworld: Arc<Mutex<World>>,
     nether: Arc<Mutex<World>>,
     end: Arc<Mutex<World>>,
@@ -167,8 +168,14 @@ impl DimensionWorlds {
             Some(world) => world,
             None => manager.create_new(Dimension::End)?,
         };
+        let paths = [
+            manager.path(Dimension::Overworld),
+            manager.path(Dimension::Nether),
+            manager.path(Dimension::End),
+        ];
         Ok(Self {
             manager,
+            paths,
             overworld: Arc::new(Mutex::new(overworld)),
             nether: Arc::new(Mutex::new(nether)),
             end: Arc::new(Mutex::new(end)),
@@ -185,6 +192,24 @@ impl DimensionWorlds {
 
     pub fn path(&self, dimension: Dimension) -> PathBuf {
         self.manager.path(dimension)
+    }
+
+    /// Borrow the live world without constructing a new lock or loading a disk snapshot.
+    pub fn world_ref(&self, dimension: Dimension) -> &Mutex<World> {
+        match dimension {
+            Dimension::Overworld => self.overworld.as_ref(),
+            Dimension::Nether => self.nether.as_ref(),
+            Dimension::End => self.end.as_ref(),
+        }
+    }
+
+    /// Stable path reference for a session that switches worlds while connected.
+    pub fn path_ref(&self, dimension: Dimension) -> &Path {
+        match dimension {
+            Dimension::Overworld => &self.paths[0],
+            Dimension::Nether => &self.paths[1],
+            Dimension::End => &self.paths[2],
+        }
     }
 
     /// Bind all dimension writes to one root-level session lock. The router
