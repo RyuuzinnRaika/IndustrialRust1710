@@ -3053,7 +3053,11 @@ fn natural_spawn_x_sign(seed: u64) -> i32 {
 /// could never be far north or south of a player. Low bits choose direction
 /// independently of the passive/hostile attempt; the radius uses higher bits.
 fn natural_spawn_horizontal_offset(seed: u64) -> (i32, i32) {
-    let radius = 24 + ((seed >> 3) % 65) as i32;
+    // Reach the outer eligible chunks too: 24..=88 never sampled the
+    // 89..=120-block band even though the 17x17 chunk cap includes it.
+    // A 120-block long offset and a 32-block lateral offset remain inside
+    // the 128-block 3D player-distance limit before vertical checks.
+    let radius = 24 + ((seed >> 3) % 97) as i32;
     let lateral = ((seed >> 8) % 65) as i32 - 32;
     let long_offset = natural_spawn_x_sign(seed) * radius;
     if seed & 4 == 0 {
@@ -3909,11 +3913,30 @@ mod tests {
 
     #[test]
     fn natural_spawn_offsets_stay_inside_the_bounded_search_radius() {
-        for seed in 0_u64..2048 {
+        let mut reached_outer_band = [false; 4];
+        for seed in 0_u64..8192 {
             let (dx, dz) = natural_spawn_horizontal_offset(seed);
             let horizontal_distance = f64::from(dx).hypot(f64::from(dz));
             assert!((24.0..=128.0).contains(&horizontal_distance));
+            // The outer eligible band must be reachable in every direction;
+            // a previous 88-block maximum silently excluded it entirely.
+            if dx >= 110 {
+                reached_outer_band[0] = true;
+            }
+            if dx <= -110 {
+                reached_outer_band[1] = true;
+            }
+            if dz >= 110 {
+                reached_outer_band[2] = true;
+            }
+            if dz <= -110 {
+                reached_outer_band[3] = true;
+            }
         }
+        assert!(
+            reached_outer_band.iter().all(|reached| *reached),
+            "outer eligible spawn band must be sampled in all four directions"
+        );
     }
 
     #[test]
