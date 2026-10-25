@@ -400,6 +400,84 @@ impl World {
         }
         Some(doors.into_iter().collect())
     }
+    /// A limited, live extension of an existing generated village: accept
+    /// player-built doors just outside its original footprint when they are
+    /// within 16 horizontal blocks of an intact door inside that footprint.
+    /// This is one hop only; it does not create new villages or implement the
+    /// vanilla sky-exposure/population-based village boundary algorithm.
+    /// A villager outside the original footprint can use the annex only while
+    /// at least one qualifying annex door still exists nearby.
+    pub fn village_doors_with_bounded_annex(&self, x: i32, z: i32) -> Option<Vec<[i32; 3]>> {
+        let (seed, dimension) = self.extended_identity()?;
+        if dimension != crate::dimensions::Dimension::Overworld {
+            return None;
+        }
+        // An annex is limited to 16 blocks beyond the generated footprint.
+        // Its coordinates still fall in the same 192-block generation cell.
+        let cell_x = x.div_euclid(192).checked_mul(192)?.checked_add(48)?;
+        let cell_z = z.div_euclid(192).checked_mul(192)?.checked_add(48)?;
+        let (cx, _, cz) = crate::worldgen::village_center(
+            seed,
+            x.clamp(cell_x - 31, cell_x + 31),
+            z.clamp(cell_z - 26, cell_z + 26),
+        )?;
+        let offset_x = (i64::from(x) - i64::from(cx)).abs();
+        let offset_z = (i64::from(z) - i64::from(cz)).abs();
+        if offset_x > 47 || offset_z > 42 {
+            return None;
+        }
+
+        let core = self.village_doors_including_player_edits(cx, cz)?;
+        if core.is_empty() {
+            return None;
+        }
+        let mut doors: BTreeSet<[i32; 3]> = core.iter().copied().collect();
+        let mut annex = Vec::new();
+        for (&(dx, dy, dz), &lower) in self.edits.range(
+            (cx.saturating_sub(47), 0u8, i32::MIN)..=(cx.saturating_add(47), u8::MAX, i32::MAX),
+        ) {
+            if doors.len() >= 128 {
+                break;
+            }
+            let x_distance = (i64::from(dx) - i64::from(cx)).abs();
+            let z_distance = (i64::from(dz) - i64::from(cz)).abs();
+            if z_distance > 42
+                || (x_distance <= 31 && z_distance <= 26)
+                || dy == u8::MAX
+                || lower >> 4 != 64
+                || lower & 8 != 0
+            {
+                continue;
+            }
+            let upper = self.get(dx, i32::from(dy) + 1, dz);
+            if upper >> 4 != 64 || upper & 8 == 0 {
+                continue;
+            }
+            let connected = core.iter().any(|[ax, _, az]| {
+                let x_delta = i64::from(dx) - i64::from(*ax);
+                let z_delta = i64::from(dz) - i64::from(*az);
+                x_delta * x_delta + z_delta * z_delta <= 16 * 16
+            });
+            if connected {
+                let door = [dx, i32::from(dy), dz];
+                if doors.insert(door) {
+                    annex.push(door);
+                }
+            }
+        }
+        // Outside the original footprint, a nearby live annex door is
+        // required; do not make empty terrain count as an expanded village.
+        if (offset_x > 31 || offset_z > 26)
+            && !annex.iter().any(|[ax, _, az]| {
+                let x_delta = i64::from(x) - i64::from(*ax);
+                let z_delta = i64::from(z) - i64::from(*az);
+                x_delta * x_delta + z_delta * z_delta <= 16 * 16
+            })
+        {
+            return None;
+        }
+        Some(doors.into_iter().collect())
+    }
     /// Bounded lookup of intact dungeon spawners close to active players.
     /// IRW4 generated sites are indexed by their 64-block feature cells so
     /// this never walks ungenerated chunks or scans a large 3D volume.
@@ -1922,6 +2000,65 @@ mod tests {
         assert_eq!(
             World::expanded(seed, crate::dimensions::Dimension::Nether)
                 .village_doors_including_player_edits(cx, cz),
+            None
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn village_annex_uses_only_connected_live_doors_and_survives_restart() {
+        let seed = 42;
+        let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+        let (cx, _, cz) = (-8..=8)
+            .flat_map(|gx| (-8..=8).map(move |gz| (gx * 192 + 48, gz * 192 + 48)))
+            .find_map(|(x, z)| crate::worldgen::village_center(seed, x, z))
+            .expect("seed 42 has a generated village");
+        let anchor = world.live_village_house_doors(cx, cz).unwrap()[1].unwrap();
+        let annex = [anchor[0] + 15, anchor[1], anchor[2]];
+        let disconnected = [anchor[0] + 17, anchor[1], anchor[2]];
+        assert_eq!(
+            world.village_doors_with_bounded_annex(annex[0], annex[2]),
+            None
+        );
+        for door in [annex, disconnected] {
+            world
+                .import_block(door[0], door[1], door[2], 64 << 4 | 2)
+                .unwrap();
+            world
+                .import_block(door[0], door[1] + 1, door[2], 64 << 4 | 8)
+                .unwrap();
+        }
+        let active = world
+            .village_doors_with_bounded_annex(annex[0], annex[2])
+            .unwrap();
+        assert!(active.contains(&annex));
+        assert!(!active.contains(&disconnected));
+        assert!(!world
+            .village_doors_including_player_edits(cx, cz)
+            .unwrap()
+            .contains(&annex));
+        assert_eq!(world.village_doors_with_bounded_annex(cx + 48, cz), None);
+
+        let path =
+            std::env::temp_dir().join(format!("ir1710-village-annex-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        world.save(&path).unwrap();
+        let mut restored = World::load(&path).unwrap();
+        assert!(restored
+            .village_doors_with_bounded_annex(annex[0], annex[2])
+            .unwrap()
+            .contains(&annex));
+        restored
+            .import_block(annex[0], annex[1] + 1, annex[2], 0)
+            .unwrap();
+        assert_eq!(
+            restored.village_doors_with_bounded_annex(annex[0], annex[2]),
+            None
+        );
+        assert_eq!(restored.village_doors_with_bounded_annex(i32::MIN, 0), None);
+        assert_eq!(
+            World::expanded(seed, crate::dimensions::Dimension::Nether)
+                .village_doors_with_bounded_annex(cx, cz),
             None
         );
         fs::remove_file(path).unwrap();
