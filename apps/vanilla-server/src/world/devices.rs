@@ -668,7 +668,13 @@ mod redstone_regression_tests {
         w.import_block(0, 63, 0, 1 << 4).unwrap();
         assert_eq!(w.strong_signal_into((0, 64, 0), (0, 63, 0)), 9);
         assert_eq!(w.signal_into((0, 63, 0), (1, 63, 0)), 9);
-        for target in [(1, 64, 0), (-1, 64, 0), (0, 64, 1), (0, 64, -1), (0, 65, 0)] {
+        for target in [
+            (1, 64, 0),
+            (-1, 64, 0),
+            (0, 64, 1),
+            (0, 64, -1),
+            (0, 65, 0),
+        ] {
             assert_eq!(w.strong_signal_into((0, 64, 0), target), 0);
         }
         // Signal strength still determines the current carried through a cube.
