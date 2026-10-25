@@ -804,6 +804,8 @@ mod tests {
             assert_eq!(aboveground(42, 0, SEA - 2, 0, SEA - 3, biome_id), b(9));
         }
         assert_eq!(aboveground(42, 0, SEA, 0, SEA - 3, 7), b(9));
+        // Cold beaches do not freeze their water into an ocean ice sheet.
+        assert_eq!(aboveground(42, 0, SEA, 0, SEA - 3, 26), b(9));
     }
 
     #[test]
