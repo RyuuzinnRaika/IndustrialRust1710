@@ -503,9 +503,7 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
             }
             // Glazed windows on both side walls and the rear wall. Keep
             // corner logs, the doorway and the roof unchanged.
-            if y == base + 3
-                && ((a.abs() == 4 && c == 0) || (c.abs() == 4 && a.abs() == 2))
-            {
+            if y == base + 3 && ((a.abs() == 4 && c == 0) || (c.abs() == 4 && a.abs() == 2)) {
                 return Some(b(20));
             }
             return Some(if a.abs() == 4 && c.abs() == 4 {
@@ -946,7 +944,13 @@ mod tests {
                     // replaced by glass at either half of the wooden door.
                     for (a, c) in [(-4, -4), (-4, 4), (4, -4), (4, 4)] {
                         assert_eq!(
-                            block(seed, Dimension::Overworld, cx + hx + a, base + 3, cz + hz + c),
+                            block(
+                                seed,
+                                Dimension::Overworld,
+                                cx + hx + a,
+                                base + 3,
+                                cz + hz + c
+                            ),
                             b(17)
                         );
                     }
