@@ -664,19 +664,40 @@ fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition) -> bool 
     if !physics::supported(world, &at) || physics::collides(world, &at) {
         return false;
     }
-    // Fluids do not have solid collision boxes. Vanilla's natural-spawn
-    // eligibility separately rejects liquid inside a land mob's body.
-    // Check the occupied vertical cells; Endermen need a third head cell,
-    // while spiders are shorter than one block.
-    let x = at.x.floor() as i32;
+    // Fluids have no solid collision boxes. Test the horizontal extent of
+    // the species' body, not just the center column: a spider/horse can
+    // overlap liquid in the next block while its feet remain on dry ground.
+    let half_width = match kind {
+        Kind::Spider | Kind::Horse | Kind::IronGolem => 0.7,
+        Kind::Cow | Kind::Pig | Kind::Sheep => 0.45,
+        Kind::CaveSpider => 0.35,
+        Kind::Chicken => 0.2,
+        _ => 0.3,
+    };
     let y = at.y.floor() as i32;
-    let z = at.z.floor() as i32;
     let body_height = match kind {
-        Kind::Enderman => 3,
-        Kind::Spider | Kind::CaveSpider => 1,
+        Kind::Enderman | Kind::IronGolem => 3,
+        Kind::Spider | Kind::CaveSpider | Kind::Chicken => 1,
         _ => 2,
     };
-    (0..body_height).all(|dy| !matches!(world.get(x, y + dy, z) >> 4, 8..=11))
+    let min_x = (at.x - half_width).floor() as i32;
+    let max_x = (at.x + half_width).floor() as i32;
+    let min_z = (at.z - half_width).floor() as i32;
+    let max_z = (at.z + half_width).floor() as i32;
+    (min_x..=max_x).all(|x| {
+        (min_z..=max_z).all(|z| {
+            // A face-touching block has zero overlap and is not inside the
+            // entity's AABB (important at exact integer boundaries).
+            if (x + 1) as f64 <= at.x - half_width
+                || x as f64 >= at.x + half_width
+                || (z + 1) as f64 <= at.z - half_width
+                || z as f64 >= at.z + half_width
+            {
+                return true;
+            }
+            (0..body_height).all(|dy| !matches!(world.get(x, y + dy, z) >> 4, 8..=11))
+        })
+    })
 }
 
 /// A bounded, collision-swept aerial step. Ghasts keep their distance and
@@ -3381,6 +3402,43 @@ mod tests {
             world.import_block(0, 67, 0, fluid << 4).unwrap();
             assert!(!natural_spawn_body_ok(&world, Kind::Enderman, at));
         }
+    }
+
+    #[test]
+    fn wide_natural_mobs_reject_fluid_in_adjacent_body_columns() {
+        let center = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        for fluid in [8u16, 9, 10, 11] {
+            let mut world = World::new();
+            world.import_block(0, 64, 0, 1 << 4).unwrap();
+            for kind in [Kind::Spider, Kind::Horse, Kind::IronGolem] {
+                assert!(natural_spawn_body_ok(&world, kind, center));
+            }
+            world.import_block(1, 65, 0, fluid << 4).unwrap();
+            // Wide mobs overlap x=1 even though their center is in x=0.
+            for kind in [Kind::Spider, Kind::Horse, Kind::IronGolem] {
+                assert!(!natural_spawn_body_ok(&world, kind, center));
+            }
+            // A 0.6-wide zombie at the center does not overlap x=1.
+            assert!(natural_spawn_body_ok(&world, Kind::Zombie, center));
+            let edge = PlayerPosition { x: 0.85, ..center };
+            assert!(!natural_spawn_body_ok(&world, Kind::Cow, edge));
+        }
+
+        // Negative coordinates and the Z axis use the same AABB logic.
+        let mut world = World::new();
+        world.import_block(-1, 64, -1, 1 << 4).unwrap();
+        let negative = PlayerPosition {
+            x: -0.5,
+            y: 65.0,
+            z: -0.5,
+        };
+        assert!(natural_spawn_body_ok(&world, Kind::Spider, negative));
+        world.import_block(-1, 65, 0, 9 << 4).unwrap();
+        assert!(!natural_spawn_body_ok(&world, Kind::Spider, negative));
     }
 
     #[test]
