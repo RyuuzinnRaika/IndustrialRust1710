@@ -1231,10 +1231,7 @@ mod tests {
                     for (a, c) in [(-4, -4), (-4, 0), (0, 0), (4, 0), (4, 4)] {
                         let x = cx + hx + a;
                         let z = cz + hz + c;
-                        assert_eq!(
-                            block(seed, Dimension::Overworld, x, base + 5, z),
-                            b(5)
-                        );
+                        assert_eq!(block(seed, Dimension::Overworld, x, base + 5, z), b(5));
                         for y in base + 6..=base + 7 {
                             assert_eq!(village(seed, x, y, z), Some(AIR));
                             assert_eq!(
