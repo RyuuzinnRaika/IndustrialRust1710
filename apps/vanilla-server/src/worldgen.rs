@@ -904,10 +904,7 @@ mod tests {
                 }
                 let base = height(seed, cx, cz);
                 for (dx, dz) in [(0, 0), (-31, -26), (-31, 26), (31, -26), (31, 26)] {
-                    assert_eq!(
-                        village_center(seed, cx + dx, cz + dz),
-                        Some((cx, base, cz))
-                    );
+                    assert_eq!(village_center(seed, cx + dx, cz + dz), Some((cx, base, cz)));
                 }
                 for (dx, dz) in [(-32, 0), (32, 0), (0, -27), (0, 27)] {
                     assert_eq!(village_center(seed, cx + dx, cz + dz), None);
