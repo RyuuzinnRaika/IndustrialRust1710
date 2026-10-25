@@ -4,7 +4,7 @@
 //! This preserves the wire representation and all unknown tags through moves.
 use fastnbt::Value;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serializer};
 use std::collections::HashMap;
 use std::io::{self, ErrorKind, Read, Write};
 use std::sync::{Mutex, OnceLock};

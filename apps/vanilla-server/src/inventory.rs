@@ -64,7 +64,7 @@ impl Stack {
     }
     pub fn is_valid(self) -> bool {
         crate::items_1710::valid_stack(self.id, self.count, self.damage)
-            && self.nbt.map_or(true, crate::item_nbt::is_live)
+            && self.nbt.is_none_or(crate::item_nbt::is_live)
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2900,13 +2900,15 @@ mod tests {
 
     #[test]
     fn enchant_choice_debits_exact_xp_and_survives_save_reload() {
-        let mut inv = Inventory::default();
-        inv.enchant_input = Some(Stack {
-            id: 257,
-            count: 1,
-            damage: 12,
-            nbt: None,
-        });
+        let mut inv = Inventory {
+            enchant_input: Some(Stack {
+                id: 257,
+                count: 1,
+                damage: 12,
+                nbt: None,
+            }),
+            ..Inventory::default()
+        };
         let mut xp = crate::experience::Experience { total: 2000 };
         let old = inv.clone();
         let old_xp = xp;
@@ -2926,8 +2928,10 @@ mod tests {
             assert!(!inv.enchant_choice(2, [1, 2, 30], 42, &mut xp, true));
             assert_eq!(inv, snapshot);
         }
-        let mut empty = Inventory::default();
-        empty.enchant_input = old.enchant_input;
+        let mut empty = Inventory {
+            enchant_input: old.enchant_input,
+            ..Inventory::default()
+        };
         let mut no_xp = crate::experience::Experience::default();
         assert!(!empty.enchant_choice(2, [1, 2, 30], 42, &mut no_xp, true));
         assert_eq!(empty, old);
