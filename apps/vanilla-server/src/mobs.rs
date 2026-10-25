@@ -592,6 +592,24 @@ fn spawn_light_ok(block: u8, sky: u8, now: u64, passive: bool) -> bool {
         block < 8 && effective_sky < 8
     }
 }
+
+/// Vanilla 1.7.10 slime chunks allow underground slimes at Y < 40
+/// regardless of light level. Swamp surface slimes and every other species
+/// still obey the ordinary spawn-light check.
+fn natural_spawn_species_light_ok(
+    kind: Kind,
+    world_seed: u64,
+    x: i32,
+    y: i32,
+    z: i32,
+    block: u8,
+    sky: u8,
+    now: u64,
+    passive: bool,
+) -> bool {
+    (kind == Kind::Slime && is_slime_cave_location(world_seed, x, y, z))
+        || spawn_light_ok(block, sky, now, passive)
+}
 /// Ghasts are four blocks wide and tall. Reusing the player's narrow
 /// collision hull lets them clip through fortress walls, so the conservative
 /// volume test rejects solid blocks throughout their body.
@@ -1992,16 +2010,14 @@ impl Mobs {
             }
             let grass = world.get(x, y - 1, z) >> 4 == 2;
             let open = sky_exposed(world, position);
-            let (block_light, sky_light) = world.light_at(x, y, z);
             let overworld = dimension == crate::dimensions::Dimension::Overworld;
             let is_passive = overworld
                 && grass
                 && open
                 && now.is_multiple_of(400)
                 && natural_spawn_passive_roll(seed);
-            if overworld && !spawn_light_ok(block_light, sky_light, now, is_passive) {
-                continue;
-            }
+            // Select the species before applying light rules: slime-chunk
+            // cave spawns are legal even at light level 15.
             let kind = if is_passive {
                 if passive >= passive_cap || matches!(biome, 0 | 2 | 7 | 8 | 9 | 10 | 11 | 16 | 24)
                 {
@@ -2101,7 +2117,17 @@ impl Mobs {
                 }
                 if overworld {
                     let (block, sky) = world.light_at(cx, cy, cz);
-                    if !spawn_light_ok(block, sky, now, is_passive) {
+                    if !natural_spawn_species_light_ok(
+                        kind,
+                        world.natural_seed().unwrap_or(0),
+                        cx,
+                        cy,
+                        cz,
+                        block,
+                        sky,
+                        now,
+                        is_passive,
+                    ) {
                         continue;
                     }
                 }
@@ -3762,6 +3788,36 @@ mod tests {
             }
             assert_eq!(natural_spawn_passive_roll(seed), seed & 2 == 0);
         }
+    }
+
+    #[test]
+    fn slime_chunk_cave_spawns_ignore_light_without_weakening_other_spawn_rules() {
+        let seed = 0;
+        let slime_chunk = (0..128)
+            .find(|&chunk| is_slime_chunk(seed, chunk, 0))
+            .expect("find a slime chunk");
+        let other_chunk = (0..128)
+            .find(|&chunk| !is_slime_chunk(seed, chunk, 0))
+            .expect("find a non-slime chunk");
+        let sx = slime_chunk * 16 + 8;
+        let ox = other_chunk * 16 + 8;
+        let now = 6000; // Daytime, so ordinary hostile light rules reject 15.
+        assert!(!spawn_light_ok(15, 15, now, false));
+        assert!(natural_spawn_species_light_ok(
+            Kind::Slime, seed, sx, 30, 8, 15, 15, now, false
+        ));
+        assert!(!natural_spawn_species_light_ok(
+            Kind::Slime, seed, ox, 30, 8, 15, 15, now, false
+        ));
+        assert!(!natural_spawn_species_light_ok(
+            Kind::Slime, seed, sx, 40, 8, 15, 15, now, false
+        ));
+        assert!(!natural_spawn_species_light_ok(
+            Kind::Zombie, seed, sx, 30, 8, 15, 15, now, false
+        ));
+        assert!(natural_spawn_species_light_ok(
+            Kind::Cow, seed, sx, 65, 8, 15, 15, now, true
+        ));
     }
 
     #[test]
