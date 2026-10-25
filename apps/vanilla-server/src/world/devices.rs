@@ -67,6 +67,7 @@ fn movable(block: u16) -> bool {
                 | 29
                 | 33
                 | 34
+                | 36 // moving piston (transient block, never pushable)
                 | 49 // obsidian
                 | 52 // spawner
                 | 54
@@ -1003,6 +1004,26 @@ mod redstone_regression_tests {
             assert!(
                 changes.is_empty(),
                 "piston must not overwrite or displace portal block {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn piston_does_not_push_moving_piston_blocks() {
+        // ID 36 is the transient moving-piston block, not an ordinary solid.
+        // It must not be displaced or overwritten by another piston.
+        for piston_id in [29u16, 33] {
+            let mut world = World::new();
+            world.import_block(-2, 64, 0, (69 << 4) | 8).unwrap();
+            world.import_block(-1, 64, 0, (piston_id << 4) | 5).unwrap();
+            world.import_block(0, 64, 0, 36 << 4).unwrap();
+
+            assert!(!movable(36 << 4));
+            let mut changes = BTreeMap::new();
+            world.push_piston(-1, 64, 0, (piston_id << 4) | 5, &mut changes);
+            assert!(
+                changes.is_empty(),
+                "piston {piston_id} must not push a moving piston block"
             );
         }
     }
