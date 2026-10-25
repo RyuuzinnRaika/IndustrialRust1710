@@ -146,6 +146,9 @@ impl Devices {
     /// selecting the same slot on every activation of nearby devices. This is
     /// deterministic for redo-journal replay, not Java Random compatibility.
     pub fn stage_eject(&self, pos: Position, seed: u64) -> io::Result<Option<(Self, Stack)>> {
+        if !world::in_bounds(pos.0, pos.1, pos.2) {
+            return Err(invalid("device position outside world"));
+        }
         let slots = self.slots(pos);
         let filled: Vec<usize> = slots
             .iter()
@@ -183,6 +186,11 @@ impl Devices {
         destination: Position,
         seed: u64,
     ) -> io::Result<Option<Self>> {
+        if !world::in_bounds(source.0, source.1, source.2)
+            || !world::in_bounds(destination.0, destination.1, destination.2)
+        {
+            return Err(invalid("device position outside world"));
+        }
         if source == destination {
             return Ok(None);
         }
@@ -370,6 +378,23 @@ mod tests {
             .enumerate()
             .all(|(index, hit)| [0, 4, 8].contains(&index) || !hit));
         assert_eq!(devices.slots(pos), slots);
+    }
+
+    #[test]
+    fn invalid_device_coordinates_fail_closed_before_ejection_or_transfer() {
+        let source = (0, 65, 0);
+        let invalid_position = (0, -1, 0);
+        let mut slots = [None; DEVICE_SLOTS];
+        slots[0] = Some(Stack {
+            id: 1,
+            count: 1,
+            damage: 0,
+        });
+        let devices = Devices::default().staged_update(source, slots).unwrap();
+        assert!(devices.stage_eject(invalid_position, 0).is_err());
+        assert!(devices.stage_transfer_one(source, invalid_position, 0).is_err());
+        assert!(devices.stage_transfer_one(invalid_position, source, 0).is_err());
+        assert_eq!(devices.slots(source), slots);
     }
 
     #[test]
