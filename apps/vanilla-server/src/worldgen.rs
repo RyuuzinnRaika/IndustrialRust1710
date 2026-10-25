@@ -480,6 +480,12 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
                 b(9)
             });
         }
+        // Clear the entire well footprint above the rim, including its
+        // corners outside the road. Nearby hills must not seal the water
+        // under dirt or leave the well inaccessible from above.
+        if (base + 2..=base + 5).contains(&y) {
+            return Some(AIR);
+        }
     }
     // Keep the remaining road open for player movement.
     if dz.abs() <= 1 && dx.abs() <= 29 {
@@ -901,6 +907,18 @@ mod tests {
                             block(seed, Dimension::Overworld, cx + dx, base + 1, cz + dz),
                             expected
                         );
+                        // The entire 5x5 well remains accessible above its
+                        // rim even when natural terrain is higher nearby.
+                        for y in base + 2..=base + 5 {
+                            assert_eq!(
+                                block(seed, Dimension::Overworld, cx + dx, y, cz + dz),
+                                AIR,
+                                "blocked well headroom at ({}, {}, {})",
+                                cx + dx,
+                                y,
+                                cz + dz
+                            );
+                        }
                     }
                 }
                 assert_eq!(village(seed, cx + 5, base, cz), Some(b(13)));
