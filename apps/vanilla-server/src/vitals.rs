@@ -362,9 +362,7 @@ mod tests {
             id,
             count: 1,
             damage: 0,
-        },
-        nbt: None,
-    t: None,
+            nbt: None,
         }
     }
     #[test]
