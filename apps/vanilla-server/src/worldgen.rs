@@ -968,7 +968,10 @@ mod tests {
                     continue;
                 };
                 let doors = village_house_doors(seed, cx, cz).unwrap();
-                assert_eq!(doors, [[cx - 17, base + 1, cz - 5], [cx + 17, base + 1, cz + 5]]);
+                assert_eq!(
+                    doors,
+                    [[cx - 17, base + 1, cz - 5], [cx + 17, base + 1, cz + 5]]
+                );
                 for (index, [x, y, z]) in doors.into_iter().enumerate() {
                     let facing = if index == 0 { 0 } else { 2 };
                     assert_eq!(village(seed, x, y, z), Some(state(64, facing)));
