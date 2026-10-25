@@ -213,5 +213,4 @@ mod tests {
         assert!(verify_tree_exact(&root.join("source"), &root.join("copy"), 0).is_err());
         fs::remove_dir_all(root).unwrap();
     }
-
 }
