@@ -456,7 +456,11 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
             .any(|&(hx, hz)| (dx - hx).abs() <= 4 && (dz - hz).abs() <= 4);
         let farm = (9..=20).contains(&dx) && (-22..=-13).contains(&dz);
         if (road || well || path || house || farm) && y > height(seed, x, z) {
-            return Some(if farm && !matches!(dx, 11 | 15 | 19) { b(3) } else { b(4) });
+            return Some(if farm && !matches!(dx, 11 | 15 | 19) {
+                b(3)
+            } else {
+                b(4)
+            });
         }
     }
     // The central well must take precedence over the crossing road.
@@ -557,7 +561,11 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
             });
         }
         if y == base + 1 {
-            return Some(if matches!(dx, 11 | 15 | 19) { AIR } else { state(59, 7) });
+            return Some(if matches!(dx, 11 | 15 | 19) {
+                AIR
+            } else {
+                state(59, 7)
+            });
         }
     }
     None
