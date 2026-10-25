@@ -552,6 +552,31 @@ fn distance(a: PlayerPosition, b: PlayerPosition) -> f64 {
 fn distance_3d(a: PlayerPosition, b: PlayerPosition) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
 }
+/// Choose a reachable-side approach point for an intact generated house door.
+/// Re-read the authoritative world on each decision: removed/replaced doors
+/// must not remain AI goals. This is bounded to the two generated doors and
+/// does not yet discover player-built doors or model a dynamic village.
+fn villager_door_destination(world: &World, at: PlayerPosition) -> Option<PlayerPosition> {
+    if !at.is_valid() {
+        return None;
+    }
+    let doors = world.live_village_house_doors(at.x.floor() as i32, at.z.floor() as i32)?;
+    doors
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, door)| {
+            let [x, y, z] = door?;
+            // Both generated house entrances face the village road. Approach
+            // from outside rather than pathfinding into a closed door block.
+            let target = PlayerPosition {
+                x: f64::from(x) + 0.5,
+                y: f64::from(y),
+                z: f64::from(z) + if index == 0 { 1.5 } else { -0.5 },
+            };
+            (distance_3d(at, target) <= 32.0).then_some(target)
+        })
+        .min_by(|a, b| distance_3d(at, *a).total_cmp(&distance_3d(at, *b)))
+}
 fn can_see(world: &World, source: PlayerPosition, target: PlayerPosition) -> bool {
     let start = PlayerPosition {
         y: source.y + 1.3,
@@ -2457,6 +2482,11 @@ impl Mobs {
                     .min_by(|a, b| {
                         distance(*a, mob.position).total_cmp(&distance(*b, mob.position))
                     });
+                let village_target = if mob.kind == Kind::Villager {
+                    villager_door_destination(world, mob.position)
+                } else {
+                    None
+                };
                 let prey = (mob.kind == Kind::Zombie)
                     .then(|| {
                         villagers
@@ -2480,8 +2510,11 @@ impl Mobs {
                         villager
                     }
                     (None, Some(villager)) => villager,
-                    (Some(player), _) => player,
-                    _ => continue,
+                    (Some(player), _) => village_target.unwrap_or(player),
+                    (None, None) => match village_target {
+                        Some(door) => door,
+                        None => continue,
+                    },
                 };
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider)
                     && mob.bright_spider
@@ -2582,7 +2615,9 @@ impl Mobs {
                     }
                     continue;
                 }
-                let destination = if mob.kind == Kind::Skeleton && d < 7.0 {
+                let destination = if mob.kind == Kind::Villager && village_target.is_some() {
+                    target
+                } else if mob.kind == Kind::Skeleton && d < 7.0 {
                     PlayerPosition {
                         x: mob.position.x + (mob.position.x - target.x),
                         z: mob.position.z + (mob.position.z - target.z),
@@ -4404,6 +4439,76 @@ mod tests {
         assert_eq!(mobs.orbs.len(), 1);
         assert_eq!(mobs.orbs.values().next().unwrap().1, 2);
         assert_eq!(events.iter().filter(|event| event.id == 0x11).count(), 1);
+    }
+
+    #[test]
+    fn villager_ai_tracks_live_village_doors_without_a_player_target() {
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        let mut village = None;
+        'search: for gx in -8..=8 {
+            for gz in -8..=8 {
+                let x = gx * 192 + 48;
+                let z = gz * 192 + 48;
+                if let Some([Some(first), Some(second)]) =
+                    world.live_village_house_doors(x, z)
+                {
+                    village = Some((x, z, first, second));
+                    break 'search;
+                }
+            }
+        }
+        let (cx, cz, first, second) = village.expect("seed 42 has generated villages");
+        let middle = PlayerPosition {
+            x: f64::from(cx) + 0.5,
+            y: f64::from(first[1]),
+            z: f64::from(cz) + 0.5,
+        };
+        let first_goal = PlayerPosition {
+            x: f64::from(first[0]) + 0.5,
+            y: f64::from(first[1]),
+            z: f64::from(first[2]) + 1.5,
+        };
+        let second_goal = PlayerPosition {
+            x: f64::from(second[0]) + 0.5,
+            y: f64::from(second[1]),
+            z: f64::from(second[2]) - 0.5,
+        };
+        assert_eq!(villager_door_destination(&world, middle), Some(first_goal));
+
+        // The mob tick must use the live door even without a nearby player.
+        let outside = PlayerPosition {
+            z: f64::from(first[2]) + 3.5,
+            ..first_goal
+        };
+        let mut mobs = Mobs::new_with_difficulty(&world, false, 2);
+        let id = mobs.next_id;
+        mobs.insert(Kind::Villager, outside, false);
+        mobs.tick(1, &world, &[]);
+        let villager = mobs.entities.get(&id).unwrap();
+        assert!(
+            villager.position != outside || villager.waypoint.is_some(),
+            "villager must plan or move toward an intact generated door"
+        );
+
+        let original_lower = world.get(first[0], first[1], first[2]);
+        world.import_block(first[0], first[1], first[2], 0).unwrap();
+        assert_eq!(villager_door_destination(&world, middle), Some(second_goal));
+        world.import_block(second[0], second[1], second[2], 1 << 4).unwrap();
+        assert_eq!(villager_door_destination(&world, middle), None);
+        let before = mobs.entities.get(&id).unwrap().position;
+        mobs.tick(2, &world, &[]);
+        assert_eq!(mobs.entities.get(&id).unwrap().position, before);
+        world
+            .import_block(first[0], first[1], first[2], original_lower)
+            .unwrap();
+        assert_eq!(villager_door_destination(&world, middle), Some(first_goal));
+        assert_eq!(
+            villager_door_destination(
+                &World::expanded(42, crate::dimensions::Dimension::Nether),
+                middle
+            ),
+            None
+        );
     }
 
     #[test]
