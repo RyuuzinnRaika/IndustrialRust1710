@@ -1341,9 +1341,9 @@ impl World {
             return Err(io::Error::new(
                 err.kind(),
                 format!(
-                        "failed to write new world staging file {}: {err}",
-                        staging.display()
-                    ),
+                    "failed to write new world staging file {}: {err}",
+                    staging.display()
+                ),
             ));
         }
         let published = fs::hard_link(&staging, path).map_err(|err| {
