@@ -238,7 +238,12 @@ impl PlayerPosition {
     }
 
     /// Persists the position, vitals and active dimension in the same NBT write.
-    pub fn save_state_in_dimension(&self, path: &Path, vitals: Vitals, dimension: i32) -> io::Result<()> {
+    pub fn save_state_in_dimension(
+        &self,
+        path: &Path,
+        vitals: Vitals,
+        dimension: i32,
+    ) -> io::Result<()> {
         if !matches!(dimension, -1 | 0 | 1) {
             return Err(invalid("unsupported player dimension"));
         }
@@ -327,12 +332,23 @@ mod tests {
         let parent = std::env::temp_dir().join(format!("ir1710-dimension-{}", std::process::id()));
         let _ = fs::remove_dir_all(&parent);
         let file = parent.join("player.dat");
-        let position = PlayerPosition { x: -100.5, y: 75.0, z: 22.5 };
+        let position = PlayerPosition {
+            x: -100.5,
+            y: 75.0,
+            z: 22.5,
+        };
         for dimension in [-1, 0, 1] {
-            position.save_state_in_dimension(&file, Vitals::default(), dimension).unwrap();
-            assert_eq!(PlayerPosition::load_state_with_dimension(&file).unwrap(), (position, Vitals::default(), dimension));
+            position
+                .save_state_in_dimension(&file, Vitals::default(), dimension)
+                .unwrap();
+            assert_eq!(
+                PlayerPosition::load_state_with_dimension(&file).unwrap(),
+                (position, Vitals::default(), dimension)
+            );
         }
-        assert!(position.save_state_in_dimension(&file, Vitals::default(), 2).is_err());
+        assert!(position
+            .save_state_in_dimension(&file, Vitals::default(), 2)
+            .is_err());
         fs::remove_dir_all(parent).unwrap();
     }
 
