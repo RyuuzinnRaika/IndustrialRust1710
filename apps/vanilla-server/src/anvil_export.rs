@@ -104,6 +104,42 @@ struct LevelInfo {
     initialized: i8,
 }
 
+/// Project IRW4 spawner blocks to vanilla 1.7.10 "MobSpawner"
+/// TileEntities. The native IRW world remains authoritative; this is an
+/// offline snapshot, not live TileEntity persistence or a saved cooldown.
+fn spawner_tile_entities(world: &World, cx: i32, cz: i32) -> io::Result<Vec<fastnbt::Value>> {
+    let mut output = Vec::new();
+    for (x, y, z) in world.spawners_in_chunk(cx, cz) {
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "EntityId".to_owned(),
+            fastnbt::Value::String(crate::mobs::dungeon_spawner_entity_id(x, y, z).to_owned()),
+        );
+        for (field, value) in [
+            ("Delay", 20),
+            ("MinSpawnDelay", 200),
+            ("MaxSpawnDelay", 800),
+            ("SpawnCount", 4),
+            ("MaxNearbyEntities", 6),
+            ("RequiredPlayerRange", 16),
+            ("SpawnRange", 4),
+        ] {
+            extra.insert(field.to_owned(), fastnbt::Value::Short(value));
+        }
+        let tile = crate::legacy_inventory_nbt::TileEntity {
+            id: "MobSpawner".to_owned(),
+            x,
+            y,
+            z,
+            items: None,
+            extra,
+        };
+        let encoded = fastnbt::to_bytes(&tile).map_err(wrap)?;
+        output.push(fastnbt::from_bytes(&encoded).map_err(wrap)?);
+    }
+    Ok(output)
+}
+
 fn nbt_for_chunk(world: &World, cx: i32, cz: i32, tiles: &[fastnbt::Value]) -> io::Result<Vec<u8>> {
     let mut sections = Vec::new();
     let base_x = cx * 16;
@@ -155,7 +191,12 @@ fn nbt_for_chunk(world: &World, cx: i32, cz: i32, tiles: &[fastnbt::Value]) -> i
             height_map: IntArray::new(heights),
             sections,
             entities: Vec::new(),
-            tile_entities: tiles.to_vec(),
+            tile_entities: {
+                let mut collected = tiles.to_vec();
+                collected.extend(spawner_tile_entities(world, cx, cz)?);
+                crate::legacy_inventory_nbt::validate_tiles(&collected, Some((cx, cz)))?;
+                collected
+            },
         },
     };
     fastnbt::to_bytes(&root).map_err(wrap)
@@ -359,6 +400,39 @@ mod tests {
         blocks: ByteArray,
         #[serde(rename = "Data")]
         metadata: ByteArray,
+    }
+
+    #[test]
+    fn generated_spawners_project_valid_1710_nbt_without_orphans() {
+        use crate::dimensions::Dimension;
+        use crate::legacy_inventory_nbt::TileEntity;
+        let seed = 42;
+        let mut world = World::expanded(seed, Dimension::Overworld);
+        let (x, y, z) = crate::worldgen::dungeon_spawner_in_cell(seed, -1, 0);
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        let tiles = spawner_tile_entities(&world, cx, cz).unwrap();
+        assert_eq!(tiles.len(), 1);
+        crate::legacy_inventory_nbt::validate_tiles(&tiles, Some((cx, cz))).unwrap();
+        let tile: TileEntity = fastnbt::from_bytes(&fastnbt::to_bytes(&tiles[0]).unwrap()).unwrap();
+        assert_eq!(tile.id, "MobSpawner");
+        assert_eq!((tile.x, tile.y, tile.z), (x, y, z));
+        assert_eq!(
+            tile.extra["EntityId"],
+            fastnbt::Value::String(crate::mobs::dungeon_spawner_entity_id(x, y, z).to_owned())
+        );
+        assert_eq!(tile.extra["Delay"], fastnbt::Value::Short(20));
+        assert_eq!(tile.extra["RequiredPlayerRange"], fastnbt::Value::Short(16));
+
+        // A player breaking a generated dungeon spawner must not resurrect
+        // its tile entity when the Anvil snapshot is created.
+        world.import_block(x, y, z, 0).unwrap();
+        assert!(spawner_tile_entities(&world, cx, cz).unwrap().is_empty());
+
+        // Explicitly placed spawners work for old flat worlds as well.
+        let mut flat = World::new();
+        flat.import_block(-1, 81, -1, 52 << 4).unwrap();
+        assert_eq!(spawner_tile_entities(&flat, -1, -1).unwrap().len(), 1);
+        assert!(spawner_tile_entities(&flat, 0, 0).unwrap().is_empty());
     }
 
     #[test]
