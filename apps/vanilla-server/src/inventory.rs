@@ -2877,14 +2877,28 @@ mod tests {
     fn d31_tagged_items_never_merge_with_distinct_nbt() {
         use fastnbt::Value;
         use std::collections::HashMap;
-        let a = crate::item_nbt::from_value(&Value::Compound(HashMap::from([
-            ("Unique".into(), Value::String("alpha".into())),
-        ]))).unwrap();
-        let b = crate::item_nbt::from_value(&Value::Compound(HashMap::from([
-            ("Unique".into(), Value::String("beta".into())),
-        ]))).unwrap();
-        let alpha = Stack { id: 1, count: 10, damage: 0, nbt: Some(a) };
-        let beta = Stack { id: 1, count: 5, damage: 0, nbt: Some(b) };
+        let a = crate::item_nbt::from_value(&Value::Compound(HashMap::from([(
+            "Unique".into(),
+            Value::String("alpha".into()),
+        )])))
+        .unwrap();
+        let b = crate::item_nbt::from_value(&Value::Compound(HashMap::from([(
+            "Unique".into(),
+            Value::String("beta".into()),
+        )])))
+        .unwrap();
+        let alpha = Stack {
+            id: 1,
+            count: 10,
+            damage: 0,
+            nbt: Some(a),
+        };
+        let beta = Stack {
+            id: 1,
+            count: 5,
+            damage: 0,
+            nbt: Some(b),
+        };
         let mut inv = Inventory::default();
         inv.slots[36] = Some(alpha);
         assert_eq!(inv.receive_stack(beta), Some(vec![37]));
@@ -2894,8 +2908,20 @@ mod tests {
         let loaded: Inventory = serde_json::from_slice(&saved).unwrap();
         assert_eq!(loaded.slots[36], Some(alpha));
         assert_eq!(loaded.slots[37], Some(beta));
-        assert_eq!(crate::item_nbt::wire(a), loaded.slots[36].unwrap().nbt.and_then(crate::item_nbt::wire));
-        assert_eq!(crate::item_nbt::wire(b), loaded.slots[37].unwrap().nbt.and_then(crate::item_nbt::wire));
+        assert_eq!(
+            crate::item_nbt::wire(a),
+            loaded.slots[36]
+                .unwrap()
+                .nbt
+                .and_then(crate::item_nbt::wire)
+        );
+        assert_eq!(
+            crate::item_nbt::wire(b),
+            loaded.slots[37]
+                .unwrap()
+                .nbt
+                .and_then(crate::item_nbt::wire)
+        );
     }
 
     #[test]
