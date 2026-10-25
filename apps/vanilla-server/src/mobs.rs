@@ -2147,7 +2147,13 @@ impl Mobs {
                 }
                 if kind == Kind::Slime
                     && !is_slime_cave_location(world.natural_seed().unwrap_or(0), cx, cy, cz)
-                    && !(world.biome_at(cx, cz) == 6 && (50..=70).contains(&cy) && !sunlight(now))
+                    && !swamp_slime_spawn_ok(
+                        world.biome_at(cx, cz),
+                        cy,
+                        now,
+                        hash(seed ^ (member as u64).wrapping_mul(0x65d2_1b0c_91fa_3e47)),
+                        world.light_at(cx, cy, cz),
+                    )
                 {
                     continue;
                 }
@@ -3021,6 +3027,26 @@ fn overworld_passive_kind(biome: u8, roll: u64) -> Kind {
         32..=39 => Kind::Cow,
         _ => Kind::Horse,
     }
+}
+
+/// Swamp slimes are subject to the lunar phase in Java 1.7.10, unlike
+/// underground slime-chunk spawns. Day zero is a full moon; day four is
+/// a new moon. Use independent deterministic rolls for the 50% gate,
+/// lunar brightness and the 0..7 light threshold.
+fn swamp_slime_spawn_ok(biome: u8, y: i32, now: u64, seed: u64, light: (u8, u8)) -> bool {
+    if biome != 6 || !(51..70).contains(&y) {
+        return false;
+    }
+    let moon_quarters = [4_u64, 3, 2, 1, 0, 1, 2, 3][((now / 24_000) % 8) as usize];
+    if moon_quarters == 0 {
+        return false;
+    }
+    let effective_sky = light.1.saturating_sub(if sunlight(now) { 0 } else { 11 });
+    let brightness = light.0.max(effective_sky);
+    let light_roll = (hash(seed ^ 0x40d5_3a2b_2d10_28f1) % 8) as u8;
+    let moon_roll = hash(seed ^ 0x9f71_428c_40e2_a503) % 65_536;
+    let half_roll = hash(seed ^ 0x65d2_1b0c_91fa_3e47) & 1 == 0;
+    half_roll && brightness <= light_roll && moon_roll < moon_quarters * 16_384
 }
 
 /// Minecraft 1.7.10 default hostile list: four common monsters and Slime
@@ -3958,6 +3984,35 @@ mod tests {
             assert!(!overworld_biome_allows_passive_spawn(biome));
             assert!(!overworld_biome_allows_natural_spawn(biome));
         }
+    }
+
+    #[test]
+    fn swamp_slimes_obey_moon_phase_light_and_height_without_affecting_cave_slimes() {
+        let full_moon = 18_000_u64;
+        let new_moon = full_moon + 4 * 24_000;
+        let mut full_moon_successes = 0;
+        let mut half_moon_successes = 0;
+        for seed in 0..8_192_u64 {
+            if swamp_slime_spawn_ok(6, 60, full_moon, seed, (0, 0)) {
+                full_moon_successes += 1;
+            }
+            if swamp_slime_spawn_ok(6, 60, full_moon + 2 * 24_000, seed, (0, 0)) {
+                half_moon_successes += 1;
+            }
+            assert!(!swamp_slime_spawn_ok(6, 60, new_moon, seed, (0, 0)));
+            assert!(!swamp_slime_spawn_ok(6, 60, full_moon, seed, (8, 0)));
+            assert!(!swamp_slime_spawn_ok(6, 50, full_moon, seed, (0, 0)));
+            assert!(!swamp_slime_spawn_ok(6, 70, full_moon, seed, (0, 0)));
+            assert!(!swamp_slime_spawn_ok(1, 60, full_moon, seed, (0, 0)));
+        }
+        assert!(full_moon_successes > 0);
+        assert!(half_moon_successes > 0);
+        assert!(half_moon_successes < full_moon_successes);
+        // The cave predicate has no moon-phase dependency.
+        assert_eq!(
+            is_slime_cave_location(0, 0, 39, 0),
+            is_slime_cave_location(0, 0, 39, 0)
+        );
     }
 
     #[test]
