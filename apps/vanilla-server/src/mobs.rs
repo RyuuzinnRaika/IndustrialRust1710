@@ -2079,6 +2079,7 @@ impl Mobs {
             // pack. Recheck every proposed position: one safe center does not
             // make nearby blocks/biomes/light levels safe. This preserves the
             // older server's CPU and snapshot guards (at most six per cycle).
+            let mobs_before_attempt = self.entities.len();
             for member in 0..natural_pack_attempts(kind, seed) {
                 if self.entities.len() >= MAX_LOADED_MOBS || self.next_id >= 1_000_000 {
                     break;
@@ -2175,7 +2176,11 @@ impl Mobs {
                     events.push(self.insert_sized(kind, candidate, baby, size));
                 }
             }
-            break; // Bound per-cycle packets and CPU.
+            // A rejected pack must not consume the whole spawn cycle: try
+            // the remaining bounded origins when no member was inserted.
+            if self.entities.len() > mobs_before_attempt {
+                break; // Bound per-cycle packets and CPU after a successful pack.
+            }
         }
     }
     /// Minecraft 1.7.10-style dungeon spawner activation. Check at most once
@@ -4822,6 +4827,43 @@ mod tests {
         assert!(!zombie_infects_villager(2, 1));
         assert!(zombie_infects_villager(3, 1));
     }
+    #[test]
+    fn natural_spawning_retries_after_a_pack_with_no_eligible_members() {
+        // At this tick, the first origin selects a surface slime in plains
+        // (ineligible), while the second selects a zombie. A failed first
+        // pack must not stop the remaining three bounded origin attempts.
+        let world = World::natural(0);
+        let now = 18_040_u64;
+        let first_seed = hash(now);
+        let second_seed = hash(now ^ 0x9e3779b97f4a7c15);
+        assert_eq!(
+            overworld_monster_kind(hash(first_seed ^ 0xd1a7c4b500137e6d)),
+            Kind::Slime
+        );
+        assert_eq!(
+            overworld_monster_kind(hash(second_seed ^ 0xd1a7c4b500137e6d)),
+            Kind::Zombie
+        );
+        let player = PlayerPosition {
+            x: 512.5,
+            y: world.spawn_y(),
+            z: 512.5,
+        };
+        let (dx, dz) = natural_spawn_horizontal_offset(first_seed);
+        let first_y = world.surface_height_at(512 + dx, 512 + dz).unwrap() + 1;
+        assert!(first_y >= 40);
+        assert_eq!(world.biome_at(512 + dx, 512 + dz), 1);
+
+        let mut mobs = Mobs::new_with_difficulty(&world, true, 2);
+        let mut events = Vec::new();
+        mobs.spawn_natural(now, &world, &[player], &mut events);
+        assert!(
+            mobs.entities.values().any(|mob| mob.kind == Kind::Zombie),
+            "second origin must be attempted after the rejected slime pack"
+        );
+        assert!(!events.is_empty());
+    }
+
     #[test]
     fn natural_mobs_spawn_in_protocol5() {
         let world = World::natural(42);
