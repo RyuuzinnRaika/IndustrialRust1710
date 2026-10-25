@@ -2331,22 +2331,8 @@ impl Mobs {
                         ),
                     ));
                 }
-                if mob.rider.is_some() || mob.leash_holder.is_some() || mob.fence_anchor.is_some() {
-                    continue; // Mounted or leashed animals never wander independently.
-                }
-                let nearest_distance = distance_to_players(mob.position, players);
-                if mob.kind.despawnable() && nearest_distance > 128.0 {
-                    dead.push(mob.id);
-                    continue;
-                }
-                if mob.kind.despawnable()
-                    && nearest_distance > 32.0
-                    && now.saturating_sub(mob.hit_tick) > 600
-                    && hash(now ^ mob.id as u64).is_multiple_of(800)
-                {
-                    dead.push(mob.id);
-                    continue;
-                }
+                // Restraints suppress independent wandering and ordinary despawn,
+                // but must not make undead immune to daylight damage.
                 if matches!(mob.kind, Kind::Zombie | Kind::Skeleton)
                     && sunlight(now)
                     && sky_exposed(world, mob.position)
@@ -2364,6 +2350,22 @@ impl Mobs {
                     }
                     events.push(mob.status(2));
                     events.push(mob.health_metadata());
+                }
+                if mob.rider.is_some() || mob.leash_holder.is_some() || mob.fence_anchor.is_some() {
+                    continue; // Mounted or leashed animals never wander independently.
+                }
+                let nearest_distance = distance_to_players(mob.position, players);
+                if mob.kind.despawnable() && nearest_distance > 128.0 {
+                    dead.push(mob.id);
+                    continue;
+                }
+                if mob.kind.despawnable()
+                    && nearest_distance > 32.0
+                    && now.saturating_sub(mob.hit_tick) > 600
+                    && hash(now ^ mob.id as u64).is_multiple_of(800)
+                {
+                    dead.push(mob.id);
+                    continue;
                 }
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     let p = mob.position;
@@ -3568,6 +3570,36 @@ mod tests {
             assert_eq!(horse_spawn_weight(biome), 0);
             assert!((0..256).all(|roll| overworld_passive_kind(biome, roll) != Kind::Horse));
         }
+    }
+
+    #[test]
+    fn tethered_undead_still_take_daylight_damage() {
+        let mut world = World::new();
+        // A roof above the head must still protect a restrained zombie.
+        world.import_block(10, 67, 0, 1 << 4).unwrap();
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        mobs.insert(Kind::Zombie, at, false);
+        let leashed = mobs.next_id - 1;
+        mobs.entities.get_mut(&leashed).unwrap().leash_holder = Some(42);
+        mobs.insert(Kind::Skeleton, PlayerPosition { x: 5.5, ..at }, false);
+        let anchored = mobs.next_id - 1;
+        mobs.entities.get_mut(&anchored).unwrap().fence_anchor = Some([5, 65, 0]);
+        mobs.insert(Kind::Zombie, PlayerPosition { x: 10.5, ..at }, false);
+        let sheltered = mobs.next_id - 1;
+        mobs.entities.get_mut(&sheltered).unwrap().leash_holder = Some(42);
+
+        mobs.tick(20, &world, &[]);
+        assert!(mobs.entities[&leashed].health < Kind::Zombie.health());
+        assert!(mobs.entities[&anchored].health < Kind::Skeleton.health());
+        assert_eq!(mobs.entities[&sheltered].health, Kind::Zombie.health());
+        // Restraints remain attached; sunlight must not detach or move them.
+        assert_eq!(mobs.entities[&leashed].leash_holder, Some(42));
+        assert_eq!(mobs.entities[&anchored].fence_anchor, Some([5, 65, 0]));
     }
 
     #[test]
