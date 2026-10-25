@@ -1018,7 +1018,11 @@ fn play(
                 if pearl_impact {
                     next_vitals.apply_ender_pearl_damage();
                 }
-                target.save_state_in_dimension(player_path, next_vitals, session_dimension.protocol_id() as i32)?;
+                target.save_state_in_dimension(
+                    player_path,
+                    next_vitals,
+                    session_dimension.protocol_id() as i32,
+                )?;
                 *vitals = next_vitals;
                 *player = target;
                 location = (target.x, target.y, target.z);
@@ -1135,7 +1139,11 @@ fn play(
             }
         }
         if saved_at.elapsed() >= Duration::from_secs(5) {
-            player.save_state_in_dimension(player_path, *vitals, session_dimension.protocol_id() as i32)?;
+            player.save_state_in_dimension(
+                player_path,
+                *vitals,
+                session_dimension.protocol_id() as i32,
+            )?;
             inventory.save(inventory_path)?;
             saved_at = Instant::now();
         }
@@ -1353,7 +1361,11 @@ fn play(
                     *inventory = worn;
                 }
                 vitals.health = (vitals.health - damage.ceil()).max(0.0);
-                player.save_state_in_dimension(player_path, *vitals, session_dimension.protocol_id() as i32)?;
+                player.save_state_in_dimension(
+                    player_path,
+                    *vitals,
+                    session_dimension.protocol_id() as i32,
+                )?;
                 if armor_changed {
                     send(s, 0x30, &inventory.window_items())?;
                 }
@@ -1384,7 +1396,11 @@ fn play(
                 let mut next_vitals = *vitals;
                 next_vitals.health = (next_vitals.health - f32::from(damage)).max(0.0);
                 // Save accepted position and HP before sending an update.
-                candidate.save_state_in_dimension(player_path, next_vitals, session_dimension.protocol_id() as i32)?;
+                candidate.save_state_in_dimension(
+                    player_path,
+                    next_vitals,
+                    session_dimension.protocol_id() as i32,
+                )?;
                 *player = candidate;
                 *vitals = next_vitals;
                 location = (candidate.x, candidate.y, candidate.z);
@@ -1416,7 +1432,11 @@ fn play(
             last_vitals_tick = now_tick;
             let mut next = *vitals;
             if next.tick(steps) {
-                player.save_state_in_dimension(player_path, next, session_dimension.protocol_id() as i32)?;
+                player.save_state_in_dimension(
+                    player_path,
+                    next,
+                    session_dimension.protocol_id() as i32,
+                )?;
                 *vitals = next;
                 send(s, 0x06, &health_packet(*vitals))?;
             } else {
@@ -1434,7 +1454,11 @@ fn play(
             drop(w);
             if total > 0.0 {
                 vitals.health = (vitals.health - total).max(0.0);
-                player.save_state_in_dimension(player_path, *vitals, session_dimension.protocol_id() as i32)?;
+                player.save_state_in_dimension(
+                    player_path,
+                    *vitals,
+                    session_dimension.protocol_id() as i32,
+                )?;
                 send(s, 0x06, &health_packet(*vitals))?;
             }
         }
@@ -1539,7 +1563,11 @@ fn play(
             if visible_changed
                 || (vitals.exhaustion != old_exhaustion && now_tick.is_multiple_of(20))
             {
-                player.save_state_in_dimension(player_path, *vitals, session_dimension.protocol_id() as i32)?;
+                player.save_state_in_dimension(
+                    player_path,
+                    *vitals,
+                    session_dimension.protocol_id() as i32,
+                )?;
                 if visible_changed {
                     send(s, 0x06, &health_packet(*vitals))?;
                 }
@@ -1582,7 +1610,11 @@ fn play(
                                         ),
                                     });
                                 }
-                                player.save_state_in_dimension(player_path, *vitals, session_dimension.protocol_id() as i32)?;
+                                player.save_state_in_dimension(
+                                    player_path,
+                                    *vitals,
+                                    session_dimension.protocol_id() as i32,
+                                )?;
                                 send(s, 0x30, &inventory.window_items())?;
                                 send(s, 0x06, &health_packet(*vitals))?;
                                 send(
@@ -1636,7 +1668,11 @@ fn play(
                                 if container_returned {
                                     // Debit inventory before player-NBT food credit.
                                     remaining.save(inventory_path)?;
-                                    player.save_state_in_dimension(player_path, after, session_dimension.protocol_id() as i32)?;
+                                    player.save_state_in_dimension(
+                                        player_path,
+                                        after,
+                                        session_dimension.protocol_id() as i32,
+                                    )?;
                                     *inventory = remaining;
                                     *vitals = after;
                                     for effect in vitals::food_side_effects(
@@ -1731,7 +1767,11 @@ fn play(
             if hardcore {
                 // Persist the dead state before ending the connection. Future
                 // logins reject this player even after server restart.
-                player.save_state_in_dimension(player_path, *vitals, session_dimension.protocol_id() as i32)?;
+                player.save_state_in_dimension(
+                    player_path,
+                    *vitals,
+                    session_dimension.protocol_id() as i32,
+                )?;
                 return Ok(());
             }
         }
@@ -2237,7 +2277,11 @@ fn play(
                     landing_distance = fall.take_landing_distance();
                     if damage != 0 {
                         vitals.health = (vitals.health - f32::from(damage)).max(0.0);
-                        player.save_state_in_dimension(player_path, *vitals, session_dimension.protocol_id() as i32)?;
+                        player.save_state_in_dimension(
+                            player_path,
+                            *vitals,
+                            session_dimension.protocol_id() as i32,
+                        )?;
                         send(s, 0x06, &health_packet(*vitals))?;
                     }
                 }
@@ -2251,7 +2295,11 @@ fn play(
                         vitals.travel(distance);
                     }
                     if vitals.food != old_food || vitals.saturation != old_saturation {
-                        player.save_state_in_dimension(player_path, *vitals, session_dimension.protocol_id() as i32)?;
+                        player.save_state_in_dimension(
+                            player_path,
+                            *vitals,
+                            session_dimension.protocol_id() as i32,
+                        )?;
                         send(s, 0x06, &health_packet(*vitals))?;
                     }
                 }
@@ -2335,21 +2383,27 @@ fn play(
                             let is_ready = target == dimensions::Dimension::End
                                 || now_tick.saturating_sub(entered_at) >= 80;
                             if is_ready {
-                                if let Some(arrival) = worlds.resolve_portal(
-                                    *session_dimension, bx, by, bz,
-                                )? {
+                                if let Some(arrival) =
+                                    worlds.resolve_portal(*session_dimension, bx, by, bz)?
+                                {
                                     let destination = PlayerPosition {
-                                        x: arrival.x, y: arrival.y, z: arrival.z,
+                                        x: arrival.x,
+                                        y: arrival.y,
+                                        z: arrival.z,
                                     };
                                     // Persist player inventory and checkpoint first.
                                     inventory.save(inventory_path.as_path())?;
                                     experience.save(experience_path)?;
                                     achievements.save(achievements_path)?;
                                     destination.save_state_in_dimension(
-                                        player_path, *vitals, arrival.dimension.protocol_id() as i32,
+                                        player_path,
+                                        *vitals,
+                                        arrival.dimension.protocol_id() as i32,
                                     )?;
                                     if !hub.change_dimension(
-                                        entity_id, arrival.dimension, destination,
+                                        entity_id,
+                                        arrival.dimension,
+                                        destination,
                                     )? {
                                         return Err(bad("portal traveler was removed from hub"));
                                     }
@@ -2377,8 +2431,9 @@ fn play(
                                     bow_start = None;
                                     portal_since = None;
                                     portal_cooldown_until = now_tick.saturating_add(100);
-                                    let mut respawn =
-                                        (arrival.dimension.protocol_id() as i32).to_be_bytes().to_vec();
+                                    let mut respawn = (arrival.dimension.protocol_id() as i32)
+                                        .to_be_bytes()
+                                        .to_vec();
                                     respawn.extend_from_slice(&[
                                         difficulty.load(Ordering::Acquire),
                                         u8::from(!survival) | if hardcore { 0x08 } else { 0 },
@@ -2387,7 +2442,12 @@ fn play(
                                     send(s, 0x07, &respawn)?;
                                     loaded_chunks.clear();
                                     pending_chunk_relights.clear();
-                                    sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                                    sync_chunks(
+                                        s,
+                                        world,
+                                        &mut loaded_chunks,
+                                        chunk_center(player),
+                                    )?;
                                     send_player_position(s, player)?;
                                     last_movement_broadcast = Instant::now();
                                     continue;
@@ -3175,7 +3235,11 @@ fn play(
                                         vitals.food = (vitals.food + 2).min(20);
                                         vitals.saturation =
                                             (vitals.saturation + 0.4).min(vitals.food as f32);
-                                        player.save_state_in_dimension(player_path, *vitals, session_dimension.protocol_id() as i32)?;
+                                        player.save_state_in_dimension(
+                                            player_path,
+                                            *vitals,
+                                            session_dimension.protocol_id() as i32,
+                                        )?;
                                         send(s, 0x06, &health_packet(*vitals))?;
                                         hub.broadcast(block_change_event(&w, x, y, z));
                                     }
@@ -4559,7 +4623,11 @@ fn play(
                 }
                 if survival && action == 0 && vitals.health <= 0.0 {
                     if hardcore {
-                        player.save_state_in_dimension(player_path, *vitals, session_dimension.protocol_id() as i32)?;
+                        player.save_state_in_dimension(
+                            player_path,
+                            *vitals,
+                            session_dimension.protocol_id() as i32,
+                        )?;
                         return Ok(());
                     }
                     let keep_inventory = game_rules
@@ -4602,7 +4670,11 @@ fn play(
                         }
                     };
                     let fresh_vitals = Vitals::default();
-                    origin.save_state_in_dimension(player_path, fresh_vitals, session_dimension.protocol_id() as i32)?;
+                    origin.save_state_in_dimension(
+                        player_path,
+                        fresh_vitals,
+                        session_dimension.protocol_id() as i32,
+                    )?;
                     *vitals = fresh_vitals;
                     *player = origin;
                     death_recorded = false;
@@ -4937,19 +5009,22 @@ fn handle(
     }
     let (mut player_state, mut player_vitals, saved_dimension_id) =
         match PlayerPosition::load_state_with_dimension(&player_file) {
-        Ok(state) => state,
-        Err(err) => {
-            eprintln!("player state unavailable for {name}: {err}");
-            login_disconnect(
-                &mut s,
-                "Player save is unreadable. Administrator must repair it.",
-            )?;
-            return Ok(());
-        }
-    };
+            Ok(state) => state,
+            Err(err) => {
+                eprintln!("player state unavailable for {name}: {err}");
+                login_disconnect(
+                    &mut s,
+                    "Player save is unreadable. Administrator must repair it.",
+                )?;
+                return Ok(());
+            }
+        };
     // Saved NBT selects the live world on reconnect, but single-world mode
     // continues to use its explicitly configured dimension.
-    let initial_dimension = world.lock().map_err(|_| bad("world mutex poisoned"))?.dimension();
+    let initial_dimension = world
+        .lock()
+        .map_err(|_| bad("world mutex poisoned"))?
+        .dimension();
     let admission_dimension = if dimension_worlds.is_some() {
         dimensions::Dimension::from_protocol(saved_dimension_id as i8)
             .ok_or_else(|| bad("invalid saved player dimension"))?
@@ -5200,7 +5275,9 @@ fn handle(
             .save(&guard)
     };
     let player_saved = player_state.save_state_in_dimension(
-        &player_file, player_vitals, session_dimension.protocol_id() as i32,
+        &player_file,
+        player_vitals,
+        session_dimension.protocol_id() as i32,
     );
     let inventory_saved = inventory_state.save(&inventory_file);
     let experience_saved = experience_state.save(&experience_file);
