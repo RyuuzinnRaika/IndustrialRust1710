@@ -523,7 +523,17 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
     // Farm with water channel and mature wheat; no global RNG.
     if (9..=20).contains(&dx) && (-22..=-13).contains(&dz) {
         if y == base {
-            return Some(if dx == 15 { b(9) } else { state(60, 7) });
+            // Cap the irrigation trench at both ends so source water cannot
+            // spill into surrounding terrain when fluid updates run.
+            return Some(if dx == 15 {
+                if dz == -22 || dz == -13 {
+                    b(4)
+                } else {
+                    b(9)
+                }
+            } else {
+                state(60, 7)
+            });
         }
         if y == base + 1 {
             return Some(if dx == 15 { AIR } else { state(59, 7) });
@@ -866,6 +876,49 @@ mod tests {
                 if gx > 0 && gz > 0 {
                     tested_positive = true;
                 }
+            }
+        }
+        assert!(tested_negative && tested_positive);
+    }
+    #[test]
+    fn village_farm_irrigation_is_capped_at_both_ends() {
+        let seed = 42u64;
+        let mut tested_negative = false;
+        let mut tested_positive = false;
+        for gx in -8..=8 {
+            for gz in -8..=8 {
+                if !hash(seed ^ 0x711a, gx, 0, gz).is_multiple_of(4) {
+                    continue;
+                }
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                if !matches!(biome(seed, cx, cz), 1 | 2 | 35 | 4) {
+                    continue;
+                }
+                let base = height(seed, cx, cz);
+                for dz in -22..=-13 {
+                    let expected = if dz == -22 || dz == -13 { b(4) } else { b(9) };
+                    assert_eq!(
+                        block(seed, Dimension::Overworld, cx + 15, base, cz + dz),
+                        expected
+                    );
+                    assert_eq!(
+                        block(seed, Dimension::Overworld, cx + 15, base + 1, cz + dz),
+                        AIR
+                    );
+                    for dx in [14, 16] {
+                        assert_eq!(
+                            block(seed, Dimension::Overworld, cx + dx, base, cz + dz),
+                            state(60, 7)
+                        );
+                        assert_eq!(
+                            block(seed, Dimension::Overworld, cx + dx, base + 1, cz + dz),
+                            state(59, 7)
+                        );
+                    }
+                }
+                tested_negative |= gx < 0 && gz < 0;
+                tested_positive |= gx > 0 && gz > 0;
             }
         }
         assert!(tested_negative && tested_positive);
