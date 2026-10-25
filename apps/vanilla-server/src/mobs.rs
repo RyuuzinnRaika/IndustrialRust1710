@@ -658,6 +658,59 @@ fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
     })
 }
 
+/// Return the horizontal half-width and vertical height used by natural
+/// spawning. Keep entity-to-entity and terrain clearance on the same hull.
+fn natural_spawn_body_dimensions(kind: Kind, size: u8) -> (f64, f64) {
+    if kind.splitting() {
+        let edge = 0.6 * f64::from(size);
+        return (edge / 2.0, edge);
+    }
+    let half_width = match kind {
+        Kind::Ghast => 2.0,
+        Kind::Spider | Kind::Horse | Kind::IronGolem => 0.7,
+        Kind::Cow | Kind::Pig | Kind::Sheep => 0.45,
+        Kind::CaveSpider => 0.35,
+        Kind::Chicken => 0.2,
+        _ => 0.3,
+    };
+    let height = match kind {
+        Kind::Ghast => 4.0,
+        Kind::Enderman | Kind::IronGolem => 3.0,
+        Kind::Spider | Kind::CaveSpider | Kind::Chicken => 1.0,
+        _ => 2.0,
+    };
+    (half_width, height)
+}
+
+/// Vanilla natural spawns must not overlap already loaded living entities.
+/// Check all three AABB axes, including the chosen slime size and floating
+/// ghasts (whose stored position is the center rather than the feet).
+fn natural_spawn_entity_clearance(
+    entities: &BTreeMap<i32, Mob>,
+    kind: Kind,
+    at: PlayerPosition,
+    size: u8,
+) -> bool {
+    let (half_width, height) = natural_spawn_body_dimensions(kind, size);
+    let bottom = if kind == Kind::Ghast {
+        at.y - height / 2.0
+    } else {
+        at.y
+    };
+    entities.values().all(|mob| {
+        let (other_half, other_height) = natural_spawn_body_dimensions(mob.kind, mob.size);
+        let other_bottom = if mob.kind == Kind::Ghast {
+            mob.position.y - other_height / 2.0
+        } else {
+            mob.position.y
+        };
+        (at.x - mob.position.x).abs() >= half_width + other_half
+            || (at.z - mob.position.z).abs() >= half_width + other_half
+            || bottom >= other_bottom + other_height
+            || other_bottom >= bottom + height
+    })
+}
+
 /// Flying ghasts must be able to spawn in air. A generic ground-support
 /// test here would discard every valid floating ghast candidate.
 fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition, size: u8) -> bool {
@@ -672,27 +725,8 @@ fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition, size: u8
     // overlap liquid in the next block while its feet remain on dry ground.
     // EntitySlime#setSlimeSize uses a 0.6 * size cube in Java 1.7.10.
     // The selected natural-spawn size must be used before inserting it.
-    let half_width = if kind.splitting() {
-        0.3 * f64::from(size)
-    } else {
-        match kind {
-            Kind::Spider | Kind::Horse | Kind::IronGolem => 0.7,
-            Kind::Cow | Kind::Pig | Kind::Sheep => 0.45,
-            Kind::CaveSpider => 0.35,
-            Kind::Chicken => 0.2,
-            _ => 0.3,
-        }
-    };
+    let (half_width, body_height) = natural_spawn_body_dimensions(kind, size);
     let y = at.y.floor() as i32;
-    let body_height = if kind.splitting() {
-        0.6 * f64::from(size)
-    } else {
-        match kind {
-            Kind::Enderman | Kind::IronGolem => 3.0,
-            Kind::Spider | Kind::CaveSpider | Kind::Chicken => 1.0,
-            _ => 2.0,
-        }
-    };
     // The player-sized physics collision check misses solid blocks intersecting
     // wide spiders/horses or the upper part of a large slime/enderman.
     if physics::collides_sized(world, &at, half_width, body_height) {
@@ -2186,6 +2220,7 @@ impl Mobs {
                 if !candidate.is_valid()
                     || !natural_spawn_location_ok(world, candidate, players)
                     || !natural_spawn_body_ok(world, kind, candidate, size)
+                    || !natural_spawn_entity_clearance(&self.entities, kind, candidate, size)
                 {
                     continue;
                 }
@@ -3463,6 +3498,67 @@ mod tests {
         assert!(natural_spawn_body_ok(&world, Kind::Spider, negative, 1));
         world.import_block(-1, 65, 0, 9 << 4).unwrap();
         assert!(!natural_spawn_body_ok(&world, Kind::Spider, negative, 1));
+    }
+
+    #[test]
+    fn natural_spawns_reject_overlapping_mobs_with_species_sized_aabbs() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        assert!(natural_spawn_entity_clearance(&mobs.entities, Kind::Zombie, at, 1));
+        mobs.insert(Kind::Zombie, at, false);
+        assert!(!natural_spawn_entity_clearance(&mobs.entities, Kind::Zombie, at, 1));
+        // Touching faces are not overlapping bodies.
+        assert!(natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Zombie,
+            PlayerPosition { x: 1.5, ..at },
+            1
+        ));
+        assert!(natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Zombie,
+            PlayerPosition { y: 67.0, ..at },
+            1
+        ));
+        assert!(!natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Zombie,
+            PlayerPosition { y: 66.5, ..at },
+            1
+        ));
+
+        mobs.insert_sized(Kind::Slime, PlayerPosition { x: 5.5, ..at }, false, 4);
+        assert!(!natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Zombie,
+            PlayerPosition { x: 6.5, ..at },
+            1
+        ));
+        assert!(natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Zombie,
+            PlayerPosition { x: 7.5, ..at },
+            1
+        ));
+
+        // A ghast's stored Y is its center: Y=70 spans [68,72].
+        mobs.insert(Kind::Ghast, PlayerPosition { x: 12.5, y: 70.0, ..at }, false);
+        assert!(!natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Zombie,
+            PlayerPosition { x: 12.5, y: 67.0, ..at },
+            1
+        ));
+        assert!(natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Zombie,
+            PlayerPosition { x: 12.5, y: 65.0, ..at },
+            1
+        ));
     }
 
     #[test]
