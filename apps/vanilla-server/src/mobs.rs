@@ -3100,6 +3100,20 @@ fn natural_mob_cap(players: &[PlayerPosition], base: usize) -> usize {
     // as actual pack-spawn origins.
     base.saturating_mul(chunks.len()) / 256
 }
+/// Java 1.7.10 counts the 17x17 square for the mob cap, but its outer
+/// one-chunk border is ineligible for natural spawn attempts. A chunk is
+/// eligible if it lies in the interior 15x15 square of *any* online player.
+/// Use signed chunk coordinates and widened subtraction for negative worlds.
+fn natural_spawn_chunk_eligible(at: PlayerPosition, players: &[PlayerPosition]) -> bool {
+    let cx = i64::from((at.x.floor() as i32).div_euclid(16));
+    let cz = i64::from((at.z.floor() as i32).div_euclid(16));
+    players.iter().any(|player| {
+        let px = i64::from((player.x.floor() as i32).div_euclid(16));
+        let pz = i64::from((player.z.floor() as i32).div_euclid(16));
+        (cx - px).abs() <= 7 && (cz - pz).abs() <= 7
+    })
+}
+
 fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
     players
         .iter()
@@ -3202,7 +3216,9 @@ fn natural_spawn_location_ok(
     at: PlayerPosition,
     players: &[PlayerPosition],
 ) -> bool {
-    if !(24.0..=128.0).contains(&distance_to_players(at, players)) {
+    if !(24.0..=128.0).contains(&distance_to_players(at, players))
+        || !natural_spawn_chunk_eligible(at, players)
+    {
         return false;
     }
     if world.dimension() == crate::dimensions::Dimension::Overworld {
@@ -3942,6 +3958,43 @@ mod tests {
             reached_outer_band.iter().all(|reached| *reached),
             "outer eligible spawn band must be sampled in all four directions"
         );
+    }
+
+    #[test]
+    fn natural_spawn_skips_outer_border_chunks_but_counts_them_for_caps() {
+        let player = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let candidate = |x: f64, z: f64| PlayerPosition { x, z, ..player };
+        // The cap includes 17x17 chunks; spawning only uses the 15x15
+        // interior. Negative coordinates must use floor division.
+        assert_eq!(natural_mob_cap(&[player], 70), 79);
+        assert!(natural_spawn_chunk_eligible(candidate(127.5, 0.5), &[player]));
+        assert!(natural_spawn_chunk_eligible(candidate(-111.5, 0.5), &[player]));
+        assert!(!natural_spawn_chunk_eligible(candidate(128.5, 0.5), &[player]));
+        assert!(!natural_spawn_chunk_eligible(candidate(-112.5, 0.5), &[player]));
+        assert!(!natural_spawn_chunk_eligible(candidate(0.5, -112.5), &[player]));
+        // A chunk on one player's border may be interior to another.
+        let second = candidate(-128.5, 0.5);
+        assert!(natural_spawn_chunk_eligible(candidate(-112.5, 0.5), &[player, second]));
+        assert!(!natural_spawn_chunk_eligible(candidate(0.5, 0.5), &[]));
+    }
+
+    #[test]
+    fn natural_spawn_location_rejects_border_even_within_distance_limit() {
+        let world = World::natural(42);
+        let y = world.spawn_y();
+        let player = PlayerPosition { x: 400.5, y, z: 0.5 };
+        // Player chunk 25, candidate chunk 17: exactly eight chunks west.
+        // Its 113-block distance passes the radius check, but not the
+        // 1.7.10 interior-chunk eligibility check.
+        let border = PlayerPosition { x: 287.5, ..player };
+        let interior = PlayerPosition { x: 288.5, ..player };
+        assert!((24.0..=128.0).contains(&distance_to_players(border, &[player])));
+        assert!(!natural_spawn_location_ok(&world, border, &[player]));
+        assert!(natural_spawn_location_ok(&world, interior, &[player]));
     }
 
     #[test]
