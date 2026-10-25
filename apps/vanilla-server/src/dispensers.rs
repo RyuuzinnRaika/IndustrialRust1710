@@ -355,7 +355,12 @@ mod tests {
             // Selection must be reproducible for the same redo-journal seed.
             assert_eq!(
                 next.slots(pos),
-                devices.stage_eject(pos, seed).unwrap().unwrap().0.slots(pos)
+                devices
+                    .stage_eject(pos, seed)
+                    .unwrap()
+                    .unwrap()
+                    .0
+                    .slots(pos)
             );
             seen[selected] = true;
         }
