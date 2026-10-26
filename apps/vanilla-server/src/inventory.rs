@@ -83,6 +83,10 @@ pub struct Inventory {
     /// discarded if a client closes the transient GUI or a save is replayed.
     #[serde(default)]
     anvil_inputs: [Option<Stack>; 2],
+    /// Pending rename text belongs to the open GUI, not the saved inventory.
+    /// Some("") removes a custom name; None means no rename requested.
+    #[serde(skip)]
+    anvil_name: Option<String>,
     /// Enchanting-table input is a single item; kept in the save until it can
     /// be returned to the player so disconnect/full inventory cannot erase it.
     #[serde(default)]
@@ -101,6 +105,7 @@ impl Default for Inventory {
             cursor: None,
             workbench: [None; 9],
             anvil_inputs: [None; 2],
+            anvil_name: None,
             enchant_input: None,
             drag: Drag::default(),
             bed_spawn: None,
@@ -1615,10 +1620,31 @@ impl Inventory {
         }
     }
 
-    /// Compute a server-owned durability repair or compatible enchantment merge.
-    /// The 1.7.10 rename GUI and full prior-work costs remain pending.
+    /// Pending rename text is transient and can only be changed while the
+    /// owning anvil window is valid. A blank name intentionally clears it.
+    pub fn set_anvil_name(&mut self, name: String) -> bool {
+        if self.anvil_inputs[0].is_none()
+            || name.encode_utf16().count() > 30
+            || name.chars().any(char::is_control)
+            || self.anvil_name.as_deref() == Some(name.as_str())
+        {
+            return false;
+        }
+        self.anvil_name = Some(name);
+        true
+    }
+
+    pub fn clear_anvil_name(&mut self) {
+        self.anvil_name = None;
+    }
+
+    /// Server-owned repair, enchant combination or name-only result.
     pub fn anvil_preview(&self) -> Option<crate::workstations::Repair> {
-        crate::workstations::repair(self.anvil_inputs[0]?, self.anvil_inputs[1]?)
+        crate::workstations::repair_with_name(
+            self.anvil_inputs[0]?,
+            self.anvil_inputs[1],
+            self.anvil_name.as_deref(),
+        )
     }
 
     /// Protocol 5 anvil GUI: two inputs, read-only result, 36 player slots.
@@ -1657,6 +1683,7 @@ impl Inventory {
             }
         }
         staged.anvil_inputs = [None; 2];
+        staged.anvil_name = None;
         *self = staged;
         true
     }
@@ -1671,7 +1698,8 @@ impl Inventory {
         experience: &mut crate::experience::Experience,
         survival: bool,
     ) -> bool {
-        match slot {
+        let before_left = self.anvil_inputs[0];
+        let accepted = match slot {
             0 | 1 if mode == 0 && matches!(button, 0 | 1) => {
                 let index = slot as usize;
                 let original = self.anvil_inputs[index];
@@ -1799,7 +1827,13 @@ impl Inventory {
                 self.click_window(0, translated, button, mode)
             }
             _ => false,
+        };
+        // The name belongs to the previous left-hand item, not whichever
+        // stack happens to be placed in the slot after a click/shift-click.
+        if accepted && self.anvil_inputs[0] != before_left {
+            self.anvil_name = None;
         }
+        accepted
     }
 
     /// Clientbound Set Slot (0x2F): window -1, slot -1 represents the cursor.
