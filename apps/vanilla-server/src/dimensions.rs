@@ -152,6 +152,10 @@ impl DimensionManager {
 pub struct DimensionWorlds {
     manager: DimensionManager,
     paths: [PathBuf; 3],
+    // Bind the live worlds to the exact root directory opened at startup.
+    // A path check alone cannot detect rename + replacement by a real directory.
+    #[cfg(unix)]
+    root_identity: (u64, u64),
     overworld: Arc<Mutex<World>>,
     nether: Arc<Mutex<World>>,
     end: Arc<Mutex<World>>,
@@ -199,9 +203,17 @@ impl DimensionWorlds {
             manager.path(Dimension::Nether),
             manager.path(Dimension::End),
         ];
+        #[cfg(unix)]
+        let root_identity = {
+            use std::os::unix::fs::MetadataExt;
+            let meta = fs::symlink_metadata(&manager.root)?;
+            (meta.dev(), meta.ino())
+        };
         Ok(Self {
             manager,
             paths,
+            #[cfg(unix)]
+            root_identity,
             overworld: Arc::new(Mutex::new(overworld)),
             nether: Arc::new(Mutex::new(nether)),
             end: Arc::new(Mutex::new(end)),
@@ -262,6 +274,19 @@ impl DimensionWorlds {
         // The world directory may have changed since load_all. Refuse to
         // commit through a substituted root or ancestor symlink.
         self.manager.validate_root_ancestors()?;
+        // A non-symlink replacement of the root is also unsafe: the session
+        // lock and the loaded worlds belong to the original directory inode.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = fs::symlink_metadata(&self.manager.root)?;
+            if (meta.dev(), meta.ino()) != self.root_identity {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "dimension root directory replaced after load",
+                ));
+            }
+        }
         let dimensions = [Dimension::Overworld, Dimension::Nether, Dimension::End];
         let paths = dimensions.map(|dim| self.manager.path(dim));
         let snapshots = dimensions.map(|dim| {
@@ -1185,6 +1210,37 @@ mod tests {
         assert!(!moved.join("dimensions.pending-txn.json").exists());
 
         fs::remove_file(&root).unwrap();
+        drop(worlds);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_all_rejects_real_directory_substituted_after_load() {
+        let base = std::env::temp_dir().join(format!(
+            "ir1710-dimension-save-real-root-swap-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let root = base.join("worlds");
+        let moved = base.join("original-worlds");
+        let worlds = DimensionWorlds::load_all(DimensionManager::new(&root, 72)).unwrap();
+        let original = fs::read(root.join("overworld.irw")).unwrap();
+
+        // The replacement is a normal directory, not a symlink. Validating
+        // path components alone would allow a journal and snapshots here.
+        fs::rename(&root, &moved).unwrap();
+        fs::create_dir(&root).unwrap();
+        assert_eq!(
+            worlds.save_all().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(moved.join("overworld.irw")).unwrap(), original);
+        assert!(!root.join("dimensions.pending-txn.json").exists());
+        assert!(!root.join("overworld.irw").exists());
+
         drop(worlds);
         fs::remove_dir_all(base).unwrap();
     }
