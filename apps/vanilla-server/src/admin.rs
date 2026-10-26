@@ -169,6 +169,33 @@ fn validate_ops(entries: &[NamedEntry]) -> io::Result<()> {
     Ok(())
 }
 
+/// Name-only bans apply to a username; verified bans belong to immutable
+/// account UUIDs. Multiple historical UUIDs may legitimately share a name.
+fn validate_banned_players(entries: &[NamedEntry]) -> io::Result<()> {
+    let mut names = BTreeSet::new();
+    let mut uuids = BTreeSet::new();
+    for entry in entries {
+        if !valid_name(&entry.name) {
+            return Err(invalid("invalid banned player name"));
+        }
+        if entry
+            .reason
+            .as_ref()
+            .is_some_and(|r| r.len() > 256 || r.chars().any(char::is_control))
+        {
+            return Err(invalid("invalid BAN reason"));
+        }
+        if let Some(uuid) = &entry.uuid {
+            if !valid_uuid(uuid) || !uuids.insert(uuid.to_ascii_lowercase()) {
+                return Err(invalid("invalid or duplicate banned account UUID"));
+            }
+        } else if !names.insert(entry.name.to_ascii_lowercase()) {
+            return Err(invalid("duplicate name-only ban"));
+        }
+    }
+    Ok(())
+}
+
 fn valid_uuid(uuid: &str) -> bool {
     let bytes = uuid.as_bytes();
     bytes.len() == 36
@@ -249,7 +276,7 @@ impl Administration {
     }
     fn banned_players(&self) -> io::Result<Vec<NamedEntry>> {
         let data = read_array(&self.file("banned-players.json"))?;
-        validate_named(&data)?;
+        validate_banned_players(&data)?;
         Ok(data)
     }
     fn banned_ips(&self) -> io::Result<Vec<IpEntry>> {
@@ -284,18 +311,22 @@ impl Administration {
         self.banned_identity(name, None, address)
     }
     /// A verified account cannot evade a UUID-linked ban by changing its name.
-    /// Offline sessions are only checked by name because their UUID is not trusted.
+    /// A new owner of a recycled name cannot inherit the previous account's ban.
+    /// Before authentication (or in offline mode) only name-only and IP bans apply.
     pub fn banned_identity(
         &self,
         name: &str,
         verified_uuid: Option<&str>,
         address: IpAddr,
     ) -> io::Result<Option<String>> {
+        if verified_uuid.is_some_and(|id| !valid_uuid(id)) {
+            return Err(invalid("invalid verified ban identity"));
+        }
         let by_name = self.banned_players()?;
         let by_ip = self.banned_ips()?;
-        if let Some(entry) = by_name.iter().find(|e| {
-            e.name.eq_ignore_ascii_case(name)
-                || verified_uuid.is_some_and(|uuid| entry_uuid_matches(e, uuid))
+        if let Some(entry) = by_name.iter().find(|e| match e.uuid.as_deref() {
+            Some(uuid) => verified_uuid.is_some_and(|id| uuid.eq_ignore_ascii_case(id)),
+            None => e.name.eq_ignore_ascii_case(name),
         }) {
             return Ok(Some(
                 entry
@@ -397,10 +428,31 @@ impl Administration {
             return Err(invalid("invalid player BAN"));
         }
         let mut bans = self.banned_players()?;
-        bans.retain(|e| {
-            !e.name.eq_ignore_ascii_case(name)
-                && !verified_uuid.is_some_and(|id| entry_uuid_matches(e, id))
-        });
+        if enabled {
+            // A verified account's rename or a recycled username must not
+            // silently lift an independent UUID-linked ban.
+            bans.retain(|e| {
+                if let Some(uuid) = verified_uuid {
+                    !entry_uuid_matches(e, uuid)
+                } else {
+                    e.uuid.is_some() || !e.name.eq_ignore_ascii_case(name)
+                }
+            });
+        } else if let Some(uuid) = verified_uuid {
+            // UUID-targeted pardon never revokes another account's ban.
+            bans.retain(|e| !entry_uuid_matches(e, uuid));
+        } else {
+            // Preserve familiar /pardon Name for an unambiguous old record,
+            // but require /pardon-uuid for recycled names with multiple UUIDs.
+            let matches = bans
+                .iter()
+                .filter(|e| e.uuid.is_some() && e.name.eq_ignore_ascii_case(name))
+                .count();
+            if matches > 1 {
+                return Err(invalid("ambiguous banned name: use /pardon-uuid"));
+            }
+            bans.retain(|e| !e.name.eq_ignore_ascii_case(name));
+        }
         if enabled {
             bans.push(NamedEntry {
                 name: name.into(),
@@ -415,6 +467,18 @@ impl Administration {
         }
         persist_array(&self.file("banned-players.json"), &bans)
     }
+
+    /// Explicitly revoke an authenticated account's ban even after it has
+    /// changed names or is no longer online. UUIDs are not inferred from names.
+    pub fn pardon_uuid(&self, uuid: &str) -> io::Result<()> {
+        if !valid_uuid(uuid) {
+            return Err(invalid("invalid pardon UUID"));
+        }
+        let mut bans = self.banned_players()?;
+        bans.retain(|entry| !entry_uuid_matches(entry, uuid));
+        persist_array(&self.file("banned-players.json"), &bans)
+    }
+
     pub fn set_ip_ban(&self, address: &str, reason: Option<&str>, enabled: bool) -> io::Result<()> {
         let ip: IpAddr = address.parse().map_err(|_| invalid("invalid IP address"))?;
         if reason.is_some_and(|r| r.len() > 256 || r.chars().any(char::is_control)) {
@@ -629,6 +693,137 @@ mod tests {
             .banned_identity("NewName", Some(uuid), ip)
             .unwrap()
             .is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_bans_survive_recycled_names_and_selective_pardon() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-ban-recycle-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = Administration::new(root.clone()).unwrap();
+        let ip: IpAddr = "192.0.2.78".parse().unwrap();
+        let first = "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca";
+        let second = "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9cb";
+        store
+            .set_player_ban_verified("Reused", Some(first), Some("first owner"), true)
+            .unwrap();
+
+        // Login Start has no trusted UUID, so name-only preflight must not
+        // punish an unrelated account just because it reuses an old name.
+        assert_eq!(store.banned("Reused", ip).unwrap(), None);
+        assert_eq!(
+            store.banned_identity("Reused", Some(second), ip).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.banned_identity("NewName", Some(first), ip).unwrap(),
+            Some("first owner".into())
+        );
+
+        store
+            .set_player_ban_verified("Reused", Some(second), Some("second owner"), true)
+            .unwrap();
+        let reloaded = Administration::new(root.clone()).unwrap();
+        assert_eq!(reloaded.banned_players().unwrap().len(), 2);
+        assert_eq!(
+            reloaded
+                .banned_identity("NewName", Some(first), ip)
+                .unwrap(),
+            Some("first owner".into())
+        );
+        assert_eq!(
+            reloaded
+                .banned_identity("Reused", Some(second), ip)
+                .unwrap(),
+            Some("second owner".into())
+        );
+        assert!(reloaded.set_player_ban("Reused", None, false).is_err());
+        assert_eq!(reloaded.banned_players().unwrap().len(), 2);
+        reloaded.pardon_uuid(&second.to_ascii_uppercase()).unwrap();
+        assert!(reloaded
+            .banned_identity("Reused", Some(second), ip)
+            .unwrap()
+            .is_none());
+        assert!(reloaded
+            .banned_identity("NewName", Some(first), ip)
+            .unwrap()
+            .is_some());
+        reloaded.pardon_uuid(first).unwrap();
+        assert!(reloaded.banned_players().unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn name_only_and_ip_bans_remain_effective_before_authentication() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-ban-name-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = Administration::new(root.clone()).unwrap();
+        let ip: IpAddr = "192.0.2.79".parse().unwrap();
+        let account = "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca";
+        store
+            .set_player_ban("Legacy", Some("name ban"), true)
+            .unwrap();
+        assert_eq!(store.banned("Legacy", ip).unwrap(), Some("name ban".into()));
+        assert_eq!(
+            store.banned_identity("Legacy", Some(account), ip).unwrap(),
+            Some("name ban".into())
+        );
+        store
+            .set_player_ban_verified("Legacy", Some(account), Some("uuid ban"), true)
+            .unwrap();
+        assert_eq!(store.banned_players().unwrap().len(), 2);
+        store.set_player_ban("Legacy", None, false).unwrap();
+        assert!(store
+            .banned_identity("Renamed", Some(account), ip)
+            .unwrap()
+            .is_none());
+
+        store
+            .set_ip_ban("192.0.2.79", Some("ip ban"), true)
+            .unwrap();
+        assert_eq!(store.banned("AnyName", ip).unwrap(), Some("ip ban".into()));
+        assert_eq!(
+            store.banned_identity("Renamed", Some(account), ip).unwrap(),
+            Some("ip ban".into())
+        );
+        assert!(store
+            .banned_identity("Whatever", Some("bad uuid"), ip)
+            .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_verified_ban_uuids_fail_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-ban-uuid-duplicate-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = Administration::new(root.clone()).unwrap();
+        let uuid = "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca";
+        store
+            .set_player_ban_verified("First", Some(uuid), None, true)
+            .unwrap();
+        let mut bans = store.banned_players().unwrap();
+        let mut duplicate = bans[0].clone();
+        duplicate.name = "Second".into();
+        duplicate.uuid = Some(uuid.to_ascii_uppercase());
+        bans.push(duplicate);
+        fs::write(
+            root.join("banned-players.json"),
+            serde_json::to_vec(&bans).unwrap(),
+        )
+        .unwrap();
+        assert!(store.banned("First", "127.0.0.1".parse().unwrap()).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
