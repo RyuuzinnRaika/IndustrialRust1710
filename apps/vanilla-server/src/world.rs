@@ -231,6 +231,9 @@ impl World {
                 .lock()
                 .map_err(|_| invalid("session lock mutex poisoned"))?
                 .verify()?;
+            if world_path.with_extension("pending-txn.json").exists() {
+                return Err(invalid("pending world redo requires recovery before save"));
+            }
         }
         Ok(())
     }
@@ -1583,6 +1586,118 @@ impl World {
         }
         Ok(true)
     }
+    /// E46 opt-in block mutation path for an EXISTING Overworld Anvil chunk.
+    ///
+    /// The live server still uses IRW saves. A caller must explicitly choose
+    /// this bridge; it requires a bound session.lock and a byte-identical IRW
+    /// baseline. Neither IRW nor the Anvil region may advance by itself.
+    /// Unknown Anvil NBT survives in the existing region rewrite helper.
+    pub fn update_and_flush_existing_anvil(
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u16,
+    ) -> io::Result<bool> {
+        if !in_bounds(x, y, z) || block >> 4 > 255 {
+            return Err(invalid("E46 Anvil block outside vanilla/IRW limits"));
+        }
+        // IRW4 Nether/End save files are nested below the lock root and need
+        // dimension-aware redo publication before they can use this bridge.
+        if self.dimension() != crate::dimensions::Dimension::Overworld {
+            return Err(invalid("E46 Anvil block bridge supports Overworld only"));
+        }
+        let (bound_path, session) = self
+            .save_session
+            .as_ref()
+            .ok_or_else(|| invalid("E46 Anvil block write requires session.lock"))?;
+        if bound_path != path {
+            return Err(invalid("Anvil block write path differs from bound world"));
+        }
+        let previous = self.get(x, y, z);
+        if previous == block {
+            return Ok(false);
+        }
+        // In-memory state must agree with the exact durable IRW generation.
+        // Never use a stale or partially saved IRW to overwrite newer Anvil.
+        let old_irw = self.encoded()?;
+        if fs::read(path)? != old_irw {
+            return Err(invalid("E46 IRW memory and disk differ before Anvil save"));
+        }
+        let mut next = self.clone();
+        let key = (x, y as u8, z);
+        if block == self.base_block(x, y as u8, z) {
+            next.edits.remove(&key);
+        } else {
+            if !next.edits.contains_key(&key) && next.edits.len() >= MAX_EDITS {
+                return Err(invalid("too many changed blocks for E46 Anvil save"));
+            }
+            next.edits.insert(key, block);
+        }
+        let next_irw = next.encoded()?;
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        let (rx, rz) = (cx.div_euclid(32), cz.div_euclid(32));
+        let session = Arc::clone(session);
+        let mut lock = session
+            .lock()
+            .map_err(|_| invalid("E46 session lock mutex poisoned"))?;
+        lock.verify()?;
+        if path.parent() != Some(lock.world_dir()) {
+            return Err(invalid("E46 Anvil world must be in locked root directory"));
+        }
+        let region_path = lock.world_dir().join("region").join(format!("r.{rx}.{rz}.mca"));
+        let region_meta = fs::symlink_metadata(&region_path)?;
+        // The redo journal caps one region at 8 MiB. Enforce this before
+        // loading untrusted on-disk data into memory.
+        if !region_meta.file_type().is_file()
+            || region_meta.len() < 8192
+            || region_meta.len() > 8 * 1024 * 1024
+        {
+            return Err(invalid("E46 invalid or oversized Anvil source region"));
+        }
+        let region = fs::read(&region_path)?;
+        let mut reader = fastanvil::Region::from_stream(std::io::Cursor::new(&region))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let original_nbt = reader
+            .read_chunk(cx.rem_euclid(32) as usize, cz.rem_euclid(32) as usize)
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .ok_or_else(|| invalid("E46 dirty-block save requires an existing Anvil chunk"))?;
+        let parsed = crate::legacy_nbt::parse_chunk(&original_nbt, cx, cz)?;
+        let idx = (y as usize % 16) * 256 + z.rem_euclid(16) as usize * 16
+            + x.rem_euclid(16) as usize;
+        let (old_id, old_meta) = parsed
+            .level
+            .sections
+            .iter()
+            .find(|section| section.y == (y / 16) as i8)
+            .and_then(|section| section.block_at(idx))
+            .unwrap_or((0, 0));
+        if (old_id << 4) | u16::from(old_meta) != previous {
+            return Err(invalid("E46 Anvil block disagrees with authoritative IRW"));
+        }
+        crate::legacy_region_rewrite::flush_irw_block_edits_under_lock_expected(
+            &mut lock,
+            crate::dimensions::Dimension::Overworld,
+            &[(x, y, z, block)],
+            &BTreeMap::from([((rx, rz), region)]),
+            path,
+            &old_irw,
+            &next_irw,
+        )?;
+        drop(lock);
+        // Only publish the in-memory transition after both disk images have
+        // committed. This exactly preserves the regular block wake semantics.
+        next.mark_lighting_changed(x, z, previous, block);
+        next.wake_gravity(x, y, z);
+        next.wake_block_updates(x, y, z);
+        if matches!(previous >> 4, 17 | 162) || matches!(block >> 4, 17 | 162) {
+            next.wake_leaves(x, y, z);
+        }
+        *self = next;
+        Ok(true)
+    }
+
     /// Apply one parsed block to a *detached* import world. Call save_new only
     /// after every Anvil chunk has been validated; never persist partial imports.
     pub fn import_block(&mut self, x: i32, y: i32, z: i32, block: u16) -> io::Result<()> {
@@ -1886,6 +2001,9 @@ impl World {
         };
         if let Some(guard) = session_guard.as_mut() {
             guard.verify()?;
+            if path.with_extension("pending-txn.json").exists() {
+                return Err(invalid("pending world redo requires recovery before IRW save"));
+            }
         }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
