@@ -6923,13 +6923,9 @@ fn main() -> io::Result<()> {
                                 if !matches!(state >> 4, 23 | 158) || state & 8 == 0 {
                                     continue;
                                 }
-                                let offset = match state & 7 {
-                                    0 => (0, -1, 0),
-                                    1 => (0, 1, 0),
-                                    2 => (0, 0, -1),
-                                    3 => (0, 0, 1),
-                                    4 => (-1, 0, 0),
-                                    _ => (1, 0, 0),
+                                let Some(offset) = dispensers::facing_offset(state) else {
+                                    // Malformed 6/7 facing must not eject or debit inventory.
+                                    continue;
                                 };
                                 let dest = (pos.0 + offset.0, pos.1 + offset.1, pos.2 + offset.2);
                                 if !world::in_bounds(dest.0, dest.1, dest.2) {
