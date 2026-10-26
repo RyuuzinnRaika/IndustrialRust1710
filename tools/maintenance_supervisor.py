@@ -7,6 +7,7 @@ Requires Python 3.9+ and an existing vanilla-server executable.
 from __future__ import annotations
 
 import argparse
+import shutil
 import signal
 import stat
 import subprocess
@@ -16,33 +17,89 @@ import time
 from pathlib import Path
 
 
+# Must match the Rust backup_rotation::MARKER exactly. Only the native
+# offline rotator can create a marked generation; unrelated folders survive.
+BACKUP_MARKER = b"IndustrialRust1710 verified offline backup v1\n"
+
+
 def backup_names(root: Path) -> set[str]:
     """Snapshot direct entries without following links or trusting markers."""
     try:
-        children = list(root.iterdir())
+        if not stat.S_ISDIR(root.lstat().st_mode):
+            raise RuntimeError("backup root must be a real directory")
     except FileNotFoundError:
         return set()
-    if not stat.S_ISDIR(root.lstat().st_mode):
-        raise RuntimeError("backup root must be a real directory")
-    return {entry.name for entry in children if entry.name.startswith("backup-")}
+    return {entry.name for entry in root.iterdir() if entry.name.startswith("backup-")}
+
+
+def owned_generations(root: Path) -> list[Path]:
+    """Only count owned, marked, direct-child backup directories."""
+    try:
+        if not stat.S_ISDIR(root.lstat().st_mode):
+            raise RuntimeError("backup root must be a real directory")
+    except FileNotFoundError:
+        return []
+    owned = []
+    for path in root.iterdir():
+        if not path.name.startswith("backup-") or not stat.S_ISDIR(path.lstat().st_mode):
+            continue
+        marker = path / ".industrial1710-backup"
+        try:
+            if stat.S_ISREG(marker.lstat().st_mode) and marker.read_bytes() == BACKUP_MARKER:
+                owned.append(path)
+        except FileNotFoundError:
+            continue
+    return sorted(owned)
+
+
+def prune_verified_backups(root: Path, keep: int, new: Path) -> None:
+    """Only prune after an isolated restore drill has completed successfully."""
+    owned = owned_generations(root)
+    if new not in owned:
+        raise RuntimeError("verified new backup disappeared before retention")
+    # Always keep the newly proven restorable generation, even if the system
+    # clock moved backwards so its filename sorts before older snapshots.
+    deletable = [path for path in owned if path != new]
+    for old in deletable[:max(0, len(owned) - keep)]:
+        # Recheck immediately before deleting. Never follow a replaced link.
+        marker = old / ".industrial1710-backup"
+        if not stat.S_ISDIR(old.lstat().st_mode) or not stat.S_ISREG(marker.lstat().st_mode):
+            raise RuntimeError("backup changed during retention; refusing removal")
+        if marker.read_bytes() != BACKUP_MARKER:
+            raise RuntimeError("backup ownership changed; refusing removal")
+        shutil.rmtree(old)
 
 
 def maintenance(server: Path, world: Path, backups: Path, keep: int) -> None:
-    """Fail closed: stop, verify, rotate, restore-drill, then allow restart."""
+    """Fail closed: stop, verify, snapshot, restore-drill, then prune/restart."""
     subprocess.run([str(server), "--verify-world", str(world)], check=True)
     before = backup_names(backups)
+    prior = owned_generations(backups)
+    # The native rotator prunes *before* an external restore drill. Grant
+    # enough temporary capacity to protect every older generation until the
+    # new snapshot has passed the drill. The native CLI caps retention at 100.
+    if len(prior) >= 100:
+        raise RuntimeError("100 backup generations exist; manual archival is required")
+    staging_keep = max(keep, len(prior) + 1)
     subprocess.run(
-        [str(server), "--world", str(world), "--backup-rotate", str(backups), str(keep)],
+        [str(server), "--world", str(world),
+         "--backup-rotate", str(backups), str(staging_keep)],
         check=True,
     )
     created = backup_names(backups) - before
     if len(created) != 1:
         raise RuntimeError("cannot uniquely identify the new backup for restore drill")
     restored = backups / created.pop()
+    after = owned_generations(backups)
+    if restored not in after or not set(prior).issubset(after):
+        raise RuntimeError("new backup is unmarked or older generations changed")
     subprocess.run([
         sys.executable, str(Path(__file__).with_name("verify_backup_restore.py")),
         "--server", str(server), "--backup", str(restored),
     ], check=True)
+    # No older generation is removed if the world, backup, or restore drill
+    # fails. Preserve unrelated unmarked directories during retention.
+    prune_verified_backups(backups, keep, restored)
 
 
 class Supervisor:
