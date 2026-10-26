@@ -599,6 +599,26 @@ impl TravelCheckpoint {
         }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
+            // Do not write checkpoints through a substituted parent symlink.
+            if !fs::symlink_metadata(parent)?.file_type().is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsafe travel checkpoint parent directory",
+                ));
+            }
+        }
+        // Loading refuses symlinks and non-files; saving must not silently
+        // replace them either. Check before creating the staging file.
+        match fs::symlink_metadata(path) {
+            Ok(meta) if !meta.file_type().is_file() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsafe travel checkpoint destination",
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
         }
         let staging = path.with_extension("dimension.tmp");
         // create_new refuses a pre-existing staging file (including symlinks).
@@ -892,6 +912,50 @@ mod tests {
         assert!(!path.with_extension("dimension.tmp").exists());
         fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_save_rejects_symlink_parent_and_destination() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-checkpoint-symlink-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let outside = root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let checkpoint = TravelCheckpoint::new(
+            destination(Dimension::Overworld, Dimension::Nether, 80.0, 64.0, 0.0).unwrap(),
+        )
+        .unwrap();
+
+        let linked_parent = root.join("linked-parent");
+        symlink(&outside, &linked_parent).unwrap();
+        let redirected = linked_parent.join("pending.json");
+        assert_eq!(
+            checkpoint.save(&redirected).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(!outside.join("pending.json").exists());
+
+        let victim = outside.join("victim.json");
+        fs::write(&victim, "keep").unwrap();
+        let linked_file = root.join("pending.json");
+        symlink(&victim, &linked_file).unwrap();
+        assert_eq!(
+            checkpoint.save(&linked_file).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(fs::symlink_metadata(&linked_file)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!linked_file.with_extension("dimension.tmp").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn checkpoint_roundtrip() {
         let file = std::env::temp_dir().join(format!("ir1710-travel-{}.json", std::process::id()));
