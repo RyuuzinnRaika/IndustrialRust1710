@@ -610,7 +610,19 @@ impl TravelCheckpoint {
         file.write_all(&serde_json::to_vec(self)?)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(staging, path)
+        fs::rename(&staging, path)?;
+        // The checkpoint's contents are durable after file.sync_all(), but
+        // the renamed directory entry also needs syncing on Unix. Without
+        // this, a power loss can roll back the checkpoint name after success.
+        #[cfg(unix)]
+        {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
     }
 }
 #[cfg(test)]
@@ -851,6 +863,33 @@ mod tests {
                 io::ErrorKind::InvalidData,
             );
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn checkpoint_replacement_retains_latest_destination_without_staging() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-travel-replace-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("pending.json");
+        let first = TravelCheckpoint::new(
+            destination(Dimension::Overworld, Dimension::Nether, 80.0, 64.0, 0.0).unwrap(),
+        )
+        .unwrap();
+        first.save(&path).unwrap();
+        let replacement = TravelCheckpoint::new(
+            destination(Dimension::Overworld, Dimension::End, 80.0, 64.0, 0.0).unwrap(),
+        )
+        .unwrap();
+        replacement.save(&path).unwrap();
+        assert_eq!(
+            TravelCheckpoint::load(&path).unwrap().unwrap().destination,
+            replacement.destination
+        );
+        assert!(!path.with_extension("dimension.tmp").exists());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
