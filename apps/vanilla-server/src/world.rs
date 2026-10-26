@@ -1777,7 +1777,9 @@ impl World {
         path: &Path,
         changes: &[(i32, i32, i32, u16)],
     ) -> io::Result<()> {
-        if self.generation != Generation::Flat || self.dimension() != crate::dimensions::Dimension::Overworld {
+        if self.generation != Generation::Flat
+            || self.dimension() != crate::dimensions::Dimension::Overworld
+        {
             return Err(invalid("E46 new Anvil chunks require flat Overworld"));
         }
         if changes.is_empty() || changes.len() > 32 {
@@ -2541,8 +2543,8 @@ mod tests {
         let path = root.join("flat.irw");
         let region_path = root.join("region/r.0.0.mca");
         let before_chunk = {
-            let mut region = fastanvil::Region::from_stream(File::open(&region_path).unwrap())
-                .unwrap();
+            let mut region =
+                fastanvil::Region::from_stream(File::open(&region_path).unwrap()).unwrap();
             assert!(region.read_chunk(4, 0).unwrap().is_none());
             region.read_chunk(0, 0).unwrap().unwrap()
         };
@@ -2554,16 +2556,17 @@ mod tests {
             .unwrap();
         assert_eq!(World::load(&path).unwrap().get(64, 90, 2), (5 << 4) | 7);
         assert_eq!(world.get(65, 90, 2), 1 << 4);
-        let mut region =
-            fastanvil::Region::from_stream(File::open(&region_path).unwrap()).unwrap();
+        let mut region = fastanvil::Region::from_stream(File::open(&region_path).unwrap()).unwrap();
         assert_eq!(region.read_chunk(0, 0).unwrap().unwrap(), before_chunk);
-        let chunk = crate::legacy_nbt::parse_chunk(
-            &region.read_chunk(4, 0).unwrap().unwrap(),
-            4,
-            0,
-        )
-        .unwrap();
-        let section = chunk.level.sections.iter().find(|section| section.y == 5).unwrap();
+        let chunk =
+            crate::legacy_nbt::parse_chunk(&region.read_chunk(4, 0).unwrap().unwrap(), 4, 0)
+                .unwrap();
+        let section = chunk
+            .level
+            .sections
+            .iter()
+            .find(|section| section.y == 5)
+            .unwrap();
         assert_eq!(section.block_at((90 % 16) * 256 + 2 * 16), Some((5, 7)));
         assert_eq!(section.block_at((90 % 16) * 256 + 2 * 16 + 1), Some((1, 0)));
         assert_eq!(
@@ -2584,20 +2587,19 @@ mod tests {
         let new_region = root.join("region/r.1.-1.mca");
         assert!(!new_region.exists());
         world
-            .update_many_and_create_missing_anvil_chunk(
-                &path,
-                &[(512, 90, -512, 4 << 4)],
-            )
+            .update_many_and_create_missing_anvil_chunk(&path, &[(512, 90, -512, 4 << 4)])
             .unwrap();
         assert_eq!(World::load(&path).unwrap().get(512, 90, -512), 4 << 4);
         let mut region = fastanvil::Region::from_stream(File::open(&new_region).unwrap()).unwrap();
-        let chunk = crate::legacy_nbt::parse_chunk(
-            &region.read_chunk(0, 0).unwrap().unwrap(),
-            32,
-            -32,
-        )
-        .unwrap();
-        let block = chunk.level.sections.iter().find(|section| section.y == 5).unwrap();
+        let chunk =
+            crate::legacy_nbt::parse_chunk(&region.read_chunk(0, 0).unwrap().unwrap(), 32, -32)
+                .unwrap();
+        let block = chunk
+            .level
+            .sections
+            .iter()
+            .find(|section| section.y == 5)
+            .unwrap();
         assert_eq!(block.block_at((90 % 16) * 256), Some((4, 0)));
         assert!(region.read_chunk(1, 0).unwrap().is_none());
         drop(region);
