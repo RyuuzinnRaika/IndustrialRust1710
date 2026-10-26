@@ -266,7 +266,9 @@ impl World {
     fn comparator_override_at(&self, pos: (i32, i32, i32)) -> Option<u8> {
         let state = self.get(pos.0, pos.1, pos.2);
         match state >> 4 {
-            23 | 158 => Some(
+            // Inventory-backed blocks share the same analog snapshot map.
+            // Their signals are never emitted as ordinary redstone power.
+            23 | 54 | 61 | 62 | 146 | 154 | 158 => Some(
                 self.device_comparator_inputs
                     .get(&(pos.0, pos.1 as u8, pos.2))
                     .copied()
@@ -932,6 +934,56 @@ mod redstone_regression_tests {
         w.import_block(rear.0, rear.1, rear.2, 23 << 4).unwrap();
         w.device_comparator_inputs.insert((-1, 64, 0), 6);
         assert_eq!(w.comparator_rear_input(rear, comparator), 6);
+    }
+
+    #[test]
+    fn comparator_reads_container_analog_snapshots_without_powering_dust() {
+        // The 20TPS worker currently supplies dispenser/dropper snapshots.
+        // Other container snapshots can use the same input path when wired.
+        for id in [23u16, 54, 61, 62, 146, 154, 158] {
+            let mut w = World::new();
+            let rear = (-1, 64, 0);
+            let comparator = (0, 64, 0);
+            w.import_block(rear.0, rear.1, rear.2, id << 4).unwrap();
+            w.device_comparator_inputs.insert((-1, 64, 0), 9);
+            assert_eq!(
+                w.comparator_rear_input(rear, comparator),
+                9,
+                "container {id} must expose its analog inventory signal"
+            );
+            assert_eq!(
+                w.signal_into(rear, comparator),
+                0,
+                "container {id} must not emit ordinary redstone power"
+            );
+            w.device_comparator_inputs.remove(&(-1, 64, 0));
+            assert_eq!(
+                w.comparator_rear_input(rear, comparator),
+                0,
+                "container {id} must reset when its inventory becomes empty"
+            );
+        }
+    }
+
+    #[test]
+    fn comparator_reads_container_analog_through_one_opaque_block() {
+        for id in [54u16, 61, 62, 146, 154] {
+            let mut w = World::new();
+            w.import_block(-1, 64, 0, 1 << 4).unwrap();
+            w.import_block(-2, 64, 0, id << 4).unwrap();
+            w.device_comparator_inputs.insert((-2, 64, 0), 6);
+            assert_eq!(
+                w.comparator_rear_input((-1, 64, 0), (0, 64, 0)),
+                6,
+                "container {id} must be readable through one opaque block"
+            );
+            w.import_block(-1, 64, 0, 20 << 4).unwrap();
+            assert_eq!(
+                w.comparator_rear_input((-1, 64, 0), (0, 64, 0)),
+                0,
+                "glass must not bridge container {id} analog input"
+            );
+        }
     }
 
     #[test]
