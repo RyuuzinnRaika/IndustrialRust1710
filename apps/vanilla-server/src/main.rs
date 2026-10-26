@@ -5906,6 +5906,19 @@ fn start_clock_console(
     })
 }
 
+/// Join every worker even when an earlier one panicked. Early-returning from
+/// the shutdown drain would detach remaining workers and skip final saves.
+fn join_shutdown_worker(
+    worker: thread::JoinHandle<()>,
+    name: &'static str,
+    first_failure: &mut Option<&'static str>,
+) {
+    if worker.join().is_err() {
+        eprintln!("SHUTDOWN WORKER PANIC: {name}");
+        first_failure.get_or_insert(name);
+    }
+}
+
 fn main() -> io::Result<()> {
     // Explicit, offline-only create-if-missing recovery. No network listener,
     // no server.properties parsing, and no silent replacement of a live world.
@@ -7378,6 +7391,7 @@ fn main() -> io::Result<()> {
     };
     listener.set_nonblocking(true)?;
     let mut client_threads: Vec<thread::JoinHandle<()>> = Vec::new();
+    let mut shutdown_worker_failure: Option<&'static str> = None;
     while !shutdown.load(Ordering::Acquire) {
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
@@ -7394,14 +7408,22 @@ fn main() -> io::Result<()> {
         let mut active = Vec::new();
         for worker in client_threads.drain(..) {
             if worker.is_finished() {
-                worker
-                    .join()
-                    .map_err(|_| io::Error::other("client thread panicked"))?;
+                join_shutdown_worker(worker, "client", &mut shutdown_worker_failure);
             } else {
                 active.push(worker);
             }
         }
         client_threads = active;
+        if shutdown_worker_failure.is_some() {
+            // A failed session worker is fatal, but do not abandon live
+            // sessions or world workers before they have saved their state.
+            shutdown.store(true, Ordering::Release);
+            hub.broadcast(Event {
+                id: ADMIN_KICK_EVENT,
+                body: b"Server shutting down".to_vec(),
+            });
+            break;
+        }
         let peer_ip = stream.peer_addr()?.ip();
         // Rate limit before accessing disk so repeated banned connections cannot
         // turn into an unlimited JSON parsing workload.
@@ -7508,29 +7530,15 @@ fn main() -> io::Result<()> {
     // their disconnect paths persist position, inventory and player state.
     drop(listener);
     for worker in client_threads {
-        worker
-            .join()
-            .map_err(|_| io::Error::other("client worker panicked during shutdown"))?;
+        join_shutdown_worker(worker, "client", &mut shutdown_worker_failure);
     }
-    tick_thread
-        .join()
-        .map_err(|_| io::Error::other("tick worker panicked during shutdown"))?;
-    hopper_thread
-        .join()
-        .map_err(|_| io::Error::other("hopper worker panicked during shutdown"))?;
-    brewing_thread
-        .join()
-        .map_err(|_| io::Error::other("brewing worker panicked during shutdown"))?;
-    projectile_thread
-        .join()
-        .map_err(|_| io::Error::other("projectile worker panicked during shutdown"))?;
+    join_shutdown_worker(tick_thread, "tick", &mut shutdown_worker_failure);
+    join_shutdown_worker(hopper_thread, "hopper", &mut shutdown_worker_failure);
+    join_shutdown_worker(brewing_thread, "brewing", &mut shutdown_worker_failure);
+    join_shutdown_worker(projectile_thread, "projectile", &mut shutdown_worker_failure);
     clock.stop();
-    clock_thread
-        .join()
-        .map_err(|_| io::Error::other("clock worker panicked during shutdown"))?;
-    console_thread
-        .join()
-        .map_err(|_| io::Error::other("console worker panicked during shutdown"))?;
+    join_shutdown_worker(clock_thread, "clock", &mut shutdown_worker_failure);
+    join_shutdown_worker(console_thread, "console", &mut shutdown_worker_failure);
     session_guard
         .lock()
         .map_err(|_| bad("session lock mutex poisoned"))?
@@ -7640,9 +7648,34 @@ fn main() -> io::Result<()> {
         .lock()
         .map_err(|_| bad("session lock mutex poisoned"))?
         .verify()?;
+    if let Some(worker) = shutdown_worker_failure {
+        return Err(io::Error::other(format!(
+            "shutdown saved state, but worker panicked: {worker}"
+        )));
+    }
     println!("Server safely stopped; player sessions, workers and persistent state flushed.");
     Ok(())
 }
+#[cfg(test)]
+mod f54_shutdown_worker_tests {
+    use super::*;
+
+    #[test]
+    fn panic_does_not_skip_joining_remaining_workers() {
+        let joined = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::clone(&joined);
+        let panicking = thread::spawn(|| panic!("F54 synthetic worker crash"));
+        let successful = thread::spawn(move || {
+            completed.fetch_add(1, Ordering::Release);
+        });
+        let mut failure = None;
+        join_shutdown_worker(panicking, "synthetic", &mut failure);
+        join_shutdown_worker(successful, "other", &mut failure);
+        assert_eq!(failure, Some("synthetic"));
+        assert_eq!(joined.load(Ordering::Acquire), 1);
+    }
+}
+
 #[cfg(test)]
 mod h_special_item_transaction_tests {
     use super::*;
