@@ -5116,12 +5116,11 @@ mod tests {
             ..at
         };
         assert!(distance_to_players(edge, &[outside, at]) > 128.0);
-        assert!(
-            distance_to_players(
-                edge,
-                &[outside, PlayerPosition { x: edge.x - 10.0, ..at }]
-            ) < 32.0
-        );
+        let near = PlayerPosition {
+            x: edge.x - 10.0,
+            ..at
+        };
+        assert!(distance_to_players(edge, &[outside, near]) < 32.0);
     }
 
     #[test]
