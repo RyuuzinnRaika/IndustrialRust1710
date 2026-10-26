@@ -473,6 +473,8 @@ fn valid_nether_frame(world: &World, x: i32, y: i32, z: i32, dx: i32, dz: i32) -
 
 /// The 1.7.10 End gateway from the Overworld uses a 3x3 portal plane and
 /// twelve surrounding End Portal Frame blocks with filled eyes (metadata 4).
+/// The frames must also face inward, matching the activation check in
+/// world/special.rs; a filled but misoriented ring is not a valid gateway.
 fn valid_end_entry(world: &World, x: i32, y: i32, z: i32) -> bool {
     if world.get(x, y, z) >> 4 != 119 {
         return false;
@@ -488,14 +490,16 @@ fn valid_end_entry(world: &World, x: i32, y: i32, z: i32) -> bool {
                 }
             }
             for i in 0..3 {
-                for (fx, fz) in [
-                    (min_x - 1, min_z + i),
-                    (min_x + 3, min_z + i),
-                    (min_x + i, min_z - 1),
-                    (min_x + i, min_z + 3),
+                // 1.7.10 frame metadata: 0=S, 1=W, 2=N, 3=E.
+                // Each side must face the center, not merely contain an eye.
+                for (fx, fz, facing) in [
+                    (min_x - 1, min_z + i, 3),
+                    (min_x + 3, min_z + i, 1),
+                    (min_x + i, min_z - 1, 0),
+                    (min_x + i, min_z + 3, 2),
                 ] {
                     let state = world.get(fx, y, fz);
-                    intact &= state >> 4 == 120 && state & 4 != 0;
+                    intact &= state >> 4 == 120 && state & 4 != 0 && state & 3 == facing;
                 }
             }
             if intact {
@@ -665,12 +669,22 @@ mod tests {
             }
         }
         for i in 0..3 {
-            for (x, z) in [(-1, i), (3, i), (i, -1), (i, 3)] {
+            for (x, z, facing) in [(-1, i, 3), (3, i, 1), (i, -1, 0), (i, 3, 2)] {
                 world
-                    .update_and_save(&path, x, 75, z, (120 << 4) | 4)
+                    .update_and_save(&path, x, 75, z, (120 << 4) | 4 | facing)
                     .unwrap();
             }
         }
+        assert_eq!(portal_target(&world, 1, 75, 1), Some(Dimension::End));
+        // An eye-filled frame facing away from the portal must invalidate
+        // travel, even if the portal blocks have not been removed yet.
+        world
+            .update_and_save(&path, -1, 75, 1, (120 << 4) | 4 | 1)
+            .unwrap();
+        assert_eq!(portal_target(&world, 1, 75, 1), None);
+        world
+            .update_and_save(&path, -1, 75, 1, (120 << 4) | 4 | 3)
+            .unwrap();
         assert_eq!(portal_target(&world, 1, 75, 1), Some(Dimension::End));
         world.update_and_save(&path, -1, 75, 1, 120 << 4).unwrap();
         assert_eq!(portal_target(&world, 1, 75, 1), None);
