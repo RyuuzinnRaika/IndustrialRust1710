@@ -685,6 +685,9 @@ fn natural_spawn_body_dimensions(kind: Kind, size: u8) -> (f64, f64) {
         Kind::Ghast => 4.0,
         Kind::Enderman | Kind::IronGolem => 2.9,
         Kind::Horse => 1.6,
+        Kind::Creeper => 1.7,
+        Kind::Zombie | Kind::ZombiePigman | Kind::Blaze | Kind::Villager => 1.8,
+        Kind::Witch => 1.95,
         Kind::Cow | Kind::Sheep => 1.3,
         Kind::Spider | Kind::Pig => 0.9,
         Kind::Chicken => 0.7,
@@ -3419,6 +3422,12 @@ mod tests {
             (Kind::Cow, 0.45, 1.3),
             (Kind::Sheep, 0.45, 1.3),
             (Kind::Horse, 0.7, 1.6),
+            (Kind::Creeper, 0.3, 1.7),
+            (Kind::Zombie, 0.3, 1.8),
+            (Kind::ZombiePigman, 0.3, 1.8),
+            (Kind::Blaze, 0.3, 1.8),
+            (Kind::Villager, 0.3, 1.8),
+            (Kind::Witch, 0.3, 1.95),
             (Kind::Enderman, 0.3, 2.9),
             (Kind::IronGolem, 0.7, 2.9),
         ] {
@@ -3593,6 +3602,20 @@ mod tests {
             &mobs.entities,
             Kind::Zombie,
             PlayerPosition { y: 66.5, ..at },
+            1
+        ));
+        // A zombie is 1.8 blocks tall, not 2.0. A candidate whose feet
+        // exactly touch its head must not be rejected as overlapping.
+        assert!(natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Creeper,
+            PlayerPosition { y: 66.8, ..at },
+            1
+        ));
+        assert!(!natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Creeper,
+            PlayerPosition { y: 66.75, ..at },
             1
         ));
 
