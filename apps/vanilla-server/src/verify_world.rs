@@ -225,9 +225,15 @@ fn inspect_irw(world_file: &Path) -> io::Result<Summary> {
         verify_tile_anchors(&world, &tiles, &[23, 158])
     });
     let decorations = Decorations::location(world_file);
-    check!(decorations.clone(), Decorations::load(&decorations));
+    check!(decorations.clone(), {
+        let records = Decorations::load(&decorations)?;
+        records.verify_world_references(&world)
+    });
     let hangings = Hangings::location(world_file);
-    check!(hangings.clone(), Hangings::load(&hangings));
+    check!(hangings.clone(), {
+        let entities = Hangings::load(&hangings)?;
+        entities.verify_world_references(&world)
+    });
     let maps = Maps::location(world_file);
     check!(maps.clone(), Maps::load(&maps));
     let minecarts = Minecarts::location(world_file);
@@ -608,6 +614,138 @@ mod tests {
         world.update_and_save(&path, 3, 65, 5, 54 << 4).unwrap();
         assert!(inspect(&path).is_err(), "chest accepted as a dropper");
         assert_eq!(fs::read(&device_file).unwrap(), original_device);
+        assert!(!root.join("session.lock").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn f56_decoration_references_require_matching_world_blocks() {
+        let root = std::env::temp_dir().join(format!(
+            "f56-decoration-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("flat.irw");
+        let mut world = World::new();
+        world.save_new(&path).unwrap();
+
+        let decoration_path = Decorations::location(&path);
+        fs::write(
+            &decoration_path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "signs": {"1,70,1": ["Hello", "", "", ""]},
+                "notes": {"2,70,1": 10},
+                "records": {"3,70,1": 2256},
+                "pots": {"4,70,1": {"id": 37, "count": 1, "damage": 0}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let baseline_world = fs::read(&path).unwrap();
+        let baseline_record = fs::read(&decoration_path).unwrap();
+        assert!(inspect(&path).is_err(), "orphaned decoration accepted");
+        assert_eq!(fs::read(&path).unwrap(), baseline_world);
+        assert_eq!(fs::read(&decoration_path).unwrap(), baseline_record);
+        assert!(!root.join("session.lock").exists());
+
+        for (x, block) in [(1, 63u16), (2, 25), (3, 84), (4, 140)] {
+            world.update_and_save(&path, x, 70, 1, block << 4).unwrap();
+        }
+        assert!(inspect(&path).is_ok(), "valid decorations should pass");
+        world.update_and_save(&path, 1, 70, 1, 68 << 4).unwrap();
+        assert!(inspect(&path).is_ok(), "wall sign should also be valid");
+
+        for (x, block) in [(1, 54u16), (2, 54), (3, 54), (4, 54)] {
+            world.update_and_save(&path, x, 70, 1, block << 4).unwrap();
+            assert!(
+                inspect(&path).is_err(),
+                "wrong block type accepted at x={x}"
+            );
+            let restored_block = match x {
+                1 => 68,
+                2 => 25,
+                3 => 84,
+                _ => 140,
+            };
+            world
+                .update_and_save(&path, x, 70, 1, restored_block << 4)
+                .unwrap();
+        }
+        assert!(inspect(&path).is_ok());
+        assert_eq!(fs::read(&decoration_path).unwrap(), baseline_record);
+        assert!(!root.join("session.lock").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn f56_hanging_entities_require_support_and_unobstructed_nonoverlap() {
+        let root = std::env::temp_dir().join(format!(
+            "f56-hanging-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("flat.irw");
+        let mut world = World::new();
+        world.save_new(&path).unwrap();
+
+        // One wall block permits a frame and a 1x1 painting on separate faces.
+        world.update_and_save(&path, 0, 70, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, 8, 70, 0, 1 << 4).unwrap();
+        let (state, frame) = Hangings::default()
+            .stage_place(&world, (0, 70, 0), 3, 389)
+            .unwrap()
+            .unwrap();
+        let (state, _) = state
+            .stage_place(&world, (8, 70, 0), 3, 321)
+            .unwrap()
+            .unwrap();
+        let hanging_path = Hangings::location(&path);
+        state.save(&hanging_path).unwrap();
+        let original = fs::read(&hanging_path).unwrap();
+        assert!(
+            inspect(&path).is_ok(),
+            "supported hanging entities should pass"
+        );
+        assert!(!root.join("session.lock").exists());
+
+        // A removed supporting wall, or a solid block occupying a frame,
+        // must not silently pass after a clean JSON load.
+        world.update_and_save(&path, 0, 70, 0, 0).unwrap();
+        assert!(inspect(&path).is_err(), "detached frame accepted");
+        world.update_and_save(&path, 0, 70, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, 0, 70, 1, 1 << 4).unwrap();
+        assert!(inspect(&path).is_err(), "obstructed frame accepted");
+        world.update_and_save(&path, 0, 70, 1, 0).unwrap();
+        assert!(inspect(&path).is_ok());
+        world.update_and_save(&path, 8, 70, 0, 0).unwrap();
+        assert!(inspect(&path).is_err(), "detached painting accepted");
+        world.update_and_save(&path, 8, 70, 0, 1 << 4).unwrap();
+        assert!(inspect(&path).is_ok());
+
+        // Two individually valid entities cannot occupy the same saved cell.
+        // Bypass the model's placement guard only to simulate corrupted input.
+        let mut overlapping = serde_json::to_value(&state).unwrap();
+        let entities = overlapping
+            .get_mut("entities")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        let duplicate_id = frame.id + 100;
+        let mut duplicate = entities.get(&frame.id.to_string()).unwrap().clone();
+        duplicate["id"] = serde_json::json!(duplicate_id);
+        entities.insert(duplicate_id.to_string(), duplicate);
+        fs::write(&hanging_path, serde_json::to_vec(&overlapping).unwrap()).unwrap();
+        assert!(inspect(&path).is_err(), "overlapping frames accepted");
+        fs::write(&hanging_path, &original).unwrap();
+        assert!(
+            inspect(&path).is_ok(),
+            "original hangings should remain valid"
+        );
         assert!(!root.join("session.lock").exists());
         fs::remove_dir_all(root).unwrap();
     }

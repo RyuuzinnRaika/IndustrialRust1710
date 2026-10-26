@@ -121,6 +121,39 @@ impl Decorations {
         store.validate()?;
         Ok(store)
     }
+    /// Read-only referential integrity check for IRW decoration sidecars.
+    ///
+    /// A JSON record can be structurally valid while referencing a removed
+    /// sign, note block, jukebox or flower pot. Reject that orphaned state
+    /// rather than silently declaring a stopped world recoverable.
+    pub fn verify_world_references(&self, world: &world::World) -> io::Result<()> {
+        for position in self.signs.keys() {
+            let (x, y, z) = parse_key(position)?;
+            if !matches!(world.get(x, y, z) >> 4, 63 | 68) {
+                return Err(invalid("orphaned sign: no matching world block"));
+            }
+        }
+        for position in self.notes.keys() {
+            let (x, y, z) = parse_key(position)?;
+            if world.get(x, y, z) >> 4 != 25 {
+                return Err(invalid("orphaned note block: no matching world block"));
+            }
+        }
+        for position in self.records.keys() {
+            let (x, y, z) = parse_key(position)?;
+            if world.get(x, y, z) >> 4 != 84 {
+                return Err(invalid("orphaned jukebox record: no matching world block"));
+            }
+        }
+        for position in self.pots.keys() {
+            let (x, y, z) = parse_key(position)?;
+            if world.get(x, y, z) >> 4 != 140 {
+                return Err(invalid("orphaned flower pot: no matching world block"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn encoded(&self) -> io::Result<Vec<u8>> {
         self.validate()?;
         let data =
