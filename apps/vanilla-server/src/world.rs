@@ -1634,10 +1634,7 @@ impl World {
         let mut seen = BTreeSet::new();
         let mut different = Vec::new();
         for &(x, y, z, block) in changes {
-            if !in_bounds(x, y, z)
-                || block >> 4 > 255
-                || !seen.insert((x, y, z))
-            {
+            if !in_bounds(x, y, z) || block >> 4 > 255 || !seen.insert((x, y, z)) {
                 return Err(invalid("E46 invalid or duplicate Anvil block change"));
             }
             let previous = self.get(x, y, z);
@@ -2280,7 +2277,9 @@ mod tests {
             (-1, 90, 0, (17 << 4) | 2),
             (-1, 90, -1, 4 << 4),
         ];
-        assert!(world.update_many_and_flush_existing_anvil(&path, &changes).unwrap());
+        assert!(world
+            .update_many_and_flush_existing_anvil(&path, &changes)
+            .unwrap());
         for &(x, y, z, block) in &changes {
             assert_eq!(world.get(x, y, z), block);
             assert_eq!(World::load(&path).unwrap().get(x, y, z), block);
@@ -2292,14 +2291,14 @@ mod tests {
             let mut region =
                 fastanvil::Region::from_stream(File::open(&region_path).unwrap()).unwrap();
             let nbt = region
-                .read_chunk(x.div_euclid(16).rem_euclid(32) as usize,
-                            z.div_euclid(16).rem_euclid(32) as usize)
+                .read_chunk(
+                    x.div_euclid(16).rem_euclid(32) as usize,
+                    z.div_euclid(16).rem_euclid(32) as usize,
+                )
                 .unwrap()
                 .unwrap();
-            let chunk = crate::legacy_nbt::parse_chunk(
-                &nbt, x.div_euclid(16), z.div_euclid(16),
-            )
-            .unwrap();
+            let chunk =
+                crate::legacy_nbt::parse_chunk(&nbt, x.div_euclid(16), z.div_euclid(16)).unwrap();
             let index = (y as usize % 16) * 256
                 + z.rem_euclid(16) as usize * 16
                 + x.rem_euclid(16) as usize;
@@ -2315,7 +2314,9 @@ mod tests {
         }
         assert!(!path.with_extension("pending-txn.json").exists());
         // All no-op edits remain a no-op, not a redundant redo write.
-        assert!(!world.update_many_and_flush_existing_anvil(&path, &changes).unwrap());
+        assert!(!world
+            .update_many_and_flush_existing_anvil(&path, &changes)
+            .unwrap());
         drop(world);
         fs::remove_dir_all(base).unwrap();
     }
@@ -2332,10 +2333,7 @@ mod tests {
         let original_irw = fs::read(&irw).unwrap();
         let before: Vec<_> = regions.iter().map(|p| fs::read(p).unwrap()).collect();
         assert!(world
-            .update_many_and_flush_existing_anvil(
-                &irw,
-                &[(-1, 90, 0, 1 << 4), (2, 90, 3, 4 << 4)],
-            )
+            .update_many_and_flush_existing_anvil(&irw, &[(-1, 90, 0, 1 << 4), (2, 90, 3, 4 << 4)],)
             .is_err());
         for &(x, y, z) in &[(-1, 90, 0), (2, 90, 3)] {
             assert_eq!(world.get(x, y, z), 0);
@@ -2357,11 +2355,11 @@ mod tests {
         let region = root.join("region/r.0.0.mca");
         let before_irw = fs::read(&irw).unwrap();
         let before_region = fs::read(&region).unwrap();
-        assert!(world.update_many_and_flush_existing_anvil(&irw, &[]).is_err());
         assert!(world
-            .update_many_and_flush_existing_anvil(
-                &irw, &[(0, 90, 0, 1 << 4), (0, 90, 0, 2 << 4)]
-            )
+            .update_many_and_flush_existing_anvil(&irw, &[])
+            .is_err());
+        assert!(world
+            .update_many_and_flush_existing_anvil(&irw, &[(0, 90, 0, 1 << 4), (0, 90, 0, 2 << 4)])
             .is_err());
         assert!(world
             .update_many_and_flush_existing_anvil(&irw, &[(0, 256, 0, 1 << 4)])
@@ -2370,11 +2368,14 @@ mod tests {
             .update_many_and_flush_existing_anvil(&irw, &[(0, 90, 0, 4096)])
             .is_err());
         // Anvil snapshot exports spawn chunks only; x=512 is absent.
-        assert!(world
-            .update_many_and_flush_existing_anvil(
-                &irw, &[(0, 90, 0, 1 << 4), (512, 90, 0, 1 << 4)],
-            )
-            .is_err());
+        assert!(
+            world
+                .update_many_and_flush_existing_anvil(
+                    &irw,
+                    &[(0, 90, 0, 1 << 4), (512, 90, 0, 1 << 4)],
+                )
+                .is_err()
+        );
         assert_eq!(fs::read(&irw).unwrap(), before_irw);
         assert_eq!(fs::read(&region).unwrap(), before_region);
         assert_eq!(world.get(0, 90, 0), 0);
@@ -2387,11 +2388,10 @@ mod tests {
         let (base, mut world) = e46_fixture("same-chunk", false);
         let root = base.join("anvil");
         let irw = root.join("flat.irw");
-        let patches = [
-            (2, 90, 3, (5 << 4) | 1),
-            (3, 90, 3, (5 << 4) | 2),
-        ];
-        assert!(world.update_many_and_flush_existing_anvil(&irw, &patches).unwrap());
+        let patches = [(2, 90, 3, (5 << 4) | 1), (3, 90, 3, (5 << 4) | 2)];
+        assert!(world
+            .update_many_and_flush_existing_anvil(&irw, &patches)
+            .unwrap());
         assert_eq!(world.get(2, 90, 3), (5 << 4) | 1);
         assert_eq!(world.get(3, 90, 3), (5 << 4) | 2);
         assert_eq!(World::load(&irw).unwrap().get(3, 90, 3), (5 << 4) | 2);
