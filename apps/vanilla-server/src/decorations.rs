@@ -127,14 +127,10 @@ impl Decorations {
     /// sign, note block, jukebox or flower pot. Reject that orphaned state
     /// rather than silently declaring a stopped world recoverable.
     pub fn verify_world_references(&self, world: &world::World) -> io::Result<()> {
-        for (entries, expected) in [
-            (&self.signs, &[63u16, 68][..]),
-        ] {
-            for position in entries.keys() {
-                let (x, y, z) = parse_key(position)?;
-                if !expected.contains(&(world.get(x, y, z) >> 4)) {
-                    return Err(invalid("orphaned sign: no matching world block"));
-                }
+        for position in self.signs.keys() {
+            let (x, y, z) = parse_key(position)?;
+            if !matches!(world.get(x, y, z) >> 4, 63 | 68) {
+                return Err(invalid("orphaned sign: no matching world block"));
             }
         }
         for (position, _) in &self.notes {
