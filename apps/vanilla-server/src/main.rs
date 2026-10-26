@@ -7182,17 +7182,18 @@ fn main() -> io::Result<()> {
                                         Err(_) => return,
                                     };
                                     let mut stand = brewers.get(dest);
-                                    if dispensers::dropper_brewer_insert(&mut stand, offset, stack) {
-                                        let next_brewers =
-                                            match brewers.staged_update(dest, stand) {
-                                                Ok(value) => value,
-                                                Err(error) => {
-                                                    eprintln!(
-                                                        "DROPPER BREWING TRANSFER ERROR: {error}"
-                                                    );
-                                                    continue;
-                                                }
-                                            };
+                                    if dispensers::dropper_brewer_insert(&mut stand, offset, stack)
+                                    {
+                                        let next_brewers = match brewers.staged_update(dest, stand)
+                                        {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                eprintln!(
+                                                    "DROPPER BREWING TRANSFER ERROR: {error}"
+                                                );
+                                                continue;
+                                            }
+                                        };
                                         let result = (|| -> io::Result<()> {
                                             journal::commit(
                                                 &furnace_world_path
