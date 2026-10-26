@@ -5509,7 +5509,7 @@ fn start_clock_console(
                     } else {
                         administration.set_op(name, false)
                     }
-                },
+                }
                 ["/ban", name, reason @ ..] => (|| -> io::Result<()> {
                     let reason = if reason.is_empty() {
                         "Banned by administrator".to_owned()
