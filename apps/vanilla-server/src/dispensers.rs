@@ -218,6 +218,21 @@ impl Devices {
     }
 }
 
+/// Decode a dispenser/dropper's six valid facing values (0..=5).
+/// Metadata bit 3 is the activation flag; 6 and 7 are invalid facings and
+/// must never silently fall back to east when a world contains bad metadata.
+pub(crate) fn facing_offset(metadata: u16) -> Option<Position> {
+    match metadata & 7 {
+        0 => Some((0, -1, 0)),
+        1 => Some((0, 1, 0)),
+        2 => Some((0, 0, -1)),
+        3 => Some((0, 0, 1)),
+        4 => Some((-1, 0, 0)),
+        5 => Some((1, 0, 0)),
+        _ => None,
+    }
+}
+
 /// Vanilla 1.7.10 comparator override for a nine-slot device:
 /// floor(14 * average slot fullness) + 1 when any slot is occupied.
 /// All supported item stack caps (1, 16, 64) divide 64 exactly.
@@ -267,6 +282,25 @@ pub fn insert_one<const N: usize>(slots: &mut [Option<Stack>; N], item: Stack) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_facing_rejects_invalid_metadata_without_east_fallback() {
+        let expected = [
+            (0, -1, 0),
+            (0, 1, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+            (-1, 0, 0),
+            (1, 0, 0),
+        ];
+        for (metadata, direction) in expected.into_iter().enumerate() {
+            assert_eq!(facing_offset(metadata as u16), Some(direction));
+            assert_eq!(facing_offset(metadata as u16 | 8), Some(direction));
+        }
+        for invalid in [6, 7, 14, 15] {
+            assert_eq!(facing_offset(invalid), None);
+        }
+    }
 
     #[test]
     fn device_comparator_signal_respects_stack_caps_and_empty_slots() {
