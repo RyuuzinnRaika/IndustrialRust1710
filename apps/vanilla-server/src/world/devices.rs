@@ -1068,6 +1068,54 @@ mod redstone_regression_tests {
     }
 
     #[test]
+    fn comparator_device_to_hopper_replacement_does_not_reuse_stale_inventory() {
+        let mut w = World::new();
+        let pos = (-1, 64, 0);
+        let key = (-1, 64u8, 0);
+        w.import_block(pos.0, pos.1, pos.2, 23 << 4).unwrap();
+
+        let mut dispenser = BTreeMap::new();
+        dispenser.insert(key, 12);
+        w.set_inventory_comparator_inputs(
+            dispenser.clone(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        assert_eq!(w.comparator_rear_input(pos, (0, 64, 0)), 12);
+
+        // The old dispenser's persisted inventory must not power a hopper.
+        w.import_block(pos.0, pos.1, pos.2, 154 << 4).unwrap();
+        w.set_inventory_comparator_inputs(
+            dispenser,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        assert_eq!(w.comparator_rear_input(pos, (0, 64, 0)), 0);
+
+        let mut hopper = BTreeMap::new();
+        hopper.insert(key, 7);
+        w.set_inventory_comparator_inputs(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            hopper.clone(),
+        );
+        assert_eq!(w.comparator_rear_input(pos, (0, 64, 0)), 7);
+
+        // The reverse replacement must not leak a hopper's old analog level.
+        w.import_block(pos.0, pos.1, pos.2, 158 << 4).unwrap();
+        w.set_inventory_comparator_inputs(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            hopper,
+        );
+        assert_eq!(w.comparator_rear_input(pos, (0, 64, 0)), 0);
+    }
+
+    #[test]
     fn comparator_live_snapshots_ignore_stale_storage_at_replaced_blocks() {
         let mut w = World::new();
         let pos = (-1, 64, 0);
