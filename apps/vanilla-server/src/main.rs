@@ -5370,11 +5370,7 @@ fn run_player_admin_command(
     let parts: Vec<&str> = message.split_whitespace().collect();
     let minimum_level = match parts.first().copied() {
         Some("/time") | Some("/weather") => 2,
-        Some("/kick")
-        | Some("/ban")
-        | Some("/pardon")
-        | Some("/pardon-uuid")
-        | Some("/ban-ip")
+        Some("/kick") | Some("/ban") | Some("/pardon") | Some("/pardon-uuid") | Some("/ban-ip")
         | Some("/pardon-ip") => 3,
         Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
         _ => return Err(bad("unknown operator command")),
