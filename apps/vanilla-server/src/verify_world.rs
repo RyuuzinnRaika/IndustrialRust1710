@@ -535,7 +535,10 @@ mod tests {
         .unwrap();
         let initial_world = fs::read(&path).unwrap();
         let initial_brew = fs::read(&brew_file).unwrap();
-        assert!(inspect(&path).is_err(), "orphaned brewing stand was accepted");
+        assert!(
+            inspect(&path).is_err(),
+            "orphaned brewing stand was accepted"
+        );
         assert_eq!(fs::read(&path).unwrap(), initial_world);
         assert_eq!(fs::read(&brew_file).unwrap(), initial_brew);
         assert!(!root.join("session.lock").exists());
@@ -583,7 +586,10 @@ mod tests {
         .unwrap();
         let original_device = fs::read(&device_file).unwrap();
         let original_world = fs::read(&path).unwrap();
-        assert!(inspect(&path).is_err(), "orphaned device inventory accepted");
+        assert!(
+            inspect(&path).is_err(),
+            "orphaned device inventory accepted"
+        );
         assert_eq!(fs::read(&path).unwrap(), original_world);
         assert_eq!(fs::read(&device_file).unwrap(), original_device);
 
