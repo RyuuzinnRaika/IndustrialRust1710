@@ -2930,11 +2930,16 @@ mod tests {
         assert_eq!(doors.len(), 128);
         assert!(doors.contains(&near), "nearby door must not be crowded out");
         for door in generated.into_iter().flatten() {
-            assert!(doors.contains(&door), "generated village door must be retained");
+            assert!(
+                doors.contains(&door),
+                "generated village door must be retained"
+            );
         }
         assert!(!doors.contains(&[cx - 30, 200, cz - 20]));
 
-        world.import_block(near[0], near[1] + 1, near[2], 0).unwrap();
+        world
+            .import_block(near[0], near[1] + 1, near[2], 0)
+            .unwrap();
         assert!(!world
             .village_doors_including_player_edits(cx, cz)
             .unwrap()
