@@ -3131,11 +3131,18 @@ mod tests {
         xp.total = 300;
         assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
         assert_eq!(inv.anvil_inputs, [None, None]);
-        assert_eq!(inv.cursor, Some(expected));
+        let actual = inv.cursor.unwrap();
+        assert_eq!((actual.id, actual.count, actual.damage), (expected.id, expected.count, expected.damage));
+        // NBT intern handles are process-local and serialized Compound maps
+        // can have different byte order; compare actual tag semantics instead.
+        assert_eq!(
+            crate::item_nbt::value(actual.nbt.unwrap()).unwrap(),
+            crate::item_nbt::value(expected.nbt.unwrap()).unwrap()
+        );
         assert!(xp.total < 300);
         let saved = inv.encoded().unwrap();
         let reloaded: Inventory = serde_json::from_slice(&saved).unwrap();
-        assert_eq!(reloaded.cursor, Some(expected));
+        assert_eq!(reloaded.cursor, Some(actual));
         assert_eq!(reloaded.anvil_inputs, [None, None]);
         let Value::Compound(tags) =
             crate::item_nbt::value(reloaded.cursor.unwrap().nbt.unwrap()).unwrap()
