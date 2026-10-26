@@ -7929,7 +7929,7 @@ mod tests {
 
     #[test]
     fn creative_c10_rejects_invalid_nbt_and_unregistered_ids_without_mutation() {
-        let mut inventory = Inventory::default();
+        let inventory = Inventory::default();
         let original = inventory.clone();
 
         // Valid item, but the claimed compressed NBT is not a gzip Compound.
