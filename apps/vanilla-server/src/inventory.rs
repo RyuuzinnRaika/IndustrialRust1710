@@ -2714,6 +2714,7 @@ mod tests {
             id: 17,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         for slot in 1..=4 {
             assert!(inventory.creative_set(slot, Some(logs)).unwrap());
