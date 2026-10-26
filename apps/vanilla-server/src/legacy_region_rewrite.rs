@@ -37,6 +37,19 @@ pub(crate) fn rewrite_chunks_create_only(
     destination: &Path,
     replacements: &[((i32, i32), &[u8])],
 ) -> io::Result<()> {
+    build_region_create_only(Some(source), destination, replacements, false)
+}
+
+/// Opt-in E46 helper. Allow inserting previously ungenerated chunks, or
+/// creating a completely new region, without changing the existing
+/// update-only API. This only creates a *staged* file; the caller must publish
+/// it through a verified session-locked redo transaction.
+fn build_region_create_only(
+    source: Option<&Path>,
+    destination: &Path,
+    replacements: &[((i32, i32), &[u8])],
+    allow_new_chunks: bool,
+) -> io::Result<()> {
     let (first, _) = replacements
         .first()
         .ok_or_else(|| invalid("Anvil region update must contain chunks"))?;
@@ -45,16 +58,14 @@ pub(crate) fn rewrite_chunks_create_only(
     }
     let (cx, cz) = *first;
     let region = (cx.div_euclid(32), cz.div_euclid(32));
-    let file_name = format!("r.{}.{}.mca", region.0, region.1);
-    if source.file_name().and_then(|name| name.to_str()) != Some(file_name.as_str())
-        || destination.file_name().and_then(|name| name.to_str()) != Some(file_name.as_str())
+    let filename = format!("r.{}.{}.mca", region.0, region.1);
+    if source.is_some_and(|path| {
+        path.file_name().and_then(|name| name.to_str()) != Some(filename.as_str())
+    }) || destination.file_name().and_then(|name| name.to_str()) != Some(filename.as_str())
     {
         return Err(invalid(
             "Anvil region name does not match replacement chunk",
         ));
-    }
-    if !fs::symlink_metadata(source)?.file_type().is_file() {
-        return Err(invalid("source Anvil region is not a regular file"));
     }
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     if !fs::symlink_metadata(parent)?.file_type().is_dir() {
@@ -83,14 +94,35 @@ pub(crate) fn rewrite_chunks_create_only(
             return Err(invalid("duplicate Anvil chunk in batch"));
         }
     }
-    // Reject malformed source sectors or NBT before any filesystem mutation.
-    crate::legacy_region::inspect_region(source)?;
-    let mut input = Region::from_stream(File::open(source)?).map_err(wrap)?;
-    for &(x, z) in overlay.keys() {
-        if input.read_chunk(x, z).map_err(wrap)?.is_none() {
+
+    // Existing sources are parsed completely before any staging mutation.
+    let mut input = if let Some(path) = source {
+        if !fs::symlink_metadata(path)?.file_type().is_file() {
+            return Err(invalid("source Anvil region is not a regular file"));
+        }
+        crate::legacy_region::inspect_region(path)?;
+        Some(Region::from_stream(File::open(path)?).map_err(wrap)?)
+    } else {
+        if !allow_new_chunks {
             return Err(invalid(
-                "source chunk does not exist; new generation is separate",
+                "missing Anvil region requires explicit insert mode",
             ));
+        }
+        None
+    };
+    if !allow_new_chunks {
+        for &(x, z) in overlay.keys() {
+            if input
+                .as_mut()
+                .ok_or_else(|| invalid("missing source Anvil region"))?
+                .read_chunk(x, z)
+                .map_err(wrap)?
+                .is_none()
+            {
+                return Err(invalid(
+                    "source chunk does not exist; new generation is separate",
+                ));
+            }
         }
     }
     let staging = destination.with_extension("creating");
@@ -103,9 +135,13 @@ pub(crate) fn rewrite_chunks_create_only(
         let mut output = Region::create(stage_file).map_err(wrap)?;
         for z in 0..32 {
             for x in 0..32 {
-                if let Some(bytes) = input.read_chunk(x, z).map_err(wrap)? {
-                    let data = overlay.get(&(x, z)).copied().unwrap_or(bytes.as_slice());
-                    output.write_chunk(x, z, data).map_err(wrap)?;
+                let original = match input.as_mut() {
+                    Some(reader) => reader.read_chunk(x, z).map_err(wrap)?,
+                    None => None,
+                };
+                let contents = overlay.get(&(x, z)).copied().or(original.as_deref());
+                if let Some(bytes) = contents {
+                    output.write_chunk(x, z, bytes).map_err(wrap)?;
                 }
             }
         }
@@ -114,20 +150,25 @@ pub(crate) fn rewrite_chunks_create_only(
         file.set_len(length)?;
         file.sync_all()?;
         drop(file);
+        // Validate every sector/chunk, not only the newly written positions.
+        crate::legacy_region::inspect_region_bytes(destination, &fs::read(&staging)?)?;
         let mut verify = Region::from_stream(File::open(&staging)?).map_err(wrap)?;
         for z in 0..32 {
             for x in 0..32 {
                 let observed = verify.read_chunk(x, z).map_err(wrap)?;
                 let expected = match overlay.get(&(x, z)) {
                     Some(bytes) => Some(bytes.to_vec()),
-                    None => input.read_chunk(x, z).map_err(wrap)?,
+                    None => match input.as_mut() {
+                        Some(reader) => reader.read_chunk(x, z).map_err(wrap)?,
+                        None => None,
+                    },
                 };
                 if observed != expected {
                     return Err(invalid("reconstructed region lost an original chunk"));
                 }
             }
         }
-        // hard_link is create-only even if another process wins the race.
+        // This stage cannot overwrite an existing destination.
         fs::hard_link(&staging, destination)?;
         #[cfg(unix)]
         File::open(parent)?.sync_all()?;
@@ -350,6 +391,62 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
     world_file: &Path,
     sidecars: &[(&Path, Vec<u8>)],
 ) -> io::Result<()> {
+    let source_images = expected_sources
+        .iter()
+        .map(|(region, bytes)| (*region, Some(bytes.clone())))
+        .collect();
+    commit_region_batch(
+        lock,
+        dimension,
+        replacements,
+        &source_images,
+        world_file,
+        sidecars,
+        false,
+    )
+}
+
+/// E46 opt-in migration primitive: add previously absent chunks or entire
+/// region files while publishing 2..8 related files as one redo generation.
+/// Every region must have an explicit expected byte image or explicit None
+/// (expected to be absent). No active gameplay writer calls this yet.
+pub(crate) fn insert_regions_with_sidecars_under_lock_expected(
+    lock: &mut WorldSessionLock,
+    dimension: Dimension,
+    replacements: &[((i32, i32), &[u8])],
+    expected_sources: &std::collections::BTreeMap<(i32, i32), Option<Vec<u8>>>,
+    world_file: &Path,
+    sidecars: &[(&Path, Vec<u8>)],
+) -> io::Result<()> {
+    commit_region_batch(
+        lock,
+        dimension,
+        replacements,
+        expected_sources,
+        world_file,
+        sidecars,
+        true,
+    )
+}
+
+fn snapshot_region(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => fs::read(path).map(Some),
+        Ok(_) => Err(invalid("region source must be a regular file")),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn commit_region_batch(
+    lock: &mut WorldSessionLock,
+    dimension: Dimension,
+    replacements: &[((i32, i32), &[u8])],
+    expected_sources: &std::collections::BTreeMap<(i32, i32), Option<Vec<u8>>>,
+    world_file: &Path,
+    sidecars: &[(&Path, Vec<u8>)],
+    allow_new_chunks: bool,
+) -> io::Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
     lock.verify()?;
     let root = lock.world_dir().to_path_buf();
@@ -392,6 +489,7 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
     }
     if grouped.is_empty()
         || grouped.len() != expected_sources.len()
+        || grouped.len() + sidecars.len() < 2
         || grouped.len() + sidecars.len() > 8
         || replacements.len() > 2048
     {
@@ -432,11 +530,18 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
             .get(&(rx, rz))
             .ok_or_else(|| invalid("missing source region snapshot"))?;
         let source = regions.join(format!("r.{rx}.{rz}.mca"));
-        if !fs::symlink_metadata(&source)?.file_type().is_file() || fs::read(&source)? != *expected
-        {
+        let observed = snapshot_region(&source)?;
+        if observed.as_ref() != expected.as_ref() {
             return Err(invalid("source Anvil region changed since snapshot"));
         }
-        crate::legacy_region::inspect_region(&source)?;
+        if observed.is_none() && !allow_new_chunks {
+            return Err(invalid(
+                "missing region cannot be created by update-only API",
+            ));
+        }
+        if observed.is_some() {
+            crate::legacy_region::inspect_region(&source)?;
+        }
         sources.push(((rx, rz), source));
     }
     let nonce = SystemTime::now()
@@ -452,15 +557,19 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
         let mut changes: Vec<(&Path, Vec<u8>)> = Vec::with_capacity(grouped.len() + sidecars.len());
         for ((rx, rz), source) in &sources {
             let destination = stage.join(format!("r.{rx}.{rz}.mca"));
-            rewrite_chunks_create_only(source, &destination, &grouped[&(*rx, *rz)])?;
+            let observed = &expected_sources[&(*rx, *rz)];
+            build_region_create_only(
+                observed.as_ref().map(|_| source.as_path()),
+                &destination,
+                &grouped[&(*rx, *rz)],
+                allow_new_chunks,
+            )?;
             changes.push((source.as_path(), fs::read(&destination)?));
         }
         lock.verify()?;
         // A racing non-cooperative editor is detected before redo publication.
         for ((rx, rz), source) in &sources {
-            if !fs::symlink_metadata(source)?.file_type().is_file()
-                || fs::read(source)? != expected_sources[&(*rx, *rz)]
-            {
+            if snapshot_region(source)?.as_ref() != expected_sources[&(*rx, *rz)].as_ref() {
                 return Err(invalid("source region changed before multi-region commit"));
             }
         }
@@ -492,6 +601,145 @@ mod tests {
         anvil_export::export(&World::new(), &root.join("world")).unwrap();
         fs::create_dir(root.join("out")).unwrap();
         root
+    }
+
+    #[test]
+    fn e46_creates_absent_region_and_chunk_in_existing_region_with_one_redo() {
+        use std::collections::BTreeMap;
+        let base = setup();
+        let world = base.join("world");
+        let old_region = world.join("region/r.0.0.mca");
+        let new_region = world.join("region/r.1.-1.mca");
+        let old_bytes = fs::read(&old_region).unwrap();
+        let mut reader = Region::from_stream(File::open(&old_region).unwrap()).unwrap();
+        let unchanged = reader.read_chunk(1, 0).unwrap().unwrap();
+        let raw = reader.read_chunk(0, 0).unwrap().unwrap();
+        let mut template = legacy_nbt::parse_chunk(&raw, 0, 0).unwrap();
+        template.level.x = 31;
+        template.level.z = 31;
+        template
+            .level
+            .extra
+            .insert("UnknownNewChunk".into(), Value::String("retain me".into()));
+        let added_to_old = fastnbt::to_bytes(&template).unwrap();
+        template.level.x = 32;
+        template.level.z = -1;
+        let added_to_new = fastnbt::to_bytes(&template).unwrap();
+        let expectations = BTreeMap::from([((0, 0), Some(old_bytes)), ((1, -1), None)]);
+        let sidecar = world.join("flat.chests.json");
+        let world_file = world.join("flat.irw");
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+        insert_regions_with_sidecars_under_lock_expected(
+            &mut lock,
+            Dimension::Overworld,
+            &[((31, 31), &added_to_old), ((32, -1), &added_to_new)],
+            &expectations,
+            &world_file,
+            &[(sidecar.as_path(), br#"{"chests":[]}"#.to_vec())],
+        )
+        .unwrap();
+        let mut existing = Region::from_stream(File::open(&old_region).unwrap()).unwrap();
+        assert_eq!(existing.read_chunk(31, 31).unwrap().unwrap(), added_to_old);
+        assert_eq!(existing.read_chunk(1, 0).unwrap().unwrap(), unchanged);
+        let mut fresh = Region::from_stream(File::open(&new_region).unwrap()).unwrap();
+        assert_eq!(fresh.read_chunk(0, 31).unwrap().unwrap(), added_to_new);
+        assert_eq!(
+            crate::legacy_region::inspect_region(&new_region).unwrap(),
+            1
+        );
+        assert_eq!(fs::read(&sidecar).unwrap(), br#"{"chests":[]}"#);
+        assert!(!world_file.with_extension("pending-txn.json").exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_refuses_new_region_when_snapshot_claims_absence_but_file_exists() {
+        use std::collections::BTreeMap;
+        let base = setup();
+        let world = base.join("world");
+        let source = world.join("region/r.0.0.mca");
+        let original = fs::read(&source).unwrap();
+        let mut reader = Region::from_stream(File::open(&source).unwrap()).unwrap();
+        let replacement = reader.read_chunk(0, 0).unwrap().unwrap();
+        let sidecar = world.join("flat.chests.json");
+        let world_file = world.join("flat.irw");
+        let expectations = BTreeMap::from([((0, 0), None)]);
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+        assert!(insert_regions_with_sidecars_under_lock_expected(
+            &mut lock,
+            Dimension::Overworld,
+            &[((0, 0), &replacement)],
+            &expectations,
+            &world_file,
+            &[(sidecar.as_path(), b"{}".to_vec())],
+        )
+        .is_err());
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert!(!sidecar.exists());
+        assert!(!world_file.with_extension("pending-txn.json").exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_rejects_bad_new_chunk_without_creating_a_region_or_sidecar() {
+        use std::collections::BTreeMap;
+        let base = setup();
+        let world = base.join("world");
+        let absent = world.join("region/r.2.0.mca");
+        let sidecar = world.join("flat.chests.json");
+        let world_file = world.join("flat.irw");
+        let expectations = BTreeMap::from([((2, 0), None)]);
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+        assert!(insert_regions_with_sidecars_under_lock_expected(
+            &mut lock,
+            Dimension::Overworld,
+            &[((64, 0), b"invalid NBT")],
+            &expectations,
+            &world_file,
+            &[(sidecar.as_path(), b"{}".to_vec())],
+        )
+        .is_err());
+        assert!(!absent.exists());
+        assert!(!sidecar.exists());
+        assert!(!world_file.with_extension("pending-txn.json").exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn e46_refuses_symlink_at_absent_region_path() {
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::symlink;
+        let base = setup();
+        let world = base.join("world");
+        let destination = world.join("region/r.2.0.mca");
+        let outside = base.join("outside.mca");
+        fs::write(&outside, b"untouched").unwrap();
+        symlink(&outside, &destination).unwrap();
+        let mut reader =
+            Region::from_stream(File::open(world.join("region/r.0.0.mca")).unwrap()).unwrap();
+        let mut chunk =
+            legacy_nbt::parse_chunk(&reader.read_chunk(0, 0).unwrap().unwrap(), 0, 0).unwrap();
+        chunk.level.x = 64;
+        let nbt = fastnbt::to_bytes(&chunk).unwrap();
+        let sidecar = world.join("flat.chests.json");
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+        assert!(insert_regions_with_sidecars_under_lock_expected(
+            &mut lock,
+            Dimension::Overworld,
+            &[((64, 0), &nbt)],
+            &BTreeMap::from([((2, 0), None)]),
+            &world.join("flat.irw"),
+            &[(sidecar.as_path(), b"{}".to_vec())],
+        )
+        .is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"untouched");
+        assert!(!sidecar.exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
