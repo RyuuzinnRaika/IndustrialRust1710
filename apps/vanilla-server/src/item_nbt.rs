@@ -110,6 +110,37 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct SavedTag {
+        #[serde(with = "crate::item_nbt")]
+        nbt: Option<u64>,
+    }
+
+    #[test]
+    fn json_persistence_stores_nbt_bytes_not_process_local_handles() {
+        let tag = Value::Compound(HashMap::from([(
+            "UnknownCustomMetadata".to_string(),
+            Value::IntArray(fastnbt::IntArray::new(vec![1, 0, -19])),
+        )]));
+        let handle = from_value(&tag).unwrap();
+        let source = wire(handle).unwrap();
+
+        let json = serde_json::to_value(SavedTag { nbt: Some(handle) }).unwrap();
+        assert!(json["nbt"].is_array(), "NBT must be persisted as bytes");
+        let recovered: SavedTag = serde_json::from_value(json).unwrap();
+        assert_eq!(wire(recovered.nbt.unwrap()).unwrap(), source);
+        assert_eq!(value(recovered.nbt.unwrap()).unwrap(), tag);
+
+        let absent = serde_json::to_value(SavedTag { nbt: None }).unwrap();
+        let restored: SavedTag = serde_json::from_value(absent).unwrap();
+        assert!(restored.nbt.is_none());
+        assert!(serde_json::to_value(SavedTag { nbt: Some(u64::MAX) }).is_err());
+        assert!(
+            serde_json::from_value::<SavedTag>(serde_json::json!({"nbt": [1, 2, 3]}))
+                .is_err()
+        );
+    }
+
     #[test]
     fn unknown_nested_tags_and_arrays_keep_identical_wire_bytes() {
         let mut compound = HashMap::new();
