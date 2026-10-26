@@ -5229,7 +5229,12 @@ fn run_player_admin_command(
             Ok(format!("OP granted to {target}"))
         }
         ["/deop", target] => {
-            administration.set_op(target, false)?;
+            if let Some(uuid) = hub.uuid_for_online_name(target)? {
+                administration.revoke_op_verified(target, &uuid)?;
+            } else {
+                // Offline target: the persisted name is the only lookup key.
+                administration.set_op(target, false)?;
+            }
             Ok(format!("OP revoked from {target}"))
         }
         ["/permission", target, kind, state] => {
@@ -5494,7 +5499,17 @@ fn start_clock_console(
                     println!("OP record saved for {name}");
                     Ok(())
                 })(),
-                ["/deop", name] => administration.set_op(name, false),
+                ["/deop", name] => {
+                    if online_mode {
+                        if let Some(uuid) = hub.uuid_for_online_name(name)? {
+                            administration.revoke_op_verified(name, &uuid)
+                        } else {
+                            administration.set_op(name, false)
+                        }
+                    } else {
+                        administration.set_op(name, false)
+                    }
+                },
                 ["/ban", name, reason @ ..] => (|| -> io::Result<()> {
                     let reason = if reason.is_empty() {
                         "Banned by administrator".to_owned()
