@@ -2,7 +2,9 @@
 //! Enchanted-item creation, anvil renaming, and enchanted-book combination MUST
 //! wait until the live Stack representation preserves NBT. Never silently strip tags.
 use crate::inventory::Stack;
-use crate::items_1710;
+use crate::{enchanting, item_nbt, items_1710};
+use fastnbt::Value;
+use std::collections::{HashMap, HashSet};
 
 /// Counts bookshelves at the vanilla two-block offset, with an air gap.
 #[allow(dead_code)] // D35 offer model, pending generic ItemStack NBT
@@ -82,14 +84,124 @@ pub struct Repair {
     pub levels: u16,
 }
 
-/// Durability-only anvil repair for untagged stacks. Never accepts names or
-/// enchantments because the present Stack does not preserve them.
+/// Only edit vanilla enchantments that can be decoded without ambiguity.
+/// Unknown top-level and per-enchantment NBT fields are kept verbatim.
+fn nbt_root(stack: Stack) -> Option<HashMap<String, Value>> {
+    match stack.nbt {
+        None => Some(HashMap::new()),
+        Some(handle) => match item_nbt::value(handle).ok()? {
+            Value::Compound(fields) => Some(fields),
+            _ => None,
+        },
+    }
+}
+
+fn enchantment_entries(entries: &[Value]) -> Option<Vec<(i16, i16)>> {
+    let mut seen = HashSet::new();
+    let mut parsed = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Value::Compound(fields) = entry else {
+            return None;
+        };
+        let (Some(Value::Short(id)), Some(Value::Short(level))) =
+            (fields.get("id"), fields.get("lvl"))
+        else {
+            return None;
+        };
+        let max = enchanting::anvil_level_limit(403, *id)?;
+        if !(1..=max).contains(level) || !seen.insert(*id) {
+            return None;
+        }
+        parsed.push((*id, *level));
+    }
+    Some(parsed)
+}
+
+/// Merge only compatible, valid 1.7.10 enchantments. An invalid enchant tag,
+/// incompatible pair, or unrepresentable output must not consume either input.
+fn merge_anvil_enchantments(left: Stack, right: Stack) -> Option<(u64, u16)> {
+    let source_key = if right.id == 403 {
+        "StoredEnchantments"
+    } else {
+        "ench"
+    };
+    let target_key = if left.id == 403 {
+        "StoredEnchantments"
+    } else {
+        "ench"
+    };
+    let source = nbt_root(right)?;
+    let Some(Value::List(incoming)) = source.get(source_key) else {
+        return None;
+    };
+    let incoming_parsed = enchantment_entries(incoming)?;
+    if incoming_parsed.is_empty() {
+        return None;
+    }
+    let mut root = nbt_root(left)?;
+    let mut target_entries = match root.get(target_key) {
+        None => Vec::new(),
+        Some(Value::List(items)) => items.clone(),
+        _ => return None,
+    };
+    let mut existing = enchantment_entries(&target_entries)?;
+    let mut levels = 0u16;
+    let mut changed = false;
+    for (entry, &(id, incoming_level)) in incoming.iter().zip(&incoming_parsed) {
+        let max = enchanting::anvil_level_limit(left.id, id)?;
+        if existing
+            .iter()
+            .any(|&(other, _)| enchanting::anvil_enchant_conflicts(id, other))
+        {
+            return None;
+        }
+        let prior = existing.iter().find(|&&(other, _)| other == id).map(|&(_, lvl)| lvl);
+        let next_level = prior.map_or(incoming_level, |old| {
+            if old == incoming_level && old < max {
+                old + 1
+            } else {
+                old.max(incoming_level)
+            }
+        });
+        if next_level > max {
+            return None;
+        }
+        if prior.is_some_and(|old| old >= next_level) {
+            continue;
+        }
+        // Preserve any unknown fields in the original entry. When a new
+        // enchantment is added, preserve the source entry's extra tags.
+        if let Some(index) = existing.iter().position(|&(other, _)| other == id) {
+            let Value::Compound(fields) = &mut target_entries[index] else {
+                return None;
+            };
+            fields.insert("lvl".to_owned(), Value::Short(next_level));
+            existing[index].1 = next_level;
+        } else {
+            target_entries.push(entry.clone());
+            existing.push((id, next_level));
+        }
+        let multiplier = if right.id == 403 { 1u16 } else { 2u16 };
+        levels = levels.checked_add((next_level as u16).checked_mul(multiplier)?)?;
+        changed = true;
+    }
+    if !changed || levels == 0 {
+        return None;
+    }
+    root.insert(target_key.to_owned(), Value::List(target_entries));
+    let handle = item_nbt::from_value(&Value::Compound(root)).ok()?;
+    Some((handle, levels))
+}
+
+/// Return a server-owned anvil preview. Material and durability repairs retain
+/// the left stack's NBT; matching items and enchanted books may additionally
+/// merge compatible enchantments while preserving unknown NBT fields.
 pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
     if !left.is_valid() || !right.is_valid() || left.count != 1 {
         return None;
     }
-    let max = items_1710::max_durability(left.id)?;
-    if left.damage < 0 || left.damage >= max || max <= 0 {
+    let max = items_1710::max_durability(left.id).unwrap_or(0);
+    if left.damage < 0 || (max > 0 && left.damage > max) {
         return None;
     }
     let material = match left.id {
@@ -105,7 +217,7 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
     } else {
         material
     };
-    if right.id == material && material > 0 {
+    if right.id == material && material > 0 && max > 0 && left.damage > 0 {
         let per_unit = (max / 4).max(1);
         let units = u16::from(right.count).min(4);
         let available = u16::try_from(left.damage).ok()?;
@@ -125,25 +237,43 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
             levels: u16::from(consumed),
         });
     }
-    if right.id == left.id && right.count == 1 {
+    if right.count != 1 || (right.id != left.id && right.id != 403) {
+        return None;
+    }
+    // Book+book or enchanted book+tool may add enchantments without repairing
+    // durability. Two matching tools can perform both operations atomically.
+    let enchant = merge_anvil_enchantments(left, right);
+    let mut repaired = left.damage;
+    let mut levels = 0u16;
+    if right.id == left.id && max > 0 && left.damage > 0 {
         let left_remaining = i32::from(max - left.damage);
         let right_remaining = i32::from(max - right.damage);
         let combined =
             (left_remaining + right_remaining + i32::from(max) * 12 / 100).min(i32::from(max));
         let new_damage = (i32::from(max) - combined) as i16;
-        if new_damage >= left.damage {
-            return None;
+        if new_damage < left.damage {
+            repaired = new_damage;
+            levels = 2;
         }
-        return Some(Repair {
-            result: Stack {
-                damage: new_damage,
-                ..left
-            },
-            consumed: 1,
-            levels: 2,
-        });
     }
-    None
+    let mut result = Stack {
+        damage: repaired,
+        ..left
+    };
+    if let Some((nbt, enchant_cost)) = enchant {
+        result.nbt = Some(nbt);
+        levels = levels.checked_add(enchant_cost)?;
+    }
+    // The level cap is a conservative Survival-compatible guard until the
+    // complete 1.7.10 prior-work/Creative exception rules are implemented.
+    if levels == 0 || levels > 39 {
+        return None;
+    }
+    Some(Repair {
+        result,
+        consumed: 1,
+        levels,
+    })
 }
 
 /// Candidate enchantments by vanilla 1.7.10 numeric enchantment ID.
