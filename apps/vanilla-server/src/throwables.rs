@@ -263,7 +263,14 @@ impl Throwables {
                 let y = sample.y.floor() as i32;
                 let z = sample.z.floor() as i32;
                 let block = world.get(x, y, z) >> 4;
-                if block != 0 && !matches!(block, 6 | 31 | 32 | 37 | 38 | 39 | 40 | 50 | 78) {
+                // Vanilla ray tracing does not stop on water or lava source/flow blocks.
+                // Treating liquids as solid here destroys arrows and thrown items early.
+                if block != 0
+                    && !matches!(
+                        block,
+                        6 | 8 | 9 | 10 | 11 | 31 | 32 | 37 | 38 | 39 | 40 | 50 | 78
+                    )
+                {
                     collision = Some(sample);
                     break;
                 }
@@ -412,6 +419,27 @@ mod tests {
         };
         assert!((height(Kind::Snowball) - height(Kind::Arrow) - 0.02).abs() < 1e-10);
         assert!((height(Kind::Egg) - height(Kind::Snowball)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dispenser_projectiles_pass_through_source_and_flowing_liquids() {
+        // 1.7.10 projectile block ray tracing ignores both water and lava.
+        // Solid-block impacts remain covered by the neighboring regression test.
+        for liquid in [8u16, 9, 10, 11] {
+            let mut world = World::new();
+            world.import_block(2, 70, 0, liquid << 4).unwrap();
+            assert_eq!(world.get(2, 70, 0) >> 4, liquid);
+            let mut objects = Throwables::default();
+            objects
+                .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+                .unwrap();
+
+            let result = objects.tick(&world, 1);
+            assert_eq!(objects.active.len(), 1, "liquid block {liquid}");
+            assert_eq!(result.events.len(), 1, "liquid block {liquid}");
+            assert_ne!(result.events[0].1.id, 0x13, "liquid block {liquid}");
+            assert!(objects.active.values().next().unwrap().at.x > 2.0);
+        }
     }
 
     #[test]
