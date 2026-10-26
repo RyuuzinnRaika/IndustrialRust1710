@@ -2540,12 +2540,15 @@ impl Mobs {
                 // The 1/800 random despawn roll starts only after this mob
                 // has spent 600 simulated ticks outside the 32-block zone.
                 // Server uptime or the last combat hit is not the mob's age.
-                // A nearby player resets the timer, matching vanilla behavior.
-                if nearest_distance <= 32.0 {
+                // Vanilla's near-player reset is strictly < 32 blocks.
+                // At exactly 32 the age advances, but the random cull is
+                // strictly > 32 blocks (distance squared > 1024).
+                if nearest_distance < 32.0 {
                     mob.far_from_player_ticks = 0;
                 } else if mob.kind.despawnable() && !players.is_empty() {
                     mob.far_from_player_ticks = mob.far_from_player_ticks.saturating_add(1);
-                    if mob.far_from_player_ticks > 600
+                    if nearest_distance > 32.0
+                        && mob.far_from_player_ticks > 600
                         && hash(now ^ mob.id as u64).is_multiple_of(800)
                     {
                         dead.push(mob.id);
@@ -4756,6 +4759,61 @@ mod tests {
             .unwrap();
         mobs.tick(eligible_roll, &world, &[far]);
         assert!(!mobs.entities.contains_key(&id));
+    }
+
+    #[test]
+    fn hostile_despawn_uses_strict_32_block_random_cull_boundary() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut exact = Mobs::default();
+        exact.insert(Kind::Creeper, at, false);
+        let id = exact.next_id - 1;
+        let roll_tick = (1000_u64..100_000)
+            .find(|tick| hash(*tick ^ id as u64).is_multiple_of(800))
+            .unwrap();
+
+        // At exactly 32 blocks, vanilla advances the far-player age but
+        // does not reset it or execute the 1/800 random despawn roll.
+        exact.entities.get_mut(&id).unwrap().far_from_player_ticks = 600;
+        let boundary = PlayerPosition {
+            x: at.x + 32.0,
+            ..at
+        };
+        exact.tick(roll_tick, &world, &[boundary]);
+        assert!(exact.entities.contains_key(&id));
+        assert_eq!(exact.entities[&id].far_from_player_ticks, 604);
+
+        // Moving even slightly farther permits the same eligible roll.
+        let mut outside = Mobs::default();
+        outside.insert(Kind::Creeper, at, false);
+        outside.entities.get_mut(&id).unwrap().far_from_player_ticks = 600;
+        outside.tick(
+            roll_tick,
+            &world,
+            &[PlayerPosition {
+                x: at.x + 32.001,
+                ..at
+            }],
+        );
+        assert!(!outside.entities.contains_key(&id));
+
+        // A player just inside the boundary resets the far-player age.
+        let mut inside = Mobs::default();
+        inside.insert(Kind::Creeper, at, false);
+        inside.entities.get_mut(&id).unwrap().far_from_player_ticks = 600;
+        inside.tick(
+            roll_tick,
+            &world,
+            &[PlayerPosition {
+                x: at.x + 31.999,
+                ..at
+            }],
+        );
+        assert_eq!(inside.entities[&id].far_from_player_ticks, 0);
     }
 
     #[test]
