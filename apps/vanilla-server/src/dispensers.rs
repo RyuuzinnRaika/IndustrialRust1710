@@ -646,6 +646,60 @@ mod tests {
     }
 
     #[test]
+    fn dropper_furnace_fuel_transfer_roundtrips_without_source_mutation() {
+        let source = (-3, 64, 2);
+        let destination = (-2, 64, 2);
+        let coal = Stack {
+            id: 263,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut source_slots = [None; DEVICE_SLOTS];
+        source_slots[0] = Some(Stack { count: 2, ..coal });
+        let devices = Devices::default()
+            .staged_update(source, source_slots)
+            .unwrap();
+
+        let mut furnace = crate::furnaces::Furnace::default();
+        furnace.slots[1] = Some(Stack { count: 63, ..coal });
+        let furnaces = crate::furnaces::Furnaces::default()
+            .staged_update(destination, furnace)
+            .unwrap();
+
+        // The dropper points sideways at a lit furnace. One coal is staged
+        // into the fuel slot without touching the input/output slots.
+        assert_eq!(dropper_furnace_slot(62, (1, 0, 0), coal), Some(1));
+        let (debited, emitted) = devices.stage_eject(source, 13).unwrap().unwrap();
+        let mut next_furnace = furnaces.get(destination);
+        let mut fuel_slot = [next_furnace.slots[1]];
+        assert!(insert_one(&mut fuel_slot, emitted));
+        next_furnace.slots[1] = fuel_slot[0];
+        let staged = furnaces.staged_update(destination, next_furnace).unwrap();
+
+        assert_eq!(debited.slots(source)[0], Some(coal));
+        assert_eq!(devices.slots(source), source_slots);
+        assert_eq!(furnaces.get(destination), furnace);
+        assert_eq!(staged.get(destination).slots[1].unwrap().count, 64);
+        assert_eq!(staged.get(destination).slots[0], None);
+        assert_eq!(staged.get(destination).slots[2], None);
+
+        // The encoded journal payload must preserve the inserted fuel after
+        // a serialize/deserialize roundtrip.
+        let restored: crate::furnaces::Furnaces =
+            serde_json::from_slice(&staged.encoded().unwrap()).unwrap();
+        assert_eq!(restored.get(destination), staged.get(destination));
+
+        // A full fuel slot rejects the next item; neither original store
+        // changes unless a successful journal commit is performed.
+        let mut full_slot = [restored.get(destination).slots[1]];
+        assert!(!insert_one(&mut full_slot, coal));
+        assert_eq!(full_slot, [Some(Stack { count: 64, ..coal })]);
+        assert_eq!(devices.slots(source), source_slots);
+        assert_eq!(furnaces.get(destination), furnace);
+    }
+
+    #[test]
     fn dropper_hopper_insertion_respects_stack_caps_and_item_variants() {
         // Ender pearls stack to 16, not 64. Once a partial stack reaches
         // its limit, the next dropper activation must use a different slot.
