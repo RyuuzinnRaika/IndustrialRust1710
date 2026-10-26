@@ -541,8 +541,16 @@ impl World {
     /// Use the same opaque-block classification as the client light arrays,
     /// but do not confuse lateral skylight with direct sky exposure.
     fn village_column_sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
-        in_bounds(x, y, z)
-            && (y..=255).all(|height| lighting::lighting_signature(self.get(x, height, z)).0)
+        if !(0..=255).contains(&y) {
+            return false;
+        }
+        // The artificial IRW world boundary is not a solid roof. Treat
+        // columns beyond it as open sky so edge doors cannot become houses
+        // solely because a five-block sample crosses the world limit.
+        if !(-WORLD_LIMIT..WORLD_LIMIT).contains(&x) || !(-WORLD_LIMIT..WORLD_LIMIT).contains(&z) {
+            return true;
+        }
+        (y..=255).all(|height| lighting::lighting_signature(self.get(x, height, z)).0)
     }
 
     /// Find a small set of player-built wooden doors that could establish a
@@ -3416,6 +3424,33 @@ mod tests {
             .is_empty());
         // Preserve the old horizontal-only API for existing consumers.
         assert_eq!(world.independent_player_village_doors_near(0, 0).len(), 2);
+    }
+
+    #[test]
+    fn independent_village_world_border_is_not_a_roof() {
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        let y = 200;
+        let z = 0;
+        // A door facing the artificial X world edge must not acquire a
+        // fake roof merely because its five-block sample leaves the map.
+        // A real roof on the interior side must still qualify as a house.
+        for (x, inside) in [(WORLD_LIMIT - 2, -1), (-WORLD_LIMIT + 1, 1)] {
+            world.import_block(x, y - 1, z, 1 << 4).unwrap();
+            world.import_block(x, y, z, 64 << 4 | 1).unwrap();
+            world.import_block(x, y + 1, z, 64 << 4 | 8).unwrap();
+            assert!(
+                world
+                    .independent_player_village_doors_near_at(x, y, z)
+                    .is_empty(),
+                "world border must not count as a roof at x={x}"
+            );
+            world.import_block(x + inside, y + 3, z, 1 << 4).unwrap();
+            assert_eq!(
+                world.independent_player_village_doors_near_at(x, y, z),
+                vec![[x, y, z]],
+                "an interior roof should qualify the door at x={x}"
+            );
+        }
     }
 
     #[test]
