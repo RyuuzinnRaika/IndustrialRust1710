@@ -668,6 +668,14 @@ fn natural_spawn_species_light_ok(
     (kind == Kind::Slime && is_slime_cave_location(world_seed, at.0, at.1, at.2))
         || spawn_light_ok(light.0, light.1, now, passive)
 }
+/// True only when a block's unit interval has positive overlap with the
+/// entity's interval. Widen before adding one: `block + 1` overflows at
+/// i32::MAX even though the floating-point AABB is still representable.
+fn block_overlaps_axis(block: i32, min: f64, max: f64) -> bool {
+    let start = f64::from(block);
+    start < max && start + 1.0 > min
+}
+
 /// Ghasts store their position at the centre of a 4x4x4 AABB. Use
 /// the same precise solid-block collision shapes as other natural spawns,
 /// while rejecting fluids separately (fluids have no collision shapes).
@@ -686,12 +694,9 @@ fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
     ((min_x.floor() as i32)..=(max_x.floor() as i32)).all(|x| {
         ((min_y.floor() as i32)..=(max_y.floor() as i32)).all(|y| {
             ((min_z.floor() as i32)..=(max_z.floor() as i32)).all(|z| {
-                if (x + 1) as f64 <= min_x
-                    || x as f64 >= max_x
-                    || (y + 1) as f64 <= min_y
-                    || y as f64 >= max_y
-                    || (z + 1) as f64 <= min_z
-                    || z as f64 >= max_z
+                if !block_overlaps_axis(x, min_x, max_x)
+                    || !block_overlaps_axis(y, min_y, max_y)
+                    || !block_overlaps_axis(z, min_z, max_z)
                 {
                     return true;
                 }
@@ -796,10 +801,8 @@ fn natural_spawn_body_ok(world: &World, kind: Kind, at: PlayerPosition, size: u8
         (min_z..=max_z).all(|z| {
             // A face-touching block has zero overlap and is not inside the
             // entity's AABB (important at exact integer boundaries).
-            if (x + 1) as f64 <= at.x - half_width
-                || x as f64 >= at.x + half_width
-                || (z + 1) as f64 <= at.z - half_width
-                || z as f64 >= at.z + half_width
+            if !block_overlaps_axis(x, at.x - half_width, at.x + half_width)
+                || !block_overlaps_axis(z, at.z - half_width, at.z + half_width)
             {
                 return true;
             }
@@ -3505,6 +3508,22 @@ fn natural_spawn_location_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn natural_spawn_fluid_overlap_is_strict_and_safe_at_i32_limits() {
+        // Touching either face of a water/lava block is not a collision.
+        assert!(!block_overlaps_axis(4, 5.0, 7.0));
+        assert!(!block_overlaps_axis(7, 5.0, 7.0));
+        assert!(block_overlaps_axis(6, 5.0, 7.0));
+
+        // Integer addition in the old fluid check panicked in debug builds
+        // when a candidate hull reached the signed world-coordinate limit.
+        let max = f64::from(i32::MAX);
+        assert!(block_overlaps_axis(i32::MAX, max + 0.5, max + 1.5));
+        assert!(!block_overlaps_axis(i32::MAX, max + 1.0, max + 2.0));
+        let min = f64::from(i32::MIN);
+        assert!(block_overlaps_axis(i32::MIN, min - 0.5, min + 0.5));
+    }
+
     #[test]
     fn natural_spawn_hulls_use_species_heights() {
         for (kind, half_width, height) in [
