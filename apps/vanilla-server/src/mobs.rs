@@ -3336,7 +3336,7 @@ fn natural_spawn_capacity(players: &[PlayerPosition], base: usize) -> usize {
 /// malformed online position a phantom 17x17 chunk area and inflate mob caps.
 /// Keep the signed i32 boundary representable for the cap's arithmetic tests.
 fn natural_spawn_player_chunk(player: PlayerPosition) -> Option<(i64, i64)> {
-    if !player.y.is_finite() {
+    if !(0.0..256.0).contains(&player.y) {
         return None;
     }
     let x = natural_spawn_offset_block(player.x, 0)?;
@@ -4793,6 +4793,8 @@ mod tests {
             PlayerPosition { x: f64::NAN, ..valid },
             PlayerPosition { z: f64::INFINITY, ..valid },
             PlayerPosition { y: f64::NEG_INFINITY, ..valid },
+            PlayerPosition { y: -1.0, ..valid },
+            PlayerPosition { y: 256.0, ..valid },
             PlayerPosition { x: f64::from(i32::MAX) + 1.0, ..valid },
             PlayerPosition { z: f64::from(i32::MIN) - 1.0, ..valid },
         ];
