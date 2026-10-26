@@ -513,6 +513,7 @@ impl World {
     ///
     /// Only edited door lower halves are considered. Generated doors remain
     /// owned by the generated-village lookup, and Nether/End doors are ignored.
+    #[allow(dead_code)] // Compatibility API; live villager AI uses the height-aware variant.
     pub fn independent_player_village_doors_near(&self, x: i32, z: i32) -> Vec<[i32; 3]> {
         self.independent_player_village_doors_filtered(x, z, None)
     }
