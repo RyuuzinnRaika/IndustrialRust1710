@@ -3062,6 +3062,59 @@ mod tests {
     }
 
     #[test]
+    fn d36_anvil_book_application_is_atomic_with_xp_and_nbt_save() {
+        use fastnbt::Value;
+        let source = Value::Compound(std::collections::HashMap::from([(
+            "StoredEnchantments".to_owned(),
+            Value::List(vec![Value::Compound(std::collections::HashMap::from([
+                ("id".to_owned(), Value::Short(32)),
+                ("lvl".to_owned(), Value::Short(3)),
+            ]))]),
+        )]));
+        let book = Stack {
+            id: 403,
+            count: 1,
+            damage: 0,
+            nbt: Some(crate::item_nbt::from_value(&source).unwrap()),
+        };
+        let pickaxe = Stack {
+            id: 257,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inv = Inventory {
+            anvil_inputs: [Some(pickaxe), Some(book)],
+            ..Inventory::default()
+        };
+        let expected = inv.anvil_preview().unwrap().result;
+        assert!(expected.nbt.is_some());
+        let mut xp = crate::experience::Experience::default();
+        let original = inv.clone();
+        assert!(!inv.anvil_click_window(2, 0, 0, &mut xp, true));
+        assert_eq!(inv, original);
+        assert_eq!(xp.total, 0);
+
+        xp.total = 300;
+        assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
+        assert_eq!(inv.anvil_inputs, [None, None]);
+        assert_eq!(inv.cursor, Some(expected));
+        assert!(xp.total < 300);
+        let saved = inv.encoded().unwrap();
+        let reloaded: Inventory = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(reloaded.cursor, Some(expected));
+        assert_eq!(reloaded.anvil_inputs, [None, None]);
+        let Value::Compound(tags) =
+            crate::item_nbt::value(reloaded.cursor.unwrap().nbt.unwrap()).unwrap()
+        else {
+            panic!("missing anvil output NBT");
+        };
+        assert!(tags.contains_key("ench"));
+        assert!(!tags.contains_key("StoredEnchantments"));
+        assert!(!inv.anvil_click_window(2, 0, 0, &mut xp, true));
+    }
+
+    #[test]
     fn anvil_repair_debits_only_owned_inputs_and_xp() {
         let mut inv = Inventory::default();
         let mut xp = crate::experience::Experience { total: 34 };
