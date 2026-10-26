@@ -1,6 +1,6 @@
 //! Minecraft Java 1.7.10 workstation rules.
 //! Anvil durability repairs and compatible enchantment merging preserve NBT.
-//! Renaming and full prior-work cost compatibility remain separate work.
+//! Pre-1.8 prior-work history is persisted; exact enchantment base costs remain pending.
 use crate::inventory::Stack;
 use crate::{enchanting, item_nbt, items_1710};
 use fastnbt::Value;
