@@ -144,7 +144,7 @@ fn build_region_create_only(
         file.sync_all()?;
         drop(file);
         // Validate every sector/chunk, not only the newly written positions.
-        crate::legacy_region::inspect_region(&staging)?;
+        crate::legacy_region::inspect_region_bytes(destination, &fs::read(&staging)?)?;
         let mut verify = Region::from_stream(File::open(&staging)?).map_err(wrap)?;
         for z in 0..32 {
             for x in 0..32 {
@@ -576,6 +576,144 @@ mod tests {
         anvil_export::export(&World::new(), &root.join("world")).unwrap();
         fs::create_dir(root.join("out")).unwrap();
         root
+    }
+
+    #[test]
+    fn e46_creates_absent_region_and_chunk_in_existing_region_with_one_redo() {
+        use std::collections::BTreeMap;
+        let base = setup();
+        let world = base.join("world");
+        let old_region = world.join("region/r.0.0.mca");
+        let new_region = world.join("region/r.1.-1.mca");
+        let old_bytes = fs::read(&old_region).unwrap();
+        let mut reader = Region::from_stream(File::open(&old_region).unwrap()).unwrap();
+        let unchanged = reader.read_chunk(1, 0).unwrap().unwrap();
+        let raw = reader.read_chunk(0, 0).unwrap().unwrap();
+        let mut template = legacy_nbt::parse_chunk(&raw, 0, 0).unwrap();
+        template.level.x = 31;
+        template.level.z = 31;
+        template.level.extra.insert(
+            "UnknownNewChunk".into(), Value::String("retain me".into()),
+        );
+        let added_to_old = fastnbt::to_bytes(&template).unwrap();
+        template.level.x = 32;
+        template.level.z = -1;
+        let added_to_new = fastnbt::to_bytes(&template).unwrap();
+        let expectations = BTreeMap::from([
+            ((0, 0), Some(old_bytes)),
+            ((1, -1), None),
+        ]);
+        let sidecar = world.join("flat.chests.json");
+        let world_file = world.join("flat.irw");
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+        insert_regions_with_sidecars_under_lock_expected(
+            &mut lock,
+            Dimension::Overworld,
+            &[((31, 31), &added_to_old), ((32, -1), &added_to_new)],
+            &expectations,
+            &world_file,
+            &[(sidecar.as_path(), br#"{"chests":[]}"#.to_vec())],
+        )
+        .unwrap();
+        let mut existing = Region::from_stream(File::open(&old_region).unwrap()).unwrap();
+        assert_eq!(existing.read_chunk(31, 31).unwrap().unwrap(), added_to_old);
+        assert_eq!(existing.read_chunk(1, 0).unwrap().unwrap(), unchanged);
+        let mut fresh = Region::from_stream(File::open(&new_region).unwrap()).unwrap();
+        assert_eq!(fresh.read_chunk(0, 31).unwrap().unwrap(), added_to_new);
+        assert_eq!(crate::legacy_region::inspect_region(&new_region).unwrap(), 1);
+        assert_eq!(fs::read(&sidecar).unwrap(), br#"{"chests":[]}"#);
+        assert!(!world_file.with_extension("pending-txn.json").exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_refuses_new_region_when_snapshot_claims_absence_but_file_exists() {
+        use std::collections::BTreeMap;
+        let base = setup();
+        let world = base.join("world");
+        let source = world.join("region/r.0.0.mca");
+        let original = fs::read(&source).unwrap();
+        let mut reader = Region::from_stream(File::open(&source).unwrap()).unwrap();
+        let replacement = reader.read_chunk(0, 0).unwrap().unwrap();
+        let sidecar = world.join("flat.chests.json");
+        let world_file = world.join("flat.irw");
+        let expectations = BTreeMap::from([((0, 0), None)]);
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+        assert!(insert_regions_with_sidecars_under_lock_expected(
+            &mut lock,
+            Dimension::Overworld,
+            &[((0, 0), &replacement)],
+            &expectations,
+            &world_file,
+            &[(sidecar.as_path(), b"{}".to_vec())],
+        )
+        .is_err());
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert!(!sidecar.exists());
+        assert!(!world_file.with_extension("pending-txn.json").exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_rejects_bad_new_chunk_without_creating_a_region_or_sidecar() {
+        use std::collections::BTreeMap;
+        let base = setup();
+        let world = base.join("world");
+        let absent = world.join("region/r.2.0.mca");
+        let sidecar = world.join("flat.chests.json");
+        let world_file = world.join("flat.irw");
+        let expectations = BTreeMap::from([((2, 0), None)]);
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+        assert!(insert_regions_with_sidecars_under_lock_expected(
+            &mut lock,
+            Dimension::Overworld,
+            &[((64, 0), b"invalid NBT")],
+            &expectations,
+            &world_file,
+            &[(sidecar.as_path(), b"{}".to_vec())],
+        )
+        .is_err());
+        assert!(!absent.exists());
+        assert!(!sidecar.exists());
+        assert!(!world_file.with_extension("pending-txn.json").exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn e46_refuses_symlink_at_absent_region_path() {
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::symlink;
+        let base = setup();
+        let world = base.join("world");
+        let destination = world.join("region/r.2.0.mca");
+        let outside = base.join("outside.mca");
+        fs::write(&outside, b"untouched").unwrap();
+        symlink(&outside, &destination).unwrap();
+        let mut reader =
+            Region::from_stream(File::open(world.join("region/r.0.0.mca")).unwrap()).unwrap();
+        let mut chunk =
+            legacy_nbt::parse_chunk(&reader.read_chunk(0, 0).unwrap().unwrap(), 0, 0).unwrap();
+        chunk.level.x = 64;
+        let nbt = fastnbt::to_bytes(&chunk).unwrap();
+        let sidecar = world.join("flat.chests.json");
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+        assert!(insert_regions_with_sidecars_under_lock_expected(
+            &mut lock,
+            Dimension::Overworld,
+            &[((64, 0), &nbt)],
+            &BTreeMap::from([((2, 0), None)]),
+            &world.join("flat.irw"),
+            &[(sidecar.as_path(), b"{}".to_vec())],
+        )
+        .is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"untouched");
+        assert!(!sidecar.exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
