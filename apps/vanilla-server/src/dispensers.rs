@@ -578,6 +578,57 @@ mod tests {
     }
 
     #[test]
+    fn dropper_hopper_insertion_respects_stack_caps_and_item_variants() {
+        // Ender pearls stack to 16, not 64. Once a partial stack reaches
+        // its limit, the next dropper activation must use a different slot.
+        let pearl = Stack {
+            id: 368,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        assert_eq!(pearl.max_count(), 16);
+        let mut hopper = [None; crate::hoppers::HOPPER_SLOTS];
+        hopper[0] = Some(Stack { count: 15, ..pearl });
+        assert!(insert_one(&mut hopper, pearl));
+        assert_eq!(hopper[0].unwrap().count, 16);
+        assert!(insert_one(&mut hopper, pearl));
+        assert_eq!(hopper[0].unwrap().count, 16);
+        assert_eq!(hopper[1], Some(pearl));
+
+        // Non-stackable tools cannot be merged or consumed when all five
+        // hopper slots are occupied.
+        let sword = Stack {
+            id: 276,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        assert_eq!(sword.max_count(), 1);
+        let full = [Some(sword); crate::hoppers::HOPPER_SLOTS];
+        let mut attempted = full;
+        assert!(!insert_one(&mut attempted, sword));
+        assert_eq!(attempted, full);
+
+        // Wool with different metadata is not a compatible partial stack.
+        let wool = Stack {
+            id: 35,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut variants = [None; crate::hoppers::HOPPER_SLOTS];
+        variants[0] = Some(Stack {
+            count: 63,
+            damage: 1,
+            ..wool
+        });
+        assert!(insert_one(&mut variants, wool));
+        assert_eq!(variants[0].unwrap().count, 63);
+        assert_eq!(variants[1], Some(wool));
+    }
+
+    #[test]
     fn transfer_rejects_multi_item_batches() {
         let mut slots = [None; 2];
         assert!(!insert_one(
