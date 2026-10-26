@@ -1076,12 +1076,7 @@ mod redstone_regression_tests {
         );
         assert_eq!(w.comparator_rear_input(pos, (0, 64, 0)), 9);
         w.import_block(pos.0, pos.1, pos.2, 154 << 4).unwrap();
-        w.set_inventory_comparator_inputs(
-            BTreeMap::new(),
-            chest,
-            BTreeMap::new(),
-            BTreeMap::new(),
-        );
+        w.set_inventory_comparator_inputs(BTreeMap::new(), chest, BTreeMap::new(), BTreeMap::new());
         assert_eq!(w.comparator_rear_input(pos, (0, 64, 0)), 0);
         let mut hopper = BTreeMap::new();
         hopper.insert((-1, 64, 0), 6);
