@@ -280,6 +280,23 @@ impl Furnaces {
         candidate.revision = self.revision.wrapping_add(1);
         Ok(candidate)
     }
+    /// Only item slots contribute to comparator power, not cook/burn progress.
+    pub fn comparator_inputs(&self) -> BTreeMap<(i32, u8, i32), u8> {
+        self.entries
+            .iter()
+            .filter_map(|(name, furnace)| {
+                let mut coords = name.split(',');
+                let x = coords.next()?.parse::<i32>().ok()?;
+                let y = coords.next()?.parse::<u8>().ok()?;
+                let z = coords.next()?.parse::<i32>().ok()?;
+                if coords.next().is_some() {
+                    return None;
+                }
+                let strength = crate::dispensers::comparator_strength(&furnace.slots);
+                (strength > 0).then_some(((x, y, z), strength))
+            })
+            .collect()
+    }
     pub fn get(&self, pos: Position) -> Furnace {
         self.entries.get(&key(pos)).copied().unwrap_or_default()
     }
@@ -372,6 +389,33 @@ mod tests {
             nbt: None,
         })
     }
+    #[test]
+    fn furnace_comparator_uses_slots_not_burn_progress() {
+        let pos = (0, 64, -1);
+        let stack = stack(1, 64);
+        let full = Furnaces::default()
+            .staged_update(
+                pos,
+                Furnace {
+                    slots: [stack; FURNACE_SLOTS],
+                    ..Furnace::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(full.comparator_inputs().get(&(0, 64, -1)), Some(&15));
+        let burning_empty = full
+            .staged_update(
+                pos,
+                Furnace {
+                    burn_left: 1,
+                    burn_total: 1,
+                    ..Furnace::default()
+                },
+            )
+            .unwrap();
+        assert!(!burning_empty.comparator_inputs().contains_key(&(0, 64, -1)));
+    }
+
     #[test]
     fn recipes_and_fuels_are_legacy_bounded() {
         assert_eq!(recipe(stack(15, 3).unwrap()), stack(265, 1));

@@ -363,6 +363,32 @@ impl World {
         self.device_comparator_inputs = inputs;
     }
 
+    /// Merge live inventory snapshots only when the current world block still
+    /// belongs to that storage type. A mined chest's stale file entry must not
+    /// power a newly placed hopper at the same coordinates.
+    pub fn set_inventory_comparator_inputs(
+        &mut self,
+        devices: BTreeMap<Position, u8>,
+        chests: BTreeMap<Position, u8>,
+        furnaces: BTreeMap<Position, u8>,
+        hoppers: BTreeMap<Position, u8>,
+    ) {
+        let mut inputs = BTreeMap::new();
+        for (source, allowed) in [
+            (devices, &[23, 158][..]),
+            (chests, &[54, 146][..]),
+            (furnaces, &[61, 62][..]),
+            (hoppers, &[154][..]),
+        ] {
+            for (pos, strength) in source {
+                if allowed.contains(&(self.get(pos.0, i32::from(pos.1), pos.2) >> 4)) {
+                    inputs.insert(pos, strength);
+                }
+            }
+        }
+        self.set_device_comparator_inputs(inputs);
+    }
+
     pub(super) fn power_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> bool {
         self.signal_into(from, to) > 0
     }
@@ -1033,6 +1059,34 @@ mod redstone_regression_tests {
                 "container {id} must reset when its inventory becomes empty"
             );
         }
+    }
+
+    #[test]
+    fn comparator_live_snapshots_ignore_stale_storage_at_replaced_blocks() {
+        let mut w = World::new();
+        let pos = (-1, 64, 0);
+        w.import_block(pos.0, pos.1, pos.2, 54 << 4).unwrap();
+        let mut chest = BTreeMap::new();
+        chest.insert((-1, 64, 0), 9);
+        w.set_inventory_comparator_inputs(
+            BTreeMap::new(),
+            chest.clone(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        assert_eq!(w.comparator_rear_input(pos, (0, 64, 0)), 9);
+        w.import_block(pos.0, pos.1, pos.2, 154 << 4).unwrap();
+        w.set_inventory_comparator_inputs(BTreeMap::new(), chest, BTreeMap::new(), BTreeMap::new());
+        assert_eq!(w.comparator_rear_input(pos, (0, 64, 0)), 0);
+        let mut hopper = BTreeMap::new();
+        hopper.insert((-1, 64, 0), 6);
+        w.set_inventory_comparator_inputs(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            hopper,
+        );
+        assert_eq!(w.comparator_rear_input(pos, (0, 64, 0)), 6);
     }
 
     #[test]
