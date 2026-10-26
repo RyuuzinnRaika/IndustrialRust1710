@@ -4946,15 +4946,35 @@ mod tests {
         };
         let candidate = |y: f64| PlayerPosition { y, ..player };
         assert_eq!(distance_to_players(candidate(72.0), &[player]), 128.0);
-        assert!(natural_spawn_location_ok(&world, candidate(72.0), &[player]));
-        assert!(!natural_spawn_location_ok(&world, candidate(71.999), &[player]));
-        assert!(natural_spawn_location_ok(&world, candidate(72.001), &[player]));
+        assert!(natural_spawn_location_ok(
+            &world,
+            candidate(72.0),
+            &[player]
+        ));
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(71.999),
+            &[player]
+        ));
+        assert!(natural_spawn_location_ok(
+            &world,
+            candidate(72.001),
+            &[player]
+        ));
 
         // A second, closer player can exclude an otherwise eligible position.
         let near = PlayerPosition { y: 96.0, ..player };
-        assert!(!natural_spawn_location_ok(&world, candidate(72.0), &[player, near]));
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(72.0),
+            &[player, near]
+        ));
         let outside_inner = PlayerPosition { y: 97.0, ..player };
-        assert!(natural_spawn_location_ok(&world, candidate(72.0), &[player, outside_inner]));
+        assert!(natural_spawn_location_ok(
+            &world,
+            candidate(72.0),
+            &[player, outside_inner]
+        ));
     }
 
     #[test]
