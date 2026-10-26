@@ -611,9 +611,7 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if w == 3 && h == 2 && matches(&[&[95, 95, 95], &[95, 95, 95]]) {
         let color = at(0, 0)?.damage;
         if (0..=15).contains(&color)
-            && (0..2).all(|y| {
-                (0..3).all(|x| at(x, y).is_some_and(|stack| stack.damage == color))
-            })
+            && (0..2).all(|y| (0..3).all(|x| at(x, y).is_some_and(|stack| stack.damage == color)))
         {
             return product(160, 16, color); // stained glass panes
         }
@@ -627,7 +625,10 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
         return product(151, 1, 0); // daylight sensor (all six wooden slab variants)
     }
     if shapeless(&[377, -3, 289])
-        && grid.iter().flatten().any(|stack| stack.id == 263 && (0..=1).contains(&stack.damage))
+        && grid
+            .iter()
+            .flatten()
+            .any(|stack| stack.id == 263 && (0..=1).contains(&stack.damage))
     {
         return product(385, 3, 0); // fire charge, coal or charcoal
     }
@@ -682,34 +683,49 @@ mod tests {
     #[test]
     fn java_1710_redstone_and_fire_charge_recipes_are_not_modernized() {
         let lamp = [
-            None, item(331), None,
-            item(331), item(89), item(331),
-            None, item(331), None,
+            None,
+            item(331),
+            None,
+            item(331),
+            item(89),
+            item(331),
+            None,
+            item(331),
+            None,
         ];
         assert_eq!(result(&lamp, 3), product(123, 1, 0));
 
         for slab_color in 0..=5 {
             let mut detector = [
-                item(20), item(20), item(20),
-                item(406), item(406), item(406),
-                item(126), item(126), item(126),
+                item(20),
+                item(20),
+                item(20),
+                item(406),
+                item(406),
+                item(406),
+                item(126),
+                item(126),
+                item(126),
             ];
             detector[6..9].fill(product(126, 1, slab_color));
             assert_eq!(result(&detector, 3), product(151, 1, 0));
         }
         let mut invalid_detector = [
-            item(20), item(20), item(20),
-            item(406), item(406), item(406),
-            item(126), item(126), item(126),
+            item(20),
+            item(20),
+            item(20),
+            item(406),
+            item(406),
+            item(406),
+            item(126),
+            item(126),
+            item(126),
         ];
         invalid_detector[8] = product(126, 1, 8); // upper slab is not an item ingredient
         assert_eq!(result(&invalid_detector, 3), None);
 
         for coal in 0..=1 {
-            let ingredients = [
-                product(263, 1, coal), item(289),
-                item(377), None,
-            ];
+            let ingredients = [product(263, 1, coal), item(289), item(377), None];
             assert_eq!(result(&ingredients, 2), product(385, 3, 0));
         }
         assert_eq!(
