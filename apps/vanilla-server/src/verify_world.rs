@@ -212,11 +212,18 @@ fn inspect_irw(world_file: &Path) -> io::Result<Summary> {
         verify_tile_anchors(&world, &tiles, &[154])
     });
     let brewers = Brewers::location(world_file);
-    check!(brewers.clone(), Brewers::load(&brewers));
+    check!(brewers.clone(), {
+        let tiles = Brewers::load(&brewers)?;
+        verify_tile_anchors(&world, &tiles, &[117])
+    });
     // Check every sidecar loaded by the live server rather than reporting a
     // healthy world while a different persisted subsystem cannot start.
     let devices = Devices::location(world_file);
-    check!(devices.clone(), Devices::load(&devices));
+    check!(devices.clone(), {
+        let tiles = Devices::load(&devices)?;
+        // Both dispensers and droppers share the same nine-slot save model.
+        verify_tile_anchors(&world, &tiles, &[23, 158])
+    });
     let decorations = Decorations::location(world_file);
     check!(decorations.clone(), Decorations::load(&decorations));
     let hangings = Hangings::location(world_file);
@@ -488,6 +495,113 @@ mod tests {
         assert!(inspect(&save).is_err(), "orphaned hopper accepted");
         world.update_and_save(&save, 3, 65, 1, 154 << 4).unwrap();
         assert!(inspect(&save).is_ok(), "hopper should own its items");
+        assert!(!root.join("session.lock").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn f56_brewing_stand_requires_matching_world_block_and_leaves_world_untouched() {
+        let root = std::env::temp_dir().join(format!(
+            "f56-brewing-anchor-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("flat.irw");
+        let mut world = World::new();
+        world.save_new(&path).unwrap();
+
+        let brew_file = Brewers::location(&path);
+        // A valid 1.7.10 water bottle + nether wart inventory is not enough:
+        // the referenced tile must exist in the world save as block 117.
+        fs::write(
+            &brew_file,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "entries": {
+                    "3,65,4": {
+                        "slots": [
+                            {"id":373,"count":1,"damage":0},
+                            null,null,
+                            {"id":372,"count":1,"damage":0}
+                        ],
+                        "brew_time":0
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let initial_world = fs::read(&path).unwrap();
+        let initial_brew = fs::read(&brew_file).unwrap();
+        assert!(inspect(&path).is_err(), "orphaned brewing stand was accepted");
+        assert_eq!(fs::read(&path).unwrap(), initial_world);
+        assert_eq!(fs::read(&brew_file).unwrap(), initial_brew);
+        assert!(!root.join("session.lock").exists());
+
+        // A valid but different container block is still an invalid anchor.
+        world.update_and_save(&path, 3, 65, 4, 54 << 4).unwrap();
+        assert!(inspect(&path).is_err(), "chest accepted as brewing stand");
+        world.update_and_save(&path, 3, 65, 4, 117 << 4).unwrap();
+        assert!(
+            inspect(&path).is_ok(),
+            "brewing stand block must validate its saved items"
+        );
+        assert_eq!(fs::read(&brew_file).unwrap(), initial_brew);
+        assert!(!root.join("session.lock").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn f56_dispenser_and_dropper_require_both_world_anchors() {
+        let root = std::env::temp_dir().join(format!(
+            "f56-device-anchors-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("flat.irw");
+        let mut world = World::new();
+        world.save_new(&path).unwrap();
+
+        let device_file = Devices::location(&path);
+        let mut slots = vec![serde_json::Value::Null; 9];
+        slots[0] = serde_json::json!({"id":4,"count":3,"damage":0});
+        fs::write(
+            &device_file,
+            serde_json::to_vec(&serde_json::json!({
+                "version":1,
+                "entries":{
+                    "2,65,5": slots,
+                    "3,65,5": slots
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let original_device = fs::read(&device_file).unwrap();
+        let original_world = fs::read(&path).unwrap();
+        assert!(inspect(&path).is_err(), "orphaned device inventory accepted");
+        assert_eq!(fs::read(&path).unwrap(), original_world);
+        assert_eq!(fs::read(&device_file).unwrap(), original_device);
+
+        world.update_and_save(&path, 2, 65, 5, 23 << 4).unwrap();
+        assert!(
+            inspect(&path).is_err(),
+            "second unanchored inventory must still fail verification"
+        );
+        world.update_and_save(&path, 3, 65, 5, 158 << 4).unwrap();
+        assert!(
+            inspect(&path).is_ok(),
+            "dispenser and dropper inventories should both be accepted"
+        );
+        // Different container type, even one with its own inventory, is not a
+        // valid dispenser/dropper anchor.
+        world.update_and_save(&path, 3, 65, 5, 54 << 4).unwrap();
+        assert!(inspect(&path).is_err(), "chest accepted as a dropper");
+        assert_eq!(fs::read(&device_file).unwrap(), original_device);
         assert!(!root.join("session.lock").exists());
         fs::remove_dir_all(root).unwrap();
     }
