@@ -476,6 +476,99 @@ mod tests {
         assert!((1..=4).contains(&plan.consumed));
         assert_eq!(plan.levels, u16::from(plan.consumed));
     }
+    fn enchanted_item(id: i16, damage: i16, enchant_id: i16, level: i16) -> Stack {
+        use std::collections::HashMap;
+        let key = if id == 403 {
+            "StoredEnchantments"
+        } else {
+            "ench"
+        };
+        let value = Value::Compound(HashMap::from([
+            ("UnknownCustom".to_string(), Value::Int(904)),
+            (
+                key.to_string(),
+                Value::List(vec![Value::Compound(HashMap::from([
+                    ("id".to_string(), Value::Short(enchant_id)),
+                    ("lvl".to_string(), Value::Short(level)),
+                    ("ExtraTag".to_string(), Value::String("unchanged".into())),
+                ]))]),
+            ),
+        ]));
+        Stack {
+            id,
+            count: 1,
+            damage,
+            nbt: Some(item_nbt::from_value(&value).unwrap()),
+        }
+    }
+
+    #[test]
+    fn d36_two_enchanted_swords_upgrade_equal_levels_without_losing_tags() {
+        let left = enchanted_item(276, 0, 16, 3); // sharpness III
+        let right = enchanted_item(276, 100, 16, 3);
+        let plan = repair(left, right).unwrap();
+        assert_eq!(plan.consumed, 1);
+        assert_eq!(plan.result.damage, 0);
+        assert_eq!(plan.levels, 8);
+        let Value::Compound(root) = item_nbt::value(plan.result.nbt.unwrap()).unwrap() else {
+            panic!("compound")
+        };
+        assert_eq!(root.get("UnknownCustom"), Some(&Value::Int(904)));
+        let Some(Value::List(entries)) = root.get("ench") else {
+            panic!("enchantments")
+        };
+        let Value::Compound(entry) = &entries[0] else {
+            panic!("enchantment compound")
+        };
+        assert_eq!(entry.get("lvl"), Some(&Value::Short(4)));
+        assert_eq!(
+            entry.get("ExtraTag"),
+            Some(&Value::String("unchanged".into()))
+        );
+        assert_eq!(plan.result.id, left.id);
+        assert!(plan.result.is_valid());
+    }
+
+    #[test]
+    fn d36_enchanted_book_can_enchant_pristine_tool_and_preserves_custom_nbt() {
+        let left = stack(257, 1, 0); // pristine iron pickaxe
+        let right = enchanted_item(403, 0, 32, 3); // Efficiency III
+        let plan = repair(left, right).unwrap();
+        assert_eq!(plan.result.id, 257);
+        assert_eq!(plan.result.damage, 0);
+        assert_eq!(plan.levels, 3);
+        let Value::Compound(root) = item_nbt::value(plan.result.nbt.unwrap()).unwrap() else {
+            panic!("compound")
+        };
+        assert!(root.contains_key("ench"));
+        assert!(!root.contains_key("StoredEnchantments"));
+        assert_eq!(plan.consumed, 1);
+        assert_eq!(right.nbt.map(item_nbt::is_live), Some(true));
+    }
+
+    #[test]
+    fn d36_rejects_conflicting_or_invalid_enchants_and_preserves_inputs() {
+        let sharp = enchanted_item(276, 0, 16, 3);
+        let smite = enchanted_item(403, 0, 17, 3);
+        assert!(repair(sharp, smite).is_none()); // Sharpness vs Smite
+        let invalid_tool = enchanted_item(257, 0, 16, 1);
+        assert!(repair(invalid_tool, enchanted_item(403, 0, 32, 1)).is_none());
+        let already_maxed = enchanted_item(276, 0, 16, 5);
+        assert!(repair(already_maxed, enchanted_item(403, 0, 16, 5)).is_none());
+        // Unrelated enchantments cannot be applied to an incompatible item.
+        assert!(repair(stack(257, 1, 0), smite).is_none());
+
+        let wrong = Value::Compound(std::collections::HashMap::from([(
+            "StoredEnchantments".to_string(),
+            Value::String("not a list".into()),
+        )]));
+        let malformed_book = Stack {
+            nbt: Some(item_nbt::from_value(&wrong).unwrap()),
+            ..stack(403, 1, 0)
+        };
+        assert!(repair(stack(276, 1, 10), malformed_book).is_none());
+    }
+
     #[test]
     fn rejecting_invalid_anvil_inputs_preserves_inventory() {
         assert!(repair(stack(257, 2, 100), stack(265, 3, 0)).is_none());
