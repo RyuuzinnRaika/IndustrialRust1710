@@ -194,11 +194,10 @@ impl<'a> Input<'a> {
         }
         Ok(Some(stack))
     }
-    /// Parse a C10 Creative Inventory Action without disconnecting a player
-    /// for a syntactically valid but unsupported client-selected item.
+    /// Parse a C10 Creative Inventory Action without allowing invalid NBT
+    /// to disconnect the session or silently discarding custom item tags.
     /// Outer None means reject-and-resync; Some(None) clears a valid slot.
-    /// The live Stack model cannot preserve generic NBT yet, so tagged
-    /// creative items must be refused rather than silently losing their tag.
+    /// The caller MUST still enforce Creative mode and its permitted slots.
     fn creative_slot(&mut self) -> io::Result<Option<Option<Stack>>> {
         let id = self.i16()?;
         if id == -1 {
@@ -210,17 +209,32 @@ impl<'a> Input<'a> {
         if nbt_length < -1 {
             return Err(bad("invalid creative item NBT length"));
         }
-        if nbt_length >= 0 {
-            self.take(nbt_length as usize)?;
-            return Ok(None);
-        }
-        let stack = Stack {
+        // Consume the exact declared length even when the item is invalid,
+        // so only a truncated packet is fatal. Validate the untagged identity
+        // BEFORE allocating an interned NBT handle for an untrusted packet.
+        let wire_nbt = if nbt_length >= 0 {
+            Some(self.take(nbt_length as usize)?)
+        } else {
+            None
+        };
+        let mut stack = Stack {
             id,
             count,
             damage,
             nbt: None,
         };
-        Ok(stack.is_valid().then_some(Some(stack)))
+        if !stack.is_valid() {
+            return Ok(None);
+        }
+        if let Some(bytes) = wire_nbt {
+            // Intern validates compressed length, decompression bounds and
+            // the NBT Compound root; invalid tags are rejected atomically.
+            let Ok(handle) = item_nbt::intern(bytes) else {
+                return Ok(None);
+            };
+            stack.nbt = Some(handle);
+        }
+        Ok(Some(Some(stack)))
     }
     /// Protocol 5 Click Window carries a *client-reported* slot snapshot.
     /// The snapshot is never used to authorize a mutation, and may contain
@@ -7856,6 +7870,88 @@ mod tests {
         clear.finish().unwrap();
         assert!(inv.creative_set(slot, requested).unwrap());
         assert!(inv.held().is_none());
+    }
+
+    #[test]
+    fn creative_c10_preserves_enchanted_and_unknown_nbt_through_save_and_wire() {
+        use fastnbt::Value;
+        use std::collections::HashMap;
+
+        let original = Value::Compound(HashMap::from([
+            (
+                "display".to_owned(),
+                Value::Compound(HashMap::from([(
+                    "Name".to_owned(),
+                    Value::String("Named sword".to_owned()),
+                )])),
+            ),
+            (
+                "ench".to_owned(),
+                Value::List(vec![Value::Compound(HashMap::from([
+                    ("id".to_owned(), Value::Short(16)),
+                    ("lvl".to_owned(), Value::Short(4)),
+                ]))]),
+            ),
+            ("UnknownModField".to_owned(), Value::Int(193)),
+        ]));
+        let source_handle = item_nbt::from_value(&original).unwrap();
+        let compressed = item_nbt::wire(source_handle).unwrap();
+
+        // The clientbound S2F slot also provides the exact C10 item layout.
+        let mut inv = Inventory::default();
+        let item = Stack {
+            id: 276,
+            count: 1,
+            damage: 17,
+            nbt: Some(source_handle),
+        };
+        assert!(inv.creative_set(36, Some(item)).unwrap());
+        let slot_packet = inv.set_slot(36).unwrap();
+        let mut c10 = Vec::from(36i16.to_be_bytes());
+        c10.extend_from_slice(&slot_packet[3..]);
+        let mut incoming = Input(&c10);
+        assert_eq!(incoming.i16().unwrap(), 36);
+        let received = incoming.creative_slot().unwrap().unwrap().unwrap();
+        incoming.finish().unwrap();
+        assert_eq!(received.id, item.id);
+        assert_eq!(received.damage, item.damage);
+        assert_eq!(received.count, item.count);
+        assert_eq!(item_nbt::wire(received.nbt.unwrap()).unwrap(), compressed);
+        assert_eq!(item_nbt::value(received.nbt.unwrap()).unwrap(), original);
+
+        let mut restored = Inventory::default();
+        assert!(restored.creative_set(36, Some(received)).unwrap());
+        let saved = restored.encoded().unwrap();
+        let loaded: Inventory = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(loaded.held(), Some(received));
+        assert_eq!(loaded.set_slot(36).unwrap(), slot_packet);
+    }
+
+    #[test]
+    fn creative_c10_rejects_invalid_nbt_and_unregistered_ids_without_mutation() {
+        let mut inventory = Inventory::default();
+        let original = inventory.clone();
+
+        // Valid item, but the claimed compressed NBT is not a gzip Compound.
+        let mut invalid_tag = Input(&[0, 1, 1, 0, 0, 0, 3, 10, 0, 0]);
+        assert_eq!(invalid_tag.creative_slot().unwrap(), None);
+        invalid_tag.finish().unwrap();
+        assert_eq!(inventory, original);
+
+        // Invalid item identity with an otherwise valid NBT blob: never mint.
+        let nbt = item_nbt::from_value(&fastnbt::Value::Compound(
+            std::collections::HashMap::new(),
+        ))
+        .unwrap();
+        let bytes = item_nbt::wire(nbt).unwrap();
+        let mut claim = Vec::from(167i16.to_be_bytes());
+        claim.extend_from_slice(&[1, 0, 0]);
+        claim.extend_from_slice(&(bytes.len() as i16).to_be_bytes());
+        claim.extend_from_slice(&bytes);
+        let mut invalid_id = Input(&claim);
+        assert_eq!(invalid_id.creative_slot().unwrap(), None);
+        invalid_id.finish().unwrap();
+        assert_eq!(inventory, original);
     }
 
     #[test]
