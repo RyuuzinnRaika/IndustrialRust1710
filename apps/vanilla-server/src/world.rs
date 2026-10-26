@@ -3343,7 +3343,9 @@ mod tests {
         // same block must work without rebuilding the door or its support.
         world.import_block(door[0], 255, door[2] + 1, 0).unwrap();
         assert!(at_door(&world).is_empty());
-        world.import_block(door[0], 255, door[2] + 1, stone).unwrap();
+        world
+            .import_block(door[0], 255, door[2] + 1, stone)
+            .unwrap();
         assert_eq!(at_door(&world), vec![door]);
 
         let path = std::env::temp_dir().join(format!(
