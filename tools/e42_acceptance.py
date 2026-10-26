@@ -7,6 +7,9 @@ took place: operators must record each observation and attach local evidence.
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
+from collections import Counter
 import datetime as dt
 import json
 import re
@@ -17,13 +20,14 @@ CASES = tuple(f"42-{n:02d}" for n in range(1, 10))
 STATUSES = {"PASS", "FAIL", "BLOCKED", "NOT_RUN"}
 EVIDENCE_TYPES = {".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm", ".log", ".txt", ".jsonl"}
 HASH = re.compile(r"[0-9a-fA-F]{40}\Z")
+DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def new_report(sha: str) -> dict:
     if not HASH.fullmatch(sha):
         raise ValueError("server_commit must be a 40-digit Git commit SHA")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "server_commit": sha.lower(),
         "client": {
             "edition": "Minecraft Java Edition",
@@ -62,10 +66,47 @@ def _evidence_path(root: Path, value: str) -> Path:
     return resolved
 
 
+def _sha256(path: Path) -> str:
+    """Stream evidence hashes to avoid reading large recordings into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def seal_report(report: dict, evidence_root: Path) -> dict:
+    """Hash a manually completed report. Hashing is not proof of real gameplay."""
+    if not isinstance(report, dict) or report.get("schema_version") != 2:
+        raise ValueError("sealing requires an E42 schema v2 report")
+    cases = report.get("cases")
+    if not isinstance(cases, dict) or set(cases) != set(CASES):
+        raise ValueError("sealing requires exactly nine E42 cases")
+    sealed = copy.deepcopy(report)
+    for key, row in sealed["cases"].items():
+        if not isinstance(row, dict):
+            raise ValueError(f"{key}: invalid case")
+        if row.get("status") != "PASS":
+            continue
+        entries = row.get("evidence")
+        if not isinstance(entries, list) or not entries:
+            raise ValueError(f"{key}: PASS requires evidence paths")
+        result = []
+        for entry in entries:
+            name = entry.get("path") if isinstance(entry, dict) else entry
+            resolved = _evidence_path(evidence_root, name)
+            result.append({"path": name, "sha256": _sha256(resolved)})
+        row["evidence"] = result
+    return sealed
+
+
 def validate(report: dict, evidence_root: Path, require_pass: bool) -> list[str]:
     problems = []
-    if not isinstance(report, dict) or report.get("schema_version") != 1:
+    if not isinstance(report, dict) or report.get("schema_version") not in (1, 2):
         return ["unsupported E42 report schema"]
+    version = report["schema_version"]
+    if require_pass and version != 2:
+        problems.append("PASS certification requires schema v2 with SHA-256 evidence")
     if not isinstance(report.get("server_commit"), str) or not HASH.fullmatch(report["server_commit"]):
         problems.append("server_commit must identify an exact 40-character commit")
     client = report.get("client")
@@ -97,6 +138,7 @@ def validate(report: dict, evidence_root: Path, require_pass: bool) -> list[str]
     if not isinstance(cases, dict) or set(cases) != set(CASES):
         problems.append("exactly nine E42 scenarios are required")
         return problems
+    checksummed_by_case = {}
     for key in CASES:
         row = cases[key]
         if not isinstance(row, dict) or row.get("status") not in STATUSES:
@@ -114,11 +156,36 @@ def validate(report: dict, evidence_root: Path, require_pass: bool) -> list[str]
             if not isinstance(attachments, list) or not attachments:
                 problems.append(f"{key}: PASS needs at least one artifact")
             else:
-                for name in attachments:
+                valid_digests = set()
+                for entry in attachments:
+                    if version == 2:
+                        if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+                            problems.append(f"{key}: evidence needs path and sha256")
+                            continue
+                        name, expected = entry["path"], entry["sha256"]
+                        if not isinstance(expected, str) or not DIGEST.fullmatch(expected):
+                            problems.append(f"{key}: invalid SHA-256 digest")
+                            continue
+                    else:
+                        name, expected = entry, None
                     try:
-                        _evidence_path(evidence_root, name)
+                        path = _evidence_path(evidence_root, name)
+                        if version == 2:
+                            actual = _sha256(path)
+                            if actual != expected:
+                                problems.append(f"{key}: evidence SHA-256 mismatch: {name}")
+                            else:
+                                valid_digests.add(actual)
                     except (OSError, ValueError) as exc:
                         problems.append(f"{key}: {exc}")
+                if version == 2:
+                    checksummed_by_case[key] = valid_digests
+    if version == 2:
+        counts = Counter(value for values in checksummed_by_case.values()
+                         for value in values)
+        for key, values in checksummed_by_case.items():
+            if not any(counts[value] == 1 for value in values):
+                problems.append(f"{key}: PASS needs at least one case-specific artifact")
     return problems
 
 
@@ -128,6 +195,10 @@ def main(argv: list[str] | None = None) -> int:
     initialize = sub.add_parser("init", help="create an unverified NOT_RUN report")
     initialize.add_argument("--commit", required=True)
     initialize.add_argument("--output", type=Path, required=True)
+    sealer = sub.add_parser("seal", help="hash PASS artifacts into a separate report")
+    sealer.add_argument("--report", type=Path, required=True)
+    sealer.add_argument("--evidence-root", type=Path, required=True)
+    sealer.add_argument("--output", type=Path, required=True)
     check = sub.add_parser("verify", help="check human-recorded real-client evidence")
     check.add_argument("--report", type=Path, required=True)
     check.add_argument("--evidence-root", type=Path, required=True)
@@ -142,6 +213,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Created NOT_RUN report: {args.output}")
         return 0
     report = json.loads(args.report.read_text(encoding="utf-8"))
+    if args.command == "seal":
+        sealed = seal_report(report, args.evidence_root)
+        problems = validate(sealed, args.evidence_root, require_pass=False)
+        if problems:
+            raise ValueError("; ".join(problems))
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with args.output.open("x", encoding="utf-8") as handle:
+            json.dump(sealed, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        print(f"Sealed SHA-256 E42 evidence: {args.output}")
+        return 0
     problems = validate(report, args.evidence_root, args.require_pass)
     cases = report.get("cases", {}) if isinstance(report, dict) else {}
     summary = {status: sum(
