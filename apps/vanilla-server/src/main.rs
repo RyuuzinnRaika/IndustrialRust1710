@@ -7001,7 +7001,8 @@ fn main() -> io::Result<()> {
                                 // bounded registry so capacity failure cannot debit
                                 // the item; publish only after the inventory journal
                                 // commits. Droppers always eject ordinary items.
-                                if state >> 4 == 23 && throwables::is_dispenser_projectile(stack.id) {
+                                if state >> 4 == 23 && throwables::is_dispenser_projectile(stack.id)
+                                {
                                     let mut live_projectiles = match ejection_throwables.lock() {
                                         Ok(value) => value,
                                         Err(_) => return,
