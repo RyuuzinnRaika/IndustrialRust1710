@@ -6768,6 +6768,7 @@ fn main() -> io::Result<()> {
     let ejection_file = Arc::clone(&device_path);
     let ejection_throwables = Arc::clone(&throwables);
     let ejection_chests = Arc::clone(&chests);
+    let ejection_hoppers = Arc::clone(&hoppers);
     let ejection_chest_file = Arc::clone(&chest_path);
     let tick_shutdown = Arc::clone(&shutdown);
     let tick_thread = thread::spawn(move || {
@@ -6848,11 +6849,28 @@ fn main() -> io::Result<()> {
                     Ok(storage) => storage.comparator_inputs(),
                     Err(_) => return,
                 };
+                let chest_comparator_inputs = match ejection_chests.lock() {
+                    Ok(storage) => storage.comparator_inputs(),
+                    Err(_) => return,
+                };
+                let furnace_comparator_inputs = match furnace_worker.lock() {
+                    Ok(storage) => storage.comparator_inputs(),
+                    Err(_) => return,
+                };
+                let hopper_comparator_inputs = match ejection_hoppers.lock() {
+                    Ok(storage) => storage.comparator_inputs(),
+                    Err(_) => return,
+                };
                 let mut gravity_world = match furnace_world.lock() {
                     Ok(v) => v,
                     Err(_) => break,
                 };
-                gravity_world.set_device_comparator_inputs(device_comparator_inputs);
+                gravity_world.set_inventory_comparator_inputs(
+                    device_comparator_inputs,
+                    chest_comparator_inputs,
+                    furnace_comparator_inputs,
+                    hopper_comparator_inputs,
+                );
                 // Fire uses the same clock/weather source as client rain packets.
                 gravity_world.set_raining(weather.0);
                 gravity_world.set_day_time(furnace_clock.day_time());

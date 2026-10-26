@@ -144,6 +144,17 @@ impl Hoppers {
             .copied()
             .unwrap_or([None; HOPPER_SLOTS])
     }
+    /// Snapshot committed hopper contents for vanilla comparator inputs.
+    pub fn comparator_inputs(&self) -> BTreeMap<(i32, u8, i32), u8> {
+        self.entries
+            .iter()
+            .filter_map(|(name, slots)| {
+                let pos = parse_key(name).ok()?;
+                let strength = crate::dispensers::comparator_strength(slots);
+                (strength > 0).then_some(((pos.0, pos.1 as u8, pos.2), strength))
+            })
+            .collect()
+    }
     pub fn has_contents(&self, pos: Position) -> bool {
         self.slots(pos).iter().any(Option::is_some)
     }
@@ -319,6 +330,23 @@ mod tests {
         );
     }
     use super::*;
+    #[test]
+    fn hopper_comparator_snapshot_tracks_transfer_inventory() {
+        let pos = (2, 64, -3);
+        let stack = Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        let full = Hoppers::default()
+            .staged_update(pos, [Some(stack); HOPPER_SLOTS])
+            .unwrap();
+        assert_eq!(full.comparator_inputs().get(&(2, 64, -3)), Some(&15));
+        let empty = full.staged_update(pos, [None; HOPPER_SLOTS]).unwrap();
+        assert!(!empty.comparator_inputs().contains_key(&(2, 64, -3)));
+    }
+
     #[test]
     fn transfer_one_respects_stack_boundaries_and_item_conservation() {
         let mut src = [Some(Stack {

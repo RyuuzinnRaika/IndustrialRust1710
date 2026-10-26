@@ -181,6 +181,24 @@ impl Chests {
             .copied()
             .unwrap_or([None; CHEST_SLOTS])
     }
+    /// Analog signal from the committed chest inventory, never from a client window.
+    /// Empty chests are omitted so the world clears their previous signal.
+    pub fn comparator_inputs(&self) -> BTreeMap<(i32, u8, i32), u8> {
+        self.entries
+            .iter()
+            .filter_map(|(name, slots)| {
+                let mut coords = name.split(',');
+                let x = coords.next()?.parse::<i32>().ok()?;
+                let y = coords.next()?.parse::<u8>().ok()?;
+                let z = coords.next()?.parse::<i32>().ok()?;
+                if coords.next().is_some() {
+                    return None;
+                }
+                let strength = crate::dispensers::comparator_strength(slots);
+                (strength > 0).then_some(((x, y, z), strength))
+            })
+            .collect()
+    }
     pub fn is_nonempty(&self, pos: Position) -> bool {
         self.slots(pos).iter().any(Option::is_some)
     }
@@ -243,6 +261,25 @@ impl Chests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chest_comparator_snapshot_tracks_staged_inventory_and_emptying() {
+        let pos = (-4, 64, 9);
+        let stack = Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        let mut slots = [None; CHEST_SLOTS];
+        slots[0] = Some(stack);
+        let partial = Chests::default().staged_update(pos, slots).unwrap();
+        assert_eq!(partial.comparator_inputs().get(&(-4, 64, 9)), Some(&1));
+        let full = partial.staged_update(pos, [Some(stack); CHEST_SLOTS]).unwrap();
+        assert_eq!(full.comparator_inputs().get(&(-4, 64, 9)), Some(&15));
+        let empty = full.staged_update(pos, [None; CHEST_SLOTS]).unwrap();
+        assert!(!empty.comparator_inputs().contains_key(&(-4, 64, 9)));
+    }
+
     #[test]
     fn generated_chest_loot_is_claimed_once_even_after_emptying() {
         let file =

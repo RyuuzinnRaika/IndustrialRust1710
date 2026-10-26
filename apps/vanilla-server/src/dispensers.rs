@@ -221,7 +221,7 @@ impl Devices {
 /// Vanilla 1.7.10 comparator override for a nine-slot device:
 /// floor(14 * average slot fullness) + 1 when any slot is occupied.
 /// All supported item stack caps (1, 16, 64) divide 64 exactly.
-fn comparator_strength(slots: &[Option<Stack>; DEVICE_SLOTS]) -> u8 {
+pub(crate) fn comparator_strength<const N: usize>(slots: &[Option<Stack>; N]) -> u8 {
     let mut scaled_fill = 0u32;
     let mut occupied = false;
     for stack in slots.iter().flatten() {
@@ -231,7 +231,7 @@ fn comparator_strength(slots: &[Option<Stack>; DEVICE_SLOTS]) -> u8 {
         }
     }
     if occupied {
-        1 + ((14 * scaled_fill) / (64 * DEVICE_SLOTS as u32)) as u8
+        1 + ((14 * scaled_fill) / (64 * N as u32)) as u8
     } else {
         0
     }
