@@ -1,6 +1,6 @@
 //! Minecraft Java 1.7.10 workstation rules.
 //! Anvil durability repairs and compatible enchantment merging preserve NBT.
-//! Renaming and full prior-work cost compatibility remain separate work.
+//! Pre-1.8 prior-work history is persisted; exact enchantment base costs remain pending.
 use crate::inventory::Stack;
 use crate::{enchanting, item_nbt, items_1710};
 use fastnbt::Value;
@@ -94,6 +94,54 @@ fn nbt_root(stack: Stack) -> Option<HashMap<String, Value>> {
             _ => None,
         },
     }
+}
+
+/// Pre-1.8 Java stores this as a signed NBT Int named RepairCost. Never
+/// interpret today's exponential repair-cost component as legacy behavior.
+fn repair_penalty(stack: Stack) -> Option<u16> {
+    match nbt_root(stack)?.get("RepairCost") {
+        None => Some(0),
+        Some(Value::Int(value)) => u16::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn was_named(stack: Stack) -> Option<bool> {
+    match nbt_root(stack)?.get("display") {
+        None => Some(false),
+        Some(Value::Compound(display)) => match display.get("Name") {
+            None => Some(false),
+            Some(Value::String(_)) => Some(true),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn with_repair_penalty(mut result: Stack, value: u16) -> Option<Stack> {
+    let mut root = nbt_root(result)?;
+    root.insert("RepairCost".into(), Value::Int(i32::from(value)));
+    result.nbt = Some(item_nbt::from_value(&Value::Compound(root)).ok()?);
+    Some(result)
+}
+
+/// All changed items keep a real legacy RepairCost NBT value.
+/// Unnamed 1.7.10 results gain +2 from the larger input history. An item
+/// carrying a custom name resets its history to 2, even after another repair.
+fn finish_anvil_repair(left: Stack, right: Stack, mut plan: Repair) -> Option<Repair> {
+    let old_left = repair_penalty(left)?;
+    let old_right = repair_penalty(right)?;
+    plan.levels = plan.levels.checked_add(old_left)?.checked_add(old_right)?;
+    if plan.levels > 39 {
+        return None;
+    }
+    let next = if was_named(left)? {
+        2
+    } else {
+        old_left.max(old_right).checked_add(2)?
+    };
+    plan.result = with_repair_penalty(plan.result, next)?;
+    Some(plan)
 }
 
 fn enchantment_entries(entries: &[Value]) -> Option<Vec<(i16, i16)>> {
@@ -242,11 +290,15 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
             damage: left.damage - restored as i16,
             ..left
         };
-        return Some(Repair {
-            result,
-            consumed,
-            levels: u16::from(consumed),
-        });
+        return finish_anvil_repair(
+            left,
+            right,
+            Repair {
+                result,
+                consumed,
+                levels: u16::from(consumed),
+            },
+        );
     }
     if right.count != 1 || (right.id != left.id && right.id != 403) {
         return None;
@@ -280,17 +332,22 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
     if levels == 0 || levels > 39 {
         return None;
     }
-    Some(Repair {
-        result,
-        consumed: 1,
-        levels,
-    })
+    finish_anvil_repair(
+        left,
+        right,
+        Repair {
+            result,
+            consumed: 1,
+            levels,
+        },
+    )
 }
 
 /// Calculate the anvil result after an optional MC|ItemName update.
 /// A missing request retains the existing custom name; an empty request
 /// removes the custom name without deleting other display or mod NBT fields.
-/// Rename-only results use no right-hand ingredients and cost one level.
+/// Rename-only results use no right-hand ingredients. 1.7.10 costs
+/// 7/10 levels for durable items and 5/9 for ordinary items (first/later).
 pub fn repair_with_name(left: Stack, right: Option<Stack>, name: Option<&str>) -> Option<Repair> {
     if !left.is_valid() || left.count != 1 {
         return None;
@@ -353,9 +410,32 @@ pub fn repair_with_name(left: Stack, right: Option<Stack>, name: Option<&str>) -
         consumed: 0,
         levels: 0,
     });
-    result.result = output;
-    result.levels = result.levels.checked_add(1)?;
-    (result.levels <= 39).then_some(result)
+    // Pre-1.8 renaming is not today's 1-level rule: durable items cost
+    // 7 initially and 10 on later renames; ordinary items cost 5 initially
+    // and 9 after the usual +2 penalty has accumulated.
+    let durable = items_1710::max_durability(left.id).is_some();
+    let rename_cost = match (durable, previous.is_some()) {
+        (true, false) => 7u16,
+        (true, true) => 10,
+        (false, false) => 5,
+        (false, true) => 7, // +2 prior penalty makes 9 for repeated renames
+    };
+    let previous_penalty = if plan.is_none() {
+        repair_penalty(left)?
+    } else {
+        0 // repair() already applied both input prior-work penalties
+    };
+    result.levels = result
+        .levels
+        .checked_add(previous_penalty)?
+        .checked_add(rename_cost)?;
+    if result.levels > 39 {
+        return None;
+    }
+    // 1.7.10 sets a named item's RepairCost to exactly 2, rather than the
+    // post-1.8 exponential count. Preserve every other NBT tag.
+    result.result = with_repair_penalty(output, 2)?;
+    Some(result)
 }
 
 /// Candidate enchantments by vanilla 1.7.10 numeric enchantment ID.
@@ -655,7 +735,7 @@ mod tests {
     fn d36_rename_only_creates_display_nbt_and_clearing_keeps_unknown_tags() {
         let stone = stack(1, 1, 0);
         let plan = repair_with_name(stone, None, Some("工具の名前")).unwrap();
-        assert_eq!(plan.levels, 1);
+        assert_eq!(plan.levels, 5); // pre-1.8 non-durable rename, not 1 level
         assert_eq!(plan.consumed, 0);
         assert_eq!(plan.result.id, stone.id);
         let Value::Compound(root) = item_nbt::value(plan.result.nbt.unwrap()).unwrap() else {
@@ -688,7 +768,7 @@ mod tests {
             ..stone
         };
         let result = repair_with_name(existing, None, Some("")).unwrap();
-        assert_eq!(result.levels, 1);
+        assert_eq!(result.levels, 7); // renamed item without a saved prior cost
         let Value::Compound(root) = item_nbt::value(result.result.nbt.unwrap()).unwrap() else {
             panic!("compound");
         };
@@ -710,7 +790,7 @@ mod tests {
         let right = stack(265, 2, 0);
         let repaired = repair(left, right).unwrap();
         let named = repair_with_name(left, Some(right), Some("New Pickaxe")).unwrap();
-        assert_eq!(named.levels, repaired.levels + 1);
+        assert_eq!(named.levels, repaired.levels + 7);
         assert_eq!(named.consumed, repaired.consumed);
         assert_eq!(named.result.damage, repaired.result.damage);
         assert!(named.result.nbt.is_some());
@@ -719,6 +799,107 @@ mod tests {
         assert!(repair_with_name(left, None, Some(&"A".repeat(31))).is_none());
         assert!(repair_with_name(left, None, Some(&format!("A{}B", char::from(10)))).is_none());
         assert!(repair_with_name(left, None, Some(&"😀".repeat(16))).is_none());
+    }
+
+    fn with_work_cost(stack: Stack, cost: i32, named: bool) -> Stack {
+        let mut root = HashMap::from([
+            ("RepairCost".to_owned(), Value::Int(cost)),
+            ("CustomData".to_owned(), Value::Int(105)),
+        ]);
+        if named {
+            root.insert(
+                "display".to_owned(),
+                Value::Compound(HashMap::from([(
+                    "Name".to_owned(),
+                    Value::String("Kept name".into()),
+                )])),
+            );
+        }
+        Stack {
+            nbt: Some(item_nbt::from_value(&Value::Compound(root)).unwrap()),
+            ..stack
+        }
+    }
+
+    fn observed_work_cost(item: Stack) -> i32 {
+        let Value::Compound(root) = item_nbt::value(item.nbt.unwrap()).unwrap() else {
+            panic!("expected Compound");
+        };
+        let Some(Value::Int(cost)) = root.get("RepairCost") else {
+            panic!("expected NBT Int RepairCost");
+        };
+        *cost
+    }
+
+    #[test]
+    fn d36_pre18_repair_cost_is_linear_and_survives_json_reload() {
+        let ingot = stack(265, 1, 0);
+        let first = repair(stack(257, 1, 240), ingot).unwrap();
+        assert_eq!(first.levels, 1);
+        assert_eq!(observed_work_cost(first.result), 2);
+        let second = repair(first.result, ingot).unwrap();
+        assert_eq!(second.levels, 3);
+        assert_eq!(observed_work_cost(second.result), 4);
+        let third = repair(second.result, ingot).unwrap();
+        assert_eq!(third.levels, 5);
+        assert_eq!(observed_work_cost(third.result), 6);
+
+        let json = serde_json::to_vec(&third.result).unwrap();
+        let saved: Stack = serde_json::from_slice(&json).unwrap();
+        assert_eq!(observed_work_cost(saved), 6);
+        assert_eq!(
+            item_nbt::value(saved.nbt.unwrap()).unwrap(),
+            item_nbt::value(third.result.nbt.unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn d36_legacy_both_input_penalties_charge_once_and_follow_larger_history() {
+        let left = with_work_cost(stack(257, 1, 100), 4, false);
+        let right = with_work_cost(stack(257, 1, 150), 6, false);
+        let merged = repair(left, right).unwrap();
+        assert_eq!(merged.levels, 12); // same-item durability cost 2 + 4 + 6
+        assert_eq!(observed_work_cost(merged.result), 8);
+        assert!(merged.result.damage < left.damage);
+    }
+
+    #[test]
+    fn d36_legacy_rename_resets_penalty_and_repeated_names_charge_old_cost() {
+        let pick = stack(257, 1, 220);
+        let named = repair_with_name(pick, None, Some("Name")).unwrap();
+        assert_eq!(named.levels, 7);
+        assert_eq!(observed_work_cost(named.result), 2);
+        let renamed_again = repair_with_name(named.result, None, Some("New")).unwrap();
+        assert_eq!(renamed_again.levels, 12); // 2 prior + 10 rename
+        assert_eq!(observed_work_cost(renamed_again.result), 2);
+        let repaired = repair(renamed_again.result, stack(265, 1, 0)).unwrap();
+        assert_eq!(repaired.levels, 3); // 2 prior + one ingot
+        assert_eq!(observed_work_cost(repaired.result), 2);
+
+        let stone = repair_with_name(stack(1, 1, 0), None, Some("One")).unwrap();
+        assert_eq!(stone.levels, 5);
+        let again = repair_with_name(stone.result, None, Some("Two")).unwrap();
+        assert_eq!(again.levels, 9);
+        assert_eq!(observed_work_cost(again.result), 2);
+    }
+
+    #[test]
+    fn d36_malformed_prior_work_metadata_cannot_mint_or_modify_anvil_items() {
+        let ingot = stack(265, 1, 0);
+        assert!(repair(with_work_cost(stack(257, 1, 200), -1, false), ingot).is_none());
+        assert!(repair(with_work_cost(stack(257, 1, 200), 40, false), ingot).is_none());
+        let wrong = Value::Compound(HashMap::from([(
+            "RepairCost".to_owned(),
+            Value::String("4".into()),
+        )]));
+        let corrupted = Stack {
+            nbt: Some(item_nbt::from_value(&wrong).unwrap()),
+            ..stack(257, 1, 200)
+        };
+        assert!(repair(corrupted, ingot).is_none());
+        let high = with_work_cost(stack(257, 1, 200), 65535, false);
+        assert!(repair(high, ingot).is_none());
+        assert!(repair_with_name(high, None, Some("x")).is_none());
     }
 
     #[test]

@@ -3173,7 +3173,7 @@ mod tests {
         };
         assert!(inv.set_anvil_name("A name".into()));
         assert!(!inv.set_anvil_name("A name".into()));
-        assert_eq!(inv.anvil_preview().unwrap().levels, 1);
+        assert_eq!(inv.anvil_preview().unwrap().levels, 5);
         assert_eq!(inv.anvil_preview().unwrap().consumed, 0);
         let mut xp = crate::experience::Experience::default();
         let before = inv.clone();
