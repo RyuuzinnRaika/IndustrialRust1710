@@ -2530,9 +2530,9 @@ impl Mobs {
         self.spawn_from_spawners(now, world, players, &mut events);
         // Malformed online positions must not make every hostile appear >128 blocks
         // away. A finite Y outside build height is still a valid player reference.
-        let has_valid_online_player = players.iter().any(|player| {
-            player.x.is_finite() && player.y.is_finite() && player.z.is_finite()
-        });
+        let has_valid_online_player = players
+            .iter()
+            .any(|player| player.x.is_finite() && player.y.is_finite() && player.z.is_finite());
         for _ in 0..steps {
             let mut shots = Vec::new();
             let mut dead = Vec::new();
