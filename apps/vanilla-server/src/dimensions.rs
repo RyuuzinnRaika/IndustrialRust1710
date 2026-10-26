@@ -553,6 +553,31 @@ pub struct TravelCheckpoint {
     pub destination: PortalDestination,
 }
 impl TravelCheckpoint {
+    /// Reject symlinks and non-directories at *every existing* parent level.
+    /// Checking only the immediate parent misses an ancestor symlink when
+    /// the checkpoint is stored under a nested directory.
+    fn validate_parent_components(path: &Path, kind: io::ErrorKind) -> io::Result<()> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            for ancestor in parent.ancestors() {
+                if ancestor.as_os_str().is_empty() {
+                    continue;
+                }
+                match fs::symlink_metadata(ancestor) {
+                    Ok(meta) if !meta.file_type().is_dir() => {
+                        return Err(io::Error::new(
+                            kind,
+                            "unsafe travel checkpoint ancestor directory",
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(destination: PortalDestination) -> Option<Self> {
         destination.valid().then_some(Self {
             version: 1,
@@ -560,6 +585,7 @@ impl TravelCheckpoint {
         })
     }
     pub fn load(path: &Path) -> io::Result<Option<Self>> {
+        Self::validate_parent_components(path, io::ErrorKind::InvalidData)?;
         let meta = match fs::symlink_metadata(path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -597,15 +623,12 @@ impl TravelCheckpoint {
                 "invalid travel destination",
             ));
         }
+        // Validate before mkdir to avoid creating directories through an
+        // existing ancestor symlink, then revalidate the newly created path.
+        Self::validate_parent_components(path, io::ErrorKind::InvalidInput)?;
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
-            // Do not write checkpoints through a substituted parent symlink.
-            if !fs::symlink_metadata(parent)?.file_type().is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "unsafe travel checkpoint parent directory",
-                ));
-            }
+            Self::validate_parent_components(path, io::ErrorKind::InvalidInput)?;
         }
         // Loading refuses symlinks and non-files; saving must not silently
         // replace them either. Check before creating the staging file.
@@ -951,6 +974,60 @@ mod tests {
         let link_meta = fs::symlink_metadata(&linked_file).unwrap();
         assert!(link_meta.file_type().is_symlink());
         assert!(!linked_file.with_extension("dimension.tmp").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_rejects_symlinked_ancestor_before_nested_directory_creation() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-checkpoint-ancestor-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let outside = root.join("outside");
+        fs::create_dir_all(outside.join("nested")).unwrap();
+        let checkpoint = TravelCheckpoint::new(
+            destination(Dimension::Overworld, Dimension::Nether, 80.0, 64.0, 0.0).unwrap(),
+        )
+        .unwrap();
+        let original = outside.join("nested/pending.json");
+        checkpoint.save(&original).unwrap();
+        let before = fs::read(&original).unwrap();
+
+        let linked = root.join("linked");
+        symlink(&outside, &linked).unwrap();
+        let redirected = linked.join("nested/pending.json");
+        assert_eq!(
+            TravelCheckpoint::load(&redirected).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            checkpoint.save(&redirected).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(fs::read(&original).unwrap(), before);
+        assert!(!redirected.with_extension("dimension.tmp").exists());
+
+        let missing = linked.join("new/child/pending.json");
+        assert_eq!(
+            checkpoint.save(&missing).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(!outside.join("new").exists());
+
+        let regular = root.join("regular/child/pending.json");
+        checkpoint.save(&regular).unwrap();
+        assert_eq!(
+            TravelCheckpoint::load(&regular)
+                .unwrap()
+                .unwrap()
+                .destination,
+            checkpoint.destination
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
