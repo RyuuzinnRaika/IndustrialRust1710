@@ -24,6 +24,8 @@ pub struct PlayerPosition {
 struct PositionNbt {
     #[serde(rename = "Pos")]
     pos: Vec<f64>,
+    #[serde(rename = "Dimension", default)]
+    dimension: i32,
     #[serde(rename = "Health", default = "full_health")]
     health: f32,
     #[serde(rename = "foodLevel", default = "full_food")]
@@ -169,15 +171,20 @@ impl PlayerPosition {
     }
 
     pub fn load_state(path: &Path) -> io::Result<(Self, Vitals)> {
+        Self::load_state_with_dimension(path).map(|(position, vitals, _)| (position, vitals))
+    }
+
+    /// Loads the saved dimension without trusting unrecognized NBT dimension IDs.
+    pub fn load_state_with_dimension(path: &Path) -> io::Result<(Self, Vitals, i32)> {
         let meta = match fs::metadata(path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 let legacy = path.with_extension("json");
                 return match fs::metadata(&legacy) {
                     Ok(_) => Self::load_legacy_json(&legacy)
-                        .map(|position| (position, Vitals::default())),
+                        .map(|position| (position, Vitals::default(), 0)),
                     Err(e) if e.kind() == ErrorKind::NotFound => {
-                        Ok((Self::default(), Vitals::default()))
+                        Ok((Self::default(), Vitals::default(), 0))
                     }
                     Err(e) => Err(e),
                 };
@@ -209,6 +216,9 @@ impl PlayerPosition {
         if !pos.is_valid() {
             return Err(invalid("player location outside loaded world"));
         }
+        if !matches!(nbt.dimension, -1..=1) {
+            return Err(invalid("unsupported saved player dimension"));
+        }
         let vitals = Vitals {
             health: nbt.health,
             food: nbt.food,
@@ -220,10 +230,24 @@ impl PlayerPosition {
         if !vitals.valid() {
             return Err(invalid("invalid player health or food values"));
         }
-        Ok((pos, vitals))
+        Ok((pos, vitals, nbt.dimension))
     }
 
+    #[allow(dead_code)] // Backward-compatible Overworld-only API for legacy callers/tests.
     pub fn save_state(&self, path: &Path, vitals: Vitals) -> io::Result<()> {
+        self.save_state_in_dimension(path, vitals, 0)
+    }
+
+    /// Persists the position, vitals and active dimension in the same NBT write.
+    pub fn save_state_in_dimension(
+        &self,
+        path: &Path,
+        vitals: Vitals,
+        dimension: i32,
+    ) -> io::Result<()> {
+        if !matches!(dimension, -1..=1) {
+            return Err(invalid("unsupported player dimension"));
+        }
         if !vitals.valid() {
             return Err(invalid("invalid player health or food values"));
         }
@@ -234,7 +258,7 @@ impl PlayerPosition {
             pos: vec![self.x, self.y, self.z],
             motion: vec![0.0, 0.0, 0.0],
             rotation: vec![0.0, 0.0],
-            dimension: 0,
+            dimension,
             game_mode: 1,
             health: vitals.health,
             food: vitals.food,
@@ -302,6 +326,31 @@ mod tests {
             z: 0.5
         })
         .is_valid());
+    }
+
+    #[test]
+    fn dimension_survives_player_restart_and_rejects_unknown_ids() {
+        let parent = std::env::temp_dir().join(format!("ir1710-dimension-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&parent);
+        let file = parent.join("player.dat");
+        let position = PlayerPosition {
+            x: -100.5,
+            y: 75.0,
+            z: 22.5,
+        };
+        for dimension in [-1, 0, 1] {
+            position
+                .save_state_in_dimension(&file, Vitals::default(), dimension)
+                .unwrap();
+            assert_eq!(
+                PlayerPosition::load_state_with_dimension(&file).unwrap(),
+                (position, Vitals::default(), dimension)
+            );
+        }
+        assert!(position
+            .save_state_in_dimension(&file, Vitals::default(), 2)
+            .is_err());
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
