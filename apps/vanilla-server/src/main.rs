@@ -214,7 +214,12 @@ impl<'a> Input<'a> {
             self.take(nbt_length as usize)?;
             return Ok(None);
         }
-        let stack = Stack { id, count, damage };
+        let stack = Stack {
+            id,
+            count,
+            damage,
+            nbt: None,
+        };
         Ok(stack.is_valid().then_some(Some(stack)))
     }
     /// Protocol 5 Click Window carries a *client-reported* slot snapshot.
