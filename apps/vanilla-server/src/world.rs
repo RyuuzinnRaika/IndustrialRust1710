@@ -494,8 +494,7 @@ impl World {
                         let y_delta = i64::from(dy) - i64::from(anchor[1]);
                         let z_delta = i64::from(dz) - i64::from(anchor[2]);
                         (
-                            x_delta * x_delta + z_delta * z_delta > 16 * 16
-                                || y_delta.abs() > 4,
+                            x_delta * x_delta + z_delta * z_delta > 16 * 16 || y_delta.abs() > 4,
                             x_delta * x_delta + y_delta * y_delta + z_delta * z_delta,
                         )
                     })
@@ -3202,9 +3201,7 @@ mod tests {
                     let x_distance = i64::from(dx - 30);
                     let z_distance = i64::from(dz);
                     let y_distance = i64::from(y - 200);
-                    if x_distance * x_distance
-                        + y_distance * y_distance
-                        + z_distance * z_distance
+                    if x_distance * x_distance + y_distance * y_distance + z_distance * z_distance
                         >= 16 * 16
                     {
                         continue;
