@@ -948,10 +948,8 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
-        assert!(fs::symlink_metadata(&linked_file)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        let link_meta = fs::symlink_metadata(&linked_file).unwrap();
+        assert!(link_meta.file_type().is_symlink());
         assert!(!linked_file.with_extension("dimension.tmp").exists());
         fs::remove_dir_all(root).unwrap();
     }
