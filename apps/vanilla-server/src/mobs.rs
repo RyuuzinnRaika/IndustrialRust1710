@@ -3500,9 +3500,10 @@ fn natural_spawn_location_ok(
     at: PlayerPosition,
     players: &[PlayerPosition],
 ) -> bool {
-    if !(24.0..=128.0).contains(&distance_to_players(at, players))
-        || !natural_spawn_chunk_eligible(at, players)
-    {
+    // Java 1.7.10 excludes candidates at *or within* 24 blocks of the
+    // nearest player; the valid inner boundary is strictly greater than 24.
+    let nearest = distance_to_players(at, players);
+    if nearest <= 24.0 || nearest > 128.0 || !natural_spawn_chunk_eligible(at, players) {
         return false;
     }
     if world.dimension() == crate::dimensions::Dimension::Overworld {
@@ -3511,7 +3512,8 @@ fn natural_spawn_location_ok(
             y: world.spawn_y(),
             z: 0.5,
         };
-        if distance_3d(at, origin) < 24.0 {
+        // The world-spawn exclusion uses the same inclusive 24-block sphere.
+        if distance_3d(at, origin) <= 24.0 {
             return false;
         }
     }
@@ -4752,6 +4754,44 @@ mod tests {
             &[player, second]
         ));
         assert!(!natural_spawn_chunk_eligible(candidate(0.5, 0.5), &[]));
+    }
+
+    #[test]
+    fn natural_spawn_24_block_exclusion_is_strict_for_players_and_world_spawn() {
+        let world = World::natural(42);
+        let y = world.spawn_y();
+        let at = |x: f64| PlayerPosition { x, y, z: 0.5 };
+        let player = at(400.5);
+        // The 1.7.10 nearest-player check excludes exactly 24 blocks, not
+        // just distances strictly smaller than 24.
+        assert!(!natural_spawn_location_ok(&world, at(423.5), &[player]));
+        assert!(!natural_spawn_location_ok(&world, at(424.5), &[player]));
+        assert!(natural_spawn_location_ok(&world, at(424.501), &[player]));
+        // A more distant second player must not override the closest one.
+        assert!(!natural_spawn_location_ok(
+            &world,
+            at(424.5),
+            &[at(500.5), player]
+        ));
+
+        // The world-spawn point at (0.5, spawn_y, 0.5) has its own 24-block
+        // exclusion, even when the nearest online player is farther away.
+        let far_player = at(64.5);
+        assert!(!natural_spawn_location_ok(
+            &world,
+            at(23.5),
+            &[far_player]
+        ));
+        assert!(!natural_spawn_location_ok(
+            &world,
+            at(24.5),
+            &[far_player]
+        ));
+        assert!(natural_spawn_location_ok(
+            &world,
+            at(24.501),
+            &[far_player]
+        ));
     }
 
     #[test]
