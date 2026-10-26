@@ -3331,12 +3331,12 @@ fn natural_spawn_capacity(players: &[PlayerPosition], base: usize) -> usize {
     natural_mob_cap(players, base).min(MAX_NATURAL_PER_CATEGORY)
 }
 
-/// Reject non-finite and out-of-range player coordinates before converting
-/// to chunks. Rust float-to-int casts saturate, which would otherwise give a
-/// malformed online position a phantom 17x17 chunk area and inflate mob caps.
-/// Keep the signed i32 boundary representable for the cap's arithmetic tests.
+/// Reject non-finite Y and invalid X/Z before converting to chunks.
+/// Java 1.7.10 counts online players' X/Z chunks even when they are above
+/// build height or falling into the void; height must not change the mob cap.
+/// Rust float-to-int casts saturate, so invalid X/Z must be rejected.
 fn natural_spawn_player_chunk(player: PlayerPosition) -> Option<(i64, i64)> {
-    if !(0.0..256.0).contains(&player.y) {
+    if !player.y.is_finite() {
         return None;
     }
     let x = natural_spawn_offset_block(player.x, 0)?;
@@ -4802,8 +4802,6 @@ mod tests {
                 y: f64::NEG_INFINITY,
                 ..valid
             },
-            PlayerPosition { y: -1.0, ..valid },
-            PlayerPosition { y: 256.0, ..valid },
             PlayerPosition {
                 x: f64::from(i32::MAX) + 1.0,
                 ..valid
@@ -4819,6 +4817,13 @@ mod tests {
             assert!(!natural_spawn_chunk_eligible(malformed, &[valid]));
             assert!(!natural_spawn_chunk_eligible(valid, &[malformed]));
             assert!(natural_spawn_chunk_eligible(valid, &[valid, malformed]));
+        }
+        // Java 1.7.10 derives the eligible chunk union from player X/Z,
+        // including players below the world or above build height.
+        for y in [-1.0, 256.0, 300.0] {
+            let out_of_height = PlayerPosition { y, ..valid };
+            assert_eq!(natural_mob_cap(&[out_of_height], 70), 79);
+            assert!(natural_spawn_chunk_eligible(valid, &[out_of_height]));
         }
     }
 
