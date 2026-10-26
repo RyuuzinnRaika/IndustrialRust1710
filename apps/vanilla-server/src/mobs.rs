@@ -690,6 +690,8 @@ fn natural_spawn_body_dimensions(kind: Kind, size: u8) -> (f64, f64) {
         Kind::Creeper => 1.7,
         Kind::Zombie | Kind::ZombiePigman | Kind::Blaze | Kind::Villager => 1.8,
         Kind::Witch => 1.95,
+        // Java 1.7.10 skeletons were 1.95 tall; 1.99 was introduced in 1.9.
+        Kind::Skeleton => 1.95,
         Kind::Cow | Kind::Sheep => 1.3,
         Kind::Spider | Kind::Pig => 0.9,
         Kind::Chicken => 0.7,
@@ -3433,6 +3435,7 @@ mod tests {
             (Kind::Blaze, 0.3, 1.8),
             (Kind::Villager, 0.3, 1.8),
             (Kind::Witch, 0.3, 1.95),
+            (Kind::Skeleton, 0.3, 1.95),
             (Kind::Enderman, 0.3, 2.9),
             (Kind::IronGolem, 0.7, 2.9),
         ] {
@@ -3444,6 +3447,32 @@ mod tests {
         }
         // Splitting mobs retain their size-dependent cubic hitboxes.
         assert_eq!(natural_spawn_body_dimensions(Kind::Slime, 4), (1.2, 2.4));
+    }
+
+    #[test]
+    fn legacy_skeleton_height_prevents_false_pack_overlap() {
+        let mut mobs = Mobs::default();
+        let feet = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        mobs.insert(Kind::Skeleton, feet, false);
+        // The 1.7.10 skeleton AABB ends at Y=66.95, not 67.0.
+        let above = PlayerPosition { y: 66.96, ..feet };
+        assert!(natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Chicken,
+            above,
+            1
+        ));
+        let overlapping = PlayerPosition { y: 66.94, ..feet };
+        assert!(!natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Chicken,
+            overlapping,
+            1
+        ));
     }
 
     #[test]
