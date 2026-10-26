@@ -2527,7 +2527,10 @@ impl Mobs {
                     continue; // Mounted or leashed animals never wander independently.
                 }
                 let nearest_distance = distance_to_players(mob.position, players);
-                if mob.kind.despawnable() && nearest_distance > 128.0 {
+                // With no online players, chunks have no active despawn
+                // reference point. Infinity must not be treated as a player
+                // farther than 128 blocks, or every hostile vanishes on logout.
+                if mob.kind.despawnable() && !players.is_empty() && nearest_distance > 128.0 {
                     dead.push(mob.id);
                     continue;
                 }
@@ -2537,7 +2540,7 @@ impl Mobs {
                 // A nearby player resets the timer, matching vanilla behavior.
                 if nearest_distance <= 32.0 {
                     mob.far_from_player_ticks = 0;
-                } else if mob.kind.despawnable() {
+                } else if mob.kind.despawnable() && !players.is_empty() {
                     mob.far_from_player_ticks = mob.far_from_player_ticks.saturating_add(1);
                     if mob.far_from_player_ticks > 600
                         && hash(now ^ mob.id as u64).is_multiple_of(800)
@@ -4669,6 +4672,33 @@ mod tests {
         let sheep = mobs.next_id - 1;
         mobs.entities.get_mut(&sheep).unwrap().sheared = true;
         assert!(mobs.entities[&sheep].death_drop().is_none());
+    }
+
+    #[test]
+    fn no_online_players_do_not_despawn_or_age_hostiles() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, at, false);
+        let id = mobs.next_id - 1;
+        // A pre-existing mob can have accumulated time outside the 32-block
+        // safe zone before the final player logs out. Offline time must not
+        // advance its random despawn timer or immediately cull the entity.
+        mobs.entities.get_mut(&id).unwrap().far_from_player_ticks = 600;
+        mobs.tick(20, &world, &[]);
+        mobs.tick(40, &world, &[]);
+        assert!(mobs.entities.contains_key(&id));
+        assert_eq!(mobs.entities[&id].far_from_player_ticks, 600);
+
+        // Once a player reconnects beyond 128 blocks, ordinary despawning
+        // resumes rather than leaving the mob permanently exempt.
+        let far = PlayerPosition { x: 512.5, ..at };
+        mobs.tick(60, &world, &[far]);
+        assert!(!mobs.entities.contains_key(&id));
     }
 
     #[test]
