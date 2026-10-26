@@ -274,7 +274,9 @@ mod tests {
         slots[0] = Some(stack);
         let partial = Chests::default().staged_update(pos, slots).unwrap();
         assert_eq!(partial.comparator_inputs().get(&(-4, 64, 9)), Some(&1));
-        let full = partial.staged_update(pos, [Some(stack); CHEST_SLOTS]).unwrap();
+        let full = partial
+            .staged_update(pos, [Some(stack); CHEST_SLOTS])
+            .unwrap();
         assert_eq!(full.comparator_inputs().get(&(-4, 64, 9)), Some(&15));
         let empty = full.staged_update(pos, [None; CHEST_SLOTS]).unwrap();
         assert!(!empty.comparator_inputs().contains_key(&(-4, 64, 9)));
