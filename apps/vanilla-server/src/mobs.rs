@@ -2666,7 +2666,9 @@ impl Mobs {
                     let p = mob.position;
                     let (block, sky) =
                         world.light_at(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
-                    mob.bright_spider = spider_bright_light(block, sky, now);
+                    // Evaluate light at each simulated tick, not the final catch-up
+                    // time: sunset can fall between the bounded steps.
+                    mob.bright_spider = spider_bright_light(block, sky, simulated_tick);
                 }
                 let nearest = players
                     .iter()
@@ -2721,7 +2723,7 @@ impl Mobs {
                 };
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider)
                     && mob.bright_spider
-                    && now >= mob.anger_until
+                    && simulated_tick >= mob.anger_until
                 {
                     continue; // Light >= 12: neutral, unless attacked first.
                 }
@@ -4250,6 +4252,39 @@ mod tests {
         assert!(!spider_bright_light(0, 15, 18000));
         assert!(spider_bright_light(12, 0, 18000));
         assert!(!spider_bright_light(11, 0, 6000));
+    }
+
+    #[test]
+    fn spider_sunset_catch_up_matches_split_simulation() {
+        // Sunset is between ticks 12_000 and 12_001. A catch-up of four
+        // simulated ticks must not retroactively treat the daylight ticks
+        // as night (for either spider variant).
+        let world = World::new();
+        let from = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let player = PlayerPosition { x: 8.5, ..from };
+        assert!(world.light_at(0, 64, 0).1 >= 12);
+        for kind in [Kind::Spider, Kind::CaveSpider] {
+            let make_mobs = || {
+                let mut mobs = Mobs::default();
+                mobs.insert(kind, from, false);
+                mobs.last_tick = 11_998;
+                mobs
+            };
+            let mut catch_up = make_mobs();
+            let mut split = make_mobs();
+            catch_up.tick(12_002, &world, &[player]);
+            split.tick(12_000, &world, &[player]);
+            split.tick(12_002, &world, &[player]);
+            let actual = catch_up.entities.get(&0).unwrap();
+            let expected = split.entities.get(&0).unwrap();
+            assert_eq!(actual.position, expected.position, "{kind:?}");
+            assert!(actual.position.x > from.x, "{kind:?} must pursue at night");
+            assert!(!actual.bright_spider);
+        }
     }
 
     #[test]
