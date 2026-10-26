@@ -128,6 +128,37 @@ def main():
             continue
         candidates[name] = {"sha": head["sha"], "pr": pr["number"]}
 
+    # Also prune refs whose exact tip is reachable from main. This catches
+    # squash-independent branches and obsolete refs without an associated PR.
+    # An open PR head/base remains protected even when its tip is an ancestor.
+    open_refs = {default_branch}
+    for pr in prs:
+        if pr["state"] == "open":
+            open_refs.add(pr["base"]["ref"])
+            head = pr["head"]
+            if head["repo"] and head["repo"]["full_name"] == repo:
+                open_refs.add(head["ref"])
+
+    def compare_main_ancestry(name, expected_sha):
+        path = "/compare/" + quote(name, safe="") + "..." + quote(default_branch, safe="")
+        comparison = api(repo, path)
+        merge_base = comparison.get("merge_base_commit") or {}
+        return (comparison.get("behind_by") == 0
+                and comparison.get("status") in ("ahead", "identical")
+                and merge_base.get("sha") == expected_sha)
+
+    for name, branch in branches_by_name.items():
+        if name in candidates or name in open_refs or branch.get("protected"):
+            continue
+        head_sha = branch["commit"]["sha"]
+        try:
+            fully_contained = compare_main_ancestry(name, head_sha)
+        except HTTPError as e:
+            print("SKIP (ancestry API unavailable):", name, e.code)
+            continue
+        if fully_contained:
+            candidates[name] = {"sha": head_sha, "pr": "ancestor-of-main", "ancestor": True}
+
     print("Repository:", repo)
     print("Branches:", len(branches), "PRs:", len(prs))
     print("Verified merged or explicitly retired candidates:", len(candidates))
@@ -140,6 +171,9 @@ def main():
             current = api(repo, "/branches/" + quote(name, safe=""))
             if current.get("protected") or current["commit"]["sha"] != info["sha"]:
                 print("SKIP (protected or branch changed):", name)
+                continue
+            if info.get("ancestor") and not compare_main_ancestry(name, info["sha"]):
+                print("SKIP (no longer an ancestor of main):", name)
                 continue
             api(repo, "/git/refs/heads/" + quote(name, safe="/"), method="DELETE")
             print("DELETED:", name)
