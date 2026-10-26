@@ -100,6 +100,14 @@ fn movable(block: u16) -> bool {
                 | 138
     )
 }
+
+/// Torches have a piston destroy reaction in vanilla 1.7.10. They are
+/// replaced at the end of a push, never translated as solid blocks or
+/// pulled back by sticky pistons. Item-drop handling is tracked separately.
+fn piston_breakable(block: u16) -> bool {
+    matches!(block >> 4, 50 | 75 | 76)
+}
+
 /// Coordinates of the two physical rail endpoints, including ascending slopes.
 fn rail_endpoints(x: i32, y: i32, z: i32, metadata: u16) -> [(i32, i32, i32); 2] {
     match metadata & 7 {
@@ -416,7 +424,7 @@ impl World {
                 let found = self.get(target.0, target.1, target.2);
                 // Pistons replace water/lava in their path instead of
                 // treating the liquid as an immovable solid block.
-                if found == 0 || matches!(found >> 4, 8..=11) {
+                if found == 0 || matches!(found >> 4, 8..=11) || piston_breakable(found) {
                     break;
                 }
                 if occupied.len() >= 12 || !movable(found) {
@@ -441,7 +449,7 @@ impl World {
                     let far = (head.0 + dx, head.1 + dy, head.2 + dz);
                     if in_bounds(far.0, far.1, far.2) {
                         let pulled = self.get(far.0, far.1, far.2);
-                        if pulled != 0 && movable(pulled) {
+                        if pulled != 0 && movable(pulled) && !piston_breakable(pulled) {
                             changes.insert((head.0, head.1 as u8, head.2), pulled);
                             changes.insert((far.0, far.1 as u8, far.2), 0);
                         }
@@ -1201,6 +1209,55 @@ mod redstone_regression_tests {
                     "piston must displace liquid {liquid_id}, not push it"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn piston_replaces_torches_instead_of_pushing_them() {
+        for torch_id in [50u16, 75, 76] {
+            for blocks_before_torch in [0, 1] {
+                let mut world = World::new();
+                let piston = (33 << 4) | 5; // Facing east.
+                world.import_block(-2, 64, 0, (69 << 4) | 8).unwrap();
+                world.import_block(-1, 64, 0, piston).unwrap();
+                if blocks_before_torch == 1 {
+                    world.import_block(0, 64, 0, 1 << 4).unwrap();
+                }
+                world
+                    .import_block(blocks_before_torch, 64, 0, torch_id << 4)
+                    .unwrap();
+
+                let mut changes = BTreeMap::new();
+                world.push_piston(-1, 64, 0, piston, &mut changes);
+                assert_eq!(changes.get(&(-1, 64, 0)), Some(&(piston | 8)));
+                assert_eq!(changes.get(&(0, 64, 0)), Some(&((34 << 4) | 5)));
+                if blocks_before_torch == 1 {
+                    assert_eq!(changes.get(&(1, 64, 0)), Some(&(1 << 4)));
+                } else {
+                    assert!(!changes.contains_key(&(1, 64, 0)));
+                }
+                assert!(
+                    !changes.values().any(|block| block >> 4 == torch_id),
+                    "piston must not move torch {torch_id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sticky_piston_does_not_pull_a_torch() {
+        for torch_id in [50u16, 75, 76] {
+            let mut world = World::new();
+            let piston = (29 << 4) | 13;
+            world.import_block(0, 64, 0, piston).unwrap();
+            world.import_block(1, 64, 0, (34 << 4) | 5).unwrap();
+            world.import_block(2, 64, 0, torch_id << 4).unwrap();
+
+            let mut changes = BTreeMap::new();
+            world.push_piston(0, 64, 0, piston, &mut changes);
+            assert_eq!(changes.get(&(0, 64, 0)), Some(&((29 << 4) | 5)));
+            assert_eq!(changes.get(&(1, 64, 0)), Some(&0));
+            assert!(!changes.contains_key(&(2, 64, 0)));
         }
     }
 
