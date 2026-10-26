@@ -1700,7 +1700,9 @@ impl World {
         let mut original_chunks = BTreeMap::new();
         for &(x, y, z, previous, _) in &different {
             let chunk_pos = (x.div_euclid(16), z.div_euclid(16));
-            if let std::collections::btree_map::Entry::Vacant(entry) = original_chunks.entry(chunk_pos) {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                original_chunks.entry(chunk_pos)
+            {
                 let (cx, cz) = chunk_pos;
                 let snapshot = &source_images[&(cx.div_euclid(32), cz.div_euclid(32))];
                 let mut reader = fastanvil::Region::from_stream(std::io::Cursor::new(snapshot))
