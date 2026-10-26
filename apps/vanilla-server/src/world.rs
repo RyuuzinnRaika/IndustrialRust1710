@@ -366,8 +366,9 @@ impl World {
         // A generated door is no longer a valid village goal when the block
         // beneath its lower half is removed or replaced by non-solid terrain.
         // Match the live support check used for player-built village doors.
-        let doors =
-            crate::worldgen::village_live_house_doors(seed, x, z, |dx, dy, dz| self.get(dx, dy, dz))?;
+        let doors = crate::worldgen::village_live_house_doors(seed, x, z, |dx, dy, dz| {
+            self.get(dx, dy, dz)
+        })?;
         Some(doors.map(|door| {
             door.filter(|&[dx, dy, dz]| self.can_support(dx, dy, dz, self.get(dx, dy, dz)))
         }))
@@ -2321,10 +2322,7 @@ mod tests {
                 let support = world.get(dx, dy - 1, dz);
                 for unsupported in [0, 9 << 4, 50 << 4] {
                     world.import_block(dx, dy - 1, dz, unsupported).unwrap();
-                    assert_eq!(
-                        world.live_village_house_doors(x, z),
-                        Some([None, second])
-                    );
+                    assert_eq!(world.live_village_house_doors(x, z), Some([None, second]));
                 }
                 world.import_block(dx, dy - 1, dz, support).unwrap();
                 assert_eq!(world.live_village_house_doors(x, z), Some(doors));
