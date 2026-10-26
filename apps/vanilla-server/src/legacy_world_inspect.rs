@@ -31,10 +31,24 @@ fn checked_directory(path: &Path, required: bool) -> io::Result<bool> {
     }
 }
 
+/// Fail closed rather than reporting a Forge / other non-standard dimension
+/// as inspected when its chunks were silently omitted from the summary.
+fn reject_unsupported_dimensions(root: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(root)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("DIM") && name != "DIM-1" && name != "DIM1" {
+            return Err(invalid("unsupported extra Anvil dimension; migration is unavailable"));
+        }
+    }
+    Ok(())
+}
+
 /// Bounded, read-only recursive inspection of the three 1.7.10 dimensions.
 /// Does not create session.lock and does not acquire a write lock.
 pub(crate) fn inspect_world(root: &Path) -> io::Result<Inspection> {
     checked_directory(root, true)?;
+    reject_unsupported_dimensions(root)?;
     let _ = crate::level_dat::read_level_file(&root.join("level.dat"))?;
     let mut result = Inspection {
         regions: 0,
@@ -67,6 +81,9 @@ pub(crate) fn inspect_world(root: &Path) -> io::Result<Inspection> {
             let name = name
                 .to_str()
                 .ok_or_else(|| invalid("non-UTF8 Anvil region filename"))?;
+            if name.ends_with(".mcr") {
+                return Err(invalid("legacy .mcr region requires unsupported conversion"));
+            }
             if !name.ends_with(".mca") {
                 continue;
             }
@@ -176,6 +193,32 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), corrupted);
         fs::remove_file(world.join("level.dat")).unwrap();
         assert!(inspect_world(&world).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refuses_uninspected_forge_dimension_without_mutating_source() {
+        let root = setup("forge-dimension");
+        let world = root.join("world");
+        let extra = world.join("DIM2").join("region");
+        fs::create_dir_all(&extra).unwrap();
+        let region_bytes = fs::read(world.join("region/r.0.0.mca")).unwrap();
+        fs::write(extra.join("r.0.0.mca"), &region_bytes).unwrap();
+        assert!(inspect_world(&world).is_err());
+        assert_eq!(fs::read(extra.join("r.0.0.mca")).unwrap(), region_bytes);
+        assert!(!world.join("session.lock").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refuses_pre_anvil_mcr_region_without_mutating_source() {
+        let root = setup("legacy-mcr");
+        let world = root.join("world");
+        let old = world.join("region/r.0.0.mcr");
+        fs::write(&old, b"legacy region fixture").unwrap();
+        assert!(inspect_world(&world).is_err());
+        assert_eq!(fs::read(&old).unwrap(), b"legacy region fixture");
+        assert!(!world.join("session.lock").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
