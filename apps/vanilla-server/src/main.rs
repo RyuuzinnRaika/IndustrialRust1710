@@ -8403,9 +8403,7 @@ mod b13_trapped_double_chest_tests {
             assert_eq!(chest_neighbor(&world, right), Some(left));
         }
 
-        world
-            .import_block(left.0, left.1, left.2, 54 << 4)
-            .unwrap();
+        world.import_block(left.0, left.1, left.2, 54 << 4).unwrap();
         world
             .import_block(right.0, right.1, right.2, 146 << 4)
             .unwrap();
@@ -8452,10 +8450,7 @@ mod b13_trapped_double_chest_tests {
         assert!(staged.encoded().is_ok());
 
         let mut full_slots = vec![Some(full); 54];
-        assert!(!dispensers::insert_one_into_window(
-            &mut full_slots,
-            single
-        ));
+        assert!(!dispensers::insert_one_into_window(&mut full_slots, single));
         assert_eq!(full_slots, vec![Some(full); 54]);
     }
 }
