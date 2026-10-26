@@ -597,9 +597,12 @@ impl World {
             let x_delta = i64::from(dx) - i64::from(x);
             let z_delta = i64::from(dz) - i64::from(z);
             let distance_squared = x_delta * x_delta + z_delta * z_delta;
+            // A lower half at y=253 can still have an upper half at 254
+            // and an asymmetric roof at 255. At y=254 there is no room
+            // for the sky-exposure sample two blocks above the lower half.
             if distance_squared > 32 * 32
                 || dy == 0
-                || dy > 252
+                || dy > 253
                 || lower >> 4 != 64
                 || lower & 8 != 0
             {
@@ -3306,6 +3309,51 @@ mod tests {
         assert!(World::expanded(42, crate::dimensions::Dimension::Nether)
             .independent_player_village_doors_near(door[0], door[2])
             .is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn independent_player_village_recognizes_roof_at_world_ceiling() {
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        // A wooden door can have its lower half at y=253, upper half at
+        // y=254, and an asymmetric roof at the last valid block height.
+        let door = [-1000, 253, -1000];
+        let stone = 1 << 4;
+        for (x, y, z, block) in [
+            (door[0], door[1] - 1, door[2], stone),
+            (door[0], door[1], door[2], 64 << 4),
+            (door[0], door[1] + 1, door[2], 64 << 4 | 8),
+            (door[0], 255, door[2] + 1, stone),
+        ] {
+            world.import_block(x, y, z, block).unwrap();
+        }
+        let at_door = |world: &World| {
+            world.independent_player_village_doors_near_at(door[0], door[1], door[2])
+        };
+        assert_eq!(at_door(&world), vec![door]);
+        assert_eq!(
+            world.independent_player_village_doors_near(door[0], door[2]),
+            vec![door]
+        );
+        assert!(world
+            .independent_player_village_doors_near_at(door[0], 248, door[2])
+            .is_empty());
+
+        // Roof removal must invalidate the house immediately; restoring the
+        // same block must work without rebuilding the door or its support.
+        world.import_block(door[0], 255, door[2] + 1, 0).unwrap();
+        assert!(at_door(&world).is_empty());
+        world.import_block(door[0], 255, door[2] + 1, stone).unwrap();
+        assert_eq!(at_door(&world), vec![door]);
+
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-village-ceiling-door-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        world.save(&path).unwrap();
+        let restored = World::load(&path).unwrap();
+        assert_eq!(at_door(&restored), vec![door]);
         fs::remove_file(path).unwrap();
     }
 
