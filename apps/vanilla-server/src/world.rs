@@ -1586,13 +1586,9 @@ impl World {
         }
         Ok(true)
     }
-    /// E46 opt-in block mutation path for an EXISTING Overworld Anvil chunk.
-    ///
-    /// The live server still uses IRW saves. A caller must explicitly choose
-    /// this bridge; it requires a bound session.lock and a byte-identical IRW
-    /// baseline. Neither IRW nor the Anvil region may advance by itself.
-    /// Unknown Anvil NBT survives in the existing region rewrite helper.
-    #[allow(dead_code)] // Opt-in E46 bridge, not the default live World::save path.
+    /// Opt-in E46 bridge for one existing Overworld Anvil chunk.
+    /// Uses the same multi-block redo transaction as atomic related edits.
+    #[allow(dead_code)] // Deliberately not enabled in the live IRW save worker.
     pub fn update_and_flush_existing_anvil(
         &mut self,
         path: &Path,
@@ -1601,11 +1597,26 @@ impl World {
         z: i32,
         block: u16,
     ) -> io::Result<bool> {
-        if !in_bounds(x, y, z) || block >> 4 > 255 {
-            return Err(invalid("E46 Anvil block outside vanilla/IRW limits"));
+        self.update_many_and_flush_existing_anvil(path, &[(x, y, z, block)])
+    }
+
+    /// E46 opt-in bridge for up to 32 explicit block changes across at most
+    /// seven EXISTING Anvil regions (the eighth redo participant is IRW).
+    ///
+    /// Check that the old IRW disk image matches this exact live generation
+    /// and that EVERY touched Anvil block matches the IRW source before
+    /// committing ANY changes. The existing redo journal then publishes the
+    /// next IRW snapshot and all region images together, not one at a time.
+    /// This does NOT activate Anvil as the live server's primary store.
+    #[allow(dead_code)] // Requires explicit migration validation before use.
+    pub fn update_many_and_flush_existing_anvil(
+        &mut self,
+        path: &Path,
+        changes: &[(i32, i32, i32, u16)],
+    ) -> io::Result<bool> {
+        if changes.is_empty() || changes.len() > 32 {
+            return Err(invalid("E46 Anvil batch must contain 1..32 blocks"));
         }
-        // IRW4 Nether/End save files are nested below the lock root and need
-        // dimension-aware redo publication before they can use this bridge.
         if self.dimension() != crate::dimensions::Dimension::Overworld {
             return Err(invalid("E46 Anvil block bridge supports Overworld only"));
         }
@@ -1616,29 +1627,54 @@ impl World {
         if bound_path != path {
             return Err(invalid("Anvil block write path differs from bound world"));
         }
-        let previous = self.get(x, y, z);
-        if previous == block {
+
+        // Validate the whole request before even considering an early no-op.
+        // A duplicate is not a legitimate multi-block transaction: it could
+        // hide an inconsistent final state in a last-writer-wins map.
+        let mut seen = BTreeSet::new();
+        let mut different = Vec::new();
+        for &(x, y, z, block) in changes {
+            if !in_bounds(x, y, z)
+                || block >> 4 > 255
+                || !seen.insert((x, y, z))
+            {
+                return Err(invalid("E46 invalid or duplicate Anvil block change"));
+            }
+            let previous = self.get(x, y, z);
+            if previous != block {
+                different.push((x, y, z, previous, block));
+            }
+        }
+        if different.is_empty() {
             return Ok(false);
         }
-        // In-memory state must agree with the exact durable IRW generation.
-        // Never use a stale or partially saved IRW to overwrite newer Anvil.
+
+        // Construct but do NOT publish the next world generation. All checks,
+        // disk writes and journal replay gates precede the memory transition.
         let old_irw = self.encoded()?;
         if fs::read(path)? != old_irw {
             return Err(invalid("E46 IRW memory and disk differ before Anvil save"));
         }
         let mut next = self.clone();
-        let key = (x, y as u8, z);
-        if block == self.base_block(x, y as u8, z) {
-            next.edits.remove(&key);
-        } else {
-            if !next.edits.contains_key(&key) && next.edits.len() >= MAX_EDITS {
-                return Err(invalid("too many changed blocks for E46 Anvil save"));
+        let mut regions = BTreeSet::new();
+        for &(x, y, z, _, block) in &different {
+            let key = (x, y as u8, z);
+            if block == next.base_block(x, y as u8, z) {
+                next.edits.remove(&key);
+            } else {
+                if !next.edits.contains_key(&key) && next.edits.len() >= MAX_EDITS {
+                    return Err(invalid("too many changed blocks for E46 Anvil save"));
+                }
+                next.edits.insert(key, block);
             }
-            next.edits.insert(key, block);
+            regions.insert((x.div_euclid(512), z.div_euclid(512)));
+        }
+        if regions.len() > 7 {
+            return Err(invalid("E46 Anvil batch exceeds seven region participants"));
         }
         let next_irw = next.encoded()?;
-        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
-        let (rx, rz) = (cx.div_euclid(32), cz.div_euclid(32));
+        // The old and new byte images are now immutable while we hold the OS
+        // session lock. Other Rust saves must obtain this same session lock.
         let session = Arc::clone(session);
         let mut lock = session
             .lock()
@@ -1647,56 +1683,75 @@ impl World {
         if path.parent() != Some(lock.world_dir()) {
             return Err(invalid("E46 Anvil world must be in locked root directory"));
         }
-        let region_path = lock
-            .world_dir()
-            .join("region")
-            .join(format!("r.{rx}.{rz}.mca"));
-        let region_meta = fs::symlink_metadata(&region_path)?;
-        // The redo journal caps one region at 8 MiB. Enforce this before
-        // loading untrusted on-disk data into memory.
-        if !region_meta.file_type().is_file()
-            || region_meta.len() < 8192
-            || region_meta.len() > 8 * 1024 * 1024
-        {
-            return Err(invalid("E46 invalid or oversized Anvil source region"));
+        let mut source_images = BTreeMap::new();
+        for &(rx, rz) in &regions {
+            let region_path = lock
+                .world_dir()
+                .join("region")
+                .join(format!("r.{rx}.{rz}.mca"));
+            let metadata = fs::symlink_metadata(&region_path)?;
+            if !metadata.file_type().is_file()
+                || metadata.len() < 8192
+                || metadata.len() > 8 * 1024 * 1024
+            {
+                return Err(invalid("E46 invalid or oversized Anvil source region"));
+            }
+            source_images.insert((rx, rz), fs::read(&region_path)?);
         }
-        let region = fs::read(&region_path)?;
-        let mut reader = fastanvil::Region::from_stream(std::io::Cursor::new(&region))
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        let original_nbt = reader
-            .read_chunk(cx.rem_euclid(32) as usize, cz.rem_euclid(32) as usize)
-            .map_err(|error| io::Error::other(error.to_string()))?
-            .ok_or_else(|| invalid("E46 dirty-block save requires an existing Anvil chunk"))?;
-        let parsed = crate::legacy_nbt::parse_chunk(&original_nbt, cx, cz)?;
-        let idx =
-            (y as usize % 16) * 256 + z.rem_euclid(16) as usize * 16 + x.rem_euclid(16) as usize;
-        let (old_id, old_meta) = parsed
-            .level
-            .sections
+        // Reuse a decoded chunk per (cx, cz) to keep the preflight bounded.
+        // Never trust just the updated NBT: compare every old block state.
+        let mut original_chunks = BTreeMap::new();
+        for &(x, y, z, previous, _) in &different {
+            let chunk_pos = (x.div_euclid(16), z.div_euclid(16));
+            if !original_chunks.contains_key(&chunk_pos) {
+                let (cx, cz) = chunk_pos;
+                let snapshot = &source_images[&(cx.div_euclid(32), cz.div_euclid(32))];
+                let mut reader = fastanvil::Region::from_stream(std::io::Cursor::new(snapshot))
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                let bytes = reader
+                    .read_chunk(cx.rem_euclid(32) as usize, cz.rem_euclid(32) as usize)
+                    .map_err(|error| io::Error::other(error.to_string()))?
+                    .ok_or_else(|| invalid("E46 dirty save requires existing Anvil chunks"))?;
+                original_chunks.insert(chunk_pos, crate::legacy_nbt::parse_chunk(&bytes, cx, cz)?);
+            }
+            let original = &original_chunks[&chunk_pos];
+            let index = (y as usize % 16) * 256
+                + z.rem_euclid(16) as usize * 16
+                + x.rem_euclid(16) as usize;
+            let (old_id, old_meta) = original
+                .level
+                .sections
+                .iter()
+                .find(|section| section.y == (y / 16) as i8)
+                .and_then(|section| section.block_at(index))
+                .unwrap_or((0, 0));
+            if (old_id << 4) | u16::from(old_meta) != previous {
+                return Err(invalid("E46 Anvil block disagrees with authoritative IRW"));
+            }
+        }
+        let dirty: Vec<_> = different
             .iter()
-            .find(|section| section.y == (y / 16) as i8)
-            .and_then(|section| section.block_at(idx))
-            .unwrap_or((0, 0));
-        if (old_id << 4) | u16::from(old_meta) != previous {
-            return Err(invalid("E46 Anvil block disagrees with authoritative IRW"));
-        }
+            .map(|&(x, y, z, _, block)| (x, y, z, block))
+            .collect();
         crate::legacy_region_rewrite::flush_irw_block_edits_under_lock_expected(
             &mut lock,
             crate::dimensions::Dimension::Overworld,
-            &[(x, y, z, block)],
-            &BTreeMap::from([((rx, rz), region)]),
+            &dirty,
+            &source_images,
             path,
             &old_irw,
             &next_irw,
         )?;
         drop(lock);
-        // Only publish the in-memory transition after both disk images have
-        // committed. This exactly preserves the regular block wake semantics.
-        next.mark_lighting_changed(x, z, previous, block);
-        next.wake_gravity(x, y, z);
-        next.wake_block_updates(x, y, z);
-        if matches!(previous >> 4, 17 | 162) || matches!(block >> 4, 17 | 162) {
-            next.wake_leaves(x, y, z);
+        // Block wake queues, lighting and leaves become visible only after
+        // every participant of the redo transaction was published.
+        for (x, y, z, previous, block) in different {
+            next.mark_lighting_changed(x, z, previous, block);
+            next.wake_gravity(x, y, z);
+            next.wake_block_updates(x, y, z);
+            if matches!(previous >> 4, 17 | 162) || matches!(block >> 4, 17 | 162) {
+                next.wake_leaves(x, y, z);
+            }
         }
         *self = next;
         Ok(true)
