@@ -587,6 +587,15 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if matches(&[&[371, 371, 371], &[371, 360, 371], &[371, 371, 371]]) {
         return product(382, 1, 0); // glistering melon
     }
+    // Java 1.7.10 only dyes *white* wool in the crafting grid.
+    // Legacy dye metadata runs in reverse of wool metadata (0 ink -> 15 black).
+    if shapeless(&[35, 351]) {
+        let wool = grid.iter().flatten().find(|item| item.id == 35)?;
+        let dye = grid.iter().flatten().find(|item| item.id == 351)?;
+        if wool.damage == 0 && (0..=15).contains(&dye.damage) {
+            return product(35, 1, 15 - dye.damage);
+        }
+    }
     if shapeless(&[39, 40, 281]) {
         return product(282, 1, 0); // mushroom stew, bowl returned by eating
     }
@@ -647,6 +656,31 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn java_1710_wool_dyeing_uses_white_wool_and_inverse_dye_metadata() {
+        for dye_color in 0..=15 {
+            let dye = product(351, 1, dye_color);
+            let white = product(35, 1, 0);
+            let expected = product(35, 1, 15 - dye_color);
+            assert_eq!(result(&[white, dye, None, None], 2), expected);
+            assert_eq!(result(&[dye, white, None, None], 2), expected);
+            assert_eq!(
+                result(&[None, None, None, None, white, None, None, dye, None], 3),
+                expected
+            );
+        }
+        // Dyeing a previously colored piece was introduced in newer Java.
+        assert_eq!(
+            result(&[product(35, 1, 14), product(351, 1, 1), None, None], 2),
+            None
+        );
+        assert_eq!(
+            result(&[product(35, 1, 0), product(351, 1, 16), None, None], 2),
+            None
+        );
+        assert_eq!(result(&[product(35, 1, 0), None, None, None], 2), None);
+    }
+
     #[test]
     fn java_1710_stained_glass_and_clay_preserve_inverse_dye_metadata() {
         for dye in 0..=15 {
