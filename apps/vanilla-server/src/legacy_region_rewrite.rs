@@ -513,6 +513,37 @@ pub(crate) fn insert_regions_with_sidecars_under_lock_expected(
     )
 }
 
+/// E46 write-through of NEW chunks plus their authoritative IRW generation.
+/// Unlike the older offline insert primitive, this transaction can ONLY add
+/// absent chunks, never overwrite an existing chunk or unknown native NBT.
+/// Existing region images must match their caller-supplied snapshots exactly.
+pub(crate) fn insert_irw_chunks_under_lock_expected(
+    lock: &mut WorldSessionLock,
+    dimension: Dimension,
+    replacements: &[((i32, i32), &[u8])],
+    expected_sources: &std::collections::BTreeMap<(i32, i32), Option<Vec<u8>>>,
+    world_file: &Path,
+    expected_irw: &[u8],
+    next_irw: &[u8],
+) -> io::Result<()> {
+    if expected_irw.len() < 8
+        || next_irw.len() < 8
+        || !matches!(&expected_irw[..4], b"IRW1" | b"IRW2" | b"IRW3" | b"IRW4")
+        || next_irw[..4] != expected_irw[..4]
+    {
+        return Err(invalid("E46 chunk insert requires matching IRW versions"));
+    }
+    commit_region_batch(
+        lock,
+        dimension,
+        replacements,
+        expected_sources,
+        world_file,
+        &[(world_file, next_irw.to_vec())],
+        RegionCommitMode::IrwInsert(expected_irw),
+    )
+}
+
 fn snapshot_region(path: &Path) -> io::Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => fs::read(path).map(Some),
@@ -526,6 +557,7 @@ enum RegionCommitMode<'a> {
     ExistingOnly,
     InsertMissing,
     IrwImage(&'a [u8]),
+    IrwInsert(&'a [u8]),
 }
 
 fn commit_region_batch(
@@ -538,9 +570,13 @@ fn commit_region_batch(
     mode: RegionCommitMode<'_>,
 ) -> io::Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
-    let allow_new_chunks = matches!(mode, RegionCommitMode::InsertMissing);
+    let allow_new_chunks = matches!(
+        mode,
+        RegionCommitMode::InsertMissing | RegionCommitMode::IrwInsert(_)
+    );
+    let require_missing_chunks = matches!(mode, RegionCommitMode::IrwInsert(_));
     let expected_irw = match mode {
-        RegionCommitMode::IrwImage(bytes) => Some(bytes),
+        RegionCommitMode::IrwImage(bytes) | RegionCommitMode::IrwInsert(bytes) => Some(bytes),
         _ => None,
     };
     lock.verify()?;
@@ -642,8 +678,23 @@ fn commit_region_batch(
                 "missing region cannot be created by update-only API",
             ));
         }
-        if observed.is_some() {
+        if let Some(snapshot) = observed.as_ref() {
             crate::legacy_region::inspect_region(&source)?;
+            // No legitimate new-chunk transaction may silently clobber NBT
+            // that a second server or an earlier migration already created.
+            if require_missing_chunks {
+                let mut reader =
+                    Region::from_stream(std::io::Cursor::new(snapshot)).map_err(wrap)?;
+                for &((cx, cz), _) in &grouped[&(rx, rz)] {
+                    if reader
+                        .read_chunk(cx.rem_euclid(32) as usize, cz.rem_euclid(32) as usize)
+                        .map_err(wrap)?
+                        .is_some()
+                    {
+                        return Err(invalid("E46 insert would overwrite an existing Anvil chunk"));
+                    }
+                }
+            }
         }
         sources.push(((rx, rz), source));
     }
