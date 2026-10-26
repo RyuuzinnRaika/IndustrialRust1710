@@ -1,6 +1,6 @@
-//! Java 1.7.10 workstation rules that do not require arbitrary ItemStack NBT.
-//! Enchanted-item creation, anvil renaming, and enchanted-book combination MUST
-//! wait until the live Stack representation preserves NBT. Never silently strip tags.
+//! Minecraft Java 1.7.10 workstation rules.
+//! Anvil durability repairs and compatible enchantment merging preserve NBT.
+//! Renaming and full prior-work cost compatibility remain separate work.
 use crate::inventory::Stack;
 use crate::{enchanting, item_nbt, items_1710};
 use fastnbt::Value;
@@ -163,7 +163,10 @@ fn merge_anvil_enchantments(left: Stack, right: Stack) -> Option<(u64, u16)> {
         {
             return None;
         }
-        let prior = existing.iter().find(|&&(other, _)| other == id).map(|&(_, lvl)| lvl);
+        let prior = existing
+            .iter()
+            .find(|&&(other, _)| other == id)
+            .map(|&(_, lvl)| lvl);
         let next_level = prior.map_or(incoming_level, |old| {
             if old == incoming_level && old < max {
                 old + 1
