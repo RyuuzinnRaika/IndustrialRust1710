@@ -4893,8 +4893,7 @@ fn play(
                     // Never apply a name from a closed, remote or stale anvil.
                     // This updates only the transient preview, not disk or XP;
                     // taking the output is the authoritative transaction.
-                    if let (Some(pos), Some(requested)) =
-                        (active_anvil, parse_anvil_name(payload))
+                    if let (Some(pos), Some(requested)) = (active_anvil, parse_anvil_name(payload))
                     {
                         let valid_anvil = world
                             .lock()
@@ -4903,9 +4902,7 @@ fn play(
                             >> 4
                             == 145
                             && near(location, pos.0, pos.1, pos.2);
-                        if active_window != 0
-                            && valid_anvil
-                            && inventory.set_anvil_name(requested)
+                        if active_window != 0 && valid_anvil && inventory.set_anvil_name(requested)
                         {
                             send(s, 0x30, &inventory.anvil_window_items(active_window))?;
                             send(s, 0x31, &inventory.anvil_cost_property(active_window))?;
