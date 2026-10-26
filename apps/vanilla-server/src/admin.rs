@@ -156,6 +156,19 @@ fn validate_named(items: &[NamedEntry]) -> io::Result<()> {
     }
     Ok(())
 }
+fn validate_ops(entries: &[NamedEntry]) -> io::Result<()> {
+    validate_named(entries)?;
+    let mut uuids = BTreeSet::new();
+    for entry in entries {
+        if let Some(uuid) = &entry.uuid {
+            if !uuids.insert(uuid.to_ascii_lowercase()) {
+                return Err(invalid("duplicate authenticated OP UUID"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn valid_uuid(uuid: &str) -> bool {
     let bytes = uuid.as_bytes();
     bytes.len() == 36
@@ -231,7 +244,7 @@ impl Administration {
     }
     fn ops(&self) -> io::Result<Vec<NamedEntry>> {
         let data = read_array(&self.file("ops.json"))?;
-        validate_named(&data)?;
+        validate_ops(&data)?;
         Ok(data)
     }
     fn banned_players(&self) -> io::Result<Vec<NamedEntry>> {
@@ -249,19 +262,20 @@ impl Administration {
         validate_permissions(&data)?;
         Ok(data)
     }
-    /// An OP entry is authorized only by a Mojang-verified UUID, never an offline name.
-    pub fn operator_level(&self, name: &str, verified_uuid: Option<&str>) -> io::Result<u8> {
+    /// A verified account keeps its authority across a username change, but
+    /// a name alone (including a recycled old name) can NEVER confer OP.
+    pub fn operator_level(&self, _name: &str, verified_uuid: Option<&str>) -> io::Result<u8> {
         let operators = self.ops()?;
-        Ok(verified_uuid.map_or(0, |uuid| {
-            operators
-                .iter()
-                .filter(|entry| {
-                    entry.name.eq_ignore_ascii_case(name) && entry.uuid.as_deref() == Some(uuid)
-                })
-                .map(|entry| entry.level.unwrap_or(4))
-                .max()
-                .unwrap_or(0)
-        }))
+        Ok(verified_uuid
+            .filter(|uuid| valid_uuid(uuid))
+            .map_or(0, |uuid| {
+                operators
+                    .iter()
+                    .filter(|entry| entry_uuid_matches(entry, uuid))
+                    .map(|entry| entry.level.unwrap_or(4))
+                    .max()
+                    .unwrap_or(0)
+            }))
     }
     pub fn is_operator(&self, name: &str, verified_uuid: Option<&str>) -> io::Result<bool> {
         Ok(self.operator_level(name, verified_uuid)? > 0)
@@ -327,6 +341,11 @@ impl Administration {
     pub fn set_op_verified(&self, name: &str, uuid: &str) -> io::Result<()> {
         self.update_op(name, true, Some(uuid))
     }
+    /// Revoke the verified account, including an older username alias.
+    /// Callers must get the UUID from the authenticated live session.
+    pub fn revoke_op_verified(&self, name: &str, uuid: &str) -> io::Result<()> {
+        self.update_op(name, false, Some(uuid))
+    }
     fn update_op(&self, name: &str, enabled: bool, uuid: Option<&str>) -> io::Result<()> {
         if !valid_name(name) {
             return Err(invalid("invalid OP username"));
@@ -335,7 +354,11 @@ impl Administration {
             return Err(invalid("invalid authenticated OP UUID"));
         }
         let mut ops = self.ops()?;
-        ops.retain(|e| !e.name.eq_ignore_ascii_case(name));
+        // Re-granting after a rename must not leave a second UUID-linked OP.
+        // De-op by UUID must revoke any previously recorded name alias.
+        ops.retain(|e| {
+            !e.name.eq_ignore_ascii_case(name) && !uuid.is_some_and(|id| entry_uuid_matches(e, id))
+        });
         if enabled {
             ops.push(NamedEntry {
                 name: name.into(),
@@ -521,6 +544,61 @@ mod tests {
         store.audit("CONSOLE", "/ban Spammer", "success").unwrap();
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn operator_follows_verified_uuid_across_rename_and_revocation() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-op-rename-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = Administration::new(root.clone()).unwrap();
+        let uuid = "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca";
+        let other = "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9cb";
+        store.set_op_verified("OldName", uuid).unwrap();
+        assert_eq!(store.operator_level("NewName", Some(uuid)).unwrap(), 4);
+        assert_eq!(store.operator_level("OldName", None).unwrap(), 0);
+        assert_eq!(store.operator_level("OldName", Some(other)).unwrap(), 0);
+
+        let uppercase = uuid.to_ascii_uppercase();
+        store.set_op_verified("NewName", &uppercase).unwrap();
+        let entries = store.ops().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "NewName");
+        assert_eq!(store.operator_level("OldName", Some(uuid)).unwrap(), 4);
+
+        let reloaded = Administration::new(root.clone()).unwrap();
+        reloaded.revoke_op_verified("NewName", uuid).unwrap();
+        assert_eq!(reloaded.operator_level("OldName", Some(uuid)).unwrap(), 0);
+        assert_eq!(reloaded.operator_level("NewName", Some(uuid)).unwrap(), 0);
+        assert!(reloaded.ops().unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_verified_op_identity_fails_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-op-duplicate-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store = Administration::new(root.clone()).unwrap();
+        store
+            .set_op_verified("First", "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca")
+            .unwrap();
+        let mut entries = store.ops().unwrap();
+        let mut duplicate = entries[0].clone();
+        duplicate.name = "Second".into();
+        duplicate.uuid = duplicate.uuid.map(|value| value.to_ascii_uppercase());
+        entries.push(duplicate);
+        fs::write(root.join("ops.json"), serde_json::to_vec(&entries).unwrap()).unwrap();
+        assert!(store
+            .operator_level("First", entries[0].uuid.as_deref())
+            .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn verified_uuid_ban_survives_name_change_and_reload() {
         let root = std::env::temp_dir().join(format!(
