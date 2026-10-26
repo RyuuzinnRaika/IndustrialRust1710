@@ -2533,7 +2533,11 @@ impl Mobs {
         let has_valid_online_player = players
             .iter()
             .any(|player| player.x.is_finite() && player.y.is_finite() && player.z.is_finite());
-        for _ in 0..steps {
+        for step in 0..steps {
+            // A catch-up call simulates up to four distinct 20 Hz ticks.
+            // Reusing `now` for every step would repeat one 1/800 despawn
+            // roll rather than giving each elapsed tick its own chance.
+            let simulated_tick = now - (steps - 1 - step);
             let mut shots = Vec::new();
             let mut dead = Vec::new();
             let villagers: Vec<_> = self
@@ -2615,7 +2619,7 @@ impl Mobs {
                     mob.far_from_player_ticks = mob.far_from_player_ticks.saturating_add(1);
                     if nearest_distance > 32.0
                         && mob.far_from_player_ticks > 600
-                        && hash(now ^ mob.id as u64).is_multiple_of(800)
+                        && hash(simulated_tick ^ mob.id as u64).is_multiple_of(800)
                     {
                         dead.push(mob.id);
                         continue;
@@ -5089,6 +5093,36 @@ mod tests {
             .unwrap();
         mobs.tick(eligible_roll, &world, &[far]);
         assert!(!mobs.entities.contains_key(&id));
+    }
+
+    #[test]
+    fn hostile_despawn_rolls_once_per_simulated_catch_up_tick() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let far = PlayerPosition { x: 64.5, ..at };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Creeper, at, false);
+        let id = mobs.next_id - 1;
+        mobs.entities.get_mut(&id).unwrap().far_from_player_ticks = 600;
+
+        // Four elapsed simulation steps include now-3, now-2, now-1,
+        // and now. The old implementation reused the final roll four
+        // times and missed an eligible roll at now-1.
+        let catch_up_tick = (1000_u64..100_000)
+            .find(|tick| {
+                hash((*tick - 1) ^ id as u64).is_multiple_of(800)
+                    && !hash(*tick ^ id as u64).is_multiple_of(800)
+            })
+            .expect("an earlier catch-up tick with an independent despawn roll");
+        mobs.tick(catch_up_tick, &world, &[far]);
+        assert!(
+            !mobs.entities.contains_key(&id),
+            "the now-1 despawn roll must run during four-step catch-up"
+        );
     }
 
     #[test]
