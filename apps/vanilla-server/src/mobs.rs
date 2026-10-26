@@ -2612,10 +2612,13 @@ impl Mobs {
                 }
                 // Restraints suppress independent wandering and ordinary despawn,
                 // but must not make undead immune to daylight damage.
+                // Catch-up simulates up to four distinct ticks. Checking the
+                // final clock value for each step burns undead up to four
+                // times on a single 20-tick boundary (or misses a boundary).
                 if matches!(mob.kind, Kind::Zombie | Kind::Skeleton)
-                    && sunlight(now)
+                    && sunlight(simulated_tick)
                     && sky_exposed(world, mob.position)
-                    && now.is_multiple_of(20)
+                    && simulated_tick.is_multiple_of(20)
                 {
                     mob.health -= 1;
                     if mob.health <= 0 {
@@ -4468,6 +4471,39 @@ mod tests {
         // Restraints remain attached; sunlight must not detach or move them.
         assert_eq!(mobs.entities[&leashed].leash_holder, Some(42));
         assert_eq!(mobs.entities[&anchored].fence_anchor, Some([5, 65, 0]));
+    }
+
+    #[test]
+    fn daylight_damage_uses_each_simulated_tick_once_during_catch_up() {
+        let world = World::new();
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        mobs.insert(Kind::Zombie, at, false);
+        let zombie = mobs.next_id - 1;
+        mobs.insert(Kind::Skeleton, PlayerPosition { x: 5.5, ..at }, false);
+        let skeleton = mobs.next_id - 1;
+        // Keep both mobs stationary so only daylight damage affects HP.
+        mobs.entities.get_mut(&zombie).unwrap().leash_holder = Some(42);
+        mobs.entities.get_mut(&skeleton).unwrap().fence_anchor = Some([5, 65, 0]);
+
+        // The first call simulates ticks 17..=20, not tick 20 four times.
+        mobs.tick(20, &world, &[]);
+        assert_eq!(mobs.entities[&zombie].health, Kind::Zombie.health() - 1);
+        assert_eq!(mobs.entities[&skeleton].health, Kind::Skeleton.health() - 1);
+
+        // Polling the same tick or advancing fewer than 20 ticks adds no burn.
+        mobs.tick(20, &world, &[]);
+        mobs.tick(23, &world, &[]);
+        assert_eq!(mobs.entities[&zombie].health, Kind::Zombie.health() - 1);
+
+        // The second catch-up window includes tick 40 exactly once.
+        mobs.tick(40, &world, &[]);
+        assert_eq!(mobs.entities[&zombie].health, Kind::Zombie.health() - 2);
+        assert_eq!(mobs.entities[&skeleton].health, Kind::Skeleton.health() - 2);
     }
 
     #[test]
