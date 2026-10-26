@@ -547,9 +547,7 @@ impl World {
         // The artificial IRW world boundary is not a solid roof. Treat
         // columns beyond it as open sky so edge doors cannot become houses
         // solely because a five-block sample crosses the world limit.
-        if !(-WORLD_LIMIT..WORLD_LIMIT).contains(&x)
-            || !(-WORLD_LIMIT..WORLD_LIMIT).contains(&z)
-        {
+        if !(-WORLD_LIMIT..WORLD_LIMIT).contains(&x) || !(-WORLD_LIMIT..WORLD_LIMIT).contains(&z) {
             return true;
         }
         (y..=255).all(|height| lighting::lighting_signature(self.get(x, height, z)).0)
@@ -3441,12 +3439,12 @@ mod tests {
             world.import_block(x, y, z, 64 << 4 | 1).unwrap();
             world.import_block(x, y + 1, z, 64 << 4 | 8).unwrap();
             assert!(
-                world.independent_player_village_doors_near_at(x, y, z).is_empty(),
+                world
+                    .independent_player_village_doors_near_at(x, y, z)
+                    .is_empty(),
                 "world border must not count as a roof at x={x}"
             );
-            world
-                .import_block(x + inside, y + 3, z, 1 << 4)
-                .unwrap();
+            world.import_block(x + inside, y + 3, z, 1 << 4).unwrap();
             assert_eq!(
                 world.independent_player_village_doors_near_at(x, y, z),
                 vec![[x, y, z]],
