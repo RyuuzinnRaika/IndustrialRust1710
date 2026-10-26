@@ -74,6 +74,14 @@ RETIRED_MERGED_STACK_HEADS = {
     124: ("696d14fe217043928dfd631f0d60bbb398089179", 116),
 }
 
+# Reviewed B11/B14 stack: #55 first landed on main, then #60 was merged
+# back into its parent. Current main has the rail/dust/comparator/door
+# regression coverage; never replay this outdated base as a full merge.
+RETIRED_LATE_STACK_PAIR = {
+    "parent": ("feat/b11-20-block-physics-20261021", "7dfca59caebab75d7a7c470392af09482cc36013", 55),
+    "child": ("feat/b11-20-redstone-signal-regression-20261021", "9c068fc7ea13348788f2addec76752831f235bfe", 60),
+}
+
 
 def retired_closed_pr(pr, repo):
     expected = RETIRED_PR_HEADS.get(pr["number"])
@@ -219,6 +227,29 @@ def main():
                 or branch["commit"]["sha"] != expected_sha):
             continue
         candidates[name] = {"sha": expected_sha, "pr": number}
+
+    # Explicitly reviewed late-merged feature stack, identified by both SHA
+    # and relationship between the original main PR and its child PR.
+    parent_name, parent_sha, parent_num = RETIRED_LATE_STACK_PAIR["parent"]
+    child_name, child_sha, child_num = RETIRED_LATE_STACK_PAIR["child"]
+    parent = pr_by_number.get(parent_num)
+    child = pr_by_number.get(child_num)
+    p_ref = branches_by_name.get(parent_name)
+    c_ref = branches_by_name.get(child_name)
+    if (parent and child and p_ref and c_ref
+            and parent.get("merged_at") and parent["base"]["ref"] == default_branch
+            and child.get("merged_at") and child["base"]["ref"] == parent_name
+            and parent["head"]["ref"] == parent_name
+            and child["head"]["ref"] == child_name
+            and child["head"]["sha"] == child_sha
+            and child.get("merge_commit_sha") == parent_sha
+            and parent["merged_at"] < child["merged_at"]
+            and p_ref["commit"]["sha"] == parent_sha
+            and c_ref["commit"]["sha"] == child_sha
+            and not p_ref.get("protected") and not c_ref.get("protected")
+            and parent_name not in keep and child_name not in keep):
+        candidates[parent_name] = {"sha": parent_sha, "pr": parent_num}
+        candidates[child_name] = {"sha": child_sha, "pr": child_num}
 
     # Also prune refs whose exact tip is reachable from main. This catches
     # squash-independent branches and obsolete refs without an associated PR.
