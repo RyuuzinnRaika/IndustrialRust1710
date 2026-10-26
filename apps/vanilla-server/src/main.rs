@@ -186,6 +186,29 @@ impl<'a> Input<'a> {
         }
         Ok(Some(stack))
     }
+    /// Parse a C10 Creative Inventory Action without disconnecting a player
+    /// for a syntactically valid but unsupported client-selected item.
+    /// Outer None means reject-and-resync; Some(None) clears a valid slot.
+    /// The live Stack model cannot preserve generic NBT yet, so tagged
+    /// creative items must be refused rather than silently losing their tag.
+    fn creative_slot(&mut self) -> io::Result<Option<Option<Stack>>> {
+        let id = self.i16()?;
+        if id == -1 {
+            return Ok(Some(None));
+        }
+        let count = self.u8()?;
+        let damage = self.i16()?;
+        let nbt_length = self.i16()?;
+        if nbt_length < -1 {
+            return Err(bad("invalid creative item NBT length"));
+        }
+        if nbt_length >= 0 {
+            self.take(nbt_length as usize)?;
+            return Ok(None);
+        }
+        let stack = Stack { id, count, damage };
+        Ok(stack.is_valid().then_some(Some(stack)))
+    }
     /// Protocol 5 Click Window carries a *client-reported* slot snapshot.
     /// The snapshot is never used to authorize a mutation, and may contain
     /// valid NBT even when the server-side Stack model cannot store tags yet.
@@ -4096,16 +4119,23 @@ fn play(
             }
             16 => {
                 let slot = input.i16()?;
-                let stack = input.slot()?;
+                let requested = input.creative_slot()?;
                 input.finish()?;
                 if survival {
                     // C10 is Creative-only; never mint items in Survival.
                     send(s, 0x30, &inventory.window_items())?;
-                } else if inventory.creative_set(slot, stack)? {
-                    // Explicit, bounded creative inventory actions only.
-                    inventory.save(inventory_path)?;
-                    send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                } else if let Some(stack) = requested {
+                    if inventory.creative_set(slot, stack)? {
+                        // Persist only an accepted inventory mutation.
+                        inventory.save(inventory_path)?;
+                        send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                    } else {
+                        send(s, 0x30, &inventory.window_items())?;
+                    }
                 } else {
+                    // Valid but unsupported creative selection (e.g. an
+                    // enchanted item carrying arbitrary NBT). Keep the
+                    // session alive and restore the authoritative inventory.
                     send(s, 0x30, &inventory.window_items())?;
                 }
             }
@@ -7739,6 +7769,62 @@ mod tests {
         // An NBT-bearing client item must not be accepted as a bare stack.
         assert!(Input(&[0, 1, 1, 0, 0, 0, 3, 0, 0, 0]).slot().is_err());
     }
+    #[test]
+    fn creative_c10_parses_vanilla_hotbar_without_losing_inventory() {
+        // Slot 36, stone x64, metadata 0, no NBT.
+        let payload = [0, 36, 0, 1, 64, 0, 0, 255, 255];
+        let mut input = Input(&payload);
+        let slot = input.i16().unwrap();
+        let requested = input.creative_slot().unwrap().unwrap();
+        input.finish().unwrap();
+        let mut inv = Inventory::default();
+        assert!(inv.creative_set(slot, requested).unwrap());
+        assert_eq!(inv.held().unwrap().id, 1);
+        assert_eq!(inv.held().unwrap().count, 64);
+        assert_eq!(
+            inv.set_slot(36).unwrap(),
+            vec![0, 0, 36, 0, 1, 64, 0, 0, 255, 255]
+        );
+        assert!(inv.encoded().is_ok());
+
+        // Vanilla C10 can clear the same slot with -1 as the slot item ID.
+        let mut clear = Input(&[0, 36, 255, 255]);
+        let slot = clear.i16().unwrap();
+        let requested = clear.creative_slot().unwrap().unwrap();
+        clear.finish().unwrap();
+        assert!(inv.creative_set(slot, requested).unwrap());
+        assert!(inv.held().is_none());
+    }
+
+    #[test]
+    fn creative_c10_tagged_or_invalid_items_do_not_disconnect_or_mint() {
+        // Tagged inventory items cannot be represented as a bare Stack in
+        // main yet. Do not disconnect and, especially, do not strip their NBT.
+        let tagged = [0, 36, 1, 147, 1, 0, 0, 0, 3, 10, 0, 0];
+        let mut input = Input(&tagged);
+        assert_eq!(input.i16().unwrap(), 36);
+        assert_eq!(input.creative_slot().unwrap(), None);
+        input.finish().unwrap();
+
+        // A modern ID or excess count is a rejected creative selection, not
+        // an excuse to close a valid player's Protocol 5 connection.
+        for item in [
+            [0, 36, 1, 167, 1, 0, 0, 255, 255],
+            [0, 36, 0, 1, 65, 0, 0, 255, 255],
+        ] {
+            let mut input = Input(&item);
+            assert_eq!(input.i16().unwrap(), 36);
+            assert_eq!(input.creative_slot().unwrap(), None);
+            input.finish().unwrap();
+        }
+        let mut inv = Inventory::default();
+        let initial = inv.clone();
+        assert!(!inv.creative_set(0, None).unwrap());
+        assert_eq!(inv, initial);
+        let mut malformed = Input(&[0, 1, 1, 0, 0, 255, 254]);
+        assert!(malformed.creative_slot().is_err());
+    }
+
     #[test]
     fn click_window_ignores_untrusted_nbt_snapshot_without_disconnect() {
         // 1.7.10 packet: item id, count, damage, signed NBT bytes length,

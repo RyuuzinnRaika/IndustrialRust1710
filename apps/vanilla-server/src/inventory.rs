@@ -296,8 +296,11 @@ impl Inventory {
         if stack.is_some_and(|item| !item.is_valid()) {
             return Err(invalid("invalid Creative item"));
         }
-        // Client-side destroy slot and world drops are unsupported.
-        if !(9..45).contains(&slot) && !(5..=8).contains(&slot) {
+        // Vanilla 1.7.10 C10 accepts player window slots 1..44.
+        // Slots 1..4 are the 2x2 crafting inputs; slot 0 is the derived
+        // crafting result and must remain server-owned. Negative slots are
+        // Creative drop actions, handled separately rather than indexed.
+        if !(1..SLOT_COUNT as i16).contains(&slot) {
             return Ok(false);
         }
         if (5..=8).contains(&slot) && stack.is_some_and(|s| !armor_accepts(slot, s)) {
@@ -2594,6 +2597,30 @@ mod tests {
         );
         let _ = std::fs::remove_file(save);
     }
+    #[test]
+    fn creative_c10_accepts_crafting_input_slots_and_persists_them() {
+        let mut inventory = Inventory::default();
+        let logs = Stack {
+            id: 17,
+            count: 1,
+            damage: 0,
+        };
+        for slot in 1..=4 {
+            assert!(inventory.creative_set(slot, Some(logs)).unwrap());
+        }
+        assert_eq!(inventory.crafting_result(0).map(|x| x.id), None);
+        assert!(inventory.creative_set(4, None).unwrap());
+        assert_eq!(inventory.slots[4], None);
+        assert!(!inventory.creative_set(0, Some(logs)).unwrap());
+        assert!(!inventory.creative_set(-1, Some(logs)).unwrap());
+        assert!(!inventory.creative_set(45, Some(logs)).unwrap());
+        assert!(inventory.encoded().is_ok());
+
+        let restored: Inventory = serde_json::from_slice(&inventory.encoded().unwrap()).unwrap();
+        assert_eq!(restored.slots[1..4], [Some(logs); 3]);
+        assert_eq!(restored.slots[4], None);
+    }
+
     #[test]
     fn creative_hotbar_boundaries() {
         let mut inv = Inventory::default();
