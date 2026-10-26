@@ -389,7 +389,11 @@ mod tests {
             (Kind::Snowball, 0.03),
             (Kind::Egg, 0.03),
         ] {
-            let object = objects.active.values().find(|item| item.kind == kind).unwrap();
+            let object = objects
+                .active
+                .values()
+                .find(|item| item.kind == kind)
+                .unwrap();
             assert!((object.velocity[1] + gravity).abs() < 1e-10);
         }
         objects.tick(&world, 2);
