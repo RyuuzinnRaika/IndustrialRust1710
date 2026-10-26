@@ -446,7 +446,9 @@ mod tests {
             .unwrap();
         let mut world = world::World::new();
         world.import_block(left.0, left.1, left.2, 54 << 4).unwrap();
-        world.import_block(right.0, right.1, right.2, 54 << 4).unwrap();
+        world
+            .import_block(right.0, right.1, right.2, 54 << 4)
+            .unwrap();
         let signals = combine_chest_comparator_inputs(
             &world,
             &chests.comparator_snapshot(),
@@ -457,7 +459,9 @@ mod tests {
 
         // The persisted right-half inventory has not been cleared yet, but
         // replacing the block must immediately remove its comparator signal.
-        world.import_block(right.0, right.1, right.2, 1 << 4).unwrap();
+        world
+            .import_block(right.0, right.1, right.2, 1 << 4)
+            .unwrap();
         let signals = combine_chest_comparator_inputs(
             &world,
             &chests.comparator_snapshot(),
