@@ -303,6 +303,8 @@ mod tests {
             (-49, 145, 19, (4 << 4) | 2),
             (0, 63, 0, 0),
             (60, 78, -42, 5 << 4),
+            // A valid 1.7.10 trapped chest must survive the strict self-export roundtrip.
+            (1, 64, 1, (146 << 4) | 3),
         ] {
             world.update_and_save(&src, x, y, z, b).unwrap();
         }
@@ -312,6 +314,7 @@ mod tests {
         let target = root.join("recovered.irw");
         assert_eq!(import(&snap, &target).unwrap(), (27, 3));
         assert_eq!(fs::read(&target).unwrap(), source_bytes);
+        assert_eq!(World::load(&target).unwrap().get(1, 64, 1), (146 << 4) | 3);
         assert_eq!(fs::read(&src).unwrap(), source_bytes);
         assert!(import(&snap, &target).is_err());
         assert_eq!(fs::read(&target).unwrap(), source_bytes);
