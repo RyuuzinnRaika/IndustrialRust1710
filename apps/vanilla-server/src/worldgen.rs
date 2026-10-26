@@ -250,8 +250,8 @@ pub const ORES: [OreSpec; 7] = [
     },
     OreSpec {
         id: 21,
-        min_y: 12,
-        max_y: 32,
+        min_y: 0,
+        max_y: 30,
         attempts_per_chunk: 1,
         vein_size: 6,
     },
@@ -301,6 +301,16 @@ fn in_vein(shape: u64, x: i32, y: i32, z: i32, size: u8) -> bool {
     }
 }
 
+// Vanilla 1.7.10 selects the lapis vein height by adding two independent
+// uniform 0..15 draws. Its convolution peaks at Y=15/16 rather than a
+// uniform distribution; translate its Y=15 peak to our stateless cells.
+fn lapis_layer_weight(y: i32) -> u64 {
+    if !(0..=30).contains(&y) {
+        return 0;
+    }
+    (16 - (y - 15).abs()) as u64
+}
+
 fn ore(seed: u64, x: i32, y: i32, z: i32, is_hills: bool) -> u16 {
     let (cx, cy, cz) = (x.div_euclid(4), y.div_euclid(4), z.div_euclid(4));
     // A 16x16 chunk contains four 4x4 cells per horizontal axis, so
@@ -312,7 +322,11 @@ fn ore(seed: u64, x: i32, y: i32, z: i32, is_hills: bool) -> u16 {
             continue;
         }
         let vertical_range = (spec.max_y - spec.min_y + 1) as u64;
-        let threshold = u64::from(spec.attempts_per_chunk) * 1_000_000 / (4 * vertical_range);
+        let mut threshold = u64::from(spec.attempts_per_chunk) * 1_000_000 / (4 * vertical_range);
+        if spec.id == 21 {
+            // Sum of weights Y=1..31 is 256; normalized mean remains 1.
+            threshold = threshold * lapis_layer_weight(y) * vertical_range / 256;
+        }
         let salt = u64::from(spec.id).wrapping_mul(0x9e3779b185ebca87);
         let chance = hash(seed ^ salt ^ 0x0e0e, cx, cy, cz);
         if chance % 1_000_000 < threshold && in_vein(chance >> 20, x, y, z, spec.vein_size) {
@@ -850,6 +864,18 @@ pub fn biome_for_dimension(seed: u64, dim: Dimension, x: i32, z: i32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lapis_ores_use_a_triangular_height_distribution() {
+        assert_eq!(lapis_layer_weight(-1), 0);
+        assert_eq!(lapis_layer_weight(31), 0);
+        assert_eq!(lapis_layer_weight(15), 16);
+        assert_eq!(lapis_layer_weight(0), lapis_layer_weight(30));
+        assert!(lapis_layer_weight(15) > lapis_layer_weight(8));
+        assert_eq!((0..=30).map(lapis_layer_weight).sum::<u64>(), 256);
+        let spec = ORES.iter().find(|spec| spec.id == 21).unwrap();
+        assert_eq!((spec.min_y, spec.max_y), (0, 30));
+    }
+
     #[test]
     fn ore_tuning_is_used_and_veins_are_bounded_and_repeatable() {
         // 4x4x4 cell boundaries, including negative positions, are stable.
