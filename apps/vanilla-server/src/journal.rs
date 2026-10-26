@@ -112,6 +112,7 @@ fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
         || name.ends_with(".decorations.json")
         || name.ends_with(".dispensers.json")
         || name.ends_with(".maps.json")
+        || name.ends_with(".minecarts.json")
         || name.ends_with(".hanging.json")
         || name.ends_with(".drops.json")
         || name.ends_with(".irw")
@@ -237,7 +238,7 @@ pub fn recover(journal: &Path) -> io::Result<()> {
         serde_json::from_slice(&bytes).map_err(|_| invalid("corrupt transaction journal"))?;
     apply(journal, &record)
 }
-/// Durable bounded multi-file commit. An error must stop further writes; recovery on
+/// Durable bounded commit (one to eight files). An error must stop writes; recovery on
 /// restart completes the *new* state for all files (redo journal semantics).
 pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
     let _lock = SERIAL
@@ -247,8 +248,8 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
     if journal.exists() {
         return Err(invalid("unrecovered transaction: restart required"));
     }
-    if changes.len() < 2 || changes.len() > MAX_TRANSACTION_FILES {
-        return Err(invalid("expected 2 to 8 transaction participants"));
+    if changes.is_empty() || changes.len() > MAX_TRANSACTION_FILES {
+        return Err(invalid("expected 1 to 8 transaction participants"));
     }
     let base = root(journal);
     let files: Vec<Target> = changes
@@ -300,6 +301,48 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_minecart_checkpoint_is_durable_and_replayable() {
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-one-cart-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let journal = home.join("flat.pending-txn.json");
+        let carts = home.join("flat.minecarts.json");
+        let saved = br#"{"version":1,"next":0,"carts":[]}"#;
+
+        // A periodic checkpoint writes one file, not a multi-file transaction.
+        commit(&journal, &[(carts.as_path(), saved.to_vec())]).unwrap();
+        assert_eq!(fs::read(&carts).unwrap(), saved);
+        assert!(!journal.exists());
+
+        // Simulate a crash after publishing the redo journal.
+        let newer = br#"{"version":1,"next":1,"carts":[]}"#;
+        let record = Record {
+            version: VERSION,
+            files: vec![Target {
+                relative: PathBuf::from("flat.minecarts.json"),
+                contents: newer.to_vec(),
+                checksum: fingerprint(newer),
+            }],
+        };
+        fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
+        recover(&journal).unwrap();
+        assert_eq!(fs::read(&carts).unwrap(), newer);
+        recover(&journal).unwrap();
+        assert!(!journal.exists());
+
+        let unknown = home.join("flat.unknown.json");
+        assert!(commit(&journal, &[(unknown.as_path(), saved.to_vec())]).is_err());
+        assert!(commit(&journal, &[]).is_err());
+        assert!(!journal.exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn book_sidecar_and_player_inventory_are_committed_together() {
         let home = std::env::temp_dir().join(format!("ir-journal-books-{}", std::process::id()));
