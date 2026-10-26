@@ -3290,10 +3290,6 @@ fn natural_spawn_x_sign(seed: u64) -> i32 {
     }
 }
 
-/// Keep the bounded origin search symmetric across all four cardinal
-/// directions. Previously the long offset was always on X, so candidates
-/// could never be far north or south of a player. Low bits choose direction
-/// independently of the passive/hostile attempt; the radius uses higher bits.
 /// Convert a player coordinate and a bounded spawn offset without the
 /// saturating float-to-int cast or signed overflow changing the spawn chunk.
 fn natural_spawn_offset_block(origin: f64, offset: i32) -> Option<i32> {
@@ -3307,6 +3303,10 @@ fn natural_spawn_offset_block(origin: f64, offset: i32) -> Option<i32> {
     (block as i32).checked_add(offset)
 }
 
+/// Keep the bounded origin search symmetric across all four cardinal
+/// directions. Previously the long offset was always on X, so candidates
+/// could never be far north or south of a player. Low bits choose direction
+/// independently of the passive/hostile attempt; the radius uses higher bits.
 fn natural_spawn_horizontal_offset(seed: u64) -> (i32, i32) {
     // Reach the outer eligible chunks too: 24..=88 never sampled the
     // 89..=120-block band even though the 17x17 chunk cap includes it.
