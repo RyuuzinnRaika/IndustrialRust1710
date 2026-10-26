@@ -118,6 +118,12 @@ fn piston_breakable(block: u16) -> bool {
             | 65 // ladder
             | 92 // cake
             | 131 | 132 // tripwire hooks and string
+            | 18 // leaves
+            | 30 // cobwebs
+            | 51 // fire
+            | 81 // cactus
+            | 111 // lily pads
+            | 127 // cocoa pods
             | 6 // saplings
             | 31 | 32 // tall grass and dead bush
             | 37
@@ -1241,6 +1247,50 @@ mod redstone_regression_tests {
         assert!(paired.place_door(&path, 0, 64, 0, 64, 0).unwrap());
         assert_eq!(paired.get(0, 65, 0) & 9, 9);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn piston_breaks_fragile_natural_blocks_instead_of_translating_them() {
+        // These blocks have the vanilla destroy reaction, even when some
+        // (leaves and cocoa) were previously classified as immovable.
+        for id in [18u16, 30, 51, 81, 111, 127] {
+            assert!(piston_breakable(id << 4), "block {id} must break on push");
+            for preceding_stone in [false, true] {
+                let mut world = World::new();
+                let piston = (33 << 4) | 5; // East-facing normal piston.
+                world.import_block(-2, 64, 0, (69 << 4) | 8).unwrap();
+                world.import_block(-1, 64, 0, piston).unwrap();
+                if preceding_stone {
+                    world.import_block(0, 64, 0, 1 << 4).unwrap();
+                }
+                let target_x = if preceding_stone { 1 } else { 0 };
+                world.import_block(target_x, 64, 0, id << 4).unwrap();
+
+                let mut changes = BTreeMap::new();
+                world.push_piston(-1, 64, 0, piston, &mut changes);
+                assert_eq!(changes.get(&(-1, 64, 0)), Some(&(piston | 8)));
+                assert_eq!(changes.get(&(0, 64, 0)), Some(&((34 << 4) | 5)));
+                if preceding_stone {
+                    assert_eq!(changes.get(&(1, 64, 0)), Some(&(1 << 4)));
+                }
+                assert!(
+                    !changes.values().any(|state| state >> 4 == id),
+                    "block {id} must not be translated"
+                );
+            }
+
+            // A sticky piston must leave fragile blocks behind on retract.
+            let mut world = World::new();
+            let piston = (29 << 4) | 13;
+            world.import_block(0, 64, 0, piston).unwrap();
+            world.import_block(1, 64, 0, (34 << 4) | 5).unwrap();
+            world.import_block(2, 64, 0, id << 4).unwrap();
+            let mut changes = BTreeMap::new();
+            world.push_piston(0, 64, 0, piston, &mut changes);
+            assert_eq!(changes.get(&(0, 64, 0)), Some(&((29 << 4) | 5)));
+            assert_eq!(changes.get(&(1, 64, 0)), Some(&0));
+            assert!(!changes.contains_key(&(2, 64, 0)));
+        }
     }
 
     #[test]
