@@ -419,7 +419,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-
     #[test]
     fn rejects_orphaned_chests_furnaces_and_hoppers_without_mutating_saves() {
         let root = std::env::temp_dir().join(format!(
@@ -454,7 +453,10 @@ mod tests {
         assert_eq!(fs::read(&chests).unwrap(), chest_before);
         assert!(!root.join("session.lock").exists());
         world.update_and_save(&save, 1, 65, 1, 54 << 4).unwrap();
-        assert!(inspect(&save).is_ok(), "real chest should own its inventory");
+        assert!(
+            inspect(&save).is_ok(),
+            "real chest should own its inventory"
+        );
 
         fs::remove_file(&chests).unwrap();
         let furnace_file = Furnaces::location(&save);
