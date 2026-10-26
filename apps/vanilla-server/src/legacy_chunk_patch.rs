@@ -40,7 +40,11 @@ pub(crate) fn patch_chunk(
         let local_z = z.rem_euclid(16) as usize;
         let section_y = (y / 16) as i8;
         let index = ((y as usize % 16) * 256) + local_z * 16 + local_x;
-        let slot = chunk.level.sections.iter().position(|section| section.y == section_y);
+        let slot = chunk
+            .level
+            .sections
+            .iter()
+            .position(|section| section.y == section_y);
         let old_id = slot
             .and_then(|position| chunk.level.sections[position].block_at(index))
             .map_or(0, |(id, _)| id);
@@ -52,8 +56,7 @@ pub(crate) fn patch_chunk(
         for tile in &chunk.level.tile_entities {
             if let Value::Compound(fields) = tile {
                 let position = (fields.get("x"), fields.get("y"), fields.get("z"));
-                if let (Some(Value::Int(tx)), Some(Value::Int(ty)), Some(Value::Int(tz))) =
-                    position
+                if let (Some(Value::Int(tx)), Some(Value::Int(ty)), Some(Value::Int(tz))) = position
                 {
                     if (*tx, *ty, *tz) == (x, y, z) {
                         return Err(invalid("block update overlaps existing TileEntity"));
@@ -157,10 +160,10 @@ mod tests {
     fn blocks_metadata_heightmap_and_unknown_nbt_are_preserved() {
         let (base, bytes) = source_chunk();
         let mut chunk = legacy_nbt::parse_chunk(&bytes, 0, 0).unwrap();
-        chunk.level.extra.insert(
-            "ModdedTag".into(),
-            Value::String("do not drop".into()),
-        );
+        chunk
+            .level
+            .extra
+            .insert("ModdedTag".into(), Value::String("do not drop".into()));
         let bytes = fastnbt::to_bytes(&chunk).unwrap();
         let changed = patch_chunk(&bytes, 0, 0, &[(2, 90, 3, (5 << 4) | 7)]).unwrap();
         let reread = legacy_nbt::parse_chunk(&changed, 0, 0).unwrap();
@@ -171,11 +174,26 @@ mod tests {
             reread.level.extra.get("ModdedTag"),
             Some(&Value::String("do not drop".into()))
         );
-        assert_eq!(reread.level.extra.get("LightPopulated"), Some(&Value::Byte(0)));
+        assert_eq!(
+            reread.level.extra.get("LightPopulated"),
+            Some(&Value::Byte(0))
+        );
         assert_eq!(reread.level.height_map.as_ref().unwrap()[3 * 16 + 2], 91);
         assert_eq!(
-            reread.level.sections.iter().find(|s| s.y == 3).unwrap().block_at(0),
-            chunk.level.sections.iter().find(|s| s.y == 3).unwrap().block_at(0)
+            reread
+                .level
+                .sections
+                .iter()
+                .find(|s| s.y == 3)
+                .unwrap()
+                .block_at(0),
+            chunk
+                .level
+                .sections
+                .iter()
+                .find(|s| s.y == 3)
+                .unwrap()
+                .block_at(0)
         );
         fs::remove_dir_all(base).unwrap();
     }
@@ -196,7 +214,6 @@ mod tests {
         let (base, nbt) = source_chunk();
         let mut chunk = legacy_nbt::parse_chunk(&nbt, 0, 0).unwrap();
         let section = chunk.level.sections.iter_mut().find(|s| s.y == 3).unwrap();
-        section.add = Some(ByteArray::new(vec![0; 2048]));
         let mut high = vec![0i8; 2048];
         high[0] = 1;
         section.add = Some(ByteArray::new(high));
