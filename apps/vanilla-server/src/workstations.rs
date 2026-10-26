@@ -131,10 +131,7 @@ fn with_repair_penalty(mut result: Stack, value: u16) -> Option<Stack> {
 fn finish_anvil_repair(left: Stack, right: Stack, mut plan: Repair) -> Option<Repair> {
     let old_left = repair_penalty(left)?;
     let old_right = repair_penalty(right)?;
-    plan.levels = plan
-        .levels
-        .checked_add(old_left)?
-        .checked_add(old_right)?;
+    plan.levels = plan.levels.checked_add(old_left)?.checked_add(old_right)?;
     if plan.levels > 39 {
         return None;
     }
