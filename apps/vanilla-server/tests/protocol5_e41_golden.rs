@@ -308,8 +308,8 @@ fn live_protocol5_entity_chunk_inventory_and_window_golden() {
 /// Protocol 5 server. This checks packet boundaries beyond the unit parser.
 #[test]
 fn live_protocol5_creative_nbt_roundtrip_and_invalid_tag_recovery() {
-    use flate2::{write::GzEncoder, Compression};
     use fastnbt::Value;
+    use flate2::{write::GzEncoder, Compression};
     use std::collections::HashMap;
 
     let _live_guard = LIVE_SERVER_LOCK.lock().unwrap();
@@ -318,7 +318,10 @@ fn live_protocol5_creative_nbt_roundtrip_and_invalid_tag_recovery() {
     consume_initial(&mut alpha, 1);
 
     let root = Value::Compound(HashMap::from([
-        ("UnknownField".to_string(), Value::String("keep me".to_string())),
+        (
+            "UnknownField".to_string(),
+            Value::String("keep me".to_string()),
+        ),
         (
             "ench".to_string(),
             Value::List(vec![Value::Compound(HashMap::from([
