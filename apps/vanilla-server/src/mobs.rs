@@ -2528,6 +2528,11 @@ impl Mobs {
         }
         self.spawn_natural(now, world, players, &mut events);
         self.spawn_from_spawners(now, world, players, &mut events);
+        // Malformed online positions must not make every hostile appear >128 blocks
+        // away. A finite Y outside build height is still a valid player reference.
+        let has_valid_online_player = players
+            .iter()
+            .any(|player| player.x.is_finite() && player.y.is_finite() && player.z.is_finite());
         for _ in 0..steps {
             let mut shots = Vec::new();
             let mut dead = Vec::new();
@@ -2594,7 +2599,7 @@ impl Mobs {
                 // With no online players, chunks have no active despawn
                 // reference point. Infinity must not be treated as a player
                 // farther than 128 blocks, or every hostile vanishes on logout.
-                if mob.kind.despawnable() && !players.is_empty() && nearest_distance > 128.0 {
+                if mob.kind.despawnable() && has_valid_online_player && nearest_distance > 128.0 {
                     dead.push(mob.id);
                     continue;
                 }
@@ -2606,7 +2611,7 @@ impl Mobs {
                 // strictly > 32 blocks (distance squared > 1024).
                 if nearest_distance < 32.0 {
                     mob.far_from_player_ticks = 0;
-                } else if mob.kind.despawnable() && !players.is_empty() {
+                } else if mob.kind.despawnable() && has_valid_online_player {
                     mob.far_from_player_ticks = mob.far_from_player_ticks.saturating_add(1);
                     if nearest_distance > 32.0
                         && mob.far_from_player_ticks > 600
@@ -4985,6 +4990,44 @@ mod tests {
         let sheep = mobs.next_id - 1;
         mobs.entities.get_mut(&sheep).unwrap().sheared = true;
         assert!(mobs.entities[&sheep].death_drop().is_none());
+    }
+
+    #[test]
+    fn malformed_online_player_positions_do_not_force_hostile_despawn() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, at, false);
+        let id = mobs.next_id - 1;
+        mobs.entities.get_mut(&id).unwrap().far_from_player_ticks = 600;
+
+        // A corrupted connection position is not a 128-block-away player.
+        let invalid = [
+            PlayerPosition { x: f64::NAN, ..at },
+            PlayerPosition {
+                z: f64::INFINITY,
+                ..at
+            },
+        ];
+        mobs.tick(1, &world, &invalid);
+        assert!(mobs.entities.contains_key(&id));
+        assert_eq!(mobs.entities[&id].far_from_player_ticks, 600);
+
+        // A valid nearby player still resets the timer, even when a bad
+        // position is present in the same online snapshot.
+        let near = PlayerPosition { x: 1.5, ..at };
+        mobs.tick(2, &world, &[invalid[0], near]);
+        assert!(mobs.entities.contains_key(&id));
+        assert_eq!(mobs.entities[&id].far_from_player_ticks, 0);
+
+        // Valid players outside 128 blocks must still despawn the hostile.
+        let far = PlayerPosition { x: 200.5, ..at };
+        mobs.tick(3, &world, &[invalid[0], far]);
+        assert!(!mobs.entities.contains_key(&id));
     }
 
     #[test]
