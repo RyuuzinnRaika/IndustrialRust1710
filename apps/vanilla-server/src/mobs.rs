@@ -6029,9 +6029,14 @@ mod tests {
             candidate(24.4),
             &[player]
         ));
-        assert!(natural_spawn_location_ok(
+        assert!(!natural_spawn_location_ok(
             &world,
             candidate(24.5),
+            &[player]
+        ));
+        assert!(natural_spawn_location_ok(
+            &world,
+            candidate(24.501),
             &[player]
         ));
         assert!(!natural_spawn_location_ok(
