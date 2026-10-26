@@ -673,10 +673,17 @@ fn natural_spawn_body_dimensions(kind: Kind, size: u8) -> (f64, f64) {
         Kind::Chicken => 0.2,
         _ => 0.3,
     };
+    // Use each species' 1.7.10 Entity#setSize height. A blanket two-block
+    // hull incorrectly rejects pigs/chickens/spiders below low ceilings and
+    // changes the vertical entity-overlap test for natural spawn packs.
     let height = match kind {
         Kind::Ghast => 4.0,
-        Kind::Enderman | Kind::IronGolem => 3.0,
-        Kind::Spider | Kind::CaveSpider | Kind::Chicken => 1.0,
+        Kind::Enderman | Kind::IronGolem => 2.9,
+        Kind::Horse => 1.6,
+        Kind::Cow | Kind::Sheep => 1.3,
+        Kind::Spider | Kind::Pig => 0.9,
+        Kind::Chicken => 0.7,
+        Kind::CaveSpider => 0.5,
         _ => 2.0,
     };
     (half_width, height)
@@ -3394,6 +3401,46 @@ fn natural_spawn_location_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn natural_spawn_hulls_use_species_heights() {
+        for (kind, half_width, height) in [
+            (Kind::Spider, 0.7, 0.9),
+            (Kind::CaveSpider, 0.35, 0.5),
+            (Kind::Chicken, 0.2, 0.7),
+            (Kind::Pig, 0.45, 0.9),
+            (Kind::Cow, 0.45, 1.3),
+            (Kind::Sheep, 0.45, 1.3),
+            (Kind::Horse, 0.7, 1.6),
+            (Kind::Enderman, 0.3, 2.9),
+            (Kind::IronGolem, 0.7, 2.9),
+        ] {
+            assert_eq!(
+                natural_spawn_body_dimensions(kind, 1),
+                (half_width, height),
+                "{kind:?}"
+            );
+        }
+        // Splitting mobs retain their size-dependent cubic hitboxes.
+        assert_eq!(natural_spawn_body_dimensions(Kind::Slime, 4), (1.2, 2.4));
+    }
+
+    #[test]
+    fn natural_spawn_low_ceiling_allows_short_species_but_not_tall_animals() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 2 << 4).unwrap();
+        world.import_block(0, 66, 0, 1 << 4).unwrap();
+        let feet = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        assert!(natural_spawn_body_ok(&world, Kind::Pig, feet, 1));
+        assert!(natural_spawn_body_ok(&world, Kind::Chicken, feet, 1));
+        assert!(natural_spawn_body_ok(&world, Kind::Spider, feet, 1));
+        assert!(!natural_spawn_body_ok(&world, Kind::Cow, feet, 1));
+        assert!(!natural_spawn_body_ok(&world, Kind::Horse, feet, 1));
+    }
+
     #[test]
     fn natural_ghast_candidates_can_float_but_cannot_overlap_walls() {
         let mut world = World::new();
