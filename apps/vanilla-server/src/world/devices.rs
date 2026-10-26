@@ -49,10 +49,10 @@ fn comparator_strength(rear: u8, side: u8, subtract: bool) -> u8 {
 fn full_conductor(id: u16) -> bool {
     matches!(
         id,
-        1..=5 | 7 | 12..=17 | 19 | 22..=25 | 35 | 41..=43 | 45..=49
-            | 56..=58 | 61 | 62 | 73 | 74 | 80 | 82 | 86..=89
-            | 98..=100 | 103 | 110 | 112 | 121 | 125 | 129 | 133
-            | 137 | 152 | 153 | 155 | 159 | 162 | 170 | 172 | 173
+        1..=5 | 7 | 12..=17 | 19 | 21..=25 | 35 | 41..=43 | 45..=49
+            | 56..=58 | 61 | 62 | 73 | 74 | 80 | 82 | 84 | 86..=89 | 91
+            | 97..=100 | 103 | 110 | 112 | 121 | 123..=125 | 129 | 133
+            | 137 | 152 | 153 | 155 | 158 | 159 | 162 | 170 | 172 | 173
     )
 }
 
@@ -741,7 +741,9 @@ mod redstone_regression_tests {
         // uncolored hardened clay are full opaque cubes in Java 1.7.10.
         // They must relay strong power just like stone.
         w.import_block(0, 65, 0, 152 << 4).unwrap();
-        for id in [1u16, 35, 125, 153, 162, 170, 172] {
+        for id in [
+            1u16, 21, 23, 25, 35, 84, 91, 97, 123, 124, 125, 153, 158, 162, 170, 172,
+        ] {
             w.import_block(0, 64, 0, id << 4).unwrap();
             assert_eq!(
                 w.signal_into((0, 64, 0), (1, 64, 0)),
@@ -758,6 +760,29 @@ mod redstone_regression_tests {
                 "non-full block {id} must not relay strong power"
             );
         }
+    }
+
+    #[test]
+    fn opaque_device_blocks_relay_directional_strong_repeater_power() {
+        let mut w = World::new();
+        w.import_block(-1, 64, 0, (94 << 4) | 1).unwrap();
+        // The repeater strongly powers the east face of the solid cube.
+        // Jukeboxes, lamps and droppers must not block that power.
+        for id in [21u16, 84, 91, 97, 123, 124, 158] {
+            w.import_block(0, 64, 0, id << 4).unwrap();
+            assert_eq!(
+                w.signal_into((0, 64, 0), (1, 64, 0)),
+                15,
+                "opaque block {id} should relay repeater power"
+            );
+            assert_eq!(
+                w.signal_into((0, 64, 0), (0, 65, 0)),
+                15,
+                "opaque block {id} should relay power upward"
+            );
+        }
+        w.import_block(-1, 64, 0, (93 << 4) | 1).unwrap();
+        assert_eq!(w.signal_into((0, 64, 0), (1, 64, 0)), 0);
     }
 
     #[test]
