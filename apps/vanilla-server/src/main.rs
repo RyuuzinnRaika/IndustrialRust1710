@@ -7915,6 +7915,27 @@ mod tests {
         assert_eq!(&payload[payload.len() - 256..], &[1u8; 256]);
     }
     #[test]
+    fn protocol5_anvil_rename_payload_is_bounded_utf8_and_varint_encoded() {
+        let mut valid = Vec::new();
+        write_string("Named Sword", &mut valid).unwrap();
+        assert_eq!(parse_anvil_name(&valid), Some("Named Sword".into()));
+        let mut japanese = Vec::new();
+        write_string("名前変更", &mut japanese).unwrap();
+        assert_eq!(parse_anvil_name(&japanese), Some("名前変更".into()));
+        assert_eq!(parse_anvil_name(&[0]), Some(String::new()));
+        assert!(parse_anvil_name(&[10, b't', b'o']).is_none());
+        assert!(parse_anvil_name(&[2, 0xff, 0xff]).is_none());
+        assert!(parse_anvil_name(&[1, b'A', 0]).is_none());
+        assert!(parse_anvil_name(&[1, b'\\n']).is_none());
+        let mut too_long = Vec::new();
+        write_string(&"a".repeat(31), &mut too_long).unwrap();
+        assert!(parse_anvil_name(&too_long).is_none());
+        let mut utf16_oversized = Vec::new();
+        write_string(&"😀".repeat(16), &mut utf16_oversized).unwrap();
+        assert!(parse_anvil_name(&utf16_oversized).is_none());
+    }
+
+    #[test]
     fn protocol5_slot_nbt_length_is_validated() {
         let empty = [-1i16; 1]
             .into_iter()
