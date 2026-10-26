@@ -5181,6 +5181,64 @@ mod tests {
     }
 
     #[test]
+    fn hostile_despawn_uses_closest_valid_player_at_128_block_boundary() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: -128.5,
+            y: 65.0,
+            z: -32.5,
+        };
+        let farther = PlayerPosition {
+            x: at.x + 192.0,
+            ..at
+        };
+        let invalid = PlayerPosition { z: f64::NAN, ..at };
+        // A farther player and a malformed snapshot must not override the
+        // nearest valid player, including across negative world coordinates.
+        for (label, nearest, survives, expected_age) in [
+            (
+                "inside 32 blocks",
+                PlayerPosition {
+                    x: at.x - 31.0,
+                    ..at
+                },
+                true,
+                0,
+            ),
+            (
+                "exactly 128 blocks",
+                PlayerPosition {
+                    x: at.x - 128.0,
+                    ..at
+                },
+                true,
+                1,
+            ),
+            (
+                "just outside 128 blocks",
+                PlayerPosition {
+                    x: at.x - 128.001,
+                    ..at
+                },
+                false,
+                0,
+            ),
+        ] {
+            let mut mobs = Mobs::default();
+            mobs.insert(Kind::Creeper, at, false);
+            let id = mobs.next_id - 1;
+            mobs.tick(1, &world, &[farther, invalid, nearest]);
+            assert_eq!(mobs.entities.contains_key(&id), survives, "{label}");
+            if survives {
+                assert_eq!(
+                    mobs.entities[&id].far_from_player_ticks, expected_age,
+                    "{label}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn legacy_mob_snapshots_default_missing_far_player_age_to_zero() {
         let mut mobs = Mobs::default();
         let at = PlayerPosition {
