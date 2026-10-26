@@ -3331,14 +3331,26 @@ fn natural_spawn_capacity(players: &[PlayerPosition], base: usize) -> usize {
     natural_mob_cap(players, base).min(MAX_NATURAL_PER_CATEGORY)
 }
 
+/// Reject non-finite Y and invalid X/Z before converting to chunks.
+/// Java 1.7.10 counts online players' X/Z chunks even when they are above
+/// build height or falling into the void; height must not change the mob cap.
+/// Rust float-to-int casts saturate, so invalid X/Z must be rejected.
+fn natural_spawn_player_chunk(player: PlayerPosition) -> Option<(i64, i64)> {
+    if !player.y.is_finite() {
+        return None;
+    }
+    let x = natural_spawn_offset_block(player.x, 0)?;
+    let z = natural_spawn_offset_block(player.z, 0)?;
+    Some((i64::from(x.div_euclid(16)), i64::from(z.div_euclid(16))))
+}
+
 fn natural_mob_cap(players: &[PlayerPosition], base: usize) -> usize {
     let mut chunks = std::collections::BTreeSet::new();
-    for player in players {
-        // Use widened chunk coordinates for the 17x17 search. At the
-        // i32 block-coordinate limits, adding eight to an i32 chunk index
-        // would overflow in debug builds and abort natural spawning.
-        let cx = i64::from((player.x.floor() as i32).div_euclid(16));
-        let cz = i64::from((player.z.floor() as i32).div_euclid(16));
+    for &player in players {
+        // Widen before extending the 17x17 square at signed block limits.
+        let Some((cx, cz)) = natural_spawn_player_chunk(player) else {
+            continue;
+        };
         for x in cx - 8..=cx + 8 {
             for z in cz - 8..=cz + 8 {
                 chunks.insert((x, z));
@@ -3355,13 +3367,13 @@ fn natural_mob_cap(players: &[PlayerPosition], base: usize) -> usize {
 /// eligible if it lies in the interior 15x15 square of *any* online player.
 /// Use signed chunk coordinates and widened subtraction for negative worlds.
 fn natural_spawn_chunk_eligible(at: PlayerPosition, players: &[PlayerPosition]) -> bool {
-    let cx = i64::from((at.x.floor() as i32).div_euclid(16));
-    let cz = i64::from((at.z.floor() as i32).div_euclid(16));
-    players.iter().any(|player| {
-        let px = i64::from((player.x.floor() as i32).div_euclid(16));
-        let pz = i64::from((player.z.floor() as i32).div_euclid(16));
-        (cx - px).abs() <= 7 && (cz - pz).abs() <= 7
-    })
+    let Some((cx, cz)) = natural_spawn_player_chunk(at) else {
+        return false;
+    };
+    players
+        .iter()
+        .filter_map(|&player| natural_spawn_player_chunk(player))
+        .any(|(px, pz)| (cx - px).abs() <= 7 && (cz - pz).abs() <= 7)
 }
 
 fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
@@ -4768,6 +4780,51 @@ mod tests {
         assert_eq!(natural_mob_cap(&[min, max], 70), 158);
         assert!(natural_spawn_chunk_eligible(max, &[max]));
         assert!(natural_spawn_chunk_eligible(min, &[min]));
+    }
+
+    #[test]
+    fn natural_spawn_ignores_malformed_player_chunks() {
+        let valid = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let invalid = [
+            PlayerPosition {
+                x: f64::NAN,
+                ..valid
+            },
+            PlayerPosition {
+                z: f64::INFINITY,
+                ..valid
+            },
+            PlayerPosition {
+                y: f64::NEG_INFINITY,
+                ..valid
+            },
+            PlayerPosition {
+                x: f64::from(i32::MAX) + 1.0,
+                ..valid
+            },
+            PlayerPosition {
+                z: f64::from(i32::MIN) - 1.0,
+                ..valid
+            },
+        ];
+        for malformed in invalid {
+            assert_eq!(natural_mob_cap(&[malformed], 70), 0);
+            assert_eq!(natural_mob_cap(&[valid, malformed], 70), 79);
+            assert!(!natural_spawn_chunk_eligible(malformed, &[valid]));
+            assert!(!natural_spawn_chunk_eligible(valid, &[malformed]));
+            assert!(natural_spawn_chunk_eligible(valid, &[valid, malformed]));
+        }
+        // Java 1.7.10 derives the eligible chunk union from player X/Z,
+        // including players below the world or above build height.
+        for y in [-1.0, 256.0, 300.0] {
+            let out_of_height = PlayerPosition { y, ..valid };
+            assert_eq!(natural_mob_cap(&[out_of_height], 70), 79);
+            assert!(natural_spawn_chunk_eligible(valid, &[out_of_height]));
+        }
     }
 
     #[test]
