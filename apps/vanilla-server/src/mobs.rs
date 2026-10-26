@@ -3460,9 +3460,19 @@ mod tests {
         mobs.insert(Kind::Skeleton, feet, false);
         // The 1.7.10 skeleton AABB ends at Y=66.95, not 67.0.
         let above = PlayerPosition { y: 66.96, ..feet };
-        assert!(natural_spawn_entity_clearance(&mobs.entities, Kind::Chicken, above, 1));
+        assert!(natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Chicken,
+            above,
+            1
+        ));
         let overlapping = PlayerPosition { y: 66.94, ..feet };
-        assert!(!natural_spawn_entity_clearance(&mobs.entities, Kind::Chicken, overlapping, 1));
+        assert!(!natural_spawn_entity_clearance(
+            &mobs.entities,
+            Kind::Chicken,
+            overlapping,
+            1
+        ));
     }
 
     #[test]
