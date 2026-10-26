@@ -7094,7 +7094,10 @@ fn main() -> io::Result<()> {
                                                     .with_extension("pending-txn.json"),
                                                 &[
                                                     (&*ejection_file, updated.encoded()?),
-                                                    (&*ejection_hopper_file, next_hopper.encoded()?),
+                                                    (
+                                                        &*ejection_hopper_file,
+                                                        next_hopper.encoded()?,
+                                                    ),
                                                 ],
                                             )?;
                                             Ok(())
