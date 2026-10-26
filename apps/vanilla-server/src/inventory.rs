@@ -3132,7 +3132,10 @@ mod tests {
         assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
         assert_eq!(inv.anvil_inputs, [None, None]);
         let actual = inv.cursor.unwrap();
-        assert_eq!((actual.id, actual.count, actual.damage), (expected.id, expected.count, expected.damage));
+        assert_eq!(
+            (actual.id, actual.count, actual.damage),
+            (expected.id, expected.count, expected.damage)
+        );
         // NBT intern handles are process-local and serialized Compound maps
         // can have different byte order; compare actual tag semantics instead.
         assert_eq!(
