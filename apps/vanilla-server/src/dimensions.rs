@@ -6,7 +6,7 @@
 use crate::world::{World, WORLD_LIMIT};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -685,7 +685,29 @@ impl TravelCheckpoint {
                 "unsafe or oversized travel checkpoint",
             ));
         }
-        let bytes = fs::read(path)?;
+        // Recheck the opened descriptor: the path can be replaced between
+        // symlink_metadata and open. Never allocate based on a substituted
+        // file's untrusted length, even if it grows while being read.
+        let file = fs::File::open(path)?;
+        let opened = file.metadata()?;
+        if !opened.is_file() || opened.len() > 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsafe or oversized opened travel checkpoint",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if (meta.dev(), meta.ino()) != (opened.dev(), opened.ino()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "travel checkpoint changed while opening",
+                ));
+            }
+        }
+        let mut bytes = Vec::with_capacity(1025);
+        file.take(1025).read_to_end(&mut bytes)?;
         if bytes.len() > 1024 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1026,6 +1048,38 @@ mod tests {
         }
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn checkpoint_accepts_exact_size_limit_but_rejects_one_extra_byte() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-checkpoint-exact-bound-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("pending.json");
+        let checkpoint = TravelCheckpoint::new(
+            destination(Dimension::Overworld, Dimension::Nether, 80.0, 64.0, 0.0).unwrap(),
+        )
+        .unwrap();
+        let mut bytes = serde_json::to_vec(&checkpoint).unwrap();
+        assert!(bytes.len() < 1024);
+        bytes.resize(1024, b' ');
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            TravelCheckpoint::load(&path).unwrap().unwrap().destination,
+            checkpoint.destination
+        );
+
+        bytes.push(b' ');
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            TravelCheckpoint::load(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn checkpoint_replacement_retains_latest_destination_without_staging() {
         let root = std::env::temp_dir().join(format!(
