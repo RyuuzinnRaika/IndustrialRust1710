@@ -7939,10 +7939,8 @@ mod tests {
         assert_eq!(inventory, original);
 
         // Invalid item identity with an otherwise valid NBT blob: never mint.
-        let nbt = item_nbt::from_value(&fastnbt::Value::Compound(
-            std::collections::HashMap::new(),
-        ))
-        .unwrap();
+        let nbt = item_nbt::from_value(&fastnbt::Value::Compound(std::collections::HashMap::new()))
+            .unwrap();
         let bytes = item_nbt::wire(nbt).unwrap();
         let mut claim = Vec::from(167i16.to_be_bytes());
         claim.extend_from_slice(&[1, 0, 0]);
