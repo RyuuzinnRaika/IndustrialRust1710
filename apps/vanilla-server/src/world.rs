@@ -394,9 +394,7 @@ impl World {
                 continue;
             }
             let upper = self.get(dx, i32::from(dy) + 1, dz);
-            if upper >> 4 == 64
-                && upper & 8 != 0
-                && self.can_support(dx, i32::from(dy), dz, lower)
+            if upper >> 4 == 64 && upper & 8 != 0 && self.can_support(dx, i32::from(dy), dz, lower)
             {
                 doors.insert([dx, i32::from(dy), dz]);
             }
@@ -459,9 +457,7 @@ impl World {
                 continue;
             }
             let upper = self.get(dx, i32::from(dy) + 1, dz);
-            if upper >> 4 == 64
-                && upper & 8 != 0
-                && self.can_support(dx, i32::from(dy), dz, lower)
+            if upper >> 4 == 64 && upper & 8 != 0 && self.can_support(dx, i32::from(dy), dz, lower)
             {
                 let distance = core
                     .iter()
