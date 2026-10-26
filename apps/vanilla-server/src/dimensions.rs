@@ -1022,7 +1022,10 @@ mod tests {
         let regular = root.join("regular/child/pending.json");
         checkpoint.save(&regular).unwrap();
         assert_eq!(
-            TravelCheckpoint::load(&regular).unwrap().unwrap().destination,
+            TravelCheckpoint::load(&regular)
+                .unwrap()
+                .unwrap()
+                .destination,
             checkpoint.destination
         );
         fs::remove_dir_all(root).unwrap();
