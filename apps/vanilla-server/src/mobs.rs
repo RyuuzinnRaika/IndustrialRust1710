@@ -4725,11 +4725,7 @@ mod tests {
         // spawnableCreatureList in 1.7.10. A neighboring plains pack must
         // not admit a member on a grass block in any of these biomes.
         // The same predicate guards both pack origin and each member.
-        for (biome, name) in [
-            (0, "Ocean"),
-            (10, "Frozen Ocean"),
-            (24, "Deep Ocean"),
-        ] {
+        for (biome, name) in [(0, "Ocean"), (10, "Frozen Ocean"), (24, "Deep Ocean")] {
             assert!(
                 !overworld_biome_allows_passive_spawn(biome),
                 "{name} must reject ordinary passive mobs at origin and pack edges"
