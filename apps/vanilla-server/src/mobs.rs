@@ -2118,6 +2118,17 @@ impl Mobs {
         {
             return;
         }
+        // A malformed player snapshot must not consume one of the four
+        // bounded origin attempts while other online players are valid.
+        // Keep the same validity rule as the chunk-union mob-cap calculation.
+        let valid_players: Vec<_> = players
+            .iter()
+            .copied()
+            .filter(|player| natural_spawn_player_chunk(*player).is_some())
+            .collect();
+        if valid_players.is_empty() {
+            return;
+        }
         let passive = self
             .entities
             .values()
@@ -2135,7 +2146,7 @@ impl Mobs {
             let seed = hash(
                 now ^ index.wrapping_mul(0x9e3779b97f4a7c15) ^ world.natural_seed().unwrap_or(0),
             );
-            let player = players[(seed as usize) % players.len()];
+            let player = valid_players[(seed as usize) % valid_players.len()];
             let (offset_x, offset_z) = natural_spawn_horizontal_offset(seed);
             // A world-border coordinate plus a bounded spawn offset can
             // exceed i32. Never wrap or clamp it into a different chunk.
@@ -6254,6 +6265,66 @@ mod tests {
         assert!(!zombie_infects_villager(2, 1));
         assert!(zombie_infects_villager(3, 1));
     }
+    #[test]
+    fn natural_spawning_skips_malformed_players_without_losing_valid_origins() {
+        // The first origin can select an invalid player when the online
+        // snapshot mixes malformed coordinates with a legitimate player.
+        // Such entries must not consume the bounded four origin attempts.
+        let world = World::natural(0);
+        let valid = PlayerPosition {
+            x: 512.5,
+            y: world.spawn_y(),
+            z: 512.5,
+        };
+        let invalid = [
+            PlayerPosition {
+                x: f64::NAN,
+                ..valid
+            },
+            PlayerPosition {
+                z: f64::INFINITY,
+                ..valid
+            },
+            PlayerPosition {
+                x: f64::from(i32::MAX) + 1.0,
+                ..valid
+            },
+        ];
+        let now = 18_040;
+        let mut baseline = Mobs::new_with_difficulty(&world, true, 2);
+        let mut baseline_events = Vec::new();
+        baseline.spawn_natural(now, &world, &[valid], &mut baseline_events);
+        assert!(!baseline.entities.is_empty());
+
+        let snapshot = |mobs: &Mobs| {
+            mobs.entities
+                .values()
+                .map(|mob| {
+                    (
+                        mob.kind,
+                        mob.position.x.to_bits(),
+                        mob.position.y.to_bits(),
+                        mob.position.z.to_bits(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for bad in invalid {
+            for online in [[bad, valid], [valid, bad]] {
+                let mut mixed = Mobs::new_with_difficulty(&world, true, 2);
+                let mut mixed_events = Vec::new();
+                mixed.spawn_natural(now, &world, &online, &mut mixed_events);
+                assert_eq!(snapshot(&mixed), snapshot(&baseline));
+                assert_eq!(mixed_events.len(), baseline_events.len());
+            }
+        }
+        let mut invalid_only = Mobs::new_with_difficulty(&world, true, 2);
+        let mut invalid_events = Vec::new();
+        invalid_only.spawn_natural(now, &world, &invalid, &mut invalid_events);
+        assert!(invalid_only.entities.is_empty());
+        assert!(invalid_events.is_empty());
+    }
+
     #[test]
     fn natural_spawning_retries_after_a_pack_with_no_eligible_members() {
         // At this tick, the first origin selects a surface slime in plains
