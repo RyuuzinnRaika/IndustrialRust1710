@@ -1615,8 +1615,8 @@ impl Inventory {
         }
     }
 
-    /// Compute the server-owned result. Only untagged durability repair is
-    /// supported until generic ItemStack NBT exists in Inventory.
+    /// Compute a server-owned durability repair or compatible enchantment merge.
+    /// The 1.7.10 rename GUI and full prior-work costs remain pending.
     pub fn anvil_preview(&self) -> Option<crate::workstations::Repair> {
         crate::workstations::repair(self.anvil_inputs[0]?, self.anvil_inputs[1]?)
     }
@@ -1770,9 +1770,8 @@ impl Inventory {
                 if mode == 1 && matches!(button, 0 | 1) {
                     if let Some(item) = self.slots[translated as usize] {
                         // 1.7.10 Shift-click places a repairable tool into
-                        // the first input slot, or compatible material into
-                        // the second. Until ItemStack NBT is supported, only
-                        // untagged durability-repair combinations qualify.
+                        // the first input slot, or compatible material/book
+                        // into the second. Reject unsupported combinations.
                         if self.anvil_inputs[0].is_none()
                             && item.count == 1
                             && crate::items_1710::max_durability(item.id).is_some()
