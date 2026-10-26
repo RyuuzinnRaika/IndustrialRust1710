@@ -76,6 +76,7 @@ impl Vitals {
     fn nutrition(stack: Stack) -> Option<(i32, f32)> {
         match (stack.id, stack.damage) {
             (260, _) => Some((4, 0.3)),     // apple
+            (322, 0 | 1) => Some((4, 1.2)), // regular / enchanted golden apple
             (282, _) => Some((6, 0.6)),     // mushroom stew (bowl returned by caller)
             (297, _) => Some((5, 0.6)),     // bread
             (319, _) => Some((3, 0.3)),     // raw pork
@@ -103,7 +104,8 @@ impl Vitals {
     }
 
     pub fn can_eat(&self, stack: Stack) -> bool {
-        self.health > 0.0 && self.food < 20 && Self::nutrition(stack).is_some()
+        // Golden apples can be eaten even at full hunger in Java 1.7.10.
+        self.health > 0.0 && (self.food < 20 || stack.id == 322) && Self::nutrition(stack).is_some()
     }
 
     /// Apply food only after the inventory was durably charged.
@@ -360,6 +362,42 @@ mod tests {
             damage: 0,
         }
     }
+    #[test]
+    fn golden_apple_variants_are_edible_at_full_hunger() {
+        for damage in [0, 1] {
+            let apple = Stack {
+                id: 322,
+                count: 1,
+                damage,
+            };
+            let mut vitals = Vitals {
+                food: 20,
+                saturation: 0.0,
+                ..Vitals::default()
+            };
+            assert!(vitals.can_eat(apple));
+            assert!(vitals.eat(apple));
+            assert_eq!(vitals.food, 20);
+            assert!((vitals.saturation - 9.6).abs() < 0.001);
+            assert!(vitals.valid());
+
+            let mut hungry = Vitals {
+                food: 12,
+                saturation: 0.0,
+                ..Vitals::default()
+            };
+            assert!(hungry.eat(apple));
+            assert_eq!(hungry.food, 16);
+            assert!((hungry.saturation - 9.6).abs() < 0.001);
+        }
+        // Do not accept unknown metadata as a consumable variant.
+        assert!(!Vitals::default().can_eat(Stack {
+            id: 322,
+            count: 1,
+            damage: 2,
+        }));
+    }
+
     #[test]
     fn apple_and_steak_restore_food_without_exceeding_limits() {
         let mut v = Vitals {
