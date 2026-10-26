@@ -4720,6 +4720,27 @@ mod tests {
     }
 
     #[test]
+    fn ocean_biomes_reject_passive_packs_even_at_grassy_boundary_blocks() {
+        // BiomeGenOcean, BiomeGenOcean (frozen), and Deep Ocean clear
+        // spawnableCreatureList in 1.7.10. A neighboring plains pack must
+        // not admit a member on a grass block in any of these biomes.
+        // The same predicate guards both pack origin and each member.
+        for (biome, name) in [(0, "Ocean"), (10, "Frozen Ocean"), (24, "Deep Ocean")] {
+            assert!(
+                !overworld_biome_allows_passive_spawn(biome),
+                "{name} must reject ordinary passive mobs at origin and pack edges"
+            );
+            // These biomes retain the ordinary hostile-spawn list.
+            assert!(overworld_biome_allows_natural_spawn(biome));
+        }
+        // A pack may still originate or continue in an eligible neighboring
+        // biome; rejecting ocean members must not reject the entire pack.
+        for biome in [1, 4, 5, 6, 35] {
+            assert!(overworld_biome_allows_passive_spawn(biome));
+        }
+    }
+
+    #[test]
     fn swamp_slimes_obey_moon_phase_light_and_height_without_affecting_cave_slimes() {
         let full_moon = 18_000_u64;
         let new_moon = full_moon + 4 * 24_000;
