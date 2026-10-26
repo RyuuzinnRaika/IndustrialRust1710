@@ -3097,11 +3097,23 @@ mod tests {
         xp.total = 300;
         assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
         assert_eq!(inv.anvil_inputs, [None, None]);
-        assert_eq!(inv.cursor, Some(expected));
+        let actual = inv.cursor.expect("anvil result in cursor");
+        // Anvil preview serializes NBT through a HashMap. Equivalent tags
+        // may have a different byte order and thus a different arena handle.
+        // The contract is equal payload, not identical process-local IDs.
+        assert_eq!(
+            (actual.id, actual.count, actual.damage),
+            (expected.id, expected.count, expected.damage)
+        );
+        assert_eq!(
+            crate::item_nbt::value(actual.nbt.unwrap()).unwrap(),
+            crate::item_nbt::value(expected.nbt.unwrap()).unwrap()
+        );
         assert!(xp.total < 300);
         let saved = inv.encoded().unwrap();
         let reloaded: Inventory = serde_json::from_slice(&saved).unwrap();
-        assert_eq!(reloaded.cursor, Some(expected));
+        // The saved byte array must re-intern to the exact committed payload.
+        assert_eq!(reloaded.cursor, Some(actual));
         assert_eq!(reloaded.anvil_inputs, [None, None]);
         let Value::Compound(tags) =
             crate::item_nbt::value(reloaded.cursor.unwrap().nbt.unwrap()).unwrap()
