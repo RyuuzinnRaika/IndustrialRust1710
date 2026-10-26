@@ -4935,6 +4935,36 @@ mod tests {
     }
 
     #[test]
+    fn natural_spawn_128_block_outer_radius_is_three_dimensional() {
+        // The outer limit is a 3D sphere, not a horizontal radius.
+        // Keep X/Z in the same eligible chunk while varying only height.
+        let world = World::natural(42);
+        let player = PlayerPosition {
+            x: 400.5,
+            y: 200.0,
+            z: 400.5,
+        };
+        let candidate = |y: f64| PlayerPosition { y, ..player };
+        assert_eq!(distance_to_players(candidate(72.0), &[player]), 128.0);
+        assert!(natural_spawn_location_ok(&world, candidate(72.0), &[player]));
+        assert!(!natural_spawn_location_ok(&world, candidate(71.999), &[player]));
+        assert!(natural_spawn_location_ok(&world, candidate(72.001), &[player]));
+
+        // A second, closer player can exclude an otherwise eligible position.
+        let near = PlayerPosition { y: 96.0, ..player };
+        assert!(!natural_spawn_location_ok(
+            &world,
+            candidate(72.0),
+            &[player, near]
+        ));
+        assert!(natural_spawn_location_ok(
+            &world,
+            candidate(72.001),
+            &[player, near]
+        ));
+    }
+
+    #[test]
     fn natural_spawn_location_rejects_border_even_within_distance_limit() {
         let world = World::natural(42);
         let y = world.spawn_y();
