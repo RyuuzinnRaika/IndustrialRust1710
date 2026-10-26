@@ -7926,7 +7926,7 @@ mod tests {
         assert!(parse_anvil_name(&[10, b't', b'o']).is_none());
         assert!(parse_anvil_name(&[2, 0xff, 0xff]).is_none());
         assert!(parse_anvil_name(&[1, b'A', 0]).is_none());
-        assert!(parse_anvil_name(&[1, b'\\n']).is_none());
+        assert!(parse_anvil_name(&[1, 10]).is_none());
         let mut too_long = Vec::new();
         write_string(&"a".repeat(31), &mut too_long).unwrap();
         assert!(parse_anvil_name(&too_long).is_none());
