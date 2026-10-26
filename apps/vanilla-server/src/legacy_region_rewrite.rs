@@ -402,8 +402,7 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
         &source_images,
         world_file,
         sidecars,
-        false,
-        None,
+        RegionCommitMode::ExistingOnly,
     )
 }
 
@@ -487,8 +486,7 @@ pub(crate) fn flush_irw_block_edits_under_lock_expected(
         &region_images,
         world_file,
         &[(world_file, next_irw.to_vec())],
-        false,
-        Some(expected_irw),
+        RegionCommitMode::IrwImage(expected_irw),
     )
 }
 
@@ -511,8 +509,7 @@ pub(crate) fn insert_regions_with_sidecars_under_lock_expected(
         expected_sources,
         world_file,
         sidecars,
-        true,
-        None,
+        RegionCommitMode::InsertMissing,
     )
 }
 
@@ -525,6 +522,12 @@ fn snapshot_region(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+enum RegionCommitMode<'a> {
+    ExistingOnly,
+    InsertMissing,
+    IrwImage(&'a [u8]),
+}
+
 fn commit_region_batch(
     lock: &mut WorldSessionLock,
     dimension: Dimension,
@@ -532,10 +535,14 @@ fn commit_region_batch(
     expected_sources: &std::collections::BTreeMap<(i32, i32), Option<Vec<u8>>>,
     world_file: &Path,
     sidecars: &[(&Path, Vec<u8>)],
-    allow_new_chunks: bool,
-    expected_irw: Option<&[u8]>,
+    mode: RegionCommitMode<'_>,
 ) -> io::Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
+    let allow_new_chunks = matches!(mode, RegionCommitMode::InsertMissing);
+    let expected_irw = match mode {
+        RegionCommitMode::IrwImage(bytes) => Some(bytes),
+        _ => None,
+    };
     lock.verify()?;
     let root = lock.world_dir().to_path_buf();
     if world_file.parent() != Some(root.as_path())
