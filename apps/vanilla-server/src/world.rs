@@ -521,14 +521,17 @@ impl World {
         {
             return Vec::new();
         }
-        let mut doors = Vec::new();
+        // Edits are ordered by x/y/z, not by proximity. Keeping the first
+        // 32 doors can hide a nearby house behind 32 distant ones.
+        // Retain the 32 closest valid doors in deterministic distance order.
+        let mut nearest = BTreeSet::new();
         for (&(dx, dy, dz), &lower) in self.edits.range(
             (x.saturating_sub(32), 0u8, i32::MIN)..=(x.saturating_add(32), u8::MAX, i32::MAX),
         ) {
-            if doors.len() >= 32 {
-                break;
-            }
-            if (i64::from(dz) - i64::from(z)).abs() > 32
+            let x_delta = i64::from(dx) - i64::from(x);
+            let z_delta = i64::from(dz) - i64::from(z);
+            let distance_squared = x_delta * x_delta + z_delta * z_delta;
+            if distance_squared > 32 * 32
                 || dy == 0
                 || dy > 252
                 || lower >> 4 != 64
@@ -537,6 +540,12 @@ impl World {
                 continue;
             }
             let height = i32::from(dy);
+            let key = (distance_squared, [dx, height, dz]);
+            // No farther candidate can displace the current farthest door.
+            // Skip expensive sky checks for such candidates.
+            if nearest.len() >= 32 && nearest.last().is_some_and(|last| key >= *last) {
+                continue;
+            }
             let upper = self.get(dx, height + 1, dz);
             if upper >> 4 != 64 || upper & 8 == 0 || self.get(dx, height - 1, dz) >> 4 == 0 {
                 continue;
@@ -555,10 +564,13 @@ impl World {
                     .count()
             };
             if covered(1) != covered(-1) {
-                doors.push([dx, height, dz]);
+                nearest.insert(key);
+                if nearest.len() > 32 {
+                    nearest.pop_last();
+                }
             }
         }
-        doors
+        nearest.into_iter().map(|(_, door)| door).collect()
     }
     /// Bounded lookup of intact dungeon spawners close to active players.
     /// IRW4 generated sites are indexed by their 64-block feature cells so
@@ -2219,6 +2231,35 @@ mod tests {
             .independent_player_village_doors_near(door[0], door[2])
             .is_empty());
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn independent_player_village_prioritizes_nearby_doors_over_edit_order() {
+        fn add_roofed_door(world: &mut World, x: i32, z: i32) {
+            let y = 200;
+            world.import_block(x, y - 1, z, 1 << 4).unwrap();
+            world.import_block(x, y, z, 64 << 4).unwrap();
+            world.import_block(x, y + 1, z, 64 << 4 | 8).unwrap();
+            world.import_block(x, y + 3, z + 1, 1 << 4).unwrap();
+        }
+
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        // All 32 distant doors precede x=0 in the edit map. The former
+        // first-32 strategy never returned the much closer door at (0, 0).
+        for x in -25..=-18 {
+            for z in [-12, -4, 4, 12] {
+                add_roofed_door(&mut world, x, z);
+            }
+        }
+        add_roofed_door(&mut world, 0, 0);
+        let doors = world.independent_player_village_doors_near(0, 0);
+        assert_eq!(doors.len(), 32);
+        assert_eq!(doors[0], [0, 200, 0]);
+        assert!(doors.contains(&[0, 200, 0]));
+        assert_eq!(
+            world.independent_player_village_doors_near(100, 100),
+            Vec::<[i32; 3]>::new()
+        );
     }
 
     #[test]
