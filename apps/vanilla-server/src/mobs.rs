@@ -2283,7 +2283,12 @@ impl Mobs {
             // make nearby blocks/biomes/light levels safe. This preserves the
             // older server's CPU and snapshot guards (at most six per cycle).
             let mobs_before_attempt = self.entities.len();
-            for member in 0..if swamp_bonus { 1 } else { natural_pack_attempts(kind, seed) } {
+            let pack_attempts = if swamp_bonus {
+                1
+            } else {
+                natural_pack_attempts(kind, seed)
+            };
+            for member in 0..pack_attempts {
                 if self.entities.len() >= MAX_LOADED_MOBS || self.next_id >= 1_000_000 {
                     break;
                 }
@@ -3310,7 +3315,8 @@ fn overworld_monster_kind(roll: u64) -> Kind {
 /// the inherited 515-weight hostile list. Preserve the distinct entry rather
 /// than silently using the inherited Slime pack size of four.
 fn overworld_monster_entry(biome: u8, roll: u64) -> (Kind, bool) {
-    let selected = roll % if biome == 6 { 516 } else { 515 };
+    let total_weight = if biome == 6 { 516 } else { 515 };
+    let selected = roll % total_weight;
     if selected == 515 {
         (Kind::Slime, true)
     } else {
