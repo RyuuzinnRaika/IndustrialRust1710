@@ -473,6 +473,7 @@ mod tests {
                 id: 264,
                 count: 3,
                 damage: 0,
+                nbt: None,
             });
             items
         };
