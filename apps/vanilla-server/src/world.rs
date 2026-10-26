@@ -403,8 +403,9 @@ impl World {
     /// A bounded, live extension of an existing generated village: accept
     /// player-built doors outside its original footprint when a chain of
     /// intact doors connects them to the generated village. Each link spans
-    /// at most 16 horizontal blocks, and the search stays within 16 blocks
-    /// of the original footprint. Removing a bridge door immediately removes
+    /// at most 16 horizontal blocks and 4 vertical blocks, and the search
+    /// stays within 16 blocks of the original footprint. Removing a bridge
+    /// door immediately removes
     /// disconnected annex doors from the live result.
     /// This does not create independent villages or implement vanilla
     /// sky-exposure/population-based village boundary rules.
@@ -435,7 +436,7 @@ impl World {
         let mut doors: BTreeSet<[i32; 3]> = core.iter().copied().collect();
         // Collect a bounded set of live player-built doors near the village.
         // A door joins the annex only through a chain of intact doors with
-        // at most 16 horizontal blocks between successive lower halves.
+        // at most 16 horizontal and 4 vertical blocks between lower halves.
         let mut candidates = BTreeSet::new();
         for (&(dx, dy, dz), &lower) in self.edits.range(
             (cx.saturating_sub(47), 0u8, i32::MIN)..=(cx.saturating_add(47), u8::MAX, i32::MAX),
@@ -461,7 +462,7 @@ impl World {
 
         let mut annex = Vec::new();
         let mut frontier = core;
-        while let Some([ax, _, az]) = frontier.pop() {
+        while let Some([ax, ay, az]) = frontier.pop() {
             if doors.len() >= 128 {
                 break;
             }
@@ -474,7 +475,8 @@ impl World {
                 }
                 let x_delta = i64::from(door[0]) - i64::from(ax);
                 let z_delta = i64::from(door[2]) - i64::from(az);
-                if x_delta * x_delta + z_delta * z_delta <= 16 * 16 {
+                let y_delta = i64::from(door[1]) - i64::from(ay);
+                if x_delta * x_delta + z_delta * z_delta <= 16 * 16 && y_delta.abs() <= 4 {
                     doors.insert(*door);
                     annex.push(*door);
                     frontier.push(*door);
@@ -2033,11 +2035,14 @@ mod tests {
         let annex = [anchor[0] + 15, anchor[1], anchor[2]];
         let chained = [anchor[0] + 30, anchor[1], anchor[2]];
         let disconnected = [cx - 45, anchor[1], cz + 40];
+        // An upper-floor door is horizontally adjacent to the annex but
+        // cannot form a village link across a sixteen-block vertical gap.
+        let elevated = [annex[0], annex[1] + 16, annex[2] + 1];
         assert_eq!(
             world.village_doors_with_bounded_annex(chained[0], chained[2]),
             None
         );
-        for door in [annex, chained, disconnected] {
+        for door in [annex, chained, disconnected, elevated] {
             world
                 .import_block(door[0], door[1], door[2], 64 << 4 | 2)
                 .unwrap();
@@ -2051,6 +2056,7 @@ mod tests {
         assert!(active.contains(&annex));
         assert!(active.contains(&chained));
         assert!(!active.contains(&disconnected));
+        assert!(!active.contains(&elevated));
         assert!(!world
             .village_doors_including_player_edits(cx, cz)
             .unwrap()
@@ -2062,10 +2068,11 @@ mod tests {
         let _ = fs::remove_file(&path);
         world.save(&path).unwrap();
         let mut restored = World::load(&path).unwrap();
-        assert!(restored
+        let restored_doors = restored
             .village_doors_with_bounded_annex(chained[0], chained[2])
-            .unwrap()
-            .contains(&chained));
+            .unwrap();
+        assert!(restored_doors.contains(&chained));
+        assert!(!restored_doors.contains(&elevated));
         // The distant annex door must disappear when its only bridge breaks,
         // even though its two halves remain intact in the live world.
         restored
