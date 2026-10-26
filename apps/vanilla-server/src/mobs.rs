@@ -4631,12 +4631,16 @@ mod tests {
             natural_spawn_offset_block(f64::from(i32::MAX) + 1.0, -1),
             None
         );
+        assert_eq!(
+            natural_spawn_offset_block(f64::from(i32::MAX) - 1.0, 1),
+            Some(i32::MAX)
+        );
+        assert_eq!(
+            natural_spawn_offset_block(f64::from(i32::MIN) + 1.0, -1),
+            Some(i32::MIN)
+        );
         assert_eq!(natural_spawn_offset_block(f64::NAN, 0), None);
         assert_eq!(natural_spawn_offset_block(f64::INFINITY, 0), None);
-        // A pack member must also be skipped when its local displacement
-        // crosses the signed world-coordinate boundary.
-        assert_eq!(i32::MAX.checked_add(5), None);
-        assert_eq!(i32::MIN.checked_add(-5), None);
     }
 
     #[test]
