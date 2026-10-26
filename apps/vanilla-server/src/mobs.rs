@@ -2318,7 +2318,13 @@ impl Mobs {
                     continue;
                 }
                 if kind == Kind::Slime
-                    && !is_slime_cave_location(world.natural_seed().unwrap_or(0), cx, cy, cz)
+                    && !slime_cave_spawn_ok(
+                        world.natural_seed().unwrap_or(0),
+                        cx,
+                        cy,
+                        cz,
+                        hash(seed ^ (member as u64).wrapping_mul(0x8cb9_2baa) ^ 0x69b7_c2d3),
+                    )
                     && !swamp_slime_spawn_ok(
                         world.biome_at(cx, cz),
                         cy,
@@ -3415,6 +3421,13 @@ fn is_slime_chunk(world_seed: u64, chunk_x: i32, chunk_z: i32) -> bool {
 /// Block-to-chunk coordinates must floor toward negative infinity, not zero.
 fn is_slime_cave_location(world_seed: u64, x: i32, y: i32, z: i32) -> bool {
     y < 40 && is_slime_chunk(world_seed, x.div_euclid(16), z.div_euclid(16))
+}
+
+/// Java 1.7.10's EntitySlime::getCanSpawnHere applies a separate 1-in-10
+/// random gate even after the world-seed slime-chunk and Y<40 checks pass.
+/// Do not conflate the chunk's 10% eligibility with the per-attempt 10% roll.
+fn slime_cave_spawn_ok(world_seed: u64, x: i32, y: i32, z: i32, roll: u64) -> bool {
+    is_slime_cave_location(world_seed, x, y, z) && roll.is_multiple_of(10)
 }
 
 /// Vanilla 1.7.10 villager infection chance by world difficulty.
@@ -4559,6 +4572,30 @@ mod tests {
         let chunk_x = (0..64).find(|&x| is_slime_chunk(0, x, 0)).unwrap();
         assert!(is_slime_cave_location(0, chunk_x * 16, 39, 0));
         assert!(!is_slime_cave_location(0, chunk_x * 16, 40, 0));
+    }
+
+    #[test]
+    fn cave_slimes_require_per_attempt_one_in_ten_roll_after_chunk_selection() {
+        let slime_chunk = (0..64).find(|&x| is_slime_chunk(0, x, 0)).unwrap();
+        let non_slime_chunk = (0..64).find(|&x| !is_slime_chunk(0, x, 0)).unwrap();
+        let x = slime_chunk * 16;
+        // A slime chunk is not a guaranteed spawn: only one in ten
+        // independently sampled candidate rolls can pass at Y < 40.
+        assert_eq!(
+            (0..100_u64)
+                .filter(|&roll| slime_cave_spawn_ok(0, x, 39, 0, roll))
+                .count(),
+            10
+        );
+        assert!((0..100_u64).all(|roll| !slime_cave_spawn_ok(0, x, 40, 0, roll)));
+        assert!(
+            (0..100_u64).all(|roll| { !slime_cave_spawn_ok(0, non_slime_chunk * 16, 39, 0, roll) })
+        );
+        // Block-to-chunk conversion must continue to use floor division.
+        assert_eq!(
+            slime_cave_spawn_ok(0, -1, 39, 0, 0),
+            is_slime_chunk(0, -1, 0)
+        );
     }
 
     #[test]
