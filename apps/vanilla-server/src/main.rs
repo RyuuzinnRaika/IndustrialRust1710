@@ -7042,9 +7042,20 @@ fn main() -> io::Result<()> {
                                         Ok(value) => value,
                                         Err(_) => return,
                                     };
-                                    let mut slots = chests.slots(dest);
-                                    if dispensers::insert_one(&mut slots, stack) {
-                                        let next_chest = match chests.staged_update(dest, slots) {
+                                    // Treat both halves of a regular double chest as one
+                                    // 54-slot inventory, even if the targeted half is full.
+                                    // Keep the same canonical order used by chest windows.
+                                    let partner = if gravity_world.get(dest.0, dest.1, dest.2) >> 4
+                                        == 54
+                                    {
+                                        chest_neighbor(&gravity_world, dest)
+                                    } else {
+                                        None
+                                    };
+                                    let mut slots = chest_window_state(&chests, dest, partner);
+                                    if dispensers::insert_one_into_window(&mut slots, stack) {
+                                        let next_chest =
+                                            match stage_chest_window(&chests, dest, partner, &slots) {
                                             Ok(value) => value,
                                             Err(error) => {
                                                 eprintln!("DROPPER CHEST TRANSFER ERROR: {error}");
