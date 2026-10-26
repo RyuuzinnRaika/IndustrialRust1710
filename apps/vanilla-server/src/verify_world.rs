@@ -664,13 +664,15 @@ mod tests {
                 inspect(&path).is_err(),
                 "wrong block type accepted at x={x}"
             );
-            world.update_and_save(
-                &path,
-                x,
-                70,
-                1,
-                (if x == 1 { 68 } else if x == 2 { 25 } else if x == 3 { 84 } else { 140 }) << 4,
-            ).unwrap();
+            let restored_block = match x {
+                1 => 68,
+                2 => 25,
+                3 => 84,
+                _ => 140,
+            };
+            world
+                .update_and_save(&path, x, 70, 1, restored_block << 4)
+                .unwrap();
         }
         assert!(inspect(&path).is_ok());
         assert_eq!(fs::read(&decoration_path).unwrap(), baseline_record);
@@ -705,7 +707,10 @@ mod tests {
         let hanging_path = Hangings::location(&path);
         state.save(&hanging_path).unwrap();
         let original = fs::read(&hanging_path).unwrap();
-        assert!(inspect(&path).is_ok(), "supported hanging entities should pass");
+        assert!(
+            inspect(&path).is_ok(),
+            "supported hanging entities should pass"
+        );
         assert!(!root.join("session.lock").exists());
 
         // A removed supporting wall, or a solid block occupying a frame,
@@ -737,7 +742,10 @@ mod tests {
         fs::write(&hanging_path, serde_json::to_vec(&overlapping).unwrap()).unwrap();
         assert!(inspect(&path).is_err(), "overlapping frames accepted");
         fs::write(&hanging_path, &original).unwrap();
-        assert!(inspect(&path).is_ok(), "original hangings should remain valid");
+        assert!(
+            inspect(&path).is_ok(),
+            "original hangings should remain valid"
+        );
         assert!(!root.join("session.lock").exists());
         fs::remove_dir_all(root).unwrap();
     }
