@@ -297,6 +297,40 @@ impl Hangings {
         result.validate()?;
         Ok(result)
     }
+    /// Verify persisted paintings/frames against the stopped IRW world.
+    /// This is observational: do not respawn or remove entities during an
+    /// integrity check, even when the supporting wall has disappeared.
+    pub fn verify_world_references(&self, world: &World) -> io::Result<()> {
+        let mut occupied = BTreeSet::new();
+        for entity in self.entities.values() {
+            let (width, height) = match &entity.kind {
+                Kind::Frame { .. } => (1, 1),
+                Kind::Painting { width, height, .. } => (i32::from(*width), i32::from(*height)),
+            };
+            let (dx, dz) = offset(entity.face);
+            for (x, y, z) in occupied_cells(
+                (entity.at[0], entity.at[1], entity.at[2]),
+                entity.face,
+                width,
+                height,
+            ) {
+                if !world::in_bounds(x, y, z)
+                    || !world::in_bounds(x - dx, y, z - dz)
+                    || world.get(x, y, z) != 0
+                    || world.get(x - dx, y, z - dz) == 0
+                {
+                    return Err(invalid(
+                        "orphaned hanging: footprint obstructed or supporting wall missing",
+                    ));
+                }
+                if !occupied.insert((x, y, z)) {
+                    return Err(invalid("overlapping hanging entities in saved world"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn encoded(&self) -> io::Result<Vec<u8>> {
         self.validate()?;
         let data = serde_json::to_vec(self).map_err(|_| invalid("encode hanging JSON"))?;
