@@ -437,13 +437,14 @@ impl World {
         // Collect a bounded set of live player-built doors near the village.
         // A door joins the annex only through a chain of intact doors with
         // at most 16 horizontal and 4 vertical blocks between lower halves.
+        // The edit map is sorted by x/y/z, not by proximity. Keeping the
+        // first 512 doors can discard the only connected annex door when
+        // distant edits happen to sort first. Prefer candidates closest in
+        // 3D to a live core door, with a deterministic coordinate tie-break.
         let mut candidates = BTreeSet::new();
         for (&(dx, dy, dz), &lower) in self.edits.range(
             (cx.saturating_sub(47), 0u8, i32::MIN)..=(cx.saturating_add(47), u8::MAX, i32::MAX),
         ) {
-            if candidates.len() >= 512 {
-                break;
-            }
             let x_distance = (i64::from(dx) - i64::from(cx)).abs();
             let z_distance = (i64::from(dz) - i64::from(cz)).abs();
             if z_distance > 42
@@ -456,9 +457,23 @@ impl World {
             }
             let upper = self.get(dx, i32::from(dy) + 1, dz);
             if upper >> 4 == 64 && upper & 8 != 0 {
-                candidates.insert([dx, i32::from(dy), dz]);
+                let distance = core
+                    .iter()
+                    .map(|anchor| {
+                        let x_delta = i64::from(dx) - i64::from(anchor[0]);
+                        let y_delta = i64::from(dy) - i64::from(anchor[1]);
+                        let z_delta = i64::from(dz) - i64::from(anchor[2]);
+                        x_delta * x_delta + y_delta * y_delta + z_delta * z_delta
+                    })
+                    .min()
+                    .unwrap_or(i64::MAX);
+                candidates.insert((distance, [dx, i32::from(dy), dz]));
+                if candidates.len() > 512 {
+                    candidates.pop_last();
+                }
             }
         }
+        let candidates: BTreeSet<_> = candidates.into_iter().map(|(_, door)| door).collect();
 
         let mut annex = Vec::new();
         let mut frontier = core;
@@ -2203,6 +2218,42 @@ mod tests {
             None
         );
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn village_annex_prioritizes_connected_door_after_many_distant_edits() {
+        let seed = 42;
+        let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+        let (cx, _, cz) = (-8..=8)
+            .flat_map(|gx| (-8..=8).map(move |gz| (gx * 192 + 48, gz * 192 + 48)))
+            .find_map(|(x, z)| crate::worldgen::village_center(seed, x, z))
+            .expect("seed 42 has a generated village");
+        let anchor = world.live_village_house_doors(cx, cz).unwrap()[1].unwrap();
+        let annex = [anchor[0] + 15, anchor[1], anchor[2]];
+
+        // These 512 intact but vertically disconnected doors sort before
+        // the annex in the edit map. They used to exhaust its candidate cap.
+        for x in -47..=-32 {
+            for z in -42..=-27 {
+                for y in [180, 200] {
+                    world.import_block(cx + x, y, cz + z, 64 << 4).unwrap();
+                    world
+                        .import_block(cx + x, y + 1, cz + z, 64 << 4 | 8)
+                        .unwrap();
+                }
+            }
+        }
+        world
+            .import_block(annex[0], annex[1], annex[2], 64 << 4 | 2)
+            .unwrap();
+        world
+            .import_block(annex[0], annex[1] + 1, annex[2], 64 << 4 | 8)
+            .unwrap();
+        let doors = world
+            .village_doors_with_bounded_annex(annex[0], annex[2])
+            .expect("connected annex remains reachable despite distant edits");
+        assert!(doors.contains(&annex));
+        assert!(!doors.contains(&[cx - 47, 180, cz - 42]));
     }
 
     #[test]
