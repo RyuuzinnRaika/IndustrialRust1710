@@ -507,9 +507,7 @@ mod tests {
             .staged_update(right, [Some(stack); CHEST_SLOTS])
             .unwrap();
         assert_both(&both_full, Some(15));
-        let right_full = both_full
-            .staged_update(left, [None; CHEST_SLOTS])
-            .unwrap();
+        let right_full = both_full.staged_update(left, [None; CHEST_SLOTS]).unwrap();
         assert_both(&right_full, Some(8));
         let both_empty = right_full
             .staged_update(right, [None; CHEST_SLOTS])
