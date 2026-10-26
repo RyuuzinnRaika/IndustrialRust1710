@@ -37,6 +37,41 @@ fn checked_dir(path: &Path) -> io::Result<bool> {
         Err(error) => Err(error),
     }
 }
+/// Cross-file semantic check for tiles with saved inventories. Loading each
+/// sidecar validates its own format and item stacks, but a valid inventory
+/// at an air/stone block would otherwise hide an orphaned container.
+fn verify_tile_anchors<T: serde::Serialize>(
+    world: &World,
+    tile_state: &T,
+    block_ids: &[u16],
+) -> io::Result<()> {
+    let encoded = serde_json::to_value(tile_state)
+        .map_err(|_| invalid("could not inspect tile inventory positions"))?;
+    let entries = encoded
+        .get("entries")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| invalid("tile inventory entries missing"))?;
+    for position in entries.keys() {
+        let coords = position
+            .split(',')
+            .map(str::parse::<i32>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| invalid("bad saved tile inventory position"))?;
+        if coords.len() != 3
+            || !crate::world::in_bounds(coords[0], coords[1], coords[2])
+            || position != &format!("{},{},{}", coords[0], coords[1], coords[2])
+        {
+            return Err(invalid("invalid saved tile inventory coordinates"));
+        }
+        if !block_ids.contains(&(world.get(coords[0], coords[1], coords[2]) >> 4)) {
+            return Err(invalid(
+                "orphaned tile inventory: saved container has no matching world block",
+            ));
+        }
+    }
+    Ok(())
+}
+
 // Offline user names and authenticated UUIDs have disjoint save namespaces.
 // Inspect every recognized sidecar, even when its primary .dat file is absent,
 // and reject unknown files instead of silently declaring a partial save valid.
@@ -162,11 +197,20 @@ fn inspect_irw(world_file: &Path) -> io::Result<Summary> {
     let drops = GroundItems::location(world_file);
     check!(drops.clone(), GroundItems::load(&drops));
     let chests = Chests::location(world_file);
-    check!(chests.clone(), Chests::load(&chests));
+    check!(chests.clone(), {
+        let tiles = Chests::load(&chests)?;
+        verify_tile_anchors(&world, &tiles, &[54])
+    });
     let furnaces = Furnaces::location(world_file);
-    check!(furnaces.clone(), Furnaces::load(&furnaces));
+    check!(furnaces.clone(), {
+        let tiles = Furnaces::load(&furnaces)?;
+        verify_tile_anchors(&world, &tiles, &[61, 62])
+    });
     let hoppers = Hoppers::location(world_file);
-    check!(hoppers.clone(), Hoppers::load(&hoppers));
+    check!(hoppers.clone(), {
+        let tiles = Hoppers::load(&hoppers)?;
+        verify_tile_anchors(&world, &tiles, &[154])
+    });
     let brewers = Brewers::location(world_file);
     check!(brewers.clone(), Brewers::load(&brewers));
     // Check every sidecar loaded by the live server rather than reporting a
@@ -372,6 +416,77 @@ mod tests {
             std::os::unix::fs::symlink("/tmp", root.join("players/verified/link")).unwrap();
             assert!(inspect(&root).is_err());
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+
+    #[test]
+    fn rejects_orphaned_chests_furnaces_and_hoppers_without_mutating_saves() {
+        let root = std::env::temp_dir().join(format!(
+            "f56-container-anchors-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let save = root.join("flat.irw");
+        let mut world = World::new();
+        world.save_new(&save).unwrap();
+
+        let items = serde_json::json!({
+            "version": 1,
+            "entries": {
+                "1,65,1": [
+                    {"id":4,"count":3,"damage":0},
+                    null,null,null,null,null,null,null,null,
+                    null,null,null,null,null,null,null,null,
+                    null,null,null,null,null,null,null,null,
+                    null,null
+                ]
+            }
+        });
+        let chests = Chests::location(&save);
+        fs::write(&chests, serde_json::to_vec(&items).unwrap()).unwrap();
+        let world_before = fs::read(&save).unwrap();
+        let chest_before = fs::read(&chests).unwrap();
+        assert!(inspect(&save).is_err(), "orphaned chest items accepted");
+        assert_eq!(fs::read(&save).unwrap(), world_before);
+        assert_eq!(fs::read(&chests).unwrap(), chest_before);
+        assert!(!root.join("session.lock").exists());
+        world.update_and_save(&save, 1, 65, 1, 54 << 4).unwrap();
+        assert!(inspect(&save).is_ok(), "real chest should own its inventory");
+
+        fs::remove_file(&chests).unwrap();
+        let furnace_file = Furnaces::location(&save);
+        let furnace = serde_json::json!({
+            "version": 1,
+            "entries": {
+                "2,65,1": {
+                    "slots":[{"id":15,"count":1,"damage":0},null,null],
+                    "burn_left":0,"burn_total":0,"cook":0
+                }
+            }
+        });
+        fs::write(&furnace_file, serde_json::to_vec(&furnace).unwrap()).unwrap();
+        assert!(inspect(&save).is_err(), "orphaned furnace accepted");
+        world.update_and_save(&save, 2, 65, 1, 61 << 4).unwrap();
+        assert!(inspect(&save).is_ok(), "unlit furnace should be valid");
+        world.update_and_save(&save, 2, 65, 1, 62 << 4).unwrap();
+        assert!(inspect(&save).is_ok(), "lit furnace should be valid");
+        fs::remove_file(&furnace_file).unwrap();
+
+        let hoppers = Hoppers::location(&save);
+        let hopper = serde_json::json!({
+            "version": 1,
+            "entries": {"3,65,1": [
+                {"id":4,"count":2,"damage":0},null,null,null,null
+            ]}
+        });
+        fs::write(&hoppers, serde_json::to_vec(&hopper).unwrap()).unwrap();
+        assert!(inspect(&save).is_err(), "orphaned hopper accepted");
+        world.update_and_save(&save, 3, 65, 1, 154 << 4).unwrap();
+        assert!(inspect(&save).is_ok(), "hopper should own its items");
+        assert!(!root.join("session.lock").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
