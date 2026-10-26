@@ -1762,3 +1762,164 @@ fn vanilla_1710_fixed_width_entity_packets_do_not_drop_the_session() {
     drop(client);
     server.wait_idle();
 }
+
+#[test]
+fn creative_minecart_placement_mount_and_restart_preserve_inventory() {
+    let mut server = NativeServer::start();
+    let (mut client, player_id, _) = server.join("RustTester");
+
+    let creative_slot = |id: i16| {
+        let mut payload = 36i16.to_be_bytes().to_vec();
+        payload.extend_from_slice(&id.to_be_bytes());
+        payload.push(1);
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        frame(0x10, &payload)
+    };
+    let place = |x: i32, y: u8, id: i16| {
+        let mut payload = x.to_be_bytes().to_vec();
+        payload.push(y);
+        payload.extend_from_slice(&0i32.to_be_bytes());
+        payload.push(1); // top face
+        payload.extend_from_slice(&id.to_be_bytes());
+        payload.push(1);
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        payload.extend_from_slice(&[8, 8, 8]);
+        frame(0x08, &payload)
+    };
+    let is_cart_spawn = |body: &[u8]| {
+        let mut remaining = body;
+        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&10)
+    };
+
+    // Both the rail and the cart must be present in the server-owned hotbar.
+    client.write_all(&creative_slot(66)).unwrap();
+    until_packet(&mut client, 0x2f, |body| {
+        body.len() == 10 && body[3..5] == 66i16.to_be_bytes()
+    });
+    client.write_all(&place(2, 63, 66)).unwrap();
+    until_packet(&mut client, 0x23, |body| {
+        body.len() == 11
+            && body[0..4] == 2i32.to_be_bytes()
+            && body[4] == 64
+            && body[5..9] == 0i32.to_be_bytes()
+            && body[9] == 66
+    });
+    client.write_all(&creative_slot(328)).unwrap();
+    until_packet(&mut client, 0x2f, |body| {
+        body.len() == 10 && body[3..5] == 328i16.to_be_bytes()
+    });
+
+    // A forged client slot snapshot must not authorize a cart placement.
+    client.write_all(&place(2, 64, 329)).unwrap();
+    client.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    let mut barrier_seen = false;
+    for _ in 0..MAX_PACKETS {
+        let (id, body) = receive(&mut client);
+        if id == 0 && body.len() == 4 {
+            client.write_all(&frame(0, &body)).unwrap();
+        }
+        assert!(
+            id != 0x0e || !is_cart_spawn(&body),
+            "forged held-item snapshot spawned a minecart"
+        );
+        if id == 2 && body.windows(10).any(|window| window == b"Online (1)") {
+            barrier_seen = true;
+            break;
+        }
+    }
+    assert!(barrier_seen, "server did not process the forged placement");
+    let cart_path = server.directory.join("flat.minecarts.json");
+    if cart_path.is_file() {
+        let saved: Value = serde_json::from_slice(&fs::read(&cart_path).unwrap()).unwrap();
+        assert_eq!(saved["carts"].as_array().unwrap().len(), 0);
+    }
+
+    client.write_all(&place(2, 64, 328)).unwrap();
+    let spawned = until_packet(&mut client, 0x0e, &is_cart_spawn);
+    let mut spawn_body = spawned.as_slice();
+    let cart_id = i32::try_from(read_varint(&mut spawn_body).unwrap()).unwrap();
+    assert_eq!(spawn_body[0], 10); // Spawn Object: rideable minecart
+    let mut interact = cart_id.to_be_bytes().to_vec();
+    interact.push(0); // C02 Interact
+    client.write_all(&frame(0x02, &interact)).unwrap();
+    until_packet(&mut client, 0x1b, |body| {
+        body.len() == 9
+            && body[0..4] == player_id.to_be_bytes()
+            && body[4..8] == cart_id.to_be_bytes()
+            && body[8] == 0
+    });
+
+    // Acknowledged placement must already be durable, and Creative must not
+    // consume the single cart in the authoritative inventory.
+    await_file(&cart_path);
+    let saved: Value = serde_json::from_slice(&fs::read(&cart_path).unwrap()).unwrap();
+    assert_eq!(saved["carts"].as_array().unwrap().len(), 1);
+    assert_eq!(saved["carts"][0]["id"].as_i64(), Some(i64::from(cart_id)));
+    let inventory_path = server.directory.join("players/rusttester.inventory.json");
+    let saved: Value = serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    assert_eq!(saved["slots"][36]["id"], 328);
+    assert_eq!(saved["slots"][36]["count"], 1);
+
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/stop\n")
+        .unwrap();
+    until_packet(&mut client, 0x40, |_| true);
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        if let Some(status) = server.process.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "server failed graceful shutdown: {status}"
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "server did not stop");
+        thread::sleep(Duration::from_millis(50));
+    }
+    drop(client);
+
+    // Restart the same world and ensure the same cart appears without a stale
+    // rider, so a newly admitted player can mount it again.
+    server.process = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
+        .args(["--bind", &format!("127.0.0.1:{}", server.port)])
+        .arg("--whitelist")
+        .arg(server.directory.join("whitelist.json"))
+        .arg("--world")
+        .arg(server.directory.join("flat.irw"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if TcpStream::connect(("127.0.0.1", server.port)).is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "native server did not restart");
+        assert!(server.process.try_wait().unwrap().is_none());
+        thread::sleep(Duration::from_millis(50));
+    }
+    let (mut rejoined, new_player_id, _) = server.join("RustTester");
+    let restored = until_packet(&mut rejoined, 0x0e, &is_cart_spawn);
+    let mut restored_body = restored.as_slice();
+    assert_eq!(read_varint(&mut restored_body).unwrap(), cart_id as u32);
+    rejoined.write_all(&frame(0x02, &interact)).unwrap();
+    until_packet(&mut rejoined, 0x1b, |body| {
+        body.len() == 9
+            && body[0..4] == new_player_id.to_be_bytes()
+            && body[4..8] == cart_id.to_be_bytes()
+            && body[8] == 0
+    });
+    let saved: Value = serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    assert_eq!(saved["slots"][36]["id"], 328);
+    assert_eq!(saved["slots"][36]["count"], 1);
+    drop(rejoined);
+    server.wait_idle();
+}

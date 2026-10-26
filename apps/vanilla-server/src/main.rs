@@ -1991,7 +1991,7 @@ fn play(
                     continue;
                 }
                 drop(hanging_state);
-                if survival && vitals.health > 0.0 && action == 0 {
+                if vitals.health > 0.0 && action == 0 {
                     if minecarts
                         .lock()
                         .map_err(|_| bad("minecarts mutex poisoned"))?
@@ -2025,6 +2025,11 @@ fn play(
                         .mount(target_id, entity_id, *player)
                     {
                         hub.broadcast(attach);
+                        continue;
+                    }
+                    // The remaining animal interactions debit items or wear
+                    // tools and are currently implemented for Survival only.
+                    if !survival {
                         continue;
                     }
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
@@ -3133,8 +3138,7 @@ fn play(
                     continue;
                 }
                 // Minecart item 328 places a bounded rideable cart on rails.
-                if survival
-                    && (0..=5).contains(&face)
+                if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
                     && inventory.held().is_some_and(|item| item.id == 328)
@@ -3150,15 +3154,22 @@ fn play(
                         .lock()
                         .map_err(|_| bad("minecarts mutex poisoned"))?;
                     if carts.can_place(&railway, position) {
-                        let mut candidate = inventory.clone();
-                        if candidate.consume_held() {
-                            let mut staged_carts = carts.clone();
-                            let spawned = staged_carts
-                                .place(&railway, position, now_tick)
-                                .ok_or_else(|| bad("minecart vanished after preflight"))?;
-                            let cart_file = Minecarts::location(world_path);
-                            // The item debit and newly placed minecart must be
-                            // committed as one redo-journal transaction.
+                        let candidate = if survival {
+                            let mut candidate = inventory.clone();
+                            if !candidate.consume_held() {
+                                continue;
+                            }
+                            Some(candidate)
+                        } else {
+                            None
+                        };
+                        let mut staged_carts = carts.clone();
+                        let spawned = staged_carts
+                            .place(&railway, position, now_tick)
+                            .ok_or_else(|| bad("minecart vanished after preflight"))?;
+                        let cart_file = Minecarts::location(world_path);
+                        let debited = if let Some(candidate) = candidate {
+                            // Survival debit and placement must be one transaction.
                             journal::commit(
                                 &world_path.with_extension("pending-txn.json"),
                                 &[
@@ -3167,12 +3178,21 @@ fn play(
                                 ],
                             )?;
                             *inventory = candidate;
-                            *carts = staged_carts;
-                            drop(carts);
-                            drop(railway);
+                            true
+                        } else {
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[(cart_file.as_path(), staged_carts.encoded()?)],
+                            )?;
+                            false
+                        };
+                        *carts = staged_carts;
+                        drop(carts);
+                        drop(railway);
+                        if debited {
                             send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                            hub.broadcast_in_view(position, spawned);
                         }
+                        hub.broadcast_in_view(position, spawned);
                     }
                     continue;
                 }
@@ -5365,20 +5385,6 @@ fn handle(
         {
             send(&mut s, object.id, &object.body)?;
         }
-        for object in boats
-            .lock()
-            .map_err(|_| bad("boats mutex poisoned"))?
-            .snapshot(player_state)
-        {
-            send(&mut s, object.id, &object.body)?;
-        }
-        for object in minecarts
-            .lock()
-            .map_err(|_| bad("minecarts mutex poisoned"))?
-            .snapshot(player_state)
-        {
-            send(&mut s, object.id, &object.body)?;
-        }
         for object in fishing
             .lock()
             .map_err(|_| bad("fishing mutex poisoned"))?
@@ -5386,6 +5392,19 @@ fn handle(
         {
             send(&mut s, object.id, &object.body)?;
         }
+    }
+    // Vehicles exist independently of the joining player's game mode.
+    // Snapshot under the lock, then release it before writing to the socket.
+    let visible_boats = boats
+        .lock()
+        .map_err(|_| bad("boats mutex poisoned"))?
+        .snapshot(player_state);
+    let visible_carts = minecarts
+        .lock()
+        .map_err(|_| bad("minecarts mutex poisoned"))?
+        .snapshot(player_state);
+    for object in visible_boats.into_iter().chain(visible_carts) {
+        send(&mut s, object.id, &object.body)?;
     }
     let mut session_dimension = admission_dimension;
     let result = play(

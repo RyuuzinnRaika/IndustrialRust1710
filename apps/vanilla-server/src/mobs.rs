@@ -2330,19 +2330,26 @@ impl Mobs {
                 if overworld && !overworld_biome_allows_natural_spawn(world.biome_at(cx, cz)) {
                     continue;
                 }
-                if overworld {
-                    let (block, sky) = world.light_at(cx, cy, cz);
+                let candidate_light = if overworld {
+                    let light = if (cx, cy, cz) == (x, y, z) {
+                        (block, sky)
+                    } else {
+                        world.light_at(cx, cy, cz)
+                    };
                     if !natural_spawn_species_light_ok(
                         kind,
                         world.natural_seed().unwrap_or(0),
                         (cx, cy, cz),
-                        (block, sky),
+                        light,
                         now,
                         is_passive,
                     ) {
                         continue;
                     }
-                }
+                    Some(light)
+                } else {
+                    None
+                };
                 if is_passive
                     && (world.get(cx, cy - 1, cz) >> 4 != 2
                         || !overworld_biome_allows_passive_spawn(world.biome_at(cx, cz)))
@@ -2368,7 +2375,7 @@ impl Mobs {
                         cy,
                         now,
                         hash(seed ^ (member as u64).wrapping_mul(0x65d2_1b0c_91fa_3e47)),
-                        world.light_at(cx, cy, cz),
+                        candidate_light.unwrap_or_else(|| world.light_at(cx, cy, cz)),
                     )
                 {
                     continue;
