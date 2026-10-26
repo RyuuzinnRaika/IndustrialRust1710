@@ -378,25 +378,26 @@ impl World {
     /// village registry: only edited lower halves are scanned and each candidate
     /// must have an intact upper half. Iron doors are not villager houses.
     ///
-    /// The BTreeMap x-range avoids scanning edits in unrelated villages. The
-    /// 128-door limit bounds work for a densely edited village.
+    /// Keep generated doors and select the nearest edited doors by 3D distance
+    /// to the village center. Edit-map iteration is ordered by x/y/z, which
+    /// otherwise lets distant doors exhaust the 128-door budget before nearby
+    /// houses are considered. Equal distances use coordinates as a stable tie-break.
     pub fn village_doors_including_player_edits(&self, x: i32, z: i32) -> Option<Vec<[i32; 3]>> {
         let (seed, dimension) = self.extended_identity()?;
         if dimension != crate::dimensions::Dimension::Overworld {
             return None;
         }
-        let (cx, _, cz) = crate::worldgen::village_center(seed, x, z)?;
+        let (cx, cy, cz) = crate::worldgen::village_center(seed, x, z)?;
         let mut doors: BTreeSet<[i32; 3]> = self
             .live_village_house_doors(x, z)?
             .into_iter()
             .flatten()
             .collect();
+        let remaining = 128usize.saturating_sub(doors.len());
+        let mut nearest = BTreeSet::new();
         for (&(dx, dy, dz), &lower) in self.edits.range(
             (cx.saturating_sub(31), 0u8, i32::MIN)..=(cx.saturating_add(31), u8::MAX, i32::MAX),
         ) {
-            if doors.len() >= 128 {
-                break;
-            }
             if (i64::from(dz) - i64::from(cz)).abs() > 26
                 || dy == u8::MAX
                 || lower >> 4 != 64
@@ -407,9 +408,21 @@ impl World {
             let upper = self.get(dx, i32::from(dy) + 1, dz);
             if upper >> 4 == 64 && upper & 8 != 0 && self.can_support(dx, i32::from(dy), dz, lower)
             {
-                doors.insert([dx, i32::from(dy), dz]);
+                let door = [dx, i32::from(dy), dz];
+                if doors.contains(&door) {
+                    continue;
+                }
+                let x_delta = i64::from(dx) - i64::from(cx);
+                let y_delta = i64::from(dy) - i64::from(cy);
+                let z_delta = i64::from(dz) - i64::from(cz);
+                let distance = x_delta * x_delta + y_delta * y_delta + z_delta * z_delta;
+                nearest.insert((distance, door));
+                if nearest.len() > remaining {
+                    nearest.pop_last();
+                }
             }
         }
+        doors.extend(nearest.into_iter().map(|(_, door)| door));
         Some(doors.into_iter().collect())
     }
     /// A bounded, live extension of an existing generated village: accept
@@ -2879,6 +2892,60 @@ mod tests {
             None
         );
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn village_core_prioritizes_nearby_door_after_many_distant_edits() {
+        let seed = 42;
+        let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+        let (cx, base, cz) = (-8..=8)
+            .flat_map(|gx| (-8..=8).map(move |gz| (gx * 192 + 48, gz * 192 + 48)))
+            .find_map(|(x, z)| crate::worldgen::village_center(seed, x, z))
+            .expect("seed 42 has a generated village");
+        let generated = world.live_village_house_doors(cx, cz).unwrap();
+
+        // More than 128 valid but distant doors sort before the nearby door
+        // in the edit map. They must not consume the entire live door budget.
+        for x_offset in -30..=-25 {
+            for z_offset in -20..=20 {
+                let x = cx + x_offset;
+                let z = cz + z_offset;
+                world.import_block(x, 199, z, 1 << 4).unwrap();
+                world.import_block(x, 200, z, 64 << 4).unwrap();
+                world.import_block(x, 201, z, 64 << 4 | 8).unwrap();
+            }
+        }
+        let near = [cx + 2, base + 1, cz + 10];
+        world
+            .import_block(near[0], near[1] - 1, near[2], 1 << 4)
+            .unwrap();
+        world
+            .import_block(near[0], near[1], near[2], 64 << 4)
+            .unwrap();
+        world
+            .import_block(near[0], near[1] + 1, near[2], 64 << 4 | 8)
+            .unwrap();
+
+        let doors = world.village_doors_including_player_edits(cx, cz).unwrap();
+        assert_eq!(doors.len(), 128);
+        assert!(doors.contains(&near), "nearby door must not be crowded out");
+        for door in generated.into_iter().flatten() {
+            assert!(doors.contains(&door), "generated village door must be retained");
+        }
+        assert!(!doors.contains(&[cx - 30, 200, cz - 20]));
+
+        world.import_block(near[0], near[1] + 1, near[2], 0).unwrap();
+        assert!(!world
+            .village_doors_including_player_edits(cx, cz)
+            .unwrap()
+            .contains(&near));
+        world
+            .import_block(near[0], near[1] + 1, near[2], 64 << 4 | 8)
+            .unwrap();
+        assert!(world
+            .village_doors_including_player_edits(cx, cz)
+            .unwrap()
+            .contains(&near));
     }
 
     #[test]
