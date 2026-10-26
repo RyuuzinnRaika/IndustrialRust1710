@@ -691,7 +691,9 @@ fn commit_region_batch(
                         .map_err(wrap)?
                         .is_some()
                     {
-                        return Err(invalid("E46 insert would overwrite an existing Anvil chunk"));
+                        return Err(invalid(
+                            "E46 insert would overwrite an existing Anvil chunk",
+                        ));
                     }
                 }
             }
