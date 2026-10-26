@@ -652,6 +652,50 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn nether_portal_z_axis_crosses_negative_chunk_boundary_without_corners() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-z-portal-boundary-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let mut world = World::expanded(31, Dimension::Overworld);
+        world.save_new(&path).unwrap();
+
+        // The interior spans Z=15..16, across a chunk boundary, at X=-16.
+        // Frame corners are optional in Minecraft 1.7.10.
+        for z in 14..=17 {
+            for y in 79..=83 {
+                if (z == 14 || z == 17) && (y == 79 || y == 83) {
+                    continue;
+                }
+                let id = if z == 14 || z == 17 || y == 79 || y == 83 {
+                    49
+                } else {
+                    90
+                };
+                world.update_and_save(&path, -16, y, z, id << 4).unwrap();
+            }
+        }
+        for z in 15..=16 {
+            assert_eq!(portal_target(&world, -16, 81, z), Some(Dimension::Nether));
+        }
+
+        // A broken side frame invalidates the entire portal.
+        world.update_and_save(&path, -16, 81, 14, 0).unwrap();
+        assert_eq!(portal_target(&world, -16, 81, 15), None);
+        world.update_and_save(&path, -16, 81, 14, 49 << 4).unwrap();
+
+        // A missing interior tile also invalidates the other interior tile.
+        world.update_and_save(&path, -16, 81, 16, 0).unwrap();
+        assert_eq!(portal_target(&world, -16, 81, 15), None);
+        world.update_and_save(&path, -16, 81, 16, 90 << 4).unwrap();
+        assert_eq!(portal_target(&world, -16, 81, 15), Some(Dimension::Nether));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn end_entry_requires_all_twelve_filled_frames() {
         let root = std::env::temp_dir().join(format!(
             "ir1710-end-frame-{}-{:?}",
