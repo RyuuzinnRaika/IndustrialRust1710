@@ -452,8 +452,8 @@ mod tests {
             &chests.comparator_snapshot(),
             chests.comparator_inputs(),
         );
-        assert_eq!(signals.get(&left), Some(&15));
-        assert_eq!(signals.get(&right), Some(&15));
+        assert_eq!(signals.get(&(-2, 64, 4)), Some(&15));
+        assert_eq!(signals.get(&(-1, 64, 4)), Some(&15));
 
         // The persisted right-half inventory has not been cleared yet, but
         // replacing the block must immediately remove its comparator signal.
@@ -463,8 +463,8 @@ mod tests {
             &chests.comparator_snapshot(),
             chests.comparator_inputs(),
         );
-        assert_eq!(signals.get(&left), Some(&15));
-        assert!(!signals.contains_key(&right));
+        assert_eq!(signals.get(&(-2, 64, 4)), Some(&15));
+        assert!(!signals.contains_key(&(-1, 64, 4)));
     }
 
     #[test]
