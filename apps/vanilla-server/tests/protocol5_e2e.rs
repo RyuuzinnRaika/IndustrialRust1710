@@ -297,6 +297,85 @@ fn send_fragments(s: &mut TcpStream, packet: &[u8], pieces: &[usize]) {
 }
 
 #[test]
+fn f54_stop_drains_two_live_protocol5_players_and_persists_their_state() {
+    let mut server = NativeServer::start();
+    let (mut first, _, _) = server.join("TwinAlpha");
+    let (mut second, _, _) = server.join("TwinBeta");
+    assert_eq!(server.status()["players"]["online"], 2);
+
+    // Exercise both player pipelines with live TCP commands before shutdown.
+    // This item must reach the authoritative Creative inventory, not simply
+    // be echoed from an untrusted client packet.
+    let mut creative_stack = 36i16.to_be_bytes().to_vec();
+    creative_stack.extend_from_slice(&1i16.to_be_bytes()); // stone
+    creative_stack.push(4); // count
+    creative_stack.extend_from_slice(&0i16.to_be_bytes()); // metadata
+    creative_stack.extend_from_slice(&(-1i16).to_be_bytes()); // no NBT
+    first.write_all(&frame(16, &creative_stack)).unwrap();
+    until_packet(&mut first, 0x2f, |body| body.starts_with(&[0, 0, 36]));
+    send_position(&mut first, 1.5, 65.0, 0.5);
+    send_position(&mut second, -1.5, 65.0, 0.5);
+
+    // Leave both sessions connected so /stop (not the client) must close them,
+    // flush each player's NBT/inventory, and join all world workers.
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/stop\n")
+        .unwrap();
+    let first_reason = until_packet(&mut first, 0x40, |_| true);
+    let second_reason = until_packet(&mut second, 0x40, |_| true);
+    assert!(String::from_utf8_lossy(&first_reason).contains("Server shutting down"));
+    assert!(String::from_utf8_lossy(&second_reason).contains("Server shutting down"));
+
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let exit = loop {
+        if let Some(exit) = server.process.try_wait().unwrap() {
+            break exit;
+        }
+        assert!(Instant::now() < deadline, "/stop left workers running");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        exit.success(),
+        "server failed graceful two-client /stop: {exit}"
+    );
+    assert!(
+        TcpStream::connect(("127.0.0.1", server.port)).is_err(),
+        "shutdown should close the TCP listener"
+    );
+    for name in ["twinalpha", "twinbeta"] {
+        let player = server.directory.join(format!("players/{name}.dat"));
+        let inventory = server
+            .directory
+            .join(format!("players/{name}.inventory.json"));
+        assert!(player.is_file(), "player NBT missing after /stop: {name}");
+        assert!(inventory.is_file(), "inventory missing after /stop: {name}");
+        assert!(fs::read(player).unwrap().starts_with(&[0x1f, 0x8b]));
+    }
+    let saved: Value = serde_json::from_slice(
+        &fs::read(server.directory.join("players/twinalpha.inventory.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["slots"][36]["id"], 1);
+    assert_eq!(saved["slots"][36]["count"], 4);
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
+        .arg("--verify-world")
+        .arg(server.directory.join("flat.irw"))
+        .status()
+        .unwrap();
+    assert!(
+        verify.success(),
+        "world verification failed after two-client /stop"
+    );
+    drop(first);
+    drop(second);
+}
+
+#[test]
 fn console_gamemode_changes_live_protocol5_and_keeps_inventories_isolated() {
     let mut server = NativeServer::start_with_mode(true);
     let (mut client, _, _) = server.join("RustTester");
