@@ -652,6 +652,73 @@ mod tests {
     }
 
     #[test]
+    fn d36_rename_only_creates_display_nbt_and_clearing_keeps_unknown_tags() {
+        let stone = stack(1, 1, 0);
+        let plan = repair_with_name(stone, None, Some("工具の名前")).unwrap();
+        assert_eq!(plan.levels, 1);
+        assert_eq!(plan.consumed, 0);
+        assert_eq!(plan.result.id, stone.id);
+        let Value::Compound(root) = item_nbt::value(plan.result.nbt.unwrap()).unwrap() else {
+            panic!("compound");
+        };
+        let Some(Value::Compound(display)) = root.get("display") else {
+            panic!("display");
+        };
+        assert_eq!(display.get("Name"), Some(&Value::String("工具の名前".into())));
+        assert!(repair_with_name(stone, None, Some("")).is_none());
+
+        let custom = Value::Compound(HashMap::from([
+            ("CustomUnknown".to_owned(), Value::Int(71)),
+            (
+                "display".to_owned(),
+                Value::Compound(HashMap::from([
+                    ("Name".to_owned(), Value::String("old".into())),
+                    (
+                        "Lore".to_owned(),
+                        Value::List(vec![Value::String("keep".into())]),
+                    ),
+                ])),
+            ),
+        ]));
+        let existing = Stack {
+            nbt: Some(item_nbt::from_value(&custom).unwrap()),
+            ..stone
+        };
+        let result = repair_with_name(existing, None, Some("")).unwrap();
+        assert_eq!(result.levels, 1);
+        let Value::Compound(root) = item_nbt::value(result.result.nbt.unwrap()).unwrap() else {
+            panic!("compound");
+        };
+        assert_eq!(root.get("CustomUnknown"), Some(&Value::Int(71)));
+        let Some(Value::Compound(display)) = root.get("display") else {
+            panic!("display");
+        };
+        assert!(!display.contains_key("Name"));
+        assert_eq!(
+            display.get("Lore"),
+            Some(&Value::List(vec![Value::String("keep".into())]))
+        );
+        assert!(repair_with_name(existing, None, Some("old")).is_none());
+    }
+
+    #[test]
+    fn d36_rename_and_repair_combine_and_reject_malformed_names() {
+        let left = stack(257, 1, 100);
+        let right = stack(265, 2, 0);
+        let repaired = repair(left, right).unwrap();
+        let named = repair_with_name(left, Some(right), Some("New Pickaxe")).unwrap();
+        assert_eq!(named.levels, repaired.levels + 1);
+        assert_eq!(named.consumed, repaired.consumed);
+        assert_eq!(named.result.damage, repaired.result.damage);
+        assert!(named.result.nbt.is_some());
+        // Repeated names, control characters and oversized GUI input cannot
+        // increase the cost or create invalid item metadata.
+        assert!(repair_with_name(left, None, Some(&"A".repeat(31))).is_none());
+        assert!(repair_with_name(left, None, Some("A\\nB")).is_none());
+        assert!(repair_with_name(left, None, Some(&"😀".repeat(16))).is_none());
+    }
+
+    #[test]
     fn rejecting_invalid_anvil_inputs_preserves_inventory() {
         assert!(repair(stack(257, 2, 100), stack(265, 3, 0)).is_none());
         assert!(repair(stack(257, 1, 0), stack(265, 3, 0)).is_none());
