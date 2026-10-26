@@ -363,7 +363,15 @@ impl World {
         if dimension != crate::dimensions::Dimension::Overworld {
             return None;
         }
-        crate::worldgen::village_live_house_doors(seed, x, z, |dx, dy, dz| self.get(dx, dy, dz))
+        // A generated door is no longer a valid village goal when the block
+        // beneath its lower half is removed or replaced by non-solid terrain.
+        // Match the live support check used for player-built village doors.
+        let doors = crate::worldgen::village_live_house_doors(seed, x, z, |dx, dy, dz| {
+            self.get(dx, dy, dz)
+        })?;
+        Some(doors.map(|door| {
+            door.filter(|&[dx, dy, dz]| self.can_support(dx, dy, dz, self.get(dx, dy, dz)))
+        }))
     }
     /// Resolve intact generated and player-built wooden doors inside a generated
     /// village footprint. This is a live, bounded lookup, not a persistent
@@ -2495,6 +2503,16 @@ mod tests {
                 assert_eq!(world.live_village_house_doors(x, z), Some([None, second]));
                 world.import_block(dx, dy, dz, lower).unwrap();
                 world.import_block(dx, dy + 1, dz, upper).unwrap();
+                assert_eq!(world.live_village_house_doors(x, z), Some(doors));
+
+                // Both halves may survive a terrain edit even though a door
+                // without a solid foundation must cease being a village goal.
+                let support = world.get(dx, dy - 1, dz);
+                for unsupported in [0, 9 << 4, 50 << 4] {
+                    world.import_block(dx, dy - 1, dz, unsupported).unwrap();
+                    assert_eq!(world.live_village_house_doors(x, z), Some([None, second]));
+                }
+                world.import_block(dx, dy - 1, dz, support).unwrap();
                 assert_eq!(world.live_village_house_doors(x, z), Some(doors));
                 if negative {
                     negative_checked = true;
