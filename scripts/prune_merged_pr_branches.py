@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Maintenance: branch-prune run requested on 2026-10-26 JST; safeguards unchanged.
 """Conservatively prune repository branches whose PRs were merged into main.
 
 Default mode only prints candidates. Run with --apply to delete them.
