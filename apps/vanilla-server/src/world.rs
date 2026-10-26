@@ -547,7 +547,9 @@ impl World {
                 continue;
             }
             let upper = self.get(dx, height + 1, dz);
-            if upper >> 4 != 64 || upper & 8 == 0 || self.get(dx, height - 1, dz) >> 4 == 0 {
+            // Match the same solid-support rule used when placing a door.
+            // Water, torches, and other non-solid blocks cannot anchor a house.
+            if upper >> 4 != 64 || upper & 8 == 0 || !self.can_support(dx, height, dz, lower) {
                 continue;
             }
             // Lower-half metadata 0/2 faces along Z, 1/3 along X.
@@ -2192,6 +2194,22 @@ mod tests {
         );
         world
             .import_block(door[0], door[1] + 3, door[2] + 1, support)
+            .unwrap();
+        assert_eq!(doors(&world), vec![door]);
+        // A door must stop qualifying as a house as soon as its support
+        // disappears or becomes a non-solid block. Restoring stone makes
+        // the same live door eligible again without rebuilding its halves.
+        for unsupported in [0, 9 << 4, 50 << 4] {
+            world
+                .import_block(door[0], door[1] - 1, door[2], unsupported)
+                .unwrap();
+            assert!(
+                doors(&world).is_empty(),
+                "unsupported block {unsupported} must not anchor a village door"
+            );
+        }
+        world
+            .import_block(door[0], door[1] - 1, door[2], support)
             .unwrap();
         assert_eq!(doors(&world), vec![door]);
         world
