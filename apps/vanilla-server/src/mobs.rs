@@ -564,7 +564,9 @@ fn villager_door_destination(world: &World, at: PlayerPosition) -> Option<Player
     let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
     let doors = world
         .village_doors_with_bounded_annex(x, z)
-        .unwrap_or_else(|| world.independent_player_village_doors_near(x, z));
+        .unwrap_or_else(|| {
+            world.independent_player_village_doors_near_at(x, at.y.floor() as i32, z)
+        });
     doors
         .into_iter()
         .filter_map(|[x, y, z]| {
@@ -5023,6 +5025,12 @@ mod tests {
                 z: f64::from(z) + 1.5,
             })
         );
+        // A door on a different floor must not attract this villager.
+        let upper_floor = PlayerPosition {
+            y: f64::from(y + 16),
+            ..at
+        };
+        assert_eq!(villager_door_destination(&world, upper_floor), None);
         world.import_block(x, y + 3, z + 1, 0).unwrap();
         assert_eq!(villager_door_destination(&world, at), None);
         assert_eq!(
