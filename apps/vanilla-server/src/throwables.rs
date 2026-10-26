@@ -269,6 +269,10 @@ impl Throwables {
                 }
             }
             if let Some(at) = collision {
+                // Destroy packets are broadcast to observers near this position.
+                // Keep the impact point, not the previous tick's location, so
+                // clients near the collision also receive the removal.
+                object.at = at;
                 if object.kind == Kind::Pearl {
                     // The existing session-owned teleport path validates and
                     // durably persists the player position before syncing.
@@ -408,6 +412,31 @@ mod tests {
         };
         assert!((height(Kind::Snowball) - height(Kind::Arrow) - 0.02).abs() < 1e-10);
         assert!((height(Kind::Egg) - height(Kind::Snowball)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dispenser_projectile_destroy_is_broadcast_from_impact_position() {
+        let mut objects = Throwables::default();
+        let mut world = World::new();
+        world.import_block(2, 70, 0, 1 << 4).unwrap();
+        let (origin, _) = objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
+        let projectile_id = *objects.active.keys().next().unwrap();
+        assert!(origin.x < 2.0);
+
+        let result = objects.tick(&world, 1);
+        assert!(objects.active.is_empty());
+        assert_eq!(result.events.len(), 1);
+        let (at, packet) = &result.events[0];
+        assert_eq!(packet.id, 0x13);
+        assert_eq!(packet.body[0], 1);
+        assert_eq!(
+            i32::from_be_bytes(packet.body[1..5].try_into().unwrap()),
+            projectile_id
+        );
+        assert!((2.0..2.3).contains(&at.x), "impact={at:?}");
+        assert!((at.y - 70.5).abs() < 1e-10);
     }
 
     #[test]
