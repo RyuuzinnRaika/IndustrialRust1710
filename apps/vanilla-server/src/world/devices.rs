@@ -114,6 +114,19 @@ fn piston_breakable(block: u16) -> bool {
             | 77 | 143 // buttons
             | 93 | 94 // redstone repeaters
             | 149 | 150 // comparators
+            | 6 // saplings
+            | 31 | 32 // tall grass and dead bush
+            | 37
+            ..=40 // flowers and mushrooms
+            | 59 // wheat
+            | 78 // snow layer
+            | 83 // sugar cane
+            | 104 | 105 // pumpkin and melon stems
+            | 106 // vines
+            | 115 // nether wart
+            | 141 | 142 // carrots and potatoes
+            | 171 // carpet
+            | 175 // double-height plants
     )
 }
 
@@ -1350,6 +1363,55 @@ mod redstone_regression_tests {
             assert!(
                 !changes.contains_key(&(2, 64, 0)),
                 "sticky piston must not pull fragile block {fragile_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn pistons_destroy_fragile_plants_instead_of_translating_them() {
+        // Vanilla 1.7.10 uproots these non-solid plants and coverings when
+        // a piston extends; a sticky piston must not pull them back.
+        // Drops are intentionally out of scope for this regression.
+        for fragile_id in [
+            6u16, 31, 32, 37, 38, 39, 40, 59, 78, 83, 104, 105, 106, 115, 141, 142, 171, 175,
+        ] {
+            assert!(piston_breakable(fragile_id << 4));
+            for solids_ahead in [0, 1] {
+                let mut world = World::new();
+                let piston = (33 << 4) | 5; // East-facing normal piston.
+                world.import_block(-2, 64, 0, (69 << 4) | 8).unwrap();
+                world.import_block(-1, 64, 0, piston).unwrap();
+                if solids_ahead == 1 {
+                    world.import_block(0, 64, 0, 1 << 4).unwrap();
+                }
+                world
+                    .import_block(solids_ahead, 64, 0, fragile_id << 4)
+                    .unwrap();
+                let mut changes = BTreeMap::new();
+                world.push_piston(-1, 64, 0, piston, &mut changes);
+                assert_eq!(changes.get(&(-1, 64, 0)), Some(&(piston | 8)));
+                assert_eq!(changes.get(&(0, 64, 0)), Some(&((34 << 4) | 5)));
+                if solids_ahead == 1 {
+                    assert_eq!(changes.get(&(1, 64, 0)), Some(&(1 << 4)));
+                }
+                assert!(
+                    !changes.values().any(|block| block >> 4 == fragile_id),
+                    "piston must not translate plant {fragile_id}"
+                );
+            }
+
+            let mut world = World::new();
+            let sticky = (29 << 4) | 13; // Extended sticky piston, east.
+            world.import_block(0, 64, 0, sticky).unwrap();
+            world.import_block(1, 64, 0, (34 << 4) | 5).unwrap();
+            world.import_block(2, 64, 0, fragile_id << 4).unwrap();
+            let mut changes = BTreeMap::new();
+            world.push_piston(0, 64, 0, sticky, &mut changes);
+            assert_eq!(changes.get(&(0, 64, 0)), Some(&((29 << 4) | 5)));
+            assert_eq!(changes.get(&(1, 64, 0)), Some(&0));
+            assert!(
+                !changes.contains_key(&(2, 64, 0)),
+                "sticky piston must not pull plant {fragile_id}"
             );
         }
     }
