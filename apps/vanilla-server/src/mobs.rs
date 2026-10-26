@@ -4628,18 +4628,9 @@ mod tests {
     fn natural_spawn_coordinate_offsets_reject_overflow_and_invalid_positions() {
         assert_eq!(natural_spawn_offset_block(0.5, 24), Some(24));
         assert_eq!(natural_spawn_offset_block(-0.5, -24), Some(-25));
-        assert_eq!(
-            natural_spawn_offset_block(f64::from(i32::MAX), 1),
-            None
-        );
-        assert_eq!(
-            natural_spawn_offset_block(f64::from(i32::MIN), -1),
-            None
-        );
-        assert_eq!(
-            natural_spawn_offset_block(f64::from(i32::MAX) + 1.0, -1),
-            None
-        );
+        assert_eq!(natural_spawn_offset_block(f64::from(i32::MAX), 1), None);
+        assert_eq!(natural_spawn_offset_block(f64::from(i32::MIN), -1), None);
+        assert_eq!(natural_spawn_offset_block(f64::from(i32::MAX) + 1.0, -1), None);
         assert_eq!(natural_spawn_offset_block(f64::NAN, 0), None);
         assert_eq!(natural_spawn_offset_block(f64::INFINITY, 0), None);
         // A pack member must also be skipped when its local displacement
