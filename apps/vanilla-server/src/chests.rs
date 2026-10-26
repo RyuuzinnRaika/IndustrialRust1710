@@ -283,6 +283,9 @@ pub fn combine_chest_comparator_inputs(
     snapshots: &BTreeMap<Position, [Option<Stack>; CHEST_SLOTS]>,
     mut inputs: BTreeMap<(i32, u8, i32), u8>,
 ) -> BTreeMap<(i32, u8, i32), u8> {
+    // A chest inventory entry may outlive its block after a replacement.
+    // Never expose its old analog strength to the world update pipeline.
+    inputs.retain(|&(x, y, z), _| matches!(world.get(x, i32::from(y), z) >> 4, 54 | 146));
     for (&(x, y, z), slots) in snapshots {
         let id = world.get(x, y, z) >> 4;
         if !matches!(id, 54 | 146) {
@@ -422,8 +425,46 @@ mod tests {
             &chests.comparator_snapshot(),
             chests.comparator_inputs(),
         );
-        assert_eq!(inputs.get(&(0, 64, 0)), Some(&15));
-        // The world setter filters this stale single-chest entry by block ID.
+        assert!(!inputs.contains_key(&(0, 64, 0)));
+        // The snapshot combiner itself must drop stale single-chest entries.
+    }
+
+    #[test]
+    fn double_chest_comparator_drops_replaced_half_with_stale_inventory() {
+        let left = (-2, 64, 4);
+        let right = (-1, 64, 4);
+        let stack = Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        let chests = Chests::default()
+            .staged_update(left, [Some(stack); CHEST_SLOTS])
+            .unwrap()
+            .staged_update(right, [Some(stack); CHEST_SLOTS])
+            .unwrap();
+        let mut world = world::World::new();
+        world.import_block(left.0, left.1, left.2, 54 << 4).unwrap();
+        world.import_block(right.0, right.1, right.2, 54 << 4).unwrap();
+        let signals = combine_chest_comparator_inputs(
+            &world,
+            &chests.comparator_snapshot(),
+            chests.comparator_inputs(),
+        );
+        assert_eq!(signals.get(&left), Some(&15));
+        assert_eq!(signals.get(&right), Some(&15));
+
+        // The persisted right-half inventory has not been cleared yet, but
+        // replacing the block must immediately remove its comparator signal.
+        world.import_block(right.0, right.1, right.2, 1 << 4).unwrap();
+        let signals = combine_chest_comparator_inputs(
+            &world,
+            &chests.comparator_snapshot(),
+            chests.comparator_inputs(),
+        );
+        assert_eq!(signals.get(&left), Some(&15));
+        assert!(!signals.contains_key(&right));
     }
 
     #[test]
