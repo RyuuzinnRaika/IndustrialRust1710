@@ -596,9 +596,7 @@ pub fn portal_target(world: &World, x: i32, y: i32, z: i32) -> Option<Dimension>
         }
         (Dimension::Overworld, 119) if valid_end_entry(world, x, y, z) => Some(Dimension::End),
         // A partial or broken End exit fountain must not allow travel.
-        (Dimension::End, 119) if valid_end_return(world, x, y, z) => {
-            Some(Dimension::Overworld)
-        }
+        (Dimension::End, 119) if valid_end_return(world, x, y, z) => Some(Dimension::Overworld),
         _ => None,
     }
 }
