@@ -297,6 +297,10 @@ mod tests {
     fn dispenser_and_dropper_windows_use_distinct_titles() {
         assert_eq!(window_title(23), Some("Dispenser"));
         assert_eq!(window_title(158), Some("Dropper"));
+        assert_eq!(
+            serde_json::json!({"text": window_title(158).unwrap()}).to_string(),
+            r#"{"text":"Dropper"}"#
+        );
         for other in [0, 54, 154, 255] {
             assert_eq!(window_title(other), None);
         }
