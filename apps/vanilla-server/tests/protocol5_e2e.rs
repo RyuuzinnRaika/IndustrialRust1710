@@ -112,6 +112,25 @@ impl NativeServer {
         cursor.finish().unwrap();
         status
     }
+    fn status_ping(&self, token: i64) -> Duration {
+        let mut socket = self.client();
+        socket.write_all(&handshake(self.port, 1)).unwrap();
+        socket.write_all(&frame(0, &[])).unwrap();
+        let (packet_id, body) = receive(&mut socket);
+        assert_eq!(packet_id, 0, "missing Status Response before Ping");
+        let mut cursor = Cursor::new(&body);
+        let _: Value = serde_json::from_str(&cursor.read_string(65536).unwrap()).unwrap();
+        cursor.finish().unwrap();
+
+        let payload = token.to_be_bytes();
+        let started = Instant::now();
+        socket.write_all(&frame(1, &payload)).unwrap();
+        let (packet_id, echoed) = receive(&mut socket);
+        let elapsed = started.elapsed();
+        assert_eq!(packet_id, 1, "missing Ping Response");
+        assert_eq!(echoed, payload, "Ping Response must echo the exact token");
+        elapsed
+    }
     fn wait_idle(&self) {
         let deadline = Instant::now() + Duration::from_secs(9);
         while self.status()["players"]["online"].as_u64() != Some(0) {
@@ -547,6 +566,13 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
 
     let (mut mover, _, _) = server.join("Positioner");
     send_position(&mut mover, 3.5, 65.0, 2.5);
+    // Wait for a later packet response as a protocol-order barrier. Without
+    // it this test can close TCP before the server has polled the final move.
+    mover.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    let list = until_packet(&mut mover, 2, |body| {
+        body.windows(10).any(|window| window == b"Online (1)")
+    });
+    assert!(String::from_utf8_lossy(&list).contains("Positioner"));
     drop(mover);
     server.wait_idle();
     await_file(&server.directory.join("players/positioner.dat"));
@@ -642,6 +668,16 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
         .status()
         .unwrap();
     assert!(!retry.success(), "import overwrote an existing world");
+}
+
+#[test]
+fn protocol5_server_list_ping_echoes_latency_token_after_status_response() {
+    let server = NativeServer::start();
+    let elapsed = server.status_ping(0x0102_0304_0506_0708);
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "Ping Response took {elapsed:?}"
+    );
 }
 
 #[test]

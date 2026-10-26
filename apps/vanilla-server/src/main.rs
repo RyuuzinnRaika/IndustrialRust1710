@@ -328,14 +328,7 @@ fn status(s: &mut Connection, hub: &Hub) -> io::Result<()> {
     send(s, 0, &bytes)?;
     match receive(s) {
         Ok((1, data)) if data.len() == 8 => send(s, 1, &data),
-        Err(e)
-            if matches!(
-                e.kind(),
-                ErrorKind::UnexpectedEof | ErrorKind::WouldBlock | ErrorKind::TimedOut
-            ) =>
-        {
-            Ok(())
-        }
+        Err(e) if matches!(e.kind(), ErrorKind::UnexpectedEof | ErrorKind::TimedOut) => Ok(()),
         _ => Err(bad("bad status ping")),
     }
 }
@@ -7479,6 +7472,11 @@ fn main() -> io::Result<()> {
             }
             Err(error) => return Err(error),
         };
+        // Do not let the listener's nonblocking accept mode leak into client
+        // sockets. Status clients send the latency Ping only after reading the
+        // Status Response, so an immediate WouldBlock here must not close the
+        // connection before that second packet arrives.
+        stream.set_nonblocking(false)?;
         if shutdown.load(Ordering::Acquire) {
             break;
         }
