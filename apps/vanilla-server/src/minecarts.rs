@@ -874,9 +874,18 @@ mod tests {
         assert!(carts.place(&world, at, 0).is_some());
         for invalid in [
             PlayerPosition { x: f64::NAN, ..at },
-            PlayerPosition { y: f64::INFINITY, ..at },
-            PlayerPosition { z: f64::NEG_INFINITY, ..at },
-            PlayerPosition { x: f64::from(crate::world::WORLD_LIMIT), ..at },
+            PlayerPosition {
+                y: f64::INFINITY,
+                ..at
+            },
+            PlayerPosition {
+                z: f64::NEG_INFINITY,
+                ..at
+            },
+            PlayerPosition {
+                x: f64::from(crate::world::WORLD_LIMIT),
+                ..at
+            },
             PlayerPosition { y: 256.0, ..at },
         ] {
             assert!(carts.mount(FIRST_ID, 42, invalid).is_none());
