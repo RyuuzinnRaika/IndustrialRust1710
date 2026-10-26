@@ -506,7 +506,8 @@ mod tests {
         assert_eq!(slots[27], Some(single));
         assert!(slots[..27].iter().all(|slot| *slot == Some(full)));
 
-        // A full 54-slot chest must leave every stack unchanged.
+        // Fill the last partial stack before asserting a full-chest no-op.
+        slots[27] = Some(full);
         let snapshot = slots.clone();
         assert!(!insert_one_into_window(&mut slots, single));
         assert_eq!(slots, snapshot);
