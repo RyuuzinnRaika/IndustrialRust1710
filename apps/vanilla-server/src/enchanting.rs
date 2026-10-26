@@ -240,6 +240,20 @@ fn conflicting(a: i16, b: i16) -> bool {
             || ((16..=18).contains(&a) && (16..=18).contains(&b))
             || (matches!(a, 33 | 35) && matches!(b, 33 | 35)))
 }
+/// Shared vanilla 1.7.10 enchantment rules for anvil application.
+pub(crate) fn anvil_level_limit(item_id: i16, enchant_id: i16) -> Option<i16> {
+    let rule = RULES.iter().find(|rule| rule.id == enchant_id)?;
+    if item_id == 403 || supports(item_id, rule.kind) {
+        Some(i16::from(rule.max))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn anvil_enchant_conflicts(a: i16, b: i16) -> bool {
+    conflicting(a, b)
+}
+
 fn enchantability(id: i16) -> u8 {
     if id == 340 {
         return 1;

@@ -1615,8 +1615,8 @@ impl Inventory {
         }
     }
 
-    /// Compute the server-owned result. Only untagged durability repair is
-    /// supported until generic ItemStack NBT exists in Inventory.
+    /// Compute a server-owned durability repair or compatible enchantment merge.
+    /// The 1.7.10 rename GUI and full prior-work costs remain pending.
     pub fn anvil_preview(&self) -> Option<crate::workstations::Repair> {
         crate::workstations::repair(self.anvil_inputs[0]?, self.anvil_inputs[1]?)
     }
@@ -1770,9 +1770,8 @@ impl Inventory {
                 if mode == 1 && matches!(button, 0 | 1) {
                     if let Some(item) = self.slots[translated as usize] {
                         // 1.7.10 Shift-click places a repairable tool into
-                        // the first input slot, or compatible material into
-                        // the second. Until ItemStack NBT is supported, only
-                        // untagged durability-repair combinations qualify.
+                        // the first input slot, or compatible material/book
+                        // into the second. Reject unsupported combinations.
                         if self.anvil_inputs[0].is_none()
                             && item.count == 1
                             && crate::items_1710::max_durability(item.id).is_some()
@@ -3059,6 +3058,59 @@ mod tests {
         assert_eq!(inv.slots[15], previous.enchant_input);
         assert_eq!(inv.enchant_input, None);
         assert!(inv.reclaim_enchanting_input());
+    }
+
+    #[test]
+    fn d36_anvil_book_application_is_atomic_with_xp_and_nbt_save() {
+        use fastnbt::Value;
+        let source = Value::Compound(std::collections::HashMap::from([(
+            "StoredEnchantments".to_owned(),
+            Value::List(vec![Value::Compound(std::collections::HashMap::from([
+                ("id".to_owned(), Value::Short(32)),
+                ("lvl".to_owned(), Value::Short(3)),
+            ]))]),
+        )]));
+        let book = Stack {
+            id: 403,
+            count: 1,
+            damage: 0,
+            nbt: Some(crate::item_nbt::from_value(&source).unwrap()),
+        };
+        let pickaxe = Stack {
+            id: 257,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inv = Inventory {
+            anvil_inputs: [Some(pickaxe), Some(book)],
+            ..Inventory::default()
+        };
+        let expected = inv.anvil_preview().unwrap().result;
+        assert!(expected.nbt.is_some());
+        let mut xp = crate::experience::Experience::default();
+        let original = inv.clone();
+        assert!(!inv.anvil_click_window(2, 0, 0, &mut xp, true));
+        assert_eq!(inv, original);
+        assert_eq!(xp.total, 0);
+
+        xp.total = 300;
+        assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
+        assert_eq!(inv.anvil_inputs, [None, None]);
+        assert_eq!(inv.cursor, Some(expected));
+        assert!(xp.total < 300);
+        let saved = inv.encoded().unwrap();
+        let reloaded: Inventory = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(reloaded.cursor, Some(expected));
+        assert_eq!(reloaded.anvil_inputs, [None, None]);
+        let Value::Compound(tags) =
+            crate::item_nbt::value(reloaded.cursor.unwrap().nbt.unwrap()).unwrap()
+        else {
+            panic!("missing anvil output NBT");
+        };
+        assert!(tags.contains_key("ench"));
+        assert!(!tags.contains_key("StoredEnchantments"));
+        assert!(!inv.anvil_click_window(2, 0, 0, &mut xp, true));
     }
 
     #[test]
