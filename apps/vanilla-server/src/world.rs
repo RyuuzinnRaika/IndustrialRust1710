@@ -523,8 +523,7 @@ impl World {
         }
         let mut doors = Vec::new();
         for (&(dx, dy, dz), &lower) in self.edits.range(
-            (x.saturating_sub(32), 0u8, i32::MIN)
-                ..=(x.saturating_add(32), u8::MAX, i32::MAX),
+            (x.saturating_sub(32), 0u8, i32::MIN)..=(x.saturating_add(32), u8::MAX, i32::MAX),
         ) {
             if doors.len() >= 32 {
                 break;
@@ -539,10 +538,7 @@ impl World {
             }
             let height = i32::from(dy);
             let upper = self.get(dx, height + 1, dz);
-            if upper >> 4 != 64
-                || upper & 8 == 0
-                || self.get(dx, height - 1, dz) >> 4 == 0
-            {
+            if upper >> 4 != 64 || upper & 8 == 0 || self.get(dx, height - 1, dz) >> 4 == 0 {
                 continue;
             }
             // Lower-half metadata 0/2 faces along Z, 1/3 along X.
@@ -2178,7 +2174,10 @@ mod tests {
             .import_block(door[0], door[1] + 1, door[2], 64 << 4 | 8)
             .unwrap();
         let doors = |world: &World| world.independent_player_village_doors_near(door[0], door[2]);
-        assert!(doors(&world).is_empty(), "a bare outdoor door is not a village");
+        assert!(
+            doors(&world).is_empty(),
+            "a bare outdoor door is not a village"
+        );
         world
             .import_block(door[0], door[1] + 3, door[2] + 1, support)
             .unwrap();
@@ -2194,7 +2193,10 @@ mod tests {
         world
             .import_block(door[0], door[1] + 1, door[2], 0)
             .unwrap();
-        assert!(doors(&world).is_empty(), "a broken upper half invalidates the door");
+        assert!(
+            doors(&world).is_empty(),
+            "a broken upper half invalidates the door"
+        );
         world
             .import_block(door[0], door[1] + 1, door[2], 64 << 4 | 8)
             .unwrap();
