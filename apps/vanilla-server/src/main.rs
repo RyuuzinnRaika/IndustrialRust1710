@@ -5370,7 +5370,12 @@ fn run_player_admin_command(
     let parts: Vec<&str> = message.split_whitespace().collect();
     let minimum_level = match parts.first().copied() {
         Some("/time") | Some("/weather") => 2,
-        Some("/kick") | Some("/ban") | Some("/pardon") | Some("/ban-ip") | Some("/pardon-ip") => 3,
+        Some("/kick")
+        | Some("/ban")
+        | Some("/pardon")
+        | Some("/pardon-uuid")
+        | Some("/ban-ip")
+        | Some("/pardon-ip") => 3,
         Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
         _ => return Err(bad("unknown operator command")),
     };
@@ -5413,6 +5418,10 @@ fn run_player_admin_command(
         ["/pardon", target] => {
             administration.set_player_ban(target, None, false)?;
             Ok(format!("Unbanned {target}"))
+        }
+        ["/pardon-uuid", uuid] => {
+            administration.pardon_uuid(uuid)?;
+            Ok(format!("Unbanned verified UUID {uuid}"))
         }
         ["/ban-ip", address, reason @ ..] => {
             let reason = if reason.is_empty() {
@@ -5757,6 +5766,7 @@ fn start_clock_console(
                     Ok(())
                 })(),
                 ["/pardon", name] => administration.set_player_ban(name, None, false),
+                ["/pardon-uuid", uuid] => administration.pardon_uuid(uuid),
                 ["/ban-ip", address, reason @ ..] => (|| -> io::Result<()> {
                     let reason = if reason.is_empty() {
                         "IP banned by administrator".to_owned()
