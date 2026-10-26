@@ -29,6 +29,8 @@ mod inventory;
 mod item_nbt;
 mod items_1710;
 mod journal;
+#[allow(dead_code)] // E46: opt-in block-to-Anvil projection; live save switch gated.
+mod legacy_chunk_patch;
 mod legacy_chunk_store;
 mod legacy_entity_nbt;
 mod legacy_inventory_nbt;
