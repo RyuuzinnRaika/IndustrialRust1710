@@ -61,7 +61,10 @@ fn move_one(src: &mut [Option<Stack>], dst: &mut [Option<Stack>]) -> bool {
             .iter()
             .position(|target| {
                 target.is_some_and(|s| {
-                    s.id == stack.id && s.damage == stack.damage && s.count < s.max_count()
+                    s.id == stack.id
+                        && s.damage == stack.damage
+                        && s.nbt == stack.nbt
+                        && s.count < s.max_count()
                 })
             })
             .or_else(|| dst.iter().position(Option::is_none));
@@ -296,6 +299,7 @@ mod tests {
             id: 373,
             count: 1,
             damage: 8194,
+            nbt: None,
         };
         let mut source = [Some(potion)];
         let mut target = [Some(potion); 5];
@@ -321,11 +325,13 @@ mod tests {
             id: 4,
             count: 3,
             damage: 0,
+            nbt: None,
         }); 5];
         let mut target = [Some(Stack {
             id: 4,
             count: 63,
             damage: 0,
+            nbt: None,
         }); 27];
         assert!(move_one(&mut src, &mut target));
         assert_eq!(src[0].unwrap().count, 2);

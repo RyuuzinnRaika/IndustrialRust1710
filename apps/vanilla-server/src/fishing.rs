@@ -118,16 +118,19 @@ impl Fishing {
                             2 => 3,
                             _ => 0,
                         },
+                        nbt: None,
                     },
                     85..=94 => Stack {
                         id: 287,
                         count: 1,
                         damage: 0,
+                        nbt: None,
                     }, // string (junk)
                     _ => Stack {
                         id: 266,
                         count: 1,
                         damage: 0,
+                        nbt: None,
                     }, // gold ingot (treasure)
                 });
             }

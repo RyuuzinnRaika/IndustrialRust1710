@@ -145,12 +145,14 @@ impl Hanging {
                 id: 321,
                 count: 1,
                 damage: 0,
+                nbt: None,
             }],
             Kind::Frame { item, .. } => {
                 let mut drops = vec![Stack {
                     id: 389,
                     count: 1,
                     damage: 0,
+                    nbt: None,
                 }];
                 if let Some(stack) = item {
                     drops.push(*stack);
@@ -497,6 +499,7 @@ mod tests {
             id: 260,
             count: 7,
             damage: 0,
+            nbt: None,
         };
         let (state, debit, packet) = state
             .stage_frame_use(frame.id, Some(item))

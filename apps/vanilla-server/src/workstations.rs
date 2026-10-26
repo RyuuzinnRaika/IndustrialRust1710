@@ -285,7 +285,12 @@ pub(crate) fn enchant_nbt_item(
 mod tests {
     use super::*;
     fn stack(id: i16, count: u8, damage: i16) -> Stack {
-        Stack { id, count, damage }
+        Stack {
+            id,
+            count,
+            damage,
+            nbt: None,
+        }
     }
     #[test]
     fn bookshelf_gap_and_cap_are_server_calculated() {

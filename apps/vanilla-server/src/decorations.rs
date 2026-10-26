@@ -433,6 +433,7 @@ mod tests {
             id: 2256,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         let mut inventory = crate::inventory::Inventory::default();
         inventory.creative_set(36, Some(disc)).unwrap();
@@ -500,6 +501,7 @@ mod tests {
             id: 37,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         let staged = Decorations::default()
             .stage_pot((0, 64, 0), Some(plant))
@@ -530,12 +532,14 @@ mod tests {
         assert!(!pot_compatible(Stack {
             id: 276,
             count: 1,
-            damage: 0
+            damage: 0,
+            nbt: None,
         }));
         assert!(pot_compatible(Stack {
             id: 37,
             count: 1,
-            damage: 0
+            damage: 0,
+            nbt: None,
         }));
     }
 }
