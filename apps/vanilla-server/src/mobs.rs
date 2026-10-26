@@ -5479,12 +5479,15 @@ mod tests {
             .find(|&(x, z)| world.live_village_house_doors(x, z).is_some())
             .expect("seed 42 has a generated village");
         let y = 200;
+        // The house is outside the generated footprint and cannot connect
+        // to its ground-level doors, but is within 32 blocks of this villager.
+        let house_x = x + 40;
         let at = PlayerPosition {
-            x: f64::from(x) + 0.5,
+            x: f64::from(x + 9) + 0.5,
             y: f64::from(y),
             z: f64::from(z) + 3.5,
         };
-        assert!(world.village_doors_with_bounded_annex(x, z).is_some());
+        assert!(world.village_doors_with_bounded_annex(x + 9, z).is_some());
         assert_eq!(
             villager_door_destination(&world, at),
             None,
@@ -5495,22 +5498,22 @@ mod tests {
         // village still has intact doors. Previously Some(generated doors)
         // suppressed the independent-house lookup altogether.
         for (bx, by, bz, block) in [
-            (x, y - 1, z, 1 << 4),
-            (x, y, z, 64 << 4),
-            (x, y + 1, z, 64 << 4 | 8),
-            (x, y + 3, z + 1, 1 << 4),
+            (house_x, y - 1, z, 1 << 4),
+            (house_x, y, z, 64 << 4),
+            (house_x, y + 1, z, 64 << 4 | 8),
+            (house_x, y + 3, z + 1, 1 << 4),
         ] {
             world.import_block(bx, by, bz, block).unwrap();
         }
         let goal = PlayerPosition {
-            x: f64::from(x) + 0.5,
+            x: f64::from(house_x) + 0.5,
             y: f64::from(y),
             z: f64::from(z) + 1.5,
         };
         assert_eq!(villager_door_destination(&world, at), Some(goal));
-        world.import_block(x, y + 3, z + 1, 0).unwrap();
+        world.import_block(house_x, y + 3, z + 1, 0).unwrap();
         assert_eq!(villager_door_destination(&world, at), None);
-        world.import_block(x, y + 3, z + 1, 1 << 4).unwrap();
+        world.import_block(house_x, y + 3, z + 1, 1 << 4).unwrap();
         assert_eq!(villager_door_destination(&world, at), Some(goal));
     }
 
