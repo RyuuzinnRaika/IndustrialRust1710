@@ -96,6 +96,57 @@ fn nbt_root(stack: Stack) -> Option<HashMap<String, Value>> {
     }
 }
 
+/// Pre-1.8 Java stores this as a signed NBT Int named RepairCost. Never
+/// interpret today's exponential repair-cost component as legacy behavior.
+fn repair_penalty(stack: Stack) -> Option<u16> {
+    match nbt_root(stack)?.get("RepairCost") {
+        None => Some(0),
+        Some(Value::Int(value)) => u16::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn was_named(stack: Stack) -> Option<bool> {
+    match nbt_root(stack)?.get("display") {
+        None => Some(false),
+        Some(Value::Compound(display)) => match display.get("Name") {
+            None => Some(false),
+            Some(Value::String(_)) => Some(true),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn with_repair_penalty(mut result: Stack, value: u16) -> Option<Stack> {
+    let mut root = nbt_root(result)?;
+    root.insert("RepairCost".into(), Value::Int(i32::from(value)));
+    result.nbt = Some(item_nbt::from_value(&Value::Compound(root)).ok()?);
+    Some(result)
+}
+
+/// All changed items keep a real legacy RepairCost NBT value.
+/// Unnamed 1.7.10 results gain +2 from the larger input history. An item
+/// carrying a custom name resets its history to 2, even after another repair.
+fn finish_anvil_repair(left: Stack, right: Stack, mut plan: Repair) -> Option<Repair> {
+    let old_left = repair_penalty(left)?;
+    let old_right = repair_penalty(right)?;
+    plan.levels = plan
+        .levels
+        .checked_add(old_left)?
+        .checked_add(old_right)?;
+    if plan.levels > 39 {
+        return None;
+    }
+    let next = if was_named(left)? {
+        2
+    } else {
+        old_left.max(old_right).checked_add(2)?
+    };
+    plan.result = with_repair_penalty(plan.result, next)?;
+    Some(plan)
+}
+
 fn enchantment_entries(entries: &[Value]) -> Option<Vec<(i16, i16)>> {
     let mut seen = HashSet::new();
     let mut parsed = Vec::with_capacity(entries.len());
@@ -242,11 +293,15 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
             damage: left.damage - restored as i16,
             ..left
         };
-        return Some(Repair {
-            result,
-            consumed,
-            levels: u16::from(consumed),
-        });
+        return finish_anvil_repair(
+            left,
+            right,
+            Repair {
+                result,
+                consumed,
+                levels: u16::from(consumed),
+            },
+        );
     }
     if right.count != 1 || (right.id != left.id && right.id != 403) {
         return None;
@@ -280,17 +335,22 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
     if levels == 0 || levels > 39 {
         return None;
     }
-    Some(Repair {
-        result,
-        consumed: 1,
-        levels,
-    })
+    finish_anvil_repair(
+        left,
+        right,
+        Repair {
+            result,
+            consumed: 1,
+            levels,
+        },
+    )
 }
 
 /// Calculate the anvil result after an optional MC|ItemName update.
 /// A missing request retains the existing custom name; an empty request
 /// removes the custom name without deleting other display or mod NBT fields.
-/// Rename-only results use no right-hand ingredients and cost one level.
+/// Rename-only results use no right-hand ingredients. 1.7.10 costs
+/// 7/10 levels for durable items and 5/9 for ordinary items (first/later).
 pub fn repair_with_name(left: Stack, right: Option<Stack>, name: Option<&str>) -> Option<Repair> {
     if !left.is_valid() || left.count != 1 {
         return None;
@@ -353,9 +413,32 @@ pub fn repair_with_name(left: Stack, right: Option<Stack>, name: Option<&str>) -
         consumed: 0,
         levels: 0,
     });
-    result.result = output;
-    result.levels = result.levels.checked_add(1)?;
-    (result.levels <= 39).then_some(result)
+    // Pre-1.8 renaming is not today's 1-level rule: durable items cost
+    // 7 initially and 10 on later renames; ordinary items cost 5 initially
+    // and 9 after the usual +2 penalty has accumulated.
+    let durable = items_1710::max_durability(left.id).is_some();
+    let rename_cost = match (durable, previous.is_some()) {
+        (true, false) => 7u16,
+        (true, true) => 10,
+        (false, false) => 5,
+        (false, true) => 7, // +2 prior penalty makes 9 for repeated renames
+    };
+    let previous_penalty = if plan.is_none() {
+        repair_penalty(left)?
+    } else {
+        0 // repair() already applied both input prior-work penalties
+    };
+    result.levels = result
+        .levels
+        .checked_add(previous_penalty)?
+        .checked_add(rename_cost)?;
+    if result.levels > 39 {
+        return None;
+    }
+    // 1.7.10 sets a named item's RepairCost to exactly 2, rather than the
+    // post-1.8 exponential count. Preserve every other NBT tag.
+    result.result = with_repair_penalty(output, 2)?;
+    Some(result)
 }
 
 /// Candidate enchantments by vanilla 1.7.10 numeric enchantment ID.
