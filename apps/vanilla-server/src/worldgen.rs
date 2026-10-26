@@ -1143,6 +1143,68 @@ mod tests {
         );
     }
     #[test]
+    fn village_live_doors_recover_independently_at_chunk_edges() {
+        let seed = 42u64;
+        let mut saw_negative = false;
+        let mut saw_positive = false;
+        for gx in -8..=8 {
+            for gz in -8..=8 {
+                let cx = gx * 192 + 48;
+                let cz = gz * 192 + 48;
+                let Some([first, second]) = village_house_doors(seed, cx, cz) else {
+                    continue;
+                };
+                // Both door positions straddle a 16-block chunk boundary.
+                assert_eq!(first[0].rem_euclid(16), 15);
+                assert_eq!(second[0].rem_euclid(16), 1);
+                let generated = |x, y, z| village(seed, x, y, z).unwrap_or(AIR);
+                assert_eq!(
+                    village_live_house_doors(seed, cx, cz, |x, y, z| {
+                        if [x, y, z] == first {
+                            AIR // The first lower half was broken.
+                        } else {
+                            generated(x, y, z)
+                        }
+                    }),
+                    Some([None, Some(second)])
+                );
+                let second_upper = [second[0], second[1] + 1, second[2]];
+                assert_eq!(
+                    village_live_house_doors(seed, cx, cz, |x, y, z| {
+                        if [x, y, z] == second_upper {
+                            AIR // The second upper half was broken.
+                        } else {
+                            generated(x, y, z)
+                        }
+                    }),
+                    Some([Some(first), None])
+                );
+                // Replacing the wrong door half must not resurrect either door.
+                assert_eq!(
+                    village_live_house_doors(seed, cx, cz, |x, y, z| {
+                        if [x, y, z] == first {
+                            state(64, 8) // Upper-half metadata in the lower position.
+                        } else if [x, y, z] == second_upper {
+                            state(64, 0) // Lower-half metadata in the upper position.
+                        } else {
+                            generated(x, y, z)
+                        }
+                    }),
+                    Some([None, None])
+                );
+                // Restoring both halves recovers both village goals.
+                assert_eq!(
+                    village_live_house_doors(seed, cx, cz, generated),
+                    Some([Some(first), Some(second)])
+                );
+                saw_negative |= gx < 0 && gz < 0;
+                saw_positive |= gx > 0 && gz > 0;
+            }
+        }
+        assert!(saw_negative && saw_positive);
+    }
+
+    #[test]
     fn village_well_is_not_overwritten_by_crossing_road() {
         // Find valid villages in both positive and negative generation cells.
         // Use the public block lookup too: village() is only one layer of
