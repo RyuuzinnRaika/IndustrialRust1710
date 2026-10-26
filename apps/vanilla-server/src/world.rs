@@ -670,6 +670,29 @@ impl World {
         found.into_iter().take(128).collect()
     }
 
+    /// Enumerate actual spawner blocks in one chunk for lossless Anvil
+    /// TileEntity projection. Edits that removed generated spawners are
+    /// respected, and explicitly placed spawners are included. This lookup
+    /// does not create or modify a chunk.
+    pub(crate) fn spawners_in_chunk(&self, cx: i32, cz: i32) -> Vec<(i32, i32, i32)> {
+        let mut found = BTreeSet::new();
+        if let Generation::Expanded(seed, crate::dimensions::Dimension::Overworld) = self.generation
+        {
+            let gx = cx.div_euclid(4);
+            let gz = cz.div_euclid(4);
+            let (x, y, z) = crate::worldgen::dungeon_spawner_in_cell(seed, gx, gz);
+            if x.div_euclid(16) == cx && z.div_euclid(16) == cz && self.get(x, y, z) >> 4 == 52 {
+                found.insert((x, y, z));
+            }
+        }
+        for (&(x, y, z), &block) in &self.edits {
+            if block >> 4 == 52 && x.div_euclid(16) == cx && z.div_euclid(16) == cz {
+                found.insert((x, i32::from(y), z));
+            }
+        }
+        found.into_iter().collect()
+    }
+
     pub fn with_biomes(seed: u64) -> Self {
         Self {
             generation: Generation::Biomes(seed),

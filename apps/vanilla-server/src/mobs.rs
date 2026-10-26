@@ -546,6 +546,19 @@ fn hash(mut x: u64) -> u64 {
     x = x.wrapping_mul(0x94d049bb133111eb);
     x ^ (x >> 31)
 }
+
+/// The stable mob selected for an IRW4 dungeon spawner. Share this lookup
+/// with the Anvil NBT exporter so EntityId never disagrees with live spawning.
+pub(crate) fn dungeon_spawner_entity_id(x: i32, y: i32, z: i32) -> &'static str {
+    let salt = (x as i64 as u64).wrapping_mul(0x9e3779b185ebca87)
+        ^ (y as i64 as u64).wrapping_mul(0xc2b2ae3d27d4eb4f)
+        ^ (z as i64 as u64).wrapping_mul(0x165667b19e3779f9);
+    match hash(salt) % 4 {
+        0 | 1 => "Zombie",
+        2 => "Skeleton",
+        _ => "Spider",
+    }
+}
 fn distance(a: PlayerPosition, b: PlayerPosition) -> f64 {
     (a.x - b.x).hypot(a.z - b.z)
 }
@@ -2361,12 +2374,10 @@ impl Mobs {
             let salt = (x as i64 as u64).wrapping_mul(0x9e3779b185ebca87)
                 ^ (y as i64 as u64).wrapping_mul(0xc2b2ae3d27d4eb4f)
                 ^ (z as i64 as u64).wrapping_mul(0x165667b19e3779f9);
-            // No TileEntity spawner type is stored yet: deterministic IRW4
-            // dungeon spawners choose from the vanilla zombie/skeleton/spider
-            // pool. A subsequent TileEntity format can override this safely.
-            let kind = match hash(salt) % 4 {
-                0 | 1 => Kind::Zombie,
-                2 => Kind::Skeleton,
+            // Use the same stable entity ID as offline Anvil TileEntity NBT.
+            let kind = match dungeon_spawner_entity_id(x, y, z) {
+                "Zombie" => Kind::Zombie,
+                "Skeleton" => Kind::Skeleton,
                 _ => Kind::Spider,
             };
             let nearby_mobs = self
