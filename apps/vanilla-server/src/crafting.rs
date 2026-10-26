@@ -591,6 +591,46 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
     if shapeless(&[341, 377]) {
         return product(378, 1, 0); // magma cream
     }
+    // Java 1.7.10 uses inverse dye metadata: dye 0 (ink) -> block 15
+    // (black), dye 15 (bone meal) -> block 0 (white).
+    if w == 3 && h == 3 {
+        if let Some(dye) = at(1, 1) {
+            if dye.id == 351 && (0..=15).contains(&dye.damage) {
+                let color = 15 - dye.damage;
+                if matches(&[&[20, 20, 20], &[20, 351, 20], &[20, 20, 20]]) {
+                    return product(95, 8, color); // stained glass
+                }
+                if matches(&[&[172, 172, 172], &[172, 351, 172], &[172, 172, 172]]) {
+                    return product(159, 8, color); // stained hardened clay
+                }
+            }
+        }
+    }
+    // Panes retain the exact source glass color. Different colors must not
+    // silently combine or be assigned an arbitrary result metadata value.
+    if w == 3 && h == 2 && matches(&[&[95, 95, 95], &[95, 95, 95]]) {
+        let color = at(0, 0)?.damage;
+        if (0..=15).contains(&color)
+            && (0..2).all(|y| {
+                (0..3).all(|x| at(x, y).is_some_and(|stack| stack.damage == color))
+            })
+        {
+            return product(160, 16, color); // stained glass panes
+        }
+    }
+    if matches(&[&[0, 331, 0], &[331, 89, 331], &[0, 331, 0]]) {
+        return product(123, 1, 0); // redstone lamp
+    }
+    if matches(&[&[20, 20, 20], &[406, 406, 406], &[126, 126, 126]])
+        && (0..3).all(|x| at(x, 2).is_some_and(|stack| (0..=5).contains(&stack.damage)))
+    {
+        return product(151, 1, 0); // daylight sensor (all six wooden slab variants)
+    }
+    if shapeless(&[377, -3, 289])
+        && grid.iter().flatten().any(|stack| stack.id == 263 && (0..=1).contains(&stack.damage))
+    {
+        return product(385, 3, 0); // fire charge, coal or charcoal
+    }
     for (machine, item) in [(54, 342), (61, 343), (46, 407), (154, 408)] {
         if shapeless(&[328, machine]) {
             return product(item, 1, 0); // chest/furnace/TNT/hopper minecart
@@ -601,6 +641,83 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn java_1710_stained_glass_and_clay_preserve_inverse_dye_metadata() {
+        for dye in 0..=15 {
+            let color = 15 - dye;
+            let mut glass = [item(20); 9];
+            glass[4] = product(351, 1, dye);
+            assert_eq!(result(&glass, 3), product(95, 8, color));
+
+            let mut clay = [item(172); 9];
+            clay[4] = product(351, 1, dye);
+            assert_eq!(result(&clay, 3), product(159, 8, color));
+
+            let pane = product(95, 1, color);
+            let mut row = [None; 9];
+            row[..6].fill(pane);
+            assert_eq!(result(&row, 3), product(160, 16, color));
+            // Shift the same complete shape down one row.
+            let mut lower = [None; 9];
+            lower[3..9].fill(pane);
+            assert_eq!(result(&lower, 3), product(160, 16, color));
+        }
+        let mut invalid_dye = [item(20); 9];
+        invalid_dye[4] = product(351, 1, 16);
+        assert_eq!(result(&invalid_dye, 3), None);
+
+        let mut mixed = [None; 9];
+        mixed[..6].fill(product(95, 1, 0));
+        mixed[4] = product(95, 1, 1);
+        assert_eq!(result(&mixed, 3), None);
+        mixed[4] = product(95, 1, 16);
+        assert_eq!(result(&mixed, 3), None);
+
+        let mut incomplete = [item(172); 9];
+        incomplete[4] = product(351, 1, 4);
+        incomplete[0] = None;
+        assert_eq!(result(&incomplete, 3), None);
+    }
+
+    #[test]
+    fn java_1710_redstone_and_fire_charge_recipes_are_not_modernized() {
+        let lamp = [
+            None, item(331), None,
+            item(331), item(89), item(331),
+            None, item(331), None,
+        ];
+        assert_eq!(result(&lamp, 3), product(123, 1, 0));
+
+        for slab_color in 0..=5 {
+            let mut detector = [
+                item(20), item(20), item(20),
+                item(406), item(406), item(406),
+                item(126), item(126), item(126),
+            ];
+            detector[6..9].fill(product(126, 1, slab_color));
+            assert_eq!(result(&detector, 3), product(151, 1, 0));
+        }
+        let mut invalid_detector = [
+            item(20), item(20), item(20),
+            item(406), item(406), item(406),
+            item(126), item(126), item(126),
+        ];
+        invalid_detector[8] = product(126, 1, 8); // upper slab is not an item ingredient
+        assert_eq!(result(&invalid_detector, 3), None);
+
+        for coal in 0..=1 {
+            let ingredients = [
+                product(263, 1, coal), item(289),
+                item(377), None,
+            ];
+            assert_eq!(result(&ingredients, 2), product(385, 3, 0));
+        }
+        assert_eq!(
+            result(&[item(265), item(265), item(265), item(265)], 2),
+            None, // iron trapdoors were introduced in 1.8
+        );
+    }
+
     #[test]
     fn expanded_1710_survival_recipes_are_shaped_and_bounded() {
         let make = |ids: [i16; 9]| ids.map(|id| if id == 0 { None } else { product(id, 1, 0) });
