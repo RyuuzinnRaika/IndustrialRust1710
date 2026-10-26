@@ -45,6 +45,13 @@ impl Kind {
             Self::Pearl => 65,
         }
     }
+    /// Minecraft 1.7.10 arrows fall faster than thrown eggs, snowballs and pearls.
+    fn gravity(self) -> f64 {
+        match self {
+            Self::Arrow => 0.05,
+            Self::Snowball | Self::Egg | Self::Pearl => 0.03,
+        }
+    }
 }
 /// Whether an item must be fired as a projectile by a dispenser rather than
 /// ejected as a ground item. Droppers never use this path.
@@ -289,7 +296,7 @@ impl Throwables {
             } else {
                 object.at = destination;
                 object.velocity[0] *= 0.99;
-                object.velocity[1] = object.velocity[1] * 0.99 - 0.03;
+                object.velocity[1] = object.velocity[1] * 0.99 - object.kind.gravity();
                 object.velocity[2] *= 0.99;
                 result.events.push((
                     object.at,
@@ -365,6 +372,38 @@ mod tests {
         assert!(objects.active.is_empty());
         assert_eq!(objects.next_id, 0);
         assert!(objects.launch_dispenser(262, origin, (-1, 0, 0)).is_some());
+    }
+
+    #[test]
+    fn dispenser_arrows_have_vanilla_gravity_without_changing_thrown_items() {
+        let mut objects = Throwables::default();
+        for item in [262, 332, 344] {
+            assert!(objects
+                .launch_dispenser(item, (0, 70, 0), (1, 0, 0))
+                .is_some());
+        }
+        let world = World::new();
+        objects.tick(&world, 1);
+        for (kind, gravity) in [
+            (Kind::Arrow, 0.05),
+            (Kind::Snowball, 0.03),
+            (Kind::Egg, 0.03),
+        ] {
+            let object = objects.active.values().find(|item| item.kind == kind).unwrap();
+            assert!((object.velocity[1] + gravity).abs() < 1e-10);
+        }
+        objects.tick(&world, 2);
+        let height = |kind| {
+            objects
+                .active
+                .values()
+                .find(|item| item.kind == kind)
+                .unwrap()
+                .at
+                .y
+        };
+        assert!((height(Kind::Snowball) - height(Kind::Arrow) - 0.02).abs() < 1e-10);
+        assert!((height(Kind::Egg) - height(Kind::Snowball)).abs() < 1e-10);
     }
 
     #[test]
