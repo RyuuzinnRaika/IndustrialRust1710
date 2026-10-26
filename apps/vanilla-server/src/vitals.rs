@@ -374,6 +374,7 @@ mod tests {
                 id: 322,
                 count: 1,
                 damage,
+                nbt: None,
             };
             let mut vitals = Vitals {
                 food: 20,
@@ -400,6 +401,7 @@ mod tests {
             id: 322,
             count: 1,
             damage: 2,
+            nbt: None,
         }));
     }
 
