@@ -1646,7 +1646,10 @@ impl World {
         if path.parent() != Some(lock.world_dir()) {
             return Err(invalid("E46 Anvil world must be in locked root directory"));
         }
-        let region_path = lock.world_dir().join("region").join(format!("r.{rx}.{rz}.mca"));
+        let region_path = lock
+            .world_dir()
+            .join("region")
+            .join(format!("r.{rx}.{rz}.mca"));
         let region_meta = fs::symlink_metadata(&region_path)?;
         // The redo journal caps one region at 8 MiB. Enforce this before
         // loading untrusted on-disk data into memory.
@@ -1664,8 +1667,8 @@ impl World {
             .map_err(|error| io::Error::other(error.to_string()))?
             .ok_or_else(|| invalid("E46 dirty-block save requires an existing Anvil chunk"))?;
         let parsed = crate::legacy_nbt::parse_chunk(&original_nbt, cx, cz)?;
-        let idx = (y as usize % 16) * 256 + z.rem_euclid(16) as usize * 16
-            + x.rem_euclid(16) as usize;
+        let idx =
+            (y as usize % 16) * 256 + z.rem_euclid(16) as usize * 16 + x.rem_euclid(16) as usize;
         let (old_id, old_meta) = parsed
             .level
             .sections
@@ -2002,7 +2005,9 @@ impl World {
         if let Some(guard) = session_guard.as_mut() {
             guard.verify()?;
             if path.with_extension("pending-txn.json").exists() {
-                return Err(invalid("pending world redo requires recovery before IRW save"));
+                return Err(invalid(
+                    "pending world redo requires recovery before IRW save",
+                ));
             }
         }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -2140,20 +2145,20 @@ mod tests {
             .unwrap());
         assert_eq!(world.get(2, 90, 3), (5 << 4) | 3);
         assert_eq!(World::load(&path).unwrap().get(2, 90, 3), (5 << 4) | 3);
-        let mut region = fastanvil::Region::from_stream(
-            File::open(root.join("region/r.0.0.mca")).unwrap(),
-        )
-        .unwrap();
-        let chunk = crate::legacy_nbt::parse_chunk(
-            &region.read_chunk(0, 0).unwrap().unwrap(),
-            0,
-            0,
-        )
-        .unwrap();
+        let mut region =
+            fastanvil::Region::from_stream(File::open(root.join("region/r.0.0.mca")).unwrap())
+                .unwrap();
+        let chunk =
+            crate::legacy_nbt::parse_chunk(&region.read_chunk(0, 0).unwrap().unwrap(), 0, 0)
+                .unwrap();
         assert_eq!(
-            chunk.level.sections.iter().find(|s| s.y == 5).unwrap().block_at(
-                (90 % 16) * 256 + 3 * 16 + 2
-            ),
+            chunk
+                .level
+                .sections
+                .iter()
+                .find(|s| s.y == 5)
+                .unwrap()
+                .block_at((90 % 16) * 256 + 3 * 16 + 2),
             Some((5, 3))
         );
         assert!(!path.with_extension("pending-txn.json").exists());
@@ -2211,13 +2216,7 @@ mod tests {
     fn e46_does_not_implicitly_bind_or_create_anvil_storage() {
         let mut detached = World::new();
         assert!(detached
-            .update_and_flush_existing_anvil(
-                Path::new("nonexistent-e46.irw"),
-                0,
-                64,
-                0,
-                1 << 4,
-            )
+            .update_and_flush_existing_anvil(Path::new("nonexistent-e46.irw"), 0, 64, 0, 1 << 4,)
             .is_err());
         assert_eq!(detached.get(0, 64, 0), 0);
     }
