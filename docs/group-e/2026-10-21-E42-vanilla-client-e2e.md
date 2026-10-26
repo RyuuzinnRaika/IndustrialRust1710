@@ -90,10 +90,24 @@ python3 tools/e42_acceptance.py init \
 `acceptance.json` の `launcher`、`os_java_runtime`、タイムゾーン付き `executed_at`、`connected_clients_peak`、マスク済みサーバー起動引数を埋める。各 `42-01`〜`42-09` に、実施した場合だけ `status: PASS`、画面で確認した `observation`、相対パスの `evidence`（ログ/画像/録画）を記録する。証跡ファイルは指定したルートの中に配置し、秘密情報を必ず削除・マスクする。
 
 ```bash
-python3 tools/e42_acceptance.py verify \
+python3 tools/e42_acceptance.py seal \
   --report ./e42-test/acceptance.json \
+  --evidence-root ./e42-test \
+  --output ./e42-test/acceptance.sealed.json
+
+python3 tools/e42_acceptance.py verify \
+  --report ./e42-test/acceptance.sealed.json \
   --evidence-root ./e42-test \
   --require-pass
 ```
 
 この最終ゲートでは9ケースすべてがPASSで、各観察記録と空でないローカル証跡が存在し、複数人試験は2人以上のクライアントが接続されていたと記録されている場合だけ終了コード0になる。FAIL/BLOCKED/NOT_RUNは合格へ変換しない。検証器は添付ログや録画の真偽、操作内容の妥当性を自動判定できないため、最終承認は実機を操作した検証者が行う。
+
+## E42証跡のSHA-256整合性ゲート（2026-10-26）
+
+- `init` はスキーマv2の未実行レポートを生成します。各ケースの目視結果、操作、ログ・画像・録画の相対パスを記録してください。
+- `seal` は **別のJSONファイル** に各PASS証跡のSHA-256を記録します。元の手書き記録を上書きしません。
+- `verify --require-pass` は9ケース全PASS、証跡の存在・非空、SHA-256一致、各ケース固有（別ケースと内容の異なる）証跡を必須にします。共通のサーバーログを複数ケースで引用する場合も、それぞれに追加の固有ログ・スクリーンショット・動画が必要です。
+- 旧スキーマv1の報告は `verify` で検査できますが、新しい最終PASSゲートには使用できません。改めてv2の報告を作成して証跡を記録してください。 
+
+**限界:** ハッシュは封印後の証跡変更を検知するだけで、ログの真実性や本家クライアント実行を証明しません。`seal`/`verify` はゲームを起動せず、実機9ケースを自動PASSにするものではありません。
