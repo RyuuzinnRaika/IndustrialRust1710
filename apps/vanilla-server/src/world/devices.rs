@@ -101,11 +101,12 @@ fn movable(block: u16) -> bool {
     )
 }
 
-/// Torches have a piston destroy reaction in vanilla 1.7.10. They are
-/// replaced at the end of a push, never translated as solid blocks or
-/// pulled back by sticky pistons. Item-drop handling is tracked separately.
+/// Fragile attached redstone components have a piston destroy reaction
+/// in vanilla 1.7.10. They terminate a push rather than being translated
+/// as solid blocks, and sticky pistons cannot pull them back.
+/// Item-drop handling is tracked separately.
 fn piston_breakable(block: u16) -> bool {
-    matches!(block >> 4, 50 | 75 | 76)
+    matches!(block >> 4, 27 | 28 | 50 | 55 | 66 | 75 | 76 | 157)
 }
 
 /// Coordinates of the two physical rail endpoints, including ascending slopes.
@@ -1258,6 +1259,61 @@ mod redstone_regression_tests {
             assert_eq!(changes.get(&(0, 64, 0)), Some(&((29 << 4) | 5)));
             assert_eq!(changes.get(&(1, 64, 0)), Some(&0));
             assert!(!changes.contains_key(&(2, 64, 0)));
+        }
+    }
+
+    #[test]
+    fn piston_breaks_rails_and_redstone_wire_instead_of_moving_them() {
+        // Powered, detector, ordinary and activator rails, plus dust, are
+        // fragile piston-destroy blocks in vanilla 1.7.10.
+        for fragile_id in [27u16, 28, 55, 66, 157] {
+            for blocks_before_fragile in [0, 1] {
+                let mut world = World::new();
+                let piston = (33 << 4) | 5; // Facing east.
+                world.import_block(-2, 64, 0, (69 << 4) | 8).unwrap();
+                world.import_block(-1, 64, 0, piston).unwrap();
+                if blocks_before_fragile == 1 {
+                    world.import_block(0, 64, 0, 1 << 4).unwrap();
+                }
+                world
+                    .import_block(blocks_before_fragile, 64, 0, fragile_id << 4)
+                    .unwrap();
+
+                assert!(piston_breakable(fragile_id << 4));
+                let mut changes = BTreeMap::new();
+                world.push_piston(-1, 64, 0, piston, &mut changes);
+                assert_eq!(changes.get(&(-1, 64, 0)), Some(&(piston | 8)));
+                assert_eq!(changes.get(&(0, 64, 0)), Some(&((34 << 4) | 5)));
+                if blocks_before_fragile == 1 {
+                    assert_eq!(changes.get(&(1, 64, 0)), Some(&(1 << 4)));
+                } else {
+                    assert!(!changes.contains_key(&(1, 64, 0)));
+                }
+                assert!(
+                    !changes.values().any(|block| block >> 4 == fragile_id),
+                    "piston must not translate fragile block {fragile_id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sticky_piston_does_not_pull_rails_or_redstone_wire() {
+        for fragile_id in [27u16, 28, 55, 66, 157] {
+            let mut world = World::new();
+            let piston = (29 << 4) | 13;
+            world.import_block(0, 64, 0, piston).unwrap();
+            world.import_block(1, 64, 0, (34 << 4) | 5).unwrap();
+            world.import_block(2, 64, 0, fragile_id << 4).unwrap();
+
+            let mut changes = BTreeMap::new();
+            world.push_piston(0, 64, 0, piston, &mut changes);
+            assert_eq!(changes.get(&(0, 64, 0)), Some(&((29 << 4) | 5)));
+            assert_eq!(changes.get(&(1, 64, 0)), Some(&0));
+            assert!(
+                !changes.contains_key(&(2, 64, 0)),
+                "sticky piston must not pull fragile block {fragile_id}"
+            );
         }
     }
 
