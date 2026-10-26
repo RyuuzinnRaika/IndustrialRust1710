@@ -94,8 +94,8 @@ pub(crate) fn rewrite_inventories_under_lock(
     rewrite_inventories_impl(lock, dimension, changes, None)
 }
 
-/// Atomically persist an existing chest's Anvil inventory with the typed
-/// native chest sidecar. This opt-in bridge rejects NBT tags that the native
+/// Atomically persist existing chest inventories across up to seven Anvil
+/// regions together with the typed native chest sidecar. This opt-in bridge rejects NBT tags that the native
 /// Stack representation cannot preserve and requires identical inventory
 /// contents in both formats. It is not wired to live world saves.
 pub(crate) fn rewrite_chests_with_sidecar_under_lock(
@@ -162,15 +162,17 @@ fn rewrite_inventories_impl(
     changes: &[TileInventoryPatch],
     paired: Option<(&Path, &Path, &[u8])>,
 ) -> io::Result<()> {
-    let first = changes
-        .first()
-        .ok_or_else(|| invalid("TileEntity update cannot be empty"))?;
+    if changes.is_empty() {
+        return Err(invalid("TileEntity update cannot be empty"));
+    }
     if changes.len() > MAX_PATCHES {
         return Err(invalid("too many TileEntity edits in one batch"));
     }
-    let expected_region = (first.x.div_euclid(512), first.z.div_euclid(512));
     let mut seen = BTreeSet::new();
-    let mut grouped: BTreeMap<(i32, i32), Vec<&TileInventoryPatch>> = BTreeMap::new();
+    // Group by both region and chunk: all touched regions must be published in
+    // the same redo generation when a native sidecar participates.
+    type ChunkPatches<'a> = BTreeMap<(i32, i32), Vec<&'a TileInventoryPatch>>;
+    let mut grouped: BTreeMap<(i32, i32), ChunkPatches<'_>> = BTreeMap::new();
     for patch in changes {
         if !(0..=255).contains(&patch.y)
             || patch.x.unsigned_abs() > 30_000_000
@@ -181,88 +183,107 @@ fn rewrite_inventories_impl(
                 "invalid or unsupported TileEntity inventory identity",
             ));
         }
-        if (patch.x.div_euclid(512), patch.z.div_euclid(512)) != expected_region {
-            return Err(invalid("TileEntity update crosses Anvil region boundary"));
-        }
         if !seen.insert((patch.x, patch.y, patch.z)) {
             return Err(invalid("duplicate TileEntity inventory update"));
         }
         grouped
+            .entry((patch.x.div_euclid(512), patch.z.div_euclid(512)))
+            .or_default()
             .entry((patch.x.div_euclid(16), patch.z.div_euclid(16)))
             .or_default()
             .push(patch);
     }
+    // Unpaired writes intentionally retain the established single-region COW
+    // behavior; sequential publication would not be atomic across regions.
+    if paired.is_none() && grouped.len() > 1 {
+        return Err(invalid(
+            "unpaired TileEntity update crosses Anvil region boundary",
+        ));
+    }
 
-    let source = region_file(lock, dimension, expected_region.0, expected_region.1)?;
-    // Inspect the complete source first: fastanvil alone is not a full NBT or
-    // sector validation layer. Capture the bytes before opening its chunks.
-    crate::legacy_region::inspect_region(&source)?;
-    let expected_bytes = fs::read(&source)?;
-    let mut region = Region::from_stream(File::open(&source)?).map_err(wrap)?;
-    let mut owned_replacements = Vec::with_capacity(grouped.len());
-    for ((cx, cz), patches) in grouped {
-        let raw = region
-            .read_chunk(cx.rem_euclid(32) as usize, cz.rem_euclid(32) as usize)
-            .map_err(wrap)?
-            .ok_or_else(|| invalid("TileEntity owning Anvil chunk is missing"))?;
-        let mut chunk = crate::legacy_nbt::parse_chunk(&raw, cx, cz)?;
-        for patch in patches {
-            let mut matched = None;
-            for (idx, original) in chunk.level.tile_entities.iter().enumerate() {
-                let tile = decode_tile(original)?;
-                if (tile.x, tile.y, tile.z) == (patch.x, patch.y, patch.z) {
-                    matched = Some((idx, tile));
-                    break;
+    let mut source_images = BTreeMap::new();
+    let mut owned_replacements = Vec::new();
+    for (&(rx, rz), chunks) in &grouped {
+        let source = region_file(lock, dimension, rx, rz)?;
+        crate::legacy_region::inspect_region(&source)?;
+        let expected_bytes = fs::read(&source)?;
+        let mut region = Region::from_stream(File::open(&source)?).map_err(wrap)?;
+        for (&(cx, cz), patches) in chunks {
+            let raw = region
+                .read_chunk(cx.rem_euclid(32) as usize, cz.rem_euclid(32) as usize)
+                .map_err(wrap)?
+                .ok_or_else(|| invalid("TileEntity owning Anvil chunk is missing"))?;
+            let mut chunk = crate::legacy_nbt::parse_chunk(&raw, cx, cz)?;
+            for patch in patches {
+                let mut matched = None;
+                for (idx, original) in chunk.level.tile_entities.iter().enumerate() {
+                    let tile = decode_tile(original)?;
+                    if (tile.x, tile.y, tile.z) == (patch.x, patch.y, patch.z) {
+                        matched = Some((idx, tile));
+                        break;
+                    }
                 }
+                let (index, mut tile) =
+                    matched.ok_or_else(|| invalid("TileEntity inventory target not found"))?;
+                if tile.id != patch.expected_id {
+                    return Err(invalid("TileEntity type changed since inventory snapshot"));
+                }
+                // The native Stack sidecar cannot preserve unknown per-item NBT.
+                // Fail rather than mirroring a lossy representation.
+                if paired.is_some()
+                    && tile.items.as_ref().is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|item| item.tag.is_some() || !item.extra.is_empty())
+                    })
+                {
+                    return Err(invalid(
+                        "cannot mirror chest with unknown existing item tags",
+                    ));
+                }
+                tile.items = Some(patch.items.clone());
+                let replacement: Value =
+                    fastnbt::from_bytes(&fastnbt::to_bytes(&tile).map_err(wrap)?).map_err(wrap)?;
+                chunk.level.tile_entities[index] = replacement;
             }
-            let (index, mut tile) =
-                matched.ok_or_else(|| invalid("TileEntity inventory target not found"))?;
-            if tile.id != patch.expected_id {
-                return Err(invalid("TileEntity type changed since inventory snapshot"));
-            }
-            // The native Stack sidecar cannot represent modded NBT fields on
-            // old items. Do not silently discard those fields when mirroring.
-            if paired.is_some()
-                && tile.items.as_ref().is_some_and(|items| {
-                    items
-                        .iter()
-                        .any(|item| item.tag.is_some() || !item.extra.is_empty())
-                })
-            {
-                return Err(invalid(
-                    "cannot mirror chest with unknown existing item tags",
-                ));
-            }
-            tile.items = Some(patch.items.clone());
-            let replacement: Value =
-                fastnbt::from_bytes(&fastnbt::to_bytes(&tile).map_err(wrap)?).map_err(wrap)?;
-            chunk.level.tile_entities[index] = replacement;
+            legacy_inventory_nbt::validate_tiles(&chunk.level.tile_entities, Some((cx, cz)))?;
+            let encoded = fastnbt::to_bytes(&chunk).map_err(wrap)?;
+            crate::legacy_nbt::parse_chunk(&encoded, cx, cz)?;
+            owned_replacements.push(((cx, cz), encoded));
         }
-        legacy_inventory_nbt::validate_tiles(&chunk.level.tile_entities, Some((cx, cz)))?;
-        let encoded = fastnbt::to_bytes(&chunk).map_err(wrap)?;
-        crate::legacy_nbt::parse_chunk(&encoded, cx, cz)?;
-        owned_replacements.push(((cx, cz), encoded));
+        source_images.insert((rx, rz), expected_bytes);
     }
     let refs: Vec<_> = owned_replacements
         .iter()
         .map(|(coords, bytes)| (*coords, bytes.as_slice()))
         .collect();
     if let Some((world_file, sidecar, serialized)) = paired {
-        crate::legacy_region_rewrite::rewrite_chunks_with_sidecar_under_lock_expected(
-            lock,
-            dimension,
-            &refs,
-            Some(&expected_bytes),
-            world_file,
-            sidecar,
-            serialized,
-        )
+        if source_images.len() == 1 {
+            crate::legacy_region_rewrite::rewrite_chunks_with_sidecar_under_lock_expected(
+                lock,
+                dimension,
+                &refs,
+                source_images.values().next().map(Vec::as_slice),
+                world_file,
+                sidecar,
+                serialized,
+            )
+        } else {
+            crate::legacy_region_rewrite::rewrite_regions_with_sidecars_under_lock_expected(
+                lock,
+                dimension,
+                &refs,
+                &source_images,
+                world_file,
+                &[(sidecar, serialized.to_vec())],
+            )
+        }
     } else {
         crate::legacy_region_rewrite::rewrite_chunks_under_lock_expected(
             lock,
             dimension,
             &refs,
-            Some(&expected_bytes),
+            source_images.values().next().map(Vec::as_slice),
         )
     }
 }
@@ -417,6 +438,109 @@ mod tests {
         drop(lock);
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn chest_sidecar_and_two_regions_share_one_committed_generation() {
+        use crate::chests::Chests;
+        use crate::inventory::Stack;
+        let base = fixture_root();
+        let root = base.join("world");
+        let world_file = root.join("flat.irw");
+        World::new().save_new(&world_file).unwrap();
+        let mut lock = WorldSessionLock::acquire(&root).unwrap();
+        seed(&base, &mut lock);
+
+        // A second chest lies across the x=0 region boundary; both regions
+        // must be updated together with one native JSON inventory image.
+        let negative_region = root.join("region/r.-1.0.mca");
+        let mut region = Region::from_stream(File::open(&negative_region).unwrap()).unwrap();
+        let mut negative =
+            legacy_nbt::parse_chunk(&region.read_chunk(31, 0).unwrap().unwrap(), -1, 0).unwrap();
+        negative.level.tile_entities = vec![tile("Chest", -1, 64, 0, "negative-unknown-tag")];
+        let nbt = fastnbt::to_bytes(&negative).unwrap();
+        crate::legacy_region_rewrite::rewrite_chunk_under_lock(
+            &mut lock,
+            Dimension::Overworld,
+            -1,
+            0,
+            &nbt,
+        )
+        .unwrap();
+        drop(region);
+        let slots = |slot: usize| {
+            let mut items = [None; crate::chests::CHEST_SLOTS];
+            items[slot] = Some(Stack {
+                id: 264,
+                count: 3,
+                damage: 0,
+            });
+            items
+        };
+        let native = Chests::default()
+            .staged_update((0, 64, 0), slots(2))
+            .unwrap()
+            .staged_update((-1, 64, 0), slots(5))
+            .unwrap();
+        let make_patch = |x: i32, slot: i8| TileInventoryPatch {
+            x,
+            y: 64,
+            z: 0,
+            expected_id: "Chest".into(),
+            items: vec![SlotItem {
+                slot,
+                id: 264,
+                count: 3,
+                damage: 0,
+                tag: None,
+                extra: BTreeMap::new(),
+            }],
+        };
+        let patches = [make_patch(0, 2), make_patch(-1, 5)];
+        rewrite_chests_with_sidecar_under_lock(
+            &mut lock,
+            Dimension::Overworld,
+            &world_file,
+            &native,
+            &patches,
+        )
+        .unwrap();
+
+        let sidecar = Chests::location(&world_file);
+        let persisted = Chests::load(&sidecar).unwrap();
+        assert_eq!(persisted.slots((0, 64, 0)), slots(2));
+        assert_eq!(persisted.slots((-1, 64, 0)), slots(5));
+        for (region_name, cx, x, slot, tag) in [
+            ("r.0.0.mca", 0i32, 0, 2, "chest-must-survive"),
+            ("r.-1.0.mca", -1, -1, 5, "negative-unknown-tag"),
+        ] {
+            let source = root.join("region").join(region_name);
+            let mut opened = Region::from_stream(File::open(source).unwrap()).unwrap();
+            let chunk = legacy_nbt::parse_chunk(
+                &opened
+                    .read_chunk(cx.rem_euclid(32) as usize, 0)
+                    .unwrap()
+                    .unwrap(),
+                cx,
+                0,
+            )
+            .unwrap();
+            let matching = chunk
+                .level
+                .tile_entities
+                .iter()
+                .map(|value| decode_tile(value).unwrap())
+                .find(|value| (value.x, value.y, value.z) == (x, 64, 0))
+                .unwrap();
+            assert_eq!(matching.items.unwrap()[0].slot, slot);
+            assert_eq!(
+                matching.extra.get("UnknownModTag"),
+                Some(&Value::String(tag.into()))
+            );
+        }
+        assert!(!world_file.with_extension("pending-txn.json").exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn anvil_chest_and_native_sidecar_commit_together_without_unknown_tag_loss() {
         use crate::chests::Chests;

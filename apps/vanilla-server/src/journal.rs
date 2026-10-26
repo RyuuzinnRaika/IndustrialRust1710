@@ -10,9 +10,9 @@ use std::sync::{Mutex, OnceLock};
 
 const VERSION: u8 = 1;
 // JSON stores payload bytes as integer arrays (up to four characters per
-// byte); keep an explicit on-disk limit for four bounded participants.
+// byte); keep an explicit on-disk limit for bounded participants.
 const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_TRANSACTION_FILES: usize = 4;
+const MAX_TRANSACTION_FILES: usize = 8;
 const MAX_TARGET_BYTES: usize = 1024 * 1024;
 // Region images are larger than player JSON. A separate bounded cap applies;
 // the serialized, committed redo record still has a 64MiB aggregate limit.
@@ -237,7 +237,7 @@ pub fn recover(journal: &Path) -> io::Result<()> {
         serde_json::from_slice(&bytes).map_err(|_| invalid("corrupt transaction journal"))?;
     apply(journal, &record)
 }
-/// Durable two-file commit. An error must stop further writes; recovery on
+/// Durable bounded multi-file commit. An error must stop further writes; recovery on
 /// restart completes the *new* state for all files (redo journal semantics).
 pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
     let _lock = SERIAL
@@ -248,7 +248,7 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
         return Err(invalid("unrecovered transaction: restart required"));
     }
     if changes.len() < 2 || changes.len() > MAX_TRANSACTION_FILES {
-        return Err(invalid("expected 2 to 4 transaction participants"));
+        return Err(invalid("expected 2 to 8 transaction participants"));
     }
     let base = root(journal);
     let files: Vec<Target> = changes
@@ -519,6 +519,58 @@ mod tests {
     }
 
     #[test]
+    fn eight_participants_commit_and_crash_recovery_are_bounded() {
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-eight-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let paths: Vec<_> = (0..8)
+            .map(|index| home.join(format!("world-{index}.chests.json")))
+            .collect();
+        let journal = home.join("world.pending-txn.json");
+        let updates: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (path.as_path(), format!("updated-{index}").into_bytes()))
+            .collect();
+        commit(&journal, &updates).unwrap();
+        for (path, bytes) in &updates {
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+        }
+        let too_many: Vec<_> = (0..9)
+            .map(|index| (paths[index % 8].as_path(), b"ignored".to_vec()))
+            .collect();
+        assert_eq!(
+            commit(&journal, &too_many).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        assert!(!journal.exists());
+        let record = Record {
+            version: VERSION,
+            files: updates
+                .iter()
+                .map(|(path, bytes)| Target {
+                    relative: relative(&home, path).unwrap(),
+                    contents: bytes.clone(),
+                    checksum: fingerprint(bytes),
+                })
+                .collect(),
+        };
+        fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::write(&paths[0], b"torn-save").unwrap();
+        fs::write(&paths[7], b"torn-save").unwrap();
+        recover(&journal).unwrap();
+        for (path, bytes) in &updates {
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+        }
+        assert!(!journal.exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn corrupt_later_participant_aborts_recovery_without_partial_overwrite() {
         let home = std::env::temp_dir().join(format!(
             "ir-journal-corrupt-late-{}-{:?}",
@@ -667,6 +719,54 @@ mod tests {
         assert!(!journal.exists());
         recover(&journal).unwrap(); // Idempotent after replay.
         fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn crash_between_two_regions_and_sidecar_replays_a_single_generation() {
+        use crate::{anvil_export, world::World};
+        let parent = std::env::temp_dir().join(format!(
+            "ir-journal-multi-anvil-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&parent).unwrap();
+        let root = parent.join("world");
+        anvil_export::export(&World::new(), &root).unwrap();
+        let east = root.join("region/r.0.0.mca");
+        let west = root.join("region/r.-1.0.mca");
+        let sidecar = root.join("flat.chests.json");
+        let journal = root.join("flat.pending-txn.json");
+        let east_bytes = fs::read(&east).unwrap();
+        let west_bytes = fs::read(&west).unwrap();
+        let after_chests = br#"{"chests":[]}"#;
+        let record = Record {
+            version: VERSION,
+            files: [
+                (east.as_path(), east_bytes.as_slice()),
+                (west.as_path(), west_bytes.as_slice()),
+                (sidecar.as_path(), after_chests.as_slice()),
+            ]
+            .into_iter()
+            .map(|(path, data)| Target {
+                relative: relative(&root, path).unwrap(),
+                checksum: fingerprint(data),
+                contents: data.to_vec(),
+            })
+            .collect(),
+        };
+        fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
+        // A power loss after the first region publication can leave the
+        // remaining targets inconsistent until startup redo completes.
+        fs::write(&west, b"power-loss-torn-region").unwrap();
+        fs::write(&sidecar, b"old").unwrap();
+        recover(&journal).unwrap();
+        assert_eq!(fs::read(&east).unwrap(), east_bytes);
+        assert_eq!(fs::read(&west).unwrap(), west_bytes);
+        assert_eq!(fs::read(&sidecar).unwrap(), after_chests);
+        assert!(!journal.exists());
+        recover(&journal).unwrap();
+        fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
