@@ -7781,7 +7781,10 @@ mod tests {
         assert!(inv.creative_set(slot, requested).unwrap());
         assert_eq!(inv.held().unwrap().id, 1);
         assert_eq!(inv.held().unwrap().count, 64);
-        assert_eq!(inv.set_slot(36).unwrap(), vec![0, 0, 36, 0, 1, 64, 0, 0, 255, 255]);
+        assert_eq!(
+            inv.set_slot(36).unwrap(),
+            vec![0, 0, 36, 0, 1, 64, 0, 0, 255, 255]
+        );
         assert!(inv.encoded().is_ok());
 
         // Vanilla C10 can clear the same slot with -1 as the slot item ID.
