@@ -304,6 +304,92 @@ fn live_protocol5_entity_chunk_inventory_and_window_golden() {
     );
 }
 
+/// Round-trip a compressed NBT-tagged Creative item through the running
+/// Protocol 5 server. This checks packet boundaries beyond the unit parser.
+#[test]
+fn live_protocol5_creative_nbt_roundtrip_and_invalid_tag_recovery() {
+    use flate2::{write::GzEncoder, Compression};
+    use fastnbt::Value;
+    use std::collections::HashMap;
+
+    let _live_guard = LIVE_SERVER_LOCK.lock().unwrap();
+    let server = Server::start();
+    let mut alpha = server.login("Alpha");
+    consume_initial(&mut alpha, 1);
+
+    let root = Value::Compound(HashMap::from([
+        ("UnknownField".to_string(), Value::String("keep me".to_string())),
+        (
+            "ench".to_string(),
+            Value::List(vec![Value::Compound(HashMap::from([
+                ("id".to_string(), Value::Short(16)),
+                ("lvl".to_string(), Value::Short(3)),
+            ]))]),
+        ),
+    ]));
+    let raw = fastnbt::to_bytes(&root).unwrap();
+    let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+    gzip.write_all(&raw).unwrap();
+    let compressed = gzip.finish().unwrap();
+
+    let mut slot = Vec::from([0, 36, 1, 20, 1, 0, 0]); // diamond sword 276
+    slot.extend_from_slice(&(compressed.len() as i16).to_be_bytes());
+    slot.extend_from_slice(&compressed);
+    alpha.write_all(&packet(0x10, &slot)).unwrap();
+
+    let mut expected = vec![0]; // S2F window ID
+    expected.extend_from_slice(&slot);
+    let mut found = false;
+    for _ in 0..40 {
+        let (id, body) = received(&mut alpha);
+        match id {
+            0x2f if body == expected => {
+                found = true;
+                break;
+            }
+            0x00 if body.len() == 4 => alpha.write_all(&packet(0, &body)).unwrap(),
+            _ => {}
+        }
+    }
+    assert!(found, "server failed to preserve creative NBT on S2F");
+
+    // A bad gzip Compound is an application rejection, not a disconnect.
+    alpha
+        .write_all(&packet(0x10, &[0, 36, 1, 20, 1, 0, 0, 0, 3, 10, 0, 0]))
+        .unwrap();
+    let mut resynced = false;
+    for _ in 0..40 {
+        let (id, body) = received(&mut alpha);
+        match id {
+            0x30 if body.starts_with(&[0, 0, 45]) => {
+                resynced = true;
+                break;
+            }
+            0x00 if body.len() == 4 => alpha.write_all(&packet(0, &body)).unwrap(),
+            _ => {}
+        }
+    }
+    assert!(resynced, "bad creative NBT must resynchronize inventory");
+
+    // Confirm connection remains usable after rejected NBT.
+    alpha
+        .write_all(&packet(0x10, &[0, 36, 0, 4, 64, 0, 0, 255, 255]))
+        .unwrap();
+    let mut usable = false;
+    for _ in 0..40 {
+        let (id, body) = received(&mut alpha);
+        match id {
+            0x2f if body == [0, 0, 36, 0, 4, 64, 0, 0, 255, 255] => {
+                usable = true;
+                break;
+            }
+            0x00 if body.len() == 4 => alpha.write_all(&packet(0, &body)).unwrap(),
+            _ => {}
+        }
+    }
+    assert!(usable, "valid creative actions still work after bad NBT");
+}
+
 /// C10 (Creative Inventory Action) -> S2F (Set Slot) wire contract, exercised
 /// against the actual server binary. Fixed byte expectations are deliberately
 /// independent from Inventory::encode_slot and the server packet writer.
