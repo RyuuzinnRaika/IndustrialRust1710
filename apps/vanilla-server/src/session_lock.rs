@@ -68,6 +68,46 @@ impl WorldSessionLock {
         self.path.parent().expect("session.lock has a parent")
     }
 
+    pub(crate) fn is_lock_path(&self, path: &Path) -> io::Result<bool> {
+        if path.file_name() != self.path.file_name() {
+            return Ok(false);
+        }
+        Ok(fs::canonicalize(path)? == fs::canonicalize(&self.path)?)
+    }
+
+    /// Copy the vanilla marker through the handle that owns its exclusive
+    /// lock. On Windows, opening the locked byte range through a second handle
+    /// can fail even when this process owns the lock.
+    pub(crate) fn copy_marker_to(&mut self, destination: &Path) -> io::Result<u64> {
+        self.verify()?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut marker = [0u8; 8];
+        self.file.read_exact(&mut marker)?;
+        output.write_all(&marker)?;
+        output.sync_all()?;
+        self.verify()?;
+        Ok(marker.len() as u64)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_timestamp_for_test(&mut self, timestamp_ms: i64) -> io::Result<()> {
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(&timestamp_ms.to_be_bytes())?;
+        self.file.sync_all()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn timestamp_for_test(&mut self) -> io::Result<i64> {
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut marker = [0u8; 8];
+        self.file.read_exact(&mut marker)?;
+        Ok(i64::from_be_bytes(marker))
+    }
+
     pub fn acquire(world_dir: &Path) -> io::Result<Self> {
         match fs::symlink_metadata(world_dir) {
             Ok(metadata) if !metadata.file_type().is_dir() => {
@@ -198,12 +238,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         let mut first = WorldSessionLock::acquire(&root).unwrap();
-        let bytes = fs::read(root.join("session.lock")).unwrap();
-        assert_eq!(bytes.len(), 8);
-        assert_eq!(
-            i64::from_be_bytes(bytes.try_into().unwrap()),
-            first.started_ms
-        );
+        assert_eq!(first.timestamp_for_test().unwrap(), first.started_ms);
         assert!(first.verify().is_ok());
         assert!(WorldSessionLock::acquire(&root).is_err());
         drop(first);
@@ -244,7 +279,7 @@ mod tests {
         let mut lock = WorldSessionLock::acquire(&root).unwrap();
         // Unmodified Java servers can overwrite the marker despite advisory
         // locking. Always fail closed when the marker differs.
-        fs::write(root.join("session.lock"), 1i64.to_be_bytes()).unwrap();
+        lock.replace_timestamp_for_test(1).unwrap();
         assert!(lock.verify().is_err());
         drop(lock);
         fs::remove_dir_all(root).unwrap();

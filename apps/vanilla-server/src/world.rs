@@ -3611,9 +3611,9 @@ mod tests {
     #[test]
     fn sand_gravel_fall_one_cell_per_tick_and_restore_after_reload() {
         let path = std::env::temp_dir().join(format!(
-            "ir1710-gravity-{}-{}.irw",
+            "ir1710-gravity-{}-{:?}.irw",
             std::process::id(),
-            std::thread::current().name().unwrap_or("world")
+            std::thread::current().id()
         ));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
@@ -3852,7 +3852,11 @@ mod tests {
         // A cloned editor must carry the same ownership requirement.
         let cloned = world.clone();
         assert!(cloned.save(&root.join("wrong.irw")).is_err());
-        fs::write(root.join("session.lock"), 0i64.to_be_bytes()).unwrap();
+        session
+            .lock()
+            .unwrap()
+            .replace_timestamp_for_test(0)
+            .unwrap();
         assert!(cloned.save(&world_path).is_err());
         assert!(cloned.encoded().is_err());
         assert_eq!(fs::read(&world_path).unwrap(), before);

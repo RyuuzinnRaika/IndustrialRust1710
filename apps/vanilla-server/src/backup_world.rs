@@ -2,7 +2,7 @@
 //! The caller holds a WorldSessionLock for the full snapshot operation.
 //! Backups are staged alongside their final path; failed copies are removed.
 use crate::session_lock::WorldSessionLock;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read};
 use std::path::Path;
 
@@ -14,6 +14,10 @@ pub struct BackupStats {
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidInput, message)
+}
+
+fn context(error: io::Error, operation: &str) -> io::Error {
+    io::Error::new(error.kind(), format!("{operation}: {error}"))
 }
 
 fn sync_directory(path: &Path) -> io::Result<()> {
@@ -66,8 +70,15 @@ fn verify_file_copy(source: &Path, target: &Path, expected_len: u64) -> io::Resu
     Ok(())
 }
 
-fn copy_directory(src: &Path, dst: &Path, stats: &mut BackupStats) -> io::Result<()> {
-    for entry in fs::read_dir(src)? {
+fn copy_directory(
+    src: &Path,
+    dst: &Path,
+    stats: &mut BackupStats,
+    session: &mut WorldSessionLock,
+) -> io::Result<()> {
+    for entry in
+        fs::read_dir(src).map_err(|error| context(error, "read backup source directory"))?
+    {
         let entry = entry?;
         let source = entry.path();
         let file_type = entry.file_type()?;
@@ -76,20 +87,48 @@ fn copy_directory(src: &Path, dst: &Path, stats: &mut BackupStats) -> io::Result
         }
         let target = dst.join(entry.file_name());
         if file_type.is_dir() {
-            fs::create_dir(&target)?;
-            copy_directory(&source, &target, stats)?;
-            sync_directory(&target)?;
+            fs::create_dir(&target)
+                .map_err(|error| context(error, "create backup subdirectory"))?;
+            copy_directory(&source, &target, stats, session)
+                .map_err(|error| context(error, "copy backup subdirectory"))?;
+            sync_directory(&target).map_err(|error| context(error, "sync backup subdirectory"))?;
         } else if file_type.is_file() {
-            let length = entry.metadata()?.len();
-            let copied = fs::copy(&source, &target)?;
-            if copied != length || fs::metadata(&source)?.len() != length {
+            if session.is_lock_path(&source)? {
+                let copied = session
+                    .copy_marker_to(&target)
+                    .map_err(|error| context(error, "copy locked session marker"))?;
+                stats.files += 1;
+                stats.bytes = stats
+                    .bytes
+                    .checked_add(copied)
+                    .ok_or_else(|| invalid("backup size overflow"))?;
+                continue;
+            }
+            let length = entry
+                .metadata()
+                .map_err(|error| context(error, "read backup source metadata"))?
+                .len();
+            let copied = fs::copy(&source, &target)
+                .map_err(|error| context(error, &format!("copy {}", source.display())))?;
+            if copied != length
+                || fs::metadata(&source)
+                    .map_err(|error| context(error, "recheck backup source metadata"))?
+                    .len()
+                    != length
+            {
                 return Err(io::Error::new(
                     ErrorKind::InvalidData,
                     "file changed while copying the world",
                 ));
             }
-            verify_file_copy(&source, &target, length)?;
-            File::open(&target)?.sync_all()?;
+            verify_file_copy(&source, &target, length)
+                .map_err(|error| context(error, "verify copied world file"))?;
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&target)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| context(error, "sync copied world file"))?;
             stats.files += 1;
             stats.bytes = stats
                 .bytes
@@ -140,12 +179,18 @@ pub fn create(
     let mut staging_name = dest_name.to_os_string();
     staging_name.push(".incomplete");
     let staging = parent.join(staging_name);
-    session.verify()?;
-    fs::create_dir(&staging)?; // Never remove a pre-existing incomplete backup.
+    session
+        .verify()
+        .map_err(|error| context(error, "verify session before backup"))?;
+    fs::create_dir(&staging).map_err(|error| context(error, "create backup staging directory"))?;
+    // Never remove a pre-existing incomplete backup.
     let result = (|| {
         let mut stats = BackupStats { files: 0, bytes: 0 };
-        copy_directory(source, &staging, &mut stats)?;
-        session.verify()?;
+        copy_directory(source, &staging, &mut stats, session)
+            .map_err(|error| context(error, "copy world directory"))?;
+        session
+            .verify()
+            .map_err(|error| context(error, "verify session after backup copy"))?;
         sync_directory(&staging)?;
         // Rename is on the same filesystem because staging is a sibling.
         // Check again to reject a destination concurrently created elsewhere.
@@ -155,7 +200,8 @@ pub fn create(
                 "backup destination appeared",
             ));
         }
-        fs::rename(&staging, destination)?;
+        fs::rename(&staging, destination)
+            .map_err(|error| context(error, "publish completed backup directory"))?;
         sync_directory(parent)?;
         Ok(stats)
     })();
@@ -184,7 +230,8 @@ mod tests {
         fs::write(world.join("players/test.dat"), b"save-data").unwrap();
         let mut session = WorldSessionLock::acquire(&world).unwrap();
         let dest = root.join("backup");
-        let stats = create(&world, &dest, &mut session).unwrap();
+        let stats = create(&world, &dest, &mut session)
+            .unwrap_or_else(|error| panic!("backup create failed: {error}"));
         assert_eq!(stats.files, 3); // Two saves and session.lock.
         assert_eq!(fs::read(dest.join("flat.irw")).unwrap(), b"IRW1");
         assert_eq!(
@@ -232,7 +279,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("world")).unwrap();
         let mut session = WorldSessionLock::acquire(&root.join("world")).unwrap();
-        fs::write(root.join("world/session.lock"), 0i64.to_be_bytes()).unwrap();
+        session.replace_timestamp_for_test(0).unwrap();
         let dest = root.join("backup");
         assert!(create(&root.join("world"), &dest, &mut session).is_err());
         assert!(!dest.exists());

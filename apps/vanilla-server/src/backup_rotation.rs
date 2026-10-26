@@ -1,6 +1,6 @@
 //! J92 offline rotating snapshot helper. Retention never touches unmarked dirs.
 use crate::{backup_world, session_lock::WorldSessionLock, verify_world};
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -57,7 +57,7 @@ pub fn rotate(
     }
     let marker = destination.join(".industrial1710-backup");
     fs::write(&marker, MARKER)?;
-    File::open(&marker)?.sync_all()?;
+    OpenOptions::new().write(true).open(&marker)?.sync_all()?;
     let mut owned = Vec::new();
     for entry in fs::read_dir(root)? {
         let entry = entry?;

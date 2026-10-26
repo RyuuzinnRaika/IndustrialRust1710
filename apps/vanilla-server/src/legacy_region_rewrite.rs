@@ -1111,7 +1111,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fs::read(&source).unwrap(), original);
-        fs::write(world.join("session.lock"), 0i64.to_be_bytes()).unwrap();
+        lock.replace_timestamp_for_test(0).unwrap();
         assert!(
             rewrite_chunk_under_lock(&mut lock, Dimension::Overworld, 0, 0, b"invalid NBT")
                 .is_err()

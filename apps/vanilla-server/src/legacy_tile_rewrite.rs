@@ -428,7 +428,7 @@ mod tests {
             assert_eq!(fs::read(&source).unwrap(), before);
         }
         // Java-style session.lock tampering rejects even a valid edit.
-        fs::write(root.join("world/session.lock"), 0i64.to_be_bytes()).unwrap();
+        lock.replace_timestamp_for_test(0).unwrap();
         assert!(rewrite_inventories_under_lock(
             &mut lock,
             Dimension::Overworld,

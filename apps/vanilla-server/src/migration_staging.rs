@@ -62,7 +62,10 @@ fn copy_tree(source: &Path, dest: &Path, depth: usize, stats: &mut CopyStats) ->
                 return Err(invalid("source mutated during copy"));
             }
             compare_files(&from, &to)?;
-            File::open(&to)?.sync_all()?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&to)?
+                .sync_all()?;
         } else {
             return Err(invalid(
                 "refusing symlinks, sockets and special input files",
