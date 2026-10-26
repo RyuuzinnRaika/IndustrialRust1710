@@ -3250,9 +3250,10 @@ fn overworld_biome_allows_natural_spawn(biome: u8) -> bool {
 
 /// Vanilla 1.7.10 Desert, Snow, and Beach biome constructors clear the
 /// inherited passive creature list. Stone Beach (25) and Cold Beach (26)
-/// must not silently inherit ordinary farm-animal entries. Apply the same filter to the pack origin and each
-/// member: a pack from adjacent plains must not spawn cows in Ice Plains or
-/// Desert Hills. Mutated Desert (130) and Ice Plains Spikes (140) inherit
+/// must not silently inherit ordinary farm-animal entries. Apply this filter
+/// at both the pack origin and each member: an adjacent plains pack must not
+/// spawn cows on a beach, in Ice Plains or Desert Hills. Mutated Desert (130)
+/// and Ice Plains Spikes (140) inherit
 /// their parent biome's empty passive list.
 fn overworld_biome_allows_passive_spawn(biome: u8) -> bool {
     !matches!(
