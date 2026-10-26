@@ -472,6 +472,54 @@ mod tests {
     }
 
     #[test]
+    fn double_chest_analog_signal_tracks_both_halves_through_empty_and_refill() {
+        let left = (-8, 64, 11);
+        let right = (-7, 64, 11);
+        let stack = Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        let mut world = world::World::new();
+        world.import_block(left.0, left.1, left.2, 54 << 4).unwrap();
+        world
+            .import_block(right.0, right.1, right.2, 54 << 4)
+            .unwrap();
+        let signals = |state: &Chests| {
+            combine_chest_comparator_inputs(
+                &world,
+                &state.comparator_snapshot(),
+                state.comparator_inputs(),
+            )
+        };
+        let assert_both = |state: &Chests, expected: Option<u8>| {
+            let current = signals(state);
+            assert_eq!(current.get(&(-8, 64, 11)).copied(), expected);
+            assert_eq!(current.get(&(-7, 64, 11)).copied(), expected);
+        };
+
+        let left_full = Chests::default()
+            .staged_update(left, [Some(stack); CHEST_SLOTS])
+            .unwrap();
+        assert_both(&left_full, Some(8));
+        let both_full = left_full
+            .staged_update(right, [Some(stack); CHEST_SLOTS])
+            .unwrap();
+        assert_both(&both_full, Some(15));
+        let right_full = both_full.staged_update(left, [None; CHEST_SLOTS]).unwrap();
+        assert_both(&right_full, Some(8));
+        let both_empty = right_full
+            .staged_update(right, [None; CHEST_SLOTS])
+            .unwrap();
+        assert_both(&both_empty, None);
+        let left_refilled = both_empty
+            .staged_update(left, [Some(stack); CHEST_SLOTS])
+            .unwrap();
+        assert_both(&left_refilled, Some(8));
+    }
+
+    #[test]
     fn generated_chest_loot_is_claimed_once_even_after_emptying() {
         let file =
             std::env::temp_dir().join(format!("ir1710-dungeon-chest-{}.json", std::process::id()));
