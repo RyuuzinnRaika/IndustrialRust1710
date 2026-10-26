@@ -116,7 +116,8 @@ fn piston_breakable(block: u16) -> bool {
             | 149 | 150 // comparators
             | 6 // saplings
             | 31 | 32 // tall grass and dead bush
-            | 37..=40 // flowers and mushrooms
+            | 37
+            ..=40 // flowers and mushrooms
             | 59 // wheat
             | 78 // snow layer
             | 83 // sugar cane
@@ -1372,8 +1373,7 @@ mod redstone_regression_tests {
         // a piston extends; a sticky piston must not pull them back.
         // Drops are intentionally out of scope for this regression.
         for fragile_id in [
-            6u16, 31, 32, 37, 38, 39, 40, 59, 78, 83, 104, 105, 106, 115, 141, 142, 171,
-            175,
+            6u16, 31, 32, 37, 38, 39, 40, 59, 78, 83, 104, 105, 106, 115, 141, 142, 171, 175,
         ] {
             assert!(piston_breakable(fragile_id << 4));
             for solids_ahead in [0, 1] {
