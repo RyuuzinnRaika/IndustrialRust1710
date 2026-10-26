@@ -231,6 +231,9 @@ impl World {
                 .lock()
                 .map_err(|_| invalid("session lock mutex poisoned"))?
                 .verify()?;
+            if world_path.with_extension("pending-txn.json").exists() {
+                return Err(invalid("pending world redo requires recovery before save"));
+            }
         }
         Ok(())
     }
@@ -1583,6 +1586,122 @@ impl World {
         }
         Ok(true)
     }
+    /// E46 opt-in block mutation path for an EXISTING Overworld Anvil chunk.
+    ///
+    /// The live server still uses IRW saves. A caller must explicitly choose
+    /// this bridge; it requires a bound session.lock and a byte-identical IRW
+    /// baseline. Neither IRW nor the Anvil region may advance by itself.
+    /// Unknown Anvil NBT survives in the existing region rewrite helper.
+    #[allow(dead_code)] // Opt-in E46 bridge, not the default live World::save path.
+    pub fn update_and_flush_existing_anvil(
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        z: i32,
+        block: u16,
+    ) -> io::Result<bool> {
+        if !in_bounds(x, y, z) || block >> 4 > 255 {
+            return Err(invalid("E46 Anvil block outside vanilla/IRW limits"));
+        }
+        // IRW4 Nether/End save files are nested below the lock root and need
+        // dimension-aware redo publication before they can use this bridge.
+        if self.dimension() != crate::dimensions::Dimension::Overworld {
+            return Err(invalid("E46 Anvil block bridge supports Overworld only"));
+        }
+        let (bound_path, session) = self
+            .save_session
+            .as_ref()
+            .ok_or_else(|| invalid("E46 Anvil block write requires session.lock"))?;
+        if bound_path != path {
+            return Err(invalid("Anvil block write path differs from bound world"));
+        }
+        let previous = self.get(x, y, z);
+        if previous == block {
+            return Ok(false);
+        }
+        // In-memory state must agree with the exact durable IRW generation.
+        // Never use a stale or partially saved IRW to overwrite newer Anvil.
+        let old_irw = self.encoded()?;
+        if fs::read(path)? != old_irw {
+            return Err(invalid("E46 IRW memory and disk differ before Anvil save"));
+        }
+        let mut next = self.clone();
+        let key = (x, y as u8, z);
+        if block == self.base_block(x, y as u8, z) {
+            next.edits.remove(&key);
+        } else {
+            if !next.edits.contains_key(&key) && next.edits.len() >= MAX_EDITS {
+                return Err(invalid("too many changed blocks for E46 Anvil save"));
+            }
+            next.edits.insert(key, block);
+        }
+        let next_irw = next.encoded()?;
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        let (rx, rz) = (cx.div_euclid(32), cz.div_euclid(32));
+        let session = Arc::clone(session);
+        let mut lock = session
+            .lock()
+            .map_err(|_| invalid("E46 session lock mutex poisoned"))?;
+        lock.verify()?;
+        if path.parent() != Some(lock.world_dir()) {
+            return Err(invalid("E46 Anvil world must be in locked root directory"));
+        }
+        let region_path = lock
+            .world_dir()
+            .join("region")
+            .join(format!("r.{rx}.{rz}.mca"));
+        let region_meta = fs::symlink_metadata(&region_path)?;
+        // The redo journal caps one region at 8 MiB. Enforce this before
+        // loading untrusted on-disk data into memory.
+        if !region_meta.file_type().is_file()
+            || region_meta.len() < 8192
+            || region_meta.len() > 8 * 1024 * 1024
+        {
+            return Err(invalid("E46 invalid or oversized Anvil source region"));
+        }
+        let region = fs::read(&region_path)?;
+        let mut reader = fastanvil::Region::from_stream(std::io::Cursor::new(&region))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let original_nbt = reader
+            .read_chunk(cx.rem_euclid(32) as usize, cz.rem_euclid(32) as usize)
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .ok_or_else(|| invalid("E46 dirty-block save requires an existing Anvil chunk"))?;
+        let parsed = crate::legacy_nbt::parse_chunk(&original_nbt, cx, cz)?;
+        let idx =
+            (y as usize % 16) * 256 + z.rem_euclid(16) as usize * 16 + x.rem_euclid(16) as usize;
+        let (old_id, old_meta) = parsed
+            .level
+            .sections
+            .iter()
+            .find(|section| section.y == (y / 16) as i8)
+            .and_then(|section| section.block_at(idx))
+            .unwrap_or((0, 0));
+        if (old_id << 4) | u16::from(old_meta) != previous {
+            return Err(invalid("E46 Anvil block disagrees with authoritative IRW"));
+        }
+        crate::legacy_region_rewrite::flush_irw_block_edits_under_lock_expected(
+            &mut lock,
+            crate::dimensions::Dimension::Overworld,
+            &[(x, y, z, block)],
+            &BTreeMap::from([((rx, rz), region)]),
+            path,
+            &old_irw,
+            &next_irw,
+        )?;
+        drop(lock);
+        // Only publish the in-memory transition after both disk images have
+        // committed. This exactly preserves the regular block wake semantics.
+        next.mark_lighting_changed(x, z, previous, block);
+        next.wake_gravity(x, y, z);
+        next.wake_block_updates(x, y, z);
+        if matches!(previous >> 4, 17 | 162) || matches!(block >> 4, 17 | 162) {
+            next.wake_leaves(x, y, z);
+        }
+        *self = next;
+        Ok(true)
+    }
+
     /// Apply one parsed block to a *detached* import world. Call save_new only
     /// after every Anvil chunk has been validated; never persist partial imports.
     pub fn import_block(&mut self, x: i32, y: i32, z: i32, block: u16) -> io::Result<()> {
@@ -1886,6 +2005,11 @@ impl World {
         };
         if let Some(guard) = session_guard.as_mut() {
             guard.verify()?;
+            if path.with_extension("pending-txn.json").exists() {
+                return Err(invalid(
+                    "pending world redo requires recovery before IRW save",
+                ));
+            }
         }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
@@ -1981,6 +2105,123 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn e46_fixture(label: &str, divergent_anvil: bool) -> (PathBuf, World) {
+        let base = std::env::temp_dir().join(format!(
+            "industrial-e46-world-{}-{}-{:?}",
+            label,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let root = base.join("anvil");
+        let mut exported = World::new();
+        if divergent_anvil {
+            exported.import_block(2, 90, 3, 5 << 4).unwrap();
+        }
+        crate::anvil_export::export(&exported, &root).unwrap();
+        let path = root.join("flat.irw");
+        let mut world = World::new();
+        world.save_new(&path).unwrap();
+        let lock = Arc::new(Mutex::new(
+            crate::session_lock::WorldSessionLock::acquire(&root).unwrap(),
+        ));
+        world.bind_save_session(&path, lock).unwrap();
+        (base, world)
+    }
+
+    #[test]
+    fn e46_bound_world_block_write_updates_anvil_and_irw_together() {
+        let (base, mut world) = e46_fixture("durable", false);
+        let root = base.join("anvil");
+        let path = root.join("flat.irw");
+        assert!(world
+            .update_and_flush_existing_anvil(&path, 2, 90, 3, (5 << 4) | 7)
+            .unwrap());
+        assert!(!world
+            .update_and_flush_existing_anvil(&path, 2, 90, 3, (5 << 4) | 7)
+            .unwrap());
+        assert!(world
+            .update_and_flush_existing_anvil(&path, 2, 90, 3, (5 << 4) | 3)
+            .unwrap());
+        assert_eq!(world.get(2, 90, 3), (5 << 4) | 3);
+        assert_eq!(World::load(&path).unwrap().get(2, 90, 3), (5 << 4) | 3);
+        let mut region =
+            fastanvil::Region::from_stream(File::open(root.join("region/r.0.0.mca")).unwrap())
+                .unwrap();
+        let chunk =
+            crate::legacy_nbt::parse_chunk(&region.read_chunk(0, 0).unwrap().unwrap(), 0, 0)
+                .unwrap();
+        assert_eq!(
+            chunk
+                .level
+                .sections
+                .iter()
+                .find(|s| s.y == 5)
+                .unwrap()
+                .block_at((90 % 16) * 256 + 3 * 16 + 2),
+            Some((5, 3))
+        );
+        assert!(!path.with_extension("pending-txn.json").exists());
+        drop(region);
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_refuses_divergent_anvil_without_modifying_world() {
+        let (base, mut world) = e46_fixture("anvil-drift", true);
+        let root = base.join("anvil");
+        let irw_path = root.join("flat.irw");
+        let region_path = root.join("region/r.0.0.mca");
+        let irw_before = fs::read(&irw_path).unwrap();
+        let region_before = fs::read(&region_path).unwrap();
+        assert!(world
+            .update_and_flush_existing_anvil(&irw_path, 2, 90, 3, (1 << 4) | 2)
+            .is_err());
+        assert_eq!(world.get(2, 90, 3), 0);
+        assert_eq!(fs::read(&irw_path).unwrap(), irw_before);
+        assert_eq!(fs::read(&region_path).unwrap(), region_before);
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_refuses_stale_irw_and_pending_redo_without_publishing_anvil() {
+        let (base, mut world) = e46_fixture("failclosed", false);
+        let root = base.join("anvil");
+        let irw_path = root.join("flat.irw");
+        let region_path = root.join("region/r.0.0.mca");
+        let irw_before = fs::read(&irw_path).unwrap();
+        let region_before = fs::read(&region_path).unwrap();
+        fs::write(&irw_path, b"stale file").unwrap();
+        assert!(world
+            .update_and_flush_existing_anvil(&irw_path, 2, 90, 3, 5 << 4)
+            .is_err());
+        assert_eq!(fs::read(&region_path).unwrap(), region_before);
+        fs::write(&irw_path, &irw_before).unwrap();
+        fs::write(irw_path.with_extension("pending-txn.json"), b"pending").unwrap();
+        assert!(world.save(&irw_path).is_err());
+        assert!(world.encoded().is_err());
+        assert!(world
+            .update_and_flush_existing_anvil(&irw_path, 2, 90, 3, 5 << 4)
+            .is_err());
+        assert_eq!(fs::read(&irw_path).unwrap(), irw_before);
+        assert_eq!(fs::read(&region_path).unwrap(), region_before);
+        assert_eq!(world.get(2, 90, 3), 0);
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_does_not_implicitly_bind_or_create_anvil_storage() {
+        let mut detached = World::new();
+        assert!(detached
+            .update_and_flush_existing_anvil(Path::new("nonexistent-e46.irw"), 0, 64, 0, 1 << 4,)
+            .is_err());
+        assert_eq!(detached.get(0, 64, 0), 0);
+    }
+
     #[test]
     fn chunk_ids_and_metadata_match_direct_world_samples() {
         // The optimized single-pass packing must retain section order and
