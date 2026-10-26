@@ -2157,6 +2157,7 @@ mod tests {
             Some((5, 3))
         );
         assert!(!path.with_extension("pending-txn.json").exists());
+        drop(region);
         drop(world);
         fs::remove_dir_all(base).unwrap();
     }
