@@ -133,19 +133,19 @@ impl Decorations {
                 return Err(invalid("orphaned sign: no matching world block"));
             }
         }
-        for (position, _) in &self.notes {
+        for position in self.notes.keys() {
             let (x, y, z) = parse_key(position)?;
             if world.get(x, y, z) >> 4 != 25 {
                 return Err(invalid("orphaned note block: no matching world block"));
             }
         }
-        for (position, _) in &self.records {
+        for position in self.records.keys() {
             let (x, y, z) = parse_key(position)?;
             if world.get(x, y, z) >> 4 != 84 {
                 return Err(invalid("orphaned jukebox record: no matching world block"));
             }
         }
-        for (position, _) in &self.pots {
+        for position in self.pots.keys() {
             let (x, y, z) = parse_key(position)?;
             if world.get(x, y, z) >> 4 != 140 {
                 return Err(invalid("orphaned flower pot: no matching world block"));
