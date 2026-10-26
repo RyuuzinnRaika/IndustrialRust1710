@@ -4588,9 +4588,9 @@ mod tests {
             10
         );
         assert!((0..100_u64).all(|roll| !slime_cave_spawn_ok(0, x, 40, 0, roll)));
-        assert!((0..100_u64).all(|roll| {
-            !slime_cave_spawn_ok(0, non_slime_chunk * 16, 39, 0, roll)
-        }));
+        assert!(
+            (0..100_u64).all(|roll| { !slime_cave_spawn_ok(0, non_slime_chunk * 16, 39, 0, roll) })
+        );
         // Block-to-chunk conversion must continue to use floor division.
         assert_eq!(
             slime_cave_spawn_ok(0, -1, 39, 0, 0),
