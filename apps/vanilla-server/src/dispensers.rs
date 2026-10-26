@@ -243,6 +243,12 @@ pub(crate) fn window_title(block_id: u16) -> Option<&'static str> {
     }
 }
 
+/// Droppers insert directly into both regular and trapped chests in 1.7.10.
+/// The two block types share the same server-owned chest inventory store.
+pub(crate) fn dropper_chest_target(block_id: u16) -> bool {
+    matches!(block_id, 54 | 146)
+}
+
 /// Vanilla 1.7.10 comparator override for a nine-slot device:
 /// floor(14 * average slot fullness) + 1 when any slot is occupied.
 /// All supported item stack caps (1, 16, 64) divide 64 exactly.
@@ -404,6 +410,42 @@ mod tests {
         assert_eq!(world.get(0, 64, 0) >> 4, 149);
         assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 0);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn dropper_transfer_to_normal_and_trapped_chests_preserves_items() {
+        let source = (-2, 64, 1);
+        let destination = (-1, 64, 1);
+        let item = Stack {
+            id: 4,
+            count: 2,
+            damage: 0,
+            nbt: None,
+        };
+        let mut source_slots = [None; DEVICE_SLOTS];
+        source_slots[0] = Some(item);
+        let original = Devices::default()
+            .staged_update(source, source_slots)
+            .unwrap();
+
+        for block_id in [54, 146] {
+            assert!(dropper_chest_target(block_id));
+            let (debited, emitted) = original.stage_eject(source, 17).unwrap().unwrap();
+            assert_eq!(emitted.count, 1);
+            let chests = crate::chests::Chests::default();
+            let mut destination_slots = chests.slots(destination);
+            assert!(insert_one(&mut destination_slots, emitted));
+            let updated_chests = chests
+                .staged_update(destination, destination_slots)
+                .unwrap();
+            assert_eq!(updated_chests.slots(destination)[0], Some(emitted));
+            assert_eq!(debited.slots(source)[0].unwrap().count, 1);
+            assert_eq!(original.slots(source)[0], Some(item));
+            assert!(updated_chests.encoded().is_ok());
+        }
+        for block_id in [0, 23, 61, 62, 154, 158] {
+            assert!(!dropper_chest_target(block_id));
+        }
     }
 
     #[test]
