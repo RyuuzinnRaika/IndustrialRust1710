@@ -465,7 +465,8 @@ impl World {
         // The edit map is sorted by x/y/z, not by proximity. Keeping the
         // first 512 doors can discard the only connected annex door when
         // distant edits happen to sort first. Prefer candidates closest in
-        // 3D to a live core door, with a deterministic coordinate tie-break.
+        // 3D to a live core door, prioritizing doors reachable from the core
+        // before distance and then a deterministic coordinate tie-break.
         let mut candidates = BTreeSet::new();
         for (&(dx, dy, dz), &lower) in self.edits.range(
             (cx.saturating_sub(47), 0u8, i32::MIN)..=(cx.saturating_add(47), u8::MAX, i32::MAX),
@@ -483,23 +484,29 @@ impl World {
             let upper = self.get(dx, i32::from(dy) + 1, dz);
             if upper >> 4 == 64 && upper & 8 != 0 && self.can_support(dx, i32::from(dy), dz, lower)
             {
-                let distance = core
+                // The 512-candidate budget must favor a door that can
+                // actually join the core. A nearby door on another floor
+                // (vertical gap > 4) must not evict a valid bridge door.
+                let (unreachable, distance) = core
                     .iter()
                     .map(|anchor| {
                         let x_delta = i64::from(dx) - i64::from(anchor[0]);
                         let y_delta = i64::from(dy) - i64::from(anchor[1]);
                         let z_delta = i64::from(dz) - i64::from(anchor[2]);
-                        x_delta * x_delta + y_delta * y_delta + z_delta * z_delta
+                        (
+                            x_delta * x_delta + z_delta * z_delta > 16 * 16 || y_delta.abs() > 4,
+                            x_delta * x_delta + y_delta * y_delta + z_delta * z_delta,
+                        )
                     })
                     .min()
-                    .unwrap_or(i64::MAX);
-                candidates.insert((distance, [dx, i32::from(dy), dz]));
+                    .unwrap_or((true, i64::MAX));
+                candidates.insert((unreachable, distance, [dx, i32::from(dy), dz]));
                 if candidates.len() > 512 {
                     candidates.pop_last();
                 }
             }
         }
-        let candidates: BTreeSet<_> = candidates.into_iter().map(|(_, door)| door).collect();
+        let candidates: BTreeSet<_> = candidates.into_iter().map(|(_, _, door)| door).collect();
 
         let mut annex = Vec::new();
         let mut frontier = core;
@@ -3160,6 +3167,69 @@ mod tests {
             .expect("connected annex remains reachable despite distant edits");
         assert!(doors.contains(&annex));
         assert!(!doors.contains(&[cx - 47, 180, cz - 42]));
+    }
+
+    #[test]
+    fn village_annex_prioritizes_reachable_bridge_over_nearby_upper_floor_doors() {
+        let seed = 42;
+        let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+        let (cx, _, cz) = (-8..=8)
+            .flat_map(|gx| (-8..=8).map(move |gz| (gx * 192 + 48, gz * 192 + 48)))
+            .find_map(|(x, z)| crate::worldgen::village_center(seed, x, z))
+            .expect("seed 42 has a generated village");
+        // A player-built core door can bridge into the bounded annex.
+        let core = [cx + 30, 200, cz];
+        let bridge = [cx + 46, 200, cz];
+        for door in [core, bridge] {
+            world
+                .import_block(door[0], door[1] - 1, door[2], 1 << 4)
+                .unwrap();
+            world
+                .import_block(door[0], door[1], door[2], 64 << 4)
+                .unwrap();
+            world
+                .import_block(door[0], door[1] + 1, door[2], 64 << 4 | 8)
+                .unwrap();
+        }
+        // More than 512 doors are closer in 3D to the core than the
+        // bridge, but every one is at least five blocks higher.
+        // Their foundations and upper halves are all intact.
+        let mut distractors = 0;
+        'fill: for y in [205, 208] {
+            for dx in 32..=45 {
+                for dz in -15..=15 {
+                    let x_distance = i64::from(dx - 30);
+                    let z_distance = i64::from(dz);
+                    let y_distance = i64::from(y - 200);
+                    if x_distance * x_distance + y_distance * y_distance + z_distance * z_distance
+                        >= 16 * 16
+                    {
+                        continue;
+                    }
+                    let door = [cx + dx, y, cz + dz];
+                    world
+                        .import_block(door[0], door[1] - 1, door[2], 1 << 4)
+                        .unwrap();
+                    world
+                        .import_block(door[0], door[1], door[2], 64 << 4)
+                        .unwrap();
+                    world
+                        .import_block(door[0], door[1] + 1, door[2], 64 << 4 | 8)
+                        .unwrap();
+                    distractors += 1;
+                    if distractors == 520 {
+                        break 'fill;
+                    }
+                }
+            }
+        }
+        assert_eq!(distractors, 520);
+        let doors = world
+            .village_doors_with_bounded_annex(bridge[0], bridge[2])
+            .expect("a reachable bridge must survive the candidate budget");
+        assert!(doors.contains(&core));
+        assert!(doors.contains(&bridge));
+        assert!(!doors.contains(&[cx + 32, 205, cz]));
     }
 
     #[test]
