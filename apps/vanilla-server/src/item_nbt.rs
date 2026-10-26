@@ -134,11 +134,11 @@ mod tests {
         let absent = serde_json::to_value(SavedTag { nbt: None }).unwrap();
         let restored: SavedTag = serde_json::from_value(absent).unwrap();
         assert!(restored.nbt.is_none());
-        assert!(serde_json::to_value(SavedTag { nbt: Some(u64::MAX) }).is_err());
-        assert!(
-            serde_json::from_value::<SavedTag>(serde_json::json!({"nbt": [1, 2, 3]}))
-                .is_err()
-        );
+        assert!(serde_json::to_value(SavedTag {
+            nbt: Some(u64::MAX)
+        })
+        .is_err());
+        assert!(serde_json::from_value::<SavedTag>(serde_json::json!({"nbt": [1, 2, 3]})).is_err());
     }
 
     #[test]
