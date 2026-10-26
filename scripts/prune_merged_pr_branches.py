@@ -43,12 +43,15 @@ RETIRED_PR_HEADS = {
     88: "9b7916280f470963497206f42409d6bd5e566389",
     97: "7c5d2b4d7c6bb8f85d5f5fae9ba34c6c8c985b82",
     98: "cc2a74a3ef0f53aebf1146143de6b5525dd6a518",
+    117: "f2bd80e5de9d3db14c8046d45221f9ab4a78f07d",
     118: "5d58eca0890cc2719d334015075b3b43c30c7fc9",
     121: "e10fc063689670f47b615e793b496223c3ed3efc",
     122: "03af198341e7857a8a5c54c13bd94fe34571656a",
+    139: "4c8296e66055396033ecdc9878c3a59afa220432",
     141: "15e6bea2b632e4421156accbb10c099fc49ff284",
     147: "645f634ac2ff1671538fd97f9e73177cd408dede",
     148: "6de2b50cf89952a9dde3c19df303a902ae26d499",
+    164: "6f1abcf6839b0722d2af8fc0a997401ce51d442c",
     167: "b99c9f635d1c1817e7034a5fa87bbb59eacaa515",
     168: "89bb13307864bec1f9dd88a6de4e4fd2c6ca08c5",
     169: "11bfa1d4869dd4e792905f9b54121f9704af488e",
@@ -57,6 +60,18 @@ RETIRED_PR_HEADS = {
     173: "bc368e33d73243e380452e18463b5e21e3e4f409",
     176: "88c5b578794461717e04d572c0cac09db8a285b5",
     352: "86334e801be0bdde11bf01149a195a9e3bfca836",
+}
+
+# Nested PRs integrated into the indicated later main PR. All refs are immutable
+# SHA-pins and require both PRs to be merged in chronological order.
+RETIRED_MERGED_STACK_HEADS = {
+    36: ("dfbde540e3466a99e744cee1969d85afd43a8c23", 50),
+    39: ("14c8ff46eb414518fc646187cb45bbed2c06d537", 50),
+    40: ("2077f22807a379c61b9e04101fd3fd8bc031595d", 50),
+    41: ("125b60a2f35ade37ed9a99b704d796f4bc4ce7db", 50),
+    69: ("f98adc7f6b95aba57f773c3d6052334c0c052084", 185),
+    73: ("031e133e89cf74980d5133e642a80fad05312281", 185),
+    124: ("696d14fe217043928dfd631f0d60bbb398089179", 116),
 }
 
 
@@ -182,6 +197,28 @@ def main():
         if branch["commit"]["sha"] != head["sha"]:
             continue
         candidates[name] = {"sha": head["sha"], "pr": pr["number"]}
+
+    # Source PR merged into a feature branch before a later mainline integration.
+    pr_by_number = {pr["number"]: pr for pr in prs}
+    for number, (expected_sha, successor_number) in RETIRED_MERGED_STACK_HEADS.items():
+        source = pr_by_number.get(number)
+        successor = pr_by_number.get(successor_number)
+        if not source or not successor:
+            continue
+        if (not source.get("merged_at") or not successor.get("merged_at")
+                or successor["base"]["ref"] != default_branch
+                or source["merged_at"] >= successor["merged_at"]):
+            continue
+        head = source["head"]
+        if (not head["repo"] or head["repo"]["full_name"] != repo
+                or head["sha"] != expected_sha):
+            continue
+        name = head["ref"]
+        branch = branches_by_name.get(name)
+        if (not branch or branch.get("protected") or name in keep
+                or branch["commit"]["sha"] != expected_sha):
+            continue
+        candidates[name] = {"sha": expected_sha, "pr": number}
 
     # Also prune refs whose exact tip is reachable from main. This catches
     # squash-independent branches and obsolete refs without an associated PR.
