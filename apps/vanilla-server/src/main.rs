@@ -6777,6 +6777,8 @@ fn main() -> io::Result<()> {
     let ejection_hopper_file = Arc::clone(&hopper_path);
     let ejection_furnaces = Arc::clone(&furnaces);
     let ejection_furnace_file = Arc::clone(&furnace_path);
+    let ejection_brewers = Arc::clone(&brewers);
+    let ejection_brewer_file = Arc::clone(&brewer_path);
     let tick_shutdown = Arc::clone(&shutdown);
     let tick_thread = thread::spawn(move || {
         let mut telemetry =
@@ -7166,6 +7168,52 @@ fn main() -> io::Result<()> {
                                         }
                                         *storage = updated;
                                         *furnaces = next_furnaces;
+                                    }
+                                    continue;
+                                }
+                                // Brewing stands have four legacy slots: top supplies
+                                // ingredients and all other faces supply bottles.
+                                // Reject full/invalid slots without ejecting an item.
+                                if state >> 4 == 158
+                                    && gravity_world.get(dest.0, dest.1, dest.2) >> 4 == 117
+                                {
+                                    let mut brewers = match ejection_brewers.lock() {
+                                        Ok(value) => value,
+                                        Err(_) => return,
+                                    };
+                                    let mut stand = brewers.get(dest);
+                                    if dispensers::dropper_brewer_insert(&mut stand, offset, stack)
+                                    {
+                                        let next_brewers = match brewers.staged_update(dest, stand)
+                                        {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                eprintln!(
+                                                    "DROPPER BREWING TRANSFER ERROR: {error}"
+                                                );
+                                                continue;
+                                            }
+                                        };
+                                        let result = (|| -> io::Result<()> {
+                                            journal::commit(
+                                                &furnace_world_path
+                                                    .with_extension("pending-txn.json"),
+                                                &[
+                                                    (&*ejection_file, updated.encoded()?),
+                                                    (
+                                                        &*ejection_brewer_file,
+                                                        next_brewers.encoded()?,
+                                                    ),
+                                                ],
+                                            )?;
+                                            Ok(())
+                                        })();
+                                        if let Err(error) = result {
+                                            eprintln!("DROPPER BREWING JOURNAL ERROR: {error}");
+                                            continue;
+                                        }
+                                        *storage = updated;
+                                        *brewers = next_brewers;
                                     }
                                     continue;
                                 }

@@ -281,6 +281,45 @@ pub(crate) fn dropper_furnace_slot(
     None
 }
 
+/// Insert one dropper item into the four-slot 1.7.10 brewing stand.
+/// Above supplies the ingredient; all other faces supply potion bottles.
+/// Invalid or full slots do not
+/// debit the source inventory (the caller commits the staged debit later).
+pub(crate) fn dropper_brewer_insert(
+    stand: &mut crate::brewing::Brewer,
+    offset: Position,
+    item: Stack,
+) -> bool {
+    if item.count != 1 || !item.is_valid() {
+        return false;
+    }
+    if offset == (0, -1, 0) {
+        if !crate::brewing::slot_accepts(3, item) {
+            return false;
+        }
+        let mut ingredient = [stand.slots[3]];
+        if insert_one(&mut ingredient, item) {
+            stand.slots[3] = ingredient[0];
+            return true;
+        }
+        return false;
+    }
+    if !matches!(
+        offset,
+        (1, 0, 0) | (-1, 0, 0) | (0, 0, 1) | (0, 0, -1) | (0, 1, 0)
+    ) || !crate::brewing::slot_accepts(0, item)
+    {
+        return false;
+    }
+    for bottle in &mut stand.slots[..3] {
+        if bottle.is_none() {
+            *bottle = Some(item);
+            return true;
+        }
+    }
+    false
+}
+
 /// Vanilla 1.7.10 comparator override for a nine-slot device:
 /// floor(14 * average slot fullness) + 1 when any slot is occupied.
 /// All supported item stack caps (1, 16, 64) divide 64 exactly.
@@ -600,6 +639,62 @@ mod tests {
         slots.fill(Some(full));
         assert!(!insert_one(&mut slots, item));
         assert_eq!(slots, [Some(full); 3]);
+    }
+
+    #[test]
+    fn dropper_brewing_insertion_rejects_wrong_faces_and_full_slots() {
+        let bottle = Stack {
+            id: 373,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let wart = Stack { id: 372, ..bottle };
+        let dirt = Stack { id: 3, ..bottle };
+        let mut stand = crate::brewing::Brewer::default();
+        assert!(!dropper_brewer_insert(&mut stand, (0, 1, 0), wart));
+        assert!(!dropper_brewer_insert(&mut stand, (0, -1, 0), dirt));
+        assert!(!dropper_brewer_insert(&mut stand, (1, 0, 0), wart));
+        assert_eq!(stand, crate::brewing::Brewer::default());
+
+        assert!(dropper_brewer_insert(&mut stand, (0, -1, 0), wart));
+        assert!(dropper_brewer_insert(&mut stand, (0, -1, 0), wart));
+        assert_eq!(stand.slots[3].unwrap().count, 2);
+        for offset in [(1, 0, 0), (0, 1, 0), (0, 0, 1)] {
+            assert!(dropper_brewer_insert(&mut stand, offset, bottle));
+        }
+        let full = stand;
+        assert!(!dropper_brewer_insert(&mut stand, (0, 0, -1), bottle));
+        assert!(!dropper_brewer_insert(&mut stand, (0, 1, 0), bottle));
+        assert_eq!(stand, full);
+        assert!(stand.valid());
+    }
+
+    #[test]
+    fn dropper_brewing_transfer_is_staged_and_serializable() {
+        let source = (1, 64, 1);
+        let dest = (2, 64, 1);
+        let bottle = Stack {
+            id: 373,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut slots = [None; DEVICE_SLOTS];
+        slots[0] = Some(bottle);
+        let devices = Devices::default().staged_update(source, slots).unwrap();
+        let brewers = crate::brewing::Brewers::default();
+        let (debited, emitted) = devices.stage_eject(source, 42).unwrap().unwrap();
+        let mut stand = brewers.get(dest);
+        assert!(dropper_brewer_insert(&mut stand, (1, 0, 0), emitted));
+        let staged = brewers.staged_update(dest, stand).unwrap();
+        assert_eq!(devices.slots(source), slots);
+        assert_eq!(debited.slots(source)[0], None);
+        assert_eq!(brewers.get(dest), crate::brewing::Brewer::default());
+        assert_eq!(staged.get(dest).slots[0], Some(bottle));
+        let restored: crate::brewing::Brewers =
+            serde_json::from_slice(&staged.encoded().unwrap()).unwrap();
+        assert_eq!(restored.get(dest), staged.get(dest));
     }
 
     #[test]
