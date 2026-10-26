@@ -3276,7 +3276,7 @@ fn overworld_passive_kind(biome: u8, roll: u64) -> Kind {
 /// a new moon. Use independent deterministic rolls for the 50% gate,
 /// lunar brightness and the 0..7 light threshold.
 fn swamp_slime_spawn_ok(biome: u8, y: i32, now: u64, seed: u64, light: (u8, u8)) -> bool {
-    if biome != 6 || !(51..70).contains(&y) {
+    if !matches!(biome, 6 | 134) || !(51..70).contains(&y) {
         return false;
     }
     let moon_quarters = [4_u64, 3, 2, 1, 0, 1, 2, 3][((now / 24_000) % 8) as usize];
@@ -4709,13 +4709,21 @@ mod tests {
             if swamp_slime_spawn_ok(6, 60, full_moon, seed, (0, 0)) {
                 full_moon_successes += 1;
             }
+            // Mutated Swampland inherits the extra Slime spawn entry and
+            // must pass the same moon, light and height gates as Swampland.
+            assert_eq!(
+                swamp_slime_spawn_ok(134, 60, full_moon, seed, (0, 0)),
+                swamp_slime_spawn_ok(6, 60, full_moon, seed, (0, 0))
+            );
             if swamp_slime_spawn_ok(6, 60, full_moon + 2 * 24_000, seed, (0, 0)) {
                 half_moon_successes += 1;
             }
             assert!(!swamp_slime_spawn_ok(6, 60, new_moon, seed, (0, 0)));
+            assert!(!swamp_slime_spawn_ok(134, 60, new_moon, seed, (0, 0)));
             assert!(!swamp_slime_spawn_ok(6, 60, full_moon, seed, (8, 0)));
             assert!(!swamp_slime_spawn_ok(6, 50, full_moon, seed, (0, 0)));
             assert!(!swamp_slime_spawn_ok(6, 70, full_moon, seed, (0, 0)));
+            assert!(!swamp_slime_spawn_ok(134, 70, full_moon, seed, (0, 0)));
             assert!(!swamp_slime_spawn_ok(1, 60, full_moon, seed, (0, 0)));
         }
         assert!(full_moon_successes > 0);
