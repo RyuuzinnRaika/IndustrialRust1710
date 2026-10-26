@@ -717,7 +717,7 @@ mod tests {
         // Repeated names, control characters and oversized GUI input cannot
         // increase the cost or create invalid item metadata.
         assert!(repair_with_name(left, None, Some(&"A".repeat(31))).is_none());
-        assert!(repair_with_name(left, None, Some("A\\nB")).is_none());
+        assert!(repair_with_name(left, None, Some(&format!("A{}B", char::from(10)))).is_none());
         assert!(repair_with_name(left, None, Some(&"😀".repeat(16))).is_none());
     }
 
