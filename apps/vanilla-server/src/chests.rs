@@ -352,7 +352,9 @@ mod tests {
         };
         let mut world = world::World::new();
         world.import_block(left.0, left.1, left.2, 54 << 4).unwrap();
-        world.import_block(right.0, right.1, right.2, 54 << 4).unwrap();
+        world
+            .import_block(right.0, right.1, right.2, 54 << 4)
+            .unwrap();
         let left_only = Chests::default()
             .staged_update(left, [Some(full_stack); CHEST_SLOTS])
             .unwrap();
@@ -387,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn chest_analog_pairing_rejects_other_block_types_and_overflow() {
+    fn chest_analog_pairing_rejects_mismatched_and_replaced_blocks() {
         let left = (0, 64, 0);
         let right = (1, 64, 0);
         let full_stack = Stack {
@@ -402,7 +404,9 @@ mod tests {
         let mut world = world::World::new();
         world.import_block(left.0, left.1, left.2, 54 << 4).unwrap();
         // A trapped chest cannot pair with a normal chest.
-        world.import_block(right.0, right.1, right.2, 146 << 4).unwrap();
+        world
+            .import_block(right.0, right.1, right.2, 146 << 4)
+            .unwrap();
         let inputs = combine_chest_comparator_inputs(
             &world,
             &chests.comparator_snapshot(),
