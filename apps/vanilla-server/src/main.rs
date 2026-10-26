@@ -265,6 +265,18 @@ impl<'a> Input<'a> {
         }
     }
 }
+/// Vanilla 1.7.10 sends a VarInt-length UTF-8 String in MC|ItemName.
+fn parse_anvil_name(payload: &[u8]) -> Option<String> {
+    let mut input = Input(payload);
+    let name = input.string(30).ok()?;
+    input.finish().ok()?;
+    // The vanilla GUI limits the field to 30 UTF-16 code units.
+    if name.encode_utf16().count() > 30 || name.chars().any(char::is_control) {
+        return None;
+    }
+    Some(name)
+}
+
 fn receive(s: &mut Connection) -> io::Result<(i32, Vec<u8>)> {
     let data = read_frame(s)?;
     let mut r = Input(&data);
@@ -3891,6 +3903,7 @@ fn play(
                     active_device = None;
                     active_brewer = None;
                     active_anvil = Some((x, y, z));
+                    inventory.clear_anvil_name();
                     active_enchant = None;
                     let mut opened = vec![active_window];
                     write_string("minecraft:anvil", &mut opened)?;
@@ -4876,7 +4889,29 @@ fn play(
                 }
                 let payload = input.take(length as usize)?;
                 input.finish()?;
-                if matches!(channel.as_str(), "MC|BEdit" | "MC|BSign")
+                if channel == "MC|ItemName" {
+                    // Never apply a name from a closed, remote or stale anvil.
+                    // This updates only the transient preview, not disk or XP;
+                    // taking the output is the authoritative transaction.
+                    if let (Some(pos), Some(requested)) =
+                        (active_anvil, parse_anvil_name(payload))
+                    {
+                        let valid_anvil = world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(pos.0, pos.1, pos.2)
+                            >> 4
+                            == 145
+                            && near(location, pos.0, pos.1, pos.2);
+                        if active_window != 0
+                            && valid_anvil
+                            && inventory.set_anvil_name(requested)
+                        {
+                            send(s, 0x30, &inventory.anvil_window_items(active_window))?;
+                            send(s, 0x31, &inventory.anvil_cost_property(active_window))?;
+                        }
+                    }
+                } else if matches!(channel.as_str(), "MC|BEdit" | "MC|BSign")
                     && books::process(
                         &channel,
                         payload,
