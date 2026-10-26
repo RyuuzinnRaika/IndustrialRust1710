@@ -6775,6 +6775,8 @@ fn main() -> io::Result<()> {
     let ejection_hoppers = Arc::clone(&hoppers);
     let ejection_chest_file = Arc::clone(&chest_path);
     let ejection_hopper_file = Arc::clone(&hopper_path);
+    let ejection_furnaces = Arc::clone(&furnaces);
+    let ejection_furnace_file = Arc::clone(&furnace_path);
     let tick_shutdown = Arc::clone(&shutdown);
     let tick_thread = thread::spawn(move || {
         let mut telemetry =
@@ -7108,6 +7110,60 @@ fn main() -> io::Result<()> {
                                         }
                                         *storage = updated;
                                         *hoppers = next_hopper;
+                                    }
+                                    continue;
+                                }
+                                // Furnace insertion is sided in vanilla 1.7.10:
+                                // from above -> input, from the side/below -> fuel.
+                                // A rejected item or full slot stays in the dropper.
+                                if state >> 4 == 158
+                                    && matches!(
+                                        gravity_world.get(dest.0, dest.1, dest.2) >> 4,
+                                        61 | 62
+                                    )
+                                {
+                                    let block_id = gravity_world.get(dest.0, dest.1, dest.2) >> 4;
+                                    let Some(slot_index) =
+                                        dispensers::dropper_furnace_slot(block_id, offset, stack)
+                                    else {
+                                        continue;
+                                    };
+                                    let mut furnaces = match ejection_furnaces.lock() {
+                                        Ok(value) => value,
+                                        Err(_) => return,
+                                    };
+                                    let mut furnace = furnaces.get(dest);
+                                    let mut target = [furnace.slots[slot_index]];
+                                    if dispensers::insert_one(&mut target, stack) {
+                                        furnace.slots[slot_index] = target[0];
+                                        let next_furnaces =
+                                            match furnaces.staged_update(dest, furnace) {
+                                                Ok(value) => value,
+                                                Err(error) => {
+                                                    eprintln!("DROPPER FURNACE TRANSFER ERROR: {error}");
+                                                    continue;
+                                                }
+                                            };
+                                        let result = (|| -> io::Result<()> {
+                                            journal::commit(
+                                                &furnace_world_path
+                                                    .with_extension("pending-txn.json"),
+                                                &[
+                                                    (&*ejection_file, updated.encoded()?),
+                                                    (
+                                                        &*ejection_furnace_file,
+                                                        next_furnaces.encoded()?,
+                                                    ),
+                                                ],
+                                            )?;
+                                            Ok(())
+                                        })();
+                                        if let Err(error) = result {
+                                            eprintln!("DROPPER FURNACE JOURNAL ERROR: {error}");
+                                            continue;
+                                        }
+                                        *storage = updated;
+                                        *furnaces = next_furnaces;
                                     }
                                     continue;
                                 }
