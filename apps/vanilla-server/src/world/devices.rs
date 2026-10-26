@@ -338,6 +338,13 @@ impl World {
     /// Refresh analog overrides from committed dispenser/dropper inventories.
     /// Wake adjacent comparators only when a source's strength changes.
     pub fn set_device_comparator_inputs(&mut self, inputs: BTreeMap<Position, u8>) {
+        // Protocol 5 comparator output is always 0..=15. Clamp malformed
+        // external inventory snapshots before comparing or storing them so
+        // oversized values cannot leak into the redstone signal graph.
+        let inputs = inputs
+            .into_iter()
+            .map(|(pos, strength)| (pos, strength.min(15)))
+            .collect::<BTreeMap<_, _>>();
         let positions: std::collections::BTreeSet<_> = self
             .device_comparator_inputs
             .keys()
@@ -1022,6 +1029,36 @@ mod redstone_regression_tests {
                 "container {id} must reset when its inventory becomes empty"
             );
         }
+    }
+
+    #[test]
+    fn comparator_inventory_snapshots_cannot_exceed_vanilla_signal_strength() {
+        let mut w = World::new();
+        w.import_block(-1, 64, 0, 23 << 4).unwrap();
+        let mut inputs = BTreeMap::new();
+        inputs.insert((-1, 64, 0), u8::MAX);
+        w.set_device_comparator_inputs(inputs);
+        assert_eq!(w.device_comparator_inputs.get(&(-1, 64, 0)), Some(&15));
+        assert_eq!(w.comparator_rear_input((-1, 64, 0), (0, 64, 0)), 15);
+        assert_eq!(w.signal_into((-1, 64, 0), (0, 64, 0)), 0);
+
+        // The same cap applies when reading through one opaque block.
+        w.import_block(-1, 64, 0, 1 << 4).unwrap();
+        w.import_block(-2, 64, 0, 158 << 4).unwrap();
+        let mut inputs = BTreeMap::new();
+        inputs.insert((-2, 64, 0), 200);
+        w.set_device_comparator_inputs(inputs);
+        assert_eq!(w.comparator_rear_input((-1, 64, 0), (0, 64, 0)), 15);
+
+        // Valid analog values remain unchanged, including zero.
+        let mut inputs = BTreeMap::new();
+        inputs.insert((-2, 64, 0), 7);
+        w.set_device_comparator_inputs(inputs);
+        assert_eq!(w.comparator_rear_input((-1, 64, 0), (0, 64, 0)), 7);
+        let mut inputs = BTreeMap::new();
+        inputs.insert((-2, 64, 0), 0);
+        w.set_device_comparator_inputs(inputs);
+        assert_eq!(w.comparator_rear_input((-1, 64, 0), (0, 64, 0)), 0);
     }
 
     #[test]
