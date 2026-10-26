@@ -327,12 +327,8 @@ fn f54_stop_drains_two_live_protocol5_players_and_persists_their_state() {
         .unwrap();
     let first_reason = until_packet(&mut first, 0x40, |_| true);
     let second_reason = until_packet(&mut second, 0x40, |_| true);
-    assert!(
-        String::from_utf8_lossy(&first_reason).contains("Server shutting down")
-    );
-    assert!(
-        String::from_utf8_lossy(&second_reason).contains("Server shutting down")
-    );
+    assert!(String::from_utf8_lossy(&first_reason).contains("Server shutting down"));
+    assert!(String::from_utf8_lossy(&second_reason).contains("Server shutting down"));
 
     let deadline = Instant::now() + Duration::from_secs(25);
     let exit = loop {
@@ -342,14 +338,19 @@ fn f54_stop_drains_two_live_protocol5_players_and_persists_their_state() {
         assert!(Instant::now() < deadline, "/stop left workers running");
         thread::sleep(Duration::from_millis(50));
     };
-    assert!(exit.success(), "server failed graceful two-client /stop: {exit}");
+    assert!(
+        exit.success(),
+        "server failed graceful two-client /stop: {exit}"
+    );
     assert!(
         TcpStream::connect(("127.0.0.1", server.port)).is_err(),
         "shutdown should close the TCP listener"
     );
     for name in ["twinalpha", "twinbeta"] {
         let player = server.directory.join(format!("players/{name}.dat"));
-        let inventory = server.directory.join(format!("players/{name}.inventory.json"));
+        let inventory = server
+            .directory
+            .join(format!("players/{name}.inventory.json"));
         assert!(player.is_file(), "player NBT missing after /stop: {name}");
         assert!(inventory.is_file(), "inventory missing after /stop: {name}");
         assert!(fs::read(player).unwrap().starts_with(&[0x1f, 0x8b]));
@@ -366,7 +367,10 @@ fn f54_stop_drains_two_live_protocol5_players_and_persists_their_state() {
         .arg(server.directory.join("flat.irw"))
         .status()
         .unwrap();
-    assert!(verify.success(), "world verification failed after two-client /stop");
+    assert!(
+        verify.success(),
+        "world verification failed after two-client /stop"
+    );
     drop(first);
     drop(second);
 }
