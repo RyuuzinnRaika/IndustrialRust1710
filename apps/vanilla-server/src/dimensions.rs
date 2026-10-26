@@ -536,6 +536,43 @@ fn valid_end_entry(world: &World, x: i32, y: i32, z: i32) -> bool {
     false
 }
 
+/// An End return gateway is a complete 3x3 portal surface resting on
+/// bedrock, with a bedrock rim on all four sides. A lone portal block over
+/// bedrock is not a valid exit, even near the central island.
+fn valid_end_return(world: &World, x: i32, y: i32, z: i32) -> bool {
+    for offset_x in 0..3 {
+        for offset_z in 0..3 {
+            let min_x = x - offset_x;
+            let min_z = z - offset_z;
+            // The exit fountain belongs to the central End island.
+            if (min_x + 1).abs() > 8 || (min_z + 1).abs() > 8 {
+                continue;
+            }
+            let mut intact = true;
+            for dx in 0..3 {
+                for dz in 0..3 {
+                    intact &= world.get(min_x + dx, y, min_z + dz) >> 4 == 119;
+                    intact &= world.get(min_x + dx, y - 1, min_z + dz) >> 4 == 7;
+                }
+            }
+            for i in 0..3 {
+                for (fx, fz) in [
+                    (min_x - 1, min_z + i),
+                    (min_x + 3, min_z + i),
+                    (min_x + i, min_z - 1),
+                    (min_x + i, min_z + 3),
+                ] {
+                    intact &= world.get(fx, y, fz) >> 4 == 7;
+                }
+            }
+            if intact {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Recognize a physically intact source portal. This only resolves where a
 /// transition *could* go; a server must not emit a Respawn packet until the
 /// destination world and the per-player state have both been prepared.
@@ -558,13 +595,8 @@ pub fn portal_target(world: &World, x: i32, y: i32, z: i32) -> Option<Dimension>
             Some(Dimension::Overworld)
         }
         (Dimension::Overworld, 119) if valid_end_entry(world, x, y, z) => Some(Dimension::End),
-        // The return portal is constructed from bedrock after the dragon dies.
-        // Restrict recognition to the central island and supporting bedrock.
-        (Dimension::End, 119)
-            if x.abs() <= 8 && z.abs() <= 8 && world.get(x, y - 1, z) >> 4 == 7 =>
-        {
-            Some(Dimension::Overworld)
-        }
+        // A partial or broken End exit fountain must not allow travel.
+        (Dimension::End, 119) if valid_end_return(world, x, y, z) => Some(Dimension::Overworld),
         _ => None,
     }
 }
@@ -814,6 +846,38 @@ mod tests {
         world.update_and_save(&path, -1, 75, 1, 120 << 4).unwrap();
         assert_eq!(portal_target(&world, 1, 75, 1), None);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn end_return_requires_complete_bedrock_fountain() {
+        let mut end = World::expanded(91, Dimension::End);
+        let y = 67;
+        // Build the 3x3 exit portal, its bedrock floor and the side rim.
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                end.import_block(dx, y - 1, dz, 7 << 4).unwrap();
+                end.import_block(dx, y, dz, 119 << 4).unwrap();
+            }
+        }
+        for i in -1..=1 {
+            for (x, z) in [(-2, i), (2, i), (i, -2), (i, 2)] {
+                end.import_block(x, y, z, 7 << 4).unwrap();
+            }
+        }
+        assert_eq!(portal_target(&end, 0, y, 0), Some(Dimension::Overworld));
+        assert_eq!(portal_target(&end, -1, y, 1), Some(Dimension::Overworld));
+
+        // A broken rim, missing support or missing interior tile invalidates
+        // the entire exit rather than permitting travel through an orphan.
+        end.import_block(2, y, 0, 0).unwrap();
+        assert_eq!(portal_target(&end, 0, y, 0), None);
+        end.import_block(2, y, 0, 7 << 4).unwrap();
+        end.import_block(0, y - 1, 0, 121 << 4).unwrap();
+        assert_eq!(portal_target(&end, 0, y, 0), None);
+        end.import_block(0, y - 1, 0, 7 << 4).unwrap();
+        end.import_block(1, y, 1, 0).unwrap();
+        assert_eq!(portal_target(&end, 0, y, 0), None);
+        end.import_block(1, y, 1, 119 << 4).unwrap();
+        assert_eq!(portal_target(&end, 0, y, 0), Some(Dimension::Overworld));
     }
     #[test]
     fn nether_arrival_never_uses_bedrock_roof() {
