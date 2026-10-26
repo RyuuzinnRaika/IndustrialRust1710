@@ -3294,10 +3294,7 @@ fn natural_spawn_x_sign(seed: u64) -> i32 {
 /// saturating float-to-int cast or signed overflow changing the spawn chunk.
 fn natural_spawn_offset_block(origin: f64, offset: i32) -> Option<i32> {
     let block = origin.floor();
-    if !block.is_finite()
-        || block < f64::from(i32::MIN)
-        || block > f64::from(i32::MAX)
-    {
+    if !block.is_finite() || block < f64::from(i32::MIN) || block > f64::from(i32::MAX) {
         return None;
     }
     (block as i32).checked_add(offset)
@@ -4630,7 +4627,10 @@ mod tests {
         assert_eq!(natural_spawn_offset_block(-0.5, -24), Some(-25));
         assert_eq!(natural_spawn_offset_block(f64::from(i32::MAX), 1), None);
         assert_eq!(natural_spawn_offset_block(f64::from(i32::MIN), -1), None);
-        assert_eq!(natural_spawn_offset_block(f64::from(i32::MAX) + 1.0, -1), None);
+        assert_eq!(
+            natural_spawn_offset_block(f64::from(i32::MAX) + 1.0, -1),
+            None
+        );
         assert_eq!(natural_spawn_offset_block(f64::NAN, 0), None);
         assert_eq!(natural_spawn_offset_block(f64::INFINITY, 0), None);
         // A pack member must also be skipped when its local displacement
