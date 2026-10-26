@@ -1592,6 +1592,7 @@ impl World {
     /// this bridge; it requires a bound session.lock and a byte-identical IRW
     /// baseline. Neither IRW nor the Anvil region may advance by itself.
     /// Unknown Anvil NBT survives in the existing region rewrite helper.
+    #[allow(dead_code)] // Opt-in E46 bridge, not the default live World::save path.
     pub fn update_and_flush_existing_anvil(
         &mut self,
         path: &Path,
