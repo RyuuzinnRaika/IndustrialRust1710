@@ -2535,6 +2535,136 @@ mod tests {
     }
 
     #[test]
+    fn e46_creates_missing_chunk_inside_existing_region_and_keeps_original() {
+        let (base, mut world) = e46_fixture("missing-in-region", false);
+        let root = base.join("anvil");
+        let path = root.join("flat.irw");
+        let region_path = root.join("region/r.0.0.mca");
+        let before_chunk = {
+            let mut region = fastanvil::Region::from_stream(File::open(&region_path).unwrap())
+                .unwrap();
+            assert!(region.read_chunk(4, 0).unwrap().is_none());
+            region.read_chunk(0, 0).unwrap().unwrap()
+        };
+        world
+            .update_many_and_create_missing_anvil_chunk(
+                &path,
+                &[(64, 90, 2, (5 << 4) | 7), (65, 90, 2, 1 << 4)],
+            )
+            .unwrap();
+        assert_eq!(World::load(&path).unwrap().get(64, 90, 2), (5 << 4) | 7);
+        assert_eq!(world.get(65, 90, 2), 1 << 4);
+        let mut region =
+            fastanvil::Region::from_stream(File::open(&region_path).unwrap()).unwrap();
+        assert_eq!(region.read_chunk(0, 0).unwrap().unwrap(), before_chunk);
+        let chunk = crate::legacy_nbt::parse_chunk(
+            &region.read_chunk(4, 0).unwrap().unwrap(),
+            4,
+            0,
+        )
+        .unwrap();
+        let section = chunk.level.sections.iter().find(|section| section.y == 5).unwrap();
+        assert_eq!(section.block_at((90 % 16) * 256 + 2 * 16), Some((5, 7)));
+        assert_eq!(section.block_at((90 % 16) * 256 + 2 * 16 + 1), Some((1, 0)));
+        assert_eq!(
+            chunk.level.extra.get("LightPopulated"),
+            Some(&fastnbt::Value::Byte(0))
+        );
+        assert!(!path.with_extension("pending-txn.json").exists());
+        drop(region);
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_creates_whole_missing_region_with_irw_same_generation() {
+        let (base, mut world) = e46_fixture("new-region", false);
+        let root = base.join("anvil");
+        let path = root.join("flat.irw");
+        let new_region = root.join("region/r.1.-1.mca");
+        assert!(!new_region.exists());
+        world
+            .update_many_and_create_missing_anvil_chunk(
+                &path,
+                &[(512, 90, -512, 4 << 4)],
+            )
+            .unwrap();
+        assert_eq!(World::load(&path).unwrap().get(512, 90, -512), 4 << 4);
+        let mut region = fastanvil::Region::from_stream(File::open(&new_region).unwrap()).unwrap();
+        let chunk = crate::legacy_nbt::parse_chunk(
+            &region.read_chunk(0, 0).unwrap().unwrap(),
+            32,
+            -32,
+        )
+        .unwrap();
+        let block = chunk.level.sections.iter().find(|section| section.y == 5).unwrap();
+        assert_eq!(block.block_at((90 % 16) * 256), Some((4, 0)));
+        assert!(region.read_chunk(1, 0).unwrap().is_none());
+        drop(region);
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_missing_chunk_rejects_collisions_and_bad_inputs_without_writes() {
+        let (base, mut world) = e46_fixture("new-guard", false);
+        let root = base.join("anvil");
+        let path = root.join("flat.irw");
+        let region_path = root.join("region/r.0.0.mca");
+        let old_irw = fs::read(&path).unwrap();
+        let old_region = fs::read(&region_path).unwrap();
+        // Already present in the exported spawn region: must NEVER replace.
+        assert!(world
+            .update_many_and_create_missing_anvil_chunk(&path, &[(0, 90, 0, 1 << 4)])
+            .is_err());
+        assert!(world
+            .update_many_and_create_missing_anvil_chunk(
+                &path,
+                &[(64, 90, 2, 5 << 4), (64, 90, 2, 4 << 4)],
+            )
+            .is_err());
+        assert!(world
+            .update_many_and_create_missing_anvil_chunk(
+                &path,
+                &[(64, 90, 2, 5 << 4), (80, 90, 2, 4 << 4)],
+            )
+            .is_err());
+        assert!(world
+            .update_many_and_create_missing_anvil_chunk(&path, &[(64, 256, 2, 5 << 4)])
+            .is_err());
+        assert!(world
+            .update_many_and_create_missing_anvil_chunk(&path, &[(64, 90, 2, 4096)])
+            .is_err());
+        assert_eq!(fs::read(&path).unwrap(), old_irw);
+        assert_eq!(fs::read(&region_path).unwrap(), old_region);
+        assert_eq!(world.get(64, 90, 2), 0);
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_new_chunk_rejects_stale_irw_and_previously_edited_column() {
+        let (base, mut world) = e46_fixture("missing-stale", false);
+        let root = base.join("anvil");
+        let path = root.join("flat.irw");
+        let old_irw = fs::read(&path).unwrap();
+        fs::write(&path, b"not the bound IRW generation").unwrap();
+        assert!(world
+            .update_many_and_create_missing_anvil_chunk(&path, &[(64, 90, 2, 4 << 4)])
+            .is_err());
+        assert!(!root.join("region/r.1.0.mca").exists());
+        fs::write(&path, &old_irw).unwrap();
+        // This IRW already has edits outside any corresponding Anvil chunk.
+        world.import_block(64, 90, 2, 1 << 4).unwrap();
+        assert!(world
+            .update_many_and_create_missing_anvil_chunk(&path, &[(65, 90, 2, 4 << 4)])
+            .is_err());
+        assert_eq!(fs::read(&path).unwrap(), old_irw);
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn e46_does_not_implicitly_bind_or_create_anvil_storage() {
         let mut detached = World::new();
         assert!(detached
