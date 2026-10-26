@@ -671,6 +671,26 @@ mod tests {
     }
 
     #[test]
+    fn dropper_inserts_empty_glass_bottles_into_brewer_without_consuming_on_full() {
+        let glass = Stack {
+            id: 374,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut stand = crate::brewing::Brewer::default();
+        for offset in [(1, 0, 0), (0, 1, 0), (0, 0, -1)] {
+            assert!(dropper_brewer_insert(&mut stand, offset, glass));
+        }
+        assert_eq!(stand.slots[..3], [Some(glass); 3]);
+        assert!(stand.valid());
+        let full = stand;
+        assert!(!dropper_brewer_insert(&mut stand, (0, 1, 0), glass));
+        assert!(!dropper_brewer_insert(&mut stand, (0, -1, 0), glass));
+        assert_eq!(stand, full);
+    }
+
+    #[test]
     fn dropper_brewing_transfer_is_staged_and_serializable() {
         let source = (1, 64, 1);
         let dest = (2, 64, 1);
