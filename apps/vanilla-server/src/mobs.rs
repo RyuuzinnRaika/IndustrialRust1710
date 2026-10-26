@@ -2548,11 +2548,13 @@ impl Mobs {
         }
         self.spawn_natural(now, world, players, &mut events);
         self.spawn_from_spawners(now, world, players, &mut events);
-        // Malformed online positions must not make every hostile appear >128 blocks
-        // away. A finite Y outside build height is still a valid player reference.
+        // Despawn and natural-spawn chunk selection must agree about valid
+        // player coordinates. Finite X/Z outside the i32 block range are
+        // corrupt snapshots, not distant players; finite Y outside build
+        // height still counts as a valid reference.
         let has_valid_online_player = players
             .iter()
-            .any(|player| player.x.is_finite() && player.y.is_finite() && player.z.is_finite());
+            .any(|&player| natural_spawn_player_chunk(player).is_some());
         for step in 0..steps {
             // A catch-up call simulates up to four distinct 20 Hz ticks.
             // Reusing `now` for every step would repeat one 1/800 despawn
@@ -3411,6 +3413,7 @@ fn natural_spawn_chunk_eligible(at: PlayerPosition, players: &[PlayerPosition]) 
 fn distance_to_players(p: PlayerPosition, players: &[PlayerPosition]) -> f64 {
     players
         .iter()
+        .filter(|&&player| natural_spawn_player_chunk(player).is_some())
         .map(|other| distance_3d(p, *other))
         .fold(f64::INFINITY, f64::min)
 }
@@ -5070,6 +5073,54 @@ mod tests {
         let sheep = mobs.next_id - 1;
         mobs.entities.get_mut(&sheep).unwrap().sheared = true;
         assert!(mobs.entities[&sheep].death_drop().is_none());
+    }
+
+    #[test]
+    fn out_of_range_player_positions_are_not_despawn_references() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        // These are finite numbers, but no signed 32-bit block coordinate
+        // represents them. They must not trigger a global hostile cull.
+        let invalid = [
+            PlayerPosition {
+                x: f64::from(i32::MAX) + 1.0,
+                ..at
+            },
+            PlayerPosition {
+                z: f64::from(i32::MIN) - 1.0,
+                ..at
+            },
+        ];
+        assert_eq!(distance_to_players(at, &invalid), f64::INFINITY);
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, at, false);
+        let id = mobs.next_id - 1;
+        mobs.entities.get_mut(&id).unwrap().far_from_player_ticks = 600;
+        mobs.tick(1, &world, &invalid);
+        assert!(mobs.entities.contains_key(&id));
+        assert_eq!(mobs.entities[&id].far_from_player_ticks, 600);
+
+        // Near the signed block boundary, an invalid coordinate can look
+        // closer than a real distant player. Ignore it for the nearest-player
+        // test rather than incorrectly protecting the mob from despawn.
+        let edge = PlayerPosition {
+            x: f64::from(i32::MAX) - 2.5,
+            ..at
+        };
+        let outside = PlayerPosition {
+            x: f64::from(i32::MAX) + 1.0,
+            ..at
+        };
+        assert!(distance_to_players(edge, &[outside, at]) > 128.0);
+        let near = PlayerPosition {
+            x: edge.x - 10.0,
+            ..at
+        };
+        assert!(distance_to_players(edge, &[outside, near]) < 32.0);
     }
 
     #[test]
