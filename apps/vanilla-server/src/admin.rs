@@ -715,7 +715,10 @@ mod tests {
         // Login Start has no trusted UUID, so name-only preflight must not
         // punish an unrelated account just because it reuses an old name.
         assert_eq!(store.banned("Reused", ip).unwrap(), None);
-        assert_eq!(store.banned_identity("Reused", Some(second), ip).unwrap(), None);
+        assert_eq!(
+            store.banned_identity("Reused", Some(second), ip).unwrap(),
+            None
+        );
         assert_eq!(
             store.banned_identity("NewName", Some(first), ip).unwrap(),
             Some("first owner".into())
@@ -727,11 +730,15 @@ mod tests {
         let reloaded = Administration::new(root.clone()).unwrap();
         assert_eq!(reloaded.banned_players().unwrap().len(), 2);
         assert_eq!(
-            reloaded.banned_identity("NewName", Some(first), ip).unwrap(),
+            reloaded
+                .banned_identity("NewName", Some(first), ip)
+                .unwrap(),
             Some("first owner".into())
         );
         assert_eq!(
-            reloaded.banned_identity("Reused", Some(second), ip).unwrap(),
+            reloaded
+                .banned_identity("Reused", Some(second), ip)
+                .unwrap(),
             Some("second owner".into())
         );
         assert!(reloaded.set_player_ban("Reused", None, false).is_err());
@@ -761,7 +768,9 @@ mod tests {
         let store = Administration::new(root.clone()).unwrap();
         let ip: IpAddr = "192.0.2.79".parse().unwrap();
         let account = "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca";
-        store.set_player_ban("Legacy", Some("name ban"), true).unwrap();
+        store
+            .set_player_ban("Legacy", Some("name ban"), true)
+            .unwrap();
         assert_eq!(store.banned("Legacy", ip).unwrap(), Some("name ban".into()));
         assert_eq!(
             store.banned_identity("Legacy", Some(account), ip).unwrap(),
@@ -772,15 +781,22 @@ mod tests {
             .unwrap();
         assert_eq!(store.banned_players().unwrap().len(), 2);
         store.set_player_ban("Legacy", None, false).unwrap();
-        assert!(store.banned_identity("Renamed", Some(account), ip).unwrap().is_none());
+        assert!(store
+            .banned_identity("Renamed", Some(account), ip)
+            .unwrap()
+            .is_none());
 
-        store.set_ip_ban("192.0.2.79", Some("ip ban"), true).unwrap();
+        store
+            .set_ip_ban("192.0.2.79", Some("ip ban"), true)
+            .unwrap();
         assert_eq!(store.banned("AnyName", ip).unwrap(), Some("ip ban".into()));
         assert_eq!(
             store.banned_identity("Renamed", Some(account), ip).unwrap(),
             Some("ip ban".into())
         );
-        assert!(store.banned_identity("Whatever", Some("bad uuid"), ip).is_err());
+        assert!(store
+            .banned_identity("Whatever", Some("bad uuid"), ip)
+            .is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
