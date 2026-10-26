@@ -3311,11 +3311,12 @@ fn overworld_monster_kind(roll: u64) -> Kind {
     }
 }
 
-/// Swampland adds a second Slime entry with weight 1 and group size 1 to
-/// the inherited 515-weight hostile list. Preserve the distinct entry rather
+/// Swampland (6) adds a second Slime entry with weight 1 and group size 1
+/// to the inherited 515-weight hostile list. Its mutated biome (134) copies
+/// the parent's spawn entries. Preserve the distinct entry rather
 /// than silently using the inherited Slime pack size of four.
 fn overworld_monster_entry(biome: u8, roll: u64) -> (Kind, bool) {
-    let total_weight = if biome == 6 { 516 } else { 515 };
+    let total_weight = if matches!(biome, 6 | 134) { 516 } else { 515 };
     let selected = roll % total_weight;
     if selected == 515 {
         (Kind::Slime, true)
@@ -4389,7 +4390,7 @@ mod tests {
     #[test]
     fn swamp_slime_bonus_spawn_entry_uses_its_own_weight_and_single_member_pack() {
         // The default 515-weight list is unchanged outside Swampland.
-        for biome in [1, 4, 134] {
+        for biome in [1, 4] {
             assert_eq!(
                 (0..515)
                     .filter(|&roll| overworld_monster_entry(biome, roll).0 == Kind::Slime)
@@ -4415,6 +4416,7 @@ mod tests {
         assert_eq!(slimes, 101);
         assert_eq!(bonus, 1);
         assert_eq!(overworld_monster_entry(6, 515), (Kind::Slime, true));
+        assert_eq!(overworld_monster_entry(134, 515), (Kind::Slime, true));
         assert_eq!(overworld_monster_entry(6, 1031), (Kind::Slime, true));
         assert_eq!(overworld_monster_entry(6, 514), (Kind::Witch, false));
         assert_eq!(natural_pack_attempts(Kind::Slime, 0), 4);
