@@ -1764,6 +1764,131 @@ impl World {
         Ok(true)
     }
 
+    /// E46 opt-in: atomically add ONE previously absent Anvil chunk together
+    /// with the next IRW image after 1..32 explicit block edits inside it.
+    ///
+    /// Restricted to pristine flat Overworld chunks: until native container
+    /// state is transactionally migrated, we cannot safely synthesize NBT
+    /// for a chunk that has already been modified or generated elsewhere.
+    /// Existing chunks must use update_many_and_flush_existing_anvil instead.
+    #[allow(dead_code)] // Not wired to live block/tick saves.
+    pub fn update_many_and_create_missing_anvil_chunk(
+        &mut self,
+        path: &Path,
+        changes: &[(i32, i32, i32, u16)],
+    ) -> io::Result<()> {
+        if self.generation != Generation::Flat || self.dimension() != crate::dimensions::Dimension::Overworld {
+            return Err(invalid("E46 new Anvil chunks require flat Overworld"));
+        }
+        if changes.is_empty() || changes.len() > 32 {
+            return Err(invalid("E46 new-chunk batch must contain 1..32 blocks"));
+        }
+        let (bound, session) = self
+            .save_session
+            .as_ref()
+            .ok_or_else(|| invalid("E46 new chunk requires bound session.lock"))?;
+        if bound != path {
+            return Err(invalid("E46 new chunk IRW path differs from bound session"));
+        }
+        let mut seen = BTreeSet::new();
+        let mut target_chunk = None;
+        for &(x, y, z, block) in changes {
+            let chunk = (x.div_euclid(16), z.div_euclid(16));
+            if !in_bounds(x, y, z)
+                || block >> 4 > 255
+                || block == self.get(x, y, z)
+                || !seen.insert((x, y, z))
+                || target_chunk.is_some_and(|existing| existing != chunk)
+            {
+                return Err(invalid("E46 invalid or cross-chunk block insertion"));
+            }
+            target_chunk = Some(chunk);
+        }
+        let (cx, cz) = target_chunk.ok_or_else(|| invalid("missing target chunk"))?;
+        if self
+            .edits
+            .keys()
+            .any(|&(x, _, z)| x.div_euclid(16) == cx && z.div_euclid(16) == cz)
+        {
+            return Err(invalid("E46 will not synthesize a previously edited chunk"));
+        }
+        let old_irw = self.encoded()?;
+        if fs::read(path)? != old_irw {
+            return Err(invalid("E46 new chunk IRW memory/disk image mismatch"));
+        }
+        let mut next = self.clone();
+        for &(x, y, z, block) in changes {
+            let key = (x, y as u8, z);
+            if block == next.base_block(x, y as u8, z) {
+                next.edits.remove(&key);
+            } else {
+                if !next.edits.contains_key(&key) && next.edits.len() >= MAX_EDITS {
+                    return Err(invalid("E46 new chunk exceeds IRW edit budget"));
+                }
+                next.edits.insert(key, block);
+            }
+        }
+        let next_irw = next.encoded()?;
+        // Reuse the same 1.7.10 section/heightmap encoder as the offline
+        // exporter. Flat pristine chunks contain no existing native tiles.
+        let encoded_chunk = crate::anvil_export::nbt_for_chunk(&next, cx, cz, &[])?;
+        let mut chunk = crate::legacy_nbt::parse_chunk(&encoded_chunk, cx, cz)?;
+        // Export's constant lighting placeholders are NOT a live relight.
+        chunk
+            .level
+            .extra
+            .insert("LightPopulated".to_owned(), fastnbt::Value::Byte(0));
+        let encoded_chunk = fastnbt::to_bytes(&chunk)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        crate::legacy_nbt::parse_chunk(&encoded_chunk, cx, cz)?;
+
+        let session = Arc::clone(session);
+        let mut lock = session
+            .lock()
+            .map_err(|_| invalid("E46 new chunk session mutex poisoned"))?;
+        lock.verify()?;
+        if path.parent() != Some(lock.world_dir()) {
+            return Err(invalid("E46 new chunk world path outside locked root"));
+        }
+        let (rx, rz) = (cx.div_euclid(32), cz.div_euclid(32));
+        let region_path = lock
+            .world_dir()
+            .join("region")
+            .join(format!("r.{rx}.{rz}.mca"));
+        let source = match fs::symlink_metadata(&region_path) {
+            Ok(meta) if meta.file_type().is_file() => {
+                if meta.len() < 8192 || meta.len() > 8 * 1024 * 1024 {
+                    return Err(invalid("E46 new chunk source region size invalid"));
+                }
+                Some(fs::read(&region_path)?)
+            }
+            Ok(_) => return Err(invalid("E46 new chunk source region must be regular file")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        crate::legacy_region_rewrite::insert_irw_chunks_under_lock_expected(
+            &mut lock,
+            crate::dimensions::Dimension::Overworld,
+            &[((cx, cz), encoded_chunk.as_slice())],
+            &BTreeMap::from([((rx, rz), source)]),
+            path,
+            &old_irw,
+            &next_irw,
+        )?;
+        drop(lock);
+        for &(x, y, z, block) in changes {
+            let previous = self.get(x, y, z);
+            next.mark_lighting_changed(x, z, previous, block);
+            next.wake_gravity(x, y, z);
+            next.wake_block_updates(x, y, z);
+            if matches!(previous >> 4, 17 | 162) || matches!(block >> 4, 17 | 162) {
+                next.wake_leaves(x, y, z);
+            }
+        }
+        *self = next;
+        Ok(())
+    }
+
     /// Apply one parsed block to a *detached* import world. Call save_new only
     /// after every Anvil chunk has been validated; never persist partial imports.
     pub fn import_block(&mut self, x: i32, y: i32, z: i32, block: u16) -> io::Result<()> {
