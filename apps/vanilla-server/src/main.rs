@@ -7809,7 +7809,7 @@ mod tests {
         // A modern ID or excess count is a rejected creative selection, not
         // an excuse to close a valid player's Protocol 5 connection.
         for item in [
-            [0, 36, 1, 165, 1, 0, 0, 255, 255],
+            [0, 36, 1, 167, 1, 0, 0, 255, 255],
             [0, 36, 0, 1, 65, 0, 0, 255, 255],
         ] {
             let mut input = Input(&item);
