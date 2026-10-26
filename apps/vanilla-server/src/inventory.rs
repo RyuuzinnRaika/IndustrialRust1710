@@ -3148,6 +3148,76 @@ mod tests {
     }
 
     #[test]
+    fn d36_rename_only_anvil_spends_xp_once_and_persists_display_name() {
+        use fastnbt::Value;
+
+        let stone = Stack {
+            id: 1,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inv = Inventory {
+            anvil_inputs: [Some(stone), None],
+            ..Inventory::default()
+        };
+        assert!(inv.set_anvil_name("A name".into()));
+        assert!(!inv.set_anvil_name("A name".into()));
+        assert_eq!(inv.anvil_preview().unwrap().levels, 1);
+        assert_eq!(inv.anvil_preview().unwrap().consumed, 0);
+        let mut xp = crate::experience::Experience::default();
+        let before = inv.clone();
+        assert!(!inv.anvil_click_window(2, 0, 0, &mut xp, true));
+        assert_eq!(inv, before);
+        xp.total = 300;
+        assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
+        assert!(xp.total < 300);
+        assert!(inv.anvil_inputs.iter().all(Option::is_none));
+        assert_eq!(inv.anvil_name, None);
+        let result = inv.cursor.unwrap();
+        let saved = inv.encoded().unwrap();
+        let loaded: Inventory = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(loaded.cursor, Some(result));
+        let Value::Compound(root) =
+            crate::item_nbt::value(loaded.cursor.unwrap().nbt.unwrap()).unwrap()
+        else {
+            panic!("expected tagged item");
+        };
+        let Some(Value::Compound(display)) = root.get("display") else {
+            panic!("expected display");
+        };
+        assert_eq!(display.get("Name"), Some(&Value::String("A name".into())));
+        assert!(!inv.anvil_click_window(2, 0, 0, &mut xp, true));
+    }
+
+    #[test]
+    fn d36_stale_rename_text_is_cleared_when_left_input_changes() {
+        let pickaxe = Stack {
+            id: 257,
+            count: 1,
+            damage: 10,
+            nbt: None,
+        };
+        let mut inv = Inventory {
+            anvil_inputs: [Some(pickaxe), None],
+            ..Inventory::default()
+        };
+        assert!(inv.set_anvil_name("first".into()));
+        let mut xp = crate::experience::Experience::default();
+        assert!(inv.anvil_click_window(0, 0, 0, &mut xp, false));
+        assert!(inv.anvil_inputs[0].is_none());
+        assert!(inv.anvil_name.is_none());
+        assert!(!inv.set_anvil_name("remote".into()));
+        assert!(inv.anvil_click_window(0, 0, 0, &mut xp, false));
+        assert_eq!(inv.anvil_inputs[0], Some(pickaxe));
+        assert!(inv.anvil_preview().is_none());
+        assert!(inv.set_anvil_name("second".into()));
+        assert!(inv.reclaim_anvil_inputs());
+        assert!(inv.anvil_name.is_none());
+        assert_eq!(inv.slots[9], Some(pickaxe));
+    }
+
+    #[test]
     fn anvil_repair_debits_only_owned_inputs_and_xp() {
         let mut inv = Inventory::default();
         let mut xp = crate::experience::Experience { total: 34 };
