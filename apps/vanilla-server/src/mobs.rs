@@ -2283,11 +2283,7 @@ impl Mobs {
             // make nearby blocks/biomes/light levels safe. This preserves the
             // older server's CPU and snapshot guards (at most six per cycle).
             let mobs_before_attempt = self.entities.len();
-            let pack_attempts = if swamp_bonus {
-                1
-            } else {
-                natural_pack_attempts(kind, seed)
-            };
+            let pack_attempts = natural_pack_attempts_for_entry(kind, seed, swamp_bonus);
             for member in 0..pack_attempts {
                 if self.entities.len() >= MAX_LOADED_MOBS || self.next_id >= 1_000_000 {
                     break;
@@ -3333,6 +3329,16 @@ fn natural_pack_attempts(kind: Kind, seed: u64) -> usize {
         Kind::Enderman => 1 + ((seed >> 40) % 4) as usize,
         Kind::Horse => 2 + ((seed >> 40) % 5) as usize,
         _ => 4,
+    }
+}
+
+/// The extra Swampland Slime entry requests exactly one mob, unlike the
+/// inherited four-member Slime entry. Keep this rule independently testable.
+fn natural_pack_attempts_for_entry(kind: Kind, seed: u64, swamp_bonus: bool) -> usize {
+    if swamp_bonus {
+        1
+    } else {
+        natural_pack_attempts(kind, seed)
     }
 }
 
@@ -4419,7 +4425,9 @@ mod tests {
         assert_eq!(overworld_monster_entry(134, 515), (Kind::Slime, true));
         assert_eq!(overworld_monster_entry(6, 1031), (Kind::Slime, true));
         assert_eq!(overworld_monster_entry(6, 514), (Kind::Witch, false));
-        assert_eq!(natural_pack_attempts(Kind::Slime, 0), 4);
+        assert_eq!(natural_pack_attempts_for_entry(Kind::Slime, 0, false), 4);
+        assert_eq!(natural_pack_attempts_for_entry(Kind::Slime, 0, true), 1);
+        assert_eq!(natural_pack_attempts_for_entry(Kind::Witch, 0, false), 1);
     }
 
     #[test]
