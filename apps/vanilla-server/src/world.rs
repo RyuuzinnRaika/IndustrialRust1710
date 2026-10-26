@@ -2099,6 +2099,128 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn e46_fixture(label: &str, divergent_anvil: bool) -> (PathBuf, World) {
+        let base = std::env::temp_dir().join(format!(
+            "industrial-e46-world-{}-{}-{:?}",
+            label,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let root = base.join("anvil");
+        let mut exported = World::new();
+        if divergent_anvil {
+            exported.import_block(2, 90, 3, 5 << 4).unwrap();
+        }
+        crate::anvil_export::export(&exported, &root).unwrap();
+        let path = root.join("flat.irw");
+        let mut world = World::new();
+        world.save_new(&path).unwrap();
+        let lock = Arc::new(Mutex::new(
+            crate::session_lock::WorldSessionLock::acquire(&root).unwrap(),
+        ));
+        world.bind_save_session(&path, lock).unwrap();
+        (base, world)
+    }
+
+    #[test]
+    fn e46_bound_world_block_write_updates_anvil_and_irw_together() {
+        let (base, mut world) = e46_fixture("durable", false);
+        let root = base.join("anvil");
+        let path = root.join("flat.irw");
+        assert!(world
+            .update_and_flush_existing_anvil(&path, 2, 90, 3, (5 << 4) | 7)
+            .unwrap());
+        assert!(!world
+            .update_and_flush_existing_anvil(&path, 2, 90, 3, (5 << 4) | 7)
+            .unwrap());
+        assert!(world
+            .update_and_flush_existing_anvil(&path, 2, 90, 3, (5 << 4) | 3)
+            .unwrap());
+        assert_eq!(world.get(2, 90, 3), (5 << 4) | 3);
+        assert_eq!(World::load(&path).unwrap().get(2, 90, 3), (5 << 4) | 3);
+        let mut region = fastanvil::Region::from_stream(
+            File::open(root.join("region/r.0.0.mca")).unwrap(),
+        )
+        .unwrap();
+        let chunk = crate::legacy_nbt::parse_chunk(
+            &region.read_chunk(0, 0).unwrap().unwrap(),
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            chunk.level.sections.iter().find(|s| s.y == 5).unwrap().block_at(
+                (90 % 16) * 256 + 3 * 16 + 2
+            ),
+            Some((5, 3))
+        );
+        assert!(!path.with_extension("pending-txn.json").exists());
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_refuses_divergent_anvil_without_modifying_world() {
+        let (base, mut world) = e46_fixture("anvil-drift", true);
+        let root = base.join("anvil");
+        let irw_path = root.join("flat.irw");
+        let region_path = root.join("region/r.0.0.mca");
+        let irw_before = fs::read(&irw_path).unwrap();
+        let region_before = fs::read(&region_path).unwrap();
+        assert!(world
+            .update_and_flush_existing_anvil(&irw_path, 2, 90, 3, (1 << 4) | 2)
+            .is_err());
+        assert_eq!(world.get(2, 90, 3), 0);
+        assert_eq!(fs::read(&irw_path).unwrap(), irw_before);
+        assert_eq!(fs::read(&region_path).unwrap(), region_before);
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_refuses_stale_irw_and_pending_redo_without_publishing_anvil() {
+        let (base, mut world) = e46_fixture("failclosed", false);
+        let root = base.join("anvil");
+        let irw_path = root.join("flat.irw");
+        let region_path = root.join("region/r.0.0.mca");
+        let irw_before = fs::read(&irw_path).unwrap();
+        let region_before = fs::read(&region_path).unwrap();
+        fs::write(&irw_path, b"stale file").unwrap();
+        assert!(world
+            .update_and_flush_existing_anvil(&irw_path, 2, 90, 3, 5 << 4)
+            .is_err());
+        assert_eq!(fs::read(&region_path).unwrap(), region_before);
+        fs::write(&irw_path, &irw_before).unwrap();
+        fs::write(irw_path.with_extension("pending-txn.json"), b"pending").unwrap();
+        assert!(world.save(&irw_path).is_err());
+        assert!(world.encoded().is_err());
+        assert!(world
+            .update_and_flush_existing_anvil(&irw_path, 2, 90, 3, 5 << 4)
+            .is_err());
+        assert_eq!(fs::read(&irw_path).unwrap(), irw_before);
+        assert_eq!(fs::read(&region_path).unwrap(), region_before);
+        assert_eq!(world.get(2, 90, 3), 0);
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_does_not_implicitly_bind_or_create_anvil_storage() {
+        let mut detached = World::new();
+        assert!(detached
+            .update_and_flush_existing_anvil(
+                Path::new("nonexistent-e46.irw"),
+                0,
+                64,
+                0,
+                1 << 4,
+            )
+            .is_err());
+        assert_eq!(detached.get(0, 64, 0), 0);
+    }
+
     #[test]
     fn chunk_ids_and_metadata_match_direct_world_samples() {
         // The optimized single-pass packing must retain section order and
