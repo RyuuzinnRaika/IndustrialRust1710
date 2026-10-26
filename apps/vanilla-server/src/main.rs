@@ -1791,9 +1791,15 @@ fn play(
                 if !permissions.interact {
                     continue;
                 }
-                // Protocol 5 C02 Use Entity: target VarInt and action VarInt.
-                let target_id = input.varint()?;
-                let action = input.varint()?;
+                // Minecraft Java 1.7.10 C02 Use Entity: target Int, action Byte.
+                // Interact-at (action 2) also carries three Float coordinates.
+                let target_id = input.i32()?;
+                let action = input.i8()?;
+                if action == 2 {
+                    input.f32()?;
+                    input.f32()?;
+                    input.f32()?;
+                }
                 input.finish()?;
                 // Frame/painting IDs are disjoint from mobs. Server owns all
                 // insertions, rotations, destruction and resulting item drops.
@@ -2392,11 +2398,11 @@ fn play(
                 }
             }
             11 => {
-                // Java 1.7.10 (Protocol 5) serverbound Entity Action:
-                // VarInt entity ID, VarInt action, VarInt horse jump boost.
-                let _reported_entity_id = input.varint()?;
-                let action = input.varint()?;
-                let _jump_boost = input.varint()?;
+                // Java 1.7.10 C0B Entity Action: Int entity ID, Byte action,
+                // Int horse jump boost (9 bytes). None are VarInts here.
+                let _reported_entity_id = input.i32()?;
+                let action = i32::from(input.i8()?);
+                let _jump_boost = input.i32()?;
                 input.finish()?;
                 if survival {
                     sprinting = sprint_action(sprinting, action, vitals.food);
