@@ -140,7 +140,12 @@ fn spawner_tile_entities(world: &World, cx: i32, cz: i32) -> io::Result<Vec<fast
     Ok(output)
 }
 
-pub(crate) fn nbt_for_chunk(world: &World, cx: i32, cz: i32, tiles: &[fastnbt::Value]) -> io::Result<Vec<u8>> {
+pub(crate) fn nbt_for_chunk(
+    world: &World,
+    cx: i32,
+    cz: i32,
+    tiles: &[fastnbt::Value],
+) -> io::Result<Vec<u8>> {
     let mut sections = Vec::new();
     let base_x = cx * 16;
     let base_z = cz * 16;
