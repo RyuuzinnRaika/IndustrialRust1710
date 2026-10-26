@@ -151,10 +151,12 @@ pub fn next_step(
             best = here;
             break;
         }
-        expansions += 1;
+        // A budget of one permits expanding the start cell once. Checking
+        // after incrementing used to abort before examining any neighbour.
         if expansions >= budget.min(128) {
             break;
         }
+        expansions += 1;
         for (dx, dz) in DIRECTIONS {
             for dy in [0, 1, -1] {
                 let neighbour = (here.0 + dx, here.1 + dy, here.2 + dz);
@@ -210,6 +212,24 @@ mod tests {
         assert_eq!(open.pop(), Some(Reverse((20, 10, (1, 64, -1)))));
         assert_eq!(open.pop(), Some(Reverse((20, 10, (1, 64, 1)))));
         assert_eq!(open.pop(), Some(Reverse((30, 10, (0, 64, 0)))));
+    }
+
+    #[test]
+    fn one_expansion_can_reach_an_adjacent_cell() {
+        let world = World::new();
+        let start = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let adjacent = PlayerPosition {
+            x: 1.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        // One expansion must be usable, not silently treated as zero.
+        assert_eq!(next_step(&world, start, adjacent, 1), Some(adjacent));
+        assert!(next_step(&world, start, adjacent, 0).is_none());
     }
 
     #[test]
