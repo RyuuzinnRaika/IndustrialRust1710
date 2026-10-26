@@ -199,6 +199,9 @@ impl World {
         let (x, y, z) = from;
         let block = self.get(x, y, z);
         match block >> 4 {
+            // Dust weakly powers horizontal neighbors and the block below,
+            // but never the block directly above it (Java 1.7.10).
+            55 if to == (x, y + 1, z) => 0,
             55 => (block & 15) as u8,
             69 | 77 | 143 => {
                 if block & 8 != 0 {
@@ -743,6 +746,32 @@ mod redstone_regression_tests {
         // Signal strength still determines the current carried through a cube.
         w.import_block(0, 64, 0, 55 << 4).unwrap();
         assert_eq!(w.signal_into((0, 63, 0), (1, 63, 0)), 0);
+    }
+
+    #[test]
+    fn redstone_dust_never_weakly_powers_block_directly_above() {
+        for strength in [0u16, 1, 7, 15] {
+            let mut w = World::new();
+            w.import_block(0, 63, 0, 1 << 4).unwrap();
+            w.import_block(0, 64, 0, (55 << 4) | strength).unwrap();
+            assert_eq!(
+                w.signal_into((0, 64, 0), (0, 65, 0)),
+                0,
+                "dust strength {strength} must not power the block above"
+            );
+            assert!(!w.power_into((0, 64, 0), (0, 65, 0)));
+            assert!(!w.powered_near(0, 65, 0));
+            assert_eq!(
+                w.signal_into((0, 64, 0), (1, 64, 0)),
+                strength as u8,
+                "horizontal dust output must be preserved"
+            );
+            assert_eq!(
+                w.strong_signal_into((0, 64, 0), (0, 63, 0)),
+                strength as u8,
+                "dust must continue to strongly power its support"
+            );
+        }
     }
 
     #[test]
