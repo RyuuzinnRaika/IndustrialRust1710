@@ -609,12 +609,17 @@ fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
     dx * dx + dy * dy + dz * dz <= 64.0
 }
 /// Double chests are two adjacent, independently persisted 27-slot halves.
+/// Pair only identical chest types: trapped (146) and normal (54) never mix.
 /// Canonical ordering is shared by all viewers regardless of clicked side.
 fn chest_neighbor(world: &World, pos: ChestPosition) -> Option<ChestPosition> {
     let (x, y, z) = pos;
+    let chest_id = world.get(x, y, z) >> 4;
+    if !matches!(chest_id, 54 | 146) {
+        return None;
+    }
     [(x - 1, y, z), (x + 1, y, z), (x, y, z - 1), (x, y, z + 1)]
         .into_iter()
-        .find(|&(x, y, z)| world.get(x, y, z) >> 4 == 54)
+        .find(|&(x, y, z)| world.get(x, y, z) >> 4 == chest_id)
 }
 fn can_place_chest(world: &World, pos: ChestPosition) -> bool {
     let (x, y, z) = pos;
@@ -7042,15 +7047,10 @@ fn main() -> io::Result<()> {
                                         Ok(value) => value,
                                         Err(_) => return,
                                     };
-                                    // Treat both halves of a regular double chest as one
-                                    // 54-slot inventory, even if the targeted half is full.
-                                    // Keep the same canonical order used by chest windows.
-                                    let chest_id = gravity_world.get(dest.0, dest.1, dest.2) >> 4;
-                                    let partner = if chest_id == 54 {
-                                        chest_neighbor(&gravity_world, dest)
-                                    } else {
-                                        None
-                                    };
+                                    // Treat either same-type double chest as a 54-slot
+                                    // inventory, even if the targeted half is full.
+                                    // Keep the canonical order shared with chest windows.
+                                    let partner = chest_neighbor(&gravity_world, dest);
                                     let mut slots = chest_window_state(&chests, dest, partner);
                                     if dispensers::insert_one_into_window(&mut slots, stack) {
                                         let staged_chest =
@@ -8380,5 +8380,82 @@ mod h74_entity_contact_tests {
         assert_eq!(w.get(-2, 64, 0) & 8, 0);
         assert_eq!(World::load(&path).unwrap().get(0, 64, 0) & 1, 0);
         std::fs::remove_file(path).ok();
+    }
+}
+
+#[cfg(test)]
+mod b13_trapped_double_chest_tests {
+    use super::*;
+
+    #[test]
+    fn normal_and_trapped_chests_pair_only_with_their_own_type() {
+        let left = (10, 64, 10);
+        let right = (11, 64, 10);
+        let mut world = World::new();
+        for chest_id in [54_u16, 146] {
+            world
+                .import_block(left.0, left.1, left.2, chest_id << 4)
+                .unwrap();
+            world
+                .import_block(right.0, right.1, right.2, chest_id << 4)
+                .unwrap();
+            assert_eq!(chest_neighbor(&world, left), Some(right));
+            assert_eq!(chest_neighbor(&world, right), Some(left));
+        }
+
+        world
+            .import_block(left.0, left.1, left.2, 54 << 4)
+            .unwrap();
+        world
+            .import_block(right.0, right.1, right.2, 146 << 4)
+            .unwrap();
+        assert_eq!(chest_neighbor(&world, left), None);
+        assert_eq!(chest_neighbor(&world, right), None);
+
+        world.import_block(left.0, left.1, left.2, 0).unwrap();
+        assert_eq!(chest_neighbor(&world, left), None);
+        assert_eq!(chest_neighbor(&world, right), None);
+    }
+
+    #[test]
+    fn trapped_double_chest_dropper_stages_other_half_without_mutating_source() {
+        let left = (20, 64, 20);
+        let right = (21, 64, 20);
+        let mut world = World::new();
+        for (x, y, z) in [left, right] {
+            world.import_block(x, y, z, 146 << 4).unwrap();
+        }
+        let full = Stack {
+            id: 4,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        let single = Stack { count: 1, ..full };
+        let mut right_slots = [Some(full); 27];
+        right_slots[0] = None;
+        let original = Chests::default()
+            .staged_update(left, [Some(full); 27])
+            .unwrap()
+            .staged_update(right, right_slots)
+            .unwrap();
+        let partner = chest_neighbor(&world, left);
+        assert_eq!(partner, Some(right));
+        let mut slots = chest_window_state(&original, left, partner);
+        assert_eq!(slots.len(), 54);
+        assert!(dispensers::insert_one_into_window(&mut slots, single));
+        assert_eq!(slots[27], Some(single));
+
+        let staged = stage_chest_window(&original, left, partner, &slots).unwrap();
+        assert_eq!(staged.slots(right)[0], Some(single));
+        assert_eq!(original.slots(right)[0], None);
+        assert!(staged.encoded().is_ok());
+
+        let mut full_slots = vec![Some(full); 54];
+        assert!(!dispensers::insert_one_into_window(
+            &mut full_slots,
+            single
+        ));
+        assert_eq!(full_slots, vec![Some(full); 54]);
     }
 }
