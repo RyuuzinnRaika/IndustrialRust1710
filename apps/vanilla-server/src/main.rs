@@ -5499,7 +5499,7 @@ fn start_clock_console(
                     println!("OP record saved for {name}");
                     Ok(())
                 })(),
-                ["/deop", name] => {
+                ["/deop", name] => (|| -> io::Result<()> {
                     if online_mode {
                         if let Some(uuid) = hub.uuid_for_online_name(name)? {
                             administration.revoke_op_verified(name, &uuid)
@@ -5509,7 +5509,7 @@ fn start_clock_console(
                     } else {
                         administration.set_op(name, false)
                     }
-                }
+                })(),
                 ["/ban", name, reason @ ..] => (|| -> io::Result<()> {
                     let reason = if reason.is_empty() {
                         "Banned by administrator".to_owned()
