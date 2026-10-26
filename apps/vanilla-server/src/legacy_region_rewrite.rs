@@ -402,7 +402,91 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
         &source_images,
         world_file,
         sidecars,
-        false,
+        RegionCommitMode::ExistingOnly,
+    )
+}
+
+/// E46 opt-in bridge: atomically publish explicitly changed EXISTING Anvil
+/// chunks and the corresponding IRW snapshot in a single redo generation.
+/// The IRW bytes must be serialized BEFORE taking this session-lock guard.
+/// This is not wired into the live save worker until migration/recovery gates
+/// for entities, player files, and all containers are satisfied.
+pub(crate) fn flush_irw_block_edits_under_lock_expected(
+    lock: &mut WorldSessionLock,
+    dimension: Dimension,
+    changes: &[crate::legacy_chunk_patch::BlockPatch],
+    expected_sources: &std::collections::BTreeMap<(i32, i32), Vec<u8>>,
+    world_file: &Path,
+    expected_irw: &[u8],
+    next_irw: &[u8],
+) -> io::Result<()> {
+    use std::collections::BTreeMap;
+    lock.verify()?;
+    if changes.is_empty() || changes.len() > 2048 {
+        return Err(invalid("invalid dirty Anvil block batch size"));
+    }
+    // A block change cannot be represented by a bare .mca rewrite unless
+    // its IRW save generation is also committed and recoverable.
+    let valid_irw = expected_irw.len() >= 8
+        && next_irw.len() >= 8
+        && matches!(&expected_irw[..4], b"IRW1" | b"IRW2" | b"IRW3" | b"IRW4")
+        && next_irw[..4] == expected_irw[..4];
+    if !valid_irw {
+        return Err(invalid("invalid or mismatched IRW snapshot version"));
+    }
+    let root = lock.world_dir();
+    if world_file.parent() != Some(root) {
+        return Err(invalid("dirty flush IRW must belong to locked world"));
+    }
+    let dimension_root = match dimension {
+        Dimension::Overworld => root.to_path_buf(),
+        Dimension::Nether => root.join("DIM-1"),
+        Dimension::End => root.join("DIM1"),
+    };
+    let mut patches: BTreeMap<(i32, i32), Vec<crate::legacy_chunk_patch::BlockPatch>> =
+        BTreeMap::new();
+    for &change in changes {
+        patches
+            .entry((change.0.div_euclid(16), change.2.div_euclid(16)))
+            .or_default()
+            .push(change);
+    }
+    let mut replacements = Vec::with_capacity(patches.len());
+    for (&(cx, cz), updates) in &patches {
+        let region_key = (cx.div_euclid(32), cz.div_euclid(32));
+        let snapshot = expected_sources
+            .get(&region_key)
+            .ok_or_else(|| invalid("dirty flush missing expected region bytes"))?;
+        let region_path = dimension_root
+            .join("region")
+            .join(format!("r.{}.{}.mca", region_key.0, region_key.1));
+        if snapshot_region(&region_path)?.as_deref() != Some(snapshot.as_slice()) {
+            return Err(invalid("dirty Anvil source changed before patching"));
+        }
+        let mut reader = Region::from_stream(std::io::Cursor::new(snapshot)).map_err(wrap)?;
+        let original = reader
+            .read_chunk(cx.rem_euclid(32) as usize, cz.rem_euclid(32) as usize)
+            .map_err(wrap)?
+            .ok_or_else(|| invalid("dirty chunk must exist before block-only flush"))?;
+        let encoded = crate::legacy_chunk_patch::patch_chunk(&original, cx, cz, updates)?;
+        replacements.push(((cx, cz), encoded));
+    }
+    let borrowed: Vec<_> = replacements
+        .iter()
+        .map(|(coord, bytes)| (*coord, bytes.as_slice()))
+        .collect();
+    let region_images = expected_sources
+        .iter()
+        .map(|(key, bytes)| (*key, Some(bytes.clone())))
+        .collect();
+    commit_region_batch(
+        lock,
+        dimension,
+        &borrowed,
+        &region_images,
+        world_file,
+        &[(world_file, next_irw.to_vec())],
+        RegionCommitMode::IrwImage(expected_irw),
     )
 }
 
@@ -425,7 +509,7 @@ pub(crate) fn insert_regions_with_sidecars_under_lock_expected(
         expected_sources,
         world_file,
         sidecars,
-        true,
+        RegionCommitMode::InsertMissing,
     )
 }
 
@@ -438,6 +522,12 @@ fn snapshot_region(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+enum RegionCommitMode<'a> {
+    ExistingOnly,
+    InsertMissing,
+    IrwImage(&'a [u8]),
+}
+
 fn commit_region_batch(
     lock: &mut WorldSessionLock,
     dimension: Dimension,
@@ -445,9 +535,14 @@ fn commit_region_batch(
     expected_sources: &std::collections::BTreeMap<(i32, i32), Option<Vec<u8>>>,
     world_file: &Path,
     sidecars: &[(&Path, Vec<u8>)],
-    allow_new_chunks: bool,
+    mode: RegionCommitMode<'_>,
 ) -> io::Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
+    let allow_new_chunks = matches!(mode, RegionCommitMode::InsertMissing);
+    let expected_irw = match mode {
+        RegionCommitMode::IrwImage(bytes) => Some(bytes),
+        _ => None,
+    };
     lock.verify()?;
     let root = lock.world_dir().to_path_buf();
     if world_file.parent() != Some(root.as_path())
@@ -456,6 +551,11 @@ fn commit_region_batch(
         return Err(invalid(
             "region transaction must use the locked IRW world root",
         ));
+    }
+    if let Some(expected) = expected_irw {
+        if snapshot_region(world_file)?.as_deref() != Some(expected) {
+            return Err(invalid("IRW source changed before atomic dirty flush"));
+        }
     }
     let journal_path = world_file.with_extension("pending-txn.json");
     if journal_path.exists() {
@@ -515,11 +615,14 @@ fn commit_region_batch(
             .any(|extension| name.ends_with(extension));
         let player_inventory = path.parent() == Some(root.join("players").as_path())
             && name.ends_with(".inventory.json");
-        if !root_sidecar && !player_inventory {
+        let world_snapshot = expected_irw.is_some() && *path == world_file;
+        if !root_sidecar && !player_inventory && !world_snapshot {
             return Err(invalid("unsupported native transaction sidecar"));
         }
-        serde_json::from_slice::<serde_json::Value>(bytes)
-            .map_err(|_| invalid("native sidecar is not JSON"))?;
+        if !world_snapshot {
+            serde_json::from_slice::<serde_json::Value>(bytes)
+                .map_err(|_| invalid("native sidecar is not JSON"))?;
+        }
     }
 
     // Preflight *all* region images before creating any staging file. Refuse
@@ -571,6 +674,11 @@ fn commit_region_batch(
         for ((rx, rz), source) in &sources {
             if snapshot_region(source)?.as_ref() != expected_sources[&(*rx, *rz)].as_ref() {
                 return Err(invalid("source region changed before multi-region commit"));
+            }
+        }
+        if let Some(expected) = expected_irw {
+            if snapshot_region(world_file)?.as_deref() != Some(expected) {
+                return Err(invalid("IRW source changed before redo publication"));
             }
         }
         for (path, bytes) in sidecars {
@@ -738,6 +846,82 @@ mod tests {
         .is_err());
         assert_eq!(fs::read(&outside).unwrap(), b"untouched");
         assert!(!sidecar.exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn dirty_anvil_block_and_irw_are_atomic_with_unknown_nbt_preserved() {
+        use std::collections::BTreeMap;
+        let base = setup();
+        let root = base.join("world");
+        let region = root.join("region/r.0.0.mca");
+        let before = fs::read(&region).unwrap();
+        let original_irw = World::new().encoded().unwrap();
+        let irw = root.join("flat.irw");
+        fs::write(&irw, &original_irw).unwrap();
+        let mut next = World::new();
+        next.import_block(2, 90, 3, 5 << 4).unwrap();
+        let next_irw = next.encoded().unwrap();
+        let unchanged = {
+            let mut reader = Region::from_stream(File::open(&region).unwrap()).unwrap();
+            reader.read_chunk(1, 0).unwrap().unwrap()
+        };
+        let mut lock = WorldSessionLock::acquire(&root).unwrap();
+        flush_irw_block_edits_under_lock_expected(
+            &mut lock,
+            Dimension::Overworld,
+            &[(2, 90, 3, 5 << 4)],
+            &BTreeMap::from([((0, 0), before)]),
+            &irw,
+            &original_irw,
+            &next_irw,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&irw).unwrap(), next_irw);
+        let mut reader = Region::from_stream(File::open(&region).unwrap()).unwrap();
+        let nbt = reader.read_chunk(0, 0).unwrap().unwrap();
+        let chunk = legacy_nbt::parse_chunk(&nbt, 0, 0).unwrap();
+        assert_eq!(
+            chunk
+                .level
+                .sections
+                .iter()
+                .find(|s| s.y == 5)
+                .unwrap()
+                .block_at((90 % 16) * 256 + 3 * 16 + 2),
+            Some((5, 0))
+        );
+        assert_eq!(reader.read_chunk(1, 0).unwrap().unwrap(), unchanged);
+        assert!(!irw.with_extension("pending-txn.json").exists());
+        drop(lock);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn stale_irw_prevents_any_anvil_publication() {
+        use std::collections::BTreeMap;
+        let base = setup();
+        let root = base.join("world");
+        let region = root.join("region/r.0.0.mca");
+        let before = fs::read(&region).unwrap();
+        let irw = root.join("flat.irw");
+        let actual_irw = World::new().encoded().unwrap();
+        fs::write(&irw, &actual_irw).unwrap();
+        let mut lock = WorldSessionLock::acquire(&root).unwrap();
+        assert!(flush_irw_block_edits_under_lock_expected(
+            &mut lock,
+            Dimension::Overworld,
+            &[(2, 90, 3, 5 << 4)],
+            &BTreeMap::from([((0, 0), before.clone())]),
+            &irw,
+            b"IRW1xxxx",
+            &actual_irw,
+        )
+        .is_err());
+        assert_eq!(fs::read(&region).unwrap(), before);
+        assert_eq!(fs::read(&irw).unwrap(), actual_irw);
+        assert!(!irw.with_extension("pending-txn.json").exists());
         drop(lock);
         fs::remove_dir_all(base).unwrap();
     }
