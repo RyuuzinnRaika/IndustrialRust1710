@@ -514,6 +514,30 @@ impl World {
     /// Only edited door lower halves are considered. Generated doors remain
     /// owned by the generated-village lookup, and Nether/End doors are ignored.
     pub fn independent_player_village_doors_near(&self, x: i32, z: i32) -> Vec<[i32; 3]> {
+        self.independent_player_village_doors_filtered(x, z, None)
+    }
+
+    /// Height-aware door lookup for live villager AI. A house on another
+    /// floor must not consume the bounded candidate budget or become a goal.
+    /// This is a local heuristic, not a complete vanilla village registry.
+    pub fn independent_player_village_doors_near_at(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Vec<[i32; 3]> {
+        if !(0..=255).contains(&y) {
+            return Vec::new();
+        }
+        self.independent_player_village_doors_filtered(x, z, Some(y))
+    }
+
+    fn independent_player_village_doors_filtered(
+        &self,
+        x: i32,
+        z: i32,
+        at_y: Option<i32>,
+    ) -> Vec<[i32; 3]> {
         if !matches!(
             self.generation,
             Generation::Expanded(_, crate::dimensions::Dimension::Overworld)
@@ -540,7 +564,14 @@ impl World {
                 continue;
             }
             let height = i32::from(dy);
-            let key = (distance_squared, [dx, height, dz]);
+            let height_delta = at_y.map_or(0, |at_y| i64::from(height) - i64::from(at_y));
+            if height_delta.abs() > 4 {
+                continue;
+            }
+            let key = (
+                distance_squared + height_delta * height_delta,
+                [dx, height, dz],
+            );
             // No farther candidate can displace the current farthest door.
             // Skip expensive sky checks for such candidates.
             if nearest.len() >= 32 && nearest.last().is_some_and(|last| key >= *last) {
@@ -2278,6 +2309,32 @@ mod tests {
             world.independent_player_village_doors_near(100, 100),
             Vec::<[i32; 3]>::new()
         );
+    }
+
+    #[test]
+    fn independent_player_village_does_not_target_different_floors() {
+        fn add_roofed_door(world: &mut World, x: i32, y: i32, z: i32) {
+            world.import_block(x, y - 1, z, 1 << 4).unwrap();
+            world.import_block(x, y, z, 64 << 4).unwrap();
+            world.import_block(x, y + 1, z, 64 << 4 | 8).unwrap();
+            world.import_block(x, y + 3, z + 1, 1 << 4).unwrap();
+        }
+
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        add_roofed_door(&mut world, 0, 200, 0);
+        add_roofed_door(&mut world, 2, 220, 0);
+        assert_eq!(
+            world.independent_player_village_doors_near_at(0, 200, 0),
+            vec![[0, 200, 0]]
+        );
+        assert_eq!(
+            world.independent_player_village_doors_near_at(0, 220, 0),
+            vec![[2, 220, 0]]
+        );
+        assert!(world.independent_player_village_doors_near_at(0, 190, 0).is_empty());
+        assert!(world.independent_player_village_doors_near_at(0, -1, 0).is_empty());
+        // Preserve the old horizontal-only API for existing consumers.
+        assert_eq!(world.independent_player_village_doors_near(0, 0).len(), 2);
     }
 
     #[test]
