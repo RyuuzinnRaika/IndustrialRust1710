@@ -617,10 +617,7 @@ mod tests {
             for side in [(0, 1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)] {
                 assert_eq!(dropper_furnace_slot(block_id, side, ore), None);
                 assert_eq!(dropper_furnace_slot(block_id, side, coal), Some(1));
-                assert_eq!(
-                    dropper_furnace_slot(block_id, side, empty_bucket),
-                    Some(1)
-                );
+                assert_eq!(dropper_furnace_slot(block_id, side, empty_bucket), Some(1));
             }
         }
         assert_eq!(dropper_furnace_slot(54, (0, -1, 0), ore), None);
