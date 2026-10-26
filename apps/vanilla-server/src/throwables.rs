@@ -101,7 +101,7 @@ impl Throwables {
         direction: (i32, i32, i32),
     ) -> bool {
         let (dx, dy, dz) = direction;
-        let distance = dx.abs() + dy.abs() + dz.abs();
+        let distance = i64::from(dx).abs() + i64::from(dy).abs() + i64::from(dz).abs();
         let at = PlayerPosition {
             x: f64::from(position.0) + 0.5 + f64::from(dx) * 0.7,
             y: f64::from(position.1) + 0.5 + f64::from(dy) * 0.7,
@@ -346,6 +346,25 @@ mod tests {
         assert!(!objects.can_launch_dispenser(368, origin, (1, 0, 0)));
         assert!(!objects.can_launch_dispenser(332, origin, (1, 1, 0)));
         assert!(!objects.can_launch_dispenser(344, origin, (0, 0, 0)));
+    }
+
+    #[test]
+    fn dispenser_rejects_extreme_directions_without_overflow_or_mutation() {
+        let mut objects = Throwables::default();
+        let origin = (0, 70, 0);
+        for direction in [
+            (i32::MIN, 0, 0),
+            (0, i32::MIN, 0),
+            (0, 0, i32::MIN),
+            (i32::MAX, 0, 0),
+            (i32::MIN, i32::MAX, 0),
+        ] {
+            assert!(!objects.can_launch_dispenser(262, origin, direction));
+            assert!(objects.launch_dispenser(262, origin, direction).is_none());
+        }
+        assert!(objects.active.is_empty());
+        assert_eq!(objects.next_id, 0);
+        assert!(objects.launch_dispenser(262, origin, (-1, 0, 0)).is_some());
     }
 
     #[test]
