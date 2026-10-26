@@ -486,20 +486,29 @@ mod tests {
         assert_eq!(debit.slots(source)[0].unwrap().count, 1);
         assert_eq!(staged.slots(destination)[0], Some(emitted));
         assert_eq!(original.slots(source)[0], Some(item));
-        assert_eq!(hopper.slots(destination), [None; crate::hoppers::HOPPER_SLOTS]);
+        assert_eq!(
+            hopper.slots(destination),
+            [None; crate::hoppers::HOPPER_SLOTS]
+        );
         assert_eq!(staged.revision(), hopper.revision() + 1);
         assert!(debit.encoded().is_ok());
         assert!(staged.encoded().is_ok());
 
         // A compatible partial stack is filled before an empty slot.
         let mut partial = [None; crate::hoppers::HOPPER_SLOTS];
-        partial[0] = Some(Stack { count: 63, ..emitted });
+        partial[0] = Some(Stack {
+            count: 63,
+            ..emitted
+        });
         assert!(insert_one(&mut partial, emitted));
         assert_eq!(partial[0].unwrap().count, 64);
         assert!(partial[1].is_none());
 
         // Full hoppers must not debit the dropper or emit a ground item.
-        let full = [Some(Stack { count: 64, ..emitted }); crate::hoppers::HOPPER_SLOTS];
+        let full = [Some(Stack {
+            count: 64,
+            ..emitted
+        }); crate::hoppers::HOPPER_SLOTS];
         let mut attempted = full;
         assert!(!insert_one(&mut attempted, emitted));
         assert_eq!(attempted, full);
