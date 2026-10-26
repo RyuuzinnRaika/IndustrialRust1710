@@ -145,6 +145,14 @@ fn merge_anvil_enchantments(left: Stack, right: Stack) -> Option<(u64, u16)> {
         _ => return None,
     };
     let mut existing = enchantment_entries(&target_entries)?;
+    // An imported or client-forged enchantment incompatible with the item
+    // must never become a valid anvil result through an otherwise valid book.
+    if existing
+        .iter()
+        .any(|&(id, _)| enchanting::anvil_level_limit(left.id, id).is_none())
+    {
+        return None;
+    }
     let mut levels = 0u16;
     let mut changed = false;
     for (entry, &(id, incoming_level)) in incoming.iter().zip(&incoming_parsed) {
