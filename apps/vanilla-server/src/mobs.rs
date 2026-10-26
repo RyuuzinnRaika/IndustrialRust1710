@@ -3572,7 +3572,12 @@ mod tests {
                 "solid block at ({x},{y},{z}) overlaps the Ghast"
             );
         }
-        for (x, y, z, blocked) in [(2, 80, 0, false), (1, 80, 0, true), (0, 82, 0, false), (0, 81, 0, true)] {
+        for (x, y, z, blocked) in [
+            (2, 80, 0, false),
+            (1, 80, 0, true),
+            (0, 82, 0, false),
+            (0, 81, 0, true),
+        ] {
             let mut world = World::new();
             world.import_block(x, y, z, 8 << 4).unwrap();
             assert_eq!(
