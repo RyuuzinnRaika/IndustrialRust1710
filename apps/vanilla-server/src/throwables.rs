@@ -12,6 +12,7 @@ const START_ID: i32 = 1_200_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    Arrow,
     Snowball,
     Egg,
     Pearl,
@@ -25,10 +26,11 @@ impl Kind {
             _ => None,
         }
     }
-    /// Vanilla dispensers fire eggs and snowballs. Ender pearls are
+    /// Vanilla dispensers fire arrows, eggs and snowballs. Ender pearls are
     /// dropped as items and must not teleport an arbitrary player.
     fn from_dispenser_item(id: i16) -> Option<Self> {
         match id {
+            262 => Some(Self::Arrow),
             332 => Some(Self::Snowball),
             344 => Some(Self::Egg),
             _ => None,
@@ -37,12 +39,19 @@ impl Kind {
 
     fn object_type(self) -> u8 {
         match self {
+            Self::Arrow => 60,
             Self::Snowball => 61,
             Self::Egg => 62,
             Self::Pearl => 65,
         }
     }
 }
+/// Whether an item must be fired as a projectile by a dispenser rather than
+/// ejected as a ground item. Droppers never use this path.
+pub(crate) fn is_dispenser_projectile(item_id: i16) -> bool {
+    Kind::from_dispenser_item(item_id).is_some()
+}
+
 #[derive(Clone, Debug)]
 struct Thrown {
     id: i32,
@@ -303,7 +312,11 @@ mod tests {
     fn dispenser_uses_correct_object_types_and_has_no_player_owner() {
         let mut objects = Throwables::default();
         let origin = (0, 70, 0);
-        for (id, kind, direction) in [(332, 61u8, (1, 0, 0)), (344, 62u8, (0, 0, -1))] {
+        for (id, kind, direction) in [
+            (262, 60u8, (0, 1, 0)),
+            (332, 61u8, (1, 0, 0)),
+            (344, 62u8, (0, 0, -1)),
+        ] {
             let (at, spawn) = objects.launch_dispenser(id, origin, direction).unwrap();
             let mut packet = spawn.body.as_slice();
             assert_eq!(spawn.id, 0x0e);
@@ -320,8 +333,16 @@ mod tests {
                     z: 0.5,
                 })
                 .len(),
-            2
+            3
         );
+        for item in [262, 332, 344] {
+            assert!(is_dispenser_projectile(item));
+        }
+        for item in [1, 368, 373] {
+            assert!(!is_dispenser_projectile(item));
+        }
+        // Arrows can be dispensed but not thrown by right-clicking them.
+        assert_eq!(Kind::from_item(262), None);
         assert!(!objects.can_launch_dispenser(368, origin, (1, 0, 0)));
         assert!(!objects.can_launch_dispenser(332, origin, (1, 1, 0)));
         assert!(!objects.can_launch_dispenser(344, origin, (0, 0, 0)));
