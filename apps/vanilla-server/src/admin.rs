@@ -266,14 +266,16 @@ impl Administration {
     /// a name alone (including a recycled old name) can NEVER confer OP.
     pub fn operator_level(&self, _name: &str, verified_uuid: Option<&str>) -> io::Result<u8> {
         let operators = self.ops()?;
-        Ok(verified_uuid.filter(|uuid| valid_uuid(uuid)).map_or(0, |uuid| {
-            operators
-                .iter()
-                .filter(|entry| entry_uuid_matches(entry, uuid))
-                .map(|entry| entry.level.unwrap_or(4))
-                .max()
-                .unwrap_or(0)
-        }))
+        Ok(verified_uuid
+            .filter(|uuid| valid_uuid(uuid))
+            .map_or(0, |uuid| {
+                operators
+                    .iter()
+                    .filter(|entry| entry_uuid_matches(entry, uuid))
+                    .map(|entry| entry.level.unwrap_or(4))
+                    .max()
+                    .unwrap_or(0)
+            }))
     }
     pub fn is_operator(&self, name: &str, verified_uuid: Option<&str>) -> io::Result<bool> {
         Ok(self.operator_level(name, verified_uuid)? > 0)
@@ -355,8 +357,7 @@ impl Administration {
         // Re-granting after a rename must not leave a second UUID-linked OP.
         // De-op by UUID must revoke any previously recorded name alias.
         ops.retain(|e| {
-            !e.name.eq_ignore_ascii_case(name)
-                && !uuid.is_some_and(|id| entry_uuid_matches(e, id))
+            !e.name.eq_ignore_ascii_case(name) && !uuid.is_some_and(|id| entry_uuid_matches(e, id))
         });
         if enabled {
             ops.push(NamedEntry {
@@ -591,12 +592,10 @@ mod tests {
         duplicate.name = "Second".into();
         duplicate.uuid = duplicate.uuid.map(|value| value.to_ascii_uppercase());
         entries.push(duplicate);
-        fs::write(
-            root.join("ops.json"),
-            serde_json::to_vec(&entries).unwrap(),
-        )
-        .unwrap();
-        assert!(store.operator_level("First", entries[0].uuid.as_deref()).is_err());
+        fs::write(root.join("ops.json"), serde_json::to_vec(&entries).unwrap()).unwrap();
+        assert!(store
+            .operator_level("First", entries[0].uuid.as_deref())
+            .is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
