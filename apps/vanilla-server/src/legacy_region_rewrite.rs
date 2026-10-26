@@ -59,10 +59,13 @@ fn build_region_create_only(
     let (cx, cz) = *first;
     let region = (cx.div_euclid(32), cz.div_euclid(32));
     let filename = format!("r.{}.{}.mca", region.0, region.1);
-    if source.is_some_and(|path| path.file_name().and_then(|name| name.to_str()) != Some(filename.as_str()))
-        || destination.file_name().and_then(|name| name.to_str()) != Some(filename.as_str())
+    if source.is_some_and(|path| {
+        path.file_name().and_then(|name| name.to_str()) != Some(filename.as_str())
+    }) || destination.file_name().and_then(|name| name.to_str()) != Some(filename.as_str())
     {
-        return Err(invalid("Anvil region name does not match replacement chunk"));
+        return Err(invalid(
+            "Anvil region name does not match replacement chunk",
+        ));
     }
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     if !fs::symlink_metadata(parent)?.file_type().is_dir() {
@@ -101,7 +104,9 @@ fn build_region_create_only(
         Some(Region::from_stream(File::open(path)?).map_err(wrap)?)
     } else {
         if !allow_new_chunks {
-            return Err(invalid("missing Anvil region requires explicit insert mode"));
+            return Err(invalid(
+                "missing Anvil region requires explicit insert mode",
+            ));
         }
         None
     };
@@ -114,7 +119,9 @@ fn build_region_create_only(
                 .map_err(wrap)?
                 .is_none()
             {
-                return Err(invalid("source chunk does not exist; new generation is separate"));
+                return Err(invalid(
+                    "source chunk does not exist; new generation is separate",
+                ));
             }
         }
     }
@@ -388,7 +395,15 @@ pub(crate) fn rewrite_regions_with_sidecars_under_lock_expected(
         .iter()
         .map(|(region, bytes)| (*region, Some(bytes.clone())))
         .collect();
-    commit_region_batch(lock, dimension, replacements, &source_images, world_file, sidecars, false)
+    commit_region_batch(
+        lock,
+        dimension,
+        replacements,
+        &source_images,
+        world_file,
+        sidecars,
+        false,
+    )
 }
 
 /// E46 opt-in migration primitive: add previously absent chunks or entire
@@ -403,7 +418,15 @@ pub(crate) fn insert_regions_with_sidecars_under_lock_expected(
     world_file: &Path,
     sidecars: &[(&Path, Vec<u8>)],
 ) -> io::Result<()> {
-    commit_region_batch(lock, dimension, replacements, expected_sources, world_file, sidecars, true)
+    commit_region_batch(
+        lock,
+        dimension,
+        replacements,
+        expected_sources,
+        world_file,
+        sidecars,
+        true,
+    )
 }
 
 fn snapshot_region(path: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -512,7 +535,9 @@ fn commit_region_batch(
             return Err(invalid("source Anvil region changed since snapshot"));
         }
         if observed.is_none() && !allow_new_chunks {
-            return Err(invalid("missing region cannot be created by update-only API"));
+            return Err(invalid(
+                "missing region cannot be created by update-only API",
+            ));
         }
         if observed.is_some() {
             crate::legacy_region::inspect_region(&source)?;
@@ -592,17 +617,15 @@ mod tests {
         let mut template = legacy_nbt::parse_chunk(&raw, 0, 0).unwrap();
         template.level.x = 31;
         template.level.z = 31;
-        template.level.extra.insert(
-            "UnknownNewChunk".into(), Value::String("retain me".into()),
-        );
+        template
+            .level
+            .extra
+            .insert("UnknownNewChunk".into(), Value::String("retain me".into()));
         let added_to_old = fastnbt::to_bytes(&template).unwrap();
         template.level.x = 32;
         template.level.z = -1;
         let added_to_new = fastnbt::to_bytes(&template).unwrap();
-        let expectations = BTreeMap::from([
-            ((0, 0), Some(old_bytes)),
-            ((1, -1), None),
-        ]);
+        let expectations = BTreeMap::from([((0, 0), Some(old_bytes)), ((1, -1), None)]);
         let sidecar = world.join("flat.chests.json");
         let world_file = world.join("flat.irw");
         let mut lock = WorldSessionLock::acquire(&world).unwrap();
@@ -620,7 +643,10 @@ mod tests {
         assert_eq!(existing.read_chunk(1, 0).unwrap().unwrap(), unchanged);
         let mut fresh = Region::from_stream(File::open(&new_region).unwrap()).unwrap();
         assert_eq!(fresh.read_chunk(0, 31).unwrap().unwrap(), added_to_new);
-        assert_eq!(crate::legacy_region::inspect_region(&new_region).unwrap(), 1);
+        assert_eq!(
+            crate::legacy_region::inspect_region(&new_region).unwrap(),
+            1
+        );
         assert_eq!(fs::read(&sidecar).unwrap(), br#"{"chests":[]}"#);
         assert!(!world_file.with_extension("pending-txn.json").exists());
         drop(lock);
