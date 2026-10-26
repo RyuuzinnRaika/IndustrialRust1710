@@ -287,6 +287,77 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
     })
 }
 
+/// Calculate the anvil result after an optional MC|ItemName update.
+/// A missing request retains the existing custom name; an empty request
+/// removes the custom name without deleting other display or mod NBT fields.
+/// Rename-only results use no right-hand ingredients and cost one level.
+pub fn repair_with_name(left: Stack, right: Option<Stack>, name: Option<&str>) -> Option<Repair> {
+    if !left.is_valid() || left.count != 1 {
+        return None;
+    }
+    let mut plan = right.and_then(|ingredient| repair(left, ingredient));
+    let Some(requested) = name else {
+        return plan;
+    };
+    // The 1.7.10 anvil text box accepts at most 30 UTF-16 code units.
+    // Reject control characters rather than creating invisible NBT names.
+    if requested.encode_utf16().count() > 30 || requested.chars().any(char::is_control) {
+        return None;
+    }
+    // Do not manufacture a rename-only output while a nonempty right slot
+    // contains an invalid or incompatible ingredient.
+    if right.is_some() && plan.is_none() {
+        return None;
+    }
+
+    let left_root = nbt_root(left)?;
+    let previous = match left_root.get("display") {
+        None => None,
+        Some(Value::Compound(fields)) => match fields.get("Name") {
+            None => None,
+            Some(Value::String(value)) => Some(value.as_str()),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let unchanged = previous == Some(requested) || (requested.is_empty() && previous.is_none());
+    if unchanged {
+        return plan;
+    }
+
+    let mut output = plan.map_or(left, |value| value.result);
+    let mut root = nbt_root(output)?;
+    if requested.is_empty() {
+        if let Some(Value::Compound(display)) = root.get_mut("display") {
+            display.remove("Name");
+            if display.is_empty() {
+                root.remove("display");
+            }
+        }
+    } else {
+        let entry = root
+            .entry("display".to_owned())
+            .or_insert_with(|| Value::Compound(HashMap::new()));
+        let Value::Compound(display) = entry else {
+            return None;
+        };
+        display.insert("Name".to_owned(), Value::String(requested.to_owned()));
+    }
+    output.nbt = if root.is_empty() {
+        None
+    } else {
+        Some(item_nbt::from_value(&Value::Compound(root)).ok()?)
+    };
+    let mut result = plan.take().unwrap_or(Repair {
+        result: left,
+        consumed: 0,
+        levels: 0,
+    });
+    result.result = output;
+    result.levels = result.levels.checked_add(1)?;
+    (result.levels <= 39).then_some(result)
+}
+
 /// Candidate enchantments by vanilla 1.7.10 numeric enchantment ID.
 /// This is a conservative, one-enchantment baseline rather than the complete
 /// weighted/multiple-enchantment vanilla enchantment algorithm. Keeping it
