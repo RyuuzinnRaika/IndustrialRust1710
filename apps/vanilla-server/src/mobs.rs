@@ -4768,7 +4768,11 @@ mod tests {
         assert!(!natural_spawn_location_ok(&world, at(424.5), &[player]));
         assert!(natural_spawn_location_ok(&world, at(424.501), &[player]));
         // A more distant second player must not override the closest one.
-        assert!(!natural_spawn_location_ok(&world, at(424.5), &[at(500.5), player]));
+        assert!(!natural_spawn_location_ok(
+            &world,
+            at(424.5),
+            &[at(500.5), player]
+        ));
 
         // The world-spawn point at (0.5, spawn_y, 0.5) has its own 24-block
         // exclusion, even when the nearest online player is farther away.
