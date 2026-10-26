@@ -1,0 +1,7 @@
+# F59: pin the compiler used locally and by GitHub Actions.
+# Cargo.lock must still be generated, reviewed and committed for full
+# cross-run dependency reproducibility.
+[toolchain]
+channel = "1.90.0"
+profile = "default"
+components = ["rustfmt", "clippy"]

@@ -254,7 +254,7 @@ pub fn process(
         id
     } else {
         let id = held.damage as u16;
-        if !next.books.get(&id).is_some_and(|record| !record.signed) {
+        if next.books.get(&id).is_none_or(|record| record.signed) {
             return Ok(false);
         }
         id

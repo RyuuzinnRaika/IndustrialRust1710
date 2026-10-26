@@ -451,7 +451,7 @@ impl Inventory {
     /// entire resulting inventory fits. In particular, a stacked bucket
     /// must never lose one unit when there is no free destination slot.
     pub fn fill_milk_bucket(&mut self) -> bool {
-        if !self.held().is_some_and(|item| item.id == 325) {
+        if self.held().is_none_or(|item| item.id != 325) {
             return false;
         }
         let mut next = self.clone();
@@ -2272,7 +2272,7 @@ mod tests {
         );
         assert_eq!(inv.cursor.unwrap().id, 265);
         assert_eq!(furnace.slots[2], None);
-        assert!(!inv.furnace_click(&mut furnace, 39, 0, 0).is_some());
+        assert!(inv.furnace_click(&mut furnace, 39, 0, 0).is_none());
         assert_eq!(&inv.furnace_window_items(7, &furnace)[..3], &[7, 0, 39]);
     }
     #[test]

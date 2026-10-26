@@ -37,80 +37,87 @@ fn checked_dir(path: &Path) -> io::Result<bool> {
         Err(error) => Err(error),
     }
 }
-/// Online-mode players live under players/verified/<uuid>.dat, whereas
-/// offline players use players/<name>.dat. Both must pass identical sidecar
-/// integrity checks; neither folder may contain nested symlinks.
-fn verified_uuid(stem: &str) -> bool {
-    stem.len() == 36
-        && stem.bytes().enumerate().all(|(i, byte)| {
-            if matches!(i, 8 | 13 | 18 | 23) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-            }
-        })
-}
-
-fn inspect_players(
+// Offline user names and authenticated UUIDs have disjoint save namespaces.
+// Inspect every recognized sidecar, even when its primary .dat file is absent,
+// and reject unknown files instead of silently declaring a partial save valid.
+fn inspect_player_directory(
+    world_file: &Path,
     directory: &Path,
     verified: bool,
-    entry_count: &mut usize,
-    file_count: &mut usize,
+    count: &mut usize,
+    skip_verified: bool,
 ) -> io::Result<()> {
+    if !checked_dir(directory)? {
+        return Ok(());
+    }
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
+        if skip_verified && entry.file_name() == "verified" {
+            continue;
+        }
         let path = entry.path();
-        let name = entry.file_name();
-        let name = name
+        if !checked_file(&path)? {
+            return Err(invalid("player directory contains an unsupported entry"));
+        }
+        let filename = entry.file_name();
+        let filename = filename
             .to_str()
             .ok_or_else(|| invalid("non-UTF8 player filename"))?;
-        if !verified && name == "verified" {
-            if !checked_dir(&path)? {
-                return Err(invalid("verified player directory missing"));
+        let suffixes = [
+            ".survival.inventory.json",
+            ".achievements.json",
+            ".experience.json",
+            ".inventory.json",
+            ".gamemode",
+            ".dat",
+            ".json",
+        ];
+        let (suffix_index, stem) = suffixes
+            .iter()
+            .enumerate()
+            .find_map(|(index, suffix)| filename.strip_suffix(suffix).map(|stem| (index, stem)))
+            .ok_or_else(|| invalid("unrecognized player save file"))?;
+        if verified {
+            let canonical = PlayerPosition::authenticated_location(world_file, stem)?;
+            if canonical != directory.join(format!("{stem}.dat")) {
+                return Err(invalid("non-canonical verified player UUID filename"));
             }
-            inspect_players(&path, true, entry_count, file_count)?;
-            continue;
+        } else if !crate::whitelist::valid_name(stem) || stem != stem.to_ascii_lowercase() {
+            return Err(invalid("invalid offline player filename"));
         }
-        if !checked_file(&path)? {
-            return Err(invalid("players folder contains unsupported entry"));
-        }
-        *entry_count = entry_count
-            .checked_add(1)
-            .ok_or_else(|| invalid("too many player files"))?;
-        if *entry_count > 10_000 {
-            return Err(invalid("too many player files"));
-        }
-        if !name.ends_with(".dat") {
-            continue;
-        }
-        let stem = name.trim_end_matches(".dat");
-        if (verified && !verified_uuid(stem))
-            || (!verified
-                && (!crate::whitelist::valid_name(stem) || stem != stem.to_ascii_lowercase()))
-        {
-            return Err(invalid("invalid player filename"));
-        }
-        PlayerPosition::load_state(&path)?;
-        *file_count += 1;
-        macro_rules! check_player {
-            ($path:expr, $loader:expr) => {{
-                let sidecar: PathBuf = $path;
-                if checked_file(&sidecar)? {
-                    $loader?;
-                    *file_count += 1;
+        match suffix_index {
+            0 | 3 => {
+                Inventory::load(&path)?;
+            }
+            1 => {
+                Achievements::load(&path)?;
+            }
+            2 => {
+                Experience::load(&path)?;
+            }
+            4 => {
+                admin_state::read(&path, 1)?
+                    .ok_or_else(|| invalid("player gamemode disappeared during inspection"))?;
+            }
+            5 => {
+                PlayerPosition::load_state(&path)?;
+            }
+            6 => {
+                // The legacy JSON loader is used only when the NBT save is absent.
+                // Refuse ambiguous dual-format player records rather than ignoring one.
+                if checked_file(&path.with_extension("dat"))? {
+                    return Err(invalid("player has both JSON and NBT positions"));
                 }
-            }};
+                PlayerPosition::load_state(&path.with_extension("dat"))?;
+            }
+            _ => unreachable!(),
         }
-        let inventory = Inventory::location(&path);
-        check_player!(inventory.clone(), Inventory::load(&inventory));
-        let survival = path.with_extension("survival.inventory.json");
-        check_player!(survival.clone(), Inventory::load(&survival));
-        let xp = path.with_extension("experience.json");
-        check_player!(xp.clone(), Experience::load(&xp));
-        let achievements = path.with_extension("achievements.json");
-        check_player!(achievements.clone(), Achievements::load(&achievements));
-        let gamemode = path.with_extension("gamemode");
-        check_player!(gamemode.clone(), admin_state::read(&gamemode, 1));
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| invalid("player file count overflow"))?;
+        if *count > 10_000 {
+            return Err(invalid("too many player save files"));
+        }
     }
     Ok(())
 }
@@ -185,8 +192,27 @@ fn inspect_irw(world_file: &Path) -> io::Result<Summary> {
 
     let player_dir = parent.join("players");
     if checked_dir(&player_dir)? {
-        let mut player_entries = 0usize;
-        inspect_players(&player_dir, false, &mut player_entries, &mut count)?;
+        // The verified subdirectory is the only permitted nested player folder.
+        for entry in fs::read_dir(&player_dir)? {
+            let entry = entry?;
+            if entry.file_name() == "verified" {
+                if !checked_dir(&entry.path())? {
+                    return Err(invalid("verified player storage must be a real directory"));
+                }
+            } else if !checked_file(&entry.path())? {
+                return Err(invalid("unexpected directory or link inside players"));
+            }
+        }
+        inspect_player_directory(
+            world_file,
+            &player_dir.join("verified"),
+            true,
+            &mut count,
+            false,
+        )?;
+        // Offline files live beside the verified namespace; inspect them separately.
+        // A temporary collection is unnecessary: just inspect regular root entries.
+        inspect_player_directory(world_file, &player_dir, false, &mut count, true)?;
     }
     Ok(Summary {
         description: "IRW",
@@ -305,6 +331,63 @@ mod tests {
         assert!(!root.join("session.lock").exists());
         fs::remove_file(save.with_extension("clock")).unwrap();
         fs::write(save.with_extension("pending-txn.json"), b"unfinished").unwrap();
+        assert!(inspect(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn inspects_verified_uuid_saves_and_sidecars_without_mutation() {
+        let root = std::env::temp_dir().join(format!("f56-online-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let world = root.join("flat.irw");
+        World::new().save_new(&world).unwrap();
+        let uuid = "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca";
+        let player = PlayerPosition::authenticated_location(&world, uuid).unwrap();
+        PlayerPosition::default()
+            .save_state(&player, crate::vitals::Vitals::default())
+            .unwrap();
+        assert_eq!(inspect(&root).unwrap().files, 2);
+        fs::write(player.with_extension("gamemode"), b"1").unwrap();
+        assert_eq!(inspect(&root).unwrap().files, 3);
+        fs::write(player.with_extension("gamemode"), b"9").unwrap();
+        assert!(inspect(&root).is_err());
+        fs::remove_file(player.with_extension("gamemode")).unwrap();
+        fs::write(player.parent().unwrap().join("unknown.tmp"), b"partial").unwrap();
+        assert!(inspect(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_verified_player_names_and_nested_links() {
+        let root = std::env::temp_dir().join(format!("f56-names-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("players/verified")).unwrap();
+        World::new().save_new(&root.join("flat.irw")).unwrap();
+        let bad = root.join("players/verified/not-a-uuid.dat");
+        fs::write(&bad, b"bad").unwrap();
+        assert!(inspect(&root).is_err());
+        fs::remove_file(&bad).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/tmp", root.join("players/verified/link")).unwrap();
+            assert!(inspect(&root).is_err());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn world_sidecars_are_loaded_and_corruption_is_rejected() {
+        let root = std::env::temp_dir().join(format!("f56-sidecars-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("flat.irw");
+        World::new().save_new(&file).unwrap();
+        let score = Scoreboard::location(&file);
+        fs::write(&score, b"invalid scoreboard").unwrap();
+        assert!(inspect(&root).is_err());
+        fs::remove_file(&score).unwrap();
+        let map = Maps::location(&file);
+        fs::write(&map, b"invalid map").unwrap();
         assert!(inspect(&root).is_err());
         fs::remove_dir_all(root).unwrap();
     }

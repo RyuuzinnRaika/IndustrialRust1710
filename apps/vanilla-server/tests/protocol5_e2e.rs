@@ -1529,7 +1529,6 @@ fn native_protocol5_water_spreads_and_lever_powers_redstone_wire() {
     place(69, -4); // lever
     place(331, -3); // redstone dust item -> wire block55
     place(8, 5); // source water supported by grass
-    drop(place); // release closure's mutable TcpStream borrow
     until_packet(&mut client, 0x23, |body| {
         body.len() == 11
             && body[0..4] == 6i32.to_be_bytes()
