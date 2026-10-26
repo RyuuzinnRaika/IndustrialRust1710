@@ -2223,23 +2223,26 @@ impl Mobs {
                 && natural_passive_habitat_ok(world.get(x, y - 1, z) >> 4, block, sky, now);
             // Select the species before applying light rules: slime-chunk
             // cave spawns are legal even at light level 15.
-            let kind = if is_passive {
+            let (kind, swamp_bonus) = if is_passive {
                 if passive >= passive_cap || !overworld_biome_allows_passive_spawn(biome) {
                     continue;
                 }
-                overworld_passive_kind(biome, hash(seed ^ 0x31acb4105ff327ab))
+                (
+                    overworld_passive_kind(biome, hash(seed ^ 0x31acb4105ff327ab)),
+                    false,
+                )
             } else {
                 if self.difficulty == Some(0) || hostile >= hostile_cap {
                     continue;
                 }
                 match dimension {
                     crate::dimensions::Dimension::Overworld => {
-                        overworld_monster_kind(hash(seed ^ 0xd1a7c4b500137e6d))
+                        overworld_monster_entry(biome, hash(seed ^ 0xd1a7c4b500137e6d))
                     }
                     crate::dimensions::Dimension::Nether => {
                         // Blaze spawning is limited to the existing fortress substrate.
                         let fortress = world.get(x, y - 1, z) >> 4 == 112;
-                        if fortress && seed.is_multiple_of(4) {
+                        let kind = if fortress && seed.is_multiple_of(4) {
                             Kind::Blaze
                         } else if (seed >> 24).is_multiple_of(12) {
                             Kind::Ghast
@@ -2247,9 +2250,10 @@ impl Mobs {
                             Kind::MagmaCube
                         } else {
                             Kind::ZombiePigman
-                        }
+                        };
+                        (kind, false)
                     }
-                    crate::dimensions::Dimension::End => Kind::Enderman,
+                    crate::dimensions::Dimension::End => (Kind::Enderman, false),
                 }
             };
             let size = if kind.splitting() {
@@ -2279,7 +2283,7 @@ impl Mobs {
             // make nearby blocks/biomes/light levels safe. This preserves the
             // older server's CPU and snapshot guards (at most six per cycle).
             let mobs_before_attempt = self.entities.len();
-            for member in 0..natural_pack_attempts(kind, seed) {
+            for member in 0..if swamp_bonus { 1 } else { natural_pack_attempts(kind, seed) } {
                 if self.entities.len() >= MAX_LOADED_MOBS || self.next_id >= 1_000_000 {
                     break;
                 }
@@ -3299,6 +3303,18 @@ fn overworld_monster_kind(roll: u64) -> Kind {
         400..=499 => Kind::Slime,
         500..=509 => Kind::Enderman,
         _ => Kind::Witch,
+    }
+}
+
+/// Swampland adds a second Slime entry with weight 1 and group size 1 to
+/// the inherited 515-weight hostile list. Preserve the distinct entry rather
+/// than silently using the inherited Slime pack size of four.
+fn overworld_monster_entry(biome: u8, roll: u64) -> (Kind, bool) {
+    let selected = roll % if biome == 6 { 516 } else { 515 };
+    if selected == 515 {
+        (Kind::Slime, true)
+    } else {
+        (overworld_monster_kind(selected), false)
     }
 }
 
@@ -4362,6 +4378,40 @@ mod tests {
             assert_eq!(horse_spawn_weight(biome), 0);
             assert!((0..256).all(|roll| overworld_passive_kind(biome, roll) != Kind::Horse));
         }
+    }
+
+    #[test]
+    fn swamp_slime_bonus_spawn_entry_uses_its_own_weight_and_single_member_pack() {
+        // The default 515-weight list is unchanged outside Swampland.
+        for biome in [1, 4, 134] {
+            assert_eq!(
+                (0..515)
+                    .filter(|&roll| overworld_monster_entry(biome, roll).0 == Kind::Slime)
+                    .count(),
+                100
+            );
+            assert!((0..515).all(|roll| !overworld_monster_entry(biome, roll).1));
+        }
+        // In Swampland, the inherited 100-weight Slime entry and the
+        // separate weight-1 single-member entry both remain selectable.
+        let mut slimes = 0;
+        let mut bonus = 0;
+        for roll in 0..516 {
+            let (kind, single_member) = overworld_monster_entry(6, roll);
+            if kind == Kind::Slime {
+                slimes += 1;
+            }
+            if single_member {
+                bonus += 1;
+                assert_eq!(kind, Kind::Slime);
+            }
+        }
+        assert_eq!(slimes, 101);
+        assert_eq!(bonus, 1);
+        assert_eq!(overworld_monster_entry(6, 515), (Kind::Slime, true));
+        assert_eq!(overworld_monster_entry(6, 1031), (Kind::Slime, true));
+        assert_eq!(overworld_monster_entry(6, 514), (Kind::Witch, false));
+        assert_eq!(natural_pack_attempts(Kind::Slime, 0), 4);
     }
 
     #[test]
