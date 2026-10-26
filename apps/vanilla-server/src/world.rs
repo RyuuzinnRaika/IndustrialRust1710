@@ -2163,7 +2163,7 @@ mod tests {
     fn independent_player_village_requires_roof_asymmetry_and_survives_restart() {
         let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
         let door = [-1000, 200, -1000];
-        let support = (1 << 4) | 0;
+        let support = 1 << 4;
         world
             .import_block(door[0], door[1] - 1, door[2], support)
             .unwrap();
