@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -18,9 +19,44 @@ from urllib.request import Request, urlopen
 # Retire ONLY these exact, unchanged heads after their PRs have closed.
 # Never infer abandonment from branch age or from closure alone.
 RETIRED_PR_HEADS = {
+    35: "f3effdddca3ea1829b711fac576d9dc70c7c4ba2",
+    38: "f699c71ad6dfe484b504fd6bd6b684dc5be309be",
+    42: "99fc2f9c4401521f72a2e42b78b440e55426b934",
+    43: "2f4c864579b7e210716be0f5e5cfbcd09d59ce88",
+    45: "cd843ea00a92db3276a1554e3779e95fb4c48e9e",
+    47: "f3effdddca3ea1829b711fac576d9dc70c7c4ba2",
+    48: "c1c75580bbee15887364d7771342c81c26ca7fd7",
+    54: "f85561181f63cb51cc25182dc859a7e6263bc582",
+    57: "462196d8c3ca0494e7fc33d5268ee26a73bce15f",
+    59: "e4794b8dff08c905595a817439f877eabe5f622b",
     61: "fad31e5d09d8d0b163dde8408a084a50577f0b61",
+    62: "b706f21f194b27ae6d2053fc43ae33eb5f9f37f7",
+    70: "d7867e695c2da9a0a670210f1b4b2ee50da675cd",
+    71: "97a89e255a985eed7ce3baf656cf9a27bef581bf",
+    75: "0329c5947c1e673f2d3eb4bd19238c896ac4d3ba",
+    78: "a56510fdeb5e7e6e6192290803473ee47a1d1012",
+    80: "0c44ec15dbb0cd1721ebe4df5dd8e8827f2200aa",
+    82: "34d2da82ab60f88e9d3d8a7c87e74bce7220fa5d",
+    83: "84450a3ba10c63d4e09393101e102bc4a319449d",
+    85: "638679baa5940a3245aebf914a5661072b806a8f",
+    87: "82c1f03c43f8e63f3b3dd3598e0495c9ee1f17fa",
+    88: "9b7916280f470963497206f42409d6bd5e566389",
+    97: "7c5d2b4d7c6bb8f85d5f5fae9ba34c6c8c985b82",
+    98: "cc2a74a3ef0f53aebf1146143de6b5525dd6a518",
+    118: "5d58eca0890cc2719d334015075b3b43c30c7fc9",
+    121: "e10fc063689670f47b615e793b496223c3ed3efc",
+    122: "03af198341e7857a8a5c54c13bd94fe34571656a",
     141: "15e6bea2b632e4421156accbb10c099fc49ff284",
-    171: "1a1c0c61f5331bf02bafa999766022080a10147c",    35: "f3effdddca3ea1829b711fac576d9dc70c7c4ba2",    38: "f699c71ad6dfe484b504fd6bd6b684dc5be309be",    42: "99fc2f9c4401521f72a2e42b78b440e55426b934",    43: "2f4c864579b7e210716be0f5e5cfbcd09d59ce88",    54: "f85561181f63cb51cc25182dc859a7e6263bc582",    57: "462196d8c3ca0494e7fc33d5268ee26a73bce15f",    59: "e4794b8dff08c905595a817439f877eabe5f622b",    62: "b706f21f194b27ae6d2053fc43ae33eb5f9f37f7",    70: "d7867e695c2da9a0a670210f1b4b2ee50da675cd",    71: "97a89e255a985eed7ce3baf656cf9a27bef581bf",    75: "0329c5947c1e673f2d3eb4bd19238c896ac4d3ba",    78: "a56510fdeb5e7e6e6192290803473ee47a1d1012",    80: "0c44ec15dbb0cd1721ebe4df5dd8e8827f2200aa",    82: "34d2da82ab60f88e9d3d8a7c87e74bce7220fa5d",    97: "7c5d2b4d7c6bb8f85d5f5fae9ba34c6c8c985b82",    118: "5d58eca0890cc2719d334015075b3b43c30c7fc9",    121: "e10fc063689670f47b615e793b496223c3ed3efc",    122: "03af198341e7857a8a5c54c13bd94fe34571656a",    147: "645f634ac2ff1671538fd97f9e73177cd408dede",    148: "6de2b50cf89952a9dde3c19df303a902ae26d499",    167: "b99c9f635d1c1817e7034a5fa87bbb59eacaa515",    169: "11bfa1d4869dd4e792905f9b54121f9704af488e",    170: "e501085194be6d1ec0ca989694749614fd9194f7",    176: "88c5b578794461717e04d572c0cac09db8a285b5",    352: "86334e801be0bdde11bf01149a195a9e3bfca836",
+    147: "645f634ac2ff1671538fd97f9e73177cd408dede",
+    148: "6de2b50cf89952a9dde3c19df303a902ae26d499",
+    167: "b99c9f635d1c1817e7034a5fa87bbb59eacaa515",
+    168: "89bb13307864bec1f9dd88a6de4e4fd2c6ca08c5",
+    169: "11bfa1d4869dd4e792905f9b54121f9704af488e",
+    170: "e501085194be6d1ec0ca989694749614fd9194f7",
+    171: "1a1c0c61f5331bf02bafa999766022080a10147c",
+    173: "bc368e33d73243e380452e18463b5e21e3e4f409",
+    176: "88c5b578794461717e04d572c0cac09db8a285b5",
+    352: "86334e801be0bdde11bf01149a195a9e3bfca836",
 }
 
 
@@ -34,7 +70,7 @@ def retired_closed_pr(pr, repo):
         and head["repo"] is not None
         and head["repo"]["full_name"] == repo
         and head["sha"] == expected
-        and pr["base"]["ref"] == "main"
+        # Every retired head is explicitly pinned; it may come from a reviewed stacked PR.
     )
 
 
@@ -49,9 +85,15 @@ def api(repo, path, method="GET"):
         headers["Authorization"] = "Bearer " + token
     request = Request("https://api.github.com/repos/" + repo + path,
                       headers=headers, method=method)
-    with urlopen(request, timeout=30) as response:
-        payload = response.read()
-        return json.loads(payload) if payload else None
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=30) as response:
+                payload = response.read()
+                return json.loads(payload) if payload else None
+        except HTTPError as exc:
+            if exc.code not in (500, 502, 503, 504) or attempt == 2:
+                raise
+            time.sleep(2 ** attempt)  # Retry transient GitHub API errors only.
 
 
 def pages(repo, path):
@@ -90,14 +132,27 @@ def main():
     # Protect every open PR head/base and every head whose work was closed
     # without merging. Do not erase abandoned-but-unintegrated work.
     keep = {default_branch}
+    # Ignore a closed, unmerged PR's historical head only if the exact live
+    # branch tip was independently merged to main by a later PR.
+    merged_main_heads = {
+        pr["head"]["ref"]: pr["head"]["sha"]
+        for pr in prs
+        if pr.get("merged_at") and pr["base"]["ref"] == default_branch
+        and pr["head"]["repo"] and pr["head"]["repo"]["full_name"] == repo
+    }
     for pr in prs:
         if pr["state"] == "open":
             if pr["head"]["repo"] and pr["head"]["repo"]["full_name"] == repo:
                 keep.add(pr["head"]["ref"])
             keep.add(pr["base"]["ref"])
         elif not pr.get("merged_at") and not retired_closed_pr(pr, repo):
-            if pr["head"]["repo"] and pr["head"]["repo"]["full_name"] == repo:
-                keep.add(pr["head"]["ref"])
+            head = pr["head"]
+            if head["repo"] and head["repo"]["full_name"] == repo:
+                live = branches_by_name.get(head["ref"])
+                if (live and head["sha"] != live["commit"]["sha"]
+                        and merged_main_heads.get(head["ref"]) == live["commit"]["sha"]):
+                    continue  # Older abandoned PR, but current tip was merged to main.
+                keep.add(head["ref"])
 
     candidates = {}
     for pr in prs:
@@ -180,6 +235,9 @@ def main():
         except HTTPError as e:
             if e.code == 404:
                 print("SKIP (already missing):", name)
+                continue
+            if e.code in (500, 502, 503, 504):
+                print("SKIP (transient GitHub failure):", name, e.code)
                 continue
             print("ERROR:", name, e.code, file=sys.stderr)
             raise
