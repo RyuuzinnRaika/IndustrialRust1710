@@ -13,14 +13,14 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-# These three long-lived PRs were superseded by later, independently reviewed
-# mainline integrations. Retire ONLY these exact, unchanged head commits,
-# and ONLY after their PRs have been explicitly closed without merging.
-# Never infer abandonment from the age or closure of any other PR.
+# Explicitly reviewed, superseded PR heads, replaced by later merged mainline PRs
+# or retired as disconnected duplicate implementations. Each pin is immutable.
+# Retire ONLY these exact, unchanged heads after their PRs have closed.
+# Never infer abandonment from branch age or from closure alone.
 RETIRED_PR_HEADS = {
     61: "fad31e5d09d8d0b163dde8408a084a50577f0b61",
     141: "15e6bea2b632e4421156accbb10c099fc49ff284",
-    171: "1a1c0c61f5331bf02bafa999766022080a10147c",
+    171: "1a1c0c61f5331bf02bafa999766022080a10147c",    35: "f3effdddca3ea1829b711fac576d9dc70c7c4ba2",    38: "f699c71ad6dfe484b504fd6bd6b684dc5be309be",    42: "99fc2f9c4401521f72a2e42b78b440e55426b934",    43: "2f4c864579b7e210716be0f5e5cfbcd09d59ce88",    54: "f85561181f63cb51cc25182dc859a7e6263bc582",    57: "462196d8c3ca0494e7fc33d5268ee26a73bce15f",    59: "e4794b8dff08c905595a817439f877eabe5f622b",    62: "b706f21f194b27ae6d2053fc43ae33eb5f9f37f7",    70: "d7867e695c2da9a0a670210f1b4b2ee50da675cd",    71: "97a89e255a985eed7ce3baf656cf9a27bef581bf",    75: "0329c5947c1e673f2d3eb4bd19238c896ac4d3ba",    78: "a56510fdeb5e7e6e6192290803473ee47a1d1012",    80: "0c44ec15dbb0cd1721ebe4df5dd8e8827f2200aa",    82: "34d2da82ab60f88e9d3d8a7c87e74bce7220fa5d",    97: "7c5d2b4d7c6bb8f85d5f5fae9ba34c6c8c985b82",    118: "5d58eca0890cc2719d334015075b3b43c30c7fc9",    121: "e10fc063689670f47b615e793b496223c3ed3efc",    122: "03af198341e7857a8a5c54c13bd94fe34571656a",    147: "645f634ac2ff1671538fd97f9e73177cd408dede",    148: "6de2b50cf89952a9dde3c19df303a902ae26d499",    167: "b99c9f635d1c1817e7034a5fa87bbb59eacaa515",    169: "11bfa1d4869dd4e792905f9b54121f9704af488e",    170: "e501085194be6d1ec0ca989694749614fd9194f7",    176: "88c5b578794461717e04d572c0cac09db8a285b5",    352: "86334e801be0bdde11bf01149a195a9e3bfca836",
 }
 
 
