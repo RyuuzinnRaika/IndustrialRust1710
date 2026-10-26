@@ -664,7 +664,10 @@ mod tests {
         let Some(Value::Compound(display)) = root.get("display") else {
             panic!("display");
         };
-        assert_eq!(display.get("Name"), Some(&Value::String("工具の名前".into())));
+        assert_eq!(
+            display.get("Name"),
+            Some(&Value::String("工具の名前".into()))
+        );
         assert!(repair_with_name(stone, None, Some("")).is_none());
 
         let custom = Value::Compound(HashMap::from([
