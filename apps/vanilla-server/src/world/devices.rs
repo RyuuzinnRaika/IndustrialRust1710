@@ -1509,7 +1509,7 @@ mod redstone_regression_tests {
     #[test]
     fn pistons_destroy_attached_signs_ladders_tripwire_and_cakes() {
         // Attached and fragile blocks break instead of translating with a
-        // piston. Their item drops are handled by the separate drop pipeline.
+        // piston. Item-drop generation is not implemented by this change.
         for fragile_id in [63u16, 65, 68, 92, 131, 132] {
             assert!(piston_breakable(fragile_id << 4));
             for solids_ahead in [0, 1] {
