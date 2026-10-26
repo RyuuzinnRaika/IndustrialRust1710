@@ -2177,28 +2177,28 @@ mod tests {
         world
             .import_block(door[0], door[1] + 1, door[2], 64 << 4 | 8)
             .unwrap();
-        let doors = || world.independent_player_village_doors_near(door[0], door[2]);
-        assert!(doors().is_empty(), "a bare outdoor door is not a village");
+        let doors = |world: &World| world.independent_player_village_doors_near(door[0], door[2]);
+        assert!(doors(&world).is_empty(), "a bare outdoor door is not a village");
         world
             .import_block(door[0], door[1] + 3, door[2] + 1, support)
             .unwrap();
-        assert_eq!(doors(), vec![door]);
+        assert_eq!(doors(&world), vec![door]);
         world
             .import_block(door[0], door[1] + 3, door[2] - 1, support)
             .unwrap();
-        assert!(doors().is_empty(), "symmetric roofs are not a house");
+        assert!(doors(&world).is_empty(), "symmetric roofs are not a house");
         world
             .import_block(door[0], door[1] + 3, door[2] - 1, 0)
             .unwrap();
-        assert_eq!(doors(), vec![door]);
+        assert_eq!(doors(&world), vec![door]);
         world
             .import_block(door[0], door[1] + 1, door[2], 0)
             .unwrap();
-        assert!(doors().is_empty(), "a broken upper half invalidates the door");
+        assert!(doors(&world).is_empty(), "a broken upper half invalidates the door");
         world
             .import_block(door[0], door[1] + 1, door[2], 64 << 4 | 8)
             .unwrap();
-        assert_eq!(doors(), vec![door]);
+        assert_eq!(doors(&world), vec![door]);
         assert!(world
             .independent_player_village_doors_near(door[0] + 100, door[2])
             .is_empty());
