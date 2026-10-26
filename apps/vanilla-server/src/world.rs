@@ -177,7 +177,7 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 84 // jukebox
             | 92 // cake
             | 140 // flower pot
-            | 54 // chest (single or double)
+            | 54 | 146 // normal/trapped chest (single or double)
             | 117 // brewing stand
             | 154 // hopper
             | 56 // diamond ore
