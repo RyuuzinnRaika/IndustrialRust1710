@@ -3253,13 +3253,14 @@ fn overworld_biome_allows_natural_spawn(biome: u8) -> bool {
 /// must not silently inherit ordinary farm-animal entries. Apply this filter
 /// at both the pack origin and each member: an adjacent plains pack must not
 /// spawn cows on a beach, in Ice Plains or Desert Hills. Mutated Desert (130)
-/// and Ice Plains Spikes (140) inherit
-/// their parent biome's empty passive list.
+/// and Ice Plains Spikes (140) inherit their parent's empty passive list.
+/// Mesa (37-39) explicitly clears that list in 1.7.10, and mutated Mesa
+/// (165-167) copies the empty list. A grass patch does not override it.
 fn overworld_biome_allows_passive_spawn(biome: u8) -> bool {
     !matches!(
         biome,
         0 | 2 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 24 | 25 | 26 | 130 | 140
-    )
+    ) && !matches!(biome, 37..=39 | 165..=167)
 }
 
 fn overworld_passive_kind(biome: u8, roll: u64) -> Kind {
@@ -4715,6 +4716,22 @@ mod tests {
             assert!(overworld_biome_allows_natural_spawn(biome));
         }
         for biome in [1, 4, 5, 6] {
+            assert!(overworld_biome_allows_passive_spawn(biome));
+        }
+    }
+
+    #[test]
+    fn mesa_biomes_reject_ordinary_passive_packs_even_on_grass() {
+        // Java 1.7.10 BiomeGenMesa clears spawnableCreatureList for all
+        // three variants. BiomeGenMutated copies that empty list.
+        // The same predicate guards both the pack origin and its members.
+        for biome in [37, 38, 39, 165, 166, 167] {
+            assert!(!overworld_biome_allows_passive_spawn(biome));
+            // Mesa still permits the ordinary hostile spawn list.
+            assert!(overworld_biome_allows_natural_spawn(biome));
+        }
+        // A nearby pack may still spawn in an eligible grassy biome.
+        for biome in [1, 4, 5, 6, 35] {
             assert!(overworld_biome_allows_passive_spawn(biome));
         }
     }
