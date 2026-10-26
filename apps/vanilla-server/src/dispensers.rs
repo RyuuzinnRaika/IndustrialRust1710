@@ -282,8 +282,8 @@ pub(crate) fn dropper_furnace_slot(
 }
 
 /// Insert one dropper item into the four-slot 1.7.10 brewing stand.
-/// Above supplies the ingredient; horizontal faces supply potion bottles.
-/// The underside is reserved for extraction. Invalid or full slots do not
+/// Above supplies the ingredient; all other faces supply potion bottles.
+/// Invalid or full slots do not
 /// debit the source inventory (the caller commits the staged debit later).
 pub(crate) fn dropper_brewer_insert(
     stand: &mut crate::brewing::Brewer,
@@ -306,7 +306,7 @@ pub(crate) fn dropper_brewer_insert(
     }
     if !matches!(
         offset,
-        (1, 0, 0) | (-1, 0, 0) | (0, 0, 1) | (0, 0, -1)
+        (1, 0, 0) | (-1, 0, 0) | (0, 0, 1) | (0, 0, -1) | (0, 1, 0)
     ) || !crate::brewing::slot_accepts(0, item)
     {
         return false;
@@ -660,7 +660,7 @@ mod tests {
         assert!(dropper_brewer_insert(&mut stand, (0, -1, 0), wart));
         assert!(dropper_brewer_insert(&mut stand, (0, -1, 0), wart));
         assert_eq!(stand.slots[3].unwrap().count, 2);
-        for offset in [(1, 0, 0), (-1, 0, 0), (0, 0, 1)] {
+        for offset in [(1, 0, 0), (0, 1, 0), (0, 0, 1)] {
             assert!(dropper_brewer_insert(&mut stand, offset, bottle));
         }
         let full = stand;
