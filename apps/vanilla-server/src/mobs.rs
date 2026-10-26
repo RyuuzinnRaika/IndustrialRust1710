@@ -3427,7 +3427,7 @@ fn is_slime_cave_location(world_seed: u64, x: i32, y: i32, z: i32) -> bool {
 /// random gate even after the world-seed slime-chunk and Y<40 checks pass.
 /// Do not conflate the chunk's 10% eligibility with the per-attempt 10% roll.
 fn slime_cave_spawn_ok(world_seed: u64, x: i32, y: i32, z: i32, roll: u64) -> bool {
-    is_slime_cave_location(world_seed, x, y, z) && roll % 10 == 0
+    is_slime_cave_location(world_seed, x, y, z) && roll.is_multiple_of(10)
 }
 
 /// Vanilla 1.7.10 villager infection chance by world difficulty.
