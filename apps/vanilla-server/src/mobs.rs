@@ -4952,11 +4952,7 @@ mod tests {
 
         // A second, closer player can exclude an otherwise eligible position.
         let near = PlayerPosition { y: 96.0, ..player };
-        assert!(!natural_spawn_location_ok(
-            &world,
-            candidate(72.0),
-            &[player, near]
-        ));
+        assert!(!natural_spawn_location_ok(&world, candidate(72.0), &[player, near]));
         let outside_inner = PlayerPosition { y: 97.0, ..player };
         assert!(natural_spawn_location_ok(
             &world,
