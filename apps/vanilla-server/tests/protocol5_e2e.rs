@@ -1837,7 +1837,7 @@ fn creative_minecart_placement_mount_and_restart_preserve_inventory() {
     }
 
     client.write_all(&place(2, 64, 328)).unwrap();
-    let spawned = until_packet(&mut client, 0x0e, &is_cart_spawn);
+    let spawned = until_packet(&mut client, 0x0e, is_cart_spawn);
     let mut spawn_body = spawned.as_slice();
     let cart_id = i32::try_from(read_varint(&mut spawn_body).unwrap()).unwrap();
     assert_eq!(spawn_body[0], 10); // Spawn Object: rideable minecart
@@ -1907,7 +1907,7 @@ fn creative_minecart_placement_mount_and_restart_preserve_inventory() {
         thread::sleep(Duration::from_millis(50));
     }
     let (mut rejoined, new_player_id, _) = server.join("RustTester");
-    let restored = until_packet(&mut rejoined, 0x0e, &is_cart_spawn);
+    let restored = until_packet(&mut rejoined, 0x0e, is_cart_spawn);
     let mut restored_body = restored.as_slice();
     assert_eq!(read_varint(&mut restored_body).unwrap(), cart_id as u32);
     rejoined.write_all(&frame(0x02, &interact)).unwrap();
