@@ -7140,7 +7140,9 @@ fn main() -> io::Result<()> {
                                             match furnaces.staged_update(dest, furnace) {
                                                 Ok(value) => value,
                                                 Err(error) => {
-                                                    eprintln!("DROPPER FURNACE TRANSFER ERROR: {error}");
+                                                    eprintln!(
+                                                        "DROPPER FURNACE TRANSFER ERROR: {error}"
+                                                    );
                                                     continue;
                                                 }
                                             };
