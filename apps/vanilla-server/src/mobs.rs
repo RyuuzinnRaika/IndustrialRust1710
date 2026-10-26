@@ -3314,8 +3314,11 @@ fn natural_spawn_capacity(players: &[PlayerPosition], base: usize) -> usize {
 fn natural_mob_cap(players: &[PlayerPosition], base: usize) -> usize {
     let mut chunks = std::collections::BTreeSet::new();
     for player in players {
-        let cx = (player.x.floor() as i32).div_euclid(16);
-        let cz = (player.z.floor() as i32).div_euclid(16);
+        // Use widened chunk coordinates for the 17x17 search. At the
+        // i32 block-coordinate limits, adding eight to an i32 chunk index
+        // would overflow in debug builds and abort natural spawning.
+        let cx = i64::from((player.x.floor() as i32).div_euclid(16));
+        let cz = i64::from((player.z.floor() as i32).div_euclid(16));
         for x in cx - 8..=cx + 8 {
             for z in cz - 8..=cz + 8 {
                 chunks.insert((x, z));
@@ -4708,6 +4711,21 @@ mod tests {
         // Negative block coordinates must floor to the correct chunk.
         let west = PlayerPosition { x: -0.5, ..a };
         assert_eq!(natural_mob_cap(&[a, west], 70), 83);
+    }
+
+    #[test]
+    fn natural_mob_cap_handles_extreme_signed_block_coordinates() {
+        // The 17x17 cap union is computed in chunk coordinates. Its border
+        // must not overflow near either end of the signed block range.
+        let edge = |x: f64, z: f64| PlayerPosition { x, y: 65.0, z };
+        let max = edge(f64::from(i32::MAX), f64::from(i32::MAX));
+        let min = edge(f64::from(i32::MIN), f64::from(i32::MIN));
+        assert_eq!(natural_mob_cap(&[max], 70), 79);
+        assert_eq!(natural_mob_cap(&[min], 10), 11);
+        assert_eq!(natural_mob_cap(&[max, max], 70), 79);
+        assert_eq!(natural_mob_cap(&[min, max], 70), 158);
+        assert!(natural_spawn_chunk_eligible(max, &[max]));
+        assert!(natural_spawn_chunk_eligible(min, &[min]));
     }
 
     #[test]
