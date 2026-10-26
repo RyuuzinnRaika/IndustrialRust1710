@@ -865,14 +865,8 @@ mod tests {
                 end.import_block(x, y, z, 7 << 4).unwrap();
             }
         }
-        assert_eq!(
-            portal_target(&end, 0, y, 0),
-            Some(Dimension::Overworld)
-        );
-        assert_eq!(
-            portal_target(&end, -1, y, 1),
-            Some(Dimension::Overworld)
-        );
+        assert_eq!(portal_target(&end, 0, y, 0), Some(Dimension::Overworld));
+        assert_eq!(portal_target(&end, -1, y, 1), Some(Dimension::Overworld));
 
         // A broken rim, missing support or missing interior tile invalidates
         // the entire exit rather than permitting travel through an orphan.
@@ -885,10 +879,7 @@ mod tests {
         end.import_block(1, y, 1, 0).unwrap();
         assert_eq!(portal_target(&end, 0, y, 0), None);
         end.import_block(1, y, 1, 119 << 4).unwrap();
-        assert_eq!(
-            portal_target(&end, 0, y, 0),
-            Some(Dimension::Overworld)
-        );
+        assert_eq!(portal_target(&end, 0, y, 0), Some(Dimension::Overworld));
     }
     #[test]
     fn nether_arrival_never_uses_bedrock_roof() {
