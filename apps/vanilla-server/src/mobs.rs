@@ -2125,8 +2125,14 @@ impl Mobs {
             );
             let player = players[(seed as usize) % players.len()];
             let (offset_x, offset_z) = natural_spawn_horizontal_offset(seed);
-            let x = player.x.floor() as i32 + offset_x;
-            let z = player.z.floor() as i32 + offset_z;
+            // A world-border coordinate plus a bounded spawn offset can
+            // exceed i32. Never wrap or clamp it into a different chunk.
+            let Some(x) = natural_spawn_offset_block(player.x, offset_x) else {
+                continue;
+            };
+            let Some(z) = natural_spawn_offset_block(player.z, offset_z) else {
+                continue;
+            };
             // Overworld has a heightmap; Nether and End have ceilings/islands
             // instead, so seek a bounded standable cavern floor.
             let height = world.surface_height_at(x, z);
@@ -2260,8 +2266,12 @@ impl Mobs {
                     let h = hash(seed ^ (member as u64).wrapping_mul(0x517cc1b727220a95));
                     let dx = (h % 6) as i32 - ((h >> 8) % 6) as i32;
                     let dz = ((h >> 16) % 6) as i32 - ((h >> 24) % 6) as i32;
-                    let nx = x + dx;
-                    let nz = z + dz;
+                    let Some(nx) = x.checked_add(dx) else {
+                        continue;
+                    };
+                    let Some(nz) = z.checked_add(dz) else {
+                        continue;
+                    };
                     let ny = if overworld && height.is_some_and(|surface| y > surface) {
                         world
                             .surface_height_at(nx, nz)
@@ -3278,6 +3288,16 @@ fn natural_spawn_x_sign(seed: u64) -> i32 {
     } else {
         -1
     }
+}
+
+/// Convert a player coordinate and a bounded spawn offset without the
+/// saturating float-to-int cast or signed overflow changing the spawn chunk.
+fn natural_spawn_offset_block(origin: f64, offset: i32) -> Option<i32> {
+    let block = origin.floor();
+    if !block.is_finite() || block < f64::from(i32::MIN) || block > f64::from(i32::MAX) {
+        return None;
+    }
+    (block as i32).checked_add(offset)
 }
 
 /// Keep the bounded origin search symmetric across all four cardinal
@@ -4599,6 +4619,28 @@ mod tests {
             slime_cave_spawn_ok(0, -1, 39, 0, 0),
             is_slime_chunk(0, -1, 0)
         );
+    }
+
+    #[test]
+    fn natural_spawn_coordinate_offsets_reject_overflow_and_invalid_positions() {
+        assert_eq!(natural_spawn_offset_block(0.5, 24), Some(24));
+        assert_eq!(natural_spawn_offset_block(-0.5, -24), Some(-25));
+        assert_eq!(natural_spawn_offset_block(f64::from(i32::MAX), 1), None);
+        assert_eq!(natural_spawn_offset_block(f64::from(i32::MIN), -1), None);
+        assert_eq!(
+            natural_spawn_offset_block(f64::from(i32::MAX) + 1.0, -1),
+            None
+        );
+        assert_eq!(
+            natural_spawn_offset_block(f64::from(i32::MAX) - 1.0, 1),
+            Some(i32::MAX)
+        );
+        assert_eq!(
+            natural_spawn_offset_block(f64::from(i32::MIN) + 1.0, -1),
+            Some(i32::MIN)
+        );
+        assert_eq!(natural_spawn_offset_block(f64::NAN, 0), None);
+        assert_eq!(natural_spawn_offset_block(f64::INFINITY, 0), None);
     }
 
     #[test]
