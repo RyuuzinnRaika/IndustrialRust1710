@@ -568,7 +568,10 @@ impl World {
             if height_delta.abs() > 4 {
                 continue;
             }
-            let key = (distance_squared + height_delta * height_delta, [dx, height, dz]);
+            let key = (
+                distance_squared + height_delta * height_delta,
+                [dx, height, dz],
+            );
             // No farther candidate can displace the current farthest door.
             // Skip expensive sky checks for such candidates.
             if nearest.len() >= 32 && nearest.last().is_some_and(|last| key >= *last) {
@@ -2328,8 +2331,12 @@ mod tests {
             world.independent_player_village_doors_near_at(0, 220, 0),
             vec![[2, 220, 0]]
         );
-        assert!(world.independent_player_village_doors_near_at(0, 190, 0).is_empty());
-        assert!(world.independent_player_village_doors_near_at(0, -1, 0).is_empty());
+        assert!(world
+            .independent_player_village_doors_near_at(0, 190, 0)
+            .is_empty());
+        assert!(world
+            .independent_player_village_doors_near_at(0, -1, 0)
+            .is_empty());
         // Preserve the old horizontal-only API for existing consumers.
         assert_eq!(world.independent_player_village_doors_near(0, 0).len(), 2);
     }
