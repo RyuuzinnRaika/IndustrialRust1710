@@ -6774,6 +6774,7 @@ fn main() -> io::Result<()> {
     let ejection_chests = Arc::clone(&chests);
     let ejection_hoppers = Arc::clone(&hoppers);
     let ejection_chest_file = Arc::clone(&chest_path);
+    let ejection_hopper_file = Arc::clone(&hopper_path);
     let tick_shutdown = Arc::clone(&shutdown);
     let tick_thread = thread::spawn(move || {
         let mut telemetry =
@@ -7063,6 +7064,47 @@ fn main() -> io::Result<()> {
                                         }
                                         *storage = updated;
                                         *chests = next_chest;
+                                    }
+                                    continue;
+                                }
+                                // Droppers also insert into hoppers (including disabled
+                                // hoppers). If all five slots are full, leave the source
+                                // untouched and do not spawn a ground item.
+                                if state >> 4 == 158
+                                    && dispensers::dropper_hopper_target(
+                                        gravity_world.get(dest.0, dest.1, dest.2) >> 4,
+                                    )
+                                {
+                                    let mut hoppers = match ejection_hoppers.lock() {
+                                        Ok(value) => value,
+                                        Err(_) => return,
+                                    };
+                                    let mut slots = hoppers.slots(dest);
+                                    if dispensers::insert_one(&mut slots, stack) {
+                                        let next_hopper = match hoppers.staged_update(dest, slots) {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                eprintln!("DROPPER HOPPER TRANSFER ERROR: {error}");
+                                                continue;
+                                            }
+                                        };
+                                        let result = (|| -> io::Result<()> {
+                                            journal::commit(
+                                                &furnace_world_path
+                                                    .with_extension("pending-txn.json"),
+                                                &[
+                                                    (&*ejection_file, updated.encoded()?),
+                                                    (&*ejection_hopper_file, next_hopper.encoded()?),
+                                                ],
+                                            )?;
+                                            Ok(())
+                                        })();
+                                        if let Err(error) = result {
+                                            eprintln!("DROPPER HOPPER JOURNAL ERROR: {error}");
+                                            continue;
+                                        }
+                                        *storage = updated;
+                                        *hoppers = next_hopper;
                                     }
                                     continue;
                                 }
