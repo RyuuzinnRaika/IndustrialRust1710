@@ -335,7 +335,9 @@ impl Minecarts {
     }
 
     pub fn mount(&mut self, id: i32, rider: i32, position: PlayerPosition) -> Option<Event> {
-        if self.cart_for(rider).is_some() {
+        // Non-finite coordinates bypass ordinary distance comparisons (NaN
+        // compares false), allowing a malformed position to mount remotely.
+        if !position.is_valid() || self.cart_for(rider).is_some() {
             return None;
         }
         let cart = self.carts.get_mut(&id)?;
@@ -374,7 +376,9 @@ impl Minecarts {
 
     /// A bounded push along the rail axis. Never accepts a client position.
     pub fn control(&mut self, rider: i32, forward: f32, heading: f32) -> bool {
-        if !forward.is_finite() || !heading.is_finite() {
+        // Reject malformed or out-of-range client movement rather than
+        // letting a large finite input inject an impossible cart impulse.
+        if !forward.is_finite() || !heading.is_finite() || !(-1.0..=1.0).contains(&forward) {
             return false;
         }
         let Some(cart) = self.carts.values_mut().find(|c| c.rider == Some(rider)) else {
@@ -855,6 +859,71 @@ mod tests {
         assert!(rail_exits(27, 6).is_none());
         assert!(rail_exits(28, 7).is_none());
         assert!(rail_exits(157, 6).is_none());
+    }
+
+    #[test]
+    fn minecart_mount_rejects_invalid_player_positions() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, (66 << 4) | 1).unwrap();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.5,
+            z: 0.5,
+        };
+        let mut carts = Minecarts::default();
+        assert!(carts.place(&world, at, 0).is_some());
+        for invalid in [
+            PlayerPosition { x: f64::NAN, ..at },
+            PlayerPosition {
+                y: f64::INFINITY,
+                ..at
+            },
+            PlayerPosition {
+                z: f64::NEG_INFINITY,
+                ..at
+            },
+            PlayerPosition {
+                x: f64::from(crate::world::WORLD_LIMIT),
+                ..at
+            },
+            PlayerPosition { y: 256.0, ..at },
+        ] {
+            assert!(carts.mount(FIRST_ID, 42, invalid).is_none());
+            assert_eq!(carts.cart_for(42), None);
+        }
+        assert!(carts.mount(FIRST_ID, 42, at).is_some());
+    }
+
+    #[test]
+    fn minecart_control_rejects_invalid_impulses_without_mutation() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, (66 << 4) | 1).unwrap();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.5,
+            z: 0.5,
+        };
+        let mut carts = Minecarts::default();
+        assert!(carts.place(&world, at, 0).is_some());
+        assert!(carts.mount(FIRST_ID, 42, at).is_some());
+        let before = carts.carts[&FIRST_ID].clone();
+        for (forward, heading) in [
+            (f32::NAN, 90.0),
+            (f32::INFINITY, 90.0),
+            (f32::NEG_INFINITY, 90.0),
+            (2.0, 90.0),
+            (-2.0, 90.0),
+            (f32::MAX, 90.0),
+            (1.0, f32::NAN),
+            (1.0, f32::INFINITY),
+        ] {
+            assert!(!carts.control(42, forward, heading));
+            let after = &carts.carts[&FIRST_ID];
+            assert_eq!(after.speed, before.speed);
+            assert_eq!(after.direction, before.direction);
+        }
+        assert!(carts.control(42, 1.0, 270.0));
+        assert!(carts.carts[&FIRST_ID].speed > before.speed);
     }
 
     #[test]
