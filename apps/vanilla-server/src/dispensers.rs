@@ -681,7 +681,7 @@ mod tests {
             nbt: None,
         };
         let mut slots = [None; DEVICE_SLOTS];
-        slots[0] = Some(Stack { count: 2, ..bottle });
+        slots[0] = Some(bottle);
         let devices = Devices::default().staged_update(source, slots).unwrap();
         let brewers = crate::brewing::Brewers::default();
         let (debited, emitted) = devices.stage_eject(source, 42).unwrap().unwrap();
@@ -689,7 +689,7 @@ mod tests {
         assert!(dropper_brewer_insert(&mut stand, (1, 0, 0), emitted));
         let staged = brewers.staged_update(dest, stand).unwrap();
         assert_eq!(devices.slots(source), slots);
-        assert_eq!(debited.slots(source)[0], Some(bottle));
+        assert_eq!(debited.slots(source)[0], None);
         assert_eq!(brewers.get(dest), crate::brewing::Brewer::default());
         assert_eq!(staged.get(dest).slots[0], Some(bottle));
         let restored: crate::brewing::Brewers =
