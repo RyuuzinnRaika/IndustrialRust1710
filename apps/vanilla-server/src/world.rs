@@ -3029,6 +3029,89 @@ mod tests {
     }
 
     #[test]
+    fn village_annex_across_chunk_boundary_expires_and_recovers_after_restart() {
+        let seed = 42;
+        for negative in [true, false] {
+            let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+            let (cx, _, cz) = (-8..=8)
+                .flat_map(|gx| (-8..=8).map(move |gz| (gx * 192 + 48, gz * 192 + 48)))
+                .filter(|&(x, z)| (x < 0 && z < 0) == negative)
+                .find_map(|(x, z)| crate::worldgen::village_center(seed, x, z))
+                .expect("seed 42 has villages in both signed quadrants");
+            let anchor = world.live_village_house_doors(cx, cz).unwrap()[1].unwrap();
+            // The bridge is in the core footprint, but the next door is in
+            // the adjacent chunk and outside the generated village footprint.
+            let bridge = [anchor[0] + 14, anchor[1], anchor[2]];
+            let remote = [anchor[0] + 30, anchor[1], anchor[2]];
+            assert_eq!(bridge[0].rem_euclid(16), 15);
+            assert_eq!(remote[0].rem_euclid(16), 15);
+            assert_eq!(remote[0].div_euclid(16), bridge[0].div_euclid(16) + 1);
+
+            for door in [bridge, remote] {
+                world
+                    .import_block(door[0], door[1] - 1, door[2], 1 << 4)
+                    .unwrap();
+                world
+                    .import_block(door[0], door[1], door[2], 64 << 4)
+                    .unwrap();
+                world
+                    .import_block(door[0], door[1] + 1, door[2], 64 << 4 | 8)
+                    .unwrap();
+            }
+            let active = world
+                .village_doors_with_bounded_annex(remote[0], remote[2])
+                .expect("annex should cross the chunk boundary");
+            assert!(active.contains(&bridge));
+            assert!(active.contains(&remote));
+
+            // The remote door is intact, but losing its only supporting
+            // bridge must immediately disconnect it from the generated village.
+            world
+                .import_block(bridge[0], bridge[1] - 1, bridge[2], 9 << 4)
+                .unwrap();
+            assert_eq!(
+                world.village_doors_with_bounded_annex(remote[0], remote[2]),
+                None
+            );
+            world
+                .import_block(bridge[0], bridge[1] - 1, bridge[2], 1 << 4)
+                .unwrap();
+            assert!(world
+                .village_doors_with_bounded_annex(remote[0], remote[2])
+                .unwrap()
+                .contains(&remote));
+
+            let path = std::env::temp_dir().join(format!(
+                "ir1710-annex-chunk-{}-{}.irw",
+                std::process::id(),
+                if negative { "negative" } else { "positive" }
+            ));
+            let _ = fs::remove_file(&path);
+            world.save(&path).unwrap();
+            let mut restored = World::load(&path).unwrap();
+            assert!(restored
+                .village_doors_with_bounded_annex(remote[0], remote[2])
+                .unwrap()
+                .contains(&remote));
+            restored
+                .import_block(remote[0], remote[1] + 1, remote[2], 0)
+                .unwrap();
+            assert_eq!(
+                restored.village_doors_with_bounded_annex(remote[0], remote[2]),
+                None
+            );
+            restored
+                .import_block(remote[0], remote[1] + 1, remote[2], 64 << 4 | 8)
+                .unwrap();
+            assert!(restored
+                .village_doors_with_bounded_annex(remote[0], remote[2])
+                .unwrap()
+                .contains(&remote));
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
     fn village_annex_prioritizes_connected_door_after_many_distant_edits() {
         let seed = 42;
         let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
