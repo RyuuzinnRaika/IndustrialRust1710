@@ -7172,7 +7172,7 @@ fn main() -> io::Result<()> {
                                     continue;
                                 }
                                 // Brewing stands have four legacy slots: top supplies
-                                // ingredients and horizontal faces supply bottles.
+                                // ingredients and all other faces supply bottles.
                                 // Reject full/invalid slots without ejecting an item.
                                 if state >> 4 == 158
                                     && gravity_world.get(dest.0, dest.1, dest.2) >> 4 == 117
