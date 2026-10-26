@@ -5230,7 +5230,10 @@ mod tests {
             mobs.tick(1, &world, &[farther, invalid, nearest]);
             assert_eq!(mobs.entities.contains_key(&id), survives, "{label}");
             if survives {
-                assert_eq!(mobs.entities[&id].far_from_player_ticks, expected_age, "{label}");
+                assert_eq!(
+                    mobs.entities[&id].far_from_player_ticks, expected_age,
+                    "{label}"
+                );
             }
         }
     }
