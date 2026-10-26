@@ -5057,6 +5057,9 @@ mod tests {
         world.import_block(first[0], first[1], first[2], 0).unwrap();
         let added = [cx, first[1], cz + 8];
         world
+            .import_block(added[0], added[1] - 1, added[2], 1 << 4)
+            .unwrap();
+        world
             .import_block(added[0], added[1], added[2], 64 << 4)
             .unwrap();
         world
@@ -5086,6 +5089,9 @@ mod tests {
             z: f64::from(annex[2]) + 0.5,
         };
         assert_eq!(villager_door_destination(&world, outside), None);
+        world
+            .import_block(annex[0], annex[1] - 1, annex[2], 1 << 4)
+            .unwrap();
         world
             .import_block(annex[0], annex[1], annex[2], 64 << 4 | 2)
             .unwrap();

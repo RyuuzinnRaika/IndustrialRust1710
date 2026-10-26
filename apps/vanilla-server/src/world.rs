@@ -394,7 +394,8 @@ impl World {
                 continue;
             }
             let upper = self.get(dx, i32::from(dy) + 1, dz);
-            if upper >> 4 == 64 && upper & 8 != 0 {
+            if upper >> 4 == 64 && upper & 8 != 0 && self.can_support(dx, i32::from(dy), dz, lower)
+            {
                 doors.insert([dx, i32::from(dy), dz]);
             }
         }
@@ -456,7 +457,8 @@ impl World {
                 continue;
             }
             let upper = self.get(dx, i32::from(dy) + 1, dz);
-            if upper >> 4 == 64 && upper & 8 != 0 {
+            if upper >> 4 == 64 && upper & 8 != 0 && self.can_support(dx, i32::from(dy), dz, lower)
+            {
                 let distance = core
                     .iter()
                     .map(|anchor| {
@@ -2094,6 +2096,9 @@ mod tests {
         let placed = [cx, base + 1, cz + 8];
         let outside = [cx + 32, base + 1, cz];
         let mut expected: BTreeSet<[i32; 3]> = generated.into_iter().flatten().collect();
+        world
+            .import_block(placed[0], placed[1] - 1, placed[2], 1 << 4)
+            .unwrap();
         assert_eq!(
             world.village_doors_including_player_edits(cx, cz),
             Some(expected.iter().copied().collect())
@@ -2193,6 +2198,9 @@ mod tests {
         );
         for door in [annex, chained, disconnected, elevated] {
             world
+                .import_block(door[0], door[1] - 1, door[2], 1 << 4)
+                .unwrap();
+            world
                 .import_block(door[0], door[1], door[2], 64 << 4 | 2)
                 .unwrap();
             world
@@ -2260,6 +2268,7 @@ mod tests {
         for x in -47..=-32 {
             for z in -42..=-27 {
                 for y in [180, 200] {
+                    world.import_block(cx + x, y - 1, cz + z, 1 << 4).unwrap();
                     world.import_block(cx + x, y, cz + z, 64 << 4).unwrap();
                     world
                         .import_block(cx + x, y + 1, cz + z, 64 << 4 | 8)
@@ -2267,6 +2276,9 @@ mod tests {
                 }
             }
         }
+        world
+            .import_block(annex[0], annex[1] - 1, annex[2], 1 << 4)
+            .unwrap();
         world
             .import_block(annex[0], annex[1], annex[2], 64 << 4 | 2)
             .unwrap();
@@ -2278,6 +2290,86 @@ mod tests {
             .expect("connected annex remains reachable despite distant edits");
         assert!(doors.contains(&annex));
         assert!(!doors.contains(&[cx - 47, 180, cz - 42]));
+    }
+
+    #[test]
+    fn player_built_village_doors_expire_when_support_is_removed() {
+        let seed = 42;
+        let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+        let (cx, base, cz) = (-8..=8)
+            .flat_map(|gx| (-8..=8).map(move |gz| (gx * 192 + 48, gz * 192 + 48)))
+            .find_map(|(x, z)| crate::worldgen::village_center(seed, x, z))
+            .expect("seed 42 has a generated village");
+        let core = [cx, base + 1, cz + 8];
+        let anchor = world.live_village_house_doors(cx, cz).unwrap()[1].unwrap();
+        let annex = [anchor[0] + 15, anchor[1], anchor[2]];
+
+        for door in [core, annex] {
+            world
+                .import_block(door[0], door[1] - 1, door[2], 1 << 4)
+                .unwrap();
+            world
+                .import_block(door[0], door[1], door[2], 64 << 4)
+                .unwrap();
+            world
+                .import_block(door[0], door[1] + 1, door[2], 64 << 4 | 8)
+                .unwrap();
+        }
+        assert!(world
+            .village_doors_including_player_edits(cx, cz)
+            .unwrap()
+            .contains(&core));
+        assert!(world
+            .village_doors_with_bounded_annex(annex[0], annex[2])
+            .unwrap()
+            .contains(&annex));
+
+        // A door whose lower half is still present must nevertheless expire
+        // immediately when its supporting block is no longer solid.
+        world
+            .import_block(core[0], core[1] - 1, core[2], 9 << 4)
+            .unwrap();
+        assert!(!world
+            .village_doors_including_player_edits(cx, cz)
+            .unwrap()
+            .contains(&core));
+        world
+            .import_block(annex[0], annex[1] - 1, annex[2], 50 << 4)
+            .unwrap();
+        assert_eq!(
+            world.village_doors_with_bounded_annex(annex[0], annex[2]),
+            None
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-village-door-support-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        world.save(&path).unwrap();
+        let mut restored = World::load(&path).unwrap();
+        assert!(!restored
+            .village_doors_including_player_edits(cx, cz)
+            .unwrap()
+            .contains(&core));
+        assert_eq!(
+            restored.village_doors_with_bounded_annex(annex[0], annex[2]),
+            None
+        );
+        for door in [core, annex] {
+            restored
+                .import_block(door[0], door[1] - 1, door[2], 1 << 4)
+                .unwrap();
+        }
+        assert!(restored
+            .village_doors_including_player_edits(cx, cz)
+            .unwrap()
+            .contains(&core));
+        assert!(restored
+            .village_doors_with_bounded_annex(annex[0], annex[2])
+            .unwrap()
+            .contains(&annex));
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
