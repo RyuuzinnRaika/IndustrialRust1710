@@ -57,7 +57,12 @@ impl GroundItem {
         metadata.extend_from_slice(&self.stack.id.to_be_bytes());
         metadata.push(self.stack.count);
         metadata.extend_from_slice(&self.stack.damage.to_be_bytes());
-        if let Some(nbt) = crate::books::wire_nbt(self.stack) {
+        if let Some(nbt) = self
+            .stack
+            .nbt
+            .and_then(crate::item_nbt::wire)
+            .or_else(|| crate::books::wire_nbt(self.stack))
+        {
             metadata.extend_from_slice(&(nbt.len() as i16).to_be_bytes());
             metadata.extend_from_slice(&nbt);
         } else {
@@ -313,6 +318,7 @@ mod tests {
             id: 4,
             count: 7,
             damage: 0,
+            nbt: None,
         };
         let mut source = Inventory::default();
         assert!(source.creative_set(36, Some(stack)).unwrap());
@@ -369,11 +375,13 @@ mod tests {
                 id: 260,
                 count: 5,
                 damage: 0,
+                nbt: None,
             },
             Stack {
                 id: 1,
                 count: 32,
                 damage: 0,
+                nbt: None,
             },
         ];
         assert!(drops.has_capacity_for(2));
@@ -399,6 +407,7 @@ mod tests {
                 id: 3,
                 count: 1,
                 damage: 0,
+                nbt: None,
             },
         };
         let [object, metadata] = item.spawn();
@@ -428,6 +437,7 @@ mod tests {
                     id: 3,
                     count: 1,
                     damage: 0,
+                    nbt: None,
                 },
                 (0, 63, 0),
             )
@@ -454,6 +464,7 @@ mod tests {
                     id: 3,
                     count: 32,
                     damage: 0,
+                    nbt: None,
                 },
                 (1, 65, -1),
             )
@@ -485,6 +496,7 @@ mod tests {
                 id: 3,
                 count: 1,
                 damage: 0,
+                nbt: None,
             },
         };
         assert!(!item.valid());

@@ -136,6 +136,7 @@ pub(crate) fn rewrite_chests_with_sidecar_under_lock(
                 id: item.id,
                 count: item.count as u8,
                 damage: item.damage,
+                nbt: None,
             };
             if !stack.is_valid() {
                 return Err(invalid("invalid native chest stack"));
@@ -472,6 +473,7 @@ mod tests {
                 id: 264,
                 count: 3,
                 damage: 0,
+                nbt: None,
             });
             items
         };
@@ -556,6 +558,7 @@ mod tests {
             id: 264,
             count: 3,
             damage: 0,
+            nbt: None,
         });
         let native = Chests::default()
             .staged_update((0, 64, 0), updated)

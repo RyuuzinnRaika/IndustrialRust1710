@@ -59,6 +59,7 @@ impl World {
             id: 259,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         let Some((staged, changed, _, _)) = self.stage_special_item(x, y, z, held)? else {
             return Ok(false);
@@ -173,6 +174,7 @@ impl World {
                     id: 325,
                     count: 1,
                     damage: 0,
+                    nbt: None,
                 },
             ),
             (373, 0) if level < 3 => (
@@ -181,6 +183,7 @@ impl World {
                     id: 374,
                     count: 1,
                     damage: 0,
+                    nbt: None,
                 },
             ),
             (374, _) if level > 0 => (
@@ -189,6 +192,7 @@ impl World {
                     id: 373,
                     count: 1,
                     damage: 0,
+                    nbt: None,
                 },
             ),
             (325, _) if level == 3 => (
@@ -197,6 +201,7 @@ impl World {
                     id: 326,
                     count: 1,
                     damage: 0,
+                    nbt: None,
                 },
             ),
             _ => return None,
@@ -678,6 +683,7 @@ mod tests {
             id: 326,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         let (state, returned) = w.cauldron_exchange(1, 64, 1, bucket).unwrap();
         assert_eq!(state & 15, 3);
@@ -951,6 +957,7 @@ mod tests {
             id: 351,
             count: 1,
             damage: 15,
+            nbt: None,
         };
         w.import_block(0, 64, 0, (6 << 4) | 2).unwrap();
         let (_, changed, _, _) = w.stage_special_item(0, 64, 0, meal).unwrap().unwrap();

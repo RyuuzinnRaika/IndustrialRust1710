@@ -35,7 +35,7 @@ pub enum ChestDirection {
     OutOfChest,
 }
 
-const MAX_SAVE_BYTES: u64 = 16 * 1024;
+const MAX_SAVE_BYTES: u64 = 1024 * 1024;
 const VERSION: u8 = 1;
 
 fn invalid(reason: &'static str) -> io::Error {
@@ -48,6 +48,13 @@ pub struct Stack {
     pub id: i16,
     pub count: u8,
     pub damage: i16,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::item_nbt::serialize",
+        deserialize_with = "crate::item_nbt::deserialize"
+    )]
+    pub nbt: Option<u64>,
 }
 impl Stack {
     /// Legacy Java 1.7.10 stack limits. Tool, armor, potion and container
@@ -57,6 +64,7 @@ impl Stack {
     }
     pub fn is_valid(self) -> bool {
         crate::items_1710::valid_stack(self.id, self.count, self.damage)
+            && self.nbt.is_none_or(crate::item_nbt::is_live)
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -215,7 +223,7 @@ impl Inventory {
             || self.enchant_input.is_some_and(|item| {
                 item.count != 1
                     || !item.is_valid()
-                    || !crate::items_1710::enchantable_in_table(item.id)
+                    || (!crate::items_1710::enchantable_in_table(item.id) && item.id != 403)
             })
             || self.slots.iter().flatten().any(|stack| !stack.is_valid())
             || self.cursor.is_some_and(|stack| !stack.is_valid())
@@ -322,6 +330,7 @@ impl Inventory {
             if let Some(current) = next.slots[slot].as_mut() {
                 if current.id == item.id
                     && current.damage == item.damage
+                    && current.nbt == item.nbt
                     && current.count < current.max_count()
                 {
                     let add = (current.max_count() - current.count).min(remaining);
@@ -463,6 +472,7 @@ impl Inventory {
             id: 335,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         if count == 1 {
             let slot = next.held_slot() as usize;
@@ -512,6 +522,7 @@ impl Inventory {
                 id: 280,
                 count: 1,
                 damage: 0,
+                nbt: None,
             }); // consumed carrot, remaining stick
         } else {
             *slot = Some(tool);
@@ -538,6 +549,7 @@ impl Inventory {
             id,
             count: 1,
             damage,
+            nbt: None,
         });
         true
     }
@@ -546,6 +558,7 @@ impl Inventory {
             (Some(authoritative), Some(request)) => {
                 authoritative.id == request.id
                     && authoritative.damage == request.damage
+                    && (authoritative.nbt == request.nbt || matches!(authoritative.id, 386 | 387))
                     && request.count >= 1
             }
             _ => false,
@@ -603,6 +616,7 @@ impl Inventory {
                         id: 325,
                         count: 1,
                         damage: 0,
+                        nbt: None,
                     })
                 } else {
                     (stack.count != 0).then_some(stack)
@@ -619,6 +633,7 @@ impl Inventory {
             if let Some(mut stack) = self.lookup(window, slot) {
                 if stack.id == moving.id
                     && stack.damage == moving.damage
+                    && stack.nbt == moving.nbt
                     && stack.count < moving.max_count()
                 {
                     let count = (moving.max_count() - stack.count).min(moving.count);
@@ -671,6 +686,7 @@ impl Inventory {
             Some(mut old)
                 if old.id == output.id
                     && old.damage == output.damage
+                    && old.nbt == output.nbt
                     && u16::from(old.count) + u16::from(output.count)
                         <= u16::from(output.max_count()) =>
             {
@@ -834,7 +850,9 @@ impl Inventory {
                     (item, None, 0) => (None, item),
                     (None, item, 0) => (item, None),
                     (Some(mut target), Some(mut hand), 0)
-                        if target.id == hand.id && target.damage == hand.damage =>
+                        if target.id == hand.id
+                            && target.damage == hand.damage
+                            && target.nbt == hand.nbt =>
                     {
                         let n = (target.max_count() - target.count).min(hand.count);
                         target.count += n;
@@ -859,6 +877,7 @@ impl Inventory {
                     (Some(mut target), Some(mut hand), 1)
                         if target.id == hand.id
                             && target.damage == hand.damage
+                            && target.nbt == hand.nbt
                             && target.count < target.max_count() =>
                     {
                         target.count += 1;
@@ -907,6 +926,7 @@ impl Inventory {
                     if let Some(mut existing) = self.lookup(window, target) {
                         if existing.id == moving.id
                             && existing.damage == moving.damage
+                            && existing.nbt == moving.nbt
                             && existing.count < existing.max_count()
                         {
                             let amount = (existing.max_count() - existing.count).min(moving.count);
@@ -1157,7 +1177,9 @@ impl Inventory {
                     (item, None, 0) => (None, item),
                     (None, item, 0) => (item, None),
                     (Some(mut target), Some(mut hand), 0)
-                        if target.id == hand.id && target.damage == hand.damage =>
+                        if target.id == hand.id
+                            && target.damage == hand.damage
+                            && target.nbt == hand.nbt =>
                     {
                         let count = (target.max_count() - target.count).min(hand.count);
                         target.count += count;
@@ -1184,6 +1206,7 @@ impl Inventory {
                     (Some(mut target), Some(mut hand), 1)
                         if target.id == hand.id
                             && target.damage == hand.damage
+                            && target.nbt == hand.nbt
                             && target.count < target.max_count() =>
                     {
                         target.count += 1;
@@ -1215,6 +1238,7 @@ impl Inventory {
                     if let Some(mut existing) = self.chest_stack(chest, target) {
                         if existing.id == moving.id
                             && existing.damage == moving.damage
+                            && existing.nbt == moving.nbt
                             && existing.count < existing.max_count()
                         {
                             let count = (existing.max_count() - existing.count).min(moving.count);
@@ -1325,7 +1349,9 @@ impl Inventory {
                 return Some(ChestDirection::InventoryOnly);
             };
             let existing = furnace.slots[target];
-            if existing.is_some_and(|v| v.id != stack.id || v.damage != stack.damage) {
+            if existing
+                .is_some_and(|v| v.id != stack.id || v.damage != stack.damage || v.nbt != stack.nbt)
+            {
                 return Some(ChestDirection::InventoryOnly);
             }
             // Non-stackable fuels (notably lava buckets) must never merge
@@ -1380,6 +1406,7 @@ impl Inventory {
                     Some(mut current)
                         if current.id == output.id
                             && current.damage == output.damage
+                            && current.nbt == output.nbt
                             && u16::from(current.count) + u16::from(output.count)
                                 <= u16::from(output.max_count()) =>
                     {
@@ -1466,9 +1493,7 @@ impl Inventory {
         packet
     }
 
-    /// Protocol 5 enchanting table has exactly one input plus 36 inventory
-    /// slots. It must never offer a fake enchanted output when the live stack
-    /// model cannot represent enchantment NBT.
+    /// Protocol 5 enchanting table has one input plus 36 inventory slots.
     pub fn enchanting_window_items(&self, window: u8) -> Vec<u8> {
         let mut packet = vec![window];
         packet.extend_from_slice(&37i16.to_be_bytes());
@@ -1483,12 +1508,44 @@ impl Inventory {
         packet
     }
 
-    pub fn enchanting_has_item(&self) -> bool {
-        self.enchant_input.is_some()
-    }
-
     pub fn enchanting_input(&self) -> Option<Stack> {
         self.enchant_input
+    }
+    /// Already enchanted items remain withdrawable but cannot receive a new offer.
+    pub fn enchanting_available(&self) -> bool {
+        self.enchant_input
+            .is_some_and(crate::enchanting::can_enchant)
+    }
+    /// The C11 packet contains only the row number. All item, cost and XP
+    /// state comes from the server. The caller journals both changed states.
+    pub fn enchant_choice(
+        &mut self,
+        choice: i8,
+        offers: [u8; 3],
+        seed: u64,
+        experience: &mut crate::experience::Experience,
+        survival: bool,
+    ) -> bool {
+        let Some(cost) = usize::try_from(choice)
+            .ok()
+            .and_then(|index| offers.get(index).copied())
+            .filter(|cost| *cost > 0)
+        else {
+            return false;
+        };
+        let Some(item) = self.enchant_input else {
+            return false;
+        };
+        let mut next_xp = *experience;
+        if survival && !next_xp.spend_levels(u16::from(cost)) {
+            return false;
+        }
+        let Ok(Some(enchanted)) = crate::enchanting::apply(item, cost, seed) else {
+            return false;
+        };
+        self.enchant_input = Some(enchanted);
+        *experience = next_xp;
+        true
     }
 
     /// Return the table's item on close, atomically. If all slots are full,
@@ -1506,9 +1563,7 @@ impl Inventory {
         true
     }
 
-    /// Enchanting-table inventory transport only. C11 enchant selections are
-    /// deliberately rejected until arbitrary ItemStack NBT is supported.
-    /// The client-provided clicked stack is never trusted.
+    /// Enchanting-table slot transport; the clicked stack is never trusted.
     pub fn enchanting_click_window(&mut self, slot: i16, button: i8, mode: i8) -> bool {
         match slot {
             0 if mode == 0 && matches!(button, 0 | 1) => match (self.enchant_input, self.cursor) {
@@ -1761,7 +1816,11 @@ impl Inventory {
                 out.extend_from_slice(&value.id.to_be_bytes());
                 out.push(value.count);
                 out.extend_from_slice(&value.damage.to_be_bytes());
-                if let Some(nbt) = crate::books::wire_nbt(value) {
+                if let Some(nbt) = value
+                    .nbt
+                    .and_then(crate::item_nbt::wire)
+                    .or_else(|| crate::books::wire_nbt(value))
+                {
                     out.extend_from_slice(&(nbt.len() as i16).to_be_bytes());
                     out.extend_from_slice(&nbt);
                 } else {
@@ -1814,6 +1873,7 @@ mod tests {
             id: 332,
             count: 3,
             damage: 0,
+            nbt: None,
         };
         let mut inv = Inventory {
             cursor: Some(original),
@@ -1853,6 +1913,7 @@ mod tests {
             id: 323,
             count: 16,
             damage: 0,
+            nbt: None,
         };
         let mut inv = Inventory::default();
         for slot in 9..45 {
@@ -1866,19 +1927,22 @@ mod tests {
                 id: 5,
                 count: 2,
                 damage: 0,
+                nbt: None,
             });
         }
         inv.workbench[7] = Some(Stack {
             id: 280,
             count: 2,
             damage: 0,
+            nbt: None,
         });
         assert_eq!(
             inv.crafting_result(1),
             Some(Stack {
                 id: 323,
                 count: 3,
-                damage: 0
+                damage: 0,
+                nbt: None,
             })
         );
         let blocked = inv.clone();
@@ -1903,11 +1967,13 @@ mod tests {
             id: 264,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         let water = Stack {
             id: 373,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         inv.cursor = Some(diamond);
         assert_eq!(inv.chest_click_window(1, &mut slots, 0, 0, 0), None);
@@ -1927,6 +1993,7 @@ mod tests {
                 id: 4,
                 count: 32,
                 damage: 0,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -1938,6 +2005,7 @@ mod tests {
             id: 4,
             count: 3,
             damage: 0,
+            nbt: None,
         });
         assert!(inv.chest_click_window(1, &mut slots, -999, 0, 5).is_some());
         assert!(inv.chest_click_window(1, &mut slots, 1, 1, 5).is_some());
@@ -1953,6 +2021,7 @@ mod tests {
             id: 327,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         let mut furnace = crate::furnaces::Furnace::default();
         furnace.slots[1] = Some(bucket);
@@ -1968,6 +2037,7 @@ mod tests {
             id: 373,
             count: 1,
             damage: 8194,
+            nbt: None,
         };
         assert_eq!(potion.max_count(), 1);
         assert!(!(Stack { count: 2, ..potion }).is_valid());
@@ -1975,7 +2045,8 @@ mod tests {
             Stack {
                 id: 332,
                 count: 16,
-                damage: 0
+                damage: 0,
+                nbt: None,
             }
             .max_count(),
             16
@@ -1983,7 +2054,8 @@ mod tests {
         assert!(!(Stack {
             id: 332,
             count: 17,
-            damage: 0
+            damage: 0,
+            nbt: None,
         })
         .is_valid());
 
@@ -2015,6 +2087,7 @@ mod tests {
                 id: 17,
                 count: 3,
                 damage: 0,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -2032,6 +2105,7 @@ mod tests {
             id: 306,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         assert!(inv.receive_stack(helm).is_some());
         assert!(inv.click_window(0, 36, 0, 0));
@@ -2042,6 +2116,7 @@ mod tests {
             id: 1,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         assert!(inv.receive_stack(stone).is_some());
         assert!(inv.click_window(0, 36, 0, 0));
@@ -2058,11 +2133,13 @@ mod tests {
             id: 282,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         let bowl = Stack {
             id: 281,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         inventory.creative_set(36, Some(stew)).unwrap();
         assert!(inventory.consume_held());
@@ -2080,16 +2157,19 @@ mod tests {
             id: 298,
             count: 1,
             damage: 54,
+            nbt: None,
         };
         let chest = Stack {
             id: 307,
             count: 1,
             damage: 100,
+            nbt: None,
         };
         let pumpkin = Stack {
             id: 86,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         inv.creative_set(5, Some(helmet)).unwrap();
         inv.creative_set(6, Some(chest)).unwrap();
@@ -2112,31 +2192,37 @@ mod tests {
             id: 306,
             count: 1,
             damage: 12,
+            nbt: None,
         };
         let chestplate = Stack {
             id: 307,
             count: 1,
             damage: 7,
+            nbt: None,
         };
         let boots = Stack {
             id: 309,
             count: 1,
             damage: 3,
+            nbt: None,
         };
         let logs = Stack {
             id: 17,
             count: 4,
             damage: 2,
+            nbt: None,
         };
         let diamonds = Stack {
             id: 264,
             count: 5,
             damage: 0,
+            nbt: None,
         };
         let sticks = Stack {
             id: 280,
             count: 2,
             damage: 0,
+            nbt: None,
         };
         inventory.creative_set(5, Some(helmet)).unwrap();
         inventory.creative_set(6, Some(chestplate)).unwrap();
@@ -2167,11 +2253,13 @@ mod tests {
             id: 1,
             count: 9,
             damage: 0,
+            nbt: None,
         };
         let apple = super::Stack {
             id: 260,
             count: 2,
             damage: 0,
+            nbt: None,
         };
         inventory.creative_set(36, Some(stone)).unwrap();
         inventory.creative_set(9, Some(apple)).unwrap();
@@ -2194,6 +2282,7 @@ mod tests {
             id: 3,
             count: 12,
             damage: 0,
+            nbt: None,
         };
         inv.creative_set(36, Some(stack)).unwrap();
         assert_eq!(inv.drop_held(false), Some(Stack { count: 1, ..stack }));
@@ -2211,6 +2300,7 @@ mod tests {
                 id: 1,
                 count: 64,
                 damage: 0,
+                nbt: None,
             });
         }
         let before = inv.clone();
@@ -2228,6 +2318,7 @@ mod tests {
                 id: 15,
                 count: 3,
                 damage: 0,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -2244,6 +2335,7 @@ mod tests {
                 id: 263,
                 count: 2,
                 damage: 0,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -2256,6 +2348,7 @@ mod tests {
                 id: 57,
                 count: 10,
                 damage: 0,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -2268,6 +2361,7 @@ mod tests {
             id: 265,
             count: 1,
             damage: 0,
+            nbt: None,
         });
         assert_eq!(
             inv.furnace_click(&mut furnace, 2, 0, 0),
@@ -2287,6 +2381,7 @@ mod tests {
                 id: 270,
                 count: 1,
                 damage: 57,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -2301,6 +2396,7 @@ mod tests {
                 id: 4,
                 count: 12,
                 damage: 0,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -2312,6 +2408,7 @@ mod tests {
                 id: 274,
                 count: 1,
                 damage: 130,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -2326,11 +2423,13 @@ mod tests {
             id: 4,
             count: 10,
             damage: 0,
+            nbt: None,
         });
         player.cursor = Some(Stack {
             id: 4,
             count: 15,
             damage: 0,
+            nbt: None,
         });
         assert!(player
             .chest_click_window(3, &mut chest, -999, 0, 5)
@@ -2379,6 +2478,7 @@ mod tests {
                 id: 5,
                 count: 12,
                 damage: 1,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -2434,6 +2534,7 @@ mod tests {
             id: 1,
             count: 2,
             damage: 0,
+            nbt: None,
         });
         inv.creative_set(
             36,
@@ -2441,6 +2542,7 @@ mod tests {
                 id: 3,
                 count: 2,
                 damage: 0,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -2456,11 +2558,13 @@ mod tests {
             id: 3,
             count: 17,
             damage: 0,
+            nbt: None,
         };
         let b = Stack {
             id: 3,
             count: 60,
             damage: 0,
+            nbt: None,
         };
         inventory.creative_set(36, Some(a)).unwrap();
         inventory.creative_set(10, Some(b)).unwrap();
@@ -2505,6 +2609,7 @@ mod tests {
                 id: 17,
                 count: 1,
                 damage: 0,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -2515,7 +2620,8 @@ mod tests {
             Some(Stack {
                 id: 5,
                 count: 4,
-                damage: 0
+                damage: 0,
+                nbt: None,
             })
         );
         assert!(inv.click(0, 0, 0)); // obtain four planks
@@ -2529,7 +2635,8 @@ mod tests {
             Some(Stack {
                 id: 58,
                 count: 1,
-                damage: 0
+                damage: 0,
+                nbt: None,
             })
         );
         assert!(inv.click(0, 0, 0)); // take one crafting table
@@ -2547,6 +2654,7 @@ mod tests {
                 id: 5,
                 count: 1,
                 damage: 0,
+                nbt: None,
             });
         }
         for slot in [5, 8] {
@@ -2554,6 +2662,7 @@ mod tests {
                 id: 280,
                 count: 1,
                 damage: 0,
+                nbt: None,
             });
         }
         assert_eq!(inv.crafting_result(1).unwrap().id, 270);
@@ -2573,6 +2682,7 @@ mod tests {
                     id: 4,
                     count: 3,
                     damage: 0,
+                    nbt: None,
                 }),
             )
             .unwrap();
@@ -2636,19 +2746,22 @@ mod tests {
                 Some(Stack {
                     id: 4,
                     count: 64,
-                    damage: 0
+                    damage: 0,
+                    nbt: None,
                 })
             )
             .unwrap());
         assert!(inv.can_place(Some(Stack {
             id: 4,
             count: 1,
-            damage: 0
+            damage: 0,
+            nbt: None,
         })));
         assert!(!inv.can_place(Some(Stack {
             id: 5,
             count: 64,
-            damage: 0
+            damage: 0,
+            nbt: None,
         })));
         assert_eq!(
             inv.set_slot(36).unwrap(),
@@ -2659,7 +2772,8 @@ mod tests {
         assert!(!inv.can_place(Some(Stack {
             id: 4,
             count: 64,
-            damage: 0
+            damage: 0,
+            nbt: None,
         })));
         assert!(inv
             .creative_set(
@@ -2667,14 +2781,16 @@ mod tests {
                 Some(Stack {
                     id: 5,
                     count: 1,
-                    damage: 2
+                    damage: 2,
+                    nbt: None,
                 })
             )
             .unwrap());
         assert!(inv.can_place(Some(Stack {
             id: 5,
             count: 1,
-            damage: 2
+            damage: 2,
+            nbt: None,
         })));
     }
     #[test]
@@ -2684,6 +2800,7 @@ mod tests {
             id: 3,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         assert_eq!(inv.receive_stack(item), Some(vec![36]));
         assert_eq!(inv.receive_stack(item), Some(vec![36]));
@@ -2697,7 +2814,8 @@ mod tests {
             .receive_stack(Stack {
                 id: 7,
                 count: 65,
-                damage: 0
+                damage: 0,
+                nbt: None,
             })
             .is_none());
     }
@@ -2711,6 +2829,7 @@ mod tests {
                     id: 325,
                     count: 1,
                     damage: 0,
+                    nbt: None,
                 }),
             )
             .unwrap();
@@ -2726,6 +2845,7 @@ mod tests {
                         id: 1,
                         count: 64,
                         damage: 0,
+                        nbt: None,
                     }),
                 )
                 .unwrap();
@@ -2737,6 +2857,7 @@ mod tests {
                     id: 325,
                     count: 2,
                     damage: 0,
+                    nbt: None,
                 }),
             )
             .unwrap();
@@ -2762,6 +2883,7 @@ mod tests {
                 id: 4,
                 count: 64,
                 damage: 0,
+                nbt: None,
             }),
         )
         .unwrap();
@@ -2775,12 +2897,105 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
+    fn d31_tagged_items_never_merge_with_distinct_nbt() {
+        use fastnbt::Value;
+        use std::collections::HashMap;
+        let a = crate::item_nbt::from_value(&Value::Compound(HashMap::from([(
+            "Unique".into(),
+            Value::String("alpha".into()),
+        )])))
+        .unwrap();
+        let b = crate::item_nbt::from_value(&Value::Compound(HashMap::from([(
+            "Unique".into(),
+            Value::String("beta".into()),
+        )])))
+        .unwrap();
+        let alpha = Stack {
+            id: 1,
+            count: 10,
+            damage: 0,
+            nbt: Some(a),
+        };
+        let beta = Stack {
+            id: 1,
+            count: 5,
+            damage: 0,
+            nbt: Some(b),
+        };
+        let mut inv = Inventory::default();
+        inv.slots[36] = Some(alpha);
+        assert_eq!(inv.receive_stack(beta), Some(vec![37]));
+        assert_eq!(inv.slots[36], Some(alpha));
+        assert_eq!(inv.slots[37], Some(beta));
+        let saved = inv.encoded().unwrap();
+        let loaded: Inventory = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(loaded.slots[36], Some(alpha));
+        assert_eq!(loaded.slots[37], Some(beta));
+        assert_eq!(
+            crate::item_nbt::wire(a),
+            loaded.slots[36]
+                .unwrap()
+                .nbt
+                .and_then(crate::item_nbt::wire)
+        );
+        assert_eq!(
+            crate::item_nbt::wire(b),
+            loaded.slots[37]
+                .unwrap()
+                .nbt
+                .and_then(crate::item_nbt::wire)
+        );
+    }
+
+    #[test]
+    fn enchant_choice_debits_exact_xp_and_survives_save_reload() {
+        let mut inv = Inventory {
+            enchant_input: Some(Stack {
+                id: 257,
+                count: 1,
+                damage: 12,
+                nbt: None,
+            }),
+            ..Inventory::default()
+        };
+        let mut xp = crate::experience::Experience { total: 2000 };
+        let old = inv.clone();
+        let old_xp = xp;
+        assert!(inv.enchant_choice(2, [1, 2, 30], 42, &mut xp, true));
+        assert!(xp.total < old_xp.total);
+        if inv != old {
+            let tagged = inv.enchant_input.unwrap();
+            assert!(tagged.nbt.is_some());
+            let bytes = inv.encoded().unwrap();
+            let again: Inventory = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(again.enchant_input, inv.enchant_input);
+            assert_eq!(
+                crate::item_nbt::wire(tagged.nbt.unwrap()),
+                crate::item_nbt::wire(again.enchant_input.unwrap().nbt.unwrap())
+            );
+            let snapshot = inv.clone();
+            assert!(!inv.enchant_choice(2, [1, 2, 30], 42, &mut xp, true));
+            assert_eq!(inv, snapshot);
+        }
+        let mut empty = Inventory {
+            enchant_input: old.enchant_input,
+            ..Inventory::default()
+        };
+        let mut no_xp = crate::experience::Experience::default();
+        assert!(!empty.enchant_choice(2, [1, 2, 30], 42, &mut no_xp, true));
+        assert_eq!(empty, old);
+        assert_eq!(no_xp.total, 0);
+        assert!(!empty.enchant_choice(3, [1, 2, 30], 42, &mut no_xp, false));
+    }
+
+    #[test]
     fn enchanting_table_keeps_books_and_enforces_single_input() {
         let mut inv = Inventory {
             cursor: Some(Stack {
                 id: 340,
                 count: 4,
                 damage: 0,
+                nbt: None,
             }),
             ..Inventory::default()
         };
@@ -2804,6 +3019,7 @@ mod tests {
                 id: 264,
                 count: 1,
                 damage: 0,
+                nbt: None,
             }),
             ..Inventory::default()
         };
@@ -2822,6 +3038,7 @@ mod tests {
                 id: 276,
                 count: 1,
                 damage: 12,
+                nbt: None,
             }),
             ..Inventory::default()
         };
@@ -2830,6 +3047,7 @@ mod tests {
                 id: 264,
                 count: 64,
                 damage: 0,
+                nbt: None,
             });
         }
         let previous = inv.clone();
@@ -2850,12 +3068,14 @@ mod tests {
             id: 257,
             count: 1,
             damage: 100,
+            nbt: None,
         });
         assert!(inv.anvil_click_window(0, 0, 0, &mut xp, true));
         inv.cursor = Some(Stack {
             id: 265,
             count: 3,
             damage: 0,
+            nbt: None,
         });
         assert!(inv.anvil_click_window(1, 0, 0, &mut xp, true));
         let old = inv.anvil_preview().unwrap();
@@ -2880,11 +3100,13 @@ mod tests {
             id: 257,
             count: 1,
             damage: 100,
+            nbt: None,
         };
         let iron = Stack {
             id: 265,
             count: 4,
             damage: 0,
+            nbt: None,
         };
         inv.slots[9] = Some(pick);
         inv.slots[10] = Some(iron);
@@ -2912,11 +3134,13 @@ mod tests {
             id: 257,
             count: 1,
             damage: 100,
+            nbt: None,
         };
         let iron = Stack {
             id: 265,
             count: 3,
             damage: 0,
+            nbt: None,
         };
         let mut inv = Inventory {
             anvil_inputs: [Some(pick), Some(iron)],
@@ -2927,6 +3151,7 @@ mod tests {
                 id: 1,
                 count: 64,
                 damage: 0,
+                nbt: None,
             });
         }
         let mut xp = crate::experience::Experience { total: 100 };
@@ -2948,6 +3173,7 @@ mod tests {
             id: 265,
             count: 3,
             damage: 0,
+            nbt: None,
         };
         inv.anvil_inputs[1] = Some(iron);
         for slot in 9..45 {
@@ -2955,6 +3181,7 @@ mod tests {
                 id: 1,
                 count: 64,
                 damage: 0,
+                nbt: None,
             });
         }
         let old = inv.clone();
@@ -2974,11 +3201,13 @@ mod tests {
                     id: 257,
                     count: 1,
                     damage: 100,
+                    nbt: None,
                 }),
                 Some(Stack {
                     id: 265,
                     count: 3,
                     damage: 0,
+                    nbt: None,
                 }),
             ],
             ..Inventory::default()
@@ -2995,11 +3224,13 @@ mod tests {
             id: 257,
             count: 1,
             damage: 100,
+            nbt: None,
         };
         let ingots = Stack {
             id: 265,
             count: 3,
             damage: 0,
+            nbt: None,
         };
         let mut inv = Inventory {
             anvil_inputs: [Some(pick), Some(ingots)],
@@ -3023,11 +3254,13 @@ mod tests {
             id: 257,
             count: 1,
             damage: 100,
+            nbt: None,
         };
         let ingots = Stack {
             id: 265,
             count: 3,
             damage: 0,
+            nbt: None,
         };
         let mut inv = Inventory {
             anvil_inputs: [Some(pick), Some(ingots)],
@@ -3038,6 +3271,7 @@ mod tests {
                 id: 1,
                 count: 64,
                 damage: 0,
+                nbt: None,
             });
         }
         // Exactly one available slot is insufficient for two distinct inputs.
@@ -3059,11 +3293,13 @@ mod tests {
             id: 257,
             count: 1,
             damage: 100,
+            nbt: None,
         };
         let ingots = Stack {
             id: 265,
             count: 3,
             damage: 0,
+            nbt: None,
         };
         let mut inv = Inventory {
             anvil_inputs: [Some(pick), Some(ingots)],

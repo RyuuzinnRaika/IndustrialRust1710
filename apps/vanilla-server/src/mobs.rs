@@ -174,6 +174,7 @@ impl Kind {
             id,
             count: 1,
             damage: 0,
+            nbt: None,
         })
     }
     fn breeding_food(self, held: i16) -> bool {
@@ -361,6 +362,7 @@ impl Mob {
                 id: 329,
                 count: 1,
                 damage: 0,
+                nbt: None,
             })];
         }
         let roll = hash(self.id as u64 ^ self.hit_tick.rotate_left(17) ^ 0xb52c8c91);
@@ -377,6 +379,7 @@ impl Mob {
                 id,
                 count,
                 damage: 0,
+                nbt: None,
             })]
         }
     }
@@ -1298,6 +1301,7 @@ impl Mobs {
             id: product.0,
             count: product.1,
             damage: 0,
+            nbt: None,
         })
     }
     /// Split a defeated large slime/magma cube; every child receives an
@@ -1576,6 +1580,7 @@ impl Mobs {
                         id: 324, // wooden door item
                         count: 1,
                         damage: 0,
+                        nbt: None,
                     },
                     (x, y, z),
                 ));
@@ -1680,6 +1685,7 @@ impl Mobs {
                 id: 35,
                 count: 2,
                 damage: 0,
+                nbt: None,
             },
             Event { id: 0x1c, body },
         ))
@@ -2513,6 +2519,7 @@ impl Mobs {
                             id: 344,
                             count: 1,
                             damage: 0,
+                            nbt: None,
                         },
                         (
                             mob.position.x.floor() as i32,
@@ -3988,6 +3995,7 @@ mod tests {
             id: 325,
             count: 1,
             damage: 0,
+            nbt: None,
         });
         let cow = mobs.next_id;
         mobs.insert(Kind::Cow, at, false);
@@ -4283,6 +4291,7 @@ mod tests {
                 id,
                 count: 1,
                 damage: 0,
+                nbt: None,
             })
         };
 
@@ -5096,6 +5105,7 @@ mod tests {
             id: 388,
             count: 1,
             damage: 0,
+            nbt: None,
         });
         assert_eq!(mobs.village_offer(0, at, emerald).unwrap().id, 297);
         assert!(mobs
@@ -5105,7 +5115,8 @@ mod tests {
                 Some(Stack {
                     id: 1,
                     count: 1,
-                    damage: 0
+                    damage: 0,
+                    nbt: None,
                 })
             )
             .is_none());
@@ -5770,7 +5781,8 @@ mod tests {
                     Some(Stack {
                         id: 276,
                         count: 1,
-                        damage: 0
+                        damage: 0,
+                        nbt: None,
                     }),
                     tick
                 )
@@ -5785,7 +5797,8 @@ mod tests {
                 Some(Stack {
                     id: 276,
                     count: 1,
-                    damage: 0
+                    damage: 0,
+                    nbt: None,
                 }),
                 122
             )
@@ -5805,6 +5818,7 @@ mod tests {
             id: 296,
             count: 1,
             damage: 0,
+            nbt: None,
         });
         mobs.insert(Kind::Cow, at, false);
         mobs.insert(
@@ -5986,6 +6000,7 @@ mod tests {
             id: 359,
             count: 1,
             damage: 0,
+            nbt: None,
         });
         let (wool, metadata) = mobs.shear(0, at, held).unwrap();
         assert_eq!(wool.id, 35);

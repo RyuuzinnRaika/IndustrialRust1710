@@ -197,6 +197,7 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
         } else {
             0
         },
+        nbt: None,
     })
 }
 
@@ -307,6 +308,7 @@ mod tests {
             id,
             damage,
             count: 1,
+            nbt: None,
         })
     }
     #[test]

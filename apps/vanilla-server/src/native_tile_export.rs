@@ -64,12 +64,21 @@ fn items(slots: &[Option<Stack>]) -> io::Result<Vec<SlotItem>> {
             if !stack.is_valid() {
                 return Err(invalid("invalid item in native tile"));
             }
+            // Never drop named/enchantment NBT when exporting native sidecars
+            // to Anvil. Legacy books without an attached tag use world-owned
+            // reference IDs rather than vanilla Damage and must fail closed.
+            if matches!(stack.id, 386 | 387) && stack.damage > 0 && stack.nbt.is_none() {
+                return Err(invalid(
+                    "legacy book reference cannot be exported as vanilla NBT",
+                ));
+            }
+            let tag = stack.nbt.map(crate::item_nbt::value).transpose()?;
             Ok(SlotItem {
                 slot: i8::try_from(slot).map_err(|_| invalid("tile slot exceeds signed byte"))?,
                 id: stack.id,
                 count: i8::try_from(stack.count).map_err(|_| invalid("tile stack too large"))?,
                 damage: stack.damage,
-                tag: None,
+                tag,
                 extra: BTreeMap::new(),
             })
         })

@@ -47,6 +47,7 @@ pub fn recipe(input: Stack) -> Option<Stack> {
         id,
         count: 1,
         damage,
+        nbt: None,
     })
 }
 /// Return fuel burn duration in 20Hz ticks. Reject metadata variants that
@@ -96,6 +97,7 @@ impl Furnace {
             Some(existing)
                 if existing.id == result.id
                     && existing.damage == result.damage
+                    && existing.nbt == result.nbt
                     && existing.count <= 63 =>
             {
                 Some(result)
@@ -121,6 +123,7 @@ impl Furnace {
                             id: 325,
                             count: 1,
                             damage: 0,
+                            nbt: None,
                         })
                     } else if fuel.count > 1 {
                         Some(Stack {
@@ -366,6 +369,7 @@ mod tests {
             id,
             count,
             damage: 0,
+            nbt: None,
         })
     }
     #[test]

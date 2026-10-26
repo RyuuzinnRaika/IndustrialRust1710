@@ -347,6 +347,7 @@ mod tests {
                     id: 386,
                     count: 1,
                     damage: 0,
+                    nbt: None,
                 }),
             )
             .unwrap();

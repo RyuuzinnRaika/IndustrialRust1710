@@ -245,7 +245,10 @@ pub fn insert_one<const N: usize>(slots: &mut [Option<Stack>; N], item: Stack) -
     }
     for entry in slots.iter_mut() {
         if let Some(stack) = entry.as_mut() {
-            if stack.id == item.id && stack.damage == item.damage && stack.count < stack.max_count()
+            if stack.id == item.id
+                && stack.damage == item.damage
+                && stack.nbt == item.nbt
+                && stack.count < stack.max_count()
             {
                 stack.count += 1;
                 return true;
@@ -273,18 +276,21 @@ mod tests {
             id: 1,
             count: 1,
             damage: 0,
+            nbt: None,
         });
         assert_eq!(comparator_strength(&slots), 1);
         slots[0] = Some(Stack {
             id: 1,
             count: 64,
             damage: 0,
+            nbt: None,
         });
         assert_eq!(comparator_strength(&slots), 2);
         slots.fill(Some(Stack {
             id: 1,
             count: 64,
             damage: 0,
+            nbt: None,
         }));
         assert_eq!(comparator_strength(&slots), 15);
         slots[0] = None;
@@ -293,12 +299,14 @@ mod tests {
             id: 267,
             count: 1,
             damage: 0,
+            nbt: None,
         }));
         assert_eq!(comparator_strength(&slots), 15);
         slots.fill(Some(Stack {
             id: 323,
             count: 16,
             damage: 0,
+            nbt: None,
         }));
         assert_eq!(comparator_strength(&slots), 15);
     }
@@ -320,6 +328,7 @@ mod tests {
             id: 1,
             count: 64,
             damage: 0,
+            nbt: None,
         }); DEVICE_SLOTS];
         let storage = Devices::default().staged_update(pos, full).unwrap();
         world.set_device_comparator_inputs(storage.comparator_inputs());
@@ -349,11 +358,13 @@ mod tests {
             id: 1,
             count: 2,
             damage: 0,
+            nbt: None,
         });
         let full = [Some(Stack {
             id: 1,
             count: 64,
             damage: 0,
+            nbt: None,
         }); DEVICE_SLOTS];
         let original = Devices::default()
             .staged_update(from, source)
@@ -367,6 +378,7 @@ mod tests {
             id: 1,
             count: 63,
             damage: 0,
+            nbt: None,
         });
         let original = original.staged_update(to, available).unwrap();
         let transferred = original.stage_transfer_one(from, to, 0).unwrap().unwrap();
@@ -385,6 +397,7 @@ mod tests {
             id: 4,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         let mut slots = [None; 3];
         slots[0] = Some(Stack { count: 63, ..item });
@@ -406,7 +419,8 @@ mod tests {
             Stack {
                 id: 4,
                 count: 2,
-                damage: 0
+                damage: 0,
+                nbt: None,
             }
         ));
         assert_eq!(slots, [None; 2]);
@@ -423,6 +437,7 @@ mod tests {
             id: 4,
             count: 2,
             damage: 0,
+            nbt: None,
         });
         let storage = Devices::default().staged_update(pos, slots).unwrap();
         storage.save(&path).unwrap();
@@ -449,6 +464,7 @@ mod tests {
                 id: (index + 1) as i16,
                 count: 2,
                 damage: 0,
+                nbt: None,
             });
         }
         let devices = Devices::default().staged_update(pos, slots).unwrap();
@@ -496,6 +512,7 @@ mod tests {
             id: 1,
             count: 1,
             damage: 0,
+            nbt: None,
         });
         let devices = Devices::default().staged_update(source, slots).unwrap();
         assert!(devices.stage_eject(invalid_position, 0).is_err());
@@ -517,6 +534,7 @@ mod tests {
             id: 4,
             count: 2,
             damage: 0,
+            nbt: None,
         });
         let devices = Devices::default().staged_update(valid, slots).unwrap();
 

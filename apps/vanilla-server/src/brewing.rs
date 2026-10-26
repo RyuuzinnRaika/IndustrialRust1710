@@ -74,6 +74,7 @@ pub fn result(bottle: Stack, reagent: Stack) -> Option<Stack> {
         id: 373,
         count: 1,
         damage: damage as i16,
+        nbt: None,
     })
 }
 /// Effect ID, amplifier, duration ticks, based on legacy potion damage metadata.
@@ -294,11 +295,13 @@ mod tests {
             id: 373,
             count: 1,
             damage: 0,
+            nbt: None,
         };
         let wart = Stack {
             id: 372,
             count: 2,
             damage: 0,
+            nbt: None,
         };
         assert_eq!(result(water, wart).unwrap().damage, 16);
         let mut stand = Brewer {
@@ -319,6 +322,7 @@ mod tests {
             id: 264,
             count: 1,
             damage: 0,
+            nbt: None,
         });
         assert!(!stand.valid());
         stand.slots[0] = None;
@@ -326,6 +330,7 @@ mod tests {
             id: 264,
             count: 1,
             damage: 0,
+            nbt: None,
         });
         assert!(!stand.valid());
     }
