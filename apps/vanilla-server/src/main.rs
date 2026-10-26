@@ -4155,24 +4155,28 @@ fn play(
             }
             16 => {
                 let slot = input.i16()?;
-                let requested = input.creative_slot()?;
-                input.finish()?;
                 if survival {
-                    // C10 is Creative-only; never mint items in Survival.
+                    // Survival must never allocate Creative-supplied NBT.
+                    // Consume untrusted bytes without interning or minting.
+                    input.skip_untrusted_slot()?;
+                    input.finish()?;
                     send(s, 0x30, &inventory.window_items())?;
-                } else if let Some(stack) = requested {
-                    if inventory.creative_set(slot, stack)? {
-                        // Persist only an accepted inventory mutation.
-                        inventory.save(inventory_path)?;
-                        send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                } else {
+                    let requested = input.creative_slot()?;
+                    input.finish()?;
+                    if let Some(stack) = requested {
+                        if inventory.creative_set(slot, stack)? {
+                            // Persist only an accepted inventory mutation.
+                            inventory.save(inventory_path)?;
+                            send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                        } else {
+                            send(s, 0x30, &inventory.window_items())?;
+                        }
                     } else {
+                        // Invalid or unrepresentable NBT cannot mint an item.
+                        // Keep the session alive and restore server state.
                         send(s, 0x30, &inventory.window_items())?;
                     }
-                } else {
-                    // Valid but unsupported creative selection (e.g. an
-                    // enchanted item carrying arbitrary NBT). Keep the
-                    // session alive and restore the authoritative inventory.
-                    send(s, 0x30, &inventory.window_items())?;
                 }
             }
             14 => {
