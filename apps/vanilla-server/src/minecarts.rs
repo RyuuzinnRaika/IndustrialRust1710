@@ -39,7 +39,8 @@ fn rail(world: &World, pos: PlayerPosition) -> Option<(u16, u16)> {
     );
     let state = world.get(x, y, z);
     let id = state >> 4;
-    matches!(id, 27 | 28 | 66 | 157).then_some((id, state & 15))
+    (matches!(id, 27 | 28 | 66 | 157) && rail_exits(id, state & 15).is_some())
+        .then_some((id, state & 15))
 }
 
 fn straight_axis(id: u16, meta: u16) -> Option<bool> {
@@ -798,6 +799,53 @@ mod tests {
         carts.tick(&world, 1);
         assert_eq!(carts.carts[&FIRST_ID].position.x, at.x);
         assert_eq!(carts.carts[&FIRST_ID].speed, 0.0);
+    }
+
+    #[test]
+    fn minecart_placement_rejects_invalid_rail_shapes() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.5,
+            z: 0.5,
+        };
+        let mut world = World::new();
+        // Ordinary rails only have shapes 0..=9. Powered, detector and
+        // activator rails only have shapes 0..=5 (bit 3 is their power flag).
+        for (id, meta) in [
+            (66u16, 10u16),
+            (66, 15),
+            (27, 6),
+            (27, 7),
+            (28, 6),
+            (157, 7),
+        ] {
+            world.import_block(0, 65, 0, (id << 4) | meta).unwrap();
+            let mut carts = Minecarts::default();
+            assert!(!carts.can_place(&world, at), "invalid rail {id}:{meta}");
+            assert!(
+                carts.place(&world, at, 0).is_none(),
+                "invalid rail {id}:{meta}"
+            );
+            assert!(carts.carts.is_empty());
+        }
+        // Preserve normal and curved rails, plus the valid power flag on
+        // powered/detector/activator rails.
+        for (id, meta) in [
+            (66u16, 0u16),
+            (66, 9),
+            (27, 8),
+            (27, 13),
+            (28, 9),
+            (157, 13),
+        ] {
+            world.import_block(0, 65, 0, (id << 4) | meta).unwrap();
+            let mut carts = Minecarts::default();
+            assert!(carts.can_place(&world, at), "valid rail {id}:{meta}");
+            assert!(
+                carts.place(&world, at, 0).is_some(),
+                "valid rail {id}:{meta}"
+            );
+        }
     }
 
     #[test]
