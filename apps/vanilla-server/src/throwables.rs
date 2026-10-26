@@ -431,7 +431,10 @@ mod tests {
         let (at, packet) = &result.events[0];
         assert_eq!(packet.id, 0x13);
         assert_eq!(packet.body[0], 1);
-        assert_eq!(i32::from_be_bytes(packet.body[1..5].try_into().unwrap()), projectile_id);
+        assert_eq!(
+            i32::from_be_bytes(packet.body[1..5].try_into().unwrap()),
+            projectile_id
+        );
         assert!((2.0..2.3).contains(&at.x), "impact={at:?}");
         assert!((at.y - 70.5).abs() < 1e-10);
     }
