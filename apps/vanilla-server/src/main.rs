@@ -7026,10 +7026,12 @@ fn main() -> io::Result<()> {
                                     continue;
                                 }
                                 // A 1.7.10 dropper sends one item directly into
-                                // a chest it faces. If the chest is full, do
+                                // a normal or trapped chest it faces. If the chest is full, do
                                 // not consume or create a ground item.
                                 if state >> 4 == 158
-                                    && gravity_world.get(dest.0, dest.1, dest.2) >> 4 == 54
+                                    && dispensers::dropper_chest_target(
+                                        gravity_world.get(dest.0, dest.1, dest.2) >> 4,
+                                    )
                                 {
                                     let mut chests = match ejection_chests.lock() {
                                         Ok(value) => value,
