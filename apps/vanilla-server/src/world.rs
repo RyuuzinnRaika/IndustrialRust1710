@@ -496,6 +496,70 @@ impl World {
         }
         Some(doors.into_iter().collect())
     }
+    /// Whether a column has an unobstructed path to the sky above a door.
+    /// Use the same opaque-block classification as the client light arrays,
+    /// but do not confuse lateral skylight with direct sky exposure.
+    fn village_column_sees_sky(&self, x: i32, y: i32, z: i32) -> bool {
+        in_bounds(x, y, z)
+            && (y..=255).all(|height| lighting::lighting_signature(self.get(x, height, z)).0)
+    }
+
+    /// Find a small set of player-built wooden doors that could establish a
+    /// village independently of generated structures. A door is a candidate
+    /// only when its halves are intact, it has a supporting block, and the
+    /// five sky-exposure samples on opposite sides differ (the 1.7.10 door
+    /// "inside/outside" rule). This is a live, bounded local query, not a
+    /// persistent village registry or a complete population/radius model.
+    ///
+    /// Only edited door lower halves are considered. Generated doors remain
+    /// owned by the generated-village lookup, and Nether/End doors are ignored.
+    pub fn independent_player_village_doors_near(&self, x: i32, z: i32) -> Vec<[i32; 3]> {
+        if !matches!(
+            self.generation,
+            Generation::Expanded(_, crate::dimensions::Dimension::Overworld)
+        ) || !in_bounds(x, 64, z)
+        {
+            return Vec::new();
+        }
+        let mut doors = Vec::new();
+        for (&(dx, dy, dz), &lower) in self.edits.range(
+            (x.saturating_sub(32), 0u8, i32::MIN)..=(x.saturating_add(32), u8::MAX, i32::MAX),
+        ) {
+            if doors.len() >= 32 {
+                break;
+            }
+            if (i64::from(dz) - i64::from(z)).abs() > 32
+                || dy == 0
+                || dy > 252
+                || lower >> 4 != 64
+                || lower & 8 != 0
+            {
+                continue;
+            }
+            let height = i32::from(dy);
+            let upper = self.get(dx, height + 1, dz);
+            if upper >> 4 != 64 || upper & 8 == 0 || self.get(dx, height - 1, dz) >> 4 == 0 {
+                continue;
+            }
+            // Lower-half metadata 0/2 faces along Z, 1/3 along X.
+            let (axis_x, axis_z) = if lower & 1 == 0 { (0, 1) } else { (1, 0) };
+            let covered = |side: i32| {
+                (1..=5)
+                    .filter(|step| {
+                        !self.village_column_sees_sky(
+                            dx + axis_x * step * side,
+                            height + 2,
+                            dz + axis_z * step * side,
+                        )
+                    })
+                    .count()
+            };
+            if covered(1) != covered(-1) {
+                doors.push([dx, height, dz]);
+            }
+        }
+        doors
+    }
     /// Bounded lookup of intact dungeon spawners close to active players.
     /// IRW4 generated sites are indexed by their 64-block feature cells so
     /// this never walks ungenerated chunks or scans a large 3D volume.
@@ -2092,6 +2156,68 @@ mod tests {
                 .village_doors_with_bounded_annex(cx, cz),
             None
         );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn independent_player_village_requires_roof_asymmetry_and_survives_restart() {
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        let door = [-1000, 200, -1000];
+        let support = 1 << 4;
+        world
+            .import_block(door[0], door[1] - 1, door[2], support)
+            .unwrap();
+        world
+            .import_block(door[0], door[1], door[2], 64 << 4)
+            .unwrap();
+        world
+            .import_block(door[0], door[1] + 1, door[2], 64 << 4 | 8)
+            .unwrap();
+        let doors = |world: &World| world.independent_player_village_doors_near(door[0], door[2]);
+        assert!(
+            doors(&world).is_empty(),
+            "a bare outdoor door is not a village"
+        );
+        world
+            .import_block(door[0], door[1] + 3, door[2] + 1, support)
+            .unwrap();
+        assert_eq!(doors(&world), vec![door]);
+        world
+            .import_block(door[0], door[1] + 3, door[2] - 1, support)
+            .unwrap();
+        assert!(doors(&world).is_empty(), "symmetric roofs are not a house");
+        world
+            .import_block(door[0], door[1] + 3, door[2] - 1, 0)
+            .unwrap();
+        assert_eq!(doors(&world), vec![door]);
+        world
+            .import_block(door[0], door[1] + 1, door[2], 0)
+            .unwrap();
+        assert!(
+            doors(&world).is_empty(),
+            "a broken upper half invalidates the door"
+        );
+        world
+            .import_block(door[0], door[1] + 1, door[2], 64 << 4 | 8)
+            .unwrap();
+        assert_eq!(doors(&world), vec![door]);
+        assert!(world
+            .independent_player_village_doors_near(door[0] + 100, door[2])
+            .is_empty());
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-independent-village-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        world.save(&path).unwrap();
+        let restored = World::load(&path).unwrap();
+        assert_eq!(
+            restored.independent_player_village_doors_near(door[0], door[2]),
+            vec![door]
+        );
+        assert!(World::expanded(42, crate::dimensions::Dimension::Nether)
+            .independent_player_village_doors_near(door[0], door[2])
+            .is_empty());
         fs::remove_file(path).unwrap();
     }
 

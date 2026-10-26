@@ -552,14 +552,19 @@ fn distance(a: PlayerPosition, b: PlayerPosition) -> f64 {
 fn distance_3d(a: PlayerPosition, b: PlayerPosition) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
 }
-/// Choose a live wooden door in a generated village or its bounded annex.
-/// Generated and player-built doors share the same lower-half facing metadata.
+/// Choose a live wooden door in a generated village, bounded annex, or a
+/// nearby player-built house with asymmetric sky exposure. The independent
+/// door fallback is deliberately bounded; it does not implement a complete
+/// vanilla village registry, population cap, or door lifetime.
 /// Re-read the authoritative world each tick so removed doors are not AI goals.
 fn villager_door_destination(world: &World, at: PlayerPosition) -> Option<PlayerPosition> {
     if !at.is_valid() {
         return None;
     }
-    let doors = world.village_doors_with_bounded_annex(at.x.floor() as i32, at.z.floor() as i32)?;
+    let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
+    let doors = world
+        .village_doors_with_bounded_annex(x, z)
+        .unwrap_or_else(|| world.independent_player_village_doors_near(x, z));
     doors
         .into_iter()
         .filter_map(|[x, y, z]| {
@@ -4876,6 +4881,43 @@ mod tests {
             villager_door_destination(
                 &World::expanded(42, crate::dimensions::Dimension::Nether),
                 middle
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn villager_can_target_independent_player_built_house() {
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        let (x, z) = (-8..=8)
+            .flat_map(|gx| (-8..=8).map(move |gz| (gx * 192 + 48, gz * 192 + 48)))
+            .find(|&(x, z)| world.village_doors_with_bounded_annex(x, z).is_none())
+            .expect("seed 42 has a location without a generated village");
+        let y = 200;
+        let at = PlayerPosition {
+            x: f64::from(x) + 0.5,
+            y: f64::from(y),
+            z: f64::from(z) + 3.5,
+        };
+        world.import_block(x, y - 1, z, 1 << 4).unwrap();
+        world.import_block(x, y, z, 64 << 4).unwrap();
+        world.import_block(x, y + 1, z, 64 << 4 | 8).unwrap();
+        assert_eq!(villager_door_destination(&world, at), None);
+        world.import_block(x, y + 3, z + 1, 1 << 4).unwrap();
+        assert_eq!(
+            villager_door_destination(&world, at),
+            Some(PlayerPosition {
+                x: f64::from(x) + 0.5,
+                y: f64::from(y),
+                z: f64::from(z) + 1.5,
+            })
+        );
+        world.import_block(x, y + 3, z + 1, 0).unwrap();
+        assert_eq!(villager_door_destination(&world, at), None);
+        assert_eq!(
+            villager_door_destination(
+                &World::expanded(42, crate::dimensions::Dimension::Nether),
+                at
             ),
             None
         );
