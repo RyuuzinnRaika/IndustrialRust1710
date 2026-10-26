@@ -1612,3 +1612,38 @@ fn native_protocol5_eight_player_admission_full_and_reconnect() {
     drop(players);
     server.wait_idle();
 }
+
+#[test]
+fn vanilla_1710_fixed_width_entity_packets_do_not_drop_the_session() {
+    let server = NativeServer::start();
+    let (mut client, player_entity_id, _) = server.join("RustTester");
+
+    // Protocol 5 / Java 1.7.10 C0B: Int entity ID, Byte action, Int jump boost.
+    let mut sprint = player_entity_id.to_be_bytes().to_vec();
+    sprint.push(3); // start sprinting
+    sprint.extend_from_slice(&0i32.to_be_bytes());
+    client.write_all(&frame(0x0b, &sprint)).unwrap();
+
+    // C02: 4-byte entity ID + 1-byte action.
+    let mut attack = i32::MAX.to_be_bytes().to_vec();
+    attack.push(1);
+    client.write_all(&frame(0x02, &attack)).unwrap();
+
+    // C02 action 2 has an interaction point (three extra floats).
+    let mut interact_at = i32::MAX.to_be_bytes().to_vec();
+    interact_at.push(2);
+    interact_at.extend_from_slice(&0.5f32.to_be_bytes());
+    interact_at.extend_from_slice(&0.5f32.to_be_bytes());
+    interact_at.extend_from_slice(&0.5f32.to_be_bytes());
+    client.write_all(&frame(0x02, &interact_at)).unwrap();
+
+    // The old VarInt parser disconnected with "unexpected packet bytes".
+    thread::sleep(Duration::from_millis(350));
+    assert_eq!(
+        server.status()["players"]["online"].as_u64(),
+        Some(1),
+        "valid Minecraft 1.7.10 entity packets must not disconnect the player"
+    );
+    drop(client);
+    server.wait_idle();
+}
