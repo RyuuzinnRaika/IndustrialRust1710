@@ -21,7 +21,9 @@ fn key((x, y, z): Position) -> String {
     format!("{x},{y},{z}")
 }
 fn valid_potion(item: Option<Stack>) -> bool {
-    item.is_none_or(|s| s.id == 373 && s.count == 1 && s.damage >= 0)
+    item.is_none_or(|s| {
+        s.count == 1 && ((s.id == 373 && s.damage >= 0) || (s.id == 374 && s.damage == 0))
+    })
 }
 fn is_reagent(item: Stack) -> bool {
     matches!(
@@ -30,8 +32,8 @@ fn is_reagent(item: Stack) -> bool {
     )
 }
 /// Authoritative 1.7.10 brewing slot limits, used before GUI mutations and
-/// when loading a saved brewing stand. Bottles are non-stackable; only the
-/// fourth slot accepts brewing reagents.
+/// when loading a saved brewing stand. Potion items and empty glass bottles
+/// occupy one bottle slot each; only the fourth slot accepts brewing reagents.
 pub fn slot_accepts(slot: i16, item: Stack) -> bool {
     if !item.is_valid() {
         return false;
@@ -314,6 +316,37 @@ mod tests {
         assert_eq!(stand.slots[0].unwrap().damage, 16);
         assert_eq!(stand.slots[3].unwrap().count, 1);
         assert_eq!(stand.brew_time, 0);
+    }
+    #[test]
+    fn empty_glass_bottle_is_valid_in_brewing_slots_but_cannot_brew() {
+        let glass = Stack {
+            id: 374,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        for slot in 0..3 {
+            assert!(slot_accepts(slot, glass));
+        }
+        assert!(!slot_accepts(3, glass));
+        assert!(!slot_accepts(0, Stack { count: 2, ..glass }));
+        assert!(!slot_accepts(0, Stack { damage: 1, ..glass }));
+
+        let wart = Stack { id: 372, ..glass };
+        let mut stand = Brewer {
+            slots: [Some(glass), None, None, Some(wart)],
+            brew_time: 0,
+        };
+        assert!(stand.valid());
+        assert!(!stand.tick());
+        assert_eq!(stand.slots[0], Some(glass));
+        assert_eq!(stand.slots[3], Some(wart));
+        assert_eq!(stand.brew_time, 0);
+
+        let position = (0, 64, 0);
+        let staged = Brewers::default().staged_update(position, stand).unwrap();
+        let restored: Brewers = serde_json::from_slice(&staged.encoded().unwrap()).unwrap();
+        assert_eq!(restored.get(position), stand);
     }
     #[test]
     fn reject_unbrewable_bottle_or_non_reagent() {
