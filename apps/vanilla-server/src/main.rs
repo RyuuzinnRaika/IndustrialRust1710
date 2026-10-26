@@ -6849,8 +6849,8 @@ fn main() -> io::Result<()> {
                     Ok(storage) => storage.comparator_inputs(),
                     Err(_) => return,
                 };
-                let chest_comparator_inputs = match ejection_chests.lock() {
-                    Ok(storage) => storage.comparator_inputs(),
+                let (chest_comparator_inputs, chest_snapshot) = match ejection_chests.lock() {
+                    Ok(storage) => (storage.comparator_inputs(), storage.comparator_snapshot()),
                     Err(_) => return,
                 };
                 let furnace_comparator_inputs = match furnace_worker.lock() {
@@ -6865,6 +6865,13 @@ fn main() -> io::Result<()> {
                     Ok(v) => v,
                     Err(_) => break,
                 };
+                // Pair only real adjacent chest blocks, after releasing the chest
+                // mutex and acquiring World. Both halves share one 54-slot signal.
+                let chest_comparator_inputs = chests::combine_chest_comparator_inputs(
+                    &gravity_world,
+                    &chest_snapshot,
+                    chest_comparator_inputs,
+                );
                 gravity_world.set_inventory_comparator_inputs(
                     device_comparator_inputs,
                     chest_comparator_inputs,
