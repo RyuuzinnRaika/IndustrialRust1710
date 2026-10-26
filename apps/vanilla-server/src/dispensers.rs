@@ -233,6 +233,16 @@ pub(crate) fn facing_offset(metadata: u16) -> Option<Position> {
     }
 }
 
+/// Both devices use the same 3x3 Protocol 5 window type, but the
+/// client-visible title must identify the actual block.
+pub(crate) fn window_title(block_id: u16) -> Option<&'static str> {
+    match block_id {
+        23 => Some("Dispenser"),
+        158 => Some("Dropper"),
+        _ => None,
+    }
+}
+
 /// Vanilla 1.7.10 comparator override for a nine-slot device:
 /// floor(14 * average slot fullness) + 1 when any slot is occupied.
 /// All supported item stack caps (1, 16, 64) divide 64 exactly.
@@ -282,6 +292,15 @@ pub fn insert_one<const N: usize>(slots: &mut [Option<Stack>; N], item: Stack) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispenser_and_dropper_windows_use_distinct_titles() {
+        assert_eq!(window_title(23), Some("Dispenser"));
+        assert_eq!(window_title(158), Some("Dropper"));
+        for other in [0, 54, 154, 255] {
+            assert_eq!(window_title(other), None);
+        }
+    }
 
     #[test]
     fn device_facing_rejects_invalid_metadata_without_east_fallback() {
