@@ -342,6 +342,12 @@ pub(crate) fn comparator_strength<const N: usize>(slots: &[Option<Stack>; N]) ->
 /// Insert exactly one item into a destination container, preferring
 /// compatible partial stacks. Returns false without mutating if it is full.
 pub fn insert_one<const N: usize>(slots: &mut [Option<Stack>; N], item: Stack) -> bool {
+    insert_one_into_window(slots, item)
+}
+
+/// Insert one item across a single or double chest's complete slot window.
+/// A double chest must search all 54 slots, not just the targeted half.
+pub fn insert_one_into_window(slots: &mut [Option<Stack>], item: Stack) -> bool {
     if item.count != 1 || !item.is_valid() {
         return false;
     }
@@ -481,6 +487,45 @@ mod tests {
         assert_eq!(world.get(0, 64, 0) >> 4, 149);
         assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 0);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn dropper_double_chest_can_insert_into_other_half() {
+        let full = Stack {
+            id: 4,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        let single = Stack { count: 1, ..full };
+        let mut slots = vec![Some(full); 54];
+        slots[27] = None;
+
+        // The clicked half is full, but the other half has a free slot.
+        assert!(insert_one_into_window(&mut slots, single));
+        assert_eq!(slots[27], Some(single));
+        assert!(slots[..27].iter().all(|slot| *slot == Some(full)));
+
+        // A full 54-slot chest must leave every stack unchanged.
+        let snapshot = slots.clone();
+        assert!(!insert_one_into_window(&mut slots, single));
+        assert_eq!(slots, snapshot);
+    }
+
+    #[test]
+    fn dropper_double_chest_merges_partial_stack_in_other_half() {
+        let full = Stack {
+            id: 4,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        let single = Stack { count: 1, ..full };
+        let mut slots = vec![Some(full); 54];
+        slots[53] = Some(Stack { count: 63, ..full });
+        assert!(insert_one_into_window(&mut slots, single));
+        assert_eq!(slots[53], Some(full));
+        assert!(slots[..53].iter().all(|slot| *slot == Some(full)));
     }
 
     #[test]
