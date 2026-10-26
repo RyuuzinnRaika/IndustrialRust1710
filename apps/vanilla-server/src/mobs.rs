@@ -4954,11 +4954,7 @@ mod tests {
         let near = PlayerPosition { y: 96.0, ..player };
         assert!(!natural_spawn_location_ok(&world, candidate(72.0), &[player, near]));
         let outside_inner = PlayerPosition { y: 97.0, ..player };
-        assert!(natural_spawn_location_ok(
-            &world,
-            candidate(72.0),
-            &[player, outside_inner]
-        ));
+        assert!(natural_spawn_location_ok(&world, candidate(72.0), &[player, outside_inner]));
     }
 
     #[test]
