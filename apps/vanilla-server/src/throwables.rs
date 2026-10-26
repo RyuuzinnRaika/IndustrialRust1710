@@ -266,7 +266,10 @@ impl Throwables {
                 // Vanilla ray tracing does not stop on water or lava source/flow blocks.
                 // Treating liquids as solid here destroys arrows and thrown items early.
                 if block != 0
-                    && !matches!(block, 6 | 8 | 9 | 10 | 11 | 31 | 32 | 37 | 38 | 39 | 40 | 50 | 78)
+                    && !matches!(
+                        block,
+                        6 | 8 | 9 | 10 | 11 | 31 | 32 | 37 | 38 | 39 | 40 | 50 | 78
+                    )
                 {
                     collision = Some(sample);
                     break;
