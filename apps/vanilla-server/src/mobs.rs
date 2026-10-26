@@ -4799,6 +4799,34 @@ mod tests {
     }
 
     #[test]
+    fn natural_mob_cap_diagonal_overlap_and_border_membership() {
+        let a = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        // An eight-chunk diagonal offset overlaps the two 17x17 squares
+        // in exactly 9x9 chunks. Count the union, not 2 * 289 chunks.
+        let b = PlayerPosition {
+            x: 128.5,
+            z: 128.5,
+            ..a
+        };
+        assert_eq!(natural_mob_cap(&[a, b], 70), 135);
+        assert_eq!(natural_mob_cap(&[b, a, a], 70), 135);
+        assert_eq!(natural_mob_cap(&[a, b], 10), 19);
+        assert_eq!(natural_spawn_capacity(&[a, b], 70), 135);
+
+        let at = |x: f64, z: f64| PlayerPosition { x, z, ..a };
+        // Chunk (8, 0) is on both players' outer border and cannot spawn.
+        assert!(!natural_spawn_chunk_eligible(at(128.5, 0.5), &[a, b]));
+        // Chunk (8, 1) is on A's border but inside B's 15x15 area.
+        assert!(natural_spawn_chunk_eligible(at(128.5, 16.5), &[a, b]));
+        // Chunk (7, 0) remains eligible through A's interior.
+        assert!(natural_spawn_chunk_eligible(at(112.5, 0.5), &[a, b]));
+    }
+
+    #[test]
     fn natural_mob_cap_handles_extreme_signed_block_coordinates() {
         // The 17x17 cap union is computed in chunk coordinates. Its border
         // must not overflow near either end of the signed block range.
