@@ -668,16 +668,36 @@ fn natural_spawn_species_light_ok(
     (kind == Kind::Slime && is_slime_cave_location(world_seed, at.0, at.1, at.2))
         || spawn_light_ok(light.0, light.1, now, passive)
 }
-/// Ghasts are four blocks wide and tall. Reusing the player's narrow
-/// collision hull lets them clip through fortress walls or spawn inside
-/// water/lava, so the conservative volume test requires a dry body volume.
+/// Ghasts store their position at the centre of a 4x4x4 AABB. Use
+/// the same precise solid-block collision shapes as other natural spawns,
+/// while rejecting fluids separately (fluids have no collision shapes).
+/// Merely touching the outer face of a block is not an intersection.
 fn ghast_has_clearance(world: &World, p: PlayerPosition) -> bool {
-    let x = p.x.floor() as i32;
-    let y = p.y.floor() as i32;
-    let z = p.z.floor() as i32;
-    (x - 2..=x + 2).all(|bx| {
-        (y - 2..=y + 2)
-            .all(|by| (z - 2..=z + 2).all(|bz| matches!(world.get(bx, by, bz) >> 4, 0 | 6)))
+    if !p.is_valid() {
+        return false;
+    }
+    let feet = PlayerPosition { y: p.y - 2.0, ..p };
+    if !feet.is_valid() || physics::collides_sized(world, &feet, 2.0, 4.0) {
+        return false;
+    }
+    let (min_x, max_x) = (p.x - 2.0, p.x + 2.0);
+    let (min_y, max_y) = (p.y - 2.0, p.y + 2.0);
+    let (min_z, max_z) = (p.z - 2.0, p.z + 2.0);
+    ((min_x.floor() as i32)..=(max_x.floor() as i32)).all(|x| {
+        ((min_y.floor() as i32)..=(max_y.floor() as i32)).all(|y| {
+            ((min_z.floor() as i32)..=(max_z.floor() as i32)).all(|z| {
+                if (x + 1) as f64 <= min_x
+                    || x as f64 >= max_x
+                    || (y + 1) as f64 <= min_y
+                    || y as f64 >= max_y
+                    || (z + 1) as f64 <= min_z
+                    || z as f64 >= max_z
+                {
+                    return true;
+                }
+                !matches!(world.get(x, y, z) >> 4, 8..=11)
+            })
+        })
     })
 }
 
@@ -3523,6 +3543,49 @@ mod tests {
         assert!(!natural_spawn_body_ok(&world, Kind::Skeleton, air, 1));
         world.import_block(2, 80, 0, 1 << 4).unwrap();
         assert!(!natural_spawn_body_ok(&world, Kind::Ghast, air, 1));
+    }
+
+    #[test]
+    fn ghast_clearance_distinguishes_face_contact_from_volume_overlap() {
+        let at = PlayerPosition {
+            x: 0.0,
+            y: 80.0,
+            z: 0.0,
+        };
+        // A centered four-block-wide Ghast occupies [-2,2] on X and Z
+        // and [78,82] on Y. The adjacent faces must not reject spawning.
+        for (x, y, z) in [(2, 80, 0), (-3, 80, 0), (0, 82, 0), (0, 77, 0), (0, 80, 2)] {
+            let mut world = World::new();
+            world.import_block(x, y, z, 1 << 4).unwrap();
+            assert!(
+                ghast_has_clearance(&world, at),
+                "face contact at ({x},{y},{z}) is not overlap"
+            );
+        }
+        // Solid blocks in the actual hull, including its negative faces,
+        // must still be rejected.
+        for (x, y, z) in [(1, 80, 0), (-2, 80, 0), (0, 81, 0), (0, 78, 0), (0, 80, -2)] {
+            let mut world = World::new();
+            world.import_block(x, y, z, 1 << 4).unwrap();
+            assert!(
+                !ghast_has_clearance(&world, at),
+                "solid block at ({x},{y},{z}) overlaps the Ghast"
+            );
+        }
+        for (x, y, z, blocked) in [
+            (2, 80, 0, false),
+            (1, 80, 0, true),
+            (0, 82, 0, false),
+            (0, 81, 0, true),
+        ] {
+            let mut world = World::new();
+            world.import_block(x, y, z, 8 << 4).unwrap();
+            assert_eq!(
+                ghast_has_clearance(&world, at),
+                !blocked,
+                "fluid at ({x},{y},{z})"
+            );
+        }
     }
 
     #[test]
