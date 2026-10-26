@@ -256,6 +256,31 @@ pub(crate) fn dropper_hopper_target(block_id: u16) -> bool {
     block_id == 154
 }
 
+/// Select the furnace slot reachable from a dropper's facing direction.
+/// A dropper above the furnace enters the input slot; from a side or below
+/// it can insert fuel (or the vanilla empty-bucket exception) only.
+/// Returning None for a furnace means *retain* the source item, not eject it.
+pub(crate) fn dropper_furnace_slot(
+    block_id: u16,
+    offset: (i32, i32, i32),
+    item: Stack,
+) -> Option<usize> {
+    if !matches!(block_id, 61 | 62) || item.count != 1 || !item.is_valid() {
+        return None;
+    }
+    if offset == (0, -1, 0) {
+        return Some(0);
+    }
+    if matches!(
+        offset,
+        (0, 1, 0) | (-1, 0, 0) | (1, 0, 0) | (0, 0, -1) | (0, 0, 1)
+    ) && (crate::furnaces::burn_duration(item).is_some() || item.id == 325)
+    {
+        return Some(1);
+    }
+    None
+}
+
 /// Vanilla 1.7.10 comparator override for a nine-slot device:
 /// floor(14 * average slot fullness) + 1 when any slot is occupied.
 /// All supported item stack caps (1, 16, 64) divide 64 exactly.
@@ -575,6 +600,49 @@ mod tests {
         slots.fill(Some(full));
         assert!(!insert_one(&mut slots, item));
         assert_eq!(slots, [Some(full); 3]);
+    }
+
+    #[test]
+    fn dropper_furnace_insertion_respects_sides_fuel_and_atomic_staging() {
+        let ore = Stack {
+            id: 15,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let coal = Stack { id: 263, ..ore };
+        let empty_bucket = Stack { id: 325, ..ore };
+        for block_id in [61, 62] {
+            assert_eq!(dropper_furnace_slot(block_id, (0, -1, 0), ore), Some(0));
+            for side in [(0, 1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)] {
+                assert_eq!(dropper_furnace_slot(block_id, side, ore), None);
+                assert_eq!(dropper_furnace_slot(block_id, side, coal), Some(1));
+                assert_eq!(dropper_furnace_slot(block_id, side, empty_bucket), Some(1));
+            }
+        }
+        assert_eq!(dropper_furnace_slot(54, (0, -1, 0), ore), None);
+        assert_eq!(dropper_furnace_slot(61, (1, 1, 0), coal), None);
+
+        let pos = (1, 64, 1);
+        let original = crate::furnaces::Furnaces::default();
+        let mut furnace = original.get(pos);
+        let mut slot = [furnace.slots[0]];
+        assert!(insert_one(&mut slot, ore));
+        furnace.slots[0] = slot[0];
+        let staged = original.staged_update(pos, furnace).unwrap();
+        assert_eq!(original.get(pos).slots[0], None);
+        assert_eq!(staged.get(pos).slots[0], Some(ore));
+        assert!(staged.encoded().is_ok());
+
+        // A full destination cannot consume a second item or mutate state.
+        let full = Stack {
+            id: 15,
+            count: 64,
+            ..ore
+        };
+        let mut occupied = [Some(full)];
+        assert!(!insert_one(&mut occupied, ore));
+        assert_eq!(occupied, [Some(full)]);
     }
 
     #[test]
