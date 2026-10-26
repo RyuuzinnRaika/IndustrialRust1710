@@ -249,6 +249,13 @@ pub(crate) fn dropper_chest_target(block_id: u16) -> bool {
     matches!(block_id, 54 | 146)
 }
 
+/// A dropper facing a hopper inserts into its five-slot inventory rather than
+/// spawning an item. The hopper's enabled/disabled flag affects its own
+/// transfer tick, not external insertion.
+pub(crate) fn dropper_hopper_target(block_id: u16) -> bool {
+    block_id == 154
+}
+
 /// Vanilla 1.7.10 comparator override for a nine-slot device:
 /// floor(14 * average slot fullness) + 1 when any slot is occupied.
 /// All supported item stack caps (1, 16, 64) divide 64 exactly.
@@ -446,6 +453,57 @@ mod tests {
         for block_id in [0, 23, 61, 62, 154, 158] {
             assert!(!dropper_chest_target(block_id));
         }
+    }
+
+    #[test]
+    fn dropper_hopper_transfer_stages_one_item_without_loss_or_duplication() {
+        let source = (2, 64, 3);
+        let destination = (3, 64, 3);
+        let item = Stack {
+            id: 4,
+            count: 2,
+            damage: 0,
+            nbt: None,
+        };
+        let mut source_slots = [None; DEVICE_SLOTS];
+        source_slots[0] = Some(item);
+        let original = Devices::default()
+            .staged_update(source, source_slots)
+            .unwrap();
+        let hopper = crate::hoppers::Hoppers::default();
+
+        assert!(dropper_hopper_target(154));
+        for other in [0, 23, 54, 61, 62, 146, 158] {
+            assert!(!dropper_hopper_target(other));
+        }
+
+        // An empty hopper accepts exactly one item; both source and target
+        // snapshots remain unchanged until the redo journal commits.
+        let (debit, emitted) = original.stage_eject(source, 9).unwrap().unwrap();
+        let mut empty = hopper.slots(destination);
+        assert!(insert_one(&mut empty, emitted));
+        let staged = hopper.staged_update(destination, empty).unwrap();
+        assert_eq!(debit.slots(source)[0].unwrap().count, 1);
+        assert_eq!(staged.slots(destination)[0], Some(emitted));
+        assert_eq!(original.slots(source)[0], Some(item));
+        assert_eq!(hopper.slots(destination), [None; crate::hoppers::HOPPER_SLOTS]);
+        assert_eq!(staged.revision(), hopper.revision() + 1);
+        assert!(debit.encoded().is_ok());
+        assert!(staged.encoded().is_ok());
+
+        // A compatible partial stack is filled before an empty slot.
+        let mut partial = [None; crate::hoppers::HOPPER_SLOTS];
+        partial[0] = Some(Stack { count: 63, ..emitted });
+        assert!(insert_one(&mut partial, emitted));
+        assert_eq!(partial[0].unwrap().count, 64);
+        assert!(partial[1].is_none());
+
+        // Full hoppers must not debit the dropper or emit a ground item.
+        let full = [Some(Stack { count: 64, ..emitted }); crate::hoppers::HOPPER_SLOTS];
+        let mut attempted = full;
+        assert!(!insert_one(&mut attempted, emitted));
+        assert_eq!(attempted, full);
+        assert_eq!(original.slots(source)[0], Some(item));
     }
 
     #[test]
