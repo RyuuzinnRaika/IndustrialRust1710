@@ -1700,7 +1700,7 @@ impl World {
         let mut original_chunks = BTreeMap::new();
         for &(x, y, z, previous, _) in &different {
             let chunk_pos = (x.div_euclid(16), z.div_euclid(16));
-            if !original_chunks.contains_key(&chunk_pos) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = original_chunks.entry(chunk_pos) {
                 let (cx, cz) = chunk_pos;
                 let snapshot = &source_images[&(cx.div_euclid(32), cz.div_euclid(32))];
                 let mut reader = fastanvil::Region::from_stream(std::io::Cursor::new(snapshot))
@@ -1709,7 +1709,7 @@ impl World {
                     .read_chunk(cx.rem_euclid(32) as usize, cz.rem_euclid(32) as usize)
                     .map_err(|error| io::Error::other(error.to_string()))?
                     .ok_or_else(|| invalid("E46 dirty save requires existing Anvil chunks"))?;
-                original_chunks.insert(chunk_pos, crate::legacy_nbt::parse_chunk(&bytes, cx, cz)?);
+                entry.insert(crate::legacy_nbt::parse_chunk(&bytes, cx, cz)?);
             }
             let original = &original_chunks[&chunk_pos];
             let index = (y as usize % 16) * 256
