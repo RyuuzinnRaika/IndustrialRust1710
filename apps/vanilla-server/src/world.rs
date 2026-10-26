@@ -2269,6 +2269,137 @@ mod tests {
     }
 
     #[test]
+    fn e46_multi_block_flush_crosses_chunks_and_region_boundaries_atomically() {
+        let (base, mut world) = e46_fixture("multi-region", false);
+        let root = base.join("anvil");
+        let path = root.join("flat.irw");
+        let changes = [
+            (0, 90, 0, (5 << 4) | 7),
+            (1, 90, 0, (5 << 4) | 3),
+            (16, 90, 0, 1 << 4),
+            (-1, 90, 0, (17 << 4) | 2),
+            (-1, 90, -1, 4 << 4),
+        ];
+        assert!(world.update_many_and_flush_existing_anvil(&path, &changes).unwrap());
+        for &(x, y, z, block) in &changes {
+            assert_eq!(world.get(x, y, z), block);
+            assert_eq!(World::load(&path).unwrap().get(x, y, z), block);
+            let region_path = root.join("region").join(format!(
+                "r.{}.{}.mca",
+                x.div_euclid(512),
+                z.div_euclid(512)
+            ));
+            let mut region =
+                fastanvil::Region::from_stream(File::open(&region_path).unwrap()).unwrap();
+            let nbt = region
+                .read_chunk(x.div_euclid(16).rem_euclid(32) as usize,
+                            z.div_euclid(16).rem_euclid(32) as usize)
+                .unwrap()
+                .unwrap();
+            let chunk = crate::legacy_nbt::parse_chunk(
+                &nbt, x.div_euclid(16), z.div_euclid(16),
+            )
+            .unwrap();
+            let index = (y as usize % 16) * 256
+                + z.rem_euclid(16) as usize * 16
+                + x.rem_euclid(16) as usize;
+            let (id, metadata) = chunk
+                .level
+                .sections
+                .iter()
+                .find(|section| section.y == (y / 16) as i8)
+                .unwrap()
+                .block_at(index)
+                .unwrap();
+            assert_eq!((id << 4) | u16::from(metadata), block);
+        }
+        assert!(!path.with_extension("pending-txn.json").exists());
+        // All no-op edits remain a no-op, not a redundant redo write.
+        assert!(!world.update_many_and_flush_existing_anvil(&path, &changes).unwrap());
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_multi_block_divergent_later_chunk_rolls_back_all_participants() {
+        let (base, mut world) = e46_fixture("multi-stale", true);
+        let root = base.join("anvil");
+        let irw = root.join("flat.irw");
+        let regions = [
+            root.join("region/r.0.0.mca"),
+            root.join("region/r.-1.0.mca"),
+        ];
+        let original_irw = fs::read(&irw).unwrap();
+        let before: Vec<_> = regions.iter().map(|p| fs::read(p).unwrap()).collect();
+        assert!(world
+            .update_many_and_flush_existing_anvil(
+                &irw,
+                &[(-1, 90, 0, 1 << 4), (2, 90, 3, 4 << 4)],
+            )
+            .is_err());
+        for &(x, y, z) in &[(-1, 90, 0), (2, 90, 3)] {
+            assert_eq!(world.get(x, y, z), 0);
+        }
+        assert_eq!(fs::read(&irw).unwrap(), original_irw);
+        for (path, expected) in regions.iter().zip(before.iter()) {
+            assert_eq!(fs::read(path).unwrap(), *expected);
+        }
+        assert!(!irw.with_extension("pending-txn.json").exists());
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_multi_block_rejects_duplicates_invalid_and_missing_chunks() {
+        let (base, mut world) = e46_fixture("multi-invalid", false);
+        let root = base.join("anvil");
+        let irw = root.join("flat.irw");
+        let region = root.join("region/r.0.0.mca");
+        let before_irw = fs::read(&irw).unwrap();
+        let before_region = fs::read(&region).unwrap();
+        assert!(world.update_many_and_flush_existing_anvil(&irw, &[]).is_err());
+        assert!(world
+            .update_many_and_flush_existing_anvil(
+                &irw, &[(0, 90, 0, 1 << 4), (0, 90, 0, 2 << 4)]
+            )
+            .is_err());
+        assert!(world
+            .update_many_and_flush_existing_anvil(&irw, &[(0, 256, 0, 1 << 4)])
+            .is_err());
+        assert!(world
+            .update_many_and_flush_existing_anvil(&irw, &[(0, 90, 0, 4096)])
+            .is_err());
+        // Anvil snapshot exports spawn chunks only; x=512 is absent.
+        assert!(world
+            .update_many_and_flush_existing_anvil(
+                &irw, &[(0, 90, 0, 1 << 4), (512, 90, 0, 1 << 4)],
+            )
+            .is_err());
+        assert_eq!(fs::read(&irw).unwrap(), before_irw);
+        assert_eq!(fs::read(&region).unwrap(), before_region);
+        assert_eq!(world.get(0, 90, 0), 0);
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn e46_multi_block_changes_in_same_chunk_preserve_other_blocks() {
+        let (base, mut world) = e46_fixture("same-chunk", false);
+        let root = base.join("anvil");
+        let irw = root.join("flat.irw");
+        let patches = [
+            (2, 90, 3, (5 << 4) | 1),
+            (3, 90, 3, (5 << 4) | 2),
+        ];
+        assert!(world.update_many_and_flush_existing_anvil(&irw, &patches).unwrap());
+        assert_eq!(world.get(2, 90, 3), (5 << 4) | 1);
+        assert_eq!(world.get(3, 90, 3), (5 << 4) | 2);
+        assert_eq!(World::load(&irw).unwrap().get(3, 90, 3), (5 << 4) | 2);
+        drop(world);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn e46_does_not_implicitly_bind_or_create_anvil_storage() {
         let mut detached = World::new();
         assert!(detached
