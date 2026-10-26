@@ -324,7 +324,7 @@ pub fn can_enchant(item: Stack) -> bool {
 /// Applies a validated server offer; returns None for already enchanted,
 /// ineligible or invalid inputs without modifying the inventory or XP.
 pub fn apply(item: Stack, cost: u8, seed: u64) -> io::Result<Option<Stack>> {
-    if cost == 0 || !can_enchant(item) {
+    if !(1..=30).contains(&cost) || !can_enchant(item) {
         return Ok(None);
     }
     let mut rng = StdRng::seed_from_u64(seed ^ (item.id as u16 as u64) << 32 ^ u64::from(cost));
@@ -425,6 +425,19 @@ mod tests {
             if map.contains_key("StoredEnchantments"))
         );
     }
+    #[test]
+    fn table_rejects_costs_outside_vanilla_1710_offers() {
+        let input = Stack {
+            id: 257,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        assert!(apply(input, 0, 42).unwrap().is_none());
+        assert!(apply(input, 31, 42).unwrap().is_none());
+        assert!(apply(input, u8::MAX, 42).unwrap().is_none());
+    }
+
     #[test]
     fn incompatible_enchantments_are_never_selected_together() {
         for id in [257, 276, 301, 261] {
