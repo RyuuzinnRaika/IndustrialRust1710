@@ -5609,6 +5609,11 @@ fn start_clock_console(
     thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
+            // stdin is blocking and may not produce another line during an
+            // emergency shutdown. Refuse new admin mutations if it wakes later.
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
             let Ok(line) = line else {
                 break;
             };
@@ -7535,10 +7540,22 @@ fn main() -> io::Result<()> {
     join_shutdown_worker(tick_thread, "tick", &mut shutdown_worker_failure);
     join_shutdown_worker(hopper_thread, "hopper", &mut shutdown_worker_failure);
     join_shutdown_worker(brewing_thread, "brewing", &mut shutdown_worker_failure);
-    join_shutdown_worker(projectile_thread, "projectile", &mut shutdown_worker_failure);
+    join_shutdown_worker(
+        projectile_thread,
+        "projectile",
+        &mut shutdown_worker_failure,
+    );
     clock.stop();
     join_shutdown_worker(clock_thread, "clock", &mut shutdown_worker_failure);
-    join_shutdown_worker(console_thread, "console", &mut shutdown_worker_failure);
+    if shutdown_worker_failure.is_some() && !console_thread.is_finished() {
+        // Emergency shutdown may be triggered without another console line.
+        // A blocked stdin read cannot be interrupted portably. The thread
+        // checks shutdown before it can execute any more commands; allow the
+        // process to exit after flushing rather than deadlocking here.
+        drop(console_thread);
+    } else {
+        join_shutdown_worker(console_thread, "console", &mut shutdown_worker_failure);
+    }
     session_guard
         .lock()
         .map_err(|_| bad("session lock mutex poisoned"))?
