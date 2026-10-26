@@ -3745,6 +3745,17 @@ fn play(
                         23 | 158
                     )
                 {
+                    // Resolve the block before locking device storage, keeping
+                    // the world/device lock ordering unchanged.
+                    let block_id = world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4;
+                    let Some(title) = dispensers::window_title(block_id) else {
+                        // The block may have been replaced after the initial check.
+                        continue;
+                    };
                     let pos = (x, y, z);
                     let guard = devices.lock().map_err(|_| bad("device lock poisoned"))?;
                     last_device_view = guard.slots(pos);
@@ -3767,7 +3778,7 @@ fn play(
                     let mut opened = vec![active_window];
                     // Both machines use the 1.7.10 dispenser 3x3 window.
                     write_string("minecraft:dispenser", &mut opened)?;
-                    write_string(&json!({"text":"Dispenser"}).to_string(), &mut opened)?;
+                    write_string(&json!({"text":title}).to_string(), &mut opened)?;
                     opened.push(dispensers::DEVICE_SLOTS as u8);
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &items)?;
