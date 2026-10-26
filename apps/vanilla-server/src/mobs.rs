@@ -4790,13 +4790,28 @@ mod tests {
             z: 0.5,
         };
         let invalid = [
-            PlayerPosition { x: f64::NAN, ..valid },
-            PlayerPosition { z: f64::INFINITY, ..valid },
-            PlayerPosition { y: f64::NEG_INFINITY, ..valid },
+            PlayerPosition {
+                x: f64::NAN,
+                ..valid
+            },
+            PlayerPosition {
+                z: f64::INFINITY,
+                ..valid
+            },
+            PlayerPosition {
+                y: f64::NEG_INFINITY,
+                ..valid
+            },
             PlayerPosition { y: -1.0, ..valid },
             PlayerPosition { y: 256.0, ..valid },
-            PlayerPosition { x: f64::from(i32::MAX) + 1.0, ..valid },
-            PlayerPosition { z: f64::from(i32::MIN) - 1.0, ..valid },
+            PlayerPosition {
+                x: f64::from(i32::MAX) + 1.0,
+                ..valid
+            },
+            PlayerPosition {
+                z: f64::from(i32::MIN) - 1.0,
+                ..valid
+            },
         ];
         for malformed in invalid {
             assert_eq!(natural_mob_cap(&[malformed], 70), 0);
