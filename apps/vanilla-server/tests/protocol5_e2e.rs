@@ -119,7 +119,7 @@ impl NativeServer {
         let (packet_id, body) = receive(&mut socket);
         assert_eq!(packet_id, 0, "missing Status Response before Ping");
         let mut cursor = Cursor::new(&body);
-        let _: Value = serde_json::from_str(&cursor.read_string(65536).unwrap()).unwrap();
+        let _: Value = serde_json::from_str(cursor.read_string(65536).unwrap()).unwrap();
         cursor.finish().unwrap();
 
         let payload = token.to_be_bytes();

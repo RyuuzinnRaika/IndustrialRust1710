@@ -589,6 +589,12 @@ fn villager_door_destination(world: &World, at: PlayerPosition) -> Option<Player
     doors
         .into_iter()
         .filter_map(|[x, y, z]| {
+            // Keep generated-village and independent-house goals on the same
+            // reachable floor. A 3D radius alone lets a villager on an upper
+            // floor walk toward an inaccessible ground-level door.
+            if (f64::from(y) - at.y.floor()).abs() > 4.0 {
+                return None;
+            }
             // 1.7.10 lower-half metadata bits 0..1 encode door facing.
             // Approach from the exterior side rather than the closed door.
             let (tx, tz) = match world.get(x, y, z) & 3 {
@@ -5388,6 +5394,51 @@ mod tests {
             z: f64::from(second[2]) - 0.5,
         };
         assert_eq!(villager_door_destination(&world, middle), Some(first_goal));
+        // Generated doors must obey the same four-block vertical reach as
+        // independent player-built houses, even when horizontally nearby.
+        assert_eq!(
+            villager_door_destination(
+                &world,
+                PlayerPosition {
+                    y: middle.y + 8.0,
+                    ..middle
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            villager_door_destination(
+                &world,
+                PlayerPosition {
+                    y: middle.y - 8.0,
+                    ..middle
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            villager_door_destination(
+                &world,
+                PlayerPosition {
+                    y: middle.y + 4.0,
+                    ..middle
+                }
+            ),
+            Some(first_goal)
+        );
+
+        // The floor of the villager's feet coordinate defines its block Y;
+        // fractional positions on the fourth block still count as reachable.
+        assert_eq!(
+            villager_door_destination(
+                &world,
+                PlayerPosition {
+                    y: middle.y + 4.75,
+                    ..middle
+                }
+            ),
+            Some(first_goal)
+        );
 
         // The mob tick must use the live door even without a nearby player.
         let outside = PlayerPosition {
