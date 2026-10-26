@@ -287,6 +287,77 @@ pub fn repair(left: Stack, right: Stack) -> Option<Repair> {
     })
 }
 
+/// Calculate the anvil result after an optional MC|ItemName update.
+/// A missing request retains the existing custom name; an empty request
+/// removes the custom name without deleting other display or mod NBT fields.
+/// Rename-only results use no right-hand ingredients and cost one level.
+pub fn repair_with_name(left: Stack, right: Option<Stack>, name: Option<&str>) -> Option<Repair> {
+    if !left.is_valid() || left.count != 1 {
+        return None;
+    }
+    let mut plan = right.and_then(|ingredient| repair(left, ingredient));
+    let Some(requested) = name else {
+        return plan;
+    };
+    // The 1.7.10 anvil text box accepts at most 30 UTF-16 code units.
+    // Reject control characters rather than creating invisible NBT names.
+    if requested.encode_utf16().count() > 30 || requested.chars().any(char::is_control) {
+        return None;
+    }
+    // Do not manufacture a rename-only output while a nonempty right slot
+    // contains an invalid or incompatible ingredient.
+    if right.is_some() && plan.is_none() {
+        return None;
+    }
+
+    let left_root = nbt_root(left)?;
+    let previous = match left_root.get("display") {
+        None => None,
+        Some(Value::Compound(fields)) => match fields.get("Name") {
+            None => None,
+            Some(Value::String(value)) => Some(value.as_str()),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let unchanged = previous == Some(requested) || (requested.is_empty() && previous.is_none());
+    if unchanged {
+        return plan;
+    }
+
+    let mut output = plan.map_or(left, |value| value.result);
+    let mut root = nbt_root(output)?;
+    if requested.is_empty() {
+        if let Some(Value::Compound(display)) = root.get_mut("display") {
+            display.remove("Name");
+            if display.is_empty() {
+                root.remove("display");
+            }
+        }
+    } else {
+        let entry = root
+            .entry("display".to_owned())
+            .or_insert_with(|| Value::Compound(HashMap::new()));
+        let Value::Compound(display) = entry else {
+            return None;
+        };
+        display.insert("Name".to_owned(), Value::String(requested.to_owned()));
+    }
+    output.nbt = if root.is_empty() {
+        None
+    } else {
+        Some(item_nbt::from_value(&Value::Compound(root)).ok()?)
+    };
+    let mut result = plan.take().unwrap_or(Repair {
+        result: left,
+        consumed: 0,
+        levels: 0,
+    });
+    result.result = output;
+    result.levels = result.levels.checked_add(1)?;
+    (result.levels <= 39).then_some(result)
+}
+
 /// Candidate enchantments by vanilla 1.7.10 numeric enchantment ID.
 /// This is a conservative, one-enchantment baseline rather than the complete
 /// weighted/multiple-enchantment vanilla enchantment algorithm. Keeping it
@@ -578,6 +649,76 @@ mod tests {
             ..stack(403, 1, 0)
         };
         assert!(repair(stack(276, 1, 10), malformed_book).is_none());
+    }
+
+    #[test]
+    fn d36_rename_only_creates_display_nbt_and_clearing_keeps_unknown_tags() {
+        let stone = stack(1, 1, 0);
+        let plan = repair_with_name(stone, None, Some("工具の名前")).unwrap();
+        assert_eq!(plan.levels, 1);
+        assert_eq!(plan.consumed, 0);
+        assert_eq!(plan.result.id, stone.id);
+        let Value::Compound(root) = item_nbt::value(plan.result.nbt.unwrap()).unwrap() else {
+            panic!("compound");
+        };
+        let Some(Value::Compound(display)) = root.get("display") else {
+            panic!("display");
+        };
+        assert_eq!(
+            display.get("Name"),
+            Some(&Value::String("工具の名前".into()))
+        );
+        assert!(repair_with_name(stone, None, Some("")).is_none());
+
+        let custom = Value::Compound(HashMap::from([
+            ("CustomUnknown".to_owned(), Value::Int(71)),
+            (
+                "display".to_owned(),
+                Value::Compound(HashMap::from([
+                    ("Name".to_owned(), Value::String("old".into())),
+                    (
+                        "Lore".to_owned(),
+                        Value::List(vec![Value::String("keep".into())]),
+                    ),
+                ])),
+            ),
+        ]));
+        let existing = Stack {
+            nbt: Some(item_nbt::from_value(&custom).unwrap()),
+            ..stone
+        };
+        let result = repair_with_name(existing, None, Some("")).unwrap();
+        assert_eq!(result.levels, 1);
+        let Value::Compound(root) = item_nbt::value(result.result.nbt.unwrap()).unwrap() else {
+            panic!("compound");
+        };
+        assert_eq!(root.get("CustomUnknown"), Some(&Value::Int(71)));
+        let Some(Value::Compound(display)) = root.get("display") else {
+            panic!("display");
+        };
+        assert!(!display.contains_key("Name"));
+        assert_eq!(
+            display.get("Lore"),
+            Some(&Value::List(vec![Value::String("keep".into())]))
+        );
+        assert!(repair_with_name(existing, None, Some("old")).is_none());
+    }
+
+    #[test]
+    fn d36_rename_and_repair_combine_and_reject_malformed_names() {
+        let left = stack(257, 1, 100);
+        let right = stack(265, 2, 0);
+        let repaired = repair(left, right).unwrap();
+        let named = repair_with_name(left, Some(right), Some("New Pickaxe")).unwrap();
+        assert_eq!(named.levels, repaired.levels + 1);
+        assert_eq!(named.consumed, repaired.consumed);
+        assert_eq!(named.result.damage, repaired.result.damage);
+        assert!(named.result.nbt.is_some());
+        // Repeated names, control characters and oversized GUI input cannot
+        // increase the cost or create invalid item metadata.
+        assert!(repair_with_name(left, None, Some(&"A".repeat(31))).is_none());
+        assert!(repair_with_name(left, None, Some(&format!("A{}B", char::from(10)))).is_none());
+        assert!(repair_with_name(left, None, Some(&"😀".repeat(16))).is_none());
     }
 
     #[test]

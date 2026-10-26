@@ -83,6 +83,10 @@ pub struct Inventory {
     /// discarded if a client closes the transient GUI or a save is replayed.
     #[serde(default)]
     anvil_inputs: [Option<Stack>; 2],
+    /// Pending rename text belongs to the open GUI, not the saved inventory.
+    /// Some("") removes a custom name; None means no rename requested.
+    #[serde(skip)]
+    anvil_name: Option<String>,
     /// Enchanting-table input is a single item; kept in the save until it can
     /// be returned to the player so disconnect/full inventory cannot erase it.
     #[serde(default)]
@@ -101,6 +105,7 @@ impl Default for Inventory {
             cursor: None,
             workbench: [None; 9],
             anvil_inputs: [None; 2],
+            anvil_name: None,
             enchant_input: None,
             drag: Drag::default(),
             bed_spawn: None,
@@ -1615,10 +1620,31 @@ impl Inventory {
         }
     }
 
-    /// Compute a server-owned durability repair or compatible enchantment merge.
-    /// The 1.7.10 rename GUI and full prior-work costs remain pending.
+    /// Pending rename text is transient and can only be changed while the
+    /// owning anvil window is valid. A blank name intentionally clears it.
+    pub fn set_anvil_name(&mut self, name: String) -> bool {
+        if self.anvil_inputs[0].is_none()
+            || name.encode_utf16().count() > 30
+            || name.chars().any(char::is_control)
+            || self.anvil_name.as_deref() == Some(name.as_str())
+        {
+            return false;
+        }
+        self.anvil_name = Some(name);
+        true
+    }
+
+    pub fn clear_anvil_name(&mut self) {
+        self.anvil_name = None;
+    }
+
+    /// Server-owned repair, enchant combination or name-only result.
     pub fn anvil_preview(&self) -> Option<crate::workstations::Repair> {
-        crate::workstations::repair(self.anvil_inputs[0]?, self.anvil_inputs[1]?)
+        crate::workstations::repair_with_name(
+            self.anvil_inputs[0]?,
+            self.anvil_inputs[1],
+            self.anvil_name.as_deref(),
+        )
     }
 
     /// Protocol 5 anvil GUI: two inputs, read-only result, 36 player slots.
@@ -1657,6 +1683,7 @@ impl Inventory {
             }
         }
         staged.anvil_inputs = [None; 2];
+        staged.anvil_name = None;
         *self = staged;
         true
     }
@@ -1671,7 +1698,8 @@ impl Inventory {
         experience: &mut crate::experience::Experience,
         survival: bool,
     ) -> bool {
-        match slot {
+        let before_left = self.anvil_inputs[0];
+        let accepted = match slot {
             0 | 1 if mode == 0 && matches!(button, 0 | 1) => {
                 let index = slot as usize;
                 let original = self.anvil_inputs[index];
@@ -1799,7 +1827,13 @@ impl Inventory {
                 self.click_window(0, translated, button, mode)
             }
             _ => false,
+        };
+        // The name belongs to the previous left-hand item, not whichever
+        // stack happens to be placed in the slot after a click/shift-click.
+        if accepted && self.anvil_inputs[0] != before_left {
+            self.anvil_name = None;
         }
+        accepted
     }
 
     /// Clientbound Set Slot (0x2F): window -1, slot -1 represents the cursor.
@@ -3097,11 +3131,21 @@ mod tests {
         xp.total = 300;
         assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
         assert_eq!(inv.anvil_inputs, [None, None]);
-        assert_eq!(inv.cursor, Some(expected));
+        let actual = inv.cursor.unwrap();
+        assert_eq!(
+            (actual.id, actual.count, actual.damage),
+            (expected.id, expected.count, expected.damage)
+        );
+        // NBT intern handles are process-local and serialized Compound maps
+        // can have different byte order; compare actual tag semantics instead.
+        assert_eq!(
+            crate::item_nbt::value(actual.nbt.unwrap()).unwrap(),
+            crate::item_nbt::value(expected.nbt.unwrap()).unwrap()
+        );
         assert!(xp.total < 300);
         let saved = inv.encoded().unwrap();
         let reloaded: Inventory = serde_json::from_slice(&saved).unwrap();
-        assert_eq!(reloaded.cursor, Some(expected));
+        assert_eq!(reloaded.cursor, Some(actual));
         assert_eq!(reloaded.anvil_inputs, [None, None]);
         let Value::Compound(tags) =
             crate::item_nbt::value(reloaded.cursor.unwrap().nbt.unwrap()).unwrap()
@@ -3111,6 +3155,76 @@ mod tests {
         assert!(tags.contains_key("ench"));
         assert!(!tags.contains_key("StoredEnchantments"));
         assert!(!inv.anvil_click_window(2, 0, 0, &mut xp, true));
+    }
+
+    #[test]
+    fn d36_rename_only_anvil_spends_xp_once_and_persists_display_name() {
+        use fastnbt::Value;
+
+        let stone = Stack {
+            id: 1,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inv = Inventory {
+            anvil_inputs: [Some(stone), None],
+            ..Inventory::default()
+        };
+        assert!(inv.set_anvil_name("A name".into()));
+        assert!(!inv.set_anvil_name("A name".into()));
+        assert_eq!(inv.anvil_preview().unwrap().levels, 1);
+        assert_eq!(inv.anvil_preview().unwrap().consumed, 0);
+        let mut xp = crate::experience::Experience::default();
+        let before = inv.clone();
+        assert!(!inv.anvil_click_window(2, 0, 0, &mut xp, true));
+        assert_eq!(inv, before);
+        xp.total = 300;
+        assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
+        assert!(xp.total < 300);
+        assert!(inv.anvil_inputs.iter().all(Option::is_none));
+        assert_eq!(inv.anvil_name, None);
+        let result = inv.cursor.unwrap();
+        let saved = inv.encoded().unwrap();
+        let loaded: Inventory = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(loaded.cursor, Some(result));
+        let Value::Compound(root) =
+            crate::item_nbt::value(loaded.cursor.unwrap().nbt.unwrap()).unwrap()
+        else {
+            panic!("expected tagged item");
+        };
+        let Some(Value::Compound(display)) = root.get("display") else {
+            panic!("expected display");
+        };
+        assert_eq!(display.get("Name"), Some(&Value::String("A name".into())));
+        assert!(!inv.anvil_click_window(2, 0, 0, &mut xp, true));
+    }
+
+    #[test]
+    fn d36_stale_rename_text_is_cleared_when_left_input_changes() {
+        let pickaxe = Stack {
+            id: 257,
+            count: 1,
+            damage: 10,
+            nbt: None,
+        };
+        let mut inv = Inventory {
+            anvil_inputs: [Some(pickaxe), None],
+            ..Inventory::default()
+        };
+        assert!(inv.set_anvil_name("first".into()));
+        let mut xp = crate::experience::Experience::default();
+        assert!(inv.anvil_click_window(0, 0, 0, &mut xp, false));
+        assert!(inv.anvil_inputs[0].is_none());
+        assert!(inv.anvil_name.is_none());
+        assert!(!inv.set_anvil_name("remote".into()));
+        assert!(inv.anvil_click_window(0, 0, 0, &mut xp, false));
+        assert_eq!(inv.anvil_inputs[0], Some(pickaxe));
+        assert!(inv.anvil_preview().is_none());
+        assert!(inv.set_anvil_name("second".into()));
+        assert!(inv.reclaim_anvil_inputs());
+        assert!(inv.anvil_name.is_none());
+        assert_eq!(inv.slots[9], Some(pickaxe));
     }
 
     #[test]

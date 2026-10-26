@@ -265,6 +265,18 @@ impl<'a> Input<'a> {
         }
     }
 }
+/// Vanilla 1.7.10 sends a VarInt-length UTF-8 String in MC|ItemName.
+fn parse_anvil_name(payload: &[u8]) -> Option<String> {
+    let mut input = Input(payload);
+    let name = input.string(30).ok()?;
+    input.finish().ok()?;
+    // The vanilla GUI limits the field to 30 UTF-16 code units.
+    if name.encode_utf16().count() > 30 || name.chars().any(char::is_control) {
+        return None;
+    }
+    Some(name)
+}
+
 fn receive(s: &mut Connection) -> io::Result<(i32, Vec<u8>)> {
     let data = read_frame(s)?;
     let mut r = Input(&data);
@@ -3891,6 +3903,7 @@ fn play(
                     active_device = None;
                     active_brewer = None;
                     active_anvil = Some((x, y, z));
+                    inventory.clear_anvil_name();
                     active_enchant = None;
                     let mut opened = vec![active_window];
                     write_string("minecraft:anvil", &mut opened)?;
@@ -4876,7 +4889,26 @@ fn play(
                 }
                 let payload = input.take(length as usize)?;
                 input.finish()?;
-                if matches!(channel.as_str(), "MC|BEdit" | "MC|BSign")
+                if channel == "MC|ItemName" {
+                    // Never apply a name from a closed, remote or stale anvil.
+                    // This updates only the transient preview, not disk or XP;
+                    // taking the output is the authoritative transaction.
+                    if let (Some(pos), Some(requested)) = (active_anvil, parse_anvil_name(payload))
+                    {
+                        let valid_anvil = world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(pos.0, pos.1, pos.2)
+                            >> 4
+                            == 145
+                            && near(location, pos.0, pos.1, pos.2);
+                        if active_window != 0 && valid_anvil && inventory.set_anvil_name(requested)
+                        {
+                            send(s, 0x30, &inventory.anvil_window_items(active_window))?;
+                            send(s, 0x31, &inventory.anvil_cost_property(active_window))?;
+                        }
+                    }
+                } else if matches!(channel.as_str(), "MC|BEdit" | "MC|BSign")
                     && books::process(
                         &channel,
                         payload,
@@ -7879,6 +7911,27 @@ mod tests {
         assert_eq!(payload.len(), 8192 + 4096 + 8192 + 256);
         assert_eq!(&payload[payload.len() - 256..], &[1u8; 256]);
     }
+    #[test]
+    fn protocol5_anvil_rename_payload_is_bounded_utf8_and_varint_encoded() {
+        let mut valid = Vec::new();
+        write_string("Named Sword", &mut valid).unwrap();
+        assert_eq!(parse_anvil_name(&valid), Some("Named Sword".into()));
+        let mut japanese = Vec::new();
+        write_string("名前変更", &mut japanese).unwrap();
+        assert_eq!(parse_anvil_name(&japanese), Some("名前変更".into()));
+        assert_eq!(parse_anvil_name(&[0]), Some(String::new()));
+        assert!(parse_anvil_name(&[10, b't', b'o']).is_none());
+        assert!(parse_anvil_name(&[2, 0xff, 0xff]).is_none());
+        assert!(parse_anvil_name(&[1, b'A', 0]).is_none());
+        assert!(parse_anvil_name(&[1, 10]).is_none());
+        let mut too_long = Vec::new();
+        write_string(&"a".repeat(31), &mut too_long).unwrap();
+        assert!(parse_anvil_name(&too_long).is_none());
+        let mut utf16_oversized = Vec::new();
+        write_string(&"😀".repeat(16), &mut utf16_oversized).unwrap();
+        assert!(parse_anvil_name(&utf16_oversized).is_none());
+    }
+
     #[test]
     fn protocol5_slot_nbt_length_is_validated() {
         let empty = [-1i16; 1]
