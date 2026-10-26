@@ -578,11 +578,14 @@ fn villager_door_destination(world: &World, at: PlayerPosition) -> Option<Player
         return None;
     }
     let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
+    // A generated village can have live doors on a different floor.
+    // Still consider nearby player-built houses instead of suppressing the
+    // fallback whenever any generated door happens to exist.
     let doors = world
         .village_doors_with_bounded_annex(x, z)
-        .unwrap_or_else(|| {
-            world.independent_player_village_doors_near_at(x, at.y.floor() as i32, z)
-        });
+        .unwrap_or_default()
+        .into_iter()
+        .chain(world.independent_player_village_doors_near_at(x, at.y.floor() as i32, z));
     doors
         .into_iter()
         .filter_map(|[x, y, z]| {
@@ -5466,6 +5469,52 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn villager_can_target_roofed_player_house_above_generated_village() {
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        let (x, z) = (-8..=8)
+            .flat_map(|gx| (-8..=8).map(move |gz| (gx * 192 + 48, gz * 192 + 48)))
+            .find(|&(x, z)| world.live_village_house_doors(x, z).is_some())
+            .expect("seed 42 has a generated village");
+        let y = 200;
+        // The house is outside the generated footprint and cannot connect
+        // to its ground-level doors, but is within 32 blocks of this villager.
+        let house_x = x + 40;
+        let at = PlayerPosition {
+            x: f64::from(x + 9) + 0.5,
+            y: f64::from(y),
+            z: f64::from(z) + 3.5,
+        };
+        assert!(world.village_doors_with_bounded_annex(x + 9, z).is_some());
+        assert_eq!(
+            villager_door_destination(&world, at),
+            None,
+            "generated ground-level doors must not attract an upper-floor villager"
+        );
+
+        // The independent house must remain eligible even while the generated
+        // village still has intact doors. Previously Some(generated doors)
+        // suppressed the independent-house lookup altogether.
+        for (bx, by, bz, block) in [
+            (house_x, y - 1, z, 1 << 4),
+            (house_x, y, z, 64 << 4),
+            (house_x, y + 1, z, 64 << 4 | 8),
+            (house_x, y + 3, z + 1, 1 << 4),
+        ] {
+            world.import_block(bx, by, bz, block).unwrap();
+        }
+        let goal = PlayerPosition {
+            x: f64::from(house_x) + 0.5,
+            y: f64::from(y),
+            z: f64::from(z) + 1.5,
+        };
+        assert_eq!(villager_door_destination(&world, at), Some(goal));
+        world.import_block(house_x, y + 3, z + 1, 0).unwrap();
+        assert_eq!(villager_door_destination(&world, at), None);
+        world.import_block(house_x, y + 3, z + 1, 1 << 4).unwrap();
+        assert_eq!(villager_door_destination(&world, at), Some(goal));
     }
 
     #[test]
