@@ -58,12 +58,36 @@ impl DimensionManager {
             Dimension::End => self.root.join("DIM1").join("end.irw"),
         }
     }
+    /// A real directory at the final root is not sufficient: an ancestor
+    /// symlink can still redirect all dimension files outside the locked
+    /// world tree. Reject every existing non-directory path component before
+    /// loading, recovering or creating any dimension files.
+    fn validate_root_ancestors(&self) -> io::Result<()> {
+        for ancestor in self.root.ancestors() {
+            if ancestor.as_os_str().is_empty() {
+                continue;
+            }
+            match fs::symlink_metadata(ancestor) {
+                Ok(meta) if !meta.file_type().is_dir() => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unsafe dimension root ancestor directory",
+                    ));
+                }
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
     /// Inspect an existing dimension without creating any missing files.
     /// Symlinks (including broken links) and non-regular world files are
     /// rejected before World::load can follow them. The server must hold a
     /// session lock on this root while loading and creating dimensions.
     fn inspect_existing(&self, dimension: Dimension) -> io::Result<Option<World>> {
         let invalid = |reason| io::Error::new(io::ErrorKind::InvalidData, reason);
+        self.validate_root_ancestors()?;
         match fs::symlink_metadata(&self.root) {
             Ok(meta) if !meta.file_type().is_dir() => {
                 return Err(invalid("dimension root is not a real directory"));
@@ -103,6 +127,7 @@ impl DimensionManager {
     }
 
     fn create_new(&self, dimension: Dimension) -> io::Result<World> {
+        self.validate_root_ancestors()?;
         let fresh = World::expanded(self.seed, dimension);
         fresh.save_new(&self.path(dimension))?;
         Ok(fresh)
@@ -134,6 +159,7 @@ pub struct DimensionWorlds {
 
 impl DimensionWorlds {
     pub fn load_all(manager: DimensionManager) -> io::Result<Self> {
+        manager.validate_root_ancestors()?;
         // Recover a pending three-dimension save before looking at any
         // world snapshot. The server is responsible for holding session.lock.
         // Reject prototype storage inside native Anvil level directories.
@@ -1062,6 +1088,47 @@ mod tests {
         ] {
             assert!(destination(Dimension::Overworld, Dimension::Nether, x, y, z).is_none());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dimension_root_rejects_symlinked_ancestor_without_writing_worlds() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "ir1710-dimension-ancestor-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let real = base.join("real");
+        fs::create_dir_all(&real).unwrap();
+        symlink(&real, base.join("alias")).unwrap();
+
+        // The final world directory does not exist yet, so checking only
+        // symlink_metadata(root) would miss the redirected ancestor.
+        let redirected = DimensionManager::new(base.join("alias/worlds"), 42);
+        assert_eq!(
+            DimensionWorlds::load_all(redirected.clone())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            redirected
+                .load_or_create(Dimension::Overworld)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!real.join("worlds").exists());
+
+        // The same nested path must work when every ancestor is real.
+        let normal = DimensionManager::new(real.join("worlds"), 42);
+        let worlds = DimensionWorlds::load_all(normal).unwrap();
+        assert!(worlds.path(Dimension::Overworld).is_file());
+        drop(worlds);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
