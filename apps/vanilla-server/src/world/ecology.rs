@@ -151,7 +151,7 @@ impl World {
         }
     }
     pub(super) fn is_cold_biome(&self, x: i32, z: i32) -> bool {
-        matches!(self.biome_at(x, z), 11 | 12 | 13 | 26 | 30 | 31)
+        matches!(self.biome_at(x, z), 5 | 10 | 11 | 12 | 13 | 26 | 30 | 31)
     }
     fn wet_farmland(&self, x: i32, y: i32, z: i32) -> bool {
         for dx in -4..=4 {
