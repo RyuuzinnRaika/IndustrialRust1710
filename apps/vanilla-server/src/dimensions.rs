@@ -259,6 +259,9 @@ impl DimensionWorlds {
     /// server's session lock until commit finishes. If commit fails, stop
     /// further writes and let load_all replay the prepared redo journal.
     pub fn save_all(&self) -> io::Result<()> {
+        // The world directory may have changed since load_all. Refuse to
+        // commit through a substituted root or ancestor symlink.
+        self.manager.validate_root_ancestors()?;
         let dimensions = [Dimension::Overworld, Dimension::Nether, Dimension::End];
         let paths = dimensions.map(|dim| self.manager.path(dim));
         let snapshots = dimensions.map(|dim| {
@@ -1152,6 +1155,38 @@ mod tests {
         ] {
             assert!(destination(Dimension::Overworld, Dimension::Nether, x, y, z).is_none());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_all_rejects_root_symlink_substituted_after_load() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "ir1710-dimension-save-root-swap-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let root = base.join("worlds");
+        let moved = base.join("moved-worlds");
+        let worlds = DimensionWorlds::load_all(DimensionManager::new(&root, 71)).unwrap();
+        let original = fs::read(root.join("overworld.irw")).unwrap();
+
+        // Simulate a root replacement between the initial load and save.
+        fs::rename(&root, &moved).unwrap();
+        symlink(&moved, &root).unwrap();
+        assert_eq!(
+            worlds.save_all().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(moved.join("overworld.irw")).unwrap(), original);
+        assert!(!moved.join("dimensions.pending-txn.json").exists());
+
+        fs::remove_file(&root).unwrap();
+        drop(worlds);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[cfg(unix)]
