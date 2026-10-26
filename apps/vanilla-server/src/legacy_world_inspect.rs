@@ -38,7 +38,9 @@ fn reject_unsupported_dimensions(root: &Path) -> io::Result<()> {
         let name = entry?.file_name();
         let name = name.to_string_lossy();
         if name.starts_with("DIM") && name != "DIM-1" && name != "DIM1" {
-            return Err(invalid("unsupported extra Anvil dimension; migration is unavailable"));
+            return Err(invalid(
+                "unsupported extra Anvil dimension; migration is unavailable",
+            ));
         }
     }
     Ok(())
@@ -82,7 +84,9 @@ pub(crate) fn inspect_world(root: &Path) -> io::Result<Inspection> {
                 .to_str()
                 .ok_or_else(|| invalid("non-UTF8 Anvil region filename"))?;
             if name.ends_with(".mcr") {
-                return Err(invalid("legacy .mcr region requires unsupported conversion"));
+                return Err(invalid(
+                    "legacy .mcr region requires unsupported conversion",
+                ));
             }
             if !name.ends_with(".mca") {
                 continue;
