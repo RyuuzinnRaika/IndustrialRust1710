@@ -1021,6 +1021,76 @@ mod tests {
     }
 
     #[test]
+    fn tnt_capacity_defers_chain_blocks_instead_of_failing_the_save() {
+        let path = file("tnt-capacity");
+        let mut world = World::new();
+        for x in 1..=3 {
+            world.import_block(x, 100, 0, 46 << 4).unwrap();
+        }
+        for x in 0..(MAX_PRIMED_TNT - 1) {
+            assert!(world.spawn_primed_tnt(100 + x as i32, 100, 40, 80));
+        }
+        assert!(world.spawn_primed_tnt(0, 100, 0, 1));
+        assert!(!world.spawn_primed_tnt(9, 100, 0, 80));
+        assert!(world
+            .stage_special_item(
+                1,
+                100,
+                0,
+                Stack {
+                    id: 259,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                },
+            )
+            .unwrap()
+            .is_none());
+
+        world.save(&path).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.primed_tnt.len(), MAX_PRIMED_TNT);
+        assert_eq!(world.get(1, 100, 0), 0);
+        assert_eq!(world.get(2, 100, 0) >> 4, 46);
+        assert_eq!(world.get(3, 100, 0) >> 4, 46);
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.primed_tnt.len(), MAX_PRIMED_TNT);
+        assert_eq!(restored.get(3, 100, 0) >> 4, 46);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn two_hundred_fifty_six_simultaneous_tnt_resume_without_lost_explosions() {
+        let path = file("tnt-256-burst");
+        let mut world = World::new();
+        for x in 0..256 {
+            assert!(world.spawn_primed_tnt(x * 20, 200, 0, 1));
+        }
+        world.save(&path).unwrap();
+        world.drain_tnt_events();
+        let mut detonated = std::collections::BTreeSet::new();
+        for tick in 0..64 {
+            world.block_tick(&path, 64).unwrap();
+            for event in world.drain_tnt_events() {
+                if let TntEvent::Explode { entity_id, .. } = event {
+                    assert!(detonated.insert(entity_id), "duplicate TNT detonation");
+                }
+            }
+            assert_eq!(detonated.len(), ((tick + 1) * 4) as usize);
+            if tick == 31 {
+                // Simulate /stop and restart halfway through an overdue queue.
+                world.save(&path).unwrap();
+                world = World::load(&path).unwrap();
+                world.drain_tnt_events();
+            }
+        }
+        assert_eq!(detonated.len(), 256);
+        assert!(world.primed_tnt.is_empty());
+        assert!(World::load(&path).unwrap().primed_tnt.is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn malformed_tnt_trailer_fails_closed() {
         let path = file("tnt-corrupt");
         let mut world = World::new();
