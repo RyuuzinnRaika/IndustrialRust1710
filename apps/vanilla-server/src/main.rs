@@ -9995,7 +9995,11 @@ mod initial_join_disconnect_tests {
 
         let hub = Arc::new(Hub::default());
         let (id, _events, _) = hub
-            .add("RustTester".into(), "uuid-1".into(), PlayerPosition::default())
+            .add(
+                "RustTester".into(),
+                "uuid-1".into(),
+                PlayerPosition::default(),
+            )
             .unwrap();
         {
             let _admission = PlayerAdmission {
@@ -10018,7 +10022,11 @@ mod initial_join_disconnect_tests {
         }
         assert_eq!(hub.count().unwrap(), 0, "failed Join leaked admission");
         let (new_id, _events, _) = hub
-            .add("RustTester".into(), "uuid-2".into(), PlayerPosition::default())
+            .add(
+                "RustTester".into(),
+                "uuid-2".into(),
+                PlayerPosition::default(),
+            )
             .unwrap();
         assert!(new_id > id);
     }
@@ -10027,8 +10035,9 @@ mod initial_join_disconnect_tests {
     fn join_failure_classifies_bounded_queue_and_backend_errors() {
         assert!(join_failure_reason(&io::Error::from(ErrorKind::WouldBlock)).contains("busy"));
         assert!(join_failure_reason(&io::Error::from(ErrorKind::TimedOut)).contains("timed out"));
-        assert!(join_failure_reason(&io::Error::other("internal secret"))
-            .contains("loading failed"));
+        assert!(
+            join_failure_reason(&io::Error::other("internal secret")).contains("loading failed")
+        );
     }
 }
 
