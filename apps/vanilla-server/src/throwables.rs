@@ -1359,9 +1359,11 @@ mod tests {
             for y in [70.25, 70.75] {
                 let from = PlayerPosition { x: 0.2, y, z: 0.5 };
                 let to = PlayerPosition { x: 2.2, ..from };
-                assert_eq!(first_solid_block_hit(&world, from, to).unwrap().1, [1, 70, 0]);
+                assert_eq!(
+                    first_solid_block_hit(&world, from, to).unwrap().1,
+                    [1, 70, 0]
+                );
             }
         }
     }
-
 }
