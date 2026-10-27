@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 const QUEUE_CAPACITY: usize = 32;
 /// Per-session bounded batch to prevent one login from filling the shared queue.
 pub const SESSION_BATCH_LIMIT: usize = 8;
-const SUBMIT_TIMEOUT: Duration = Duration::from_millis(100);
+const SUBMIT_TIMEOUT: Duration = Duration::from_millis(750);
 /// Cap wall-clock time spent on a batch of compressed chunks for one client.
 /// The session is disconnected on expiry, instead of hanging on a dead worker.
 pub const BATCH_DEADLINE: Duration = Duration::from_secs(15);
