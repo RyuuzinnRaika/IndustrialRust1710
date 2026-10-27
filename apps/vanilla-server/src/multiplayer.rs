@@ -20,6 +20,9 @@ pub const PEARL_TELEPORT_EVENT: u32 = u32::MAX - 2;
 pub const ADMIN_KICK_EVENT: u32 = u32::MAX - 3;
 /// Console-only mode change, distinct from the internal Kick mailbox event.
 pub const ADMIN_GAMEMODE_EVENT: u32 = u32::MAX - 4;
+/// Internal worker-to-player correction after a server-owned piston move.
+/// Session thread rechecks the live collision and persists the new position.
+pub const PISTON_PUSH_EVENT: u32 = u32::MAX - 5;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {

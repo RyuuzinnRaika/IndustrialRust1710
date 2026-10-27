@@ -532,6 +532,64 @@ pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPos
     true
 }
 
+/// Reconcile a player caught by a newly committed piston extension.
+/// Block motion is delivered by the world worker asynchronously from the
+/// player's input loop; without this the client becomes trapped in a solid
+/// block and the ordinary movement validator rubber-bands it indefinitely.
+///
+/// This is a bounded server-authoritative resolution, not a replacement for
+/// vanilla's half-block-per-tick TileEntityPiston entity sweep.
+pub fn piston_push_candidate(
+    world: &World,
+    player: &PlayerPosition,
+    piston: (i32, i32, i32),
+    facing: u8,
+) -> Option<PlayerPosition> {
+    let (dx, dy, dz) = match facing {
+        0 => (0, -1, 0),
+        1 => (0, 1, 0),
+        2 => (0, 0, -1),
+        3 => (0, 0, 1),
+        4 => (-1, 0, 0),
+        5 => (1, 0, 0),
+        _ => return None,
+    };
+    // Only block cells actually written by this move can displace players.
+    // The transient swept-cell registry expires after three simulation ticks.
+    let intersects = (1..=13).any(|step| {
+        let (x, y, z) = (
+            piston.0 + dx * step,
+            piston.1 + dy * step,
+            piston.2 + dz * step,
+        );
+        world.piston_sweep_at(x, y, z)
+            && overlap(
+                player.x - HALF_WIDTH,
+                player.x + HALF_WIDTH,
+                x as f64,
+                x as f64 + 1.0,
+            )
+            && overlap(player.y, player.y + HEIGHT, y as f64, y as f64 + 1.0)
+            && overlap(
+                player.z - HALF_WIDTH,
+                player.z + HALF_WIDTH,
+                z as f64,
+                z as f64 + 1.0,
+            )
+    });
+    if !intersects {
+        return None;
+    }
+    let next = PlayerPosition {
+        x: player.x + dx as f64,
+        y: player.y + dy as f64,
+        z: player.z + dz as f64,
+    };
+    // The newly persisted block layout is authoritative. Never shove a
+    // player outside world limits or through an immovable wall.
+    (next.is_valid() && !collides(world, &next)).then_some(next)
+}
+
 const GRAVITY_ACCELERATION: f64 = 0.08;
 const AIR_DRAG: f64 = 0.98;
 const TERMINAL_VELOCITY: f64 = -3.92;
@@ -840,6 +898,39 @@ mod group_b_collision_tests {
                 assert_eq!(axis_length, 0.75);
             }
         }
+    }
+
+    #[test]
+    fn piston_extension_displaces_overlapping_player_without_wall_clipping() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-physics-piston-player-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, -1, 64, 0, 152 << 4).unwrap();
+        world
+            .update_and_save(&path, 0, 64, 0, (33 << 4) | 5)
+            .unwrap();
+        world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        let caught = PlayerPosition {
+            x: 2.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        assert_eq!(
+            piston_push_candidate(&world, &caught, (0, 64, 0), 5),
+            Some(PlayerPosition { x: 3.5, ..caught })
+        );
+        assert_eq!(piston_push_candidate(&world, &caught, (0, 64, 0), 6), None);
+        assert_eq!(
+            piston_push_candidate(&world, &PlayerPosition { x: 5.5, ..caught }, (0, 64, 0), 5),
+            None
+        );
+        world.update_and_save(&path, 3, 64, 0, 7 << 4).unwrap();
+        assert_eq!(piston_push_candidate(&world, &caught, (0, 64, 0), 5), None);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
