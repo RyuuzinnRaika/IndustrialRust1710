@@ -61,8 +61,8 @@ mod session_lock;
 mod survival;
 mod survival_damage;
 mod telemetry;
-mod terrain;
 mod teleport_gate;
+mod terrain;
 mod throwables;
 mod vehicles;
 mod verify_world;
@@ -1403,7 +1403,10 @@ fn play(
                 &mut reason,
             )?;
             let _ = send(s, 0x40, &reason);
-            return Err(io::Error::new(ErrorKind::TimedOut, "teleport acknowledgement timeout"));
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                "teleport acknowledgement timeout",
+            ));
         }
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
@@ -3320,7 +3323,8 @@ fn play(
                                         chunk_center(player),
                                     )?;
                                     send_player_position(s, player, yaw, pitch)?;
-                                    pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
+                                    pending_teleport =
+                                        Some(TeleportGate::new(*player, Instant::now()));
                                     last_movement_broadcast = Instant::now();
                                     continue;
                                 }
