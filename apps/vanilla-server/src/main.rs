@@ -2044,34 +2044,17 @@ fn play(
             }
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
             for explosion in explosions {
-                hub.broadcast_in_view(explosion.position, explosion.packet());
-                // One blast removes at most 64 non-tile blocks, protecting persisted containers.
-                let mut destroyed = 0;
-                let (cx, cy, cz) = (
+                let center = (
                     explosion.position.x.floor() as i32,
                     explosion.position.y.floor() as i32,
                     explosion.position.z.floor() as i32,
                 );
-                'blast: for y in (cy - 3).max(1)..=(cy + 3).min(254) {
-                    for x in cx - 3..=cx + 3 {
-                        for z in cz - 3..=cz + 3 {
-                            let d = ((x - cx).pow(2) + (y - cy).pow(2) + (z - cz).pow(2)) as f64;
-                            if d > explosion.radius * explosion.radius {
-                                continue;
-                            }
-                            let block = w.get(x, y, z) >> 4;
-                            if matches!(block, 0 | 7 | 49 | 54 | 61 | 62) {
-                                continue;
-                            }
-                            if w.update_and_save(world_path, x, y, z, 0)? {
-                                hub.broadcast(block_change_event(&w, x, y, z));
-                                destroyed += 1;
-                                if destroyed >= 64 {
-                                    break 'blast;
-                                }
-                            }
-                        }
-                    }
+                // Save once per blast, not once per destroyed block. Publish
+                // no block updates or explosion graphics before durable state.
+                let changed = w.creeper_blast_and_save(world_path, center, explosion.radius)?;
+                hub.broadcast_in_view(explosion.position, explosion.packet());
+                for (x, y, z) in changed {
+                    hub.broadcast_in_view(explosion.position, block_change_event(&w, x, y, z));
                 }
             }
             drop(w);
@@ -2164,9 +2147,14 @@ fn play(
                 if damage != 0 {
                     send(s, 0x06, &health_packet(*vitals))?;
                 }
+                // Server-driven gravity changes the real player position
+                // even when the look-only packet rate limit has not expired.
+                // Keep Hub targeting/collision consumers synchronized.
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, *player, yaw, pitch);
                     last_movement_broadcast = Instant::now();
+                } else {
+                    hub.record_player_position(entity_id, *player);
                 }
             }
         }
@@ -3307,6 +3295,7 @@ fn play(
                 // chunk. Avoid reconstructing/diffing the 5x5 viewport unless
                 // the player actually crosses a 16-block boundary.
                 let previous_chunk_center = chunk_center(player);
+                let position_changed = *player != candidate;
                 location = (x, y, z);
                 *player = candidate;
                 // A10: server-authoritative source-frame and destination validation.
@@ -3417,6 +3406,11 @@ fn play(
                 }
                 let new_chunk_center = chunk_center(&candidate);
                 if new_chunk_center != previous_chunk_center {
+                    // Publish authoritative position BEFORE expensive chunk
+                    // generation/compression/socket writes can block this
+                    // session. Otherwise a creeper may hit a stale Hub point.
+                    hub.move_player(entity_id, candidate, yaw, pitch);
+                    last_movement_broadcast = Instant::now();
                     let old_chunks = loaded_chunks.clone();
                     sync_chunks(s, world, &mut loaded_chunks, new_chunk_center)?;
                     if loaded_chunks != old_chunks {
@@ -3424,8 +3418,17 @@ fn play(
                         send_visible_signs(s, decorations, &entering)?;
                         send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                     }
-                }
-                if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
+                } else if position_changed {
+                    // The Hub owns the position consulted by Mob targeting,
+                    // explosions, pickups and other sessions. Throttle only
+                    // peer packet fanout, never authoritative state updates.
+                    if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
+                        hub.move_player(entity_id, candidate, yaw, pitch);
+                        last_movement_broadcast = Instant::now();
+                    } else {
+                        hub.record_player_position(entity_id, candidate);
+                    }
+                } else if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, candidate, yaw, pitch);
                     last_movement_broadcast = Instant::now();
                 }

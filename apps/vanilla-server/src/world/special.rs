@@ -62,7 +62,7 @@ fn blast_resistance(id: u16) -> f64 {
     }
 }
 
-fn blast_breakable(id: u16) -> bool {
+pub(super) fn blast_breakable(id: u16) -> bool {
     !matches!(
         id,
         7 | 49 | 90 | 119 | 120 | 130

@@ -1872,6 +1872,72 @@ impl World {
         Ok(changed)
     }
 
+    /// Commit a creeper explosion as one durable world transition.
+    ///
+    /// The former handler saved the entire IRW file once for EACH of up to
+    /// 64 broken blocks while holding the shared World mutex. On Windows this
+    /// could stall player movement and leave a half-exploded world on a failed
+    /// save. Select from the original state, then publish only after one save.
+    pub fn creeper_blast_and_save(
+        &mut self,
+        path: &Path,
+        center: (i32, i32, i32),
+        radius: f64,
+    ) -> io::Result<Vec<(i32, i32, i32)>> {
+        if !radius.is_finite() || !(0.0..=4.0).contains(&radius) {
+            return Err(invalid("invalid creeper explosion radius"));
+        }
+        let (cx, cy, cz) = center;
+        let mut changed = Vec::new();
+        'blast: for y in (cy - 3).max(1)..=(cy + 3).min(254) {
+            for x in cx - 3..=cx + 3 {
+                for z in cz - 3..=cz + 3 {
+                    if !in_bounds(x, y, z) {
+                        continue;
+                    }
+                    let distance_squared = i64::from(x - cx).pow(2)
+                        + i64::from(y - cy).pow(2)
+                        + i64::from(z - cz).pow(2);
+                    if (distance_squared as f64) > radius * radius {
+                        continue;
+                    }
+                    let previous = self.get(x, y, z);
+                    if previous == 0 || !special::blast_breakable(previous >> 4) {
+                        continue;
+                    }
+                    changed.push((x, y, z, previous));
+                    if changed.len() == 64 {
+                        break 'blast;
+                    }
+                }
+            }
+        }
+        if changed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut next = self.clone();
+        for &(x, y, z, previous) in &changed {
+            let key = (x, y as u8, z);
+            if next.base_block(x, y as u8, z) == 0 {
+                next.edits.remove(&key);
+            } else {
+                next.edits.insert(key, 0);
+            }
+            if next.edits.len() > MAX_EDITS {
+                return Err(invalid("creeper explosion exceeds world edit capacity"));
+            }
+            next.mark_lighting_changed(x, z, previous, 0);
+            next.wake_gravity(x, y, z);
+            next.wake_block_updates(x, y, z);
+            if matches!(previous >> 4, 17 | 162) {
+                next.wake_leaves(x, y, z);
+            }
+        }
+        next.save(path)?;
+        *self = next;
+        Ok(changed.into_iter().map(|(x, y, z, _)| (x, y, z)).collect())
+    }
+
     /// Persist a small related block edit (such as the two bed halves) as
     /// one world snapshot, never exposing a half-built object to clients.
     pub fn update_many_and_save(
@@ -2841,6 +2907,35 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creeper_blast_is_single_durable_transition_and_preserves_tile_blocks() {
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust1710-creeper-batch-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 1 << 4).unwrap();
+        world.import_block(1, 64, 0, 50 << 4).unwrap();
+        world.import_block(0, 64, 1, 54 << 4).unwrap(); // chest contents protected
+        world.import_block(5, 64, 0, 1 << 4).unwrap();
+        world.save(&path).unwrap();
+        let changed = world
+            .creeper_blast_and_save(&path, (0, 64, 0), 3.0)
+            .unwrap();
+        assert!(changed.contains(&(0, 64, 0)));
+        assert!(changed.contains(&(1, 64, 0)));
+        assert!(!changed.contains(&(0, 64, 1)));
+        assert_eq!(world.get(0, 64, 0), 0);
+        assert_eq!(world.get(0, 64, 1), 54 << 4);
+        assert_eq!(world.get(5, 64, 0), 1 << 4);
+        let reloaded = World::load(&path).unwrap();
+        assert_eq!(reloaded.get(0, 64, 0), 0);
+        assert_eq!(reloaded.get(1, 64, 0), 0);
+        assert_eq!(reloaded.get(0, 64, 1), 54 << 4);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn chunk_read_snapshot_matches_live_packets_with_edits_and_light_halo() {

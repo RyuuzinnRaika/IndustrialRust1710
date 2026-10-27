@@ -553,6 +553,20 @@ impl Hub {
             }
         }
     }
+    /// Record every accepted authoritative movement sample, even if the
+    /// outbound entity teleport is rate-limited. Explosion exposure, Mob
+    /// targeting and other player sessions read this position immediately.
+    ///
+    /// The caller must use move_player on chunk-interest transitions so
+    /// spawn/despawn membership changes are never silently swallowed.
+    pub fn record_player_position(&self, id: i32, position: PlayerPosition) {
+        if let Ok(mut inner) = self.0.lock() {
+            if let Some(peer) = inner.players.get_mut(&id) {
+                peer.position = position;
+            }
+        }
+    }
+
     pub fn move_player(&self, id: i32, position: PlayerPosition, yaw: f32, pitch: f32) {
         if let Ok(mut inner) = self.0.lock() {
             if let Some(peer) = inner.players.get_mut(&id) {
@@ -780,6 +794,38 @@ mod tests {
         };
         assert!(visible(&origin, &edge));
         assert!(!visible(&origin, &outside));
+    }
+
+    #[test]
+    fn accepted_fast_player_samples_update_shared_position_without_outgoing_packets() {
+        let hub = Hub::default();
+        let (alice, alice_rx, _) = hub
+            .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        let (_bob, bob_rx, _) = hub
+            .add("Bob".into(), "uuid-b".into(), PlayerPosition::default())
+            .unwrap();
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+        let actual = PlayerPosition {
+            x: 2.5,
+            y: 65.0,
+            z: -3.5,
+        };
+        hub.record_player_position(alice, actual);
+        assert_eq!(
+            hub.participants()
+                .unwrap()
+                .into_iter()
+                .find(|p| p.0 == alice)
+                .unwrap()
+                .1,
+            actual
+        );
+        assert!(bob_rx.try_recv().is_err());
+        // A later full broadcast still uses the current authoritative point.
+        hub.move_player(alice, actual, 0.0, 0.0);
+        assert_eq!(bob_rx.try_recv().unwrap().id, 0x18);
     }
 
     #[test]
