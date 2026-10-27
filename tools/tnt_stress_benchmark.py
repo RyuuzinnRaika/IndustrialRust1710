@@ -168,7 +168,7 @@ def run_profile(server: Path, output: Path, count: int, duration: float,
             after = tnt_snapshot_count(world)
             if after[1] > count or (crashed_remaining is not None and after[1] > crashed_remaining):
                 raise RuntimeError("primed TNT count increased despite no TNT block ignition")
-            verify = subprocess.run([str(server), "--verify-world", str(world.parent)],
+            verify = subprocess.run([str(server), "--verify-world", str(world)],
                                     cwd=folder, capture_output=True, text=True, timeout=90)
             if verify.returncode:
                 raise RuntimeError(f"read-only --verify-world failed: {verify.stderr}")
