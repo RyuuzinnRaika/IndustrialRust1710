@@ -141,7 +141,13 @@ impl WorldSessionLock {
             .write(true)
             .create(true)
             .truncate(false) // Never alter the file before acquiring its lock.
-            .open(&lock_file)?;
+            .open(&lock_file)
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("open world session marker {}: {error}", lock_file.display()),
+                )
+            })?;
         FileExt::try_lock_exclusive(&file).map_err(|error| {
             io::Error::new(
                 error.kind(),
