@@ -356,7 +356,11 @@ impl Throwables {
                     destination.y.floor() as i32,
                     destination.z.floor() as i32,
                 ) >> 4;
-                let drag = if matches!(block, 8 | 9) { 0.8 } else { 0.99 };
+                let drag = if matches!(block, 8 | 9) {
+                    0.8
+                } else {
+                    0.99
+                };
                 object.velocity[0] *= drag;
                 object.velocity[1] = object.velocity[1] * drag - object.kind.gravity();
                 object.velocity[2] *= drag;
