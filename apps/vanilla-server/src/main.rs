@@ -16,6 +16,7 @@ mod clock;
 mod crafting;
 mod decorations;
 mod dimensions;
+mod disconnect_log;
 mod dispensers;
 mod enchanting;
 mod experience;
@@ -8767,7 +8768,7 @@ fn main() -> io::Result<()> {
                 ip_permit,
             ) {
                 let category = disconnect_category(&e);
-                if category != "peer_closed" {
+                if disconnect_log::should_log(category) {
                     eprintln!(
                         "client disconnected: category={category} io_kind={:?} reason={e}",
                         e.kind()
