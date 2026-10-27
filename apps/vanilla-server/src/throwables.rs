@@ -200,8 +200,31 @@ fn first_solid_block_hit(
     // Normal projectiles travel only a few blocks per tick; bound traversal
     // even if a future caller supplies an unexpectedly large velocity.
     for _ in 0..1024 {
-        if solid_projectile_block(world.get(cell[0], cell[1], cell[2]) >> 4) {
-            return Some((entry, cell));
+        let state = world.get(cell[0], cell[1], cell[2]);
+        let block = state >> 4;
+        if solid_projectile_block(block) {
+            // Single stone/wood slabs occupy only half a voxel. Testing the
+            // whole cell would incorrectly shield entities above/below them.
+            // Double slabs (43/125) still use the full-block path.
+            if matches!(block, 44 | 126) {
+                let bottom = f64::from(cell[1]) + if state & 8 != 0 { 0.5 } else { 0.0 };
+                if let Some(t) = segment_box_entry(
+                    from,
+                    to,
+                    [f64::from(cell[0]), bottom, f64::from(cell[2])],
+                    [
+                        f64::from(cell[0]) + 1.0,
+                        bottom + 0.5,
+                        f64::from(cell[2]) + 1.0,
+                    ],
+                ) {
+                    if t >= entry {
+                        return Some((t, cell));
+                    }
+                }
+            } else {
+                return Some((entry, cell));
+            }
         }
         if cell == end {
             return None;
@@ -1286,5 +1309,61 @@ mod tests {
         assert_eq!(cell, [1, 70, 0]);
         assert!((t - 0.4).abs() < 1e-10);
         assert_eq!(first_solid_block_hit(&World::new(), from, to), None);
+    }
+    #[test]
+    fn projectile_ray_respects_single_slab_half_and_full_block_behind() {
+        // 1.7.10 single stone/wood slabs use metadata bit 3 for the upper half.
+        for slab in [44u16, 126] {
+            for upper in [false, true] {
+                let mut world = World::new();
+                let state = (slab << 4) | if upper { 8 } else { 0 };
+                world.import_block(1, 70, 0, state).unwrap();
+                let from = PlayerPosition {
+                    x: 0.2,
+                    y: if upper { 70.25 } else { 70.75 },
+                    z: 0.5,
+                };
+                let to = PlayerPosition { x: 3.2, ..from };
+                assert_eq!(
+                    first_solid_block_hit(&world, from, to),
+                    None,
+                    "ray through empty slab half: block {slab}, upper {upper}"
+                );
+                // A full cube behind the empty half must still be detected.
+                world.import_block(2, 70, 0, 1 << 4).unwrap();
+                let (t, cell) = first_solid_block_hit(&world, from, to).unwrap();
+                assert_eq!(cell, [2, 70, 0]);
+                assert!((t - 0.6).abs() < 1e-10);
+                // A ray through the occupied half hits the slab first.
+                let hit_from = PlayerPosition {
+                    y: if upper { 70.75 } else { 70.25 },
+                    ..from
+                };
+                let hit_to = PlayerPosition { x: 3.2, ..hit_from };
+                let (t, cell) = first_solid_block_hit(&world, hit_from, hit_to).unwrap();
+                assert_eq!(cell, [1, 70, 0]);
+                assert!((t - (0.8 / 3.0)).abs() < 1e-10);
+                // Reversing the ray also respects the half-height shape.
+                let (t, cell) = first_solid_block_hit(&world, hit_to, hit_from).unwrap();
+                assert_eq!(cell, [2, 70, 0]);
+                assert!((t - (0.2 / 3.0)).abs() < 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn projectile_ray_treats_double_slabs_as_full_blocks() {
+        for slab in [43u16, 125] {
+            let mut world = World::new();
+            world.import_block(1, 70, 0, slab << 4).unwrap();
+            for y in [70.25, 70.75] {
+                let from = PlayerPosition { x: 0.2, y, z: 0.5 };
+                let to = PlayerPosition { x: 2.2, ..from };
+                assert_eq!(
+                    first_solid_block_hit(&world, from, to).unwrap().1,
+                    [1, 70, 0]
+                );
+            }
+        }
     }
 }
