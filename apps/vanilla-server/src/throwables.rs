@@ -294,10 +294,9 @@ impl Throwables {
                 if object.kind == Kind::Arrow {
                     object.embedded = true;
                     object.velocity = [0.0; 3];
-                    result.events.push((
-                        at,
-                        multiplayer::teleport(object.id, &at, 0.0, 0.0),
-                    ));
+                    result
+                        .events
+                        .push((at, multiplayer::teleport(object.id, &at, 0.0, 0.0)));
                     continue;
                 }
                 if object.kind == Kind::Pearl {
