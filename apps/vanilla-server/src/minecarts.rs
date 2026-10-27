@@ -712,8 +712,8 @@ mod tests {
 
     #[test]
     fn durable_snapshot_restores_carts_without_reusing_player_attachment() {
-        let path = std::env::temp_dir().join(format!("ir1710-carts-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let directory = TestDir::new();
+        let path = directory.file("snapshot.json");
         let mut world = World::new();
         world.import_block(0, 65, 0, (66 << 4) | 1).unwrap();
         let position = PlayerPosition {
@@ -733,14 +733,13 @@ mod tests {
         assert_eq!(saved.last_tick, 500);
         assert_eq!(saved.rider, None);
         assert!(restored.place(&world, position, 500).is_none());
-        std::fs::remove_file(path).unwrap();
+        // TestDir owns cleanup; never remove a shared process-wide path.
     }
 
     #[test]
     fn corrupted_and_duplicate_cart_entries_fail_closed() {
-        let path =
-            std::env::temp_dir().join(format!("ir1710-carts-corrupt-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let directory = TestDir::new();
+        let path = directory.file("corrupt.json");
         for malformed in [
             r#"{"version":1,"next":1,"carts":[{"id":1500000,"position":{"x":0.5,"y":65.5,"z":0.5},"speed":0.1,"direction":1,"east_west":false},{"id":1500000,"position":{"x":0.5,"y":65.5,"z":0.5},"speed":0.1,"direction":1,"east_west":false}]}"#,
             r#"{"version":1,"next":1,"carts":[{"id":1500000,"position":{"x":0.5,"y":65.5,"z":0.5},"speed":99.0,"direction":1,"east_west":false}]}"#,
@@ -749,7 +748,7 @@ mod tests {
             std::fs::write(&path, malformed).unwrap();
             assert!(Minecarts::load(&path, 10).is_err());
         }
-        std::fs::remove_file(path).unwrap();
+        // TestDir owns cleanup; never remove a shared process-wide path.
     }
 
     #[test]
