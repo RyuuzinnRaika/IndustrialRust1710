@@ -19,6 +19,19 @@ pub(super) enum BiomeWorldType {
     Default11,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BiomeLayer {
+    world_seed: i64,
+    layer_salt: i64,
+    world_type: BiomeWorldType,
+}
+
+impl BiomeLayer {
+    pub(super) fn new(world_seed: i64, layer_salt: i64, world_type: BiomeWorldType) -> Self {
+        Self { world_seed, layer_salt, world_type }
+    }
+}
+
 /// Translate parent climate IDs and special flags to vanilla biome IDs.
 ///
 /// The upper 0xF00 bits carry the special-biome marker from GenLayerEdge.
@@ -26,13 +39,11 @@ pub(super) enum BiomeWorldType {
 /// Each cell seeds its own Java-long RNG, so split/overlapping requests are
 /// deterministic even for negative coordinates and signed-int wraparound.
 pub(super) fn biome_map<F>(
-    world_seed: i64,
-    layer_salt: i64,
+    layer: BiomeLayer,
     x: i32,
     z: i32,
     width: usize,
     height: usize,
-    world_type: BiomeWorldType,
     parent: F,
 ) -> Vec<i32>
 where
@@ -44,7 +55,7 @@ where
     let source = parent(x, z, width, height);
     assert_eq!(source.len(), width * height);
     let mut result = Vec::with_capacity(source.len());
-    let mut rng = GenLayerRng::new(world_seed, layer_salt);
+    let mut rng = GenLayerRng::new(layer.world_seed, layer.layer_salt);
 
     for dz in 0..height {
         for dx in 0..width {
@@ -68,7 +79,7 @@ where
                 3 if special > 0 => 32, // Mega Taiga
                 1..=4 => {
                     let pool: &[i32] = match climate {
-                        1 if world_type == BiomeWorldType::Default11 => &DEFAULT_1_1_HOT,
+                        1 if layer.world_type == BiomeWorldType::Default11 => &DEFAULT_1_1_HOT,
                         1 => &HOT,
                         2 => &WARM,
                         3 => &COOL,
@@ -182,7 +193,7 @@ mod tests {
             ),
         ];
         for (seed, x, z, world_type, expected) in cases {
-            let actual = biome_map(seed, 200, x, z, 8, 8, world_type, patterned_parent);
+            let actual = biome_map(BiomeLayer::new(seed, 200, world_type), x, z, 8, 8, patterned_parent);
             assert_eq!(biome_hex(&actual), expected, "seed={seed} at ({x},{z})");
         }
     }
@@ -190,7 +201,7 @@ mod tests {
     #[test]
     fn preserves_ocean_mushroom_and_special_biome_rules() {
         let source = [0, 24, 14, 1 | 0x100, 2 | 0x100, 3 | 0x100, 4 | 0x100, 5];
-        let result = biome_map(42, 200, -16, 15, 8, 1, BiomeWorldType::Default, |_, _, _, _| {
+        let result = biome_map(BiomeLayer::new(42, 200, BiomeWorldType::Default), -16, 15, 8, 1, |_, _, _, _| {
             source.to_vec()
         });
         assert_eq!(&result[..3], &[0, 24, 14]);
@@ -204,17 +215,15 @@ mod tests {
     #[test]
     fn split_queries_match_across_negative_chunk_boundaries() {
         for world_type in [BiomeWorldType::Default, BiomeWorldType::Default11] {
-            let whole = biome_map(42, 200, -17, -17, 8, 8, world_type, patterned_parent);
+            let whole = biome_map(BiomeLayer::new(42, 200, world_type), -17, -17, 8, 8, patterned_parent);
             for dz in (0..8).rev() {
                 for dx in (0..8).rev() {
                     let single = biome_map(
-                        42,
-                        200,
+                        BiomeLayer::new(42, 200, world_type),
                         -17 + dx,
                         -17 + dz,
                         1,
                         1,
-                        world_type,
                         patterned_parent,
                     );
                     assert_eq!(single[0], whole[(dz * 8 + dx) as usize]);
@@ -226,36 +235,32 @@ mod tests {
     #[test]
     fn signed_coordinate_wraparound_and_empty_requests() {
         let whole = biome_map(
-            42,
-            200,
+            BiomeLayer::new(42, 200, BiomeWorldType::Default),
             i32::MAX - 1,
             i32::MIN,
             4,
             2,
-            BiomeWorldType::Default,
             patterned_parent,
         );
         for dz in 0..2 {
             for dx in 0..4 {
                 let single = biome_map(
-                    42,
-                    200,
+                    BiomeLayer::new(42, 200, BiomeWorldType::Default),
                     (i32::MAX - 1).wrapping_add(dx),
                     i32::MIN.wrapping_add(dz),
                     1,
                     1,
-                    BiomeWorldType::Default,
                     patterned_parent,
                 );
                 assert_eq!(single[0], whole[(dz * 4 + dx) as usize]);
             }
         }
         assert!(biome_map(
-            42, 200, 0, 0, 0, 8, BiomeWorldType::Default,
+            BiomeLayer::new(42, 200, BiomeWorldType::Default), 0, 0, 0, 8,
             |_, _, _, _| panic!("empty request evaluated parent")
         ).is_empty());
         assert!(biome_map(
-            42, 200, 0, 0, 8, 0, BiomeWorldType::Default,
+            BiomeLayer::new(42, 200, BiomeWorldType::Default), 0, 0, 8, 0,
             |_, _, _, _| panic!("empty request evaluated parent")
         ).is_empty());
     }
