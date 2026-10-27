@@ -294,6 +294,7 @@ impl Throwables {
         Some([Event { id: 0x0d, body }, multiplayer::destroy(id)])
     }
 
+    #[cfg(test)]
     pub fn tick(&mut self, world: &World, tick: u64) -> TickResult {
         self.tick_with_mob_targets(world, tick, &[])
     }
