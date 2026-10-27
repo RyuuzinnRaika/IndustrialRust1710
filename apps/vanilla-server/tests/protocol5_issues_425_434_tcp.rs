@@ -284,6 +284,57 @@ fn add005_duplicate_login_does_not_replace_active_play_session() {
 }
 
 #[test]
+fn add011_two_simultaneous_tcp_logins_have_exactly_one_play_owner() {
+    use std::sync::{Arc, Barrier};
+
+    let server = Server::launch();
+    let mut sockets = Vec::new();
+    for _ in 0..2 {
+        let mut stream = server.connect();
+        stream
+            .write_all(&handshake(server.port, "localhost", 2))
+            .unwrap();
+        sockets.push(stream);
+    }
+    let barrier = Arc::new(Barrier::new(2));
+    let threads: Vec<_> = sockets
+        .into_iter()
+        .map(|mut socket| {
+            let start = Arc::clone(&barrier);
+            thread::spawn(move || {
+                start.wait();
+                socket.write_all(&frame(0, &mc_string("RustTester"))).unwrap();
+                let (packet_id, _) = receive(&mut socket);
+                (packet_id, socket)
+            })
+        })
+        .collect();
+    let mut results: Vec<_> = threads.into_iter().map(|join| join.join().unwrap()).collect();
+    results.sort_by_key(|(packet_id, _)| *packet_id);
+    assert_eq!(
+        results.iter().map(|(packet_id, _)| *packet_id).collect::<Vec<_>>(),
+        vec![0, 2],
+        "one Login Disconnect and one Login Success are required",
+    );
+
+    let rejected = results.remove(0).1;
+    must_close(rejected);
+    let mut owner = results.remove(0).1;
+    server.wait_online(1);
+    // The losing connection cannot replace or kick the admitted session.
+    owner.write_all(&frame(0, &0i32.to_be_bytes())).unwrap();
+    server.wait_online(1);
+    drop(owner);
+    server.wait_online(0);
+
+    // Only after the owner exits may the identity be admitted again.
+    let replacement = server.login("RustTester");
+    server.wait_online(1);
+    drop(replacement);
+    server.wait_online(0);
+}
+
+#[test]
 fn add004_protocol_version_and_255_character_hostname_boundaries() {
     let server = Server::launch();
     // Both sides of Protocol 5 must fail closed as a Login Disconnect,
