@@ -196,6 +196,94 @@ fn bad_login(server: &Server, payload: &[u8]) {
 }
 
 #[test]
+fn add005_state_machine_never_admits_out_of_order_packets() {
+    let server = Server::launch();
+    assert_eq!(server.status_online(), 0);
+
+    // No packets (including valid Play IDs) are permitted before Handshake.
+    bad_handshake(&server, &frame(4, &[0; 33]));
+    bad_handshake(&server, &frame(1, &0i64.to_be_bytes()));
+    // Only state 1 (Status) and state 2 (Login) exist after Handshake.
+    for next in [0, 3, 99] {
+        bad_handshake(&server, &handshake(server.port, "localhost", next));
+    }
+
+    // A Login Start is not a Status Request (which must have no body).
+    let mut status = server.connect();
+    status
+        .write_all(&handshake(server.port, "localhost", 1))
+        .unwrap();
+    status
+        .write_all(&frame(0, &mc_string("RustTester")))
+        .unwrap();
+    must_close(status);
+    assert_eq!(server.status_online(), 0);
+
+    // Once the Status Response was sent, this socket can only Ping/close.
+    // It must not be upgraded to Login or Play by a subsequent packet.
+    let mut status = server.connect();
+    status
+        .write_all(&handshake(server.port, "localhost", 1))
+        .unwrap();
+    status.write_all(&frame(0, &[])).unwrap();
+    assert_eq!(receive(&mut status).0, 0);
+    status
+        .write_all(&frame(0, &mc_string("RustTester")))
+        .unwrap();
+    must_close(status);
+    assert_eq!(server.status_online(), 0);
+
+    // Valid Handshake->Login disallows Status Ping and any Play packet.
+    bad_login(&server, &frame(1, &0i64.to_be_bytes()));
+    bad_login(&server, &frame(4, &[0; 33]));
+
+    // Pipelining a whitelisted-looking Play mutation behind an unapproved
+    // identity must not create a session or enter the game dispatcher.
+    let mut unauthenticated = server.connect();
+    let mut pipelined = handshake(server.port, "localhost", 2);
+    pipelined.extend_from_slice(&frame(0, &mc_string("NotAllowed")));
+    pipelined.extend_from_slice(&frame(8, &[0; 15]));
+    unauthenticated.write_all(&pipelined).unwrap();
+    let (id, _) = receive(&mut unauthenticated);
+    assert_eq!(id, 0, "unapproved identity must receive Login Disconnect");
+    must_close(unauthenticated);
+    assert_eq!(server.status_online(), 0);
+
+    // The invalid sessions must not poison subsequent successful admission.
+    let valid = server.login("RustTester");
+    server.wait_online(1);
+    drop(valid);
+    server.wait_online(0);
+}
+
+#[test]
+fn add005_duplicate_login_does_not_replace_active_play_session() {
+    let server = Server::launch();
+    let mut first = server.login("RustTester");
+    server.wait_online(1);
+
+    // One identity may have only one admitted Play session. A simultaneous
+    // second Login receives a Login Disconnect, never Login Success.
+    let mut duplicate = server.connect();
+    duplicate
+        .write_all(&handshake(server.port, "localhost", 2))
+        .unwrap();
+    duplicate
+        .write_all(&frame(0, &mc_string("RustTester")))
+        .unwrap();
+    let (id, _) = receive(&mut duplicate);
+    assert_eq!(id, 0, "duplicate login must not enter Play");
+    must_close(duplicate);
+    server.wait_online(1);
+
+    // The original player must remain authenticated and connected.
+    first.write_all(&frame(0, &0i32.to_be_bytes())).unwrap();
+    server.wait_online(1);
+    drop(first);
+    server.wait_online(0);
+}
+
+#[test]
 fn add004_protocol_version_and_255_character_hostname_boundaries() {
     let server = Server::launch();
     // Both sides of Protocol 5 must fail closed as a Login Disconnect,
