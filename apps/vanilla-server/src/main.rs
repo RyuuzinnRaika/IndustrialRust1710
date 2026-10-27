@@ -364,6 +364,18 @@ struct InitialPlayer<'a> {
     hardcore: bool,
     difficulty: u8,
 }
+fn primed_tnt_spawn_body(entity_id: i32, pos: (i32, i32, i32)) -> Vec<u8> {
+    let mut body = Vec::new();
+    write_varint(entity_id as u32, &mut body);
+    body.push(50); // Protocol 5 Spawn Object: primed TNT.
+    for coordinate in [pos.0, pos.1, pos.2] {
+        body.extend_from_slice(&(coordinate * 32 + 16).to_be_bytes());
+    }
+    body.extend_from_slice(&[0, 0]);
+    body.extend_from_slice(&0i32.to_be_bytes());
+    body
+}
+
 fn join(
     s: &mut Connection,
     world: &Mutex<World>,
@@ -429,6 +441,14 @@ fn join(
         chunk_center(position),
         view_chunks(chunk_center(position)),
     )?;
+    // Send nearby persistent TNT entities to players joining after ignition.
+    let primed = world
+        .lock()
+        .map_err(|_| bad("world mutex poisoned"))?
+        .visible_primed_tnt(*position);
+    for (id, pos) in primed {
+        send(s, 0x0e, &primed_tnt_spawn_body(id, pos))?;
+    }
 
     // Clientbound 0x30 / 0x09: authoritative Creative inventory and hotbar.
     send(s, 0x30, &inventory.window_items())?;
@@ -7747,16 +7767,7 @@ fn main() -> io::Result<()> {
                                         entity_id,
                                         pos: (x, y, z),
                                     } => {
-                                        let mut body = Vec::new();
-                                        write_varint(entity_id as u32, &mut body);
-                                        body.push(50); // Protocol 5 Spawn Object: primed TNT
-                                        for coordinate in [x, y, z] {
-                                            body.extend_from_slice(
-                                                &(coordinate * 32 + 16).to_be_bytes(),
-                                            );
-                                        }
-                                        body.extend_from_slice(&[0, 0]);
-                                        body.extend_from_slice(&0i32.to_be_bytes());
+                                        let body = primed_tnt_spawn_body(entity_id, (x, y, z));
                                         furnace_hub.broadcast(Event { id: 0x0e, body });
                                     }
                                     world::TntEvent::Explode {
