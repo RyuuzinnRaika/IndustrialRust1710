@@ -294,17 +294,32 @@ impl GroundItems {
         Ok(Some((candidate, collected, remainder)))
     }
 
-    #[cfg(test)]
+    /// Persist an already validated, staged drop batch in one file sync.
+    /// The caller only publishes spawn packets after this succeeds.
+    pub fn commit_staged_put(
+        &mut self,
+        path: &Path,
+        staged: (Self, Vec<GroundItem>),
+    ) -> io::Result<Vec<GroundItem>> {
+        let (candidate, inserted) = staged;
+        candidate.save(path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("save ground items at {}: {error}", path.display()),
+            )
+        })?;
+        *self = candidate;
+        Ok(inserted)
+    }
+
     pub fn put_many(
         &mut self,
         path: &Path,
         stacks: &[Stack],
         block: (i32, i32, i32),
     ) -> io::Result<Vec<GroundItem>> {
-        let (candidate, inserted) = self.stage_put_many(stacks, block)?;
-        candidate.save(path)?;
-        *self = candidate;
-        Ok(inserted)
+        let staged = self.stage_put_many(stacks, block)?;
+        self.commit_staged_put(path, staged)
     }
 
     pub fn nearby_ready(&self, feet: (f64, f64, f64)) -> Option<GroundItem> {
