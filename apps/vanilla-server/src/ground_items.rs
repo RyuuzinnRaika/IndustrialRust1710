@@ -170,7 +170,10 @@ impl GroundItems {
         let mut file = File::create(&temporary).map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("create temporary ground-item save {}: {error}", temporary.display()),
+                format!(
+                    "create temporary ground-item save {}: {error}",
+                    temporary.display()
+                ),
             )
         })?;
         file.write_all(&data)?;
