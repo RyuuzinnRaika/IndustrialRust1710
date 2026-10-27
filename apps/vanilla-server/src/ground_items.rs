@@ -312,6 +312,30 @@ impl GroundItems {
         Ok(Some((candidate, collected, remainder)))
     }
 
+    /// Revalidate a pickup under the shared GroundItems lock immediately
+    /// before committing the inventory + entity update. The caller must hold
+    /// that lock through journal::commit and publication of the new snapshot.
+    /// A stale entity ID, early pickup, or moved-away player earns nothing.
+    pub fn stage_claim_ready(
+        &self,
+        id: i32,
+        count: u8,
+        feet: (f64, f64, f64),
+    ) -> io::Result<Option<(Self, GroundItem, Option<GroundItem>)>> {
+        let Some(item) = self.entries.get(&id) else {
+            return Ok(None);
+        };
+        if !item.in_pickup_range(feet)
+            || !self
+                .eligible_after
+                .get(&id)
+                .is_some_and(|time| Instant::now() >= *time)
+        {
+            return Ok(None);
+        }
+        self.stage_take_amount(id, count)
+    }
+
     /// Persist an already validated, staged drop batch in one file sync.
     /// The caller only publishes spawn packets after this succeeds.
     pub fn commit_staged_put(
@@ -400,7 +424,21 @@ mod tests {
             )
             .unwrap();
         let entity_id = spawned[0].id;
+        assert!(
+            initial
+                .stage_claim_ready(entity_id, 8, (0.5, 65.0, 0.5))
+                .unwrap()
+                .is_none(),
+            "spawned drops may not be collected before their pickup delay"
+        );
         initial.eligible_after.insert(entity_id, Instant::now());
+        assert!(
+            initial
+                .stage_claim_ready(entity_id, 8, (50.0, 65.0, 0.5))
+                .unwrap()
+                .is_none(),
+            "a faraway player may not claim the item"
+        );
         fs::write(&drop_file, initial.encoded().unwrap()).unwrap();
 
         let shared = Arc::new(Mutex::new(initial));
@@ -425,7 +463,7 @@ mod tests {
                     let mut receiver = Inventory::default();
                     let (count, _) = receiver.receive_stack_partial(item.stack).unwrap();
                     let (new_ground, pickup, remainder) = ground
-                        .stage_take_amount(item.id, count)
+                        .stage_claim_ready(item.id, count, (0.5, 65.0, 0.5))
                         .unwrap()
                         .unwrap();
                     assert_eq!(pickup.stack.count, 8);
