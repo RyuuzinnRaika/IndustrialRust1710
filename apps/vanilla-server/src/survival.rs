@@ -64,7 +64,7 @@ fn tool(stack: Option<Stack>) -> Option<Tool> {
         _ => return None,
     };
     // Damaged tool metadata must represent an existing, unbroken item.
-    if held.count != 1 || held.damage >= max_uses {
+    if held.count != 1 || held.damage < 0 || held.damage >= max_uses {
         return None;
     }
     Some(Tool {
@@ -628,6 +628,26 @@ mod tests {
                 })
                 .expect("each leaf species should drop its matching sapling");
             assert_eq!(sapling.damage, expected);
+        }
+    }
+
+    #[test]
+    fn s03_negative_or_exhausted_pickaxe_damage_cannot_harvest_stone() {
+        // Tool damage is signed in the legacy item stack. A negative value
+        // must not become a usable pickaxe or bypass the harvest/timing rules.
+        let valid = stack(270, 58);
+        let (valid_time, valid_mine) = mine_rule(1 << 4, valid).unwrap();
+        assert_eq!(tool_max_uses(valid.unwrap()), Some(59));
+        assert_eq!(valid_mine.drop, Some(BlockDrop { id: 4, damage: 0 }));
+        assert!(valid_mine.wear_tool);
+
+        for damage in [i16::MIN, -1, 59, i16::MAX] {
+            let invalid = stack(270, damage);
+            assert_eq!(tool_max_uses(invalid.unwrap()), None);
+            let (minimum, mined) = mine_rule(1 << 4, invalid).unwrap();
+            assert_eq!(mined.drop, None, "invalid damage {damage}");
+            assert!(!mined.wear_tool, "invalid damage {damage}");
+            assert!(minimum > valid_time, "invalid damage {damage}");
         }
     }
 
