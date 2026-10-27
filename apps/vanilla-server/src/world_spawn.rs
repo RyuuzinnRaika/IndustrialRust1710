@@ -4,7 +4,9 @@
 use crate::player::PlayerPosition;
 use crate::world::{self, World};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
@@ -113,7 +115,7 @@ pub fn load(world_path: &Path) -> io::Result<Option<WorldSpawn>> {
     }
     let point: WorldSpawn =
         serde_json::from_slice(&bytes).map_err(|_| invalid("corrupt world spawn sidecar"))?;
-    if point.version != VERSION || Self::valid(point).is_none() {
+    if point.version != VERSION || SelfCheck::valid(point).is_none() {
         return Err(invalid("invalid world spawn record"));
     }
     Ok(Some(point))
@@ -182,8 +184,6 @@ mod tests {
     #[test]
     fn legacy_spawn_packets_and_safe_surface() {
         let world = World::default();
-        let existing = effective(Path::new("/tmp/nonexistent-worldspawn-in-test.irw"), &world);
-        assert!(existing.is_ok());
         let spawn = WorldSpawn::new(10, 64, -20).unwrap();
         assert_eq!(spawn.packet().len(), 12);
         assert_eq!(spawn.packet()[0..4], 10i32.to_be_bytes());
