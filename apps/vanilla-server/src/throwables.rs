@@ -534,8 +534,10 @@ mod tests {
         let mut world = World::new();
         world.import_block(2, 70, 0, 1 << 4).unwrap();
         for (offset, expected) in [(1, 0), (0, 1), (183, 4)] {
-            let mut objects = Throwables::default();
-            objects.next_id = offset;
+            let mut objects = Throwables {
+                next_id: offset,
+                ..Throwables::default()
+            };
             objects
                 .launch_dispenser(344, (0, 70, 0), (1, 0, 0))
                 .unwrap();
