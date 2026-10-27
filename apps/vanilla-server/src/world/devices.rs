@@ -480,7 +480,21 @@ impl World {
             .iter()
             .filter(|&&(ox, oy, oz)| (ox, oy, oz) != (dx, dy, dz))
             .any(|&(ox, oy, oz)| self.power_into((x + ox, y + oy, z + oz), (x, y, z)))
-            || (in_bounds(x, y + 1, z) && self.powered_near(x, y + 1, z));
+            // Java 1.7.10 QC/BUD checks the block two above and the
+            // four horizontal neighbours of the block immediately above.
+            // It does NOT include the piston itself or another below-block
+            // input when testing the above-block neighbourhood.
+            || (in_bounds(x, y + 2, z)
+                && self.power_into((x, y + 2, z), (x, y + 1, z)))
+            || [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                .into_iter()
+                .any(|(ox, oz)| {
+                    in_bounds(x + ox, y + 1, z + oz)
+                        && self.power_into(
+                            (x + ox, y + 1, z + oz),
+                            (x, y + 1, z),
+                        )
+                });
         if extended == on {
             return;
         }
@@ -489,6 +503,7 @@ impl World {
         // must never read the original value of an already staged base/head
         // or overwrite a move performed earlier in this same tick.
         if !in_bounds(head.0, head.1, head.2)
+            || head.1 == 0
             || changes.contains_key(&(x, y as u8, z))
             || changes.contains_key(&(head.0, head.1 as u8, head.2))
         {
@@ -500,7 +515,7 @@ impl World {
             let mut occupied = Vec::new();
             let mut target = head;
             loop {
-                if !in_bounds(target.0, target.1, target.2) {
+                if !in_bounds(target.0, target.1, target.2) || target.1 == 0 {
                     return;
                 }
                 // The terminal cell is part of the write set too: another
@@ -548,7 +563,16 @@ impl World {
                         && !changes.contains_key(&(far.0, far.1 as u8, far.2))
                     {
                         let pulled = self.get(far.0, far.1, far.2);
-                        if pulled != 0 && movable(pulled) && !piston_breakable(pulled) {
+                        if pulled != 0
+                            && movable(pulled)
+                            && !piston_breakable(pulled)
+                            // Vanilla 1.7.10 fast-pulse rule: an extending
+                            // moving-piston tile entity must settle at the far
+                            // cell, rather than being instantly pulled back.
+                            && !self.piston_extending_at(
+                                far.0, far.1, far.2, (block & 7) as u8,
+                            )
+                        {
                             changes.insert((head.0, head.1 as u8, head.2), pulled);
                             changes.insert((far.0, far.1 as u8, far.2), 0);
                         }
@@ -1450,6 +1474,67 @@ mod redstone_regression_tests {
         world.push_piston(0, 64, 0, piston, &mut changes);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes.get(&(2, 64, 0)), Some(&0));
+    }
+
+    #[test]
+    fn sticky_fast_pulse_does_not_pull_a_still_extending_block() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-piston-fast-pulse-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 64, 0, (29 << 4) | 5).unwrap();
+        world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert!(world.piston_extending_at(2, 64, 0, 5));
+        assert_eq!(world.get(2, 64, 0), 1 << 4);
+        // Switch power off before the moving piston completes its animation.
+        world.update_and_save(&path, -1, 64, 0, 69 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 64, 0), (29 << 4) | 5);
+        assert_eq!(world.get(1, 64, 0), 0);
+        assert_eq!(world.get(2, 64, 0), 1 << 4);
+        for _ in 0..3 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert!(!world.piston_extending_at(2, 64, 0, 5));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn sticky_piston_pulls_normally_after_extension_has_settled() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-piston-slow-pulse-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 64, 0, (29 << 4) | 5).unwrap();
+        world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        for _ in 0..3 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        world.update_and_save(&path, -1, 64, 0, 69 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 64, 0), (29 << 4) | 5);
+        assert_eq!(world.get(1, 64, 0), 1 << 4);
+        assert_eq!(world.get(2, 64, 0), 0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn downwards_piston_cannot_push_into_world_bottom() {
+        let mut world = World::new();
+        let piston = (33 << 4) | 0;
+        world.import_block(0, 1, 0, piston).unwrap();
+        world.import_block(-1, 1, 0, (69 << 4) | 8).unwrap();
+        let mut changes = BTreeMap::new();
+        world.push_piston(0, 1, 0, piston, &mut changes);
+        assert!(changes.is_empty());
     }
 
     #[test]
