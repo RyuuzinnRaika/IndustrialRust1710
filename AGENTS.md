@@ -13,6 +13,10 @@ This includes the Minecraft 1.7.10 server, protocols, chunk loading/sending, wor
 
 Shell/PowerShell wrappers may perform minimal platform setup, environment checks, build, and launch steps. Do not put Minecraft rules, world mutations, security-sensitive business logic, or persistent runtime supervisors in such wrappers. Existing Java oracle files are for development verification only; no Java-based server implementation.
 
+## Rust CI execution policy (2026-10-27)
+
+**Do not start or rerun GitHub Actions Rust CI.** The automatic push/pull-request Rust workflow triggers have been removed from `.github/workflows/ci.yml`; the remaining manual trigger must not be used unless the user explicitly changes this policy. Validate Rust locally on a development machine when available, record exact commands and commit SHA, and mark unavailable checks as unrun. Follow [detailed policies](docs/POLICY_RULES.md). Do not bypass GitHub branch protection; if a now-disabled Rust CI check remains required, hold the merge and request its removal in repository settings.
+
 ## Required behavior for developers and agents
 
 1. Before changing a feature, implement the feature in the appropriate Rust crate under `apps/` or `crates/` (or in a new Rust crate). Do not create a Python substitute for missing runtime functionality.
