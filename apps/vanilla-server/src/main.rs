@@ -2103,10 +2103,9 @@ fn play(
         }
         // A real 1.7.10 client predicts gravity while sending movement.
         // After six silent server ticks we integrate vertical gravity here.
-        // A position correction must be acknowledged by the real 1.7.10
-        // client before idle gravity is allowed to issue another S08.
-        // Otherwise the server overwrites the target while old C04 packets
-        // are still in flight, creating an endless rubber-band loop.
+        // Do not integrate server-side idle gravity while a teleport or
+        // collision correction is pending acknowledgement. Ordinary silent
+        // airborne clients still fall under the regular 20TPS fallback.
         if survival && vitals.health > 0.0 && pending_teleport.is_none() {
             let gravity_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let simulated = idle_gravity.advance(&gravity_world, player, now_tick);
@@ -2150,13 +2149,10 @@ fn play(
                         hub.broadcast(block_change_event(&soil, fx, fy, fz));
                     }
                 }
+                // Continue simulating silent airborne clients until landing.
+                // The position ACK gate is used for rejected client movement,
+                // not for each step of continuous server-side gravity.
                 send_player_position(s, player, yaw, pitch)?;
-                pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
-                if trace_movement {
-                    eprintln!(
-                        "movement trace: gravity correction pending_ack target={player:?}"
-                    );
-                }
                 if damage != 0 {
                     send(s, 0x06, &health_packet(*vitals))?;
                 }
