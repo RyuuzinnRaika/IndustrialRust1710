@@ -624,19 +624,58 @@ impl Minecarts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Use a fresh directory per test, including when tests run in parallel or
+    // a previous process left files behind. Never delete a shared PID path.
+    static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            loop {
+                let sequence = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "ir1710-carts-test-{}-{sequence}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("cannot create minecart test directory: {error}"),
+                }
+            }
+        }
+
+        fn file(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn minecart_load_missing_snapshot_starts_empty_without_creating_file() {
+        let directory = TestDir::new();
+        let path = directory.file("missing.json");
+        let restored = Minecarts::load(&path, 10).unwrap();
+        assert!(restored.carts.is_empty());
+        assert!(!path.exists());
+    }
+
     #[test]
     fn minecart_load_rejects_non_regular_save_paths() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-carts-nonregular-{}.json",
-            std::process::id()
-        ));
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir(&path);
+        let directory = TestDir::new();
+        let path = directory.file("snapshot.json");
         fs::create_dir(&path).unwrap();
 
         let error = Minecarts::load(&path, 10).err().unwrap();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
-        fs::remove_dir(path).unwrap();
     }
 
     #[cfg(unix)]
@@ -644,28 +683,20 @@ mod tests {
     fn minecart_load_rejects_symlink_even_to_valid_snapshot() {
         use std::os::unix::fs::symlink;
 
-        let directory = std::env::temp_dir();
-        let suffix = std::process::id();
-        let target = directory.join(format!("ir1710-carts-target-{suffix}.json"));
-        let link = directory.join(format!("ir1710-carts-link-{suffix}.json"));
-        let _ = fs::remove_file(&link);
-        let _ = fs::remove_file(&target);
+        let directory = TestDir::new();
+        let target = directory.file("target.json");
+        let link = directory.file("link.json");
         fs::write(&target, Minecarts::default().encoded().unwrap()).unwrap();
         symlink(&target, &link).unwrap();
 
         let error = Minecarts::load(&link, 10).err().unwrap();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
-        fs::remove_file(link).unwrap();
-        fs::remove_file(target).unwrap();
     }
 
     #[test]
     fn minecart_snapshot_size_limit_accepts_boundary_and_rejects_one_extra_byte() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-carts-size-limit-{}.json",
-            std::process::id()
-        ));
-        let _ = fs::remove_file(&path);
+        let directory = TestDir::new();
+        let path = directory.file("snapshot.json");
 
         let mut bytes = Minecarts::default().encoded().unwrap();
         bytes.resize(MAX_SAVE_BYTES as usize, b' ');
@@ -677,7 +708,6 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         let error = Minecarts::load(&path, 42).err().unwrap();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
-        fs::remove_file(path).unwrap();
     }
 
     #[test]
