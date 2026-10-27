@@ -947,6 +947,9 @@ fn play(
     let mut ping_time = started;
     let mut pong_time = started;
     let mut ping_id: i32 = 0;
+    // Only one outstanding server-issued KeepAlive may refresh liveness.
+    // An unsolicited, replayed or cross-session ID must never count as a pong.
+    let mut pending_ping: Option<i32> = None;
     let mut last_time_tick: u64 = clock.ticks();
     let mut last_vitals_tick = clock.ticks();
     let mut admission_check = started;
@@ -1848,9 +1851,10 @@ fn play(
             send(s, 0x03, &time)?;
             last_time_tick = now_tick;
         }
-        if ping_time.elapsed() >= Duration::from_secs(10) {
+        if pending_ping.is_none() && ping_time.elapsed() >= Duration::from_secs(10) {
             ping_id = ping_id.wrapping_add(1);
             send(s, 0, &ping_id.to_be_bytes())?;
+            pending_ping = Some(ping_id);
             ping_time = Instant::now();
         }
         if pong_time.elapsed() > Duration::from_secs(40) {
@@ -2206,9 +2210,10 @@ fn play(
             0 => {
                 let reply = input.i32()?;
                 input.finish()?;
-                if reply != ping_id {
-                    return Err(bad("unexpected keepalive ID"));
+                if pending_ping != Some(reply) {
+                    return Err(bad("unexpected or replayed keepalive ID"));
                 }
+                pending_ping = None;
                 pong_time = Instant::now();
             }
             1 => {
