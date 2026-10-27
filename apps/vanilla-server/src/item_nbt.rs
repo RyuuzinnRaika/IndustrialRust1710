@@ -296,4 +296,44 @@ mod tests {
         assert!(matches!(value(id).unwrap(), Value::Compound(_)));
         assert!(intern(&[0, 1, 2]).is_err());
     }
+
+    fn gzip_raw(raw: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(raw).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn nested_compound(depth: usize) -> Vec<u8> {
+        // Root Compound followed by 'depth' named Compound children,
+        // each with an empty name. Close every compound with TAG_End.
+        let mut raw = vec![10, 0, 0];
+        for _ in 0..depth {
+            raw.extend_from_slice(&[10, 0, 0]);
+        }
+        raw.extend(std::iter::repeat_n(0, depth + 1));
+        raw
+    }
+
+    #[test]
+    fn add007_nbt_preflight_enforces_depth_without_recursion() {
+        assert!(validate_nbt_wire(&nested_compound(MAX_NBT_DEPTH - 1)).is_ok());
+        assert!(validate_nbt_wire(&nested_compound(MAX_NBT_DEPTH)).is_err());
+        assert!(intern(&gzip_raw(&nested_compound(MAX_NBT_DEPTH))).is_err());
+    }
+
+    #[test]
+    fn add007_rejects_array_length_lies_and_illegal_list_tags_before_deserialization() {
+        // Named ByteArray "b" with a negative length.
+        let negative = [10, 0, 0, 7, 0, 1, b'b', 255, 255, 255, 255, 0];
+        // Named IntArray "i" with an impossible count, before reading elements.
+        let enormous = [10, 0, 0, 11, 0, 1, b'i', 0x7f, 0xff, 0xff, 0xff, 0];
+        // TAG_List "l" declares a nonempty list of TAG_End (not valid).
+        let illegal = [10, 0, 0, 9, 0, 1, b'l', 0, 0, 0, 0, 1, 0];
+        // Correct scalar tag, but its payload is truncated.
+        let truncated = [10, 0, 0, 4, 0, 1, b'n', 0, 0, 0];
+        for bytes in [negative.as_slice(), enormous.as_slice(), illegal.as_slice(), truncated.as_slice()] {
+            assert!(validate_nbt_wire(bytes).is_err());
+            assert!(intern(&gzip_raw(bytes)).is_err());
+        }
+    }
 }
