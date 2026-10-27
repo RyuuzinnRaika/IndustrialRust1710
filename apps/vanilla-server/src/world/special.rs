@@ -575,7 +575,10 @@ impl World {
     pub(super) fn special_changes(
         &self,
         budget: usize,
-    ) -> (BTreeMap<Position, u16>, std::collections::BTreeSet<Position>) {
+    ) -> (
+        BTreeMap<Position, u16>,
+        std::collections::BTreeSet<Position>,
+    ) {
         let mut changes = BTreeMap::new();
         let mut blast_cells = std::collections::BTreeSet::new();
         let len = self.pending_devices.len();
@@ -1311,7 +1314,9 @@ mod tests {
         assert!(!restored.pending_blast_edits.contains_key(&pos));
         assert!(restored.drain_tnt_events().is_empty());
         assert_eq!(
-            World::load(&path).unwrap().get(pos.0, i32::from(pos.1), pos.2),
+            World::load(&path)
+                .unwrap()
+                .get(pos.0, i32::from(pos.1), pos.2),
             0
         );
         fs::remove_file(path).ok();
