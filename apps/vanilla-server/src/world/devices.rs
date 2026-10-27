@@ -307,9 +307,7 @@ impl World {
         match block >> 4 {
             // Dust weakly powers only horizontal faces selected by its wire
             // shape and the supporting block below. It does not power above.
-            55 if to == (x, y - 1, z) || self.dust_points_into(from, to) => {
-                (block & 15) as u8
-            }
+            55 if to == (x, y - 1, z) || self.dust_points_into(from, to) => (block & 15) as u8,
             55 => 0,
             69 | 77 | 143 => {
                 if block & 8 != 0 {
