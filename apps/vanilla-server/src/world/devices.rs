@@ -641,8 +641,7 @@ impl World {
                         if entry.0 <= self.fluid_phase {
                             changes.insert(
                                 pos,
-                                ((if should_light { 76u16 } else { 75u16 }) << 4)
-                                    | (current & 15),
+                                ((if should_light { 76u16 } else { 75u16 }) << 4) | (current & 15),
                             );
                             self.pending_torches.remove(&pos);
                         }
@@ -914,26 +913,32 @@ mod redstone_regression_tests {
 
     #[test]
     fn torch_inverts_powered_attachment_after_two_world_ticks() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-torch-invert-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-torch-invert-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
         // Torch stands on a stone support. A lever fixed to its west face
         // strongly powers that support, but not the torch itself.
         world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
-        world.update_and_save(&path, 0, 65, 0, (76 << 4) | 5).unwrap();
-        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 2).unwrap();
+        world
+            .update_and_save(&path, 0, 65, 0, (76 << 4) | 5)
+            .unwrap();
+        world
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 2)
+            .unwrap();
         assert_eq!(world.signal_into((0, 65, 0), (1, 65, 0)), 15);
-        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 10).unwrap();
+        world
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 10)
+            .unwrap();
         world.block_tick(&path, 64).unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(0, 65, 0) >> 4, 76);
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(0, 65, 0), (75 << 4) | 5);
         assert_eq!(world.signal_into((0, 65, 0), (1, 65, 0)), 0);
-        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 2).unwrap();
+        world
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 2)
+            .unwrap();
         for _ in 0..3 {
             world.block_tick(&path, 64).unwrap();
         }
@@ -945,10 +950,8 @@ mod redstone_regression_tests {
 
     #[test]
     fn powered_support_below_dust_feeds_full_strength_without_a_side_wire() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-dust-vertical-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-dust-vertical-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
         world.update_and_save(&path, 0, 64, 0, 152 << 4).unwrap();
