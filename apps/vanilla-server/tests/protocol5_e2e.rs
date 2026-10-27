@@ -490,6 +490,38 @@ fn console_gamemode_changes_live_protocol5_and_keeps_inventories_isolated() {
 }
 
 #[test]
+fn native_1710_minecart_checkpoint_keeps_survival_session_and_movement_alive() {
+    let server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("Positioner");
+
+    // The projectile worker performs its first 20-tick minecart checkpoint
+    // with exactly ONE journal participant. Older builds rejected this with
+    // "expected 2 to 4 transaction participants" and stopped that worker.
+    // Exercise the real 20Hz worker and filesystem, not just journal::commit.
+    let cart_file = server.directory.join("flat.minecarts.json");
+    await_file(&cart_file);
+    let snapshot: Value = serde_json::from_slice(&fs::read(&cart_file).unwrap()).unwrap();
+    assert_eq!(snapshot["carts"], json!([]));
+    assert_eq!(snapshot["next"], 0);
+
+    // A checkpoint must not disrupt the live Protocol 5 session. Send actual
+    // vanilla C04 data AFTER the checkpoint and verify persistence on relogin.
+    send_position(&mut client, 1.5, 64.0, 0.5);
+    client.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    until_packet(&mut client, 2, |body| {
+        body.windows(10).any(|window| window == b"Online (1)")
+    });
+    drop(client);
+    server.wait_idle();
+
+    let (rejoined, _, saved) = server.join("Positioner");
+    assert_eq!(saved[0], 1.5, "movement after the minecart checkpoint was lost");
+    assert_eq!(saved[2], 0.5);
+    drop(rejoined);
+    server.wait_idle();
+}
+
+#[test]
 fn native_1710_c04_c06_decode_feet_y_before_stance() {
     let server = NativeServer::start();
     let (mut client, _, initial) = server.join("Positioner");
