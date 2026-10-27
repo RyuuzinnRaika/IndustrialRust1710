@@ -2728,9 +2728,10 @@ impl World {
         };
         // Block-light propagation can originate within 15 blocks of any
         // edge; skylight uses a smaller one-cell halo. Include both.
-        for (&(x, y, z), &block) in self.edits.range(
-            (min_x - 15, 0, i32::MIN)..(min_x + 31, 0, i32::MIN),
-        ) {
+        for (&(x, y, z), &block) in self
+            .edits
+            .range((min_x - 15, 0, i32::MIN)..(min_x + 31, 0, i32::MIN))
+        {
             if (min_z - 15..min_z + 31).contains(&z) {
                 snapshot.edits.insert((x, y, z), block);
             }
@@ -2858,7 +2859,10 @@ mod tests {
             let snapshot = world.chunk_read_snapshot(-1, -1);
             assert_eq!(snapshot.chunk_data(-1, -1), world.chunk_data(-1, -1));
             assert!(snapshot.edits.len() < world.edits.len());
-            assert_eq!(snapshot.get(200, 70, 200), snapshot.base_block(200, 70, 200));
+            assert_eq!(
+                snapshot.get(200, 70, 200),
+                snapshot.base_block(200, 70, 200)
+            );
         }
     }
 
