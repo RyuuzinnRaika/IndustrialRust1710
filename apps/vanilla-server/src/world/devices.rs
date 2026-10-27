@@ -958,10 +958,18 @@ mod redstone_regression_tests {
         world.update_and_save(&path, 0, 65, 0, 55 << 4).unwrap();
         world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
         world.update_and_save(&path, 1, 65, 0, 55 << 4).unwrap();
+        world.update_and_save(&path, 2, 64, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, 2, 65, 0, 55 << 4).unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(0, 65, 0) & 15, 15);
         world.block_tick(&path, 64).unwrap();
-        assert_eq!(world.get(1, 65, 0) & 15, 14);
+        // The redstone block also strongly powers the adjacent support,
+        // so its first wire is directly energized at 15, not attenuated.
+        assert_eq!(world.get(1, 65, 0) & 15, 15);
+        for _ in 0..3 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(2, 65, 0) & 15, 14);
         fs::remove_file(path).unwrap();
     }
 
