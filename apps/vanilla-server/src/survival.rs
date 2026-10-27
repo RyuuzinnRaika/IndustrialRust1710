@@ -341,7 +341,12 @@ impl MiningProgress {
         let penalty = self
             .penalty
             .max(environment_penalty(head_submerged, on_ground));
-        (self.started.elapsed() >= minimum.saturating_mul(penalty)).then_some(result)
+        // Dig progress is reported in client ticks but start/finish packets
+        // are processed on separate server polls. Allow one 20TPS tick of
+        // quantization slack, not an arbitrary fast-mine bypass.
+        (self.started.elapsed().saturating_add(Duration::from_millis(50))
+            >= minimum.saturating_mul(penalty))
+        .then_some(result)
     }
 }
 
@@ -653,6 +658,19 @@ mod tests {
         assert!(enter_water
             .finish_with_environment(target, block, held, true, true)
             .is_none());
+    }
+
+    #[test]
+    fn mining_allows_one_tick_of_network_quantization_but_not_instant_dirt() {
+        let at = (5, 66, 4);
+        let block = 3 << 4;
+        let base = mine_rule(block, None).unwrap().0;
+        assert!(base >= Duration::from_millis(250));
+        let mut close = MiningProgress::start(at, block, None).unwrap();
+        close.started = Instant::now() - (base - Duration::from_millis(40));
+        assert!(close.finish(at, block, None).is_some());
+        let early = MiningProgress::start(at, block, None).unwrap();
+        assert!(early.finish(at, block, None).is_none());
     }
 
     #[test]
