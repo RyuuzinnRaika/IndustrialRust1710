@@ -4872,7 +4872,7 @@ mod tests {
         assert_eq!(w.get(5, 65, 0), (64 << 4) | 8);
         assert_eq!(
             w.interact_device(&path, 5, 65, 0).unwrap(),
-            vec![(5, 64, 0)]
+            vec![(5, 64, 0), (5, 65, 0)]
         );
         assert_ne!(w.get(5, 64, 0) & 4, 0);
         w.update_and_save(&path, 5, 64, 0, 0).unwrap();

@@ -710,10 +710,15 @@ fn sync_chunks(
     center: (i32, i32),
 ) -> io::Result<()> {
     let desired = view_chunks(center);
-    for &(cx, cz) in loaded.difference(&desired) {
+    // Publish new columns first: dropping the old edge of the view before
+    // preparing replacements exposes holes and can flicker during movement.
+    // Mutate the known-loaded set only after the complete transition succeeds.
+    let entering: Vec<_> = desired.difference(loaded).copied().collect();
+    let leaving: Vec<_> = loaded.difference(&desired).copied().collect();
+    send_chunk_batch(s, world, center, entering)?;
+    for (cx, cz) in leaving {
         unload_chunk(s, cx, cz)?;
     }
-    send_chunk_batch(s, world, center, desired.difference(loaded).copied())?;
     *loaded = desired;
     Ok(())
 }
@@ -2079,6 +2084,9 @@ fn play(
             }
             let incoming =
                 creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
+            // Broadcast one animation per actual melee hit, with the health
+            // result; simply subtracting HP does not animate the attacker.
+            updates.extend(creatures.take_melee_animations());
             let hurt = if survival { incoming } else { 0 };
             let drops = creatures.take_drops();
             drop(creatures);
@@ -4609,7 +4617,12 @@ fn play(
                     if matches!(id, 69 | 77 | 143 | 64 | 71 | 96 | 93 | 94 | 107 | 149 | 150) {
                         let changed = w.interact_device(world_path, x, y, z)?;
                         for (cx, cy, cz) in changed {
-                            hub.broadcast(block_change_event(&w, cx, cy, cz));
+                            let event = block_change_event(&w, cx, cy, cz);
+                            // Apply the saved door/device state to the clicking
+                            // player immediately; other clients get exactly one
+                            // matching change through their Hub mailboxes.
+                            send(s, event.id, &event.body)?;
+                            hub.broadcast_except(entity_id, event);
                         }
                         continue;
                     }
@@ -10963,6 +10976,27 @@ mod primed_tnt_protocol5_tests {
         assert_eq!(encoded[0], 0x81); // entity ID starts as Protocol 5 VarInt
         assert_eq!(encoded[4], 50); // TNT object type
         assert_eq!(&encoded[5..9], &16i32.to_be_bytes());
+    }
+}
+
+#[cfg(test)]
+mod protocol5_chunk_transition_regression_tests {
+    use super::*;
+
+    #[test]
+    fn negative_chunk_centers_floor_correctly_and_view_shifts_by_one_column() {
+        let center = chunk_center(&PlayerPosition {
+            x: -0.5,
+            y: 65.0,
+            z: -0.5,
+        });
+        assert_eq!(center, (-1, -1));
+        let before = view_chunks(center);
+        let after = view_chunks((center.0 + 1, center.1));
+        assert_eq!(before.len(), 25);
+        assert_eq!(after.len(), 25);
+        assert_eq!(after.difference(&before).count(), 5);
+        assert_eq!(before.difference(&after).count(), 5);
     }
 }
 

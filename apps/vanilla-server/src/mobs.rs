@@ -325,6 +325,13 @@ impl Mob {
         body.push(value);
         Event { id: 0x1a, body }
     }
+    fn attack_animation(self) -> Event {
+        // 1.7.10 S0B Animation: entity ID VarInt, animation 0 (swing arm).
+        let mut body = Vec::with_capacity(6);
+        write_varint(self.id as u32, &mut body);
+        body.push(0);
+        Event { id: 0x0b, body }
+    }
     fn death_drop(self) -> Option<(Stack, (i32, i32, i32))> {
         // Baby farm animals produce neither adult meat nor wool. Sheared
         // sheep cannot drop a second wool block on death.
@@ -517,6 +524,9 @@ pub struct Mobs {
     // by a position that multiple players can occupy simultaneously.
     #[serde(skip)]
     pending_target_effects: BTreeMap<i32, (u8, u16, u64)>,
+    /// Server-produced 1.7.10 arm swings, emitted only after a real melee hit.
+    #[serde(skip)]
+    pending_melee_animations: Vec<Event>,
     #[serde(skip)]
     active_effects: BTreeMap<i32, (u8, u64, u64)>,
     #[serde(skip)]
@@ -577,6 +587,39 @@ pub(crate) fn dungeon_spawner_entity_id(x: i32, y: i32, z: i32) -> &'static str 
         _ => "Spider",
     }
 }
+/// Vanilla yaw zero faces positive Z and positive yaw turns towards negative X.
+fn facing_angles(from: PlayerPosition, to: PlayerPosition) -> (f32, f32) {
+    let dx = to.x - from.x;
+    let dz = to.z - from.z;
+    let horizontal = dx.hypot(dz);
+    let yaw = if horizontal < 1e-6 {
+        0.0
+    } else {
+        (-dx).atan2(dz).to_degrees() as f32
+    };
+    let pitch = -(to.y - from.y).atan2(horizontal).to_degrees() as f32;
+    (yaw, pitch)
+}
+
+fn facing_packets(id: i32, yaw: f32, pitch: f32) -> [Event; 2] {
+    let angle = |degrees: f32| (degrees.rem_euclid(360.0) * 256.0 / 360.0) as u8;
+    let mut look = id.to_be_bytes().to_vec();
+    look.push(angle(yaw));
+    look.push(angle(pitch));
+    let mut head = id.to_be_bytes().to_vec();
+    head.push(angle(yaw));
+    [
+        Event {
+            id: 0x16,
+            body: look,
+        }, // S16 Entity Look
+        Event {
+            id: 0x19,
+            body: head,
+        }, // S19 Entity Head Look
+    ]
+}
+
 fn distance(a: PlayerPosition, b: PlayerPosition) -> f64 {
     (a.x - b.x).hypot(a.z - b.z)
 }
@@ -2915,6 +2958,12 @@ impl Mobs {
                     continue; // Light >= 12: neutral, unless attacked first.
                 }
                 let d = distance(target, mob.position);
+                // Turn to face the selected player before advancing. A head-look
+                // packet is required in addition to body yaw for 1.7.10 mobs.
+                let (facing_yaw, facing_pitch) = facing_angles(mob.position, target);
+                if simulated_tick.is_multiple_of(5) {
+                    events.extend(facing_packets(mob.id, facing_yaw, facing_pitch));
+                }
                 if mob.kind == Kind::EnderDragon {
                     // Server-owned orbit while the fight is active.
                     let angle = now as f64 * 0.015;
@@ -3003,7 +3052,12 @@ impl Mobs {
                 if matches!(mob.kind, Kind::Ghast | Kind::Blaze) {
                     if let Some(next) = flying_step(world, mob.kind, mob.position, target, now) {
                         mob.position = next;
-                        events.push(multiplayer::teleport(mob.id, &next, 0.0, 0.0));
+                        events.push(multiplayer::teleport(
+                            mob.id,
+                            &next,
+                            facing_yaw,
+                            facing_pitch,
+                        ));
                     }
                     continue;
                 }
@@ -3065,7 +3119,12 @@ impl Mobs {
                     navigation::advance_step(world, mob.position, waypoint, speed)
                 {
                     mob.position = candidate;
-                    events.push(multiplayer::teleport(mob.id, &candidate, 0.0, 0.0));
+                    events.push(multiplayer::teleport(
+                        mob.id,
+                        &candidate,
+                        facing_yaw,
+                        facing_pitch,
+                    ));
                 } else if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     // Both spider variants climb alongside a wall, never through it.
                     let front = PlayerPosition {
@@ -3085,7 +3144,12 @@ impl Mobs {
                         };
                         if climbed.is_valid() && !physics::collides(world, &climbed) {
                             mob.position = climbed;
-                            events.push(multiplayer::teleport(mob.id, &climbed, 0.0, 0.0));
+                            events.push(multiplayer::teleport(
+                                mob.id,
+                                &climbed,
+                                facing_yaw,
+                                facing_pitch,
+                            ));
                         }
                     }
                 }
@@ -3351,6 +3415,11 @@ impl Mobs {
     pub fn hurt_player(&mut self, player_id: i32, player: PlayerPosition, tick: u64) -> u8 {
         self.hurt_player_with_health(player_id, player, tick, 20.0)
     }
+    /// Drain animation packets generated by the most recent authoritative hit.
+    pub fn take_melee_animations(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.pending_melee_animations)
+    }
+
     pub fn hurt_player_with_health(
         &mut self,
         player_id: i32,
@@ -3388,6 +3457,9 @@ impl Mobs {
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
                 mob.bite_tick = tick;
+                if self.difficulty != Some(0) {
+                    self.pending_melee_animations.push(mob.attack_animation());
+                }
                 amount =
                     amount.saturating_add(if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                         2
@@ -7786,5 +7858,42 @@ mod tests {
             .projectile_targets()
             .iter()
             .all(|target| target.0 != id));
+    }
+}
+
+#[cfg(test)]
+mod protocol5_facing_regression_tests {
+    use super::*;
+
+    #[test]
+    fn mob_looks_towards_player_on_both_axes() {
+        let origin = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let east = PlayerPosition {
+            x: 5.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let north = PlayerPosition {
+            x: 0.5,
+            y: 66.0,
+            z: -5.5,
+        };
+        let (yaw, pitch) = facing_angles(origin, east);
+        assert!((yaw + 90.0).abs() < 0.01);
+        assert_eq!(pitch, 0.0);
+        let (yaw, pitch) = facing_angles(origin, north);
+        assert!((yaw.abs() - 180.0).abs() < 0.01);
+        assert!(pitch < 0.0);
+        let packets = facing_packets(1234, yaw, pitch);
+        assert_eq!(packets[0].id, 0x16);
+        assert_eq!(packets[0].body.len(), 6);
+        assert_eq!(&packets[0].body[..4], &1234i32.to_be_bytes());
+        assert_eq!(packets[1].id, 0x19);
+        assert_eq!(packets[1].body.len(), 5);
+        assert_eq!(packets[0].body[4], packets[1].body[4]);
     }
 }
