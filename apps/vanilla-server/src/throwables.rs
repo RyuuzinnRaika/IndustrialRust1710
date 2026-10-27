@@ -59,6 +59,21 @@ pub(crate) fn is_dispenser_projectile(item_id: i16) -> bool {
     Kind::from_dispenser_item(item_id).is_some()
 }
 
+/// Vanilla eggs hatch on 1/8 impacts; 1/32 of those hatches produce four
+/// chicks instead of one. Derive both rolls from the same stable server-side
+/// value so clients cannot influence the outcome or duplicate the hatch.
+fn egg_hatch_count(tick: u64, entity_id: i32) -> usize {
+    let roll = (tick ^ (entity_id as u64).wrapping_mul(0x9e3779b97f4a7c15))
+        .rotate_left(17);
+    if roll & 7 != 0 {
+        0
+    } else if (roll >> 3) & 31 == 0 {
+        4
+    } else {
+        1
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Thrown {
     id: i32,
@@ -337,10 +352,7 @@ impl Throwables {
                     }
                 }
                 if object.kind == Kind::Egg {
-                    // Deterministic 1-in-8 hatch chance; only the server decides.
-                    let roll = (tick ^ (object.id as u64).wrapping_mul(0x9e3779b97f4a7c15))
-                        .rotate_left(17);
-                    if roll & 7 == 0 {
+                    for _ in 0..egg_hatch_count(tick, object.id) {
                         result.egg_hatches.push(at);
                     }
                 }
@@ -513,6 +525,30 @@ mod tests {
                 assert!((projectile.velocity[0] - 1.1 * drag).abs() < 1e-10);
                 assert!((projectile.velocity[1] + projectile.kind.gravity()).abs() < 1e-10);
             }
+        }
+    }
+
+
+    #[test]
+    fn dispenser_egg_hatch_supports_zero_one_and_four_chicks_without_duplication() {
+        // Frozen deterministic impact fixtures. Vanilla's rare four-chick
+        // hatch is conditional on the normal 1-in-8 hatch, not a separate egg.
+        let mut world = World::new();
+        world.import_block(2, 70, 0, 1 << 4).unwrap();
+        for (offset, expected) in [(1, 0), (0, 1), (183, 4)] {
+            let mut objects = Throwables::default();
+            objects.next_id = offset;
+            objects
+                .launch_dispenser(344, (0, 70, 0), (1, 0, 0))
+                .unwrap();
+            assert_eq!(egg_hatch_count(17, START_ID + offset), expected);
+            let impact = objects.tick(&world, 17);
+            assert_eq!(impact.egg_hatches.len(), expected);
+            assert!(impact.egg_hatches.iter().all(|at| at.x >= 2.0));
+            assert_eq!(impact.events.len(), 1);
+            assert_eq!(impact.events[0].1.id, 0x13);
+            assert!(objects.active.is_empty());
+            assert!(objects.tick(&world, 18).egg_hatches.is_empty());
         }
     }
 
