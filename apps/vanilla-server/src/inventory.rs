@@ -2073,6 +2073,33 @@ mod tests {
     }
 
     #[test]
+    fn ender_chest_is_private_persistent_inventory_and_keeps_items_across_windows() {
+        let mut alice = Inventory::default();
+        let mut bob = Inventory::default();
+        let item = Stack {
+            id: 4,
+            count: 5,
+            damage: 0,
+            nbt: None,
+        };
+        alice.creative_set(36, Some(item)).unwrap();
+        assert!(alice.ender_chest_click_window(1, 54, 0, 0).is_some());
+        assert!(alice.ender_chest_click_window(1, 0, 0, 0).is_some());
+        assert_eq!(alice.ender_chest[0], Some(item));
+        assert!(alice.cursor.is_none());
+        assert!(bob.ender_chest[0].is_none());
+        assert_eq!(&alice.ender_chest_window_items(3)[..3], &[3, 0, 63]);
+        let restored: Inventory = serde_json::from_slice(&alice.encoded().unwrap()).unwrap();
+        assert_eq!(restored.ender_chest[0], Some(item));
+        assert!(restored.ender_chest_click_window(4, 0, 0, 0).is_some());
+        assert_eq!(restored.cursor, Some(item));
+        assert!(restored.ender_chest[0].is_none());
+        // Remote player's storage must never be overwritten by this session.
+        assert!(bob.ender_chest_click_window(1, 0, 0, 0).is_some());
+        assert!(bob.cursor.is_none());
+    }
+
+    #[test]
     fn shift_click_never_stacks_lava_buckets_in_furnace() {
         let mut inv = Inventory::default();
         let bucket = Stack {
