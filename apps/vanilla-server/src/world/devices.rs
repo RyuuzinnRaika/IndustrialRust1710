@@ -1006,6 +1006,25 @@ mod redstone_regression_tests {
             world.pending_buttons.get(&(0, 64, 0)),
             Some(&(world.fluid_phase + 10))
         );
+        // The plate stays powered until the refreshed deadline. A failed
+        // release save must not clear its state or discard the timer.
+        assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 15);
+        for _ in 0..9 {
+            world.block_tick(&path, 64).unwrap();
+            assert_eq!(world.get(0, 64, 0), (70 << 4) | 1);
+        }
+        fs::create_dir(&staging).unwrap();
+        assert!(world.block_tick(&path, 64).is_err());
+        assert_eq!(world.get(0, 64, 0), (70 << 4) | 1);
+        assert!(world.pending_buttons.contains_key(&(0, 64, 0)));
+        fs::remove_dir(&staging).unwrap();
+
+        let changed = world.block_tick(&path, 64).unwrap();
+        assert!(changed.contains(&(0, 64, 0)));
+        assert_eq!(world.get(0, 64, 0), 70 << 4);
+        assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 0);
+        assert!(!world.pending_buttons.contains_key(&(0, 64, 0)));
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 70 << 4);
         fs::remove_file(path).unwrap();
     }
 
