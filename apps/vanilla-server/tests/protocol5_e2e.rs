@@ -1728,7 +1728,12 @@ fn movement_and_collision_corrections_preserve_the_players_view() {
         -22.5
     );
 
-    // Valid movement still works after a rejected collision and a correction.
+    // A queued position from the old view cannot bypass the correction ACK,
+    // even when less than 1/4 block from the authoritative location.
+    send_position(&mut client, 0.9, 64.0, 0.5);
+    // Vanilla 1.7.10 sends a C04/C06 at the corrected feet location.
+    send_position(&mut client, 0.7, 64.0, 0.5);
+    // Movement is accepted again only after that ACK.
     send_position(&mut client, 0.9, 64.0, 0.5);
     send_position(&mut client, 0.9, 60.0, 0.5);
     let correction = until_packet(&mut client, 0x08, |packet| {
@@ -1745,6 +1750,7 @@ fn movement_and_collision_corrections_preserve_the_players_view() {
 
     // C06 carries position and look in the same packet; rejected movement
     // must keep the newly reported view as well.
+    send_position(&mut client, 0.9, 64.0, 0.5);
     send_position_and_look(&mut client, 0.9, 60.0, 0.5);
     let correction = until_packet(&mut client, 0x08, |packet| {
         read_position(packet) == [0.9, 64.0, 0.5]
@@ -1760,6 +1766,28 @@ fn movement_and_collision_corrections_preserve_the_players_view() {
 }
 
 #[test]
+fn collision_correction_rejects_queued_nearby_client_movement_until_ack() {
+    let mut server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+    send_position(&mut client, 0.7, 64.0, 0.5);
+    send_position(&mut client, 0.7, 60.0, 0.5);
+    until_packet(&mut client, 0x08, |packet| {
+        read_position(packet) == [0.7, 64.0, 0.5]
+    });
+
+    // The 0.2-block stale position previously satisfied the excessively
+    // lenient 0.25-block gate. Only the exact corrected point may ACK.
+    send_position(&mut client, 0.9, 64.0, 0.5);
+    send_position(&mut client, 0.7, 64.0, 0.5);
+    drop(client);
+    server.wait_idle();
+    let (rejoined, _, saved) = server.join("RustTester");
+    assert_eq!(saved, [0.7, 64.0, 0.5]);
+    drop(rejoined);
+    server.wait_idle();
+}
+
+#[test]
 fn native_survival_collision_damage_death_respawn_and_health_persistence() {
     let server = NativeServer::start_with_mode(true);
     let (mut client, _, _) = server.join("RustTester");
@@ -1769,6 +1797,7 @@ fn native_survival_collision_damage_death_respawn_and_health_persistence() {
     until_packet(&mut client, 0x08, |packet| {
         read_position(packet) == [0.5, 65.0, 0.5]
     });
+    send_position(&mut client, 0.5, 65.0, 0.5); // S08 confirmation
 
     // Falling eight blocks to the y=64 grass surface costs five health.
     send_position(&mut client, 0.5, 72.0, 0.5);
