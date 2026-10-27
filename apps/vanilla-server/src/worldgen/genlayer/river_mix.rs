@@ -112,14 +112,7 @@ mod tests {
         let whole = river_mix_map(-17, -17, 8, 8, biome_parent, river_parent);
         for dz in (0..8).rev() {
             for dx in (0..8).rev() {
-                let cell = river_mix_map(
-                    -17 + dx,
-                    -17 + dz,
-                    1,
-                    1,
-                    biome_parent,
-                    river_parent,
-                );
+                let cell = river_mix_map(-17 + dx, -17 + dz, 1, 1, biome_parent, river_parent);
                 assert_eq!(cell[0], whole[(dz * 8 + dx) as usize]);
             }
         }
