@@ -165,7 +165,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build --release -p vanilla-server -p legacy-status-server
 ```
 
-GitHub ActionsのRust CIは書式・テスト・Lint・Releaseビルドを確認します。ただし、自動TCPテストの成功だけでは完全な1.7.10互換性を認定できません。
+**2026-10-27以降、GitHub ActionsのRust CIはpush/PRで自動実行しません。** 今後AI担当からRust CIを起動・再実行することもありません。上記cargoコマンドは開発PC等のローカル検証用です。未実施の検証を成功扱いせず、バニラ1.7.10実機検証とも区別します。停止済Rust CIがGitHub保護ルールの必須チェックに残っている場合、管理者が設定変更するまではマージ保留です。詳細は[ポリシー](docs/POLICY_RULES.md)。
 
 ## ドキュメント案内
 
