@@ -123,6 +123,8 @@ use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
 const MAX_CONNECTIONS: usize = 32;
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(40);
+// Vanilla 1.7.10 EntityPlayer stores yOffset as a float before widening it.
+const CLIENT_PLAYER_Y_OFFSET: f64 = 1.62_f32 as f64;
 // Internal to Hub; no such packet ID is ever sent on the Protocol 5 wire.
 const CHUNK_RELIGHT_EVENT: u32 = u32::MAX;
 fn bad(reason: &'static str) -> io::Error {
@@ -502,7 +504,7 @@ fn join(
     send(s, 0x2f, &inventory.cursor_packet())?;
     send(s, 0x09, &[inventory.selected()])?;
     // Player starts at their last safely persisted position.
-    send_player_position(s, position)?;
+    send_player_position(s, position, 0.0, 0.0)?;
     as_chat(
         s,
         if survival {
@@ -708,14 +710,21 @@ mod dispenser_arrow_damage_tests {
     }
 }
 
-fn send_player_position(s: &mut Connection, location: &PlayerPosition) -> io::Result<()> {
-    // Protocol 5 clientbound position/look: x, feet y, z, yaw, pitch, on_ground.
+fn send_player_position(
+    s: &mut Connection,
+    location: &PlayerPosition,
+    yaw: f32,
+    pitch: f32,
+) -> io::Result<()> {
+    // The 1.7.10 client applies S08 Y to Entity.posY, then reports its
+    // bounding-box feet Y in C04/C06. Account for the player's yOffset so a
+    // server feet position is not placed 1.62 blocks inside the ground.
     let mut bytes = Vec::with_capacity(33);
     bytes.extend_from_slice(&location.x.to_be_bytes());
-    bytes.extend_from_slice(&location.y.to_be_bytes());
+    bytes.extend_from_slice(&(location.y + CLIENT_PLAYER_Y_OFFSET).to_be_bytes());
     bytes.extend_from_slice(&location.z.to_be_bytes());
-    bytes.extend_from_slice(&0f32.to_be_bytes());
-    bytes.extend_from_slice(&0f32.to_be_bytes());
+    bytes.extend_from_slice(&yaw.to_be_bytes());
+    bytes.extend_from_slice(&pitch.to_be_bytes());
     bytes.push(0);
     send(s, 0x08, &bytes)
 }
@@ -1277,6 +1286,9 @@ fn play(
     let mut last_chunk_relight = Instant::now() - Duration::from_millis(200);
     let mut yaw: f32 = 0.0;
     let mut pitch: f32 = 0.0;
+    let trace_movement = std::env::var_os("IR_TRACE_MOVEMENT").is_some();
+    let mut last_movement_trace = Instant::now() - Duration::from_secs(2);
+    let mut last_look_trace = Instant::now() - Duration::from_secs(2);
     let mut last_movement_broadcast = Instant::now() - Duration::from_millis(50);
     let started = Instant::now();
     let mut ping_time = started;
@@ -1474,14 +1486,12 @@ fn play(
                 mining = None;
                 eating = None;
                 bow_start = None;
-                yaw = 0.0;
-                pitch = 0.0;
                 let old_chunks = loaded_chunks.clone();
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
                 let entering = loaded_chunks.difference(&old_chunks).copied().collect();
                 send_visible_signs(s, decorations, &entering)?;
                 send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
-                send_player_position(s, player)?;
+                send_player_position(s, player, yaw, pitch)?;
                 if pearl_impact {
                     send(s, 0x06, &health_packet(*vitals))?;
                 }
@@ -1522,7 +1532,7 @@ fn play(
                         let entering = loaded_chunks.difference(&old_chunks).copied().collect();
                         send_visible_signs(s, decorations, &entering)?;
                         send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
-                        send_player_position(s, player)?;
+                        send_player_position(s, player, yaw, pitch)?;
                         hub.move_player(entity_id, *player, yaw, pitch);
                         last_movement_broadcast = Instant::now();
                     }
@@ -1947,7 +1957,7 @@ fn play(
                         hub.broadcast(block_change_event(&soil, fx, fy, fz));
                     }
                 }
-                send_player_position(s, player)?;
+                send_player_position(s, player, yaw, pitch)?;
                 if damage != 0 {
                     send(s, 0x06, &health_packet(*vitals))?;
                 }
@@ -2909,7 +2919,7 @@ fn play(
                 let candidate = PlayerPosition { x, y, z };
                 if !candidate.is_valid() {
                     // Sparse world positions are validated against the global world limit.
-                    send_player_position(s, player)?;
+                    send_player_position(s, player, yaw, pitch)?;
                     continue;
                 }
                 if boats
@@ -2934,7 +2944,20 @@ fn play(
                 if survival {
                     let collision_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     if !physics::valid_movement(&collision_world, player, &candidate) {
-                        send_player_position(s, player)?;
+                        let trace_rejection = trace_movement
+                            && last_movement_trace.elapsed() >= Duration::from_secs(2);
+                        let from_collision =
+                            trace_rejection && physics::collides(&collision_world, player);
+                        let to_collision =
+                            trace_rejection && physics::collides(&collision_world, &candidate);
+                        drop(collision_world);
+                        if trace_rejection {
+                            eprintln!(
+                                "movement trace: rejected from={player:?} to={candidate:?} from_collision={from_collision} to_collision={to_collision} yaw={yaw} pitch={pitch}"
+                            );
+                            last_movement_trace = Instant::now();
+                        }
+                        send_player_position(s, player, yaw, pitch)?;
                         continue;
                     }
                     let landed = physics::supported(&collision_world, &candidate);
@@ -3028,6 +3051,10 @@ fn play(
                             }
                         }
                     }
+                }
+                if trace_movement && last_movement_trace.elapsed() >= Duration::from_secs(2) {
+                    eprintln!("movement trace: accepted from={player:?} to={candidate:?} yaw={yaw} pitch={pitch}");
+                    last_movement_trace = Instant::now();
                 }
                 location = (x, y, z);
                 *player = candidate;
@@ -3125,7 +3152,7 @@ fn play(
                                         &mut loaded_chunks,
                                         chunk_center(player),
                                     )?;
-                                    send_player_position(s, player)?;
+                                    send_player_position(s, player, yaw, pitch)?;
                                     last_movement_broadcast = Instant::now();
                                     continue;
                                 }
@@ -3154,6 +3181,10 @@ fn play(
                 input.finish()?;
                 if !yaw.is_finite() || !pitch.is_finite() {
                     return Err(bad("invalid player look angles"));
+                }
+                if trace_movement && last_look_trace.elapsed() >= Duration::from_secs(2) {
+                    eprintln!("movement trace: look yaw={yaw} pitch={pitch}");
+                    last_look_trace = Instant::now();
                 }
                 idle_gravity.observe_client(now_tick);
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
@@ -3219,7 +3250,7 @@ fn play(
                             // receive the same detach through the hub.
                             send(s, event.id, &event.body)?;
                             hub.broadcast_except(entity_id, event);
-                            send_player_position(s, player)?;
+                            send_player_position(s, player, yaw, pitch)?;
                             hub.move_player(entity_id, position, yaw, pitch);
                         }
                         Some((event, None)) => {
@@ -5705,7 +5736,7 @@ fn play(
                     send(s, 0x1f, &experience.packet())?;
                     send(s, 0x30, &inventory.window_items())?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
-                    send_player_position(s, player)?;
+                    send_player_position(s, player, yaw, pitch)?;
                     hub.move_player(entity_id, *player, yaw, pitch);
                 }
             }

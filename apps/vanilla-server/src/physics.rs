@@ -481,42 +481,11 @@ pub fn on_ladder(world: &World, position: &PlayerPosition) -> bool {
     matches!(world.get(x, position.y.floor() as i32, z) >> 4, 65)
         || matches!(world.get(x, (position.y + 1.0).floor() as i32, z) >> 4, 65)
 }
-/// Sweep both horizontal and vertical segments to prevent endpoint tunnelling.
-pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPosition) -> bool {
-    if !next.is_valid() || collides(world, next) {
-        return false;
-    }
+fn swept_path_clear(world: &World, previous: &PlayerPosition, next: &PlayerPosition) -> bool {
     let dx = next.x - previous.x;
     let dy = next.y - previous.y;
     let dz = next.z - previous.z;
     let horizontal = dx.hypot(dz);
-    if horizontal > 64.0 || dy.abs() > 128.0 {
-        return false;
-    }
-    // Client stepping onto a slab or stair first raises the feet, then moves
-    // sideways. A naive linear sweep would falsely intersect its lower half.
-    if dy > 0.0 && dy <= 0.6 && horizontal <= 1.5 {
-        let risen = PlayerPosition {
-            y: next.y,
-            ..*previous
-        };
-        if !collides(world, &risen) {
-            let steps = (horizontal / 0.2).ceil() as usize;
-            if (1..steps).all(|i| {
-                let t = i as f64 / steps as f64;
-                !collides(
-                    world,
-                    &PlayerPosition {
-                        x: risen.x + dx * t,
-                        y: risen.y,
-                        z: risen.z + dz * t,
-                    },
-                )
-            }) {
-                return true;
-            }
-        }
-    }
     let steps = (horizontal.max(dy.abs()) / 0.2).ceil().clamp(1.0, 640.0) as usize;
     for i in 1..steps {
         let f = i as f64 / steps as f64;
@@ -530,6 +499,46 @@ pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPos
         }
     }
     true
+}
+
+/// Sweep both horizontal and vertical segments to prevent endpoint tunnelling.
+pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPosition) -> bool {
+    if !next.is_valid() || collides(world, next) {
+        return false;
+    }
+    let dx = next.x - previous.x;
+    let dy = next.y - previous.y;
+    let dz = next.z - previous.z;
+    let horizontal = dx.hypot(dz);
+    if horizontal > 64.0 || dy.abs() > 128.0 {
+        return false;
+    }
+    // A normal jump or step moves upward before crossing a block edge; a
+    // descent can move over the edge before dropping. A straight diagonal
+    // between the two reported positions incorrectly cuts through the block.
+    // Bound this alternative to ordinary small player movements and sweep
+    // both legs so neither can pass through a wall or ceiling.
+    if dy != 0.0 && dy.abs() <= 1.25 && horizontal <= 1.5 {
+        let corner = if dy > 0.0 {
+            PlayerPosition {
+                y: next.y,
+                ..*previous
+            }
+        } else {
+            PlayerPosition {
+                x: next.x,
+                z: next.z,
+                ..*previous
+            }
+        };
+        if !collides(world, &corner)
+            && swept_path_clear(world, previous, &corner)
+            && swept_path_clear(world, &corner, next)
+        {
+            return true;
+        }
+    }
+    swept_path_clear(world, previous, next)
 }
 
 /// Reconcile a player caught by a newly committed piston extension.
@@ -751,6 +760,43 @@ mod tests {
 
     fn at(x: f64, y: f64, z: f64) -> PlayerPosition {
         PlayerPosition { x, y, z }
+    }
+
+    #[test]
+    fn expanded_seed_42_surface_position_accepts_small_movements() {
+        let world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        let start = at(8.699999988079071, 66.01763309290659, 8.300000011920929);
+        assert!(!collides(&world, &start));
+        assert!(supported(&world, &start));
+        for (dx, dz) in [(0.1, 0.0), (-0.1, 0.0), (0.0, 0.1), (0.0, -0.1)] {
+            let end = at(start.x + dx, start.y, start.z + dz);
+            assert!(valid_movement(&world, &start, &end), "move=({dx},{dz})");
+        }
+    }
+
+    #[test]
+    fn jumping_out_of_and_dropping_into_a_one_block_hole_remains_valid() {
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        world.import_block(8, 65, 8, 0).unwrap();
+        let in_hole = at(8.699999988079071, 65.0, 8.319575753062963);
+        let jumping = at(8.70194596296642, 66.24918707874468, 8.459342066656731);
+        let on_surface = at(8.727139172899339, 66.0, 9.049701715671159);
+        assert!(!collides(&world, &in_hole));
+        assert!(!collides(&world, &jumping));
+        assert!(!collides(&world, &on_surface));
+        assert!(valid_movement(&world, &in_hole, &jumping), "jump out");
+        assert!(valid_movement(&world, &on_surface, &in_hole), "drop in");
+    }
+
+    #[test]
+    fn stepped_jump_still_checks_the_ceiling() {
+        let mut world = World::new();
+        world.import_block(0, 66, 0, 1 << 4).unwrap();
+        let start = at(0.5, 64.0, 0.5);
+        let end = at(1.5, 65.0, 0.5);
+        assert!(!collides(&world, &start));
+        assert!(!collides(&world, &end));
+        assert!(!valid_movement(&world, &start, &end));
     }
 
     #[test]

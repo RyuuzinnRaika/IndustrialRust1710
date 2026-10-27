@@ -350,9 +350,10 @@ fn receive(socket: &mut TcpStream) -> (u32, Vec<u8>) {
     (pid, raw.to_vec())
 }
 fn read_position(packet: &[u8]) -> [f64; 3] {
+    // S08 carries the client's posY; translate it back to server feet Y.
     [
         f64::from_be_bytes(packet[0..8].try_into().unwrap()),
-        f64::from_be_bytes(packet[8..16].try_into().unwrap()),
+        f64::from_be_bytes(packet[8..16].try_into().unwrap()) - f64::from(1.62_f32),
         f64::from_be_bytes(packet[16..24].try_into().unwrap()),
     ]
 }
@@ -1626,6 +1627,86 @@ fn native_protocol5_survival_q_and_ctrl_q_drop_authoritative_stacks() {
         .collect();
     counts.sort_unstable();
     assert_eq!(counts, [1, 11]);
+}
+
+#[test]
+fn vanilla_client_position_correction_accounts_for_eye_offset() {
+    let server = NativeServer::start_with_mode(true);
+    let mut client = server.connect("RustTester");
+    let (login_id, _) = receive(&mut client);
+    assert_eq!(login_id, 2);
+    let initial = until_packet(&mut client, 0x08, |packet| packet.len() == 33);
+    let wire_y = f64::from_be_bytes(initial[8..16].try_into().unwrap());
+    let offset = f64::from(1.62_f32);
+    assert_eq!(wire_y, 65.0 + offset, "clientbound Y is the client posY");
+
+    // The vanilla client subtracts its float yOffset to obtain bounding-box
+    // feet Y, then sends that feet Y back in C04/C06.
+    let client_feet_y = wire_y - offset;
+    assert_eq!(client_feet_y, 65.0);
+    send_position(&mut client, 0.7, 64.0, 0.5);
+    send_position(&mut client, 0.7, 60.0, 0.5);
+    let correction = until_packet(&mut client, 0x08, |packet| {
+        f64::from_be_bytes(packet[0..8].try_into().unwrap()) == 0.7
+    });
+    let corrected_y = f64::from_be_bytes(correction[8..16].try_into().unwrap());
+    assert_eq!(corrected_y, 64.0 + offset);
+}
+
+#[test]
+fn movement_and_collision_corrections_preserve_the_players_view() {
+    let server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+    send_position(&mut client, 0.7, 64.0, 0.5);
+
+    let mut look = Vec::new();
+    look.extend_from_slice(&135.0_f32.to_be_bytes());
+    look.extend_from_slice(&(-22.5_f32).to_be_bytes());
+    look.push(1);
+    client.write_all(&frame(5, &look)).unwrap();
+    send_position(&mut client, 0.7, 60.0, 0.5);
+
+    let correction = until_packet(&mut client, 0x08, |packet| {
+        read_position(packet) == [0.7, 64.0, 0.5]
+    });
+    assert_eq!(
+        f32::from_be_bytes(correction[24..28].try_into().unwrap()),
+        135.0
+    );
+    assert_eq!(
+        f32::from_be_bytes(correction[28..32].try_into().unwrap()),
+        -22.5
+    );
+
+    // Valid movement still works after a rejected collision and a correction.
+    send_position(&mut client, 0.9, 64.0, 0.5);
+    send_position(&mut client, 0.9, 60.0, 0.5);
+    let correction = until_packet(&mut client, 0x08, |packet| {
+        read_position(packet) == [0.9, 64.0, 0.5]
+    });
+    assert_eq!(
+        f32::from_be_bytes(correction[24..28].try_into().unwrap()),
+        135.0
+    );
+    assert_eq!(
+        f32::from_be_bytes(correction[28..32].try_into().unwrap()),
+        -22.5
+    );
+
+    // C06 carries position and look in the same packet; rejected movement
+    // must keep the newly reported view as well.
+    send_position_and_look(&mut client, 0.9, 60.0, 0.5);
+    let correction = until_packet(&mut client, 0x08, |packet| {
+        read_position(packet) == [0.9, 64.0, 0.5]
+    });
+    assert_eq!(
+        f32::from_be_bytes(correction[24..28].try_into().unwrap()),
+        90.0
+    );
+    assert_eq!(
+        f32::from_be_bytes(correction[28..32].try_into().unwrap()),
+        0.0
+    );
 }
 
 #[test]
