@@ -1560,7 +1560,6 @@ mod redstone_regression_tests {
         fs::remove_file(path).unwrap();
     }
 
-
     #[test]
     fn wooden_door_clicks_on_either_half_persist_and_resync_both_halves() {
         let path = std::env::temp_dir().join(format!(
@@ -1572,13 +1571,17 @@ mod redstone_regression_tests {
         assert!(world.place_door(&path, 0, 64, 0, 64, 0).unwrap());
         let closed_lower = world.get(0, 64, 0);
         let upper = world.get(0, 65, 0);
-        assert_eq!(world.interact_device(&path, 0, 65, 0).unwrap(),
-                   vec![(0, 64, 0), (0, 65, 0)]);
+        assert_eq!(
+            world.interact_device(&path, 0, 65, 0).unwrap(),
+            vec![(0, 64, 0), (0, 65, 0)]
+        );
         assert_eq!(world.get(0, 64, 0), closed_lower ^ 4);
         assert_eq!(world.get(0, 65, 0), upper);
         assert_eq!(World::load(&path).unwrap().get(0, 64, 0), closed_lower ^ 4);
-        assert_eq!(world.interact_device(&path, 0, 64, 0).unwrap(),
-                   vec![(0, 64, 0), (0, 65, 0)]);
+        assert_eq!(
+            world.interact_device(&path, 0, 64, 0).unwrap(),
+            vec![(0, 64, 0), (0, 65, 0)]
+        );
         assert_eq!(world.get(0, 64, 0), closed_lower);
         assert_eq!(World::load(&path).unwrap().get(0, 64, 0), closed_lower);
         fs::remove_file(path).unwrap();
