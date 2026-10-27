@@ -1201,7 +1201,10 @@ impl Mobs {
     /// packet. Reuse the same entity IDs, AI and save format as natural spawns.
     /// NBT and bosses require their own validated command implementation.
     pub fn summon_command(
-        &mut self, world: &World, entity: &str, at: PlayerPosition,
+        &mut self,
+        world: &World,
+        entity: &str,
+        at: PlayerPosition,
     ) -> io::Result<Event> {
         let kind = match entity {
             "Zombie" => Kind::Zombie,
@@ -1223,18 +1226,34 @@ impl Mobs {
             "LavaSlime" => Kind::MagmaCube,
             "Blaze" => Kind::Blaze,
             "Ghast" => Kind::Ghast,
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported 1.7.10 Mob name")),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsupported 1.7.10 Mob name",
+                ))
+            }
         };
         if !self.enabled || !world.is_natural() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Mob simulation requires a natural world"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Mob simulation requires a natural world",
+            ));
         }
-        if !at.is_valid() || physics::collides(world, &at)
-            || self.entities.len() >= MAX_LOADED_MOBS || self.next_id >= 1_000_000
+        if !at.is_valid()
+            || physics::collides(world, &at)
+            || self.entities.len() >= MAX_LOADED_MOBS
+            || self.next_id >= 1_000_000
         {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Mob spawn position/cap invalid"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Mob spawn position/cap invalid",
+            ));
         }
         if self.difficulty == Some(0) && !kind.peaceful_safe() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "hostile Mob cannot remain in Peaceful"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "hostile Mob cannot remain in Peaceful",
+            ));
         }
         let previous_id = self.next_id;
         let packet = self.insert(kind, at, false);

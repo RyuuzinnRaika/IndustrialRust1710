@@ -262,24 +262,44 @@ impl Hub {
     }
 
     pub fn request_admin_effect(
-        &self, name: &str, operation: crate::commands::EffectRequest,
+        &self,
+        name: &str,
+        operation: crate::commands::EffectRequest,
     ) -> io::Result<bool> {
         use crate::commands::EffectRequest;
         let (action, kind, amplifier, seconds) = match operation {
             EffectRequest::Clear => (0, 0, 0, 0),
             EffectRequest::Remove(kind) => (1, kind, 0, 0),
-            EffectRequest::Add { kind, amplifier, seconds } => (2, kind, amplifier, seconds),
+            EffectRequest::Add {
+                kind,
+                amplifier,
+                seconds,
+            } => (2, kind, amplifier, seconds),
         };
         if (action != 0 && !crate::commands::valid_effect_kind(kind))
-            || amplifier > 3 || seconds > 1200
+            || amplifier > 3
+            || seconds > 1200
         {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid effect request"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid effect request",
+            ));
         }
         let mut body = vec![action, kind, amplifier];
         body.extend_from_slice(&seconds.to_be_bytes());
         let inner = self.0.lock().map_err(|_| poisoned())?;
-        if let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(name)) {
-            enqueue(peer, &Event { id: ADMIN_EFFECT_EVENT, body });
+        if let Some(peer) = inner
+            .players
+            .values()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+        {
+            enqueue(
+                peer,
+                &Event {
+                    id: ADMIN_EFFECT_EVENT,
+                    body,
+                },
+            );
             Ok(true)
         } else {
             Ok(false)
