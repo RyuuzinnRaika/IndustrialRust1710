@@ -6285,6 +6285,80 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_duplicate_lethal_hits_split_the_same_parent_only_once() {
+        // Two clients can attack the same low-health slime in one server tick.
+        // The shared Mobs mutex must serialize the death transition so the
+        // removed parent cannot allocate a second batch of child IDs.
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut state = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let parent_id = state.next_id;
+        state.insert_sized(Kind::Slime, at, false, 4);
+        state.entities.get_mut(&parent_id).unwrap().health = 1;
+
+        let shared = std::sync::Mutex::new(state);
+        let start = std::sync::Barrier::new(3);
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                start.wait();
+                shared
+                    .lock()
+                    .unwrap()
+                    .player_attack(parent_id, at, None, 20)
+            });
+            let second = scope.spawn(|| {
+                start.wait();
+                shared
+                    .lock()
+                    .unwrap()
+                    .player_attack(parent_id, at, None, 20)
+            });
+            start.wait();
+            (first.join().unwrap(), second.join().unwrap())
+        });
+
+        let attacks = [first, second];
+        assert_eq!(
+            attacks.iter().filter(|attack| attack.is_some()).count(),
+            1,
+            "a second simultaneous attack must not kill the same parent twice"
+        );
+        let death = attacks.into_iter().flatten().next().unwrap();
+        assert_eq!(death.events[0].id, 0x1a);
+        assert_eq!(death.events[1].id, 0x13);
+        assert_eq!(
+            death.events[1].body,
+            multiplayer::destroy(parent_id).body
+        );
+
+        let mobs = shared.into_inner().unwrap();
+        let children = death.events.len() - 2;
+        assert!((2..=4).contains(&children));
+        assert_eq!(mobs.entities.len(), children);
+        assert!(!mobs.entities.contains_key(&parent_id));
+        assert_eq!(mobs.next_id, BASE_ID + 1 + children as i32);
+        for (&id, mob) in &mobs.entities {
+            assert_eq!(mob.id, id);
+            let mut encoded = Vec::new();
+            write_varint(id as u32, &mut encoded);
+            assert_eq!(
+                death.events[2..]
+                    .iter()
+                    .filter(|event| event.id == 0x0f && event.body.starts_with(&encoded))
+                    .count(),
+                1,
+                "child {id} must have exactly one Protocol 5 spawn event"
+            );
+        }
+    }
+
+    #[test]
     fn split_snapshots_reject_cross_category_id_aliases_after_restart() {
         // ADD-045: a persisted split child must never share a Protocol 5 ID
         // with an arrow or XP orb, even if the snapshot was corrupted.
