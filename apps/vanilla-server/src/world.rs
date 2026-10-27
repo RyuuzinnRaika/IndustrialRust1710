@@ -1155,6 +1155,11 @@ impl World {
     /// Empty fluid destinations and wire strengths are staged before mutation.
     pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
         self.fluid_phase = self.fluid_phase.wrapping_add(1);
+        // Snapshot before any TNT movement; disk failure restores exactly
+        // the positions and velocities that were durably committed.
+        let mut moving_tnt_before = (!self.primed_tnt.is_empty()).then(|| self.primed_tnt.clone());
+        let moving_events_before = self.tnt_events.len();
+        self.advance_tnt_physics();
         self.piston_sweep_ghosts
             .retain(|_, motion| motion.expires > self.fluid_phase);
         // Lava updates every fourth server tick, water every tick. Delayed
@@ -1520,9 +1525,10 @@ impl World {
         // On any storage failure, undo the state and newly queued packets.
         // Do not clone up to 4096 TNT entities on quiet 20TPS ticks.
         // Only due detonations or new block ignitions mutate this state.
-        let mut primed_before =
-            (detonating != 0 || !primed_on_commit.is_empty()).then(|| self.primed_tnt.clone());
-        let tnt_events_before = self.tnt_events.len();
+        let mut primed_before = moving_tnt_before.take().or_else(|| {
+            (detonating != 0 || !primed_on_commit.is_empty()).then(|| self.primed_tnt.clone())
+        });
+        let tnt_events_before = moving_events_before;
         if primed_before.is_some() {
             self.finalize_tnt(&primed_on_commit);
         }
@@ -2295,16 +2301,19 @@ impl World {
             if trailer.len() < 6
                 || (&trailer[..4] != b"TNT1"
                     && &trailer[..4] != b"TNT2"
-                    && &trailer[..4] != b"TNT3")
+                    && &trailer[..4] != b"TNT3"
+                    && &trailer[..4] != b"TNT4")
             {
                 return Err(invalid("unrecognized world entity trailer"));
             }
             let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
-            let primed_end = 6 + primed_count * 20;
+            let moving = &trailer[..4] == b"TNT4";
+            let entity_stride = if moving { 44 } else { 20 };
+            let primed_end = 6 + primed_count * entity_stride;
             if primed_count > MAX_PRIMED_TNT || trailer.len() < primed_end {
                 return Err(invalid("invalid primed TNT trailer length"));
             }
-            if &trailer[..4] == b"TNT2" || &trailer[..4] == b"TNT3" {
+            if &trailer[..4] == b"TNT2" || &trailer[..4] == b"TNT3" || &trailer[..4] == b"TNT4" {
                 let queued = &trailer[primed_end..];
                 if queued.len() < 4 {
                     return Err(invalid("truncated queued TNT trailer"));
@@ -2325,7 +2334,7 @@ impl World {
                         return Err(invalid("invalid or duplicate queued TNT position"));
                     }
                 }
-                if &trailer[..4] == b"TNT3" {
+                if &trailer[..4] == b"TNT3" || &trailer[..4] == b"TNT4" {
                     let pending = &queued[chain_end..];
                     if pending.len() < 4 {
                         return Err(invalid("truncated blast backlog"));
@@ -2354,7 +2363,7 @@ impl World {
             } else if trailer.len() != primed_end {
                 return Err(invalid("unexpected TNT1 trailer data"));
             }
-            for entry in trailer[6..primed_end].as_chunks::<20>().0 {
+            for entry in trailer[6..primed_end].chunks_exact(entity_stride) {
                 let entity_id = i32::from_be_bytes(entry[..4].try_into().unwrap());
                 let x = i32::from_be_bytes(entry[4..8].try_into().unwrap());
                 let y = i32::from_be_bytes(entry[8..12].try_into().unwrap());
@@ -2363,18 +2372,32 @@ impl World {
                 if entity_id < 10_000_001 || !in_bounds(x, y, z) || remaining == 0 {
                     return Err(invalid("invalid primed TNT entity"));
                 }
-                if world
-                    .primed_tnt
-                    .insert(
-                        entity_id,
-                        special::PrimedTnt {
-                            entity_id,
-                            pos: (x, y, z),
-                            explode_at: u64::from(remaining),
-                        },
-                    )
-                    .is_some()
-                {
+                let mut entity =
+                    special::PrimedTnt::legacy(entity_id, (x, y, z), u64::from(remaining));
+                if moving {
+                    for axis in 0..3 {
+                        entity.position_fp[axis] = i32::from_be_bytes(
+                            entry[20 + axis * 4..24 + axis * 4].try_into().unwrap(),
+                        );
+                        entity.velocity_fp[axis] = i32::from_be_bytes(
+                            entry[32 + axis * 4..36 + axis * 4].try_into().unwrap(),
+                        );
+                    }
+                    if entity.pos
+                        != (
+                            entity.position_fp[0].div_euclid(4096),
+                            entity.position_fp[1].div_euclid(4096),
+                            entity.position_fp[2].div_euclid(4096),
+                        )
+                        || entity
+                            .velocity_fp
+                            .iter()
+                            .any(|&v| i64::from(v).abs() > 16384)
+                    {
+                        return Err(invalid("invalid persisted TNT motion"));
+                    }
+                }
+                if world.primed_tnt.insert(entity_id, entity).is_some() {
                     return Err(invalid("duplicate primed TNT entity"));
                 }
                 world.next_tnt_id = world.next_tnt_id.max(entity_id);
@@ -2497,7 +2520,9 @@ impl World {
             {
                 return Err(invalid("TNT entity or pending queue capacity exceeded"));
             }
-            f.write_all(if !self.pending_blast_edits.is_empty() {
+            f.write_all(if !self.primed_tnt.is_empty() {
+                b"TNT4"
+            } else if !self.pending_blast_edits.is_empty() {
                 b"TNT3"
             } else if !self.pending_chain_tnt.is_empty() {
                 b"TNT2"
@@ -2520,8 +2545,14 @@ impl World {
                 // a zero fuse is invalid on disk and previously aborted
                 // both world-tick writes and the final shutdown save.
                 f.write_all(&(remaining.max(1) as u32).to_be_bytes())?;
+                for coordinate in tnt.position_fp.into_iter().chain(tnt.velocity_fp) {
+                    f.write_all(&coordinate.to_be_bytes())?;
+                }
             }
-            if !self.pending_chain_tnt.is_empty() || !self.pending_blast_edits.is_empty() {
+            if !self.pending_chain_tnt.is_empty()
+                || !self.pending_blast_edits.is_empty()
+                || !self.primed_tnt.is_empty()
+            {
                 f.write_all(&(self.pending_chain_tnt.len() as u32).to_be_bytes())?;
                 for &(x, y, z) in &self.pending_chain_tnt {
                     f.write_all(&x.to_be_bytes())?;
@@ -2529,7 +2560,7 @@ impl World {
                     f.write_all(&z.to_be_bytes())?;
                 }
             }
-            if !self.pending_blast_edits.is_empty() {
+            if !self.pending_blast_edits.is_empty() || !self.primed_tnt.is_empty() {
                 f.write_all(&(self.pending_blast_edits.len() as u32).to_be_bytes())?;
                 for (&(x, y, z), &expected) in &self.pending_blast_edits {
                     f.write_all(&x.to_be_bytes())?;
