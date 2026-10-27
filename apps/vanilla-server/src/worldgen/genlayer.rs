@@ -107,9 +107,10 @@ mod tests {
             assert_eq!(sample(&mut backward, x, z), first[index]);
         }
         forward.start_chunk(-1, 0);
-        let original = forward;
+        let mut replay = forward;
         assert_eq!(forward.next_int(1), 0);
-        assert_eq!(forward.next_int(10), original.clone().next_int(10));
+        assert_eq!(replay.next_int(1), 0);
+        assert_eq!(forward.next_int(10), replay.next_int(10));
     }
 
     #[test]
