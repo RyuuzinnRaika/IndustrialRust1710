@@ -397,9 +397,89 @@ pub fn apply(item: Stack, cost: u8, seed: u64) -> io::Result<Option<Stack>> {
     }))
 }
 
+
+/// Apply a 1.7.10 command enchantment to the currently held item.
+/// Explicit commands must not spend XP, must not overwrite existing enchants,
+/// and must preserve unknown NBT and legacy RepairCost.
+pub fn command_enchant(item: Stack, id: i16, level: i16) -> io::Result<Option<Stack>> {
+    if !item.is_valid() || item.count != 1 || item.id == 403 {
+        return Ok(None);
+    }
+    let Some(max) = anvil_level_limit(item.id, id) else {
+        return Ok(None);
+    };
+    if !(1..=max).contains(&level) {
+        return Ok(None);
+    }
+    let mut root = match item.nbt {
+        Some(handle) => match item_nbt::value(handle)? {
+            Value::Compound(fields) => fields,
+            _ => return Ok(None),
+        },
+        None => HashMap::new(),
+    };
+    if root.contains_key("StoredEnchantments") {
+        return Ok(None);
+    }
+    let mut entries = match root.get("ench") {
+        None => Vec::new(),
+        Some(Value::List(entries)) if entries.len() <= 32 => entries.clone(),
+        _ => return Ok(None),
+    };
+    for entry in &entries {
+        let Value::Compound(fields) = entry else { return Ok(None) };
+        let (Some(Value::Short(existing)), Some(Value::Short(existing_level))) =
+            (fields.get("id"), fields.get("lvl"))
+        else { return Ok(None) };
+        let Some(limit) = anvil_level_limit(item.id, *existing) else {
+            return Ok(None);
+        };
+        if !(1..=limit).contains(existing_level)
+            || *existing == id
+            || anvil_enchant_conflicts(*existing, id)
+        {
+            return Ok(None);
+        }
+    }
+    if entries.len() >= 32 {
+        return Ok(None);
+    }
+    entries.push(Value::Compound(HashMap::from([
+        ("id".into(), Value::Short(id)),
+        ("lvl".into(), Value::Short(level)),
+    ])));
+    root.insert("ench".to_string(), Value::List(entries));
+    Ok(Some(Stack {
+        nbt: Some(item_nbt::from_value(&Value::Compound(root))?),
+        ..item
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn command_enchant_preserves_tags_and_rejects_duplicate_conflict_and_bad_levels() {
+        let input = Stack {
+            id: 276, count: 1, damage: 34,
+            nbt: Some(item_nbt::from_value(&Value::Compound(HashMap::from([
+                ("Custom".to_string(), Value::String("preserve".into())),
+            ]))).unwrap()),
+        };
+        let sharp = command_enchant(input, 16, 3).unwrap().unwrap();
+        assert_eq!(sharp.damage, 34);
+        let Value::Compound(root) = item_nbt::value(sharp.nbt.unwrap()).unwrap() else {
+            panic!("expected NBT compound");
+        };
+        assert_eq!(root.get("Custom"), Some(&Value::String("preserve".into())));
+        assert!(matches!(root.get("ench"), Some(Value::List(list)) if list.len() == 1));
+        assert!(command_enchant(sharp, 16, 2).unwrap().is_none());
+        assert!(command_enchant(sharp, 17, 1).unwrap().is_none());
+        assert!(command_enchant(input, 16, 6).unwrap().is_none());
+        assert!(command_enchant(input, 32, 1).unwrap().is_none());
+        assert!(command_enchant(Stack { id: 264, ..input }, 16, 1).unwrap().is_none());
+    }
+
     #[test]
     fn enchanter_preserves_existing_unknown_tag_and_uses_correct_nbt_key() {
         let tag = item_nbt::from_value(&Value::Compound(HashMap::from([(

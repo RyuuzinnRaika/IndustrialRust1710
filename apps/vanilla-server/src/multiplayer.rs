@@ -31,6 +31,7 @@ pub const ADMIN_GIVE_EVENT: u32 = u32::MAX - 7;
 pub const ADMIN_CLEAR_EVENT: u32 = u32::MAX - 8;
 /// Target session receives effect changes; console/network never mutates it.
 pub const ADMIN_EFFECT_EVENT: u32 = u32::MAX - 9;
+pub const ADMIN_ENCHANT_EVENT: u32 = u32::MAX - 10;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -300,6 +301,23 @@ impl Hub {
                     body,
                 },
             );
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn request_admin_enchant(&self, target: &str, id: i16, level: i16) -> io::Result<bool> {
+        if !(1..=5).contains(&level)
+            || !matches!(id, 0..=7 | 16..=21 | 32..=35 | 48..=51 | 61..=62)
+        {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid enchantment"));
+        }
+        let mut body = id.to_be_bytes().to_vec();
+        body.extend_from_slice(&level.to_be_bytes());
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        if let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(target)) {
+            enqueue(peer, &Event { id: ADMIN_ENCHANT_EVENT, body });
             Ok(true)
         } else {
             Ok(false)

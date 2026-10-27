@@ -97,7 +97,7 @@ use maps::Maps;
 use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
-    Event, Hub, JoinError, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT, ADMIN_GAMEMODE_EVENT,
+    Event, Hub, JoinError, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT, ADMIN_ENCHANT_EVENT, ADMIN_GAMEMODE_EVENT,
     ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT,
     MAX_PLAYERS, PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
 };
@@ -1518,6 +1518,24 @@ fn play(
                     )?;
                 }
                 as_chat(s, "Effect command applied.")?;
+                continue;
+            }
+            if event.id == ADMIN_ENCHANT_EVENT {
+                if event.body.len() != 4 {
+                    return Err(bad("invalid internal enchant payload"));
+                }
+                let id = i16::from_be_bytes(event.body[0..2].try_into().unwrap());
+                let level = i16::from_be_bytes(event.body[2..4].try_into().unwrap());
+                let mut candidate = inventory.clone();
+                if !candidate.command_enchant_held(id, level)? {
+                    as_chat(s, "Enchant rejected: incompatible item/enchantment or level.")?;
+                    continue;
+                }
+                // Save before changing state visible to the client.
+                candidate.save(inventory_path.as_path())?;
+                *inventory = candidate;
+                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                as_chat(s, &format!("Enchanted held item: {id} level {level}."))?;
                 continue;
             }
             if event.id == ADMIN_CLEAR_EVENT {
@@ -3012,7 +3030,7 @@ fn play(
                         Err(usage) => as_chat(s, usage)?,
                         Ok(PublicCommand::Help) => as_chat(
                             s,
-                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /time, /weather, /kick, /ban, /save.",
+                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /enchant, /testforblock, /time, /weather, /kick, /ban, /save.",
                         )?,
                         Ok(PublicCommand::List) => as_chat(
                             s,
@@ -6626,7 +6644,7 @@ fn run_player_admin_command(
     let minimum_level = match parts.first().copied() {
         Some("/time") | Some("/weather") | Some("/tp") | Some("/teleport") | Some("/gamemode")
         | Some("/give") | Some("/clear") | Some("/setblock") | Some("/effect")
-        | Some("/summon") => 2,
+        | Some("/summon") | Some("/enchant") | Some("/testforblock") => 2,
         Some("/kick") | Some("/ban") | Some("/pardon") | Some("/pardon-uuid") | Some("/ban-ip")
         | Some("/pardon-ip") => 3,
         Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
@@ -6639,6 +6657,26 @@ fn run_player_admin_command(
         ));
     }
     match parts.as_slice() {
+        ["/enchant", target, enchant, rest @ ..] if rest.len() <= 1 => {
+            let (id, level) = commands::enchant_args(enchant, rest.first().copied())?;
+            if !hub.request_admin_enchant(target, id, level)? {
+                return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+            }
+            Ok(format!("Enchant queued for {target}: {id} level {level}"))
+        }
+        ["/testforblock", x, y, z, block, rest @ ..] if rest.len() <= 1 => {
+            let origin = hub.player_position(actor)?
+                .ok_or_else(|| bad("actor not online"))?;
+            let (bx, by, bz, id, data) =
+                commands::testforblock_args([x, y, z], block, rest.first().copied(), Some(origin))?;
+            let actual = world.lock().map_err(|_| bad("world mutex poisoned"))?.get(bx, by, bz);
+            if actual >> 4 != u16::from(id)
+                || data.is_some_and(|wanted| actual & 15 != u16::from(wanted))
+            {
+                return Err(bad("testforblock: block or metadata does not match"));
+            }
+            Ok(format!("testforblock: matched {block} at {bx} {by} {bz}"))
+        }
         ["/effect", target, effect @ ..] => {
             let request = commands::effect_args(effect)?;
             if !hub.request_admin_effect(target, request)? {
@@ -6931,7 +6969,7 @@ fn start_clock_console(
             }
             let result: io::Result<()> = match args.as_slice() {
                 ["/help"] | ["/?"] => {
-                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
                     Ok(())
                 }
                 ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
@@ -6958,6 +6996,26 @@ fn start_clock_console(
                         Ok(())
                     })()
                 }
+                ["/enchant", target, enchant, rest @ ..] if rest.len() <= 1 => (|| -> io::Result<()> {
+                    let (id, level) = commands::enchant_args(enchant, rest.first().copied())?;
+                    if !hub.request_admin_enchant(target, id, level)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Enchant queued for {target}: {id} level {level}");
+                    Ok(())
+                })(),
+                ["/testforblock", x, y, z, block, rest @ ..] if rest.len() <= 1 => (|| -> io::Result<()> {
+                    let (bx, by, bz, id, data) =
+                        commands::testforblock_args([x, y, z], block, rest.first().copied(), None)?;
+                    let actual = world.lock().map_err(|_| bad("world mutex poisoned"))?.get(bx, by, bz);
+                    if actual >> 4 != u16::from(id)
+                        || data.is_some_and(|wanted| actual & 15 != u16::from(wanted))
+                    {
+                        return Err(bad("testforblock: block or metadata does not match"));
+                    }
+                    println!("testforblock: matched {block} at {bx} {by} {bz}");
+                    Ok(())
+                })(),
                 ["/clear", target, rest @ ..] if rest.len() <= 3 => (|| -> io::Result<()> {
                     let (item, data, max) = commands::clear_args(
                         rest.first().copied(),
