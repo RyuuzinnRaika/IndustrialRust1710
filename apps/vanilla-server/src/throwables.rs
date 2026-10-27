@@ -1485,19 +1485,19 @@ mod tests {
         for fence in [85u16, 113] {
             let mut world = World::new();
             world.import_block(1, 70, 1, fence << 4).unwrap();
-            let ray = |x: f64, z: f64| {
+            let ray = |x: f64| {
                 (
                     PlayerPosition { x, y: 70.5, z: 0.2 },
                     PlayerPosition { x, y: 70.5, z: 2.8 },
                 )
             };
-            let (from, to) = ray(1.5, 0.2);
+            let (from, to) = ray(1.5);
             assert_eq!(
                 first_solid_block_hit(&world, from, to).map(|hit| hit.1),
                 Some([1, 70, 1]),
                 "isolated fence post: {fence}"
             );
-            let (from, to) = ray(1.9, 0.2);
+            let (from, to) = ray(1.9);
             assert_eq!(
                 first_solid_block_hit(&world, from, to),
                 None,
@@ -1506,7 +1506,7 @@ mod tests {
             // A fence of the same type on the east connects the horizontal
             // arm; the first hit must belong to the western fence.
             world.import_block(2, 70, 1, fence << 4).unwrap();
-            let (from, to) = ray(1.9, 0.2);
+            let (from, to) = ray(1.9);
             let (t, cell) = first_solid_block_hit(&world, from, to).unwrap();
             assert_eq!(cell, [1, 70, 1]);
             assert!((t - 1.175 / 2.6).abs() < 1e-10);
