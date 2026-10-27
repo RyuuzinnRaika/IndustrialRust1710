@@ -2693,7 +2693,12 @@ impl World {
             fs::create_dir_all(parent)?;
         }
         let temp = path.with_extension("tmp");
-        let mut f = File::create(&temp)?;
+        let mut f = File::create(&temp).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("create temporary world save {}: {error}", temp.display()),
+            )
+        })?;
         self.write_to(&mut f)?;
         f.sync_all()?;
         drop(f);
@@ -2701,8 +2706,44 @@ impl World {
             guard.verify()?;
         }
         // Keep the original on filesystems that disallow atomic replacement.
-        fs::rename(temp, path)
+        fs::rename(&temp, path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "replace world save {} from {}: {error}",
+                    path.display(),
+                    temp.display()
+                ),
+            )
+        })
     }
+    /// Copy only the generation identity and edits capable of affecting a
+    /// Protocol 5 chunk (including its 15-block light-source halo).
+    /// Chunk generation/lighting can then run without holding the live World
+    /// mutex. No timer queues, entities, or save-session locks are copied.
+    ///
+    /// This is a consistent point-in-time block snapshot: later live changes
+    /// are announced separately with the normal block/light updates.
+    pub fn chunk_read_snapshot(&self, chunk_x: i32, chunk_z: i32) -> Self {
+        let min_x = chunk_x * 16;
+        let min_z = chunk_z * 16;
+        let mut snapshot = Self {
+            generation: self.generation,
+            ..Self::default()
+        };
+        // Block-light propagation can originate within 15 blocks of any
+        // edge; skylight uses a smaller one-cell halo. Include both.
+        for (&(x, y, z), &block) in self
+            .edits
+            .range((min_x - 15, 0, i32::MIN)..(min_x + 31, 0, i32::MIN))
+        {
+            if (min_z - 15..min_z + 31).contains(&z) {
+                snapshot.edits.insert((x, y, z), block);
+            }
+        }
+        snapshot
+    }
+
     /// Serializes the pre-1.8 Section ID/metadata/light arrays in Y-major order.
     /// The first two sections are always present for the flat base ground; other
     /// sections are transmitted when edited. This avoids dropping high-altitude
@@ -2800,6 +2841,35 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunk_read_snapshot_matches_live_packets_with_edits_and_light_halo() {
+        for mut world in [
+            World::new(),
+            World::with_biomes(42),
+            World::expanded(42, crate::dimensions::Dimension::Overworld),
+        ] {
+            // One inside the chunk, one on each 15-block light halo edge,
+            // and one far away that must not inflate the snapshot.
+            for (x, z, block) in [
+                (-16, -16, (50 << 4) | 1),
+                (-31, -16, 50 << 4),
+                (-1, -16, 50 << 4),
+                (-16, -31, 50 << 4),
+                (-16, -1, 50 << 4),
+                (200, 200, 89 << 4),
+            ] {
+                world.import_block(x, 70, z, block).unwrap();
+            }
+            let snapshot = world.chunk_read_snapshot(-1, -1);
+            assert_eq!(snapshot.chunk_data(-1, -1), world.chunk_data(-1, -1));
+            assert!(snapshot.edits.len() < world.edits.len());
+            assert_eq!(
+                snapshot.get(200, 70, 200),
+                snapshot.base_block(200, 70, 200)
+            );
+        }
+    }
 
     #[test]
     fn expanded_overworld_streams_seeded_biomes_instead_of_flat_sections() {

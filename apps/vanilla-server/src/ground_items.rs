@@ -167,11 +167,28 @@ impl GroundItems {
             fs::create_dir_all(parent)?;
         }
         let temporary = path.with_extension("drops.tmp");
-        let mut file = File::create(&temporary)?;
+        let mut file = File::create(&temporary).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "create temporary ground-item save {}: {error}",
+                    temporary.display()
+                ),
+            )
+        })?;
         file.write_all(&data)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(temporary, path)
+        fs::rename(&temporary, path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "replace ground-item save {} from {}: {error}",
+                    path.display(),
+                    temporary.display()
+                ),
+            )
+        })
     }
     pub fn is_full(&self) -> bool {
         self.entries.len() >= MAX_DROPS || self.next_id == i32::MAX
@@ -294,6 +311,24 @@ impl GroundItems {
         Ok(Some((candidate, collected, remainder)))
     }
 
+    /// Persist an already validated, staged drop batch in one file sync.
+    /// The caller only publishes spawn packets after this succeeds.
+    pub fn commit_staged_put(
+        &mut self,
+        path: &Path,
+        staged: (Self, Vec<GroundItem>),
+    ) -> io::Result<Vec<GroundItem>> {
+        let (candidate, inserted) = staged;
+        candidate.save(path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("save ground items at {}: {error}", path.display()),
+            )
+        })?;
+        *self = candidate;
+        Ok(inserted)
+    }
+
     #[cfg(test)]
     pub fn put_many(
         &mut self,
@@ -301,10 +336,8 @@ impl GroundItems {
         stacks: &[Stack],
         block: (i32, i32, i32),
     ) -> io::Result<Vec<GroundItem>> {
-        let (candidate, inserted) = self.stage_put_many(stacks, block)?;
-        candidate.save(path)?;
-        *self = candidate;
-        Ok(inserted)
+        let staged = self.stage_put_many(stacks, block)?;
+        self.commit_staged_put(path, staged)
     }
 
     pub fn nearby_ready(&self, feet: (f64, f64, f64)) -> Option<GroundItem> {

@@ -586,11 +586,15 @@ fn view_chunks(center: (i32, i32)) -> BTreeSet<(i32, i32)> {
     chunks
 }
 fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipeline::PendingChunk> {
-    let (mask, data) = {
+    // Only copy the small, relevant edit halo under the shared lock.
+    // Noise generation, light propagation and packet construction are CPU
+    // heavy and can safely operate on this immutable snapshot outside it.
+    let snapshot = {
         let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
         w.observe_weather_chunk(cx, cz);
-        w.chunk_data(cx, cz)
+        w.chunk_read_snapshot(cx, cz)
     };
+    let (mask, data) = snapshot.chunk_data(cx, cz);
     chunk_pipeline::submit(cx, cz, mask, data)
 }
 /// Send the chunk under the player first so the loading screen can display
@@ -3278,6 +3282,10 @@ fn play(
                     eprintln!("movement trace: accepted from={player:?} to={candidate:?} yaw={yaw} pitch={pitch}");
                     last_movement_trace = Instant::now();
                 }
+                // A normal movement packet can arrive many times within one
+                // chunk. Avoid reconstructing/diffing the 5x5 viewport unless
+                // the player actually crosses a 16-block boundary.
+                let previous_chunk_center = chunk_center(player);
                 location = (x, y, z);
                 *player = candidate;
                 // A10: server-authoritative source-frame and destination validation.
@@ -3386,12 +3394,15 @@ fn play(
                         }
                     }
                 }
-                let old_chunks = loaded_chunks.clone();
-                sync_chunks(s, world, &mut loaded_chunks, chunk_center(&candidate))?;
-                if loaded_chunks != old_chunks {
-                    let entering = loaded_chunks.difference(&old_chunks).copied().collect();
-                    send_visible_signs(s, decorations, &entering)?;
-                    send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
+                let new_chunk_center = chunk_center(&candidate);
+                if new_chunk_center != previous_chunk_center {
+                    let old_chunks = loaded_chunks.clone();
+                    sync_chunks(s, world, &mut loaded_chunks, new_chunk_center)?;
+                    if loaded_chunks != old_chunks {
+                        let entering = loaded_chunks.difference(&old_chunks).copied().collect();
+                        send_visible_signs(s, decorations, &entering)?;
+                        send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
+                    }
                 }
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, candidate, yaw, pitch);
@@ -3696,14 +3707,35 @@ fn play(
                                             target,
                                             now_tick,
                                         );
+                                        // Collect ordinary and bonus drops before any
+                                        // irreversible world edit. Two drops now require
+                                        // one durable ground-item snapshot, not two.
+                                        let mut drop_stacks = Vec::with_capacity(2);
+                                        if let Some(drop) = result.drop {
+                                            drop_stacks.push(Stack {
+                                                id: drop.id,
+                                                count: 1,
+                                                damage: drop.damage,
+                                                nbt: None,
+                                            });
+                                        }
+                                        if let Some(stack) = bonus {
+                                            drop_stacks.push(stack);
+                                        }
                                         let mut ground = ground_items.lock().map_err(|_| {
                                             io::Error::other("ground items lock poisoned")
                                         })?;
-                                        // A filled entity pool must not destroy a
-                                        // block that should have created an item.
-                                        if (result.drop.is_none() && bonus.is_none())
-                                            || !ground.is_full()
+                                        // Never break a block unless ALL item entities can
+                                        // be saved; an almost-full pool must not lose bonus
+                                        // drops on the next world update.
+                                        if drop_stacks.is_empty()
+                                            || ground.has_capacity_for(drop_stacks.len())
                                         {
+                                            let staged_drops = if drop_stacks.is_empty() {
+                                                None
+                                            } else {
+                                                Some(ground.stage_put_many(&drop_stacks, target)?)
+                                            };
                                             let mut candidate = inventory.clone();
                                             let wore =
                                                 result.wear_tool && candidate.wear_held_tool();
@@ -3729,32 +3761,15 @@ fn play(
                                                                 .set_slot(inventory.held_slot())?,
                                                         )?;
                                                     }
-                                                    if let Some(drop) = result.drop {
-                                                        let stack = Stack {
-                                                            id: drop.id,
-                                                            count: 1,
-                                                            damage: drop.damage,
-                                                            nbt: None,
-                                                        };
-                                                        // A crash after world save and
-                                                        // before entity persistence can
-                                                        // lose an item, never clone it.
-                                                        let item = ground.put(
+                                                    if let Some(staged) = staged_drops {
+                                                        // One fsync/rename for every drop
+                                                        // created by this mining action.
+                                                        // Publish only after successful save.
+                                                        let items = ground.commit_staged_put(
                                                             ground_path,
-                                                            stack,
-                                                            target,
+                                                            staged,
                                                         )?;
-                                                        for packet in item.spawn() {
-                                                            hub.broadcast(packet);
-                                                        }
-                                                    }
-                                                    if let Some(stack) = bonus {
-                                                        if !ground.is_full() {
-                                                            let item = ground.put(
-                                                                ground_path,
-                                                                stack,
-                                                                target,
-                                                            )?;
+                                                        for item in items {
                                                             for packet in item.spawn() {
                                                                 hub.broadcast(packet);
                                                             }
