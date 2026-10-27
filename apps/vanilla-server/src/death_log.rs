@@ -1,6 +1,10 @@
 //! Protocol 5 player-death announcements and diagnostic, per-world JSONL records.
 //! This is observability only: scoring, drops and respawn remain session-owned.
+use crate::journal;
+use crate::multiplayer::Event;
 use crate::player::PlayerPosition;
+use crate::scoreboard::Scoreboard;
+use crate::vitals::Vitals;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
@@ -418,6 +422,62 @@ impl StoredDeath {
         file.sync_data()?;
         Ok(true)
     }
+}
+
+/// Atomically commit a first fatal player state, its one replayable event,
+/// and its deathCount scoreboard. A prepared redo record is recovered on the
+/// next startup if any target-file rename or sync fails.
+#[allow(clippy::too_many_arguments)]
+pub fn commit_fatal_state(
+    record: &DeathRecord<'_>,
+    root_world_path: &Path,
+    death_world_path: &Path,
+    player_path: &Path,
+    next_vitals: Vitals,
+    scoreboard: &Mutex<Scoreboard>,
+    scoreboard_path: &Path,
+) -> io::Result<Vec<Event>> {
+    if next_vitals.health > 0.0 {
+        return Err(invalid("nonfatal state submitted to death transaction"));
+    }
+    let pending_path = outbox_path(player_path);
+    if let Some(previous) = StoredDeath::read(&pending_path)? {
+        // Never overwrite an earlier unflushed death event on a new death.
+        previous.append_once(root_world_path)?;
+    }
+    let pending = StoredDeath::new(record, root_world_path, death_world_path)?;
+    let marker = serde_json::to_vec(&pending)?;
+    if marker.len() as u64 > MAX_OUTBOX_BYTES {
+        return Err(invalid("oversized fatal event marker"));
+    }
+    let player_data = record
+        .position
+        .encoded_state_in_dimension(next_vitals, record.dimension)?;
+    let mut board = scoreboard
+        .lock()
+        .map_err(|_| invalid("poisoned death scoreboard lock"))?;
+    let mut updated = board.clone();
+    let events = updated.record_death(record.player)?;
+    let scoreboard_data = updated.encoded()?;
+    journal::commit(
+        &root_world_path.with_extension("pending-txn.json"),
+        &[
+            (player_path, player_data),
+            (&pending_path, marker),
+            (scoreboard_path, scoreboard_data),
+        ],
+    )?;
+    *board = updated;
+    Ok(events)
+}
+
+/// Append an already committed fatal event by its original event ID.
+/// Unlike preparing a fresh event, this cannot generate a duplicate ID.
+pub fn append_prepared(root_world_path: &Path, player_path: &Path) -> io::Result<()> {
+    let pending = StoredDeath::read(&outbox_path(player_path))?
+        .ok_or_else(|| invalid("missing committed death outbox"))?;
+    pending.append_once(root_world_path)?;
+    Ok(())
 }
 
 /// Durable outbox before JSONL publication. The outbox is saved first so a
