@@ -362,6 +362,40 @@ fn login_disconnect(s: &mut Connection, reason: &str) -> io::Result<()> {
     write_string(&json!({"text":reason}).to_string(), &mut payload)?;
     send(s, 0x00, &payload)
 }
+/// Initial chunk transfer occurs after Login Success, so an incomplete
+/// world join must use the Protocol 5 Play Disconnect (0x40), not Login
+/// Disconnect (0x00). Never expose internal paths or backend error strings.
+fn join_failure_reason(error: &io::Error) -> &'static str {
+    match error.kind() {
+        ErrorKind::TimedOut => "World loading timed out. Please reconnect.",
+        ErrorKind::WouldBlock => "World loading is busy. Please reconnect.",
+        _ => "World loading failed. Please reconnect.",
+    }
+}
+
+fn reject_failed_join(s: &mut Connection, error: io::Error) -> io::Error {
+    // A dead socket cannot receive an explanation. Preserve the root error
+    // while ensuring the admission guard is dropped on return from handle().
+    if !matches!(
+        error.kind(),
+        ErrorKind::UnexpectedEof
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::BrokenPipe
+    ) {
+        let mut body = Vec::new();
+        if write_string(
+            &json!({"text": join_failure_reason(&error)}).to_string(),
+            &mut body,
+        )
+        .is_ok()
+        {
+            let _ = send(s, 0x40, &body);
+        }
+    }
+    io::Error::new(error.kind(), format!("join initialization: {error}"))
+}
+
 fn offline_uuid(name: &str) -> String {
     let mut digest = md5::compute(format!("OfflinePlayer:{name}").as_bytes()).0;
     digest[6] = digest[6] & 0x0f | 0x30;
@@ -6256,7 +6290,7 @@ fn handle(
             "UNAUTHENTICATED OFFLINE MODE"
         }
     );
-    join(
+    if let Err(error) = join(
         &mut s,
         &world,
         &clock,
@@ -6269,8 +6303,9 @@ fn handle(
             hardcore,
             difficulty: difficulty.load(Ordering::Acquire),
         },
-    )
-    .map_err(|error| io::Error::new(error.kind(), format!("join initialization: {error}")))?;
+    ) {
+        return Err(reject_failed_join(&mut s, error));
+    }
     if survival {
         send(&mut s, 0x1f, &experience_state.packet())?;
     }
@@ -9944,6 +9979,56 @@ mod session_dimension_routing_tests {
         drop(admission);
         drop(worlds);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod initial_join_disconnect_tests {
+    use super::*;
+
+    #[test]
+    fn failed_chunk_join_sends_play_disconnect_and_releases_player_admission() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_socket, _) = listener.accept().unwrap();
+        let mut server = Connection::new(server_socket);
+
+        let hub = Arc::new(Hub::default());
+        let (id, _events, _) = hub
+            .add("RustTester".into(), "uuid-1".into(), PlayerPosition::default())
+            .unwrap();
+        {
+            let _admission = PlayerAdmission {
+                hub: Arc::clone(&hub),
+                entity_id: id,
+            };
+            let error = reject_failed_join(
+                &mut server,
+                io::Error::new(ErrorKind::TimedOut, "chunk compression deadline exceeded"),
+            );
+            assert_eq!(error.kind(), ErrorKind::TimedOut);
+            let packet = read_frame(&mut client).unwrap();
+            let (packet_id, mut body) = legacy_protocol::packet_id_and_body(&packet).unwrap();
+            assert_eq!(packet_id, 0x40);
+            let reason = body.read_string(512).unwrap();
+            assert!(reason.contains("World loading timed out"));
+            assert!(!reason.contains("compression"));
+            body.finish().unwrap();
+            assert_eq!(hub.count().unwrap(), 1);
+        }
+        assert_eq!(hub.count().unwrap(), 0, "failed Join leaked admission");
+        let (new_id, _events, _) = hub
+            .add("RustTester".into(), "uuid-2".into(), PlayerPosition::default())
+            .unwrap();
+        assert!(new_id > id);
+    }
+
+    #[test]
+    fn join_failure_classifies_bounded_queue_and_backend_errors() {
+        assert!(join_failure_reason(&io::Error::from(ErrorKind::WouldBlock)).contains("busy"));
+        assert!(join_failure_reason(&io::Error::from(ErrorKind::TimedOut)).contains("timed out"));
+        assert!(join_failure_reason(&io::Error::other("internal secret"))
+            .contains("loading failed"));
     }
 }
 
