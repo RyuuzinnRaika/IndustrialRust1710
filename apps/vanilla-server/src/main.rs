@@ -3669,11 +3669,12 @@ fn play(
                 if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
-                    && world
-                        .lock()
-                        .map_err(|_| bad("world mutex poisoned"))?
-                        .get(x, y, z)
-                        >> 4,
+                    && matches!(
+                        world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(x, y, z)
+                            >> 4,
                         54 | 146
                     )
                 {
