@@ -23,6 +23,7 @@ LEGACY_NON_RUST = frozenset({
 # Development-only reference oracles; not linked into the server.
 JAVA_ORACLES = frozenset({
     "tools/GenLayerAddIslandOracle.java",
+    "tools/GenLayerAddSnowOracle.java",
     "tools/GenLayerRiverMixOracle.java",
     "tools/GenLayerRiverOracle.java",
 })
@@ -78,6 +79,7 @@ class LanguagePolicyTest(unittest.TestCase):
             "tools/tnt_stress_benchmark.py",
             "tools/verify_backup_restore.py",
             "tools/check_world_format.py",
+            "tools/GenLayerAddSnowOracle.java",
         ):
             with self.subTest(allowed=allowed):
                 self.assertTrue(is_permitted_non_rust_source(allowed))
