@@ -161,24 +161,14 @@ fn rule(block: u16) -> Option<BlockRule> {
         162 => (2.0, Some(ToolKind::Axe), 0, false, item(162, damage & 1)),
         // Standalone early-game building materials. Their orientation/top-half
         // bits belong to the placed block and must not leak into the drop.
-        53 | 134 | 135 | 136 | 163 | 164 => (
-            2.0,
-            Some(ToolKind::Axe),
-            0,
-            false,
-            item(id as i16, 0),
-        ), // oak/spruce/birch/jungle/acacia/dark oak stairs
+        53 | 134 | 135 | 136 | 163 | 164 => {
+            (2.0, Some(ToolKind::Axe), 0, false, item(id as i16, 0))
+        } // oak/spruce/birch/jungle/acacia/dark oak stairs
         67 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(67, 0)), // cobblestone stairs
-        65 => (0.4, Some(ToolKind::Axe), 0, false, item(65, 0)), // ladder
+        65 => (0.4, Some(ToolKind::Axe), 0, false, item(65, 0)),    // ladder
         85 | 107 => (2.0, Some(ToolKind::Axe), 0, false, item(id as i16, 0)), // fence/gate
-        96 => (3.0, Some(ToolKind::Axe), 0, false, item(96, 0)), // trapdoor
-        126 if damage & 7 <= 5 => (
-            2.0,
-            Some(ToolKind::Axe),
-            0,
-            false,
-            item(126, damage & 7),
-        ), // half wooden slab (species retained, upper-half flag stripped)
+        96 => (3.0, Some(ToolKind::Axe), 0, false, item(96, 0)),    // trapdoor
+        126 if damage & 7 <= 5 => (2.0, Some(ToolKind::Axe), 0, false, item(126, damage & 7)), // half wooden slab (species retained, upper-half flag stripped)
         44 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(44, damage & 7)),
         54 => (2.5, Some(ToolKind::Axe), 0, false, item(54, 0)),
         58 => (2.5, Some(ToolKind::Axe), 0, false, item(58, 0)),
@@ -426,12 +416,14 @@ mod tests {
 
     #[test]
     fn s01_to_s04_minimum_resource_chain_matches_1710_recipe_primitives() {
-        let st = |id| Some(Stack {
-            id,
-            count: 1,
-            damage: 0,
-            nbt: None,
-        });
+        let st = |id| {
+            Some(Stack {
+                id,
+                count: 1,
+                damage: 0,
+                nbt: None,
+            })
+        };
         let wood = mine_rule(17 << 4, None).unwrap().1.drop.unwrap();
         let planks = crate::crafting::result(&[st(wood.id), None, None, None], 2).unwrap();
         assert_eq!((planks.id, planks.count), (5, 4));
@@ -440,7 +432,17 @@ mod tests {
         let workbench = crate::crafting::result(&[st(5); 4], 2).unwrap();
         assert_eq!(workbench.id, 58);
         let wooden_pick = crate::crafting::result(
-            &[st(5), st(5), st(5), None, st(280), None, None, st(280), None],
+            &[
+                st(5),
+                st(5),
+                st(5),
+                None,
+                st(280),
+                None,
+                None,
+                st(280),
+                None,
+            ],
             3,
         )
         .unwrap();
@@ -452,7 +454,17 @@ mod tests {
             .unwrap();
         assert_eq!(cobble.id, 4);
         let stone_pick = crate::crafting::result(
-            &[st(4), st(4), st(4), None, st(280), None, None, st(280), None],
+            &[
+                st(4),
+                st(4),
+                st(4),
+                None,
+                st(280),
+                None,
+                None,
+                st(280),
+                None,
+            ],
             3,
         )
         .unwrap();
@@ -470,7 +482,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(furnace.id, 61);
-        assert_eq!(crate::furnaces::recipe(st(iron_ore.id).unwrap()).unwrap().id, 265);
+        assert_eq!(
+            crate::furnaces::recipe(st(iron_ore.id).unwrap())
+                .unwrap()
+                .id,
+            265
+        );
         // This is a rules-only smoke test, not proof of live item transfers,
         // inventory debits, client packets, furnace ticks, or persistence.
     }
