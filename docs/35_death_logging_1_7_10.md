@@ -54,3 +54,28 @@ Get-Content .\world.deaths.jsonl -Tail 20
 ワールドファイル名は実際の `--world` パスへ読み替えてください。サバイバルで落下・溺水・空腹・炎上・矢・Mob・エンダーパールの各死亡を再現し、(1)チャット通知が1回のみ、(2)JSONLに各死因と座標が残る、(3)ゲームルールがfalseでもログは残る、(4)死亡回数とドロップが従来どおり、(5)リスポーン後に新しい死亡が記録できることを確認してください。
 
 **注意**: これは**死亡ログの詳細化**であり、未実装の被ダメージ源を実装する変更ではありません。大きな高負荷検証を始める前にワールドのバックアップを取ってください。
+
+
+## D03: environmental source aggregation
+
+Hazard ticks are bounded to four steps per owning session. The existing code
+returned only the **last** observed source, which could falsely claim a burn
+caused a death when drowning and lava dealt damage in the same batch.
+
+`HazardAttribution` now tracks either no source, exactly one consistent
+source, or a genuinely mixed set of sources. Combining repeated damage from
+the same source retains that source; combining different sources uses
+`mixed_environmental` and the death chat text:
+`Alex died from multiple environmental hazards`.
+
+This classification is conservative. When the engine aggregates multiple
+environmental hits in one health update it cannot prove which component
+crossed zero first without changing the combat timing model. A mixed event
+therefore avoids making an unsupported claim rather than inventing a source.
+
+Local acceptance tests:
+- [ ] Run the combined lava-feet/water-eye Rust unit test.
+- [ ] Drowning alone remains `drowning` across the 300-air-tick window.
+- [ ] Mixed exposure is `mixed_environmental`, not `combat_or_explosion`.
+- [ ] Repeated same-source hits do not become mixed.
+- [ ] No extra HP loss or delayed/duplicated health packets.
