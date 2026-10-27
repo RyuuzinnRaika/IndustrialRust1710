@@ -5730,8 +5730,11 @@ fn handle(
         send(&mut s, object.id, &object.body)?;
     }
     let mut session_dimension = admission_dimension;
-    let admission_world_path =
-        session_world_path(path.as_path(), dimension_worlds.as_deref(), admission_dimension);
+    let admission_world_path = session_world_path(
+        path.as_path(),
+        dimension_worlds.as_deref(),
+        admission_dimension,
+    );
     let result = play(
         &mut s,
         &world,
@@ -5793,8 +5796,7 @@ fn handle(
     // Always lock world before mobs to match the gameplay tick lock order.
     // A portal may have changed the active dimension since login. Never save
     // the shared Mob state against a stale admission world at disconnect.
-    let disconnect_world =
-        session_world(&world, dimension_worlds.as_deref(), session_dimension);
+    let disconnect_world = session_world(&world, dimension_worlds.as_deref(), session_dimension);
     let mob_saved = {
         let guard = disconnect_world
             .lock()
@@ -9004,15 +9006,12 @@ mod session_dimension_routing_tests {
 
     #[test]
     fn reconnect_and_disconnect_select_active_dimension_not_admission_world() {
-        let root = std::env::temp_dir().join(format!(
-            "ir1710-session-routing-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ir1710-session-routing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let worlds = dimensions::DimensionWorlds::load_all(
-            dimensions::DimensionManager::new(&root, 42),
-        )
-        .unwrap();
+        let worlds =
+            dimensions::DimensionWorlds::load_all(dimensions::DimensionManager::new(&root, 42))
+                .unwrap();
         let admission = worlds.world(dimensions::Dimension::Overworld);
         for current in [
             dimensions::Dimension::Overworld,
