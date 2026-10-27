@@ -6069,6 +6069,10 @@ mod tests {
         );
         let slime_children: Vec<_> = slime_death.events.into_iter().skip(2).collect();
         assert!((2..=4).contains(&slime_children.len()));
+        let after_slime_split = mobs.next_id;
+        // A delayed/replayed lethal hit cannot split an already removed parent.
+        assert!(mobs.player_attack(slime_id, at, None, 21).is_none());
+        assert_eq!(mobs.next_id, after_slime_split);
 
         let cow_id = mobs.next_id;
         let cow = mobs.insert(Kind::Cow, at, false);
@@ -6090,6 +6094,11 @@ mod tests {
         );
         let magma_children: Vec<_> = magma_death.events.into_iter().skip(2).collect();
         assert!((2..=4).contains(&magma_children.len()));
+        let after_magma_split = mobs.next_id;
+        assert!(mobs
+            .player_attack(magma_id, PlayerPosition { x: 3.5, ..at }, None, 22)
+            .is_none());
+        assert_eq!(mobs.next_id, after_magma_split);
 
         // Protocol 5 entity spawns must encode exactly the ID allocated by
         // the server, including each child and the interleaved categories.
@@ -6122,8 +6131,8 @@ mod tests {
         assert!(!ids.contains(&magma_id));
         assert!(ids.iter().all(|id| *id >= BASE_ID && *id < mobs.next_id));
 
-        // Every connected client receives the same shared authoritative
-        // snapshot, not a newly allocated set of child IDs on each join.
+        // Repeated join snapshots must reuse the same authoritative entity
+        // IDs; this unit test does not replace multi-client socket E2E.
         let snapshot: Vec<_> = mobs
             .spawn_events()
             .map(|event| (event.id, event.body))
@@ -6170,11 +6179,18 @@ mod tests {
         };
         let parent_id = mobs.next_id;
         mobs.insert_sized(Kind::Slime, at, false, 4);
-        let parent = mobs.entities.remove(&parent_id).unwrap();
-        let children = mobs.split(parent);
-        assert_eq!(children.len(), 1);
+        let parent = mobs.entities[&parent_id];
+        mobs.entities.get_mut(&parent_id).unwrap().health = 1;
+        let death = mobs.player_attack(parent_id, at, None, 20).unwrap();
+        // Death status, parent destroy, and exactly one remaining child ID.
+        assert_eq!(death.events.len(), 3);
+        assert_eq!(death.events[0].id, 0x1a);
+        assert_eq!(death.events[1].body, multiplayer::destroy(parent_id).body);
+        assert_eq!(death.events[2].id, 0x0f);
         assert_eq!(mobs.next_id, 1_000_000);
+        assert!(!mobs.entities.contains_key(&parent_id));
         assert!(mobs.entities.contains_key(&999_999));
+        assert!(mobs.player_attack(parent_id, at, None, 21).is_none());
         assert!(mobs.split(parent).is_empty());
         assert!(mobs.spawn_xp(at, 1).is_none());
         assert!(mobs.fire_arrow(None, at, 0.0, 0.0, 1.0, 2).is_none());
