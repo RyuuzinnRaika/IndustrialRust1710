@@ -4,6 +4,10 @@
 //! This is NOT Mojang's 1.7.10 terrain algorithm or a bit-for-bit clone.
 use crate::dimensions::Dimension;
 
+// A01: version-gated Java GenLayer RNG foundation. IRW4 generation remains unchanged.
+#[allow(dead_code)]
+mod genlayer;
+
 const SEA: i32 = 62;
 const AIR: u16 = 0;
 fn b(id: u16) -> u16 {
