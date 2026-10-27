@@ -67,6 +67,28 @@ cargo run --release -p vanilla-server -- --bind 127.0.0.1:25565 --whitelist ./wh
 | `crates/industrial-core` | Tick・工業ネットワーク計算の核 | ゲーム本体とは別の研究基盤 |
 | `apps/industrial-bench` | 合成負荷のベンチマーク | 実サーバーのTPS測定ではない |
 
+## バイオーム付き地形をWindowsで起動（A01）
+
+`run-windows.ps1` を**引数なし**で実行すると、Minecraft Java 1.7.10向けのIRW4地形生成器（固定シード42）が有効になり、平原・森林・海洋・川・起伏・洞窟・鉱石・村などを生成する**別のワールド** `world/biomes-42.irw` を作成／再読込します。最初はサバイバルモードです。IRW4の地形生成は独自実装であり、本家1.7.10と完全一致するわけではありません。
+
+```powershell
+.\run-windows.ps1
+```
+
+従来の `world/flat.irw` は**自動変換・削除されません**。既存データを続けて利用する場合は、明示的に従来の保存先を指定してください。
+
+```powershell
+.\run-windows.ps1 --world world/flat.irw
+```
+
+シードや保存先を指定した別ワールドを作る場合は明示的に指定できます（既存保存先を上書きしません）。
+
+```powershell
+.\run-windows.ps1 --survival --expanded-seed 12345 --world world/biomes-12345.irw
+```
+
+`--expanded-seed` の初回起動は新しい保存先を使ってください。既存IRW1の平坦ワールドは、起動フラグを変えるだけで地形が切り替わることはありません。既存ワールドを必ずバックアップしてから試してください。起動・CIのテスト結果と無改造クライアントでの目視検証は別々に確認してください。
+
 ## 複数ディメンションの起動（A10・試験機能）
 
 IRW4の3ディメンションを1つのワールドルートにまとめて管理する場合は、`--expanded-seed` と `--dimension-root` を併用します。

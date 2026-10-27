@@ -27,5 +27,13 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
 }
 Write-Host 'Starting IndustrialRust1710 (Minecraft Java 1.7.10). Press Ctrl+C to stop.'
 # No server.properties: default listener is 127.0.0.1:25565.
+# A normal no-argument launch now creates/loads a separate IRW4 biome world.
+# Never replace, regenerate, or migrate the historical world/flat.irw here.
+# Any caller-supplied arguments preserve the old explicit CLI behavior.
+if ($ServerArgs.Count -eq 0) {
+    $ServerArgs = @('--survival', '--expanded-seed', '42', '--world', 'world/biomes-42.irw')
+    Write-Host 'Using seeded IRW4 terrain and biomes: world/biomes-42.irw (seed 42).'
+    Write-Host 'Existing world/flat.irw is not modified. Pass explicit arguments to select another world.'
+}
 & $exe --whitelist $whitelist @ServerArgs
 exit $LASTEXITCODE

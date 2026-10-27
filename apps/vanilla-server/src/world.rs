@@ -2379,6 +2379,41 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expanded_overworld_streams_seeded_biomes_instead_of_flat_sections() {
+        let world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        let mut heights = BTreeSet::new();
+        let mut biomes = BTreeSet::new();
+        // Include negative coordinates and cross several noise/biome regions.
+        for x in (-768..=768).step_by(96) {
+            for z in (-768..=768).step_by(96) {
+                heights.insert(world.surface_height_at(x, z).unwrap());
+                biomes.insert(world.biome_at(x, z));
+            }
+        }
+        assert!(heights.len() >= 8, "expanded terrain unexpectedly flat");
+        assert!(biomes.len() >= 3, "expanded world lacks biome variation");
+
+        let (mask, data) = world.chunk_data(0, 0);
+        assert_eq!(
+            mask, 0x01ff,
+            "expanded Overworld must stream terrain sections"
+        );
+        // Protocol 5 chunk data ends with 256 column biome IDs in Z-major order.
+        let transmitted_biomes = &data[data.len() - 256..];
+        for z in [0, 7, 15] {
+            for x in [0, 7, 15] {
+                assert_eq!(
+                    transmitted_biomes[(z * 16 + x) as usize],
+                    world.biome_at(x, z),
+                    "chunk biome differs from world generator"
+                );
+            }
+        }
+        assert_ne!(mask, World::new().chunk_data(0, 0).0);
+    }
+
     fn e46_fixture(label: &str, divergent_anvil: bool) -> (PathBuf, World) {
         let base = std::env::temp_dir().join(format!(
             "industrial-e46-world-{}-{}-{:?}",
