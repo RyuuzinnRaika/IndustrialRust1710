@@ -663,6 +663,18 @@ pub fn portal_target(world: &World, x: i32, y: i32, z: i32) -> Option<Dimension>
     }
 }
 
+/// In Minecraft 1.7.10 the End gateway is immediate in either direction.
+/// Nether portal travel requires four seconds (80 ticks) of continuous contact.
+/// Reject unsupported dimension pairs rather than accidentally allowing travel.
+pub fn portal_contact_ready(source: Dimension, target: Dimension, elapsed_ticks: u64) -> bool {
+    match (source, target) {
+        (Dimension::Overworld, Dimension::End) | (Dimension::End, Dimension::Overworld) => true,
+        (Dimension::Overworld, Dimension::Nether)
+        | (Dimension::Nether, Dimension::Overworld) => elapsed_ticks >= 80,
+        _ => false,
+    }
+}
+
 /// Durable travel checkpoint for the session/router layer. The session must
 /// save player inventory/vitals and send S07 Respawn before changing worlds.
 /// The checkpoint never replaces a player.dat (it is supplemental).
@@ -813,6 +825,24 @@ impl TravelCheckpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn end_portals_are_instant_in_both_directions_but_nether_requires_contact() {
+        assert!(portal_contact_ready(Dimension::Overworld, Dimension::End, 0));
+        assert!(portal_contact_ready(Dimension::End, Dimension::Overworld, 0));
+        for (source, target) in [
+            (Dimension::Overworld, Dimension::Nether),
+            (Dimension::Nether, Dimension::Overworld),
+        ] {
+            assert!(!portal_contact_ready(source, target, 79));
+            assert!(portal_contact_ready(source, target, 80));
+        }
+        assert!(!portal_contact_ready(
+            Dimension::Overworld,
+            Dimension::Overworld,
+            1000
+        ));
+        assert!(!portal_contact_ready(Dimension::End, Dimension::Nether, 1000));
+    }
     #[test]
     fn portal_detection_rejects_orphaned_and_broken_nether_frames() {
         let root = std::env::temp_dir().join(format!(
