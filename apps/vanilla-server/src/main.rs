@@ -891,6 +891,13 @@ fn periodic_effect_interval(kind: u8, amplifier: u8) -> u64 {
 
 /// Protocol 5 Entity Action 3/4 starts and stops sprinting. Other actions
 /// (sneaking, waking up, horse controls) never alter the sprint flag.
+/// Use the live server difficulty, including administrative changes made
+/// after a player joined. The legacy Vitals::tick convenience method always
+/// assumes Normal and must not be used by gameplay sessions.
+fn tick_survival_vitals(vitals: &mut Vitals, steps: u64, difficulty: &AtomicU8) -> bool {
+    vitals.tick_with_difficulty(steps, difficulty.load(Ordering::Acquire))
+}
+
 fn sprint_action(current: bool, action: i32, food: i32) -> bool {
     match action {
         3 => food > 6,
@@ -1718,7 +1725,7 @@ fn play(
             let steps = (now_tick - last_vitals_tick).min(20);
             last_vitals_tick = now_tick;
             let mut next = *vitals;
-            if next.tick(steps) {
+            if tick_survival_vitals(&mut next, steps, difficulty) {
                 player.save_state_in_dimension(
                     player_path,
                     next,
@@ -9188,5 +9195,50 @@ mod chunk_priority_tests {
         assert_eq!(actual[1], (i32::MIN + 1, i32::MAX));
         assert_eq!(actual[2], (i32::MAX, i32::MIN));
         assert!(prioritize_chunk_view([], center).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod live_survival_difficulty_tests {
+    use super::*;
+
+    #[test]
+    fn starvation_follows_live_difficulty_without_rejoining() {
+        let current = AtomicU8::new(1);
+        let mut player = Vitals {
+            food: 0,
+            saturation: 0.0,
+            ..Vitals::default()
+        };
+        for _ in 0..160 {
+            tick_survival_vitals(&mut player, 20, &current);
+        }
+        assert_eq!(player.health, 10.0, "Easy starvation must stop at ten HP");
+        current.store(3, Ordering::Release);
+        for _ in 0..80 {
+            tick_survival_vitals(&mut player, 20, &current);
+        }
+        assert_eq!(player.health, 0.0, "Hard must allow death from starvation");
+        assert!(player.valid());
+    }
+
+    #[test]
+    fn switching_to_normal_mid_session_enforces_one_hp_floor() {
+        let current = AtomicU8::new(2);
+        let mut player = Vitals {
+            food: 0,
+            saturation: 0.0,
+            health: 2.0,
+            ..Vitals::default()
+        };
+        for _ in 0..8 {
+            tick_survival_vitals(&mut player, 20, &current);
+        }
+        assert_eq!(player.health, 1.0);
+        current.store(3, Ordering::Release);
+        for _ in 0..4 {
+            tick_survival_vitals(&mut player, 20, &current);
+        }
+        assert_eq!(player.health, 0.0);
     }
 }
