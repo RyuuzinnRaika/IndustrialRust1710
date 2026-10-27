@@ -23,6 +23,9 @@ pub struct GameRules {
     // Existing version-1 save files predate this field.
     #[serde(rename = "doMobSpawning", default = "default_enabled")]
     mob_spawning: bool,
+    // Absent in older saves: match the vanilla 1.7.10 default.
+    #[serde(rename = "showDeathMessages", default = "default_enabled")]
+    show_death_messages: bool,
 }
 
 impl Default for GameRules {
@@ -32,6 +35,7 @@ impl Default for GameRules {
             daylight_cycle: true,
             keep_inventory: false,
             mob_spawning: true,
+            show_death_messages: true,
         }
     }
 }
@@ -69,6 +73,7 @@ impl GameRules {
             "doDaylightCycle" => Some(self.daylight_cycle),
             "keepInventory" => Some(self.keep_inventory),
             "doMobSpawning" => Some(self.mob_spawning),
+            "showDeathMessages" => Some(self.show_death_messages),
             _ => None,
         }
     }
@@ -82,12 +87,16 @@ impl GameRules {
     pub fn mob_spawning(self) -> bool {
         self.mob_spawning
     }
+    pub fn show_death_messages(self) -> bool {
+        self.show_death_messages
+    }
 
     pub fn set(&mut self, key: &str, value: bool) -> io::Result<()> {
         match key {
             "doDaylightCycle" => self.daylight_cycle = value,
             "keepInventory" => self.keep_inventory = value,
             "doMobSpawning" => self.mob_spawning = value,
+            "showDeathMessages" => self.show_death_messages = value,
             _ => {
                 return Err(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -138,10 +147,12 @@ mod tests {
         assert_eq!(rules.get("keepInventory"), Some(false));
         assert_eq!(rules.get("doDaylightCycle"), Some(true));
         assert_eq!(rules.get("doMobSpawning"), Some(true));
+        assert_eq!(rules.get("showDeathMessages"), Some(true));
         assert!(rules.set("missing", true).is_err());
         rules.set("keepInventory", true).unwrap();
         rules.set("doDaylightCycle", false).unwrap();
         rules.set("doMobSpawning", false).unwrap();
+        rules.set("showDeathMessages", false).unwrap();
         rules.save(&path).unwrap();
         assert_eq!(GameRules::load(&path).unwrap(), rules);
         // Migration: old version-1 worlds must retain vanilla natural spawning.
@@ -151,6 +162,7 @@ mod tests {
         )
         .unwrap();
         assert!(GameRules::load(&path).unwrap().mob_spawning());
+        assert!(GameRules::load(&path).unwrap().show_death_messages());
         fs::write(
             &path,
             br#"{"version":1,"doDaylightCycle":"false","keepInventory":true}"#,

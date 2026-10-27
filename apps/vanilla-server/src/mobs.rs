@@ -513,6 +513,9 @@ pub struct Mobs {
     pending_hits: Vec<(PlayerPosition, u8, u64)>,
     #[serde(skip)]
     pending_blast_damage: BTreeMap<i32, u8>,
+    /// Ten-tick post-hit immunity is per authenticated player, not per Mob.
+    #[serde(skip)]
+    last_player_damage_tick: BTreeMap<i32, u64>,
     #[serde(skip)]
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
     #[serde(skip)]
@@ -540,6 +543,10 @@ pub struct Mobs {
     // Runtime-only flag. Default false (not paused) on new/load.
     #[serde(skip)]
     natural_spawning_paused: bool,
+    /// Daylight is the world-clock position, not server uptime (which starts
+    /// with a different 1.7.10 solar offset and can be changed by /time).
+    #[serde(skip)]
+    daylight_offset: Option<u64>,
     next_id: i32,
     dragon_defeated: bool,
     enabled: bool,
@@ -1240,6 +1247,70 @@ impl Mobs {
         self.entities.insert(id, mob);
         event
     }
+    /// Persist a bounded 1.7.10 Mob summon *before* publishing the spawn
+    /// packet. Reuse the same entity IDs, AI and save format as natural spawns.
+    /// NBT and bosses require their own validated command implementation.
+    pub fn summon_command(
+        &mut self,
+        world: &World,
+        entity: &str,
+        at: PlayerPosition,
+    ) -> io::Result<Event> {
+        let kind = match entity {
+            "Zombie" => Kind::Zombie,
+            "Skeleton" => Kind::Skeleton,
+            "Creeper" => Kind::Creeper,
+            "Spider" => Kind::Spider,
+            "CaveSpider" => Kind::CaveSpider,
+            "Enderman" => Kind::Enderman,
+            "Slime" => Kind::Slime,
+            "Witch" => Kind::Witch,
+            "Cow" => Kind::Cow,
+            "Pig" => Kind::Pig,
+            "Sheep" => Kind::Sheep,
+            "Chicken" => Kind::Chicken,
+            "Horse" | "EntityHorse" => Kind::Horse,
+            "Villager" => Kind::Villager,
+            "VillagerGolem" => Kind::IronGolem,
+            "PigZombie" => Kind::ZombiePigman,
+            "LavaSlime" => Kind::MagmaCube,
+            "Blaze" => Kind::Blaze,
+            "Ghast" => Kind::Ghast,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsupported 1.7.10 Mob name",
+                ))
+            }
+        };
+        // Explicit /summon is distinct from *natural* spawning. Flat worlds
+        // must still run AI for summoned mobs even with natural spawning off.
+        if !at.is_valid()
+            || physics::collides(world, &at)
+            || self.entities.len() >= MAX_LOADED_MOBS
+            || self.next_id >= 1_000_000
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Mob spawn position/cap invalid",
+            ));
+        }
+        if self.difficulty == Some(0) && !kind.peaceful_safe() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "hostile Mob cannot remain in Peaceful",
+            ));
+        }
+        let previous_id = self.next_id;
+        let packet = self.insert(kind, at, false);
+        if let Err(error) = self.save(world) {
+            self.entities.remove(&previous_id);
+            self.next_id = previous_id;
+            return Err(error);
+        }
+        Ok(packet)
+    }
+
     /// An egg impact may spawn one baby chicken, under the existing Mob cap.
     pub fn hatch_egg(&mut self, world: &World, at: PlayerPosition) -> Option<Event> {
         if self.entities.len() >= MAX_LOADED_MOBS
@@ -1623,7 +1694,23 @@ impl Mobs {
         tick: u64,
     ) -> Option<Attack> {
         let mob = self.entities.get_mut(&id)?;
-        if !mob.nearby(at, 3.0) || (mob.hit_tick != 0 && tick.saturating_sub(mob.hit_tick) < 10) {
+        // Entity positions refer to FEET; the actual attack comes from the
+        // player's eye and can reach a large/tall Mob's bounding box even
+        // when the feet-to-feet 3-D distance exceeds three blocks.
+        let (half_width, height) = projectile_hitbox(mob);
+        let horizontal = (mob.position.x - at.x).hypot(mob.position.z - at.z);
+        let eye = at.y + 1.62;
+        let gap_y = if eye < mob.position.y {
+            mob.position.y - eye
+        } else if eye > mob.position.y + height {
+            eye - (mob.position.y + height)
+        } else {
+            0.0
+        };
+        let reach = 3.0 + half_width;
+        if horizontal.hypot(gap_y) > reach
+            || (mob.hit_tick != 0 && tick.saturating_sub(mob.hit_tick) < 10)
+        {
             return None;
         }
         mob.hit_tick = tick;
@@ -2268,6 +2355,7 @@ impl Mobs {
         let hostile_cap = natural_spawn_capacity(players, VANILLA_HOSTILE_CAP);
         let passive_cap = natural_spawn_capacity(players, VANILLA_PASSIVE_CAP);
         let dimension = world.dimension();
+        let daytime = self.daylight_at(now);
         for index in 0..4u64 {
             let seed = hash(
                 now ^ index.wrapping_mul(0x9e3779b97f4a7c15) ^ world.natural_seed().unwrap_or(0),
@@ -2346,7 +2434,7 @@ impl Mobs {
             let is_passive = overworld
                 && now.is_multiple_of(400)
                 && natural_spawn_passive_roll(seed)
-                && natural_passive_habitat_ok(world.get(x, y - 1, z) >> 4, block, sky, now);
+                && natural_passive_habitat_ok(world.get(x, y - 1, z) >> 4, block, sky, daytime);
             // Select the species before applying light rules: slime-chunk
             // cave spawns are legal even at light level 15.
             let (kind, swamp_bonus) = if is_passive {
@@ -2467,7 +2555,7 @@ impl Mobs {
                         world.natural_seed().unwrap_or(0),
                         (cx, cy, cz),
                         light,
-                        now,
+                        daytime,
                         is_passive,
                     ) {
                         continue;
@@ -2619,6 +2707,24 @@ impl Mobs {
         self.natural_spawning_paused = !allowed;
     }
     /// Tick at most four elapsed 20Hz steps; caller owns broadcast fan-out.
+    /// The client-visible 1.7.10 time (0=sunrise, 6000=noon, 18000=midnight)
+    /// must drive day/night AI. Server ticks alone represent uptime and need
+    /// not match the visible sun, especially after /time set.
+    pub fn tick_at_daytime(
+        &mut self,
+        now: u64,
+        daytime: u64,
+        world: &World,
+        players: &[PlayerPosition],
+    ) -> Vec<Event> {
+        self.daylight_offset = Some((daytime % 24_000 + 24_000 - now % 24_000) % 24_000);
+        self.tick(now, world, players)
+    }
+
+    fn daylight_at(&self, tick: u64) -> u64 {
+        (tick % 24_000 + self.daylight_offset.unwrap_or(0)) % 24_000
+    }
+
     pub fn tick(&mut self, now: u64, world: &World, players: &[PlayerPosition]) -> Vec<Event> {
         // Each connected session can poll the shared world in the same 20 Hz
         // tick. Execute world simulation only once, including natural spawns.
@@ -2686,6 +2792,7 @@ impl Mobs {
             // Reusing `now` for every step would repeat one 1/800 despawn
             // roll rather than giving each elapsed tick its own chance.
             let simulated_tick = now - (steps - 1 - step);
+            let simulated_daytime = self.daylight_at(simulated_tick);
             // A delayed poll may cross a 20-tick spawner or natural-spawn
             // boundary without landing on it. Run both against the simulated
             // tick so neither attempt is lost; persisted spawner cooldowns
@@ -2736,7 +2843,7 @@ impl Mobs {
                 // final clock value for each step burns undead up to four
                 // times on a single 20-tick boundary (or misses a boundary).
                 if matches!(mob.kind, Kind::Zombie | Kind::Skeleton)
-                    && sunlight(simulated_tick)
+                    && sunlight(simulated_daytime)
                     && sky_exposed(world, mob.position)
                     && simulated_tick.is_multiple_of(20)
                 {
@@ -2791,7 +2898,7 @@ impl Mobs {
                     );
                     // Evaluate light at each simulated tick, not the final catch-up
                     // time: sunset can fall between the bounded steps.
-                    mob.bright_spider = spider_bright_light(block, sky, simulated_tick);
+                    mob.bright_spider = spider_bright_light(block, sky, simulated_daytime);
                 }
                 let nearest = players
                     .iter()
@@ -3386,12 +3493,26 @@ impl Mobs {
                 }
             }
         }
-        match self.difficulty.unwrap_or(1) {
+        let scaled = match self.difficulty.unwrap_or(1) {
             0 => 0,
             1 => amount.div_ceil(2),
             3 => amount.saturating_mul(3).div_ceil(2),
             _ => amount,
+        };
+        if scaled > 0 {
+            // Vanilla 1.7.10: after a hit the player is briefly immune to
+            // another equal/lower hit. Do not stack multiple Mob bites,
+            // projectiles and explosions in a single half-second window.
+            if self
+                .last_player_damage_tick
+                .get(&player_id)
+                .is_some_and(|&last| tick >= last && tick - last < 10)
+            {
+                return 0;
+            }
+            self.last_player_damage_tick.insert(player_id, tick);
         }
+        scaled
     }
 }
 /// Minecraft 1.7.10 BiomeGenBase spawn entries: sheep/pig/chicken/cow
@@ -3770,6 +3891,34 @@ fn natural_spawn_location_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn command_summon_in_flat_world_survives_restart_without_enabling_natural_spawns() {
+        let world = World::new();
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-summon-{}-{:?}.mobs.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        assert!(!mobs.enabled);
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 90.0,
+            z: 0.5,
+        };
+        let packet = mobs.summon_command(&world, "Cow", at).unwrap();
+        assert_eq!(packet.id, 0x0f);
+        assert_eq!(mobs.entities.len(), 1);
+        assert!(mobs
+            .summon_command(&world, "minecraft:netherite", at)
+            .is_err());
+        let loaded = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        assert_eq!(loaded.entities.len(), 1);
+        assert!(!loaded.enabled);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn natural_spawn_fluid_overlap_is_strict_and_safe_at_i32_limits() {
         // Touching either face of a water/lava block is not a collision.
@@ -4466,6 +4615,64 @@ mod tests {
             mobs.entities.get_mut(&id).unwrap().anger_until = 0;
             assert_eq!(mobs.hurt_player(777, at, 100), 0);
         }
+    }
+
+    #[test]
+    fn solar_time_follows_visible_clock_not_server_uptime() {
+        let world = World::new();
+        let pos = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, pos, false);
+        let id = mobs.next_id - 1;
+        mobs.entities.get_mut(&id).unwrap().leash_holder = Some(777);
+        mobs.last_tick = 199;
+        // The wall clock shows noon, even though uptime tick 200 could have
+        // been mapped to night by /time set.
+        mobs.tick_at_daytime(200, 6000, &world, &[]);
+        assert_eq!(mobs.entities[&id].health, 19);
+        // /time set night must stop burning at the very next tick.
+        mobs.tick_at_daytime(220, 18000, &world, &[]);
+        assert_eq!(mobs.entities[&id].health, 19);
+        mobs.tick_at_daytime(240, 6040, &world, &[]);
+        assert_eq!(mobs.entities[&id].health, 18);
+    }
+
+    #[test]
+    fn hostile_hits_have_per_player_ten_tick_damage_grace() {
+        let player = PlayerPosition::default();
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, player, false);
+        assert!(mobs.hurt_player(45, player, 20) > 0);
+        mobs.pending_blast_damage.insert(45, 8);
+        assert_eq!(mobs.hurt_player(45, player, 21), 0);
+        mobs.pending_blast_damage.insert(45, 8);
+        assert!(mobs.hurt_player(45, player, 30) > 0);
+        mobs.pending_blast_damage.insert(46, 8);
+        assert!(mobs.hurt_player(46, player, 31) > 0);
+    }
+
+    #[test]
+    fn melee_reaches_mob_body_on_vertical_steps_without_long_range_hits() {
+        let player = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let mob_pos = PlayerPosition {
+            x: 3.0,
+            y: 66.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, mob_pos, false);
+        let id = mobs.next_id - 1;
+        assert!(mobs.player_attack(id, player, None, 20).is_some());
+        let distant = PlayerPosition { x: -8.0, ..player };
+        assert!(mobs.player_attack(id, distant, None, 31).is_none());
     }
 
     #[test]
@@ -5209,6 +5416,47 @@ mod tests {
             );
             assert_ne!((x, z), (837, 142), "River member bypassed its spawn list");
         }
+
+        // C21: The same live pack loop must honor the *animal* cap, not only
+        // the monster cap tested elsewhere. In Java 1.7.10 one player's
+        // 17x17 eligible-chunk union gives floor(10 * 289 / 256) = 11.
+        // Place existing cows away from the origin so body collisions cannot
+        // mask an accidental cap overshoot.
+        assert_eq!(natural_spawn_capacity(&[player], VANILLA_PASSIVE_CAP), 11);
+        let filler = PlayerPosition {
+            x: 4096.5,
+            y: 65.0,
+            z: 4096.5,
+        };
+        let spawn_with_animals = |preexisting: usize| {
+            let mut capped = Mobs::new_with_difficulty(&world, true, 2);
+            for _ in 0..preexisting {
+                capped.insert(Kind::Cow, filler, false);
+            }
+            let mut packets = Vec::new();
+            let mut sampler = world.lighting_sampler();
+            capped.spawn_natural(now, &world, &mut sampler, &[player], &mut packets);
+            assert_eq!(
+                packets.iter().filter(|event| event.id == 0x0f).count(),
+                capped.entities.len() - preexisting,
+                "each live spawn must have exactly one Protocol 5 notification"
+            );
+            capped
+                .entities
+                .values()
+                .filter(|mob| mob.kind.counts_toward_natural_cap(true))
+                .count()
+        };
+        assert_eq!(
+            spawn_with_animals(11),
+            11,
+            "a full animal cap must block new sheep"
+        );
+        assert_eq!(
+            spawn_with_animals(10),
+            11,
+            "one free animal slot must admit exactly one sheep, not a full pack"
+        );
     }
 
     #[test]
@@ -6150,6 +6398,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hostile_random_despawn_requires_more_than_600_distant_ticks_without_loot() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let far = PlayerPosition { x: 40.5, ..at };
+        let mut young = Mobs::default();
+        young.insert(Kind::Creeper, at, false);
+        let id = young.next_id - 1;
+        let roll_tick = (1000_u64..100_000)
+            .find(|tick| hash(*tick ^ id as u64).is_multiple_of(800))
+            .expect("a deterministic 1/800 despawn roll");
+
+        // The age threshold is strict: a successful roll at exactly 600
+        // distant ticks must not despawn the mob or create loot.
+        young.last_tick = roll_tick - 1;
+        young.entities.get_mut(&id).unwrap().far_from_player_ticks = 599;
+        let young_events = young.tick(roll_tick, &world, &[far]);
+        assert!(young.entities.contains_key(&id));
+        assert_eq!(young.entities[&id].far_from_player_ticks, 600);
+        assert!(!young_events.iter().any(|event| event.id == 0x13));
+        assert!(young.take_drops().is_empty());
+
+        // The same deterministic roll becomes eligible after 600 full ticks.
+        // Despawning sends exactly one entity removal, never death loot or XP.
+        let mut old = Mobs::default();
+        old.insert(Kind::Creeper, at, false);
+        assert_eq!(old.next_id - 1, id);
+        old.last_tick = roll_tick - 1;
+        old.entities.get_mut(&id).unwrap().far_from_player_ticks = 600;
+        let old_events = old.tick(roll_tick, &world, &[far]);
+        assert!(!old.entities.contains_key(&id));
+        assert_eq!(
+            old_events
+                .iter()
+                .filter(|event| event.id == 0x13 && event.body == multiplayer::destroy(id).body)
+                .count(),
+            1
+        );
+        assert!(old.take_drops().is_empty());
+        assert!(old
+            .tick(roll_tick + 1, &world, &[far])
+            .iter()
+            .all(|event| event.id != 0x13));
     }
 
     #[test]

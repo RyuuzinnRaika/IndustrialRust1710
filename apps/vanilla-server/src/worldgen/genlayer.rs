@@ -8,6 +8,12 @@
 #[allow(dead_code)]
 mod add_island;
 #[allow(dead_code)]
+mod add_snow;
+#[allow(dead_code)]
+mod biome;
+#[allow(dead_code)]
+mod edge;
+#[allow(dead_code)]
 mod island_zoom;
 #[allow(dead_code)]
 mod river;

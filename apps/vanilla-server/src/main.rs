@@ -16,6 +16,7 @@ mod clock;
 mod commands;
 mod crafting;
 mod decorations;
+mod death_log;
 mod dimensions;
 mod disconnect_log;
 mod dispensers;
@@ -55,12 +56,14 @@ mod online_auth;
 mod physics;
 mod player;
 mod scoreboard;
+mod spawnpoint;
 mod security_limits;
 mod server_config;
 mod session_lock;
 mod survival;
 mod survival_damage;
 mod telemetry;
+mod teleport_gate;
 mod terrain;
 mod throwables;
 mod vehicles;
@@ -70,6 +73,7 @@ mod whitelist;
 mod window_open;
 mod workstations;
 mod world;
+mod world_spawn;
 mod worldgen;
 
 use achievements::Achievements;
@@ -79,6 +83,7 @@ use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use commands::PublicCommand;
 use decorations::Decorations;
+use death_log::{DeathCause, DeathRecord, FatalHit};
 use dispensers::{Devices, Position as DevicePosition};
 use experience::Experience;
 use fishing::Fishing;
@@ -96,7 +101,8 @@ use maps::Maps;
 use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
-    Event, Hub, JoinError, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT,
+    Event, Hub, JoinError, SessionEvents, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT, ADMIN_ENCHANT_EVENT,
+    ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT, ADMIN_SPAWNPOINT_EVENT,
     ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT,
     PISTON_PUSH_EVENT,
 };
@@ -111,12 +117,12 @@ use std::io::{self, BufRead, ErrorKind};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use survival::MiningProgress;
-use survival_damage::Hazards;
+use survival_damage::{HazardCause, Hazards};
+use teleport_gate::TeleportGate;
 use throwables::Throwables;
 use vehicles::Boats;
 use vitals::Vitals;
@@ -362,6 +368,40 @@ fn login_disconnect(s: &mut Connection, reason: &str) -> io::Result<()> {
     write_string(&json!({"text":reason}).to_string(), &mut payload)?;
     send(s, 0x00, &payload)
 }
+/// Initial chunk transfer occurs after Login Success, so an incomplete
+/// world join must use the Protocol 5 Play Disconnect (0x40), not Login
+/// Disconnect (0x00). Never expose internal paths or backend error strings.
+fn join_failure_reason(error: &io::Error) -> &'static str {
+    match error.kind() {
+        ErrorKind::TimedOut => "World loading timed out. Please reconnect.",
+        ErrorKind::WouldBlock => "World loading is busy. Please reconnect.",
+        _ => "World loading failed. Please reconnect.",
+    }
+}
+
+fn reject_failed_join(s: &mut Connection, error: io::Error) -> io::Error {
+    // A dead socket cannot receive an explanation. Preserve the root error
+    // while ensuring the admission guard is dropped on return from handle().
+    if !matches!(
+        error.kind(),
+        ErrorKind::UnexpectedEof
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::BrokenPipe
+    ) {
+        let mut body = Vec::new();
+        if write_string(
+            &json!({"text": join_failure_reason(&error)}).to_string(),
+            &mut body,
+        )
+        .is_ok()
+        {
+            let _ = send(s, 0x40, &body);
+        }
+    }
+    io::Error::new(error.kind(), format!("join initialization: {error}"))
+}
+
 fn offline_uuid(name: &str) -> String {
     let mut digest = md5::compute(format!("OfflinePlayer:{name}").as_bytes()).0;
     digest[6] = digest[6] & 0x0f | 0x30;
@@ -437,6 +477,7 @@ fn primed_tnt_teleport_body(entity_id: i32, position_fp: [i32; 3]) -> Vec<u8> {
 fn join(
     s: &mut Connection,
     world: &Mutex<World>,
+    root_world_path: &Path,
     clock: &Clock,
     entity_id: i32,
     initial: InitialPlayer<'_>,
@@ -472,16 +513,11 @@ fn join(
     abilities.extend_from_slice(&0.1f32.to_be_bytes());
     send(s, 0x39, &abilities)?;
 
-    let mut spawn = Vec::new();
-    let surface = world
-        .lock()
-        .map_err(|_| bad("world mutex poisoned"))?
-        .spawn_y() as i32
-        - 1;
-    for coordinate in [0i32, surface, 0] {
-        spawn.extend_from_slice(&coordinate.to_be_bytes());
-    }
-    send(s, 0x05, &spawn)?;
+    let spawn = {
+        let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        world_spawn::effective(root_world_path, &state)?
+    };
+    send(s, 0x05, &spawn.packet())?;
     send(s, 0x06, &health_packet(vitals))?;
     let mut time = Vec::new();
     time.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
@@ -525,12 +561,9 @@ fn join(
     Ok(())
 }
 
-fn safe_spawn(world: &Mutex<World>) -> io::Result<PlayerPosition> {
-    let y = world
-        .lock()
-        .map_err(|_| bad("world mutex poisoned"))?
-        .spawn_y();
-    Ok(PlayerPosition { x: 0.5, y, z: 0.5 })
+fn safe_spawn(world: &Mutex<World>, root_world_path: &Path) -> io::Result<PlayerPosition> {
+    let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+    world_spawn::player_spawn(root_world_path, &state)
 }
 fn chunk_center(player: &PlayerPosition) -> (i32, i32) {
     (
@@ -550,11 +583,15 @@ fn view_chunks(center: (i32, i32)) -> BTreeSet<(i32, i32)> {
     chunks
 }
 fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipeline::PendingChunk> {
-    let (mask, data) = {
+    // Only copy the small, relevant edit halo under the shared lock.
+    // Noise generation, light propagation and packet construction are CPU
+    // heavy and can safely operate on this immutable snapshot outside it.
+    let snapshot = {
         let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
         w.observe_weather_chunk(cx, cz);
-        w.chunk_data(cx, cz)
+        w.chunk_read_snapshot(cx, cz)
     };
+    let (mask, data) = snapshot.chunk_data(cx, cz);
     chunk_pipeline::submit(cx, cz, mask, data)
 }
 /// Send the chunk under the player first so the loading screen can display
@@ -1128,9 +1165,10 @@ struct PlayerSession<'a> {
     game_rules: &'a Mutex<GameRules>,
     scoreboard: &'a Mutex<Scoreboard>,
     scoreboard_path: &'a Path,
+    root_world_path: &'a Path,
     hub: &'a Hub,
     entity_id: i32,
-    events: &'a Receiver<Event>,
+    events: &'a SessionEvents,
     administration: &'a Administration,
     peer_ip: IpAddr,
     verified_uuid: Option<&'a str>,
@@ -1279,6 +1317,7 @@ fn play(
         game_rules,
         scoreboard,
         scoreboard_path,
+        root_world_path,
         hub,
         entity_id,
         events,
@@ -1296,6 +1335,7 @@ fn play(
     let mut fall = FallTracker::new(player.y);
     let mut idle_gravity = IdleGravity::new(clock.ticks());
     let mut loaded_chunks = view_chunks(chunk_center(player));
+    let mut pending_teleport: Option<TeleportGate> = None;
     let mut pending_chunk_relights = BTreeSet::new();
     let mut last_chunk_relight = Instant::now() - Duration::from_millis(200);
     let mut yaw: f32 = 0.0;
@@ -1355,18 +1395,62 @@ fn play(
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
     let mut death_recorded = vitals.health <= 0.0;
+    let mut fatal_hit: Option<FatalHit> = None;
     let mut last_carrot_wear = 0u64;
     let mut last_beacon_tick = clock.ticks();
     let mut last_plate_refresh_tick = clock.ticks();
     let mut last_map_tick = clock.ticks();
     let mut last_arrow_damage_tick: Option<u64> = None;
     loop {
+        if pending_teleport
+            .as_ref()
+            .is_some_and(|gate| gate.timed_out(Instant::now()))
+        {
+            let mut reason = Vec::new();
+            write_string(
+                &json!({"text":"Teleport synchronization timed out."}).to_string(),
+                &mut reason,
+            )?;
+            let _ = send(s, 0x40, &reason);
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                "teleport acknowledgement timeout",
+            ));
+        }
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
                 "outbound packet overflow or session removed",
             ));
         }
         while let Ok(event) = events.try_recv() {
+            if event.id == ADMIN_SPAWNPOINT_EVENT {
+                if event.body.len() != 12 {
+                    return Err(bad("invalid internal spawnpoint payload"));
+                }
+                let point = spawnpoint::Spawnpoint::new(
+                    i32::from_be_bytes(event.body[0..4].try_into().unwrap()),
+                    i32::from_be_bytes(event.body[4..8].try_into().unwrap()),
+                    i32::from_be_bytes(event.body[8..12].try_into().unwrap()),
+                )?;
+                if *session_dimension != dimensions::Dimension::Overworld {
+                    as_chat(s, "Spawnpoint rejected: Overworld only.")?;
+                    continue;
+                }
+                let is_safe = {
+                    let current_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    point.safe_in(&current_world)
+                };
+                if !is_safe {
+                    as_chat(s, "Spawnpoint rejected: choose a clear, supported location.")?;
+                    continue;
+                }
+                // Only the player's session writes its own UUID/name-scoped
+                // data. A failed save cannot publish a successful result.
+                spawnpoint::save(player_path, point)?;
+                let (x, y, z) = point.coords();
+                as_chat(s, &format!("Spawnpoint set to {x} {y} {z}."))?;
+                continue;
+            }
             if event.id == ADMIN_GAMEMODE_EVENT {
                 if event.body.len() != 1 || event.body[0] > 1 {
                     return Err(bad("invalid internal gamemode"));
@@ -1420,6 +1504,104 @@ fn play(
                 if survival {
                     send(s, 0x1f, &experience.packet())?;
                 }
+                continue;
+            }
+            if event.id == ADMIN_EFFECT_EVENT {
+                if event.body.len() != 5 {
+                    return Err(bad("invalid internal effect payload"));
+                }
+                let action = event.body[0];
+                let kind = event.body[1];
+                let amplifier = event.body[2];
+                let seconds = u16::from_be_bytes(event.body[3..5].try_into().unwrap());
+                if action > 2
+                    || (action != 0 && !commands::valid_effect_kind(kind))
+                    || amplifier > 3
+                    || seconds > 1200
+                    || (action == 2 && seconds == 0)
+                {
+                    return Err(bad("invalid internal effect parameters"));
+                }
+                if action == 0 || action == 1 {
+                    let mut removed = Vec::new();
+                    active_effects.retain(|old| {
+                        if action == 0 || old.kind == kind {
+                            removed.push(old.kind);
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    for removed_kind in removed {
+                        let mut packet = entity_id.to_be_bytes().to_vec();
+                        packet.push(removed_kind);
+                        send(s, 0x1e, &packet)?;
+                    }
+                } else {
+                    let now = clock.ticks();
+                    active_effects.retain(|old| old.kind != kind);
+                    let duration_ticks = u64::from(seconds) * 20;
+                    active_effects.push(ActiveEffect {
+                        kind,
+                        amplifier,
+                        expires_at: now.saturating_add(duration_ticks),
+                        next_periodic: now
+                            .saturating_add(periodic_effect_interval(kind, amplifier)),
+                    });
+                    send(
+                        s,
+                        0x1d,
+                        &potion_effect_packet(entity_id, kind, amplifier, duration_ticks as u16),
+                    )?;
+                }
+                as_chat(s, "Effect command applied.")?;
+                continue;
+            }
+            if event.id == ADMIN_ENCHANT_EVENT {
+                if event.body.len() != 4 {
+                    return Err(bad("invalid internal enchant payload"));
+                }
+                let id = i16::from_be_bytes(event.body[0..2].try_into().unwrap());
+                let level = i16::from_be_bytes(event.body[2..4].try_into().unwrap());
+                let mut candidate = inventory.clone();
+                if !candidate.command_enchant_held(id, level)? {
+                    as_chat(
+                        s,
+                        "Enchant rejected: incompatible item/enchantment or level.",
+                    )?;
+                    continue;
+                }
+                // Save before changing state visible to the client.
+                candidate.save(inventory_path.as_path())?;
+                *inventory = candidate;
+                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                as_chat(s, &format!("Enchanted held item: {id} level {level}."))?;
+                continue;
+            }
+            if event.id == ADMIN_CLEAR_EVENT {
+                if event.body.len() != 8 {
+                    return Err(bad("invalid internal clear event"));
+                }
+                let id = i16::from_be_bytes(event.body[0..2].try_into().unwrap());
+                let data = i16::from_be_bytes(event.body[2..4].try_into().unwrap());
+                let max = i32::from_be_bytes(event.body[4..8].try_into().unwrap());
+                if (id != -1 && !items_1710::exists(id)) || data < -1 || !(-1..=4096).contains(&max)
+                {
+                    return Err(bad("invalid internal clear arguments"));
+                }
+                let mut next = inventory.clone();
+                let (found, removed) =
+                    next.clear_matching((id >= 0).then_some(id), (data >= 0).then_some(data), max);
+                if removed > 0 {
+                    next.save(inventory_path.as_path())?;
+                    *inventory = next;
+                    send(s, 0x30, &inventory.window_items())?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                }
+                as_chat(
+                    s,
+                    &format!("Clear: found {found} item(s); removed {removed}."),
+                )?;
                 continue;
             }
             if event.id == ADMIN_GIVE_EVENT {
@@ -1481,6 +1663,12 @@ fn play(
                     let mut next = *vitals;
                     next.health =
                         dispenser_arrow_health_after_hit(next.health, inventory.armor_points());
+                    death_log::record_fatal(
+                        &mut fatal_hit,
+                        vitals.health,
+                        next.health,
+                        DeathCause::DispenserArrow,
+                    );
                     // The owning session persists health before any client notification.
                     player.save_state_in_dimension(
                         player_path,
@@ -1524,6 +1712,12 @@ fn play(
                 let mut next_vitals = *vitals;
                 if pearl_impact {
                     next_vitals.apply_ender_pearl_damage();
+                    death_log::record_fatal(
+                        &mut fatal_hit,
+                        vitals.health,
+                        next_vitals.health,
+                        DeathCause::EnderPearl,
+                    );
                 }
                 target.save_state_in_dimension(
                     player_path,
@@ -1544,6 +1738,7 @@ fn play(
                 send_visible_signs(s, decorations, &entering)?;
                 send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                 send_player_position(s, player, yaw, pitch)?;
+                pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                 if pearl_impact {
                     send(s, 0x06, &health_packet(*vitals))?;
                 }
@@ -1585,6 +1780,7 @@ fn play(
                         send_visible_signs(s, decorations, &entering)?;
                         send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                         send_player_position(s, player, yaw, pitch)?;
+                        pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                         hub.move_player(entity_id, *player, yaw, pitch);
                         last_movement_broadcast = Instant::now();
                     }
@@ -1863,7 +2059,10 @@ fn play(
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
             creatures.set_natural_spawning(allow_natural_spawning);
-            let mut updates = creatures.tick(now_tick, &w, &players);
+            // The 1.7.10 sky and /time commands follow the displayed
+            // 0..23999 day clock, which is not the server uptime tick.
+            let mut updates =
+                creatures.tick_at_daytime(now_tick, clock.day_time() as u64, &w, &players);
             // Preserve main's grazing and Group I's leash simulation.
             let mut grazed_blocks = Vec::new();
             for (metadata, at) in creatures.graze(&mut w, world_path, now_tick)? {
@@ -1896,34 +2095,17 @@ fn play(
             }
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
             for explosion in explosions {
-                hub.broadcast_in_view(explosion.position, explosion.packet());
-                // One blast removes at most 64 non-tile blocks, protecting persisted containers.
-                let mut destroyed = 0;
-                let (cx, cy, cz) = (
+                let center = (
                     explosion.position.x.floor() as i32,
                     explosion.position.y.floor() as i32,
                     explosion.position.z.floor() as i32,
                 );
-                'blast: for y in (cy - 3).max(1)..=(cy + 3).min(254) {
-                    for x in cx - 3..=cx + 3 {
-                        for z in cz - 3..=cz + 3 {
-                            let d = ((x - cx).pow(2) + (y - cy).pow(2) + (z - cz).pow(2)) as f64;
-                            if d > explosion.radius * explosion.radius {
-                                continue;
-                            }
-                            let block = w.get(x, y, z) >> 4;
-                            if matches!(block, 0 | 7 | 49 | 54 | 61 | 62) {
-                                continue;
-                            }
-                            if w.update_and_save(world_path, x, y, z, 0)? {
-                                hub.broadcast(block_change_event(&w, x, y, z));
-                                destroyed += 1;
-                                if destroyed >= 64 {
-                                    break 'blast;
-                                }
-                            }
-                        }
-                    }
+                // Save once per blast, not once per destroyed block. Publish
+                // no block updates or explosion graphics before durable state.
+                let changed = w.creeper_blast_and_save(world_path, center, explosion.radius)?;
+                hub.broadcast_in_view(explosion.position, explosion.packet());
+                for (x, y, z) in changed {
+                    hub.broadcast_in_view(explosion.position, block_change_event(&w, x, y, z));
                 }
             }
             drop(w);
@@ -1955,7 +2137,14 @@ fn play(
                     worn.save(inventory_path)?;
                     *inventory = worn;
                 }
+                let previous_health = vitals.health;
                 vitals.health = (vitals.health - damage.ceil()).max(0.0);
+                death_log::record_fatal(
+                    &mut fatal_hit,
+                    previous_health,
+                    vitals.health,
+                    DeathCause::CombatOrExplosion,
+                );
                 player.save_state_in_dimension(
                     player_path,
                     *vitals,
@@ -1969,7 +2158,10 @@ fn play(
         }
         // A real 1.7.10 client predicts gravity while sending movement.
         // After six silent server ticks we integrate vertical gravity here.
-        if survival && vitals.health > 0.0 {
+        // Do not integrate server-side idle gravity while a teleport or
+        // collision correction is pending acknowledgement. Ordinary silent
+        // airborne clients still fall under the regular 20TPS fallback.
+        if survival && vitals.health > 0.0 && pending_teleport.is_none() {
             let gravity_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let simulated = idle_gravity.advance(&gravity_world, player, now_tick);
             let grounded = simulated
@@ -1989,7 +2181,14 @@ fn play(
                 };
                 let landed_distance = fall.take_landing_distance();
                 let mut next_vitals = *vitals;
+                let previous_health = next_vitals.health;
                 next_vitals.health = (next_vitals.health - f32::from(damage)).max(0.0);
+                death_log::record_fatal(
+                    &mut fatal_hit,
+                    previous_health,
+                    next_vitals.health,
+                    DeathCause::Fall,
+                );
                 // Save accepted position and HP before sending an update.
                 candidate.save_state_in_dimension(
                     player_path,
@@ -2012,13 +2211,21 @@ fn play(
                         hub.broadcast(block_change_event(&soil, fx, fy, fz));
                     }
                 }
+                // Continue simulating silent airborne clients until landing.
+                // The position ACK gate is used for rejected client movement,
+                // not for each step of continuous server-side gravity.
                 send_player_position(s, player, yaw, pitch)?;
                 if damage != 0 {
                     send(s, 0x06, &health_packet(*vitals))?;
                 }
+                // Server-driven gravity changes the real player position
+                // even when the look-only packet rate limit has not expired.
+                // Keep Hub targeting/collision consumers synchronized.
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, *player, yaw, pitch);
                     last_movement_broadcast = Instant::now();
+                } else {
+                    hub.record_player_position(entity_id, *player);
                 }
             }
         }
@@ -2026,7 +2233,14 @@ fn play(
             let steps = (now_tick - last_vitals_tick).min(20);
             last_vitals_tick = now_tick;
             let mut next = *vitals;
-            if tick_survival_vitals(&mut next, steps, difficulty) {
+            let changed = tick_survival_vitals(&mut next, steps, difficulty);
+            death_log::record_fatal(
+                &mut fatal_hit,
+                vitals.health,
+                next.health,
+                DeathCause::Starvation,
+            );
+            if changed {
                 player.save_state_in_dimension(
                     player_path,
                     next,
@@ -2040,15 +2254,35 @@ fn play(
         }
         if survival && vitals.health > 0.0 && now_tick > last_hazards_tick {
             let mut total = 0.0f32;
+            let mut last_source = None;
             let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let steps = (now_tick - last_hazards_tick).min(4);
             for t in last_hazards_tick + 1..=last_hazards_tick + steps {
-                total += hazards.tick(&w, *player, t, inventory);
+                let (damage, source) = hazards.tick_detailed(&w, *player, t, inventory);
+                total += damage;
+                if damage > 0.0 {
+                    last_source = source;
+                }
             }
             last_hazards_tick = now_tick;
             drop(w);
             if total > 0.0 {
+                let previous_health = vitals.health;
                 vitals.health = (vitals.health - total).max(0.0);
+                let cause = match last_source {
+                    Some(HazardCause::Drowning) => DeathCause::Drowning,
+                    Some(HazardCause::Suffocation) => DeathCause::Suffocation,
+                    Some(HazardCause::Lava) => DeathCause::Lava,
+                    Some(HazardCause::Fire) => DeathCause::Fire,
+                    Some(HazardCause::Burning) => DeathCause::Burning,
+                    None => DeathCause::Unknown,
+                };
+                death_log::record_fatal(
+                    &mut fatal_hit,
+                    previous_health,
+                    vitals.health,
+                    cause,
+                );
                 player.save_state_in_dimension(
                     player_path,
                     *vitals,
@@ -2345,7 +2579,8 @@ fn play(
         }
         if survival && vitals.health <= 0.0 {
             eating = None;
-            if !death_recorded {
+            let newly_dead = !death_recorded;
+            if newly_dead {
                 // A death is counted exactly once in this session and the
                 // updated shared scoreboard is durable before client notify.
                 let changes = {
@@ -2363,10 +2598,12 @@ fn play(
                 }
                 death_recorded = true;
             }
-            let keep_inventory = game_rules
-                .lock()
-                .map_err(|_| bad("game rules mutex poisoned"))?
-                .keep_inventory();
+            let (keep_inventory, show_death_messages) = {
+                let rules = game_rules
+                    .lock()
+                    .map_err(|_| bad("game rules mutex poisoned"))?;
+                (rules.keep_inventory(), rules.show_death_messages())
+            };
             if !keep_inventory {
                 commit_death_drops(
                     inventory,
@@ -2377,6 +2614,23 @@ fn play(
                     hub,
                     location,
                 )?;
+            }
+            if newly_dead {
+                let record = DeathRecord {
+                    player: name,
+                    hit: fatal_hit.take(),
+                    position: *player,
+                    dimension: session_dimension.protocol_id() as i32,
+                    tick: now_tick,
+                };
+                println!("{}", record.console_summary());
+                if let Err(error) = record.append(world_path) {
+                    // Optional diagnostic output must not block drops or respawn.
+                    eprintln!("DEATH LOG WRITE ERROR: {error}");
+                }
+                if show_death_messages {
+                    hub.broadcast(chat_event(&record.chat_message())?);
+                }
             }
             if hardcore {
                 // Persist the dead state before ending the connection. Future
@@ -2440,6 +2694,12 @@ fn play(
         // Dead players cannot interact with or move through the world until
         // their Protocol 5 Client Status respawn request is accepted.
         if survival && vitals.health <= 0.0 && matches!(id, 4 | 6 | 7 | 8) {
+            continue;
+        }
+        // Before C04/C06 confirms the authoritative destination, ignore
+        // every location-sensitive action from the old client view.
+        if pending_teleport.is_some() && TeleportGate::blocks_world_action(id) {
+            mining = None;
             continue;
         }
         match id {
@@ -2883,7 +3143,7 @@ fn play(
                         Err(usage) => as_chat(s, usage)?,
                         Ok(PublicCommand::Help) => as_chat(
                             s,
-                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /time, /weather, /kick, /ban, /save.",
+                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /enchant, /testforblock, /seed, /spawnpoint, /setworldspawn, /gamerule, /difficulty, /time, /weather, /kick, /ban, /save.",
                         )?,
                         Ok(PublicCommand::List) => as_chat(
                             s,
@@ -2927,6 +3187,11 @@ fn play(
                         clock,
                         administration,
                         hardcore,
+                        dimension: *session_dimension,
+                        mobs,
+                        root_world_path,
+                        game_rules,
+                        difficulty_state: difficulty,
                     };
                     let result = run_player_admin_command(
                         &message,
@@ -2997,6 +3262,31 @@ fn play(
                 if !candidate.is_valid() {
                     // Sparse world positions are validated against the global world limit.
                     send_player_position(s, player, yaw, pitch)?;
+                    pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
+                    idle_gravity.observe_client(now_tick);
+                    if trace_movement {
+                        eprintln!("movement trace: out-of-bounds correction pending_ack received={candidate:?} target={player:?}");
+                    }
+                    continue;
+                }
+                if let Some(gate) = pending_teleport.as_mut() {
+                    if gate.acknowledges(candidate) {
+                        pending_teleport = None;
+                        idle_gravity.observe_client(now_tick);
+                        if trace_movement {
+                            eprintln!("movement trace: correction acknowledged received={candidate:?} server={player:?}");
+                        }
+                        // The destination is already authoritative and persisted.
+                        // A matching position report is only its acknowledgement,
+                        // not another move that should trigger collision/fall damage.
+                        continue;
+                    }
+                    if gate.should_resend(Instant::now()) {
+                        send_player_position(s, player, yaw, pitch)?;
+                        if trace_movement {
+                            eprintln!("movement trace: correction resent received={candidate:?} target={player:?}");
+                        }
+                    }
                     continue;
                 }
                 if boats
@@ -3034,7 +3324,20 @@ fn play(
                             );
                             last_movement_trace = Instant::now();
                         }
+                        // A rejected movement is a server-authoritative
+                        // correction, just like /tp. Wait for the client's
+                        // C04/C06 acknowledgement before accepting another
+                        // input position or a position-dependent world action.
+                        // Otherwise queued stale movement can repeatedly
+                        // overwrite or reject the position after S08.
                         send_player_position(s, player, yaw, pitch)?;
+                        pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
+                        idle_gravity.observe_client(now_tick);
+                        if trace_movement {
+                            eprintln!(
+                                "movement trace: correction pending_ack from={player:?} received={candidate:?}"
+                            );
+                        }
                         continue;
                     }
                     let landed = physics::supported(&collision_world, &candidate);
@@ -3049,7 +3352,14 @@ fn play(
                     };
                     landing_distance = fall.take_landing_distance();
                     if damage != 0 {
+                        let previous_health = vitals.health;
                         vitals.health = (vitals.health - f32::from(damage)).max(0.0);
+                        death_log::record_fatal(
+                            &mut fatal_hit,
+                            previous_health,
+                            vitals.health,
+                            DeathCause::Fall,
+                        );
                         player.save_state_in_dimension(
                             player_path,
                             *vitals,
@@ -3133,6 +3443,10 @@ fn play(
                     eprintln!("movement trace: accepted from={player:?} to={candidate:?} yaw={yaw} pitch={pitch}");
                     last_movement_trace = Instant::now();
                 }
+                // A normal movement packet can arrive many times within one
+                // chunk. Avoid reconstructing/diffing the 5x5 viewport unless
+                // the player actually crosses a 16-block boundary.
+                let previous_chunk_center = chunk_center(player);
                 let position_changed = *player != candidate;
                 location = (x, y, z);
                 *player = candidate;
@@ -3231,6 +3545,8 @@ fn play(
                                         chunk_center(player),
                                     )?;
                                     send_player_position(s, player, yaw, pitch)?;
+                                    pending_teleport =
+                                        Some(TeleportGate::new(*player, Instant::now()));
                                     last_movement_broadcast = Instant::now();
                                     continue;
                                 }
@@ -3240,20 +3556,31 @@ fn play(
                         }
                     }
                 }
-                let old_chunks = loaded_chunks.clone();
-                sync_chunks(s, world, &mut loaded_chunks, chunk_center(&candidate))?;
-                if loaded_chunks != old_chunks {
-                    let entering = loaded_chunks.difference(&old_chunks).copied().collect();
-                    send_visible_signs(s, decorations, &entering)?;
-                    send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
-                }
-                // A position change must always reach the Hub, even when the
-                // player stops moving inside the 50-ms orientation throttle.
-                // Otherwise other clients and server-side mob AI can retain a
-                // permanently different player location.
-                if position_changed
-                    || last_movement_broadcast.elapsed() >= Duration::from_millis(50)
-                {
+                let new_chunk_center = chunk_center(&candidate);
+                if new_chunk_center != previous_chunk_center {
+                    // Publish authoritative position BEFORE expensive chunk
+                    // generation/compression/socket writes can block this
+                    // session. Otherwise a creeper may hit a stale Hub point.
+                    hub.move_player(entity_id, candidate, yaw, pitch);
+                    last_movement_broadcast = Instant::now();
+                    let old_chunks = loaded_chunks.clone();
+                    sync_chunks(s, world, &mut loaded_chunks, new_chunk_center)?;
+                    if loaded_chunks != old_chunks {
+                        let entering = loaded_chunks.difference(&old_chunks).copied().collect();
+                        send_visible_signs(s, decorations, &entering)?;
+                        send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
+                    }
+                } else if position_changed {
+                    // The Hub owns the position consulted by Mob targeting,
+                    // explosions, pickups and other sessions. Throttle only
+                    // peer packet fanout, never authoritative state updates.
+                    if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
+                        hub.move_player(entity_id, candidate, yaw, pitch);
+                        last_movement_broadcast = Instant::now();
+                    } else {
+                        hub.record_player_position(entity_id, candidate);
+                    }
+                } else if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, candidate, yaw, pitch);
                     last_movement_broadcast = Instant::now();
                 }
@@ -3335,6 +3662,7 @@ fn play(
                             send(s, event.id, &event.body)?;
                             hub.broadcast_except(entity_id, event);
                             send_player_position(s, player, yaw, pitch)?;
+                            pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                             hub.move_player(entity_id, position, yaw, pitch);
                         }
                         Some((event, None)) => {
@@ -3555,14 +3883,35 @@ fn play(
                                             target,
                                             now_tick,
                                         );
+                                        // Collect ordinary and bonus drops before any
+                                        // irreversible world edit. Two drops now require
+                                        // one durable ground-item snapshot, not two.
+                                        let mut drop_stacks = Vec::with_capacity(2);
+                                        if let Some(drop) = result.drop {
+                                            drop_stacks.push(Stack {
+                                                id: drop.id,
+                                                count: 1,
+                                                damage: drop.damage,
+                                                nbt: None,
+                                            });
+                                        }
+                                        if let Some(stack) = bonus {
+                                            drop_stacks.push(stack);
+                                        }
                                         let mut ground = ground_items.lock().map_err(|_| {
                                             io::Error::other("ground items lock poisoned")
                                         })?;
-                                        // A filled entity pool must not destroy a
-                                        // block that should have created an item.
-                                        if (result.drop.is_none() && bonus.is_none())
-                                            || !ground.is_full()
+                                        // Never break a block unless ALL item entities can
+                                        // be saved; an almost-full pool must not lose bonus
+                                        // drops on the next world update.
+                                        if drop_stacks.is_empty()
+                                            || ground.has_capacity_for(drop_stacks.len())
                                         {
+                                            let staged_drops = if drop_stacks.is_empty() {
+                                                None
+                                            } else {
+                                                Some(ground.stage_put_many(&drop_stacks, target)?)
+                                            };
                                             let mut candidate = inventory.clone();
                                             let wore =
                                                 result.wear_tool && candidate.wear_held_tool();
@@ -3588,32 +3937,15 @@ fn play(
                                                                 .set_slot(inventory.held_slot())?,
                                                         )?;
                                                     }
-                                                    if let Some(drop) = result.drop {
-                                                        let stack = Stack {
-                                                            id: drop.id,
-                                                            count: 1,
-                                                            damage: drop.damage,
-                                                            nbt: None,
-                                                        };
-                                                        // A crash after world save and
-                                                        // before entity persistence can
-                                                        // lose an item, never clone it.
-                                                        let item = ground.put(
+                                                    if let Some(staged) = staged_drops {
+                                                        // One fsync/rename for every drop
+                                                        // created by this mining action.
+                                                        // Publish only after successful save.
+                                                        let items = ground.commit_staged_put(
                                                             ground_path,
-                                                            stack,
-                                                            target,
+                                                            staged,
                                                         )?;
-                                                        for packet in item.spawn() {
-                                                            hub.broadcast(packet);
-                                                        }
-                                                    }
-                                                    if let Some(stack) = bonus {
-                                                        if !ground.is_full() {
-                                                            let item = ground.put(
-                                                                ground_path,
-                                                                stack,
-                                                                target,
-                                                            )?;
+                                                        for item in items {
                                                             for packet in item.spawn() {
                                                                 hub.broadcast(packet);
                                                             }
@@ -4378,6 +4710,9 @@ fn play(
                         let mut candidate = inventory.clone();
                         candidate.set_bed_spawn(x, y, z)?;
                         candidate.save(inventory_path)?;
+                        // A newly claimed bed supersedes an earlier /spawnpoint.
+                        // The override is kept separately from mode inventories.
+                        spawnpoint::clear(player_path)?;
                         *inventory = candidate;
                         let mut packet = Vec::new();
                         packet.extend_from_slice(&entity_id.to_be_bytes());
@@ -5736,8 +6071,17 @@ fn play(
                         world
                     };
                     let origin = {
-                        let fallback = safe_spawn(respawn_world)?;
-                        if let Some((x, y, z)) = inventory.bed_spawn() {
+                        let fallback = safe_spawn(respawn_world, root_world_path)?;
+                        if let Some(point) = spawnpoint::load(player_path)? {
+                            let guard = respawn_world
+                                .lock()
+                                .map_err(|_| bad("world mutex poisoned"))?;
+                            if point.safe_in(&guard) {
+                                point.position()
+                            } else {
+                                fallback
+                            }
+                        } else if let Some((x, y, z)) = inventory.bed_spawn() {
                             let guard = respawn_world
                                 .lock()
                                 .map_err(|_| bad("world mutex poisoned"))?;
@@ -5778,6 +6122,7 @@ fn play(
                     *vitals = fresh_vitals;
                     *player = origin;
                     death_recorded = false;
+                    fatal_hit = None;
                     fall = FallTracker::new(origin.y);
                     idle_gravity = IdleGravity::new(now_tick);
                     eating = None;
@@ -5826,6 +6171,7 @@ fn play(
                     send(s, 0x30, &inventory.window_items())?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     send_player_position(s, player, yaw, pitch)?;
+                    pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                     hub.move_player(entity_id, *player, yaw, pitch);
                 }
             }
@@ -6181,7 +6527,7 @@ fn handle(
         return Ok(());
     }
     if !player_file.exists() && !player_file.with_extension("json").exists() {
-        player_state = safe_spawn(&world)?;
+        player_state = safe_spawn(&world, path.as_path())?;
     }
     // Separate survival resources from old Creative inventories to prevent
     // player-selected Creative stacks becoming free Survival items.
@@ -6249,9 +6595,10 @@ fn handle(
             "UNAUTHENTICATED OFFLINE MODE"
         }
     );
-    join(
+    if let Err(error) = join(
         &mut s,
         &world,
+        path.as_path(),
         &clock,
         entity_id,
         InitialPlayer {
@@ -6262,8 +6609,9 @@ fn handle(
             hardcore,
             difficulty: difficulty.load(Ordering::Acquire),
         },
-    )
-    .map_err(|error| io::Error::new(error.kind(), format!("join initialization: {error}")))?;
+    ) {
+        return Err(reject_failed_join(&mut s, error));
+    }
     if survival {
         send(&mut s, 0x1f, &experience_state.packet())?;
     }
@@ -6398,6 +6746,7 @@ fn handle(
             game_rules: &game_rules,
             scoreboard: &scoreboard,
             scoreboard_path: &scoreboard_path,
+            root_world_path: path.as_path(),
             hub: &hub,
             entity_id,
             events: &events,
@@ -6456,6 +6805,78 @@ fn handle(
     achievements_saved?;
     result.map_err(|error| io::Error::new(error.kind(), format!("active play session: {error}")))
 }
+/// One implementation for console and verified-OP gamerule changes. Query
+/// never writes; mutations become live only after the sidecar has been saved.
+fn command_gamerule(
+    rules: &Mutex<GameRules>,
+    rules_path: &Path,
+    clock: &Clock,
+    key: &str,
+    value: Option<&str>,
+) -> io::Result<String> {
+    let mut current = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
+    if let Some(value) = value {
+        let enabled = match value {
+            "true" => true,
+            "false" => false,
+            _ => return Err(bad("gamerule value must be true or false")),
+        };
+        let mut candidate = *current;
+        candidate.set(key, enabled)?;
+        candidate.save(rules_path)?;
+        *current = candidate;
+        if key == "doDaylightCycle" {
+            clock.set_daylight_cycle(enabled);
+        }
+        Ok(format!("{key} = {enabled}"))
+    } else {
+        let value = current.get(key).ok_or_else(|| bad("unsupported game rule"))?;
+        Ok(format!("{key} = {value}"))
+    }
+}
+
+/// Difficulty takes the Mob lock before writing the durable override. A
+/// command cannot publish a new gameplay difficulty if the disk write fails.
+fn command_difficulty(
+    mobs: &Mutex<Mobs>,
+    state: &AtomicU8,
+    difficulty_path: &Path,
+    hardcore: bool,
+    requested: &str,
+) -> io::Result<u8> {
+    let next = admin_state::parse_difficulty(requested)?;
+    if hardcore && next != 3 {
+        return Err(bad("hardcore difficulty must remain hard (3)"));
+    }
+    let mut mobs = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+    admin_state::write(difficulty_path, next, 3)?;
+    mobs.set_difficulty(next);
+    state.store(next, Ordering::Release);
+    Ok(next)
+}
+
+/// Server-wide spawn position uses the same authoritative 1.7.10 S05 packet
+/// for joining clients and currently connected clients (compass update).
+fn command_setworldspawn(
+    world: &Mutex<World>,
+    root_world_path: &Path,
+    hub: &Hub,
+    point: world_spawn::WorldSpawn,
+) -> io::Result<String> {
+    let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+    if guard.dimension() != dimensions::Dimension::Overworld {
+        return Err(bad("world spawn must be set in Overworld"));
+    }
+    world_spawn::save(root_world_path, point)?;
+    drop(guard);
+    hub.broadcast(Event {
+        id: 0x05,
+        body: point.packet(),
+    });
+    let (x, y, z) = point.coordinates();
+    Ok(format!("World spawn set to {x} {y} {z}"))
+}
+
 /// Services required to execute a level-gated in-game administrative command.
 struct PlayerAdminServices<'a> {
     hub: &'a Hub,
@@ -6464,6 +6885,11 @@ struct PlayerAdminServices<'a> {
     clock: &'a Clock,
     administration: &'a Administration,
     hardcore: bool,
+    dimension: dimensions::Dimension,
+    mobs: &'a Mutex<Mobs>,
+    root_world_path: &'a Path,
+    game_rules: &'a Mutex<GameRules>,
+    difficulty_state: &'a AtomicU8,
 }
 /// Authorization is based exclusively on the Mojang-verified session UUID.
 fn run_player_admin_command(
@@ -6479,11 +6905,31 @@ fn run_player_admin_command(
         clock,
         administration,
         hardcore,
+        dimension,
+        mobs,
+        root_world_path,
+        game_rules,
+        difficulty_state,
     } = services;
     let parts: Vec<&str> = message.split_whitespace().collect();
     let minimum_level = match parts.first().copied() {
-        Some("/time") | Some("/weather") | Some("/tp") | Some("/teleport") | Some("/gamemode")
-        | Some("/give") => 2,
+        Some("/time")
+        | Some("/weather")
+        | Some("/tp")
+        | Some("/teleport")
+        | Some("/gamemode")
+        | Some("/give")
+        | Some("/clear")
+        | Some("/setblock")
+        | Some("/effect")
+        | Some("/summon")
+        | Some("/enchant")
+        | Some("/testforblock")
+        | Some("/seed")
+        | Some("/spawnpoint")
+        | Some("/setworldspawn")
+        | Some("/gamerule")
+        | Some("/difficulty") => 2,
         Some("/kick") | Some("/ban") | Some("/pardon") | Some("/pardon-uuid") | Some("/ban-ip")
         | Some("/pardon-ip") => 3,
         Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
@@ -6496,6 +6942,159 @@ fn run_player_admin_command(
         ));
     }
     match parts.as_slice() {
+        ["/seed"] => {
+            let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            commands::seed_text(&state)
+        }
+        ["/spawnpoint"] | ["/spawnpoint", _] | ["/spawnpoint", _, _, _, _] => {
+            let target = if parts.len() == 1 { actor } else { parts[1] };
+            let point = if parts.len() == 5 {
+                if *dimension != dimensions::Dimension::Overworld {
+                    return Err(bad("relative spawnpoint requires Overworld sender"));
+                }
+                let origin = hub
+                    .player_position(actor)?
+                    .ok_or_else(|| bad("actor not online"))?;
+                commands::spawnpoint_args(&parts[2..], Some(origin))?
+            } else {
+                let current = hub
+                    .player_position(target)?
+                    .ok_or_else(|| bad("target not online"))?;
+                spawnpoint::Spawnpoint::from_position(current)?
+            };
+            if !hub.request_admin_spawnpoint(target, point)? {
+                return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+            }
+            Ok(format!("Spawnpoint update queued for {target}"))
+        }
+        ["/setworldspawn"] | ["/setworldspawn", _, _, _] => {
+            if *dimension != dimensions::Dimension::Overworld {
+                return Err(bad("world spawn must be set from Overworld"));
+            }
+            let origin = hub
+                .player_position(actor)?
+                .ok_or_else(|| bad("actor not online"))?;
+            let point = if parts.len() == 1 {
+                world_spawn::WorldSpawn::from_position(origin)?
+            } else {
+                commands::setworldspawn_args(&parts[1..], Some(origin))?
+            };
+            command_setworldspawn(world, root_world_path, hub, point)
+        }
+        ["/gamerule", key] => command_gamerule(
+            game_rules,
+            &GameRules::location(root_world_path),
+            clock,
+            key,
+            None,
+        ),
+        ["/gamerule", key, value] => command_gamerule(
+            game_rules,
+            &GameRules::location(root_world_path),
+            clock,
+            key,
+            Some(value),
+        ),
+        ["/difficulty", requested] => {
+            let next = command_difficulty(
+                mobs,
+                difficulty_state,
+                &root_world_path.with_extension("difficulty"),
+                *hardcore,
+                requested,
+            )?;
+            Ok(format!("Difficulty set to {next}"))
+        }
+        ["/enchant", target, enchant, rest @ ..] if rest.len() <= 1 => {
+            let (id, level) = commands::enchant_args(enchant, rest.first().copied())?;
+            if !hub.request_admin_enchant(target, id, level)? {
+                return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+            }
+            Ok(format!("Enchant queued for {target}: {id} level {level}"))
+        }
+        ["/testforblock", x, y, z, block, rest @ ..] if rest.len() <= 1 => {
+            let origin = hub
+                .player_position(actor)?
+                .ok_or_else(|| bad("actor not online"))?;
+            let (bx, by, bz, id, data) =
+                commands::testforblock_args([x, y, z], block, rest.first().copied(), Some(origin))?;
+            let actual = world
+                .lock()
+                .map_err(|_| bad("world mutex poisoned"))?
+                .get(bx, by, bz);
+            if actual >> 4 != u16::from(id)
+                || data.is_some_and(|wanted| actual & 15 != u16::from(wanted))
+            {
+                return Err(bad("testforblock: block or metadata does not match"));
+            }
+            Ok(format!("testforblock: matched {block} at {bx} {by} {bz}"))
+        }
+        ["/effect", target, effect @ ..] => {
+            let request = commands::effect_args(effect)?;
+            if !hub.request_admin_effect(target, request)? {
+                return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+            }
+            Ok(format!("Effect queued for {target}"))
+        }
+        ["/summon", entity, coords @ ..] => {
+            if *dimension != dimensions::Dimension::Overworld {
+                return Err(bad("summon currently supports Overworld only"));
+            }
+            let origin = hub
+                .player_position(actor)?
+                .ok_or_else(|| bad("actor not online"))?;
+            let pos = commands::summon_coordinates(coords, Some(origin))?;
+            let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            let mut entities = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+            let spawn = entities.summon_command(&state, entity, pos)?;
+            drop(entities);
+            drop(state);
+            hub.broadcast_in_dimension_view(*dimension, pos, spawn);
+            Ok(format!("Summoned {entity}"))
+        }
+        ["/clear", args @ ..] if args.len() <= 4 => {
+            let target = args.first().copied().unwrap_or(actor);
+            let (item, data, max) = commands::clear_args(
+                args.get(1).copied(),
+                args.get(2).copied(),
+                args.get(3).copied(),
+            )?;
+            if !hub.request_admin_clear(target, item, data, max)? {
+                return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+            }
+            Ok(format!("Clear queued for {target}"))
+        }
+        ["/setblock", x, y, z, block, rest @ ..] => {
+            let origin = hub
+                .player_position(actor)?
+                .ok_or_else(|| bad("actor not online"))?;
+            let (bx, by, bz, next, keep) = commands::setblock_args([x, y, z], block, rest, origin)?;
+            let mut state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            let current = state.get(bx, by, bz);
+            if keep && current != 0 {
+                return Err(bad("setblock keep requires air"));
+            }
+            if commands::is_tile_entity_block(current >> 4) {
+                return Err(bad(
+                    "setblock replacement of TileEntity needs migration support",
+                ));
+            }
+            if !state.update_and_save(world_path, bx, by, bz, next)? {
+                return Err(bad("setblock made no change or coordinates outside world"));
+            }
+            let event = block_change_event(&state, bx, by, bz);
+            drop(state);
+            hub.broadcast_in_dimension_view(
+                *dimension,
+                PlayerPosition {
+                    x: bx as f64,
+                    y: by as f64,
+                    z: bz as f64,
+                },
+                event,
+            );
+            Ok(format!("Block set at {bx} {by} {bz}"))
+        }
         ["/time", "query", "daytime"] => Ok(format!("Daytime: {}", clock.day_time())),
         ["/time", "add", ticks] => {
             let ticks = ticks
@@ -6722,7 +7321,7 @@ fn start_clock_console(
             }
             let result: io::Result<()> = match args.as_slice() {
                 ["/help"] | ["/?"] => {
-                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /seed /spawnpoint /setworldspawn /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
                     Ok(())
                 }
                 ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
@@ -6749,6 +7348,135 @@ fn start_clock_console(
                         Ok(())
                     })()
                 }
+                ["/seed"] => (|| -> io::Result<()> {
+                    let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    println!("{}", commands::seed_text(&state)?);
+                    Ok(())
+                })(),
+                ["/spawnpoint", target] => (|| -> io::Result<()> {
+                    let position = hub
+                        .player_position(target)?
+                        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "target not online"))?;
+                    let point = spawnpoint::Spawnpoint::from_position(position)?;
+                    if !hub.request_admin_spawnpoint(target, point)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Spawnpoint update queued for {target}");
+                    Ok(())
+                })(),
+                ["/spawnpoint", target, x, y, z] => (|| -> io::Result<()> {
+                    let point = commands::spawnpoint_args(&[x, y, z], None)?;
+                    if !hub.request_admin_spawnpoint(target, point)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Spawnpoint update queued for {target}");
+                    Ok(())
+                })(),
+                ["/setworldspawn", x, y, z] => (|| -> io::Result<()> {
+                    let point = commands::setworldspawn_args(&[x, y, z], None)?;
+                    println!(
+                        "{}",
+                        command_setworldspawn(&world, &world_path, &hub, point)?
+                    );
+                    Ok(())
+                })(),
+                ["/enchant", target, enchant, rest @ ..] if rest.len() <= 1 => {
+                    (|| -> io::Result<()> {
+                        let (id, level) = commands::enchant_args(enchant, rest.first().copied())?;
+                        if !hub.request_admin_enchant(target, id, level)? {
+                            return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                        }
+                        println!("Enchant queued for {target}: {id} level {level}");
+                        Ok(())
+                    })()
+                }
+                ["/testforblock", x, y, z, block, rest @ ..] if rest.len() <= 1 => {
+                    (|| -> io::Result<()> {
+                        let (bx, by, bz, id, data) = commands::testforblock_args(
+                            [x, y, z],
+                            block,
+                            rest.first().copied(),
+                            None,
+                        )?;
+                        let actual = world
+                            .lock()
+                            .map_err(|_| bad("world mutex poisoned"))?
+                            .get(bx, by, bz);
+                        if actual >> 4 != u16::from(id)
+                            || data.is_some_and(|wanted| actual & 15 != u16::from(wanted))
+                        {
+                            return Err(bad("testforblock: block or metadata does not match"));
+                        }
+                        println!("testforblock: matched {block} at {bx} {by} {bz}");
+                        Ok(())
+                    })()
+                }
+                ["/clear", target, rest @ ..] if rest.len() <= 3 => (|| -> io::Result<()> {
+                    let (item, data, max) = commands::clear_args(
+                        rest.first().copied(),
+                        rest.get(1).copied(),
+                        rest.get(2).copied(),
+                    )?;
+                    if !hub.request_admin_clear(target, item, data, max)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Clear queued for {target}");
+                    Ok(())
+                })(),
+                ["/setblock", x, y, z, block, rest @ ..] => (|| -> io::Result<()> {
+                    // A host console has no player-relative origin. Reject ~ coordinates
+                    // rather than silently resolving them to 0,0,0.
+                    if [*x, *y, *z].iter().any(|v| v.contains('~')) {
+                        return Err(bad("relative setblock requires a player sender"));
+                    }
+                    let (bx, by, bz, next, keep) =
+                        commands::setblock_args([x, y, z], block, rest, PlayerPosition::default())?;
+                    let mut state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let current = state.get(bx, by, bz);
+                    if keep && current != 0 {
+                        return Err(bad("setblock keep requires air"));
+                    }
+                    if commands::is_tile_entity_block(current >> 4) {
+                        return Err(bad(
+                            "setblock replacement of TileEntity needs migration support",
+                        ));
+                    }
+                    if !state.update_and_save(&world_path, bx, by, bz, next)? {
+                        return Err(bad("setblock made no change or coordinates outside world"));
+                    }
+                    let event = block_change_event(&state, bx, by, bz);
+                    drop(state);
+                    hub.broadcast_in_dimension_view(
+                        dimensions::Dimension::Overworld,
+                        PlayerPosition {
+                            x: bx as f64,
+                            y: by as f64,
+                            z: bz as f64,
+                        },
+                        event,
+                    );
+                    println!("Block set at {bx} {by} {bz}");
+                    Ok(())
+                })(),
+                ["/effect", target, effect @ ..] => (|| -> io::Result<()> {
+                    let request = commands::effect_args(effect)?;
+                    if !hub.request_admin_effect(target, request)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Effect queued for {target}");
+                    Ok(())
+                })(),
+                ["/summon", entity, coords @ ..] => (|| -> io::Result<()> {
+                    let pos = commands::summon_coordinates(coords, None)?;
+                    let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let mut entities = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    let spawn = entities.summon_command(&state, entity, pos)?;
+                    drop(entities);
+                    drop(state);
+                    hub.broadcast_in_dimension_view(dimensions::Dimension::Overworld, pos, spawn);
+                    println!("Summoned {entity}");
+                    Ok(())
+                })(),
                 ["/give", target, item, rest @ ..] => (|| -> io::Result<()> {
                     let (id, count, damage) = commands::give_args(item, rest)?;
                     if !hub.request_admin_give(target, id, count, damage)? {
@@ -6776,40 +7504,27 @@ fn start_clock_console(
                     Ok(())
                 }
                 ["/difficulty", requested] => (|| -> io::Result<()> {
-                    let next = admin_state::parse_difficulty(requested)?;
-                    if hardcore && next != 3 {
-                        return Err(bad("hardcore difficulty must remain hard (3)"));
-                    }
-                    // Do not publish the change until its restart override is
-                    // durable and the mob state is ready to observe it.
-                    let mut state = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
-                    admin_state::write(&difficulty_path, next, 3)?;
-                    state.set_difficulty(next);
-                    difficulty_state.store(next, Ordering::Release);
-                    println!("Difficulty set to {next} (new joins/respawns see updated setting)");
+                    let next = command_difficulty(
+                        &mobs,
+                        &difficulty_state,
+                        &difficulty_path,
+                        hardcore,
+                        requested,
+                    )?;
+                    println!(
+                        "Difficulty set to {next} (new joins/respawns see updated setting)"
+                    );
                     Ok(())
                 })(),
                 ["/gamerule", key] => (|| -> io::Result<()> {
-                    let rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
-                    let value = rules.get(key).ok_or_else(|| bad("unsupported game rule"))?;
-                    println!("{key} = {value}");
+                    println!("{}", command_gamerule(&rules, &rules_path, &clock, key, None)?);
                     Ok(())
                 })(),
                 ["/gamerule", key, value] => (|| -> io::Result<()> {
-                    let value = match *value {
-                        "true" => true,
-                        "false" => false,
-                        _ => return Err(bad("gamerule value must be true or false")),
-                    };
-                    let mut rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
-                    let mut candidate = *rules;
-                    candidate.set(key, value)?;
-                    candidate.save(&rules_path)?;
-                    *rules = candidate;
-                    if *key == "doDaylightCycle" {
-                        clock.set_daylight_cycle(value);
-                    }
-                    println!("{key} = {value}");
+                    println!(
+                        "{}",
+                        command_gamerule(&rules, &rules_path, &clock, key, Some(value))?
+                    );
                     Ok(())
                 })(),
                 ["/scoreboard", operation @ ..] => (|| -> io::Result<()> {
@@ -9849,6 +10564,65 @@ mod session_dimension_routing_tests {
 }
 
 #[cfg(test)]
+mod initial_join_disconnect_tests {
+    use super::*;
+
+    #[test]
+    fn failed_chunk_join_sends_play_disconnect_and_releases_player_admission() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_socket, _) = listener.accept().unwrap();
+        let mut server = Connection::new(server_socket);
+
+        let hub = Arc::new(Hub::default());
+        let (id, _events, _) = hub
+            .add(
+                "RustTester".into(),
+                "uuid-1".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        {
+            let _admission = PlayerAdmission {
+                hub: Arc::clone(&hub),
+                entity_id: id,
+            };
+            let error = reject_failed_join(
+                &mut server,
+                io::Error::new(ErrorKind::TimedOut, "chunk compression deadline exceeded"),
+            );
+            assert_eq!(error.kind(), ErrorKind::TimedOut);
+            let packet = read_frame(&mut client).unwrap();
+            let (packet_id, mut body) = legacy_protocol::packet_id_and_body(&packet).unwrap();
+            assert_eq!(packet_id, 0x40);
+            let reason = body.read_string(512).unwrap();
+            assert!(reason.contains("World loading timed out"));
+            assert!(!reason.contains("compression"));
+            body.finish().unwrap();
+            assert_eq!(hub.count().unwrap(), 1);
+        }
+        assert_eq!(hub.count().unwrap(), 0, "failed Join leaked admission");
+        let (new_id, _events, _) = hub
+            .add(
+                "RustTester".into(),
+                "uuid-2".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        assert!(new_id > id);
+    }
+
+    #[test]
+    fn join_failure_classifies_bounded_queue_and_backend_errors() {
+        assert!(join_failure_reason(&io::Error::from(ErrorKind::WouldBlock)).contains("busy"));
+        assert!(join_failure_reason(&io::Error::from(ErrorKind::TimedOut)).contains("timed out"));
+        assert!(
+            join_failure_reason(&io::Error::other("internal secret")).contains("loading failed")
+        );
+    }
+}
+
+#[cfg(test)]
 mod disconnect_diagnostics_tests {
     use super::*;
 
@@ -10223,5 +10997,106 @@ mod protocol5_chunk_transition_regression_tests {
         assert_eq!(after.len(), 25);
         assert_eq!(after.difference(&before).count(), 5);
         assert_eq!(before.difference(&after).count(), 5);
+    }
+}
+
+#[cfg(test)]
+mod command_world_settings_tests {
+    use super::*;
+
+    #[test]
+    fn setworldspawn_commits_before_sending_protocol5_spawn_packet() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-command-worldspawn-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let world = Mutex::new(World::default());
+        let hub = Hub::default();
+        let (_, rx, _) = hub
+            .add("Tester".into(), "uuid".into(), PlayerPosition::default())
+            .unwrap();
+        let point = world_spawn::WorldSpawn::new(15, 64, -20).unwrap();
+        assert_eq!(
+            command_setworldspawn(&world, &path, &hub, point).unwrap(),
+            "World spawn set to 15 64 -20"
+        );
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.id, 0x05);
+        assert_eq!(event.body, point.packet());
+        assert_eq!(world_spawn::load(&path).unwrap(), Some(point));
+        assert_eq!(
+            safe_spawn(&world, &path).unwrap(),
+            PlayerPosition {
+                x: 15.5,
+                y: 64.0,
+                z: -19.5,
+            }
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gamerule_player_and_console_share_durable_validation() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-command-rules-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("rules.json");
+        let rules = Mutex::new(GameRules::default());
+        let (clock, clock_thread) = Clock::start_at(0);
+        assert_eq!(
+            command_gamerule(&rules, &file, &clock, "keepInventory", None).unwrap(),
+            "keepInventory = false"
+        );
+        assert!(command_gamerule(&rules, &file, &clock, "keepInventory", Some("1")).is_err());
+        assert!(command_gamerule(&rules, &file, &clock, "spawnRadius", Some("1")).is_err());
+        assert_eq!(
+            command_gamerule(&rules, &file, &clock, "keepInventory", Some("true")).unwrap(),
+            "keepInventory = true"
+        );
+        assert!(GameRules::load(&file).unwrap().keep_inventory());
+        assert_eq!(
+            command_gamerule(&rules, &file, &clock, "doDaylightCycle", Some("false")).unwrap(),
+            "doDaylightCycle = false"
+        );
+        assert!(!GameRules::load(&file).unwrap().daylight_cycle());
+        clock.stop();
+        clock_thread.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn difficulty_rejects_hardcore_downgrade_and_persists_before_publishing() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-command-difficulty-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let difficulty_path = root.join("difficulty");
+        let mobs_path = root.join("mobs.json");
+        let mobs = Mutex::new(
+            Mobs::load_or_new(&World::default(), true, 2, &mobs_path).unwrap(),
+        );
+        let state = AtomicU8::new(2);
+        assert!(command_difficulty(&mobs, &state, &difficulty_path, true, "easy").is_err());
+        assert_eq!(state.load(Ordering::Acquire), 2);
+        assert!(!difficulty_path.exists());
+        assert!(command_difficulty(&mobs, &state, &difficulty_path, false, "4").is_err());
+        assert_eq!(
+            command_difficulty(&mobs, &state, &difficulty_path, false, "hard").unwrap(),
+            3
+        );
+        assert_eq!(state.load(Ordering::Acquire), 3);
+        assert_eq!(admin_state::read(&difficulty_path, 3).unwrap(), Some(3));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

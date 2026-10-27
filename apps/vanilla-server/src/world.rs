@@ -1872,6 +1872,72 @@ impl World {
         Ok(changed)
     }
 
+    /// Commit a creeper explosion as one durable world transition.
+    ///
+    /// The former handler saved the entire IRW file once for EACH of up to
+    /// 64 broken blocks while holding the shared World mutex. On Windows this
+    /// could stall player movement and leave a half-exploded world on a failed
+    /// save. Select from the original state, then publish only after one save.
+    pub fn creeper_blast_and_save(
+        &mut self,
+        path: &Path,
+        center: (i32, i32, i32),
+        radius: f64,
+    ) -> io::Result<Vec<(i32, i32, i32)>> {
+        if !radius.is_finite() || !(0.0..=4.0).contains(&radius) {
+            return Err(invalid("invalid creeper explosion radius"));
+        }
+        let (cx, cy, cz) = center;
+        let mut changed = Vec::new();
+        'blast: for y in (cy - 3).max(1)..=(cy + 3).min(254) {
+            for x in cx - 3..=cx + 3 {
+                for z in cz - 3..=cz + 3 {
+                    if !in_bounds(x, y, z) {
+                        continue;
+                    }
+                    let distance_squared = i64::from(x - cx).pow(2)
+                        + i64::from(y - cy).pow(2)
+                        + i64::from(z - cz).pow(2);
+                    if (distance_squared as f64) > radius * radius {
+                        continue;
+                    }
+                    let previous = self.get(x, y, z);
+                    if previous == 0 || !special::blast_breakable(previous >> 4) {
+                        continue;
+                    }
+                    changed.push((x, y, z, previous));
+                    if changed.len() == 64 {
+                        break 'blast;
+                    }
+                }
+            }
+        }
+        if changed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut next = self.clone();
+        for &(x, y, z, previous) in &changed {
+            let key = (x, y as u8, z);
+            if next.base_block(x, y as u8, z) == 0 {
+                next.edits.remove(&key);
+            } else {
+                next.edits.insert(key, 0);
+            }
+            if next.edits.len() > MAX_EDITS {
+                return Err(invalid("creeper explosion exceeds world edit capacity"));
+            }
+            next.mark_lighting_changed(x, z, previous, 0);
+            next.wake_gravity(x, y, z);
+            next.wake_block_updates(x, y, z);
+            if matches!(previous >> 4, 17 | 162) {
+                next.wake_leaves(x, y, z);
+            }
+        }
+        next.save(path)?;
+        *self = next;
+        Ok(changed.into_iter().map(|(x, y, z, _)| (x, y, z)).collect())
+    }
+
     /// Persist a small related block edit (such as the two bed halves) as
     /// one world snapshot, never exposing a half-built object to clients.
     pub fn update_many_and_save(
@@ -2693,7 +2759,12 @@ impl World {
             fs::create_dir_all(parent)?;
         }
         let temp = path.with_extension("tmp");
-        let mut f = File::create(&temp)?;
+        let mut f = File::create(&temp).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("create temporary world save {}: {error}", temp.display()),
+            )
+        })?;
         self.write_to(&mut f)?;
         f.sync_all()?;
         drop(f);
@@ -2701,8 +2772,44 @@ impl World {
             guard.verify()?;
         }
         // Keep the original on filesystems that disallow atomic replacement.
-        fs::rename(temp, path)
+        fs::rename(&temp, path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "replace world save {} from {}: {error}",
+                    path.display(),
+                    temp.display()
+                ),
+            )
+        })
     }
+    /// Copy only the generation identity and edits capable of affecting a
+    /// Protocol 5 chunk (including its 15-block light-source halo).
+    /// Chunk generation/lighting can then run without holding the live World
+    /// mutex. No timer queues, entities, or save-session locks are copied.
+    ///
+    /// This is a consistent point-in-time block snapshot: later live changes
+    /// are announced separately with the normal block/light updates.
+    pub fn chunk_read_snapshot(&self, chunk_x: i32, chunk_z: i32) -> Self {
+        let min_x = chunk_x * 16;
+        let min_z = chunk_z * 16;
+        let mut snapshot = Self {
+            generation: self.generation,
+            ..Self::default()
+        };
+        // Block-light propagation can originate within 15 blocks of any
+        // edge; skylight uses a smaller one-cell halo. Include both.
+        for (&(x, y, z), &block) in self
+            .edits
+            .range((min_x - 15, 0, i32::MIN)..(min_x + 31, 0, i32::MIN))
+        {
+            if (min_z - 15..min_z + 31).contains(&z) {
+                snapshot.edits.insert((x, y, z), block);
+            }
+        }
+        snapshot
+    }
+
     /// Serializes the pre-1.8 Section ID/metadata/light arrays in Y-major order.
     /// The first two sections are always present for the flat base ground; other
     /// sections are transmitted when edited. This avoids dropping high-altitude
@@ -2800,6 +2907,64 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creeper_blast_is_single_durable_transition_and_preserves_tile_blocks() {
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust1710-creeper-batch-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 1 << 4).unwrap();
+        world.import_block(1, 64, 0, 50 << 4).unwrap();
+        world.import_block(0, 64, 1, 54 << 4).unwrap(); // chest contents protected
+        world.import_block(5, 64, 0, 1 << 4).unwrap();
+        world.save(&path).unwrap();
+        let changed = world
+            .creeper_blast_and_save(&path, (0, 64, 0), 3.0)
+            .unwrap();
+        assert!(changed.contains(&(0, 64, 0)));
+        assert!(changed.contains(&(1, 64, 0)));
+        assert!(!changed.contains(&(0, 64, 1)));
+        assert_eq!(world.get(0, 64, 0), 0);
+        assert_eq!(world.get(0, 64, 1), 54 << 4);
+        assert_eq!(world.get(5, 64, 0), 1 << 4);
+        let reloaded = World::load(&path).unwrap();
+        assert_eq!(reloaded.get(0, 64, 0), 0);
+        assert_eq!(reloaded.get(1, 64, 0), 0);
+        assert_eq!(reloaded.get(0, 64, 1), 54 << 4);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn chunk_read_snapshot_matches_live_packets_with_edits_and_light_halo() {
+        for mut world in [
+            World::new(),
+            World::with_biomes(42),
+            World::expanded(42, crate::dimensions::Dimension::Overworld),
+        ] {
+            // One inside the chunk, one on each 15-block light halo edge,
+            // and one far away that must not inflate the snapshot.
+            for (x, z, block) in [
+                (-16, -16, (50 << 4) | 1),
+                (-31, -16, 50 << 4),
+                (-1, -16, 50 << 4),
+                (-16, -31, 50 << 4),
+                (-16, -1, 50 << 4),
+                (200, 200, 89 << 4),
+            ] {
+                world.import_block(x, 70, z, block).unwrap();
+            }
+            let snapshot = world.chunk_read_snapshot(-1, -1);
+            assert_eq!(snapshot.chunk_data(-1, -1), world.chunk_data(-1, -1));
+            assert!(snapshot.edits.len() < world.edits.len());
+            assert_eq!(
+                snapshot.get(200, 70, 200),
+                snapshot.base_block(200, 70, 200)
+            );
+        }
+    }
 
     #[test]
     fn expanded_overworld_streams_seeded_biomes_instead_of_flat_sections() {

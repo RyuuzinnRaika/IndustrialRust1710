@@ -432,6 +432,56 @@ fn send_fragments(s: &mut TcpStream, packet: &[u8], pieces: &[usize]) {
 }
 
 #[test]
+fn add014_teleport_rejects_old_position_until_destination_ack() {
+    let mut server = NativeServer::start();
+    let (mut player, _, origin) = server.join("RustTester");
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/tp RustTester 4.5 65 0.5\n")
+        .unwrap();
+
+    let destination_packet = until_packet(&mut player, 0x08, |packet| {
+        (read_position(packet)[0] - 4.5).abs() < 0.01
+    });
+    let destination = read_position(&destination_packet);
+    assert!((destination[1] - 65.0).abs() < 0.01);
+
+    // 1.7.10's queued C04 from the old view is not proof of arrival.
+    // It must cause another authoritative S08 rather than moving the server
+    // back to the old location. Pending world-action C07 is discarded.
+    thread::sleep(Duration::from_millis(1100));
+    send_position(&mut player, origin[0], origin[1], origin[2]);
+    let repeated = until_packet(&mut player, 0x08, |packet| {
+        (read_position(packet)[0] - 4.5).abs() < 0.01
+    });
+    assert!((read_position(&repeated)[0] - 4.5).abs() < 0.01);
+    let mut dig = vec![0u8];
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(64);
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(1);
+    player.write_all(&frame(7, &dig)).unwrap();
+
+    // Only the destination C04 acknowledges S08. Ordinary position reports
+    // after that must work; disconnect/reconnect reads the new saved location.
+    send_position(&mut player, destination[0], destination[1], destination[2]);
+    send_position(&mut player, 5.5, 65.0, 0.5);
+    thread::sleep(Duration::from_millis(150));
+    drop(player);
+    server.wait_idle();
+    let (reconnected, _, saved) = server.join("RustTester");
+    assert!(
+        (saved[0] - 5.5).abs() < 0.05,
+        "reconnect restored {saved:?}"
+    );
+    drop(reconnected);
+    server.wait_idle();
+}
+
+#[test]
 fn f54_stop_drains_two_live_protocol5_players_and_persists_their_state() {
     let mut server = NativeServer::start();
     let (mut first, _, _) = server.join("TwinAlpha");
@@ -1678,7 +1728,12 @@ fn movement_and_collision_corrections_preserve_the_players_view() {
         -22.5
     );
 
-    // Valid movement still works after a rejected collision and a correction.
+    // A queued position from the old view cannot bypass the correction ACK,
+    // even when less than 1/4 block from the authoritative location.
+    send_position(&mut client, 0.9, 64.0, 0.5);
+    // Vanilla 1.7.10 sends a C04/C06 at the corrected feet location.
+    send_position(&mut client, 0.7, 64.0, 0.5);
+    // Movement is accepted again only after that ACK.
     send_position(&mut client, 0.9, 64.0, 0.5);
     send_position(&mut client, 0.9, 60.0, 0.5);
     let correction = until_packet(&mut client, 0x08, |packet| {
@@ -1695,6 +1750,7 @@ fn movement_and_collision_corrections_preserve_the_players_view() {
 
     // C06 carries position and look in the same packet; rejected movement
     // must keep the newly reported view as well.
+    send_position(&mut client, 0.9, 64.0, 0.5);
     send_position_and_look(&mut client, 0.9, 60.0, 0.5);
     let correction = until_packet(&mut client, 0x08, |packet| {
         read_position(packet) == [0.9, 64.0, 0.5]
@@ -1710,6 +1766,28 @@ fn movement_and_collision_corrections_preserve_the_players_view() {
 }
 
 #[test]
+fn collision_correction_rejects_queued_nearby_client_movement_until_ack() {
+    let server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+    send_position(&mut client, 0.7, 64.0, 0.5);
+    send_position(&mut client, 0.7, 60.0, 0.5);
+    until_packet(&mut client, 0x08, |packet| {
+        read_position(packet) == [0.7, 64.0, 0.5]
+    });
+
+    // The 0.2-block stale position previously satisfied the excessively
+    // lenient 0.25-block gate. Only the exact corrected point may ACK.
+    send_position(&mut client, 0.9, 64.0, 0.5);
+    send_position(&mut client, 0.7, 64.0, 0.5);
+    drop(client);
+    server.wait_idle();
+    let (rejoined, _, saved) = server.join("RustTester");
+    assert_eq!(saved, [0.7, 64.0, 0.5]);
+    drop(rejoined);
+    server.wait_idle();
+}
+
+#[test]
 fn native_survival_collision_damage_death_respawn_and_health_persistence() {
     let server = NativeServer::start_with_mode(true);
     let (mut client, _, _) = server.join("RustTester");
@@ -1719,6 +1797,7 @@ fn native_survival_collision_damage_death_respawn_and_health_persistence() {
     until_packet(&mut client, 0x08, |packet| {
         read_position(packet) == [0.5, 65.0, 0.5]
     });
+    send_position(&mut client, 0.5, 65.0, 0.5); // S08 confirmation
 
     // Falling eight blocks to the y=64 grass surface costs five health.
     send_position(&mut client, 0.5, 72.0, 0.5);
@@ -2280,6 +2359,14 @@ fn minecart_dismount_is_safe_in_both_modes_and_restart_preserves_position_invent
     let creative_position = read_position(&corrected);
     assert_eq!(creative_position[1], 64.0);
     assert!((creative_position[0] - 2.5).hypot(creative_position[2] - 0.5) >= 0.85);
+    // A real 1.7.10 client acknowledges S08 with C04 before interacting.
+    // Do not remount from the obsolete pre-dismount client position.
+    send_position(
+        &mut client,
+        creative_position[0],
+        creative_position[1],
+        creative_position[2],
+    );
 
     // Remount, switch modes through the live server command, then exercise the
     // identical authoritative dismount path in Survival.

@@ -513,6 +513,35 @@ pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPos
     if horizontal > 64.0 || dy.abs() > 128.0 {
         return false;
     }
+    // A newly committed world edit can enclose a player's previous saved
+    // AABB (e.g. a delayed piston or a chunk correction). The ordinary
+    // swept validator rejects every exit because its starting point collides,
+    // permanently rubber-banding the player. Allow only a short escape to
+    // a collision-free destination, rejecting any re-entry into another
+    // solid block along the way.
+    if collides(world, previous) {
+        if horizontal > 1.5 || dy.abs() > 1.25 {
+            return false;
+        }
+        let steps = (horizontal.max(dy.abs()) / 0.1).ceil().max(1.0) as usize;
+        let mut escaped = false;
+        for i in 1..=steps {
+            let fraction = i as f64 / steps as f64;
+            let sample = PlayerPosition {
+                x: previous.x + dx * fraction,
+                y: previous.y + dy * fraction,
+                z: previous.z + dz * fraction,
+            };
+            if collides(world, &sample) {
+                if escaped {
+                    return false;
+                }
+            } else {
+                escaped = true;
+            }
+        }
+        return escaped;
+    }
     // A normal jump or step moves upward before crossing a block edge; a
     // descent can move over the edge before dropping. A straight diagonal
     // between the two reported positions incorrectly cuts through the block.
@@ -760,6 +789,20 @@ mod tests {
 
     fn at(x: f64, y: f64, z: f64) -> PlayerPosition {
         PlayerPosition { x, y, z }
+    }
+
+    #[test]
+    fn player_trapped_by_changed_block_can_exit_but_cannot_teleport_through_walls() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, 1 << 4).unwrap();
+        let trapped = at(0.75, 65.0, 0.5);
+        assert!(collides(&world, &trapped));
+        let clear = at(1.35, 65.0, 0.5);
+        assert!(!collides(&world, &clear));
+        assert!(valid_movement(&world, &trapped, &clear));
+        assert!(!valid_movement(&world, &trapped, &at(3.5, 65.0, 0.5)));
+        world.import_block(2, 65, 0, 1 << 4).unwrap();
+        assert!(!valid_movement(&world, &trapped, &at(2.5, 65.0, 0.5)));
     }
 
     #[test]
