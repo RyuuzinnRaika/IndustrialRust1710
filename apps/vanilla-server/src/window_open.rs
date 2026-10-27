@@ -14,11 +14,14 @@ pub(crate) enum WindowKind {
     Dispenser = 3,
     EnchantingTable = 4,
     BrewingStand = 5,
+    #[allow(dead_code)] // Reserved until server-owned merchant GUI is wired.
     Villager = 6,
+    #[allow(dead_code)] // Reserved until server-owned beacon GUI is wired.
     Beacon = 7,
     Anvil = 8,
     Hopper = 9,
     Dropper = 10,
+    #[allow(dead_code)] // Reserved until live horse inventory is wired.
     Horse = 11,
 }
 
@@ -42,6 +45,7 @@ pub(crate) fn encode(
 
 /// Horse inventory S2D in Protocol 5 has a trailing *big-endian* entity ID.
 /// Do not use the generic encoder: omitting this field corrupts the packet.
+#[allow(dead_code)] // Wire foundation; live horse inventory is tracked in #573.
 pub(crate) fn encode_horse(
     window_id: u8,
     title: &str,
