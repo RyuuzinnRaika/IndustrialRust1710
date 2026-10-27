@@ -1578,6 +1578,40 @@ fn play(
                     }
                 }
             }
+            // Dispenser-fired arrows are projectile entities, not ground items.
+            // Hold the projectile lock through the durable inventory write so
+            // two sessions cannot collect the same arrow. On process failure
+            // after commit, non-persistent projectiles vanish on restart.
+            drop(ground);
+            if session_dimension.protocol_id() == 0 {
+                let mut arrows = throwables
+                    .lock()
+                    .map_err(|_| bad("throwables mutex poisoned"))?;
+                if let Some(arrow_id) = arrows.nearby_embedded_arrow(location) {
+                    let mut candidate = inventory.clone();
+                    if let Some(slots) = candidate.receive_stack(Stack {
+                        id: 262,
+                        count: 1,
+                        damage: 0,
+                        nbt: None,
+                    }) {
+                        journal::commit(
+                            &world_path.with_extension("pending-txn.json"),
+                            &[(inventory_path, candidate.encoded()?)],
+                        )?;
+                        let packets = arrows
+                            .take_embedded_arrow(arrow_id, entity_id)
+                            .ok_or_else(|| bad("embedded arrow changed during pickup"))?;
+                        *inventory = candidate;
+                        for packet in packets {
+                            hub.broadcast(packet);
+                        }
+                        for slot in slots {
+                            send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                        }
+                    }
+                }
+            }
             last_pickup = Instant::now();
         }
         if admission_check.elapsed() >= Duration::from_secs(2) {
