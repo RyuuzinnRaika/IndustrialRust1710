@@ -254,6 +254,48 @@ impl Throwables {
             .map(Thrown::spawn)
             .collect()
     }
+    /// Return a landed dispenser arrow in reach. Flying arrows and arrows
+    /// still shaking after impact cannot be collected (1.7.10 behavior).
+    /// The session checks inventory capacity before removing this entity.
+    pub fn nearby_embedded_arrow(&self, feet: (f64, f64, f64)) -> Option<i32> {
+        if ![feet.0, feet.1, feet.2].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        self.active
+            .values()
+            .find(|arrow| {
+                if arrow.kind != Kind::Arrow || !arrow.embedded || arrow.age < 7 {
+                    return false;
+                }
+                let dx = arrow.at.x - feet.0;
+                let dy = arrow.at.y - feet.1;
+                let dz = arrow.at.z - feet.2;
+                dx * dx + dy * dy + dz * dz <= 4.0
+            })
+            .map(|arrow| arrow.id)
+    }
+
+    /// Called only after the session has durably committed one arrow to the
+    /// inventory. Holding the Throwables mutex across that commit prevents
+    /// two sessions from collecting the same projectile.
+    pub fn take_embedded_arrow(&mut self, id: i32, collector: i32) -> Option<[Event; 2]> {
+        if collector <= 0
+            || !self
+                .active
+                .get(&id)
+                .is_some_and(|arrow| arrow.kind == Kind::Arrow && arrow.embedded && arrow.age >= 7)
+        {
+            return None;
+        }
+        self.active.remove(&id)?;
+        let mut body = id.to_be_bytes().to_vec();
+        body.extend_from_slice(&collector.to_be_bytes());
+        Some([
+            Event { id: 0x0d, body },
+            multiplayer::destroy(id),
+        ])
+    }
+
     pub fn tick(&mut self, world: &World, tick: u64) -> TickResult {
         let mut result = TickResult::default();
         let mut removed = Vec::new();
@@ -722,6 +764,75 @@ mod tests {
         assert_eq!(released.events.len(), 1);
         assert_eq!(released.events[0].1.id, 0x18);
         assert_eq!(objects.active.len(), 1);
+    }
+
+    #[test]
+    fn embedded_dispenser_arrow_pickup_is_delayed_and_single_use() {
+        let mut world = World::new();
+        world.import_block(2, 70, 0, 1 << 4).unwrap();
+        let mut objects = Throwables::default();
+        objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
+        let id = *objects.active.keys().next().unwrap();
+        let feet = (2.0, 70.5, 0.5);
+        assert_eq!(objects.nearby_embedded_arrow(feet), None);
+        assert_eq!(objects.take_embedded_arrow(id, 42), None);
+        objects.tick(&world, 1);
+        for tick in 2..8 {
+            objects.tick(&world, tick);
+            assert_eq!(objects.nearby_embedded_arrow(feet), None);
+        }
+        objects.tick(&world, 8);
+        assert_eq!(objects.nearby_embedded_arrow(feet), Some(id));
+        assert_eq!(objects.nearby_embedded_arrow((8.0, 70.5, 0.5)), None);
+        assert_eq!(objects.nearby_embedded_arrow((f64::NAN, 70.5, 0.5)), None);
+        assert_eq!(objects.take_embedded_arrow(id, -1), None);
+
+        let packets = objects.take_embedded_arrow(id, 42).unwrap();
+        assert_eq!(packets[0].id, 0x0d);
+        assert_eq!(&packets[0].body[..4], &id.to_be_bytes());
+        assert_eq!(&packets[0].body[4..], &42i32.to_be_bytes());
+        assert_eq!(packets[1].id, 0x13);
+        assert_eq!(objects.nearby_embedded_arrow(feet), None);
+        assert_eq!(objects.take_embedded_arrow(id, 43), None);
+        assert!(objects.tick(&world, 9).events.is_empty());
+    }
+
+    #[test]
+    fn full_inventory_does_not_consume_embedded_arrow() {
+        let mut world = World::new();
+        world.import_block(2, 70, 0, 1 << 4).unwrap();
+        let mut objects = Throwables::default();
+        objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
+        for tick in 1..=8 {
+            objects.tick(&world, tick);
+        }
+        let mut inventory = crate::inventory::Inventory::default();
+        for slot in 9i16..45 {
+            inventory
+                .creative_set(
+                    slot,
+                    Some(crate::inventory::Stack {
+                        id: 1,
+                        count: 64,
+                        damage: 0,
+                        nbt: None,
+                    }),
+                )
+                .unwrap();
+        }
+        assert!(inventory
+            .receive_stack(crate::inventory::Stack {
+                id: 262,
+                count: 1,
+                damage: 0,
+                nbt: None,
+            })
+            .is_none());
+        assert!(objects.nearby_embedded_arrow((2.0, 70.5, 0.5)).is_some());
     }
 
     #[test]
