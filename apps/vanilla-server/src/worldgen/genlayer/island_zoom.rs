@@ -7,13 +7,7 @@ use super::GenLayerRng;
 
 /// GenLayerIsland: 1 in 10 cells is land, with the origin forced to land.
 /// Coordinates are layer cells, not chunk indices.
-pub(super) fn island_map(
-    world_seed: i64,
-    x: i32,
-    z: i32,
-    width: usize,
-    height: usize,
-) -> Vec<i32> {
+pub(super) fn island_map(world_seed: i64, x: i32, z: i32, width: usize, height: usize) -> Vec<i32> {
     let mut rng = GenLayerRng::new(world_seed, 1);
     let mut result = vec![0; width * height];
     for dz in 0..height {
@@ -26,18 +20,18 @@ pub(super) fn island_map(
     // Widen before negating so even i32::MIN is safe.
     let origin_x = -i64::from(x);
     let origin_z = -i64::from(z);
-    if origin_x >= 0
-        && origin_z >= 0
-        && origin_x < width as i64
-        && origin_z < height as i64
-    {
+    if origin_x >= 0 && origin_z >= 0 && origin_x < width as i64 && origin_z < height as i64 {
         result[origin_z as usize * width + origin_x as usize] = 1;
     }
     result
 }
 
 fn choose_two(rng: &mut GenLayerRng, a: i32, b: i32) -> i32 {
-    if rng.next_int(2) == 0 { a } else { b }
+    if rng.next_int(2) == 0 {
+        a
+    } else {
+        b
+    }
 }
 
 /// GenLayerZoom's vanilla selectModeOrRandom tie-breaking order.
@@ -129,8 +123,7 @@ where
     let mut result = vec![0; width * height];
     for dz in 0..height {
         let start = (dz + (z & 1) as usize) * stride + (x & 1) as usize;
-        result[dz * width..(dz + 1) * width]
-            .copy_from_slice(&expanded[start..start + width]);
+        result[dz * width..(dz + 1) * width].copy_from_slice(&expanded[start..start + width]);
     }
     result
 }
@@ -156,8 +149,8 @@ mod tests {
         assert_eq!(
             bits(&island_map(-12_345, -17, 7, 8, 8)),
             concat!(
-                "01000000", "00001000", "00010000", "10000000",
-                "00000010", "00000000", "00000000", "00000000"
+                "01000000", "00001000", "00010000", "10000000", "00000010", "00000000", "00000000",
+                "00000000"
             )
         );
         assert_eq!(island_map(0, -1, -1, 3, 3)[4], 1);
@@ -172,22 +165,20 @@ mod tests {
         assert_eq!(
             bits(&map),
             concat!(
-                "00000100", "10000000", "11000000", "11000000",
-                "00000000", "00000000", "00000000", "00000000"
+                "00000100", "10000000", "11000000", "11000000", "00000000", "00000000", "00000000",
+                "00000000"
             )
         );
     }
 
     #[test]
     fn zoom_matches_java_oracle_at_origin() {
-        let map = zoom_map(0, 2000, 0, 0, 8, 8, |x, z, w, h| {
-            island_map(0, x, z, w, h)
-        });
+        let map = zoom_map(0, 2000, 0, 0, 8, 8, |x, z, w, h| island_map(0, x, z, w, h));
         assert_eq!(
             bits(&map),
             concat!(
-                "11000000", "00000000", "00011000", "00001000",
-                "00000000", "00000000", "10000000", "00000000"
+                "11000000", "00000000", "00011000", "00001000", "00000000", "00000000", "10000000",
+                "00000000"
             )
         );
     }
