@@ -356,11 +356,7 @@ impl Throwables {
                     destination.y.floor() as i32,
                     destination.z.floor() as i32,
                 ) >> 4;
-                let drag = if matches!(block, 8 | 9) {
-                    0.8
-                } else {
-                    0.99
-                };
+                let drag = if matches!(block, 8 | 9) { 0.8 } else { 0.99 };
                 object.velocity[0] *= drag;
                 object.velocity[1] = object.velocity[1] * drag - object.kind.gravity();
                 object.velocity[2] *= drag;
@@ -501,13 +497,7 @@ mod tests {
     fn projectiles_slow_down_in_water_but_not_lava() {
         // Source and flowing water apply the vanilla 0.8 drag coefficient.
         // Air and lava retain the normal 0.99 coefficient.
-        for (block, drag) in [
-            (0u16, 0.99),
-            (8, 0.8),
-            (9, 0.8),
-            (10, 0.99),
-            (11, 0.99),
-        ] {
+        for (block, drag) in [(0u16, 0.99), (8, 0.8), (9, 0.8), (10, 0.99), (11, 0.99)] {
             let mut world = World::new();
             if block != 0 {
                 world.import_block(2, 70, 0, block << 4).unwrap();
