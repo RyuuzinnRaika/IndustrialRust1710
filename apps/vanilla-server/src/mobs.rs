@@ -4585,8 +4585,16 @@ mod tests {
 
     #[test]
     fn melee_reaches_mob_body_on_vertical_steps_without_long_range_hits() {
-        let player = PlayerPosition { x: 0.5, y: 64.0, z: 0.5 };
-        let mob_pos = PlayerPosition { x: 3.0, y: 66.0, z: 0.5 };
+        let player = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let mob_pos = PlayerPosition {
+            x: 3.0,
+            y: 66.0,
+            z: 0.5,
+        };
         let mut mobs = Mobs::default();
         mobs.insert(Kind::Zombie, mob_pos, false);
         let id = mobs.next_id - 1;
