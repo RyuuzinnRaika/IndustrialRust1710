@@ -96,9 +96,9 @@ use maps::Maps;
 use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
-    Event, Hub, JoinError, ADMIN_CLEAR_EVENT, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT,
-    ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT,
-    PISTON_PUSH_EVENT,
+    Event, Hub, JoinError, ADMIN_CLEAR_EVENT, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT,
+    ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS,
+    PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
 };
 use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
@@ -1424,24 +1424,23 @@ fn play(
                 let id = i16::from_be_bytes(event.body[0..2].try_into().unwrap());
                 let data = i16::from_be_bytes(event.body[2..4].try_into().unwrap());
                 let max = i32::from_be_bytes(event.body[4..8].try_into().unwrap());
-                if (id != -1 && !items_1710::exists(id))
-                    || data < -1 || !(-1..=4096).contains(&max)
+                if (id != -1 && !items_1710::exists(id)) || data < -1 || !(-1..=4096).contains(&max)
                 {
                     return Err(bad("invalid internal clear arguments"));
                 }
                 let mut next = inventory.clone();
-                let (found, removed) = next.clear_matching(
-                    (id >= 0).then_some(id),
-                    (data >= 0).then_some(data),
-                    max,
-                );
+                let (found, removed) =
+                    next.clear_matching((id >= 0).then_some(id), (data >= 0).then_some(data), max);
                 if removed > 0 {
                     next.save(inventory_path.as_path())?;
                     *inventory = next;
                     send(s, 0x30, &inventory.window_items())?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
                 }
-                as_chat(s, &format!("Clear: found {found} item(s); removed {removed}."))?;
+                as_chat(
+                    s,
+                    &format!("Clear: found {found} item(s); removed {removed}."),
+                )?;
                 continue;
             }
             if event.id == ADMIN_GIVE_EVENT {
@@ -6509,7 +6508,9 @@ fn run_player_admin_command(
         ["/clear", args @ ..] if args.len() <= 4 => {
             let target = args.first().copied().unwrap_or(actor);
             let (item, data, max) = commands::clear_args(
-                args.get(1).copied(), args.get(2).copied(), args.get(3).copied(),
+                args.get(1).copied(),
+                args.get(2).copied(),
+                args.get(3).copied(),
             )?;
             if !hub.request_admin_clear(target, item, data, max)? {
                 return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
@@ -6517,25 +6518,34 @@ fn run_player_admin_command(
             Ok(format!("Clear queued for {target}"))
         }
         ["/setblock", x, y, z, block, rest @ ..] => {
-            let origin = hub.player_position(actor)?
+            let origin = hub
+                .player_position(actor)?
                 .ok_or_else(|| bad("actor not online"))?;
-            let (bx, by, bz, next, keep) =
-                commands::setblock_args([x, y, z], block, rest, origin)?;
+            let (bx, by, bz, next, keep) = commands::setblock_args([x, y, z], block, rest, origin)?;
             let mut state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let current = state.get(bx, by, bz);
             if keep && current != 0 {
                 return Err(bad("setblock keep requires air"));
             }
             if commands::is_tile_entity_block(current >> 4) {
-                return Err(bad("setblock replacement of TileEntity needs migration support"));
+                return Err(bad(
+                    "setblock replacement of TileEntity needs migration support",
+                ));
             }
             if !state.update_and_save(world_path, bx, by, bz, next)? {
                 return Err(bad("setblock made no change or coordinates outside world"));
             }
             let event = block_change_event(&state, bx, by, bz);
             drop(state);
-            hub.broadcast_in_dimension_view(*dimension,
-                PlayerPosition { x: bx as f64, y: by as f64, z: bz as f64 }, event);
+            hub.broadcast_in_dimension_view(
+                *dimension,
+                PlayerPosition {
+                    x: bx as f64,
+                    y: by as f64,
+                    z: bz as f64,
+                },
+                event,
+            );
             Ok(format!("Block set at {bx} {by} {bz}"))
         }
         ["/time", "query", "daytime"] => Ok(format!("Daytime: {}", clock.day_time())),
@@ -6793,7 +6803,9 @@ fn start_clock_console(
                 }
                 ["/clear", target, rest @ ..] if rest.len() <= 3 => (|| -> io::Result<()> {
                     let (item, data, max) = commands::clear_args(
-                        rest.first().copied(), rest.get(1).copied(), rest.get(2).copied(),
+                        rest.first().copied(),
+                        rest.get(1).copied(),
+                        rest.get(2).copied(),
                     )?;
                     if !hub.request_admin_clear(target, item, data, max)? {
                         return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
@@ -6807,16 +6819,17 @@ fn start_clock_console(
                     if [*x, *y, *z].iter().any(|v| v.contains('~')) {
                         return Err(bad("relative setblock requires a player sender"));
                     }
-                    let (bx, by, bz, next, keep) = commands::setblock_args(
-                        [x, y, z], block, rest, PlayerPosition::default(),
-                    )?;
+                    let (bx, by, bz, next, keep) =
+                        commands::setblock_args([x, y, z], block, rest, PlayerPosition::default())?;
                     let mut state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let current = state.get(bx, by, bz);
                     if keep && current != 0 {
                         return Err(bad("setblock keep requires air"));
                     }
                     if commands::is_tile_entity_block(current >> 4) {
-                        return Err(bad("setblock replacement of TileEntity needs migration support"));
+                        return Err(bad(
+                            "setblock replacement of TileEntity needs migration support",
+                        ));
                     }
                     if !state.update_and_save(&world_path, bx, by, bz, next)? {
                         return Err(bad("setblock made no change or coordinates outside world"));
@@ -6825,7 +6838,11 @@ fn start_clock_console(
                     drop(state);
                     hub.broadcast_in_dimension_view(
                         dimensions::Dimension::Overworld,
-                        PlayerPosition { x: bx as f64, y: by as f64, z: bz as f64 },
+                        PlayerPosition {
+                            x: bx as f64,
+                            y: by as f64,
+                            z: bz as f64,
+                        },
                         event,
                     );
                     println!("Block set at {bx} {by} {bz}");

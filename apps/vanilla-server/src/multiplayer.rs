@@ -223,17 +223,36 @@ impl Hub {
         }
     }
     /// Bounded inventory mutation request. Player session alone owns the save.
-    pub fn request_admin_clear(&self, name: &str, item: i16, data: i16, max: i32) -> io::Result<bool> {
+    pub fn request_admin_clear(
+        &self,
+        name: &str,
+        item: i16,
+        data: i16,
+        max: i32,
+    ) -> io::Result<bool> {
         if (item != -1 && !items_1710::exists(item)) || data < -1 || !(-1..=4096).contains(&max) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid clear request"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid clear request",
+            ));
         }
         let mut body = Vec::with_capacity(8);
         body.extend_from_slice(&item.to_be_bytes());
         body.extend_from_slice(&data.to_be_bytes());
         body.extend_from_slice(&max.to_be_bytes());
         let inner = self.0.lock().map_err(|_| poisoned())?;
-        if let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(name)) {
-            enqueue(peer, &Event { id: ADMIN_CLEAR_EVENT, body });
+        if let Some(peer) = inner
+            .players
+            .values()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+        {
+            enqueue(
+                peer,
+                &Event {
+                    id: ADMIN_CLEAR_EVENT,
+                    body,
+                },
+            );
             Ok(true)
         } else {
             Ok(false)
