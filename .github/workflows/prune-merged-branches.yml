@@ -1,6 +1,6 @@
 name: Prune merged branches safely
 on:
-  # Bootstrap the cleanup once when this workflow is first merged to main.
+  # Run approved merged-branch cleanup after the 2026-10-27 PR consolidation.
   push:
     branches: [main]
     paths:
