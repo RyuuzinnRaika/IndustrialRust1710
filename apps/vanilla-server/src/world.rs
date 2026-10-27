@@ -1344,9 +1344,7 @@ impl World {
             // supports beneath the wire also provide power. Previously this
             // code inspected only horizontal neighbours and could not energize
             // dust placed directly on a powered block.
-            strongest = strongest.max(u16::from(
-                self.signal_into((x, y - 1, z), (x, y, z)),
-            ));
+            strongest = strongest.max(u16::from(self.signal_into((x, y - 1, z), (x, y, z))));
             for (nx, nz) in [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)] {
                 // Dust climbs one block when there is air above the
                 // current dust, or descends along a block edge.
