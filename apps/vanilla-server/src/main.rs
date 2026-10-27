@@ -2014,7 +2014,10 @@ fn play(
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
             creatures.set_natural_spawning(allow_natural_spawning);
-            let mut updates = creatures.tick(now_tick, &w, &players);
+            // The 1.7.10 sky and /time commands follow the displayed
+            // 0..23999 day clock, which is not the server uptime tick.
+            let mut updates =
+                creatures.tick_at_daytime(now_tick, clock.day_time() as u64, &w, &players);
             // Preserve main's grazing and Group I's leash simulation.
             let mut grazed_blocks = Vec::new();
             for (metadata, at) in creatures.graze(&mut w, world_path, now_tick)? {
