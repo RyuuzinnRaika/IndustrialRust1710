@@ -141,8 +141,29 @@ impl WorldSessionLock {
             .write(true)
             .create(true)
             .truncate(false) // Never alter the file before acquiring its lock.
-            .open(&lock_file)?;
-        FileExt::try_lock_exclusive(&file)?;
+            .open(&lock_file)
+            .map_err(|error| {
+                if cfg!(windows) && error.raw_os_error() == Some(33) {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "cannot open Minecraft world lock {}: {error}. Another process may have locked the file; stop the other server and retry. Do not delete session.lock.",
+                            lock_file.display()
+                        ),
+                    )
+                } else {
+                    error
+                }
+            })?;
+        FileExt::try_lock_exclusive(&file).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot acquire Minecraft world lock {}: {error}. Another server or process may be using this world; stop it gracefully before restarting. Do not delete session.lock.",
+                    lock_file.display()
+                ),
+            )
+        })?;
         let duration = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| io::Error::new(ErrorKind::InvalidData, "system clock before epoch"))?;
@@ -240,7 +261,8 @@ mod tests {
         let mut first = WorldSessionLock::acquire(&root).unwrap();
         assert_eq!(first.timestamp_for_test().unwrap(), first.started_ms);
         assert!(first.verify().is_ok());
-        assert!(WorldSessionLock::acquire(&root).is_err());
+        let contention = WorldSessionLock::acquire(&root).unwrap_err();
+        assert!(contention.to_string().contains("session.lock"));
         drop(first);
         let mut next = WorldSessionLock::acquire(&root).unwrap();
         next.verify().unwrap();
