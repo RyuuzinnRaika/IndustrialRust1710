@@ -1421,17 +1421,35 @@ mod tests {
                 for inverted in [false, true] {
                     let mut world = World::new();
                     let metadata = facing | if inverted { 4 } else { 0 };
-                    world.import_block(1, 70, 1, (stair << 4) | metadata).unwrap();
+                    world
+                        .import_block(1, 70, 1, (stair << 4) | metadata)
+                        .unwrap();
                     let ray = |offset: f64, y: f64| {
                         if along_x {
                             (
-                                PlayerPosition { x: 0.2, y, z: offset },
-                                PlayerPosition { x: 2.8, y, z: offset },
+                                PlayerPosition {
+                                    x: 0.2,
+                                    y,
+                                    z: offset,
+                                },
+                                PlayerPosition {
+                                    x: 2.8,
+                                    y,
+                                    z: offset,
+                                },
                             )
                         } else {
                             (
-                                PlayerPosition { x: offset, y, z: 0.2 },
-                                PlayerPosition { x: offset, y, z: 2.8 },
+                                PlayerPosition {
+                                    x: offset,
+                                    y,
+                                    z: 0.2,
+                                },
+                                PlayerPosition {
+                                    x: offset,
+                                    y,
+                                    z: 2.8,
+                                },
                             )
                         }
                     };
