@@ -1068,6 +1068,56 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
 }
 
 #[test]
+fn native_open_window_packets_cover_other_interactive_gui_blocks() {
+    // Use real placed blocks and the running server, not just the packet builder.
+    // Each case starts with an empty world to avoid layout-dependent interactions.
+    let cases = [
+        (23i16, 3u8, "Dispenser", 9u8),
+        (158, 10, "Dropper", 9),
+        (117, 5, "Brewing Stand", 4),
+        (154, 9, "Hopper", 5),
+        (116, 4, "Enchant", 0),
+        (145, 8, "Repair & Name", 0),
+        (146, 0, "Chest", 27),
+    ];
+    for (block, kind, title, slots) in cases {
+        let server = NativeServer::start();
+        let (mut player, _, _) = server.join("RustTester");
+        let mut held = 36i16.to_be_bytes().to_vec();
+        held.extend_from_slice(&block.to_be_bytes());
+        held.push(1);
+        held.extend_from_slice(&0i16.to_be_bytes());
+        held.extend_from_slice(&(-1i16).to_be_bytes());
+        player.write_all(&frame(0x10, &held)).unwrap();
+        until_packet(&mut player, 0x2f, |p| p.starts_with(&[0, 0, 36]));
+
+        let mut place = 0i32.to_be_bytes().to_vec();
+        place.push(63);
+        place.extend_from_slice(&0i32.to_be_bytes());
+        place.push(1);
+        place.extend_from_slice(&block.to_be_bytes());
+        place.push(1);
+        place.extend_from_slice(&0i16.to_be_bytes());
+        place.extend_from_slice(&(-1i16).to_be_bytes());
+        place.extend_from_slice(&[8, 8, 8]);
+        player.write_all(&frame(8, &place)).unwrap();
+        until_packet(&mut player, 0x23, |p| p.len() >= 11 && p[4] == 64);
+
+        let mut open = 0i32.to_be_bytes().to_vec();
+        open.push(64);
+        open.extend_from_slice(&0i32.to_be_bytes());
+        open.push(1);
+        open.extend_from_slice(&(-1i16).to_be_bytes());
+        open.extend_from_slice(&[8, 8, 8]);
+        player.write_all(&frame(8, &open)).unwrap();
+        let opened = until_packet(&mut player, 0x2d, |p| p.first() == Some(&1));
+        assert_open_window_protocol5(&opened, 1, kind, title, slots);
+        player.write_all(&frame(13, &[1])).unwrap();
+        drop(player);
+    }
+}
+
+#[test]
 fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     let server = NativeServer::start();
     let (mut alice, _, _) = server.join("RustTester");
