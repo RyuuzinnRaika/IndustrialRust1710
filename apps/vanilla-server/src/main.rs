@@ -2318,11 +2318,16 @@ fn play(
             0 => {
                 let reply = input.i32()?;
                 input.finish()?;
-                if pending_ping != Some(reply) {
+                if pending_ping == Some(reply) {
+                    pending_ping = None;
+                    pong_time = Instant::now();
+                } else if reply != 0 {
                     return Err(bad("unexpected or replayed keepalive ID"));
                 }
-                pending_ping = None;
-                pong_time = Instant::now();
+                // Vanilla 1.7.10's terrain-loading screen emits unsolicited
+                // C00 KeepAlive packets with the default ID 0. Ignore them
+                // without marking a server challenge answered or refreshing
+                // the liveness timeout; still reject other unsolicited IDs.
             }
             1 => {
                 let message = input.string(100)?;
