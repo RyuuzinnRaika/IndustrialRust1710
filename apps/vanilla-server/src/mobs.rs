@@ -5168,7 +5168,11 @@ mod tests {
                 .filter(|mob| mob.kind.counts_toward_natural_cap(true))
                 .count()
         };
-        assert_eq!(spawn_with_animals(11), 11, "a full animal cap must block new sheep");
+        assert_eq!(
+            spawn_with_animals(11),
+            11,
+            "a full animal cap must block new sheep"
+        );
         assert_eq!(
             spawn_with_animals(10),
             11,
