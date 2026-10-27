@@ -98,7 +98,7 @@ fn rule(block: u16) -> Option<BlockRule> {
         // Common 1.7.10 wild plants must be breakable even without tools.
         // Tall grass / ferns are removed with no guaranteed block item:
         // optional wheat seeds are decided in additional_drop().
-        31 => (0.0, None, 0, false, None),
+        31 | 32 | 175 => (0.0, None, 0, false, None), // grass, dead bush, tall plants
         37 => (0.0, None, 0, false, item(37, 0)), // dandelion
         38 => (0.0, None, 0, false, item(38, damage)), // flower variants
         39 | 40 => (0.0, None, 0, false, item(id as i16, 0)),
@@ -106,13 +106,18 @@ fn rule(block: u16) -> Option<BlockRule> {
         83 => (0.0, None, 0, false, item(338, 0)), // sugar cane item
         86 | 91 => (1.0, Some(ToolKind::Axe), 0, false, item(id as i16, 0)),
         111 => (0.0, None, 0, false, item(111, 0)), // lily pad
+        106 => (0.2, None, 0, false, None), // vines: shears-only drop
+        78 => (0.1, Some(ToolKind::Shovel), 0, false, None), // snow layer
+        79 => (0.5, Some(ToolKind::Pickaxe), 0, false, None), // ice melts
+        110 => (0.6, Some(ToolKind::Shovel), 0, false, item(3, 0)), // mycelium
         2 | 3 => (0.5, Some(ToolKind::Shovel), 0, false, item(3, 0)),
         12 => (0.5, Some(ToolKind::Shovel), 0, false, item(12, damage)),
         13 => (0.6, Some(ToolKind::Shovel), 0, false, item(13, 0)),
         80 => (0.2, Some(ToolKind::Shovel), 0, false, item(332, 0)),
         82 => (0.6, Some(ToolKind::Shovel), 0, false, item(337, 0)),
         1 => (1.5, Some(ToolKind::Pickaxe), 0, true, item(4, 0)),
-        4 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(4, 0)),
+        4 | 48 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(id as i16, 0)),
+        24 => (0.8, Some(ToolKind::Pickaxe), 0, true, item(24, damage)),
         14 => (3.0, Some(ToolKind::Pickaxe), 2, true, item(14, 0)),
         15 => (3.0, Some(ToolKind::Pickaxe), 1, true, item(15, 0)),
         16 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(263, 0)),
@@ -185,7 +190,9 @@ fn rule(block: u16) -> Option<BlockRule> {
         61 | 62 => (3.5, Some(ToolKind::Pickaxe), 0, true, item(61, 0)),
         20 => (0.3, None, 0, false, None), // glass: breaks but no drop
         35 => (0.8, None, 0, false, item(35, damage)),
-        87 => (0.4, Some(ToolKind::Pickaxe), 0, true, item(87, 0)),
+        87 => (0.4, Some(ToolKind::Pickaxe), 0, false, item(87, 0)),
+        88 => (0.5, Some(ToolKind::Shovel), 0, false, item(88, 0)),
+        153 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(153, 0)),
         89 => (0.3, None, 0, false, item(348, 0)),
         170 => (0.5, Some(ToolKind::Axe), 0, false, item(170, 0)),
         _ => return None,
@@ -251,9 +258,16 @@ pub fn mine_rule(block: u16, held: Option<Stack>) -> Option<(Duration, MineResul
     } else {
         1.0
     };
-    let ticks = ((spec.hardness * if can_harvest { 30.0 } else { 100.0 }) / speed)
-        .ceil()
-        .max(1.0) as u64;
+    // Instant-break foliage must accept a C07 Start/Finish pair sent in
+    // the same client tick; enforcing one 50ms tick made grass and flowers
+    // intermittently reappear when the finish arrived immediately.
+    let ticks = if spec.hardness == 0.0 {
+        0
+    } else {
+        ((spec.hardness * if can_harvest { 30.0 } else { 100.0 }) / speed)
+            .ceil()
+            .max(1.0) as u64
+    };
     let drop = if can_harvest { spec.drop } else { None };
     Some((
         Duration::from_millis(ticks.saturating_mul(50)),
@@ -639,6 +653,34 @@ mod tests {
         assert!(enter_water
             .finish_with_environment(target, block, held, true, true)
             .is_none());
+    }
+
+    #[test]
+    fn instant_break_foliage_accepts_same_tick_finish() {
+        let at = (8, 66, -2);
+        for id in [31_u16, 32, 37, 38, 39, 40, 83, 111, 175] {
+            let block = id << 4;
+            let (minimum, _) = mine_rule(block, None).unwrap();
+            assert!(minimum.is_zero(), "instant block {id} requires a delay");
+            let progress = MiningProgress::start(at, block, None).unwrap();
+            assert!(progress.finish(at, block, None).is_some(), "instant block {id}");
+        }
+    }
+
+    #[test]
+    fn common_1710_surface_blocks_remain_breakable_without_dropping_wrong_items() {
+        for (id, expected) in [
+            (78_u16, None),
+            (79, None),
+            (106, None),
+            (110, Some(3_i16)),
+            (175, None),
+            (88, Some(88)),
+        ] {
+            let (_, result) = mine_rule(id << 4, None).unwrap();
+            assert_eq!(result.drop.map(|drop| drop.id), expected, "block {id}");
+        }
+        assert!(mine_rule(7 << 4, None).is_none(), "bedrock must remain unbreakable");
     }
 
     #[test]
