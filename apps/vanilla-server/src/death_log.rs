@@ -776,6 +776,53 @@ mod tests {
     }
 
     #[test]
+    fn fatal_transaction_rejects_invalid_outbox_without_counting_or_saving_hp() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-death-atomic-failure-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(root.join("players")).unwrap();
+        let world = root.join("overworld.irw");
+        let alice = root.join("players/alice.dat");
+        let scoreboard_path = Scoreboard::location(&world);
+        let mut board = Scoreboard::default();
+        board.add_objective("deaths", "Deaths", "deathCount").unwrap();
+        board.save(&scoreboard_path).unwrap();
+        let live = Mutex::new(board);
+        fs::create_dir(outbox_path(&alice)).unwrap(); // A directory, not a safe marker.
+        let record = DeathRecord {
+            player: "Alice",
+            hit: None,
+            position: PlayerPosition::default(),
+            dimension: 0,
+            tick: 5,
+        };
+        let dead = Vitals {
+            health: 0.0,
+            ..Vitals::default()
+        };
+        assert!(
+            commit_fatal_state(
+                &record,
+                &world,
+                &world,
+                &alice,
+                dead,
+                &live,
+                &scoreboard_path,
+            )
+            .is_err()
+        );
+        assert!(!alice.exists());
+        assert!(!world.with_extension("pending-txn.json").exists());
+        let encoded: Value =
+            serde_json::from_slice(&fs::read(&scoreboard_path).unwrap()).unwrap();
+        assert!(encoded["scores"]["deaths"].get("Alice").is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn existing_dead_player_has_safe_fallback_without_fabricated_cause() {
         let record = DeathRecord {
             player: "Alex",
