@@ -59,7 +59,21 @@ impl Server {
     }
 
     fn connect(&self) -> TcpStream {
-        let s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        // An earlier negative-protocol connection may still be releasing its
+        // per-IP permit. A refused TCP connection is not a protocol assertion;
+        // retry briefly without accepting any invalid login or packet.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let s = loop {
+            match TcpStream::connect(("127.0.0.1", self.port)) {
+                Ok(socket) => break socket,
+                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused
+                    && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => panic!("test TCP server unavailable: {error}"),
+            }
+        };
         s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         s.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
         s
@@ -154,7 +168,13 @@ fn must_close(mut socket: TcpStream) {
     let mut bytes = [0; 65536];
     loop {
         match socket.read(&mut bytes) {
-            Ok(0) => return,
+            Ok(0) => {
+                // The child closes its socket before the worker's IP permit
+                // drops. Give it time to finish before the next adversarial
+                // handshake; security assertions remain unchanged.
+                thread::sleep(Duration::from_millis(100));
+                return;
+            },
             Ok(_) => {}
             Err(error)
                 if matches!(
@@ -162,7 +182,8 @@ fn must_close(mut socket: TcpStream) {
                     io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
                 ) =>
             {
-                return
+                thread::sleep(Duration::from_millis(100));
+                return;
             }
             Err(error)
                 if matches!(
