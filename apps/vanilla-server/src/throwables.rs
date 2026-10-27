@@ -293,6 +293,9 @@ impl Throwables {
                 object.at = at;
                 if object.kind == Kind::Arrow {
                     object.embedded = true;
+                    // Vanilla counts the 1200-tick lifetime from entering the block,
+                    // not from launch. Flight time must not shorten embedded lifetime.
+                    object.age = 0;
                     object.velocity = [0.0; 3];
                     result
                         .events
@@ -516,11 +519,11 @@ mod tests {
         assert!((at.y - 70.5).abs() < 1e-10);
         assert!(objects.active.get(&projectile_id).unwrap().embedded);
 
-        for tick in 2..1200 {
+        for tick in 2..1201 {
             assert!(objects.tick(&world, tick).events.is_empty());
         }
         assert_eq!(objects.active.len(), 1);
-        let expired = objects.tick(&world, 1200);
+        let expired = objects.tick(&world, 1201);
         assert!(objects.active.is_empty());
         assert_eq!(expired.events.len(), 1);
         let (at, packet) = &expired.events[0];
@@ -531,7 +534,38 @@ mod tests {
             projectile_id
         );
         assert!((2.0..2.3).contains(&at.x), "expiry={at:?}");
-        assert!(objects.tick(&world, 1201).events.is_empty());
+        assert!(objects.tick(&world, 1202).events.is_empty());
+    }
+
+    #[test]
+    fn dispenser_arrow_flight_time_does_not_shorten_embedded_lifetime() {
+        let mut world = World::new();
+        world.import_block(2, 70, 0, 8 << 4).unwrap();
+        world.import_block(3, 70, 0, 1 << 4).unwrap();
+        let mut objects = Throwables::default();
+        objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
+        let projectile_id = *objects.active.keys().next().unwrap();
+
+        objects.tick(&world, 1);
+        assert_eq!(objects.active.get(&projectile_id).unwrap().age, 1);
+        let impact = objects.tick(&world, 2);
+        assert_eq!(impact.events.len(), 1);
+        assert_eq!(impact.events[0].1.id, 0x18);
+        let arrow = objects.active.get(&projectile_id).unwrap();
+        assert!(arrow.embedded);
+        assert_eq!(arrow.age, 0, "embedded lifetime begins at impact");
+
+        for tick in 3..1202 {
+            assert!(objects.tick(&world, tick).events.is_empty());
+        }
+        assert!(objects.active.contains_key(&projectile_id));
+        let expired = objects.tick(&world, 1202);
+        assert_eq!(expired.events.len(), 1);
+        assert_eq!(expired.events[0].1.id, 0x13);
+        assert!(!objects.active.contains_key(&projectile_id));
+        assert!(objects.tick(&world, 1203).events.is_empty());
     }
 
     #[test]
