@@ -32,6 +32,8 @@ pub const ADMIN_CLEAR_EVENT: u32 = u32::MAX - 8;
 /// Target session receives effect changes; console/network never mutates it.
 pub const ADMIN_EFFECT_EVENT: u32 = u32::MAX - 9;
 pub const ADMIN_ENCHANT_EVENT: u32 = u32::MAX - 10;
+/// Session-owned persisted /spawnpoint change (not a wire packet).
+pub const ADMIN_SPAWNPOINT_EVENT: u32 = u32::MAX - 11;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -108,6 +110,7 @@ fn stamp_event(peer: &Peer, packet: Event) -> QueuedEvent {
             | ADMIN_CLEAR_EVENT
             | ADMIN_EFFECT_EVENT
             | ADMIN_ENCHANT_EVENT
+            | ADMIN_SPAWNPOINT_EVENT
     );
     QueuedEvent {
         epoch: (!global).then(|| peer.epoch.load(Ordering::Relaxed)),
@@ -390,6 +393,42 @@ impl Hub {
         }
     }
 
+    /// Queue an Overworld-only per-player respawn point to the target's owning
+    /// session. The mailbox contains just block coordinates, never file paths.
+    pub fn request_admin_spawnpoint(
+        &self,
+        target: &str,
+        point: crate::spawnpoint::Spawnpoint,
+    ) -> io::Result<bool> {
+        let (x, y, z) = point.coords();
+        let mut body = Vec::with_capacity(12);
+        body.extend_from_slice(&x.to_be_bytes());
+        body.extend_from_slice(&y.to_be_bytes());
+        body.extend_from_slice(&z.to_be_bytes());
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(peer) = inner
+            .players
+            .values()
+            .find(|p| p.name.eq_ignore_ascii_case(target))
+        else {
+            return Ok(false);
+        };
+        if peer.dimension != Dimension::Overworld {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "spawnpoint target must be in the Overworld",
+            ));
+        }
+        enqueue(
+            peer,
+            &Event {
+                id: ADMIN_SPAWNPOINT_EVENT,
+                body,
+            },
+        );
+        Ok(true)
+    }
+
     /// UUID attached to the currently admitted peer. Caller must ensure the
     /// server is configured online-mode before treating it as authenticated.
     pub fn uuid_for_online_name(&self, name: &str) -> io::Result<Option<String>> {
@@ -618,6 +657,20 @@ impl Hub {
             }
         }
     }
+    /// Record every accepted authoritative movement sample, even if the
+    /// outbound entity teleport is rate-limited. Explosion exposure, Mob
+    /// targeting and other player sessions read this position immediately.
+    ///
+    /// The caller must use move_player on chunk-interest transitions so
+    /// spawn/despawn membership changes are never silently swallowed.
+    pub fn record_player_position(&self, id: i32, position: PlayerPosition) {
+        if let Ok(mut inner) = self.0.lock() {
+            if let Some(peer) = inner.players.get_mut(&id) {
+                peer.position = position;
+            }
+        }
+    }
+
     pub fn move_player(&self, id: i32, position: PlayerPosition, yaw: f32, pitch: f32) {
         if let Ok(mut inner) = self.0.lock() {
             if let Some(peer) = inner.players.get_mut(&id) {
@@ -852,6 +905,38 @@ mod tests {
     }
 
     #[test]
+    fn accepted_fast_player_samples_update_shared_position_without_outgoing_packets() {
+        let hub = Hub::default();
+        let (alice, alice_rx, _) = hub
+            .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        let (_bob, bob_rx, _) = hub
+            .add("Bob".into(), "uuid-b".into(), PlayerPosition::default())
+            .unwrap();
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+        let actual = PlayerPosition {
+            x: 2.5,
+            y: 65.0,
+            z: -3.5,
+        };
+        hub.record_player_position(alice, actual);
+        assert_eq!(
+            hub.participants()
+                .unwrap()
+                .into_iter()
+                .find(|p| p.0 == alice)
+                .unwrap()
+                .1,
+            actual
+        );
+        assert!(bob_rx.try_recv().is_err());
+        // A later full broadcast still uses the current authoritative point.
+        hub.move_player(alice, actual, 0.0, 0.0);
+        assert_eq!(bob_rx.try_recv().unwrap().id, 0x18);
+    }
+
+    #[test]
     fn out_of_view_players_spawn_on_entry_and_destroy_on_exit() {
         let hub = Hub::default();
         let (a, a_rx, _) = hub
@@ -1019,6 +1104,33 @@ mod tests {
         assert_eq!(cara_rx.try_recv().unwrap().id, 0x38);
         assert!(cara_rx.try_recv().is_err());
     }
+    #[test]
+    fn spawnpoint_mailbox_is_owned_by_overworld_target() {
+        let hub = Hub::default();
+        let (_, rx, _) = hub
+            .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        hub.add_in_dimension(
+            "NetherUser".into(),
+            "uuid-n".into(),
+            PlayerPosition::default(),
+            Dimension::Nether,
+        )
+        .unwrap();
+        let point = crate::spawnpoint::Spawnpoint::new(-15, 65, 20).unwrap();
+        assert!(!hub.request_admin_spawnpoint("NotOnline", point).unwrap());
+        assert!(hub.request_admin_spawnpoint("NetherUser", point).is_err());
+        assert!(hub.request_admin_spawnpoint("aLiCe", point).unwrap());
+        // The Nether player still appears in the global tab list.
+        assert_eq!(rx.try_recv().unwrap().id, 0x38);
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.id, ADMIN_SPAWNPOINT_EVENT);
+        assert_eq!(event.body.len(), 12);
+        assert_eq!(&event.body[0..4], &(-15i32).to_be_bytes());
+        assert_eq!(&event.body[4..8], &(65i32).to_be_bytes());
+        assert_eq!(&event.body[8..12], &(20i32).to_be_bytes());
+    }
+
     #[test]
     fn queue_overflow_marks_session_unhealthy_instead_of_silent_desync() {
         let hub = Hub::default();

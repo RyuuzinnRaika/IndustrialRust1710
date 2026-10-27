@@ -204,6 +204,61 @@ fn straight_stair_entry(
     [base, step].into_iter().flatten().min_by(f64::total_cmp)
 }
 
+/// Vanilla 1.7.10 fences connect to their own fence type, fence gates, and
+/// opaque full cubes (but not glass, pumpkins, or the other fence type).
+fn fence_connects_to(world: &World, cell: [i32; 3], fence: u16, dx: i32, dz: i32) -> bool {
+    let neighbor = world.get(cell[0] + dx, cell[1], cell[2] + dz) >> 4;
+    neighbor == fence
+        || neighbor == 107
+        || matches!(
+            neighbor,
+            1..=5 | 7 | 12..=17 | 19 | 21..=25 | 35 | 41..=43 | 45..=49
+                | 56..=58 | 61 | 62 | 73 | 74 | 80 | 82 | 84 | 87
+                | 97..=100 | 103 | 110 | 112 | 121 | 123..=125 | 129
+                | 133 | 137 | 152 | 153 | 155 | 158 | 159 | 162 | 170
+                | 172 | 173
+        )
+}
+
+/// Collision shape of a 1.7.10 wooden (85) or nether-brick (113) fence.
+/// The central post is 1/4 block wide; connected arms extend to the
+/// neighboring block edge. Ray tracing uses the one-block-high selection
+/// bounds, not the 1.5-block-tall entity collision boxes.
+fn fence_entry(
+    world: &World,
+    from: PlayerPosition,
+    to: PlayerPosition,
+    cell: [i32; 3],
+    fence: u16,
+) -> Option<f64> {
+    let [x, y, z] = cell.map(f64::from);
+    let mut first = segment_box_entry(
+        from,
+        to,
+        [x + 0.375, y, z + 0.375],
+        [x + 0.625, y + 1.0, z + 0.625],
+    );
+    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        if !fence_connects_to(world, cell, fence, dx, dz) {
+            continue;
+        }
+        let (min_x, max_x, min_z, max_z) = match (dx, dz) {
+            (1, 0) => (0.625, 1.0, 0.375, 0.625),
+            (-1, 0) => (0.0, 0.375, 0.375, 0.625),
+            (0, 1) => (0.375, 0.625, 0.625, 1.0),
+            _ => (0.375, 0.625, 0.0, 0.375),
+        };
+        let arm = segment_box_entry(
+            from,
+            to,
+            [x + min_x, y, z + min_z],
+            [x + max_x, y + 1.0, z + max_z],
+        );
+        first = [first, arm].into_iter().flatten().min_by(f64::total_cmp);
+    }
+    first
+}
+
 /// Traverse each voxel crossed by the flight segment in parametric order.
 /// Sampling endpoints alone can miss a grazing wall and incorrectly shield
 /// an entity that is actually in front of the wall.
@@ -249,6 +304,12 @@ fn first_solid_block_hit(
                         f64::from(cell[2]) + 1.0,
                     ],
                 ) {
+                    if t >= entry {
+                        return Some((t, cell));
+                    }
+                }
+            } else if matches!(block, 85 | 113) {
+                if let Some(t) = fence_entry(world, from, to, cell, block) {
                     if t >= entry {
                         return Some((t, cell));
                     }
@@ -1405,6 +1466,98 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn projectile_ray_respects_fence_posts_and_connected_arms() {
+        for fence in [85u16, 113] {
+            let mut world = World::new();
+            world.import_block(1, 70, 1, fence << 4).unwrap();
+            let ray = |x: f64| {
+                (
+                    PlayerPosition { x, y: 70.5, z: 0.2 },
+                    PlayerPosition { x, y: 70.5, z: 2.8 },
+                )
+            };
+            let (from, to) = ray(1.5);
+            assert_eq!(
+                first_solid_block_hit(&world, from, to).map(|hit| hit.1),
+                Some([1, 70, 1]),
+                "isolated fence post: {fence}"
+            );
+            let (from, to) = ray(1.9);
+            assert_eq!(
+                first_solid_block_hit(&world, from, to),
+                None,
+                "unconnected fence arm must not be solid: {fence}"
+            );
+            // A fence of the same type on the east connects the horizontal
+            // arm; the first hit must belong to the western fence.
+            world.import_block(2, 70, 1, fence << 4).unwrap();
+            let (from, to) = ray(1.9);
+            let (t, cell) = first_solid_block_hit(&world, from, to).unwrap();
+            assert_eq!(cell, [1, 70, 1]);
+            assert!((t - 1.175 / 2.6).abs() < 1e-10);
+            let (reverse_t, reverse_cell) = first_solid_block_hit(&world, to, from).unwrap();
+            assert_eq!(reverse_cell, [1, 70, 1]);
+            assert!((reverse_t - 1.175 / 2.6).abs() < 1e-10);
+
+            // Nether-brick and wooden fences do not join each other.
+            let other = if fence == 85 { 113 } else { 85 };
+            world.import_block(2, 70, 1, other << 4).unwrap();
+            assert_eq!(first_solid_block_hit(&world, from, to), None);
+            // An opaque cube or fence gate does connect; glass does not.
+            for connected in [1u16, 107] {
+                world.import_block(2, 70, 1, connected << 4).unwrap();
+                assert_eq!(
+                    first_solid_block_hit(&world, from, to).map(|hit| hit.1),
+                    Some([1, 70, 1])
+                );
+            }
+            world.import_block(2, 70, 1, 20 << 4).unwrap();
+            assert_eq!(first_solid_block_hit(&world, from, to), None);
+        }
+    }
+
+    #[test]
+    fn projectile_ray_respects_fence_north_south_arms_and_upper_collision() {
+        let mut world = World::new();
+        world.import_block(1, 70, 1, 85 << 4).unwrap();
+        let from = PlayerPosition {
+            x: 0.2,
+            y: 70.5,
+            z: 1.9,
+        };
+        let to = PlayerPosition { x: 2.8, ..from };
+        assert_eq!(first_solid_block_hit(&world, from, to), None);
+        world.import_block(1, 70, 2, 85 << 4).unwrap();
+        assert_eq!(
+            first_solid_block_hit(&world, from, to).map(|hit| hit.1),
+            Some([1, 70, 1])
+        );
+        // Vanilla's projectile ray trace uses the 1-block selection shape,
+        // whereas the fence's entity collision boxes reach 1.5 blocks.
+        let high_from = PlayerPosition {
+            x: 0.2,
+            y: 71.25,
+            z: 1.5,
+        };
+        let high_to = PlayerPosition {
+            x: 2.8,
+            ..high_from
+        };
+        assert_eq!(first_solid_block_hit(&world, high_from, high_to), None);
+        let low_from = PlayerPosition {
+            y: 70.95,
+            ..high_from
+        };
+        let low_to = PlayerPosition {
+            y: 70.95,
+            ..high_to
+        };
+        let (t, cell) = first_solid_block_hit(&world, low_from, low_to).unwrap();
+        assert_eq!(cell, [1, 70, 1]);
+        assert!((t - 1.175 / 2.6).abs() < 1e-10);
     }
 
     #[test]
