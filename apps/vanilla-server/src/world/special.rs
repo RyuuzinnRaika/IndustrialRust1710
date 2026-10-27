@@ -99,8 +99,7 @@ impl World {
         {
             let (cx, cy, cz) = tnt.pos;
             for (&(x, y, z), &block) in self.edits.range(
-                (cx.saturating_sub(12), 0, i32::MIN)
-                    ..=(cx.saturating_add(12), u8::MAX, i32::MAX),
+                (cx.saturating_sub(12), 0, i32::MIN)..=(cx.saturating_add(12), u8::MAX, i32::MAX),
             ) {
                 if (i64::from(y) - i64::from(cy)).abs() <= 12
                     && (i64::from(z) - i64::from(cz)).abs() <= 12
