@@ -16,8 +16,8 @@ mod clock;
 mod command_completion;
 mod commands;
 mod crafting;
-mod decorations;
 mod death_log;
+mod decorations;
 mod dimensions;
 mod disconnect_log;
 mod dispensers;
@@ -57,10 +57,10 @@ mod online_auth;
 mod physics;
 mod player;
 mod scoreboard;
-mod spawnpoint;
 mod security_limits;
 mod server_config;
 mod session_lock;
+mod spawnpoint;
 mod survival;
 mod survival_damage;
 mod telemetry;
@@ -83,8 +83,8 @@ use brewing::{Brewer, Brewers, Position as BrewerPosition};
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use commands::PublicCommand;
-use decorations::Decorations;
 use death_log::{DeathCause, DeathRecord, FatalHit};
+use decorations::Decorations;
 use dispensers::{Devices, Position as DevicePosition};
 use experience::Experience;
 use fishing::Fishing;
@@ -102,10 +102,10 @@ use maps::Maps;
 use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
-    Event, Hub, JoinError, SessionEvents, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT, ADMIN_ENCHANT_EVENT,
-    ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT, ADMIN_SPAWNPOINT_EVENT,
-    ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT,
-    PISTON_PUSH_EVENT,
+    Event, Hub, JoinError, SessionEvents, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT,
+    ADMIN_ENCHANT_EVENT, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT,
+    ADMIN_SPAWNPOINT_EVENT, ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS,
+    PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
 };
 use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
@@ -1442,7 +1442,10 @@ fn play(
                     point.safe_in(&current_world)
                 };
                 if !is_safe {
-                    as_chat(s, "Spawnpoint rejected: choose a clear, supported location.")?;
+                    as_chat(
+                        s,
+                        "Spawnpoint rejected: choose a clear, supported location.",
+                    )?;
                     continue;
                 }
                 // Only the player's session writes its own UUID/name-scoped
@@ -2281,12 +2284,7 @@ fn play(
                     Some(HazardCause::Burning) => DeathCause::Burning,
                     None => DeathCause::Unknown,
                 };
-                death_log::record_fatal(
-                    &mut fatal_hit,
-                    previous_health,
-                    vitals.health,
-                    cause,
-                );
+                death_log::record_fatal(&mut fatal_hit, previous_health, vitals.health, cause);
                 player.save_state_in_dimension(
                     player_path,
                     *vitals,
@@ -6845,7 +6843,9 @@ fn command_gamerule(
         }
         Ok(format!("{key} = {enabled}"))
     } else {
-        let value = current.get(key).ok_or_else(|| bad("unsupported game rule"))?;
+        let value = current
+            .get(key)
+            .ok_or_else(|| bad("unsupported game rule"))?;
         Ok(format!("{key} = {value}"))
     }
 }
@@ -7526,13 +7526,14 @@ fn start_clock_console(
                         hardcore,
                         requested,
                     )?;
-                    println!(
-                        "Difficulty set to {next} (new joins/respawns see updated setting)"
-                    );
+                    println!("Difficulty set to {next} (new joins/respawns see updated setting)");
                     Ok(())
                 })(),
                 ["/gamerule", key] => (|| -> io::Result<()> {
-                    println!("{}", command_gamerule(&rules, &rules_path, &clock, key, None)?);
+                    println!(
+                        "{}",
+                        command_gamerule(&rules, &rules_path, &clock, key, None)?
+                    );
                     Ok(())
                 })(),
                 ["/gamerule", key, value] => (|| -> io::Result<()> {
@@ -11098,9 +11099,7 @@ mod command_world_settings_tests {
         std::fs::create_dir_all(&root).unwrap();
         let difficulty_path = root.join("difficulty");
         let mobs_path = root.join("mobs.json");
-        let mobs = Mutex::new(
-            Mobs::load_or_new(&World::default(), true, 2, &mobs_path).unwrap(),
-        );
+        let mobs = Mutex::new(Mobs::load_or_new(&World::default(), true, 2, &mobs_path).unwrap());
         let state = AtomicU8::new(2);
         assert!(command_difficulty(&mobs, &state, &difficulty_path, true, "easy").is_err());
         assert_eq!(state.load(Ordering::Acquire), 2);

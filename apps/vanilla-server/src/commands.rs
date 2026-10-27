@@ -592,7 +592,9 @@ pub fn setworldspawn_args(
         return Err(invalid("Usage: /setworldspawn [x y z]"));
     }
     if origin.is_none() && coordinates.iter().any(|part| part.starts_with('~')) {
-        return Err(invalid("console setworldspawn requires absolute coordinates"));
+        return Err(invalid(
+            "console setworldspawn requires absolute coordinates",
+        ));
     }
     let origin = origin.unwrap_or(PlayerPosition {
         x: 0.0,
@@ -626,11 +628,17 @@ mod tests {
 
     #[test]
     fn spawnpoint_1710_coordinates_reject_invalid_and_console_relative() {
-        let origin = PlayerPosition { x: -2.8, y: 65.0, z: 3.3 };
+        let origin = PlayerPosition {
+            x: -2.8,
+            y: 65.0,
+            z: 3.3,
+        };
         let parsed = spawnpoint_args(&["~", "~", "~1"], Some(origin)).unwrap();
         assert_eq!(parsed.coords(), (-3, 65, 4));
         assert_eq!(
-            spawnpoint_args(&["10", "64", "-20"], None).unwrap().coords(),
+            spawnpoint_args(&["10", "64", "-20"], None)
+                .unwrap()
+                .coords(),
             (10, 64, -20)
         );
         assert!(spawnpoint_args(&["~", "64", "0"], None).is_err());
