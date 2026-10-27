@@ -124,3 +124,44 @@ These commands share the existing verified-OP level-2 gate and console audit log
   rather than showing a fictional value; the save format is not rewritten.
 - Invalid or extra arguments are rejected. Tests cover both seeded and
   legacy flat worlds.
+
+## Vanilla 1.7.10 Tab completion (Draft)
+
+Press **Tab** in the vanilla Java 1.7.10 chat/command input. The unmodified
+client sends C14 `Tab Complete` (play/serverbound packet `0x14`), containing
+one Minecraft string. The server responds on the same player connection
+with S3A `Tab Complete` (play/clientbound packet `0x3A`): a VarInt
+candidate count and that many Minecraft strings. **There is no Brigadier
+transaction ID or modern command-tree packet in Protocol 5.**
+
+Implemented suggestions:
+
+- Command names, including `/help`, `/tell`, `/msg`, `/w`, and
+  currently implemented verified-OP commands, filtered by required level.
+- Currently online player usernames for private messages and supported
+  target-player admin commands (no arbitrary offline name guessing).
+- Existing 1.7.10 command arguments such as `/gamemode creative`,
+  `/time set day`, `/weather rain`, `/summon Zombie`,
+  bounded common legacy item/block names, and `~` for relative coordinates.
+- Ordinary chat username completion, as supported by the vanilla client.
+
+No server-side command executes on Tab. Completion cannot authorize
+privileged actions: OP level is loaded for the **verified UUID** of the
+current session; offline-mode users are never treated as OP by name.
+No 1.8+ command suggestions (e.g. `/fill` or `/execute`).
+The server caps requests at 256 characters and responses at 32 suggestions,
+with deduplicated, deterministic ordering. The vanilla client owns
+display/cycling/selection; no new GUI or mod is required.
+
+Regression checks: Rust unit tests cover command names, OP isolation,
+partial username matching, argument keywords, invalid input, and the S3A
+VarInt/string wire format. A native Protocol 5 TCP integration test sends
+a real C14 and checks the S3A response, including that unauthorized
+players cannot enumerate OP-only commands.
+
+No GitHub Actions are required or invoked by this feature. Before merging,
+run `cargo fmt --all -- --check`, `cargo test -p vanilla-server`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and verify the
+actual Java 1.7.10 client's Tab suggestions on Windows.
+
+Wire reference: https://prismarinejs.github.io/minecraft-data/protocol/pc/1.7/
