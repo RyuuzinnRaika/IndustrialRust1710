@@ -7128,7 +7128,7 @@ fn start_clock_console(
             }
             let result: io::Result<()> = match args.as_slice() {
                 ["/help"] | ["/?"] => {
-                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /seed /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /seed /setworldspawn /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
                     Ok(())
                 }
                 ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
@@ -7158,6 +7158,14 @@ fn start_clock_console(
                 ["/seed"] => (|| -> io::Result<()> {
                     let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     println!("{}", commands::seed_text(&state)?);
+                    Ok(())
+                })(),
+                ["/setworldspawn", x, y, z] => (|| -> io::Result<()> {
+                    let point = commands::setworldspawn_args(&[x, y, z], None)?;
+                    println!(
+                        "{}",
+                        command_setworldspawn(&world, &world_path, &hub, point)?
+                    );
                     Ok(())
                 })(),
                 ["/enchant", target, enchant, rest @ ..] if rest.len() <= 1 => {
@@ -7284,40 +7292,27 @@ fn start_clock_console(
                     Ok(())
                 }
                 ["/difficulty", requested] => (|| -> io::Result<()> {
-                    let next = admin_state::parse_difficulty(requested)?;
-                    if hardcore && next != 3 {
-                        return Err(bad("hardcore difficulty must remain hard (3)"));
-                    }
-                    // Do not publish the change until its restart override is
-                    // durable and the mob state is ready to observe it.
-                    let mut state = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
-                    admin_state::write(&difficulty_path, next, 3)?;
-                    state.set_difficulty(next);
-                    difficulty_state.store(next, Ordering::Release);
-                    println!("Difficulty set to {next} (new joins/respawns see updated setting)");
+                    let next = command_difficulty(
+                        &mobs,
+                        &difficulty_state,
+                        &difficulty_path,
+                        hardcore,
+                        requested,
+                    )?;
+                    println!(
+                        "Difficulty set to {next} (new joins/respawns see updated setting)"
+                    );
                     Ok(())
                 })(),
                 ["/gamerule", key] => (|| -> io::Result<()> {
-                    let rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
-                    let value = rules.get(key).ok_or_else(|| bad("unsupported game rule"))?;
-                    println!("{key} = {value}");
+                    println!("{}", command_gamerule(&rules, &rules_path, &clock, key, None)?);
                     Ok(())
                 })(),
                 ["/gamerule", key, value] => (|| -> io::Result<()> {
-                    let value = match *value {
-                        "true" => true,
-                        "false" => false,
-                        _ => return Err(bad("gamerule value must be true or false")),
-                    };
-                    let mut rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
-                    let mut candidate = *rules;
-                    candidate.set(key, value)?;
-                    candidate.save(&rules_path)?;
-                    *rules = candidate;
-                    if *key == "doDaylightCycle" {
-                        clock.set_daylight_cycle(value);
-                    }
-                    println!("{key} = {value}");
+                    println!(
+                        "{}",
+                        command_gamerule(&rules, &rules_path, &clock, key, Some(value))?
+                    );
                     Ok(())
                 })(),
                 ["/scoreboard", operation @ ..] => (|| -> io::Result<()> {
