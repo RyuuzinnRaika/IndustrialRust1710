@@ -61,6 +61,7 @@ mod session_lock;
 mod survival;
 mod survival_damage;
 mod telemetry;
+mod teleport_gate;
 mod terrain;
 mod throwables;
 mod vehicles;
@@ -117,6 +118,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use survival::MiningProgress;
 use survival_damage::Hazards;
+use teleport_gate::TeleportGate;
 use throwables::Throwables;
 use vehicles::Boats;
 use vitals::Vitals;
@@ -1325,6 +1327,7 @@ fn play(
     let mut fall = FallTracker::new(player.y);
     let mut idle_gravity = IdleGravity::new(clock.ticks());
     let mut loaded_chunks = view_chunks(chunk_center(player));
+    let mut pending_teleport: Option<TeleportGate> = None;
     let mut pending_chunk_relights = BTreeSet::new();
     let mut last_chunk_relight = Instant::now() - Duration::from_millis(200);
     let mut yaw: f32 = 0.0;
@@ -1390,6 +1393,21 @@ fn play(
     let mut last_map_tick = clock.ticks();
     let mut last_arrow_damage_tick: Option<u64> = None;
     loop {
+        if pending_teleport
+            .as_ref()
+            .is_some_and(|gate| gate.timed_out(Instant::now()))
+        {
+            let mut reason = Vec::new();
+            write_string(
+                &json!({"text":"Teleport synchronization timed out."}).to_string(),
+                &mut reason,
+            )?;
+            let _ = send(s, 0x40, &reason);
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                "teleport acknowledgement timeout",
+            ));
+        }
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
                 "outbound packet overflow or session removed",
@@ -1650,6 +1668,7 @@ fn play(
                 send_visible_signs(s, decorations, &entering)?;
                 send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                 send_player_position(s, player, yaw, pitch)?;
+                pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                 if pearl_impact {
                     send(s, 0x06, &health_packet(*vitals))?;
                 }
@@ -1691,6 +1710,7 @@ fn play(
                         send_visible_signs(s, decorations, &entering)?;
                         send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                         send_player_position(s, player, yaw, pitch)?;
+                        pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                         hub.move_player(entity_id, *player, yaw, pitch);
                         last_movement_broadcast = Instant::now();
                     }
@@ -2545,6 +2565,12 @@ fn play(
         if survival && vitals.health <= 0.0 && matches!(id, 4 | 6 | 7 | 8) {
             continue;
         }
+        // Before C04/C06 confirms the authoritative destination, ignore
+        // every location-sensitive action from the old client view.
+        if pending_teleport.is_some() && TeleportGate::blocks_world_action(id) {
+            mining = None;
+            continue;
+        }
         match id {
             18 => {
                 // Protocol 5 C12: Int X, Short Y, Int Z, four Strings.
@@ -3104,6 +3130,20 @@ fn play(
                     send_player_position(s, player, yaw, pitch)?;
                     continue;
                 }
+                if let Some(gate) = pending_teleport.as_mut() {
+                    if gate.acknowledges(candidate) {
+                        pending_teleport = None;
+                        idle_gravity.observe_client(now_tick);
+                        // The destination is already authoritative and persisted.
+                        // A matching position report is only its acknowledgement,
+                        // not another move that should trigger collision/fall damage.
+                        continue;
+                    }
+                    if gate.should_resend(Instant::now()) {
+                        send_player_position(s, player, yaw, pitch)?;
+                    }
+                    continue;
+                }
                 if boats
                     .lock()
                     .map_err(|_| bad("boats mutex poisoned"))?
@@ -3335,6 +3375,8 @@ fn play(
                                         chunk_center(player),
                                     )?;
                                     send_player_position(s, player, yaw, pitch)?;
+                                    pending_teleport =
+                                        Some(TeleportGate::new(*player, Instant::now()));
                                     last_movement_broadcast = Instant::now();
                                     continue;
                                 }
@@ -3433,6 +3475,7 @@ fn play(
                             send(s, event.id, &event.body)?;
                             hub.broadcast_except(entity_id, event);
                             send_player_position(s, player, yaw, pitch)?;
+                            pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                             hub.move_player(entity_id, position, yaw, pitch);
                         }
                         Some((event, None)) => {
@@ -5919,6 +5962,7 @@ fn play(
                     send(s, 0x30, &inventory.window_items())?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     send_player_position(s, player, yaw, pitch)?;
+                    pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                     hub.move_player(entity_id, *player, yaw, pitch);
                 }
             }
