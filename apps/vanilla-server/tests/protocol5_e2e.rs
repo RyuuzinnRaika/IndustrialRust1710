@@ -1121,13 +1121,15 @@ fn add018_two_survival_clients_collect_one_ground_entity_exactly_once() {
     thread::scope(|scope| {
         let alice_gate = std::sync::Arc::clone(&gate);
         let bob_gate = std::sync::Arc::clone(&gate);
-        scope.spawn(|| {
+        let alice_stream = &mut alice;
+        let bob_stream = &mut bob;
+        scope.spawn(move || {
             alice_gate.wait();
-            send_position(&mut alice, 3.5, 65.0, 0.5);
+            send_position(alice_stream, 3.5, 65.0, 0.5);
         });
-        scope.spawn(|| {
+        scope.spawn(move || {
             bob_gate.wait();
-            send_position(&mut bob, 3.5, 65.0, 0.5);
+            send_position(bob_stream, 3.5, 65.0, 0.5);
         });
         gate.wait();
     });
