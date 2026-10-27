@@ -127,12 +127,16 @@ fn frame(id: u32, payload: &[u8]) -> Vec<u8> {
     output
 }
 
-fn handshake(port: u16, host: &str, next: u32) -> Vec<u8> {
-    let mut body = varint(5);
+fn handshake_version(port: u16, host: &str, next: u32, version: u32) -> Vec<u8> {
+    let mut body = varint(version);
     body.extend_from_slice(&mc_string(host));
     body.extend_from_slice(&port.to_be_bytes());
     body.extend_from_slice(&varint(next));
     frame(0, &body)
+}
+
+fn handshake(port: u16, host: &str, next: u32) -> Vec<u8> {
+    handshake_version(port, host, next, 5)
 }
 
 fn receive(stream: &mut TcpStream) -> (u32, Vec<u8>) {
@@ -189,6 +193,42 @@ fn bad_login(server: &Server, payload: &[u8]) {
     socket.write_all(payload).unwrap();
     must_close(socket);
     assert_eq!(server.status_online(), 0);
+}
+
+#[test]
+fn add004_protocol_version_and_255_character_hostname_boundaries() {
+    let server = Server::launch();
+    // Both sides of Protocol 5 must fail closed as a Login Disconnect,
+    // without admitting a player or preventing a following valid login.
+    for version in [4, 6] {
+        let mut socket = server.connect();
+        socket
+            .write_all(&handshake_version(server.port, "localhost", 2, version))
+            .unwrap();
+        let (id, data) = receive(&mut socket);
+        assert_eq!(id, 0, "wrong protocol must yield Login Disconnect");
+        let mut reason = Cursor::new(&data);
+        assert!(reason.read_string(512).unwrap().contains("1.7.10"));
+        reason.finish().unwrap();
+        must_close(socket);
+        assert_eq!(server.status_online(), 0);
+    }
+
+    // The vanilla 255-character Handshake hostname limit is inclusive.
+    let mut status = server.connect();
+    status
+        .write_all(&handshake(server.port, &"h".repeat(255), 1))
+        .unwrap();
+    status.write_all(&frame(0, &[])).unwrap();
+    assert_eq!(receive(&mut status).0, 0);
+    drop(status);
+
+    // A valid 16-character Login name must still be admitted after all
+    // invalid connections. The 17-character rejection is checked below.
+    let valid_login = server.login("LongName12345678");
+    server.wait_online(1);
+    drop(valid_login);
+    server.wait_online(0);
 }
 
 #[test]
