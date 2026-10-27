@@ -671,7 +671,8 @@ fn native_1710_minecart_checkpoint_keeps_survival_session_and_movement_alive() {
 fn native_1710_c04_c06_decode_feet_y_before_stance() {
     let server = NativeServer::start();
     let (mut client, _, initial) = server.join("Positioner");
-    assert_eq!(initial, [0.5, 65.0, 0.5]);
+    // The default IRW flat surface is y=63, so the player's feet start at 64.
+    assert_eq!(initial, [0.5, 64.0, 0.5]);
 
     // The unmodified 1.7.10 client writes [X, feet Y, stance, Z].
     // Assert C04 independently, so a broken C04 cannot be hidden by C06.
@@ -748,7 +749,7 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
 
     // A split VarInt / chat payload must survive multiple 50ms polls.
     let (mut client, _, pos) = server.join("RustTester");
-    assert_eq!(pos, [0.5, 65.0, 0.5]);
+    assert_eq!(pos, [0.5, 64.0, 0.5]);
     let list = frame(1, &mc_string("/list"));
     send_fragments(&mut client, &list, &[1, 1, 1, 2]);
     let response = until_packet(&mut client, 2, |body| {
@@ -1688,12 +1689,12 @@ fn vanilla_client_position_correction_accounts_for_eye_offset() {
     let initial = until_packet(&mut client, 0x08, |packet| packet.len() == 33);
     let wire_y = f64::from_be_bytes(initial[8..16].try_into().unwrap());
     let offset = f64::from(1.62_f32);
-    assert_eq!(wire_y, 65.0 + offset, "clientbound Y is the client posY");
+    assert_eq!(wire_y, 64.0 + offset, "clientbound Y is the client posY");
 
     // The vanilla client subtracts its float yOffset to obtain bounding-box
     // feet Y, then sends that feet Y back in C04/C06.
     let client_feet_y = wire_y - offset;
-    assert_eq!(client_feet_y, 65.0);
+    assert_eq!(client_feet_y, 64.0);
     send_position(&mut client, 0.7, 64.0, 0.5);
     send_position(&mut client, 0.7, 60.0, 0.5);
     let correction = until_packet(&mut client, 0x08, |packet| {
@@ -1790,14 +1791,13 @@ fn collision_correction_rejects_queued_nearby_client_movement_until_ack() {
 #[test]
 fn native_survival_collision_damage_death_respawn_and_health_persistence() {
     let server = NativeServer::start_with_mode(true);
-    let (mut client, _, _) = server.join("RustTester");
+    let (mut client, _, spawn) = server.join("RustTester");
+    assert_eq!(spawn, [0.5, 64.0, 0.5]);
 
     // Position inside bedrock at y=60 must be rejected by the server.
     send_position(&mut client, 0.5, 60.0, 0.5);
-    until_packet(&mut client, 0x08, |packet| {
-        read_position(packet) == [0.5, 65.0, 0.5]
-    });
-    send_position(&mut client, 0.5, 65.0, 0.5); // S08 confirmation
+    until_packet(&mut client, 0x08, |packet| read_position(packet) == spawn);
+    send_position(&mut client, spawn[0], spawn[1], spawn[2]); // S08 ACK
 
     // Falling eight blocks to the y=64 grass surface costs five health.
     send_position(&mut client, 0.5, 72.0, 0.5);
@@ -1828,14 +1828,12 @@ fn native_survival_collision_damage_death_respawn_and_health_persistence() {
     until_packet(&mut rejoined, 0x06, |packet| {
         packet.len() == 10 && packet[0..4] == 20f32.to_be_bytes()
     });
-    until_packet(&mut rejoined, 0x08, |packet| {
-        read_position(packet) == [0.5, 65.0, 0.5]
-    });
+    until_packet(&mut rejoined, 0x08, |packet| read_position(packet) == spawn);
     drop(rejoined);
     server.wait_idle();
     let (final_session, _, position) = server.join("RustTester");
-    // During a slow reconnect the 20TPS idle-gravity fallback may already
-    // have started falling from the respawn Y=65 toward the safe floor Y=64.
+    // The default world spawn is now already supported at feet Y=64.
+    // Reconnection must not place the player below the floor or high in the air.
     assert_eq!([position[0], position[2]], [0.5, 0.5]);
     assert!(
         (64.0..=65.0).contains(&position[1]),
@@ -2178,7 +2176,7 @@ fn native_protocol5_eight_player_admission_full_and_reconnect() {
     for index in 0..8 {
         let name = format!("Load{index}");
         let (socket, entity_id, position) = server.join(&name);
-        assert_eq!(position, [0.5, 65.0, 0.5]);
+        assert_eq!(position, [0.5, 64.0, 0.5]);
         assert!(entity_id > 0);
         players.push((socket, entity_id));
     }
@@ -2210,7 +2208,7 @@ fn native_protocol5_eight_player_admission_full_and_reconnect() {
         thread::sleep(Duration::from_millis(40));
     }
     let (rejoined, new_id, position) = server.join("Load7");
-    assert_eq!(position, [0.5, 65.0, 0.5]);
+    assert_eq!(position, [0.5, 64.0, 0.5]);
     assert!(new_id > old_id, "entity ID reused after reconnection");
     players.push((rejoined, new_id));
     assert_eq!(server.status()["players"]["online"], 8);
