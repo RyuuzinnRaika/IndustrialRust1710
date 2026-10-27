@@ -1484,9 +1484,13 @@ mod redstone_regression_tests {
         ));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
-        world.update_and_save(&path, 0, 64, 0, (29 << 4) | 5).unwrap();
+        world
+            .update_and_save(&path, 0, 64, 0, (29 << 4) | 5)
+            .unwrap();
         world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
-        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
+        world
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 8)
+            .unwrap();
         world.block_tick(&path, 64).unwrap();
         assert!(world.piston_extending_at(2, 64, 0, 5));
         assert_eq!(world.get(2, 64, 0), 1 << 4);
@@ -1511,9 +1515,13 @@ mod redstone_regression_tests {
         ));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
-        world.update_and_save(&path, 0, 64, 0, (29 << 4) | 5).unwrap();
+        world
+            .update_and_save(&path, 0, 64, 0, (29 << 4) | 5)
+            .unwrap();
         world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
-        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
+        world
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 8)
+            .unwrap();
         world.block_tick(&path, 64).unwrap();
         for _ in 0..3 {
             world.block_tick(&path, 64).unwrap();
