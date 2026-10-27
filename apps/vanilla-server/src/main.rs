@@ -10775,6 +10775,41 @@ mod command_world_settings_tests {
     use super::*;
 
     #[test]
+    fn setworldspawn_commits_before_sending_protocol5_spawn_packet() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-command-worldspawn-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let world = Mutex::new(World::default());
+        let hub = Hub::default();
+        let (_, rx, _) = hub
+            .add("Tester".into(), "uuid".into(), PlayerPosition::default())
+            .unwrap();
+        let point = world_spawn::WorldSpawn::new(15, 64, -20).unwrap();
+        assert_eq!(
+            command_setworldspawn(&world, &path, &hub, point).unwrap(),
+            "World spawn set to 15 64 -20"
+        );
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.id, 0x05);
+        assert_eq!(event.body, point.packet());
+        assert_eq!(world_spawn::load(&path).unwrap(), Some(point));
+        assert_eq!(
+            safe_spawn(&world, &path).unwrap(),
+            PlayerPosition {
+                x: 15.5,
+                y: 64.0,
+                z: -19.5,
+            }
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn gamerule_player_and_console_share_durable_validation() {
         let root = std::env::temp_dir().join(format!(
             "ir1710-command-rules-{}-{:?}",
