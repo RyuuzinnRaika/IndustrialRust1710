@@ -6695,12 +6695,12 @@ fn command_setworldspawn(
     hub: &Hub,
     point: world_spawn::WorldSpawn,
 ) -> io::Result<String> {
-    let _lock = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-    if _lock.dimension() != dimensions::Dimension::Overworld {
+    let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+    if guard.dimension() != dimensions::Dimension::Overworld {
         return Err(bad("world spawn must be set in Overworld"));
     }
     world_spawn::save(root_world_path, point)?;
-    drop(_lock);
+    drop(guard);
     hub.broadcast(Event {
         id: 0x05,
         body: point.packet(),
@@ -10767,5 +10767,71 @@ mod primed_tnt_protocol5_tests {
         assert_eq!(encoded[0], 0x81); // entity ID starts as Protocol 5 VarInt
         assert_eq!(encoded[4], 50); // TNT object type
         assert_eq!(&encoded[5..9], &16i32.to_be_bytes());
+    }
+}
+
+#[cfg(test)]
+mod command_world_settings_tests {
+    use super::*;
+
+    #[test]
+    fn gamerule_player_and_console_share_durable_validation() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-command-rules-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("rules.json");
+        let rules = Mutex::new(GameRules::default());
+        let (clock, clock_thread) = Clock::start_at(0);
+        assert_eq!(
+            command_gamerule(&rules, &file, &clock, "keepInventory", None).unwrap(),
+            "keepInventory = false"
+        );
+        assert!(command_gamerule(&rules, &file, &clock, "keepInventory", Some("1")).is_err());
+        assert!(command_gamerule(&rules, &file, &clock, "spawnRadius", Some("1")).is_err());
+        assert_eq!(
+            command_gamerule(&rules, &file, &clock, "keepInventory", Some("true")).unwrap(),
+            "keepInventory = true"
+        );
+        assert!(GameRules::load(&file).unwrap().keep_inventory());
+        assert_eq!(
+            command_gamerule(&rules, &file, &clock, "doDaylightCycle", Some("false")).unwrap(),
+            "doDaylightCycle = false"
+        );
+        assert!(!GameRules::load(&file).unwrap().daylight_cycle());
+        clock.stop();
+        clock_thread.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn difficulty_rejects_hardcore_downgrade_and_persists_before_publishing() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-command-difficulty-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let difficulty_path = root.join("difficulty");
+        let mobs_path = root.join("mobs.json");
+        let mobs = Mutex::new(
+            Mobs::load_or_new(&World::default(), true, 2, &mobs_path).unwrap(),
+        );
+        let state = AtomicU8::new(2);
+        assert!(command_difficulty(&mobs, &state, &difficulty_path, true, "easy").is_err());
+        assert_eq!(state.load(Ordering::Acquire), 2);
+        assert!(!difficulty_path.exists());
+        assert!(command_difficulty(&mobs, &state, &difficulty_path, false, "4").is_err());
+        assert_eq!(
+            command_difficulty(&mobs, &state, &difficulty_path, false, "hard").unwrap(),
+            3
+        );
+        assert_eq!(state.load(Ordering::Acquire), 3);
+        assert_eq!(admin_state::read(&difficulty_path, 3).unwrap(), Some(3));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
