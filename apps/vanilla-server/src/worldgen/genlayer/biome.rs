@@ -28,7 +28,11 @@ pub(super) struct BiomeLayer {
 
 impl BiomeLayer {
     pub(super) fn new(world_seed: i64, layer_salt: i64, world_type: BiomeWorldType) -> Self {
-        Self { world_seed, layer_salt, world_type }
+        Self {
+            world_seed,
+            layer_salt,
+            world_type,
+        }
     }
 }
 
@@ -149,10 +153,14 @@ mod tests {
                 -17,
                 BiomeWorldType::Default,
                 concat!(
-                    "0e011b000c201502", "0000180e0206010c",
-                    "1b230e1800270c01", "200c2606040e0100",
-                    "0c2015021e030100", "2303030c0015200c",
-                    "00000c031b020c20", "010e2300180c2601"
+                    "0e011b000c201502",
+                    "0000180e0206010c",
+                    "1b230e1800270c01",
+                    "200c2606040e0100",
+                    "0c2015021e030100",
+                    "2303030c0015200c",
+                    "00000c031b020c20",
+                    "010e2300180c2601"
                 ),
             ),
             (
@@ -161,10 +169,14 @@ mod tests {
                 -17,
                 BiomeWorldType::Default,
                 concat!(
-                    "0e0101000c201523", "0000180e021b031e",
-                    "01230e1800260c05", "200c2604040e2300",
-                    "0c2015020c010100", "0201030c0015200c",
-                    "00000c0403010c20", "030e0200181e2704"
+                    "0e0101000c201523",
+                    "0000180e021b031e",
+                    "01230e1800260c05",
+                    "200c2604040e2300",
+                    "0c2015020c010100",
+                    "0201030c0015200c",
+                    "00000c0403010c20",
+                    "030e0200181e2704"
                 ),
             ),
             (
@@ -173,10 +185,14 @@ mod tests {
                 -1,
                 BiomeWorldType::Default,
                 concat!(
-                    "0e0101000c201502", "0000180e0206010c",
-                    "01020e1800260c03", "200c271b040e2300",
-                    "0c2015021e030600", "0203031e0015200c",
-                    "00001e0304230c20", "030e0200181e2606"
+                    "0e0101000c201502",
+                    "0000180e0206010c",
+                    "01020e1800260c03",
+                    "200c271b040e2300",
+                    "0c2015021e030600",
+                    "0203031e0015200c",
+                    "00001e0304230c20",
+                    "030e0200181e2606"
                 ),
             ),
             (
@@ -185,15 +201,26 @@ mod tests {
                 15,
                 BiomeWorldType::Default11,
                 concat!(
-                    "0e0404000c201502", "0000180e0506030c",
-                    "1b050e1800260c03", "201e2706030e0600",
-                    "0c2015050c040100", "0303040c0015200c",
-                    "00000c0503020c20", "050e0100181e261b"
+                    "0e0404000c201502",
+                    "0000180e0506030c",
+                    "1b050e1800260c03",
+                    "201e2706030e0600",
+                    "0c2015050c040100",
+                    "0303040c0015200c",
+                    "00000c0503020c20",
+                    "050e0100181e261b"
                 ),
             ),
         ];
         for (seed, x, z, world_type, expected) in cases {
-            let actual = biome_map(BiomeLayer::new(seed, 200, world_type), x, z, 8, 8, patterned_parent);
+            let actual = biome_map(
+                BiomeLayer::new(seed, 200, world_type),
+                x,
+                z,
+                8,
+                8,
+                patterned_parent,
+            );
             assert_eq!(biome_hex(&actual), expected, "seed={seed} at ({x},{z})");
         }
     }
@@ -201,9 +228,14 @@ mod tests {
     #[test]
     fn preserves_ocean_mushroom_and_special_biome_rules() {
         let source = [0, 24, 14, 1 | 0x100, 2 | 0x100, 3 | 0x100, 4 | 0x100, 5];
-        let result = biome_map(BiomeLayer::new(42, 200, BiomeWorldType::Default), -16, 15, 8, 1, |_, _, _, _| {
-            source.to_vec()
-        });
+        let result = biome_map(
+            BiomeLayer::new(42, 200, BiomeWorldType::Default),
+            -16,
+            15,
+            8,
+            1,
+            |_, _, _, _| source.to_vec(),
+        );
         assert_eq!(&result[..3], &[0, 24, 14]);
         assert!(matches!(result[3], 38 | 39));
         assert_eq!(result[4], 21);
@@ -215,7 +247,14 @@ mod tests {
     #[test]
     fn split_queries_match_across_negative_chunk_boundaries() {
         for world_type in [BiomeWorldType::Default, BiomeWorldType::Default11] {
-            let whole = biome_map(BiomeLayer::new(42, 200, world_type), -17, -17, 8, 8, patterned_parent);
+            let whole = biome_map(
+                BiomeLayer::new(42, 200, world_type),
+                -17,
+                -17,
+                8,
+                8,
+                patterned_parent,
+            );
             for dz in (0..8).rev() {
                 for dx in (0..8).rev() {
                     let single = biome_map(
@@ -256,12 +295,22 @@ mod tests {
             }
         }
         assert!(biome_map(
-            BiomeLayer::new(42, 200, BiomeWorldType::Default), 0, 0, 0, 8,
+            BiomeLayer::new(42, 200, BiomeWorldType::Default),
+            0,
+            0,
+            0,
+            8,
             |_, _, _, _| panic!("empty request evaluated parent")
-        ).is_empty());
+        )
+        .is_empty());
         assert!(biome_map(
-            BiomeLayer::new(42, 200, BiomeWorldType::Default), 0, 0, 8, 0,
+            BiomeLayer::new(42, 200, BiomeWorldType::Default),
+            0,
+            0,
+            8,
+            0,
             |_, _, _, _| panic!("empty request evaluated parent")
-        ).is_empty());
+        )
+        .is_empty());
     }
 }
