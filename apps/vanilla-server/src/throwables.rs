@@ -106,12 +106,14 @@ impl Thrown {
 }
 /// Check the full flight segment against a server-owned entity AABB.
 /// Sampling only the end points can skip a narrow/grazing hitbox at high speed.
-fn segment_hits_box(
+/// Return the first intersection parameter on a finite segment (0..=1).
+/// The entry parameter lets the caller compare entity and block impacts.
+fn segment_box_entry(
     from: PlayerPosition,
     to: PlayerPosition,
     min: [f64; 3],
     max: [f64; 3],
-) -> bool {
+) -> Option<f64> {
     let mut entry = 0.0_f64;
     let mut exit = 1.0_f64;
     for (start, end, low, high) in [
@@ -125,12 +127,12 @@ fn segment_hits_box(
             || !high.is_finite()
             || low > high
         {
-            return false;
+            return None;
         }
         let delta = end - start;
         if delta == 0.0 {
             if start < low || start > high {
-                return false;
+                return None;
             }
         } else {
             let t0 = (low - start) / delta;
@@ -138,11 +140,93 @@ fn segment_hits_box(
             entry = entry.max(t0.min(t1));
             exit = exit.min(t0.max(t1));
             if entry > exit {
-                return false;
+                return None;
             }
         }
     }
-    true
+    Some(entry)
+}
+
+#[cfg(test)]
+fn segment_hits_box(
+    from: PlayerPosition,
+    to: PlayerPosition,
+    min: [f64; 3],
+    max: [f64; 3],
+) -> bool {
+    segment_box_entry(from, to, min, max).is_some()
+}
+
+fn segment_point(from: PlayerPosition, to: PlayerPosition, t: f64) -> PlayerPosition {
+    PlayerPosition {
+        x: from.x + (to.x - from.x) * t,
+        y: from.y + (to.y - from.y) * t,
+        z: from.z + (to.z - from.z) * t,
+    }
+}
+
+fn solid_projectile_block(block: u16) -> bool {
+    block != 0 && !matches!(block, 6 | 8 | 9 | 10 | 11 | 31 | 32 | 37 | 38 | 39 | 40 | 50 | 78)
+}
+
+/// Traverse each voxel crossed by the flight segment in parametric order.
+/// Sampling endpoints alone can miss a grazing wall and incorrectly shield
+/// an entity that is actually in front of the wall.
+fn first_solid_block_hit(
+    world: &World,
+    from: PlayerPosition,
+    to: PlayerPosition,
+) -> Option<(f64, [i32; 3])> {
+    if !from.is_valid() || !to.is_valid() {
+        return None;
+    }
+    let start = [from.x, from.y, from.z];
+    let delta = [to.x - from.x, to.y - from.y, to.z - from.z];
+    let mut cell = [
+        from.x.floor() as i32,
+        from.y.floor() as i32,
+        from.z.floor() as i32,
+    ];
+    let end = [
+        to.x.floor() as i32,
+        to.y.floor() as i32,
+        to.z.floor() as i32,
+    ];
+    let mut entry = 0.0_f64;
+    // Normal projectiles travel only a few blocks per tick; bound traversal
+    // even if a future caller supplies an unexpectedly large velocity.
+    for _ in 0..1024 {
+        if solid_projectile_block(world.get(cell[0], cell[1], cell[2]) >> 4) {
+            return Some((entry, cell));
+        }
+        if cell == end {
+            return None;
+        }
+        let mut next_t = f64::INFINITY;
+        let mut axis = None;
+        for index in 0..3 {
+            if delta[index] == 0.0 {
+                continue;
+            }
+            let boundary = if delta[index] > 0.0 {
+                f64::from(cell[index]) + 1.0
+            } else {
+                f64::from(cell[index])
+            };
+            let candidate = (boundary - start[index]) / delta[index];
+            if candidate < next_t {
+                next_t = candidate;
+                axis = Some(index);
+            }
+        }
+        if !next_t.is_finite() || next_t > 1.0 {
+            return None;
+        }
+        let index = axis?;
+        cell[index] += if delta[index] > 0.0 { 1 } else { -1 };
+        entry = next_t.max(entry);
+    }
+    None
 }
 
 #[derive(Clone, Default)]
@@ -390,104 +474,66 @@ impl Throwables {
                 y: previous.y + object.velocity[1],
                 z: previous.z + object.velocity[2],
             };
-            let length = (destination.x - previous.x)
-                .hypot(destination.y - previous.y)
-                .hypot(destination.z - previous.z);
-            let steps = (length * 4.0).ceil().clamp(1.0, 32.0) as usize;
-            let mut collision = None;
-            let mut mob_collision = None;
-            let mut player_collision = None;
-            for index in 1..=steps {
-                let t = index as f64 / steps as f64;
-                let sample = PlayerPosition {
-                    x: previous.x + (destination.x - previous.x) * t,
-                    y: previous.y + (destination.y - previous.y) * t,
-                    z: previous.z + (destination.z - previous.z) * t,
-                };
-                if !sample.is_valid() {
-                    break;
+            let block_hit = first_solid_block_hit(world, previous, destination);
+            let block_t = block_hit.map_or(f64::INFINITY, |(t, _)| t);
+            let mut mob_hit: Option<(f64, i32)> = None;
+            let mut player_hit: Option<(f64, i32)> = None;
+            if object.kind == Kind::Arrow {
+                for (id, at, radius, height) in mob_targets {
+                    if *radius < 0.0 || *height < 0.0 {
+                        continue;
+                    }
+                    if let Some(t) = segment_box_entry(
+                        previous,
+                        destination,
+                        [at.x - radius, at.y - 0.25, at.z - radius],
+                        [at.x + radius, at.y + height + 0.25, at.z + radius],
+                    ) {
+                        if mob_hit.is_none_or(|(best, _)| t < best) {
+                            mob_hit = Some((t, *id));
+                        }
+                    }
                 }
-                let x = sample.x.floor() as i32;
-                let y = sample.y.floor() as i32;
-                let z = sample.z.floor() as i32;
-                let block = world.get(x, y, z) >> 4;
-                // Vanilla ray tracing does not stop on water or lava source/flow blocks.
-                // Treating liquids as solid here destroys arrows and thrown items early.
-                if block != 0
-                    && !matches!(
-                        block,
-                        6 | 8 | 9 | 10 | 11 | 31 | 32 | 37 | 38 | 39 | 40 | 50 | 78
-                    )
-                {
-                    collision = Some(sample);
-                    break;
-                }
-                let previous_sample_t = (index - 1) as f64 / steps as f64;
-                let segment_start = PlayerPosition {
-                    x: previous.x + (destination.x - previous.x) * previous_sample_t,
-                    y: previous.y + (destination.y - previous.y) * previous_sample_t,
-                    z: previous.z + (destination.z - previous.z) * previous_sample_t,
-                };
-                let hit_mob = if object.kind == Kind::Arrow {
-                    mob_targets.iter().find(|(_, at, radius, height)| {
-                        *radius >= 0.0
-                            && *height >= 0.0
-                            && segment_hits_box(
-                                segment_start,
-                                sample,
-                                [at.x - radius, at.y - 0.25, at.z - radius],
-                                [at.x + radius, at.y + height + 0.25, at.z + radius],
-                            )
-                    })
-                } else {
-                    None
-                };
-                if let Some((mob_id, _, _, _)) = hit_mob {
-                    mob_collision = Some((*mob_id, sample));
-                    break;
-                }
-                let hit_player = if object.kind == Kind::Arrow {
-                    player_targets.iter().find(|(id, at)| {
-                        *id != object.owner_entity
-                            && segment_hits_box(
-                                segment_start,
-                                sample,
-                                [at.x - 0.3, at.y - 0.25, at.z - 0.3],
-                                [at.x + 0.3, at.y + 2.05, at.z + 0.3],
-                            )
-                    })
-                } else {
-                    None
-                };
-                if let Some((player_id, _)) = hit_player {
-                    player_collision = Some((*player_id, sample));
-                    break;
+                for (id, at) in player_targets {
+                    if *id == object.owner_entity {
+                        continue;
+                    }
+                    if let Some(t) = segment_box_entry(
+                        previous,
+                        destination,
+                        [at.x - 0.3, at.y - 0.25, at.z - 0.3],
+                        [at.x + 0.3, at.y + 2.05, at.z + 0.3],
+                    ) {
+                        if player_hit.is_none_or(|(best, _)| t < best) {
+                            player_hit = Some((t, *id));
+                        }
+                    }
                 }
             }
-            if let Some((player_id, at)) = player_collision {
-                object.at = at;
+            let mob_t = mob_hit.map_or(f64::INFINITY, |(t, _)| t);
+            if let Some((t, player_id)) =
+                player_hit.filter(|(t, _)| *t < block_t && *t < mob_t)
+            {
+                object.at = segment_point(previous, destination, t);
                 result.player_hits.push(player_id);
                 removed.push(object.id);
                 continue;
             }
-            if let Some((mob_id, at)) = mob_collision {
-                object.at = at;
+            if let Some((t, mob_id)) = mob_hit.filter(|(t, _)| *t < block_t) {
+                object.at = segment_point(previous, destination, t);
                 result.mob_hits.push((mob_id, tick));
                 removed.push(object.id);
                 continue;
             }
-            if let Some(at) = collision {
+            if let Some((t, block_cell)) = block_hit {
+                let at = segment_point(previous, destination, t);
                 // Destroy packets are broadcast to observers near this position.
                 // Keep the impact point, not the previous tick's location, so
                 // clients near the collision also receive the removal.
                 object.at = at;
                 if object.kind == Kind::Arrow {
                     object.embedded = true;
-                    let (x, y, z) = (
-                        at.x.floor() as i32,
-                        at.y.floor() as i32,
-                        at.z.floor() as i32,
-                    );
+                    let [x, y, z] = block_cell;
                     object.embedded_block = Some((x, y, z, world.get(x, y, z)));
                     // Vanilla counts the 1200-tick lifetime from entering the block,
                     // not from launch. Flight time must not shorten embedded lifetime.
@@ -1168,4 +1214,56 @@ mod tests {
             [1.1, 70.1, 0.1]
         ));
     }
+    #[test]
+    fn arrow_hits_mob_in_front_of_wall_even_within_same_old_sample() {
+        let mut world = World::new();
+        world.import_block(2, 70, 0, 1 << 4).unwrap();
+        let mut objects = Throwables::default();
+        objects.launch_dispenser(262, (0, 70, 0), (1, 0, 0)).unwrap();
+        // The old 0.22-block sampling saw stone at x=2.08 before checking
+        // the segment from x=1.86, skipping this mob at x=1.94.
+        let targets = [(
+            500_123,
+            PlayerPosition { x: 1.94, y: 70.0, z: 0.5 },
+            0.03,
+            1.0,
+        )];
+        let hit = objects.tick_with_mob_targets(&world, 20, &targets);
+        assert_eq!(hit.mob_hits, vec![(500_123, 20)]);
+        assert!(objects.active.is_empty());
+    }
+
+    #[test]
+    fn arrow_hits_player_before_wall_but_not_player_behind_it() {
+        let mut world = World::new();
+        world.import_block(2, 70, 0, 1 << 4).unwrap();
+        for (player_x, should_hit) in [(2.2, true), (2.6, false)] {
+            let mut objects = Throwables::default();
+            objects.launch_dispenser(262, (0, 70, 0), (1, 0, 0)).unwrap();
+            let players = [(
+                42,
+                PlayerPosition { x: player_x, y: 70.0, z: 0.5 },
+            )];
+            let hit = objects.tick_with_targets(&world, 20, &[], &players);
+            assert_eq!(!hit.player_hits.is_empty(), should_hit);
+            if should_hit {
+                assert!(objects.active.is_empty());
+            } else {
+                assert!(objects.active.values().next().unwrap().embedded);
+            }
+        }
+    }
+
+    #[test]
+    fn first_wall_intersection_uses_exact_voxel_and_negative_direction() {
+        let mut world = World::new();
+        world.import_block(1, 70, 0, 1 << 4).unwrap();
+        let from = PlayerPosition { x: 2.8, y: 70.5, z: 0.5 };
+        let to = PlayerPosition { x: 0.8, y: 70.5, z: 0.5 };
+        let (t, cell) = first_solid_block_hit(&world, from, to).unwrap();
+        assert_eq!(cell, [1, 70, 0]);
+        assert!((t - 0.4).abs() < 1e-10);
+        assert_eq!(first_solid_block_hit(&World::new(), from, to), None);
+    }
+
 }
