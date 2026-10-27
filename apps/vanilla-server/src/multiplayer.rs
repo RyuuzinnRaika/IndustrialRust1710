@@ -981,5 +981,4 @@ mod tests {
         assert!(!hub.request_dispenser_arrow_damage(999).unwrap());
         assert!(bob_rx.try_recv().is_err());
     }
-
 }
