@@ -473,7 +473,10 @@ fn add014_teleport_rejects_old_position_until_destination_ack() {
     drop(player);
     server.wait_idle();
     let (reconnected, _, saved) = server.join("RustTester");
-    assert!((saved[0] - 5.5).abs() < 0.05, "reconnect restored {saved:?}");
+    assert!(
+        (saved[0] - 5.5).abs() < 0.05,
+        "reconnect restored {saved:?}"
+    );
     drop(reconnected);
     server.wait_idle();
 }
