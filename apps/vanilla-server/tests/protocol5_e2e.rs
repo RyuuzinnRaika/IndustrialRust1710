@@ -39,12 +39,20 @@ impl NativeServer {
         Self::start_with_mode_and_items(survival, &[])
     }
     fn start_with_mode_and_items(survival: bool, items: &[(usize, i16)]) -> Self {
-        Self::start_with_seed(survival, items, false)
+        Self::start_with_seed(survival, items, false, false)
     }
     fn start_with_mode_and_cow(survival: bool, items: &[(usize, i16)]) -> Self {
-        Self::start_with_seed(survival, items, true)
+        Self::start_with_seed(survival, items, true, false)
     }
-    fn start_with_seed(survival: bool, items: &[(usize, i16)], cow: bool) -> Self {
+    fn start_with_contended_drop() -> Self {
+        Self::start_with_seed(true, &[], false, true)
+    }
+    fn start_with_seed(
+        survival: bool,
+        items: &[(usize, i16)],
+        cow: bool,
+        ground_drop: bool,
+    ) -> Self {
         let exclusive = SERVER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -94,6 +102,28 @@ impl NativeServer {
             fs::write(
                 directory.join("players").join(inventory_name),
                 serde_json::to_vec(&inventory).unwrap(),
+            )
+            .unwrap();
+        }
+        if ground_drop {
+            // GroundItems::load assigns the normal pickup delay. Three blocks
+            // separate this fixed entity from both players' spawn position,
+            // allowing their pickup attempts to be synchronized.
+            let id = 1_000_000_001i32;
+            let drops = json!({
+                "version": 1,
+                "next_id": id,
+                "entries": {
+                    "1000000001": {
+                        "id": id,
+                        "position": [3 * 32 + 16, 65 * 32 + 16, 16],
+                        "stack": {"id": 4, "count": 8, "damage": 0}
+                    }
+                }
+            });
+            fs::write(
+                directory.join("flat.drops.json"),
+                serde_json::to_vec(&drops).unwrap(),
             )
             .unwrap();
         }
@@ -1060,6 +1090,104 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     let (rejoined, _, _) = server.join("RustTester");
     drop(rejoined);
     server.wait_idle();
+}
+
+#[test]
+fn add018_two_survival_clients_collect_one_ground_entity_exactly_once() {
+    const DROP_ID: i32 = 1_000_000_001;
+    let server = NativeServer::start_with_contended_drop();
+    let (mut alice, alice_id, _) = server.join("RustTester");
+    let (mut bob, bob_id, _) = server.join("TwinAlpha");
+    assert_eq!(server.status()["players"]["online"], 2);
+
+    // Both clients must see the same entity before either can claim it.
+    for client in [&mut alice, &mut bob] {
+        let entity = until_packet(client, 0x0e, |p| {
+            p.len() == 24 && p[5] == 2
+        });
+        let mut encoded = entity.as_slice();
+        assert_eq!(read_varint(&mut encoded).unwrap() as i32, DROP_ID);
+        let metadata = until_packet(client, 0x1c, |p| {
+            p.len() >= 13 && p[..4] == DROP_ID.to_be_bytes()
+        });
+        assert_eq!(metadata[5..7], 4i16.to_be_bytes());
+        assert_eq!(metadata[7], 8);
+    }
+
+    // Wait for the server-owned pickup delay, then race two independent
+    // Protocol 5 TCP sessions toward exactly the same item position.
+    thread::sleep(Duration::from_millis(900));
+    let gate = std::sync::Arc::new(std::sync::Barrier::new(3));
+    thread::scope(|scope| {
+        let alice_gate = std::sync::Arc::clone(&gate);
+        let bob_gate = std::sync::Arc::clone(&gate);
+        scope.spawn(|| {
+            alice_gate.wait();
+            send_position(&mut alice, 3.5, 65.0, 0.5);
+        });
+        scope.spawn(|| {
+            bob_gate.wait();
+            send_position(&mut bob, 3.5, 65.0, 0.5);
+        });
+        gate.wait();
+    });
+
+    // Collect Item (S0D) followed by Destroy Entities (S13) must reach
+    // *both* clients, but identify only one collector.
+    let mut collectors = Vec::new();
+    for client in [&mut alice, &mut bob] {
+        let packet = until_packet(client, 0x0d, |p| {
+            p.len() == 8 && p[..4] == DROP_ID.to_be_bytes()
+        });
+        let collector = i32::from_be_bytes(packet[4..8].try_into().unwrap());
+        assert!(collector == alice_id || collector == bob_id);
+        collectors.push(collector);
+        let destroy = until_packet(client, 0x13, |p| {
+            p.len() == 5 && p[0] == 1 && p[1..] == DROP_ID.to_be_bytes()
+        });
+        assert_eq!(&destroy[1..], &DROP_ID.to_be_bytes());
+    }
+    assert_eq!(collectors[0], collectors[1]);
+
+    drop(alice);
+    drop(bob);
+    server.wait_idle();
+
+    let saved = |name: &str| {
+        let path = server.directory.join(format!(
+            "players/{name}.survival.inventory.json"
+        ));
+        await_file(&path);
+        let inventory: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let total = inventory["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(std::iter::once(&inventory["cursor"]))
+            .filter_map(|v| v["count"].as_u64())
+            .sum::<u64>();
+        total
+    };
+    let alice_items = saved("rusttester");
+    let bob_items = saved("twinalpha");
+    assert_eq!(alice_items + bob_items, 8, "duplicate or missing pickup");
+    assert_eq!(alice_items, if collectors[0] == alice_id { 8 } else { 0 });
+    assert_eq!(bob_items, if collectors[0] == bob_id { 8 } else { 0 });
+
+    let ground_file = server.directory.join("flat.drops.json");
+    let ground: Value = serde_json::from_slice(&fs::read(&ground_file).unwrap()).unwrap();
+    assert!(ground["entries"].as_object().unwrap().is_empty());
+
+    // Reconnect both identities to verify the durable per-player snapshots.
+    let (returning_a, _, _) = server.join("RustTester");
+    let (returning_b, _, _) = server.join("TwinAlpha");
+    drop(returning_a);
+    drop(returning_b);
+    server.wait_idle();
+    assert_eq!(saved("rusttester"), alice_items);
+    assert_eq!(saved("twinalpha"), bob_items);
+    let ground: Value = serde_json::from_slice(&fs::read(ground_file).unwrap()).unwrap();
+    assert!(ground["entries"].as_object().unwrap().is_empty());
 }
 
 #[test]
