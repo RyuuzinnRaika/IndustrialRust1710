@@ -2921,7 +2921,9 @@ mod tests {
         world.import_block(0, 64, 1, 54 << 4).unwrap(); // chest contents protected
         world.import_block(5, 64, 0, 1 << 4).unwrap();
         world.save(&path).unwrap();
-        let changed = world.creeper_blast_and_save(&path, (0, 64, 0), 3.0).unwrap();
+        let changed = world
+            .creeper_blast_and_save(&path, (0, 64, 0), 3.0)
+            .unwrap();
         assert!(changed.contains(&(0, 64, 0)));
         assert!(changed.contains(&(1, 64, 0)));
         assert!(!changed.contains(&(0, 64, 1)));
