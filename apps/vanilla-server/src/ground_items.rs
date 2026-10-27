@@ -340,16 +340,34 @@ impl GroundItems {
         self.commit_staged_put(path, staged)
     }
 
+    /// Choose the first *receivable* nearby item rather than the first item
+    /// alone. A full inventory must not let an unstackable/foreign item block
+    /// pickup of a later stack that can still merge into an occupied slot.
+    /// Selection is bounded by MAX_DROPS; the caller journals any transfer.
+    pub fn nearby_ready_with<T>(
+        &self,
+        feet: (f64, f64, f64),
+        mut select: impl FnMut(&GroundItem) -> Option<T>,
+    ) -> Option<(GroundItem, T)> {
+        let now = Instant::now();
+        for item in self.entries.values() {
+            let eligible = self
+                .eligible_after
+                .get(&item.id)
+                .is_some_and(|time| now >= *time);
+            if eligible && item.in_pickup_range(feet) {
+                if let Some(accepted) = select(item) {
+                    return Some((item.clone(), accepted));
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
     pub fn nearby_ready(&self, feet: (f64, f64, f64)) -> Option<GroundItem> {
-        self.entries
-            .values()
-            .find(|item| {
-                self.eligible_after
-                    .get(&item.id)
-                    .is_some_and(|time| Instant::now() >= *time)
-                    && item.in_pickup_range(feet)
-            })
-            .cloned()
+        self.nearby_ready_with(feet, |_| Some(()))
+            .map(|(item, ())| item)
     }
     /// Legacy independent-file path retained for existing unit tests.
     #[cfg(test)]
@@ -368,6 +386,122 @@ impl GroundItems {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn s01_compatible_ground_stack_is_not_blocked_by_earlier_unreceivable_item() {
+        use crate::inventory::Inventory;
+
+        let apple = Stack {
+            id: 260,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let cobble = Stack {
+            id: 4,
+            count: 2,
+            damage: 0,
+            nbt: None,
+        };
+        let (mut ground, spawned) = GroundItems::default()
+            .stage_put_many(&[apple, cobble], (0, 64, 0))
+            .unwrap();
+        for item in &spawned {
+            ground
+                .eligible_after
+                .insert(item.id, Instant::now() - Duration::from_secs(1));
+        }
+
+        let mut inventory = Inventory::default();
+        for slot in 9..45 {
+            assert!(inventory
+                .creative_set(
+                    slot,
+                    Some(Stack {
+                        id: 3,
+                        count: 64,
+                        damage: 0,
+                        nbt: None,
+                    }),
+                )
+                .unwrap());
+        }
+        // No empty slots; the earlier apple is impossible to accept. The
+        // later cobble may still merge one item into the existing hotbar.
+        assert!(inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 4,
+                    count: 63,
+                    damage: 0,
+                    nbt: None,
+                }),
+            )
+            .unwrap());
+        let (selected, (credited, amount, slots)) = ground
+            .nearby_ready_with((0.5, 64.0, 0.5), |item| {
+                let mut next = inventory.clone();
+                next.receive_stack_partial(item.stack)
+                    .map(|(count, changed)| (next, count, changed))
+            })
+            .expect("compatible later stack must not be starved");
+        assert_eq!(selected.id, spawned[1].id);
+        assert_eq!(amount, 1);
+        assert_eq!(slots, vec![36]);
+        assert_eq!(credited.held().unwrap().count, 64);
+        assert_eq!(inventory.held().unwrap().count, 63);
+        let (staged, picked, remaining) = ground
+            .stage_take_amount(selected.id, amount)
+            .unwrap()
+            .unwrap();
+        assert_eq!(picked.stack.count, 1);
+        assert_eq!(remaining.unwrap().stack.count, 1);
+        assert_eq!(staged.entries.get(&spawned[0].id).unwrap().stack, apple);
+        assert_eq!(staged.entries.get(&spawned[1].id).unwrap().stack.count, 1);
+    }
+
+    #[test]
+    fn s01_unready_or_distant_drops_never_reach_the_inventory_selector() {
+        let (mut drops, added) = GroundItems::default()
+            .stage_put_many(
+                &[Stack {
+                    id: 17,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                }],
+                (0, 64, 0),
+            )
+            .unwrap();
+        let id = added[0].id;
+        let mut called = false;
+        assert!(drops
+            .nearby_ready_with((0.5, 64.0, 0.5), |_| {
+                called = true;
+                Some(())
+            })
+            .is_none());
+        assert!(!called);
+        drops
+            .eligible_after
+            .insert(id, Instant::now() - Duration::from_secs(1));
+        assert!(drops
+            .nearby_ready_with((10.5, 64.0, 0.5), |_| {
+                called = true;
+                Some(())
+            })
+            .is_none());
+        assert!(!called);
+        assert_eq!(
+            drops
+                .nearby_ready_with((0.5, 64.0, 0.5), |_| Some(()))
+                .unwrap()
+                .0
+                .id,
+            id
+        );
+    }
+
     #[test]
     fn partial_take_keeps_same_item_entity_and_never_loses_remainder() {
         let original = GroundItems::default();
