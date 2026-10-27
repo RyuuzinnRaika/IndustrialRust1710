@@ -506,6 +506,9 @@ pub struct Mobs {
     pending_hits: Vec<(PlayerPosition, u8, u64)>,
     #[serde(skip)]
     pending_blast_damage: BTreeMap<i32, u8>,
+    /// Ten-tick post-hit immunity is per authenticated player, not per Mob.
+    #[serde(skip)]
+    last_player_damage_tick: BTreeMap<i32, u64>,
     #[serde(skip)]
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
     #[serde(skip)]
@@ -530,6 +533,10 @@ pub struct Mobs {
     // Runtime-only flag. Default false (not paused) on new/load.
     #[serde(skip)]
     natural_spawning_paused: bool,
+    /// Daylight is the world-clock position, not server uptime (which starts
+    /// with a different 1.7.10 solar offset and can be changed by /time).
+    #[serde(skip)]
+    daylight_offset: Option<u64>,
     next_id: i32,
     dragon_defeated: bool,
     enabled: bool,
@@ -1644,7 +1651,23 @@ impl Mobs {
         tick: u64,
     ) -> Option<Attack> {
         let mob = self.entities.get_mut(&id)?;
-        if !mob.nearby(at, 3.0) || (mob.hit_tick != 0 && tick.saturating_sub(mob.hit_tick) < 10) {
+        // Entity positions refer to FEET; the actual attack comes from the
+        // player's eye and can reach a large/tall Mob's bounding box even
+        // when the feet-to-feet 3-D distance exceeds three blocks.
+        let (half_width, height) = projectile_hitbox(mob);
+        let horizontal = (mob.position.x - at.x).hypot(mob.position.z - at.z);
+        let eye = at.y + 1.62;
+        let gap_y = if eye < mob.position.y {
+            mob.position.y - eye
+        } else if eye > mob.position.y + height {
+            eye - (mob.position.y + height)
+        } else {
+            0.0
+        };
+        let reach = 3.0 + half_width;
+        if horizontal.hypot(gap_y) > reach
+            || (mob.hit_tick != 0 && tick.saturating_sub(mob.hit_tick) < 10)
+        {
             return None;
         }
         mob.hit_tick = tick;
@@ -2289,6 +2312,7 @@ impl Mobs {
         let hostile_cap = natural_spawn_capacity(players, VANILLA_HOSTILE_CAP);
         let passive_cap = natural_spawn_capacity(players, VANILLA_PASSIVE_CAP);
         let dimension = world.dimension();
+        let daytime = self.daylight_at(now);
         for index in 0..4u64 {
             let seed = hash(
                 now ^ index.wrapping_mul(0x9e3779b97f4a7c15) ^ world.natural_seed().unwrap_or(0),
@@ -2367,7 +2391,7 @@ impl Mobs {
             let is_passive = overworld
                 && now.is_multiple_of(400)
                 && natural_spawn_passive_roll(seed)
-                && natural_passive_habitat_ok(world.get(x, y - 1, z) >> 4, block, sky, now);
+                && natural_passive_habitat_ok(world.get(x, y - 1, z) >> 4, block, sky, daytime);
             // Select the species before applying light rules: slime-chunk
             // cave spawns are legal even at light level 15.
             let (kind, swamp_bonus) = if is_passive {
@@ -2488,7 +2512,7 @@ impl Mobs {
                         world.natural_seed().unwrap_or(0),
                         (cx, cy, cz),
                         light,
-                        now,
+                        daytime,
                         is_passive,
                     ) {
                         continue;
@@ -2640,6 +2664,24 @@ impl Mobs {
         self.natural_spawning_paused = !allowed;
     }
     /// Tick at most four elapsed 20Hz steps; caller owns broadcast fan-out.
+    /// The client-visible 1.7.10 time (0=sunrise, 6000=noon, 18000=midnight)
+    /// must drive day/night AI. Server ticks alone represent uptime and need
+    /// not match the visible sun, especially after /time set.
+    pub fn tick_at_daytime(
+        &mut self,
+        now: u64,
+        daytime: u64,
+        world: &World,
+        players: &[PlayerPosition],
+    ) -> Vec<Event> {
+        self.daylight_offset = Some((daytime % 24_000 + 24_000 - now % 24_000) % 24_000);
+        self.tick(now, world, players)
+    }
+
+    fn daylight_at(&self, tick: u64) -> u64 {
+        (tick % 24_000 + self.daylight_offset.unwrap_or(0)) % 24_000
+    }
+
     pub fn tick(&mut self, now: u64, world: &World, players: &[PlayerPosition]) -> Vec<Event> {
         // Each connected session can poll the shared world in the same 20 Hz
         // tick. Execute world simulation only once, including natural spawns.
@@ -2707,6 +2749,7 @@ impl Mobs {
             // Reusing `now` for every step would repeat one 1/800 despawn
             // roll rather than giving each elapsed tick its own chance.
             let simulated_tick = now - (steps - 1 - step);
+            let simulated_daytime = self.daylight_at(simulated_tick);
             // A delayed poll may cross a 20-tick spawner or natural-spawn
             // boundary without landing on it. Run both against the simulated
             // tick so neither attempt is lost; persisted spawner cooldowns
@@ -2757,7 +2800,7 @@ impl Mobs {
                 // final clock value for each step burns undead up to four
                 // times on a single 20-tick boundary (or misses a boundary).
                 if matches!(mob.kind, Kind::Zombie | Kind::Skeleton)
-                    && sunlight(simulated_tick)
+                    && sunlight(simulated_daytime)
                     && sky_exposed(world, mob.position)
                     && simulated_tick.is_multiple_of(20)
                 {
@@ -2812,7 +2855,7 @@ impl Mobs {
                     );
                     // Evaluate light at each simulated tick, not the final catch-up
                     // time: sunset can fall between the bounded steps.
-                    mob.bright_spider = spider_bright_light(block, sky, simulated_tick);
+                    mob.bright_spider = spider_bright_light(block, sky, simulated_daytime);
                 }
                 let nearest = players
                     .iter()
@@ -3378,12 +3421,26 @@ impl Mobs {
                 }
             }
         }
-        match self.difficulty.unwrap_or(1) {
+        let scaled = match self.difficulty.unwrap_or(1) {
             0 => 0,
             1 => amount.div_ceil(2),
             3 => amount.saturating_mul(3).div_ceil(2),
             _ => amount,
+        };
+        if scaled > 0 {
+            // Vanilla 1.7.10: after a hit the player is briefly immune to
+            // another equal/lower hit. Do not stack multiple Mob bites,
+            // projectiles and explosions in a single half-second window.
+            if self
+                .last_player_damage_tick
+                .get(&player_id)
+                .is_some_and(|&last| tick >= last && tick - last < 10)
+            {
+                return 0;
+            }
+            self.last_player_damage_tick.insert(player_id, tick);
         }
+        scaled
     }
 }
 /// Minecraft 1.7.10 BiomeGenBase spawn entries: sheep/pig/chicken/cow
@@ -4486,6 +4543,56 @@ mod tests {
             mobs.entities.get_mut(&id).unwrap().anger_until = 0;
             assert_eq!(mobs.hurt_player(777, at, 100), 0);
         }
+    }
+
+    #[test]
+    fn solar_time_follows_visible_clock_not_server_uptime() {
+        let world = World::new();
+        let pos = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, pos, false);
+        let id = mobs.next_id - 1;
+        mobs.entities.get_mut(&id).unwrap().leash_holder = Some(777);
+        mobs.last_tick = 199;
+        // The wall clock shows noon, even though uptime tick 200 could have
+        // been mapped to night by /time set.
+        mobs.tick_at_daytime(200, 6000, &world, &[]);
+        assert_eq!(mobs.entities[&id].health, 19);
+        // /time set night must stop burning at the very next tick.
+        mobs.tick_at_daytime(220, 18000, &world, &[]);
+        assert_eq!(mobs.entities[&id].health, 19);
+        mobs.tick_at_daytime(240, 6040, &world, &[]);
+        assert_eq!(mobs.entities[&id].health, 18);
+    }
+
+    #[test]
+    fn hostile_hits_have_per_player_ten_tick_damage_grace() {
+        let player = PlayerPosition::default();
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, player, false);
+        assert!(mobs.hurt_player(45, player, 20) > 0);
+        mobs.pending_blast_damage.insert(45, 8);
+        assert_eq!(mobs.hurt_player(45, player, 21), 0);
+        mobs.pending_blast_damage.insert(45, 8);
+        assert!(mobs.hurt_player(45, player, 30) > 0);
+        mobs.pending_blast_damage.insert(46, 8);
+        assert!(mobs.hurt_player(46, player, 31) > 0);
+    }
+
+    #[test]
+    fn melee_reaches_mob_body_on_vertical_steps_without_long_range_hits() {
+        let player = PlayerPosition { x: 0.5, y: 64.0, z: 0.5 };
+        let mob_pos = PlayerPosition { x: 3.0, y: 66.0, z: 0.5 };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, mob_pos, false);
+        let id = mobs.next_id - 1;
+        assert!(mobs.player_attack(id, player, None, 20).is_some());
+        let distant = PlayerPosition { x: -8.0, ..player };
+        assert!(mobs.player_attack(id, distant, None, 31).is_none());
     }
 
     #[test]
