@@ -1038,11 +1038,7 @@ mod tests {
     fn spawnpoint_mailbox_is_owned_by_overworld_target() {
         let hub = Hub::default();
         let (_, rx, _) = hub
-            .add(
-                "Alice".into(),
-                "uuid-a".into(),
-                PlayerPosition::default(),
-            )
+            .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
             .unwrap();
         hub.add_in_dimension(
             "NetherUser".into(),
