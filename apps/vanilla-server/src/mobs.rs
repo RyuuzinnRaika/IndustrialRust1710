@@ -3417,12 +3417,16 @@ fn natural_spawn_capacity(players: &[PlayerPosition], base: usize) -> usize {
     natural_mob_cap(players, base).min(MAX_NATURAL_PER_CATEGORY)
 }
 
-/// Reject non-finite Y and invalid X/Z before converting to chunks.
-/// Java 1.7.10 counts online players' X/Z chunks even when they are above
-/// build height or falling into the void; height must not change the mob cap.
-/// Rust float-to-int casts saturate, so invalid X/Z must be rejected.
+/// Only in-world X/Z coordinates may contribute to the eligible-chunk union.
+/// Java 1.7.10 counts online players above build height or in the void, so
+/// height must not affect the cap. But corrupt positions beyond our world
+/// border must not inflate caps or act as distance/despawn references.
 fn natural_spawn_player_chunk(player: PlayerPosition) -> Option<(i64, i64)> {
-    if !player.y.is_finite() {
+    let limit = f64::from(crate::world::WORLD_LIMIT);
+    if !player.y.is_finite()
+        || !(-limit..limit).contains(&player.x)
+        || !(-limit..limit).contains(&player.z)
+    {
         return None;
     }
     let x = natural_spawn_offset_block(player.x, 0)?;
@@ -5154,18 +5158,41 @@ mod tests {
     }
 
     #[test]
-    fn natural_mob_cap_handles_extreme_signed_block_coordinates() {
-        // The 17x17 cap union is computed in chunk coordinates. Its border
-        // must not overflow near either end of the signed block range.
+    fn natural_mob_cap_handles_world_border_signed_coordinates() {
+        // The 17x17 union extends beyond a player's chunk at the world edge.
+        // Both signs must remain valid without integer overflow or saturation.
         let edge = |x: f64, z: f64| PlayerPosition { x, y: 65.0, z };
-        let max = edge(f64::from(i32::MAX), f64::from(i32::MAX));
-        let min = edge(f64::from(i32::MIN), f64::from(i32::MIN));
+        let limit = f64::from(crate::world::WORLD_LIMIT);
+        let max = edge(limit - 0.5, limit - 0.5);
+        let min = edge(-limit + 0.5, -limit + 0.5);
         assert_eq!(natural_mob_cap(&[max], 70), 79);
         assert_eq!(natural_mob_cap(&[min], 10), 11);
         assert_eq!(natural_mob_cap(&[max, max], 70), 79);
         assert_eq!(natural_mob_cap(&[min, max], 70), 158);
         assert!(natural_spawn_chunk_eligible(max, &[max]));
         assert!(natural_spawn_chunk_eligible(min, &[min]));
+
+        // Exact positive and negative borders are excluded by PlayerPosition
+        // validation. They must not add chunks, protect mobs from despawning,
+        // or make a candidate chunk eligible.
+        for outside in [
+            edge(limit, 0.5),
+            edge(-limit, 0.5),
+            edge(0.5, limit),
+            edge(0.5, -limit),
+            edge(f64::from(i32::MAX), 0.5),
+            edge(f64::from(i32::MIN), 0.5),
+        ] {
+            assert_eq!(natural_mob_cap(&[outside], 70), 0);
+            assert_eq!(natural_mob_cap(&[max, outside], 70), 79);
+            assert!(!natural_spawn_chunk_eligible(outside, &[outside]));
+            assert!(!natural_spawn_chunk_eligible(outside, &[max]));
+            assert_eq!(distance_to_players(max, &[outside, max]), 0.0);
+            assert_eq!(distance_to_players(max, &[outside]), f64::INFINITY);
+        }
+        // Out-of-height players at valid X/Z still count for vanilla caps.
+        let above = PlayerPosition { y: 300.0, ..min };
+        assert_eq!(natural_mob_cap(&[above], 70), 79);
     }
 
     #[test]
