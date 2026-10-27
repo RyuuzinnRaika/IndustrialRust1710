@@ -2,10 +2,11 @@
 //!
 //! Items persist separately from IRW1 in a capped JSON file. They do not
 //! simulate gravity, collisions, liquids or merging yet.
-//! Ordering prioritizes preventing duplicate pickups: remove+persist the
-//! ground item before writing the receiver's inventory. A storage failure
-//! between these two commits can lose an item; a multi-file transaction is
-//! needed for full crash consistency.
+//! Player sessions serialize pickup claims using their shared GroundItems
+//! mutex. Before announcing a pickup, the owning session atomically commits
+//! both the new ground-item snapshot and receiver inventory through the
+//! multi-file redo journal; publishing either snapshot early could duplicate
+//! items if another session races the same entity.
 use crate::inventory::Stack;
 use crate::multiplayer::{self, Event};
 use crate::world::WORLD_LIMIT;
@@ -368,6 +369,102 @@ impl GroundItems {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn add018_contending_sessions_commit_only_one_pickup_to_durable_files() {
+        use crate::inventory::Inventory;
+        use crate::journal;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, Mutex};
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ir1710-add018-pickup-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(dir.join("players")).unwrap();
+        let drop_file = dir.join("flat.drops.json");
+        let journal_file = dir.join("flat.pending-txn.json");
+        let initial = GroundItems::default();
+        let (mut initial, spawned) = initial
+            .stage_put_many(
+                &[Stack {
+                    id: 4,
+                    count: 8,
+                    damage: 0,
+                    nbt: None,
+                }],
+                (0, 65, 0),
+            )
+            .unwrap();
+        let entity_id = spawned[0].id;
+        initial.eligible_after.insert(entity_id, Instant::now());
+        fs::write(&drop_file, initial.encoded().unwrap()).unwrap();
+
+        let shared = Arc::new(Mutex::new(initial));
+        let gate = Arc::new(Barrier::new(9));
+        let claimed = Arc::new(AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let shared = Arc::clone(&shared);
+                let gate = Arc::clone(&gate);
+                let claimed = Arc::clone(&claimed);
+                let dir = dir.clone();
+                let drop_file = drop_file.clone();
+                let journal_file = journal_file.clone();
+                scope.spawn(move || {
+                    gate.wait();
+                    // The lock must cover discovery, staging, durable commit,
+                    // and publishing the new snapshot to other sessions.
+                    let mut ground = shared.lock().unwrap();
+                    let Some(item) = ground.nearby_ready((0.5, 65.0, 0.5)) else {
+                        return;
+                    };
+                    let mut receiver = Inventory::default();
+                    let (count, _) = receiver.receive_stack_partial(item.stack).unwrap();
+                    let (new_ground, pickup, remainder) = ground
+                        .stage_take_amount(item.id, count)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(pickup.stack.count, 8);
+                    assert!(remainder.is_none());
+                    let inv_file = dir.join(format!("players/p{index:02}.inventory.json"));
+                    journal::commit(
+                        &journal_file,
+                        &[
+                            (drop_file.as_path(), new_ground.encoded().unwrap()),
+                            (inv_file.as_path(), receiver.encoded().unwrap()),
+                        ],
+                    )
+                    .unwrap();
+                    *ground = new_ground;
+                    claimed.fetch_add(1, Ordering::AcqRel);
+                });
+            }
+            gate.wait();
+        });
+
+        assert_eq!(claimed.load(Ordering::Acquire), 1);
+        assert!(shared.lock().unwrap().stage_take_amount(entity_id, 1).unwrap().is_none());
+        assert_eq!(GroundItems::load(&drop_file).unwrap().items().count(), 0);
+        assert!(!journal_file.exists(), "a successful pickup must clear redo");
+        let credited: u32 = (0..8)
+            .map(|index| {
+                let file = dir.join(format!("players/p{index:02}.inventory.json"));
+                Inventory::load(&file)
+                    .unwrap()
+                    .possessions()
+                    .iter()
+                    .map(|item| u32::from(item.count))
+                    .sum::<u32>()
+            })
+            .sum();
+        assert_eq!(credited, 8, "the item must exist exactly once");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn partial_take_keeps_same_item_entity_and_never_loses_remainder() {
         let original = GroundItems::default();
