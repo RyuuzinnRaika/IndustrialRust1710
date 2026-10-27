@@ -105,7 +105,8 @@ fn add006_protocol5_uses_an_uncompressed_packet_id_directly_after_length() {
     let mut wire = Vec::new();
     write_frame(&mut wire, &handshake).unwrap();
     assert_eq!(wire, [7, 0, 5, 1, b'a', 0x63, 0xdd, 2]);
-    let (id, mut body) = packet_id_and_body(&read_frame(&mut wire.as_slice()).unwrap()).unwrap();
+    let decoded = read_frame(&mut wire.as_slice()).unwrap();
+    let (id, mut body) = packet_id_and_body(&decoded).unwrap();
     assert_eq!(id, 0);
     assert_eq!(body.read_varint().unwrap(), PROTOCOL_VERSION);
     assert_eq!(body.read_string(255).unwrap(), "a");
