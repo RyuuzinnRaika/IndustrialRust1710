@@ -256,8 +256,11 @@ impl Minecarts {
     /// Load a bounded versioned snapshot or start empty for old worlds. The
     /// caller runs journal recovery first; malformed saves fail closed.
     pub fn load(path: &Path, tick: u64) -> io::Result<Self> {
-        let len = match fs::metadata(path) {
-            Ok(metadata) => metadata.len(),
+        // Do not follow symlinks or accept directories as vehicle snapshots.
+        // A missing save is a legacy world; a non-regular entry is not.
+        let len = match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
+            Ok(_) => return Err(invalid("minecart save must be a regular file")),
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
             Err(error) => return Err(error),
         };
@@ -613,6 +616,41 @@ impl Minecarts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn minecart_load_rejects_non_regular_save_paths() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-carts-nonregular-{}.json",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&path);
+        fs::create_dir(&path).unwrap();
+
+        let error = Minecarts::load(&path, 10).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        fs::remove_dir(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn minecart_load_rejects_symlink_even_to_valid_snapshot() {
+        use std::os::unix::fs::symlink;
+
+        let directory = std::env::temp_dir();
+        let suffix = std::process::id();
+        let target = directory.join(format!("ir1710-carts-target-{suffix}.json"));
+        let link = directory.join(format!("ir1710-carts-link-{suffix}.json"));
+        let _ = fs::remove_file(&link);
+        let _ = fs::remove_file(&target);
+        fs::write(&target, Minecarts::default().encoded().unwrap()).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let error = Minecarts::load(&link, 10).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        fs::remove_file(link).unwrap();
+        fs::remove_file(target).unwrap();
+    }
+
     #[test]
     fn durable_snapshot_restores_carts_without_reusing_player_attachment() {
         let path = std::env::temp_dir().join(format!("ir1710-carts-{}.json", std::process::id()));
