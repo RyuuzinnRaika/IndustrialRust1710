@@ -1,0 +1,20 @@
+[Unit]
+Description=IndustrialRust1710 trusted-main standalone verification (no GitHub Actions)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ir-ci
+Group=ir-ci
+Environment=HOME=/mnt/nas_storage/build-server/industrialrust1710-local-ci
+Environment=IR_CI_ROOT=/mnt/nas_storage/build-server/industrialrust1710-local-ci/state
+WorkingDirectory=/mnt/nas_storage/build-server/industrialrust1710-local-ci
+ExecStart=/usr/bin/bash /mnt/nas_storage/build-server/industrialrust1710-local-ci/bin/local-rust-ci.sh --if-changed
+TimeoutStartSec=3h
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/nas_storage/build-server/industrialrust1710-local-ci
+RestrictSUIDSGID=true
