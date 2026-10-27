@@ -91,6 +91,10 @@ pub struct Inventory {
     /// be returned to the player so disconnect/full inventory cannot erase it.
     #[serde(default)]
     enchant_input: Option<Stack>,
+    /// Ender Chest is private player storage, shared by all Ender Chest blocks
+    /// across dimensions; old saves load an empty storage by default.
+    #[serde(default)]
+    ender_chest: [Option<Stack>; 27],
     #[serde(skip)]
     drag: Drag,
     #[serde(default)]
@@ -107,6 +111,7 @@ impl Default for Inventory {
             anvil_inputs: [None; 2],
             anvil_name: None,
             enchant_input: None,
+            ender_chest: [None; 27],
             drag: Drag::default(),
             bed_spawn: None,
         }
@@ -230,6 +235,7 @@ impl Inventory {
                     || !item.is_valid()
                     || (!crate::items_1710::enchantable_in_table(item.id) && item.id != 403)
             })
+            || self.ender_chest.iter().flatten().any(|stack| !stack.is_valid())
             || self.slots.iter().flatten().any(|stack| !stack.is_valid())
             || self.cursor.is_some_and(|stack| !stack.is_valid())
         {
@@ -1087,6 +1093,25 @@ impl Inventory {
                 None
             }
         }
+    }
+
+    /// Personal, persistent Ender Chest; changes are saved in the same player
+    /// inventory snapshot so cursor, hotbar and remote storage cannot diverge.
+    pub fn ender_chest_window_items(&self, window: u8) -> Vec<u8> {
+        self.chest_window_items(window, &self.ender_chest)
+    }
+
+    pub fn ender_chest_click_window(
+        &mut self,
+        window: u8,
+        slot: i16,
+        button: i8,
+        mode: i8,
+    ) -> Option<ChestDirection> {
+        let mut slots = self.ender_chest;
+        let result = self.chest_click_window(window, &mut slots, slot, button, mode)?;
+        self.ender_chest = slots;
+        Some(result)
     }
 
     /// Double-click collection scans both the container and the player's
