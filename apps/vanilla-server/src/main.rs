@@ -3636,8 +3636,10 @@ fn play(
                                                         // One fsync/rename for every drop
                                                         // created by this mining action.
                                                         // Publish only after successful save.
-                                                        let items = ground
-                                                            .commit_staged_put(ground_path, staged)?;
+                                                        let items = ground.commit_staged_put(
+                                                            ground_path,
+                                                            staged,
+                                                        )?;
                                                         for item in items {
                                                             for packet in item.spawn() {
                                                                 hub.broadcast(packet);
