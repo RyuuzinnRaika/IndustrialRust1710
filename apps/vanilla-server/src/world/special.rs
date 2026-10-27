@@ -1020,6 +1020,28 @@ mod tests {
     }
 
     #[test]
+    fn explosion_near_irw_edit_limit_does_not_abort_tick_or_stop_save() {
+        let path = file("tnt-edits-capacity");
+        let mut world = World::new();
+        // Fill the sparse-edit map with distant blocks; generated grass and
+        // dirt near this blast would otherwise allocate unpersistable edits.
+        for n in 0..super::super::MAX_EDITS {
+            world.edits.insert(
+                (1000 + (n % 256) as i32, 100, 1000 + (n / 256) as i32),
+                49 << 4,
+            );
+        }
+        assert!(world.spawn_primed_tnt(0, 63, 0, 1));
+        world.save(&path).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert!(world.primed_tnt.is_empty());
+        assert_eq!(world.edits.len(), super::super::MAX_EDITS);
+        world.save(&path).unwrap();
+        assert!(World::load(&path).unwrap().primed_tnt.is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn tnt_capacity_defers_chain_blocks_instead_of_failing_the_save() {
         let path = file("tnt-capacity");
         let mut world = World::new();
