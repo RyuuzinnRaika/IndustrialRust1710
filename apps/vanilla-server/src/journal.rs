@@ -69,6 +69,35 @@ fn is_anvil_region(relative: &Path) -> bool {
     }
 }
 
+/// Restrict player NBT targets to the two identity namespaces created by
+/// PlayerPosition::location and authenticated_location. Never journal an
+/// arbitrary .dat file (level.dat, another directory, or forged identity).
+fn is_player_state(relative: &Path) -> bool {
+    let parts: Vec<_> = relative.iter().map(|p| p.to_str()).collect();
+    let name_ok = |name: &str| {
+        (3..=16).contains(&name.len())
+            && name
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+    };
+    match parts.as_slice() {
+        [Some("players"), Some(filename)] => filename.strip_suffix(".dat").is_some_and(name_ok),
+        [Some("players"), Some("verified"), Some(filename)] => {
+            filename.strip_suffix(".dat").is_some_and(|id| {
+                id.len() == 36
+                    && id.bytes().enumerate().all(|(i, c)| {
+                        if matches!(i, 8 | 13 | 18 | 23) {
+                            c == b'-'
+                        } else {
+                            c.is_ascii_digit() || (b'a'..=b'f').contains(&c)
+                        }
+                    })
+            })
+        }
+        _ => false,
+    }
+}
+
 fn target_limit(relative: &Path) -> usize {
     if is_anvil_region(relative) {
         MAX_REGION_TARGET_BYTES
@@ -80,6 +109,9 @@ fn target_limit(relative: &Path) -> usize {
 fn validate_target(relative: &Path, bytes: &[u8]) -> io::Result<()> {
     if bytes.len() > target_limit(relative) {
         return Err(invalid("journal target too big"));
+    }
+    if is_player_state(relative) && (bytes.len() > 8192 || !bytes.starts_with(&[0x1f, 0x8b])) {
+        return Err(invalid("invalid journaled player gzip NBT"));
     }
     if is_anvil_region(relative) {
         crate::legacy_region::inspect_region_bytes(relative, bytes)?;
@@ -116,6 +148,7 @@ fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
         || name.ends_with(".hanging.json")
         || name.ends_with(".drops.json")
         || name.ends_with(".irw")
+        || is_player_state(rel)
         || is_anvil_region(rel))
     {
         return Err(invalid("journal target type not allowed"));
@@ -301,6 +334,42 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_nbt_journal_targets_are_identity_scoped_and_gzip_bounded() {
+        assert!(is_player_state(Path::new("players/rusttester.dat")));
+        assert!(is_player_state(Path::new(
+            "players/verified/d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca.dat"
+        )));
+        for bad in [
+            "level.dat",
+            "players/admin.dat.bak",
+            "players/Alice.dat",
+            "players/verified/../../level.dat",
+            "other/rusttester.dat",
+            "players/verified/not-a-uuid.dat",
+        ] {
+            assert!(!is_player_state(Path::new(bad)), "{bad}");
+        }
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-food-nbt-journal-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let player = root.join("players/rusttester.dat");
+        let journal = root.join("flat.pending-txn.json");
+        assert!(commit(&journal, &[(player.as_path(), b"no gzip".to_vec())]).is_err());
+        assert!(!journal.exists());
+        let encoded = crate::player::PlayerPosition::default()
+            .encoded_state_in_dimension(crate::vitals::Vitals::default(), 0)
+            .unwrap();
+        commit(&journal, &[(player.as_path(), encoded.clone())]).unwrap();
+        assert_eq!(fs::read(&player).unwrap(), encoded);
+        assert!(!journal.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn single_minecart_checkpoint_is_durable_and_replayable() {

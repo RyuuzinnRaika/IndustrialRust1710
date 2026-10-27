@@ -889,6 +889,79 @@ fn periodic_effect_interval(kind: u8, amplifier: u8) -> u64 {
     (base.checked_shr(u32::from(amplifier)).unwrap_or(0)).max(1)
 }
 
+/// Recover multi-dimension player transactions from the journal loaded
+/// during server startup, not a new journal in DIM-1/DIM1. The persistent
+/// player identity files live under the Overworld save root in every dimension.
+fn food_journal_path(world_path: &Path, player_path: &Path) -> io::Result<PathBuf> {
+    let player_dir = player_path
+        .parent()
+        .ok_or_else(|| bad("player save without parent"))?;
+    let players_dir = if player_dir.file_name().is_some_and(|s| s == "verified") {
+        player_dir
+            .parent()
+            .ok_or_else(|| bad("verified player save without players root"))?
+    } else {
+        player_dir
+    };
+    if players_dir.file_name().is_none_or(|name| name != "players") {
+        return Err(bad("player save must be inside players directory"));
+    }
+    let root = players_dir
+        .parent()
+        .ok_or_else(|| bad("player save missing world root"))?;
+    if world_path.parent() == Some(root) {
+        return Ok(world_path.with_extension("pending-txn.json"));
+    }
+    let dimension_folder = world_path
+        .parent()
+        .ok_or_else(|| bad("dimension world missing parent"))?;
+    if dimension_folder.parent() != Some(root)
+        || !matches!(
+            dimension_folder.file_name().and_then(|x| x.to_str()),
+            Some("DIM-1" | "DIM1")
+        )
+    {
+        return Err(bad("player save outside dimension root"));
+    }
+    Ok(root.join("overworld.pending-txn.json"))
+}
+
+/// Publish the food-item debit and its resulting Health/Food NBT in one
+/// recoverable redo generation. Never swap live state or send client packets
+/// until both files have been committed. Journal replay resolves interrupted
+/// file replacement before the next player session is admitted.
+struct FoodSave<'a> {
+    world_path: &'a Path,
+    player_path: &'a Path,
+    inventory_path: &'a Path,
+    player: &'a PlayerPosition,
+    dimension: i32,
+}
+
+fn commit_food_consumption(
+    save: FoodSave<'_>,
+    inventory: &mut Inventory,
+    vitals: &mut Vitals,
+    staged_inventory: Inventory,
+    staged_vitals: Vitals,
+) -> io::Result<()> {
+    let inventory_bytes = staged_inventory.encoded()?;
+    let player_bytes = save
+        .player
+        .encoded_state_in_dimension(staged_vitals, save.dimension)?;
+    let log_path = food_journal_path(save.world_path, save.player_path)?;
+    journal::commit(
+        &log_path,
+        &[
+            (save.inventory_path, inventory_bytes),
+            (save.player_path, player_bytes),
+        ],
+    )?;
+    *inventory = staged_inventory;
+    *vitals = staged_vitals;
+    Ok(())
+}
+
 /// Protocol 5 Entity Action 3/4 starts and stops sprinting. Other actions
 /// (sneaking, waking up, horse controls) never alter the sprint flag.
 /// Use the live server difficulty, including administrative changes made
@@ -1894,16 +1967,31 @@ fn play(
                                     })
                                     .is_some()
                             {
-                                // Inventory debit is durable before temporary status or HP gain.
-                                remaining.save(inventory_path)?;
-                                *inventory = remaining;
+                                // Instant healing/harming and the bottle debit must
+                                // survive a crash together. Timed effects remain a
+                                // separate follow-up requiring persisted effect state.
+                                let mut after = *vitals;
                                 if kind == 6 {
-                                    vitals.health =
-                                        (vitals.health + 4.0 * f32::from(amplifier + 1)).min(20.0);
+                                    after.health =
+                                        (after.health + 4.0 * f32::from(amplifier + 1)).min(20.0);
                                 } else if kind == 7 {
-                                    vitals.health =
-                                        (vitals.health - 6.0 * f32::from(amplifier + 1)).max(0.0);
-                                } else {
+                                    after.health =
+                                        (after.health - 6.0 * f32::from(amplifier + 1)).max(0.0);
+                                }
+                                commit_food_consumption(
+                                    FoodSave {
+                                        world_path,
+                                        player_path,
+                                        inventory_path,
+                                        player,
+                                        dimension: session_dimension.protocol_id() as i32,
+                                    },
+                                    inventory,
+                                    vitals,
+                                    remaining,
+                                    after,
+                                )?;
+                                if kind != 6 && kind != 7 {
                                     active_effects.retain(|effect| effect.kind != kind);
                                     active_effects.push(ActiveEffect {
                                         kind,
@@ -1914,11 +2002,6 @@ fn play(
                                         ),
                                     });
                                 }
-                                player.save_state_in_dimension(
-                                    player_path,
-                                    *vitals,
-                                    session_dimension.protocol_id() as i32,
-                                )?;
                                 send(s, 0x30, &inventory.window_items())?;
                                 send(s, 0x06, &health_packet(*vitals))?;
                                 send(
@@ -1972,15 +2055,21 @@ fn play(
                                         })
                                         .is_some();
                                 if container_returned {
-                                    // Debit inventory before player-NBT food credit.
-                                    remaining.save(inventory_path)?;
-                                    player.save_state_in_dimension(
-                                        player_path,
+                                    // Food debit, returned bowl and Health/Food NBT
+                                    // must commit in one durable redo generation.
+                                    commit_food_consumption(
+                                        FoodSave {
+                                            world_path,
+                                            player_path,
+                                            inventory_path,
+                                            player,
+                                            dimension: session_dimension.protocol_id() as i32,
+                                        },
+                                        inventory,
+                                        vitals,
+                                        remaining,
                                         after,
-                                        session_dimension.protocol_id() as i32,
                                     )?;
-                                    *inventory = remaining;
-                                    *vitals = after;
                                     for effect in vitals::food_side_effects(
                                         stack,
                                         food_effect_roll(now_tick, entity_id),
@@ -9255,5 +9344,117 @@ mod live_survival_difficulty_tests {
             tick_survival_vitals(&mut player, 20, &current);
         }
         assert_eq!(player.health, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod survival_food_journal_tests {
+    use super::*;
+
+    #[test]
+    fn eating_commits_inventory_and_vitals_together_with_dimension() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-food-atomic-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let world = root.join("flat.irw");
+        let player_path = PlayerPosition::location(&world, "RustTester");
+        let inventory_path = Inventory::location(&player_path);
+        let player = PlayerPosition::default();
+        let mut vitals = Vitals {
+            food: 10,
+            saturation: 1.0,
+            ..Vitals::default()
+        };
+        player
+            .save_state_in_dimension(&player_path, vitals, -1)
+            .unwrap();
+        let mut inventory = Inventory::default();
+        assert!(inventory
+            .receive_stack(Stack {
+                id: 260,
+                count: 2,
+                damage: 0,
+                nbt: None,
+            })
+            .is_some());
+        inventory.save(&inventory_path).unwrap();
+        let mut after_inv = inventory.clone();
+        assert!(after_inv.consume_held());
+        let mut after_vitals = vitals;
+        assert!(after_vitals.eat(Stack {
+            id: 260,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        }));
+        commit_food_consumption(
+            FoodSave {
+                world_path: &world,
+                player_path: &player_path,
+                inventory_path: &inventory_path,
+                player: &player,
+                dimension: -1,
+            },
+            &mut inventory,
+            &mut vitals,
+            after_inv.clone(),
+            after_vitals,
+        )
+        .unwrap();
+        assert_eq!(inventory, after_inv);
+        assert_eq!(vitals, after_vitals);
+        assert_eq!(Inventory::load(&inventory_path).unwrap(), after_inv);
+        assert_eq!(
+            PlayerPosition::load_state_with_dimension(&player_path).unwrap(),
+            (player, after_vitals, -1)
+        );
+        assert!(!world.with_extension("pending-txn.json").exists());
+
+        // Reject an unsafe participant without spending the apple or
+        // changing the server-owned health snapshot.
+        let before_inv = inventory.clone();
+        let before_vitals = vitals;
+        let bad_player = root.join("level.dat");
+        let fail = commit_food_consumption(
+            FoodSave {
+                world_path: &world,
+                player_path: &bad_player,
+                inventory_path: &inventory_path,
+                player: &player,
+                dimension: -1,
+            },
+            &mut inventory,
+            &mut vitals,
+            after_inv,
+            after_vitals,
+        );
+        assert!(fail.is_err());
+        assert_eq!(inventory, before_inv);
+        assert_eq!(vitals, before_vitals);
+        assert!(!world.with_extension("pending-txn.json").exists());
+        let nether_path = root.join("DIM-1/nether.irw");
+        let end_path = root.join("DIM1/end.irw");
+        let expected_log = root.join("overworld.pending-txn.json");
+        for dimension_world in [&nether_path, &end_path] {
+            assert_eq!(
+                food_journal_path(dimension_world, &player_path).unwrap(),
+                expected_log
+            );
+            let verified = PlayerPosition::authenticated_location(
+                &world,
+                "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca",
+            )
+            .unwrap();
+            assert_eq!(
+                food_journal_path(dimension_world, &verified).unwrap(),
+                expected_log
+            );
+            assert!(food_journal_path(&root.join("other/nether.irw"), &player_path).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
