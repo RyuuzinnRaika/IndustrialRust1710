@@ -4,7 +4,7 @@ use crate::multiplayer::{self, Event};
 use crate::navigation;
 use crate::physics;
 use crate::player::PlayerPosition;
-use crate::world::World;
+use crate::world::{LightSampler, World};
 use legacy_protocol::write_varint;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -2129,6 +2129,7 @@ impl Mobs {
         &mut self,
         now: u64,
         world: &World,
+        lighting: &mut LightSampler<'_>,
         players: &[PlayerPosition],
         events: &mut Vec<Event>,
     ) {
@@ -2238,7 +2239,7 @@ impl Mobs {
                 continue;
             }
             let overworld = dimension == crate::dimensions::Dimension::Overworld;
-            let (block, sky) = world.light_at(x, y, z);
+            let (block, sky) = lighting.light_at(x, y, z);
             let is_passive = overworld
                 && now.is_multiple_of(400)
                 && natural_spawn_passive_roll(seed)
@@ -2356,7 +2357,7 @@ impl Mobs {
                     let light = if (cx, cy, cz) == (x, y, z) {
                         (block, sky)
                     } else {
-                        world.light_at(cx, cy, cz)
+                        lighting.light_at(cx, cy, cz)
                     };
                     if !natural_spawn_species_light_ok(
                         kind,
@@ -2397,7 +2398,7 @@ impl Mobs {
                         cy,
                         now,
                         hash(seed ^ (member as u64).wrapping_mul(0x65d2_1b0c_91fa_3e47)),
-                        candidate_light.unwrap_or_else(|| world.light_at(cx, cy, cz)),
+                        candidate_light.unwrap_or_else(|| lighting.light_at(cx, cy, cz)),
                     )
                 {
                     continue;
@@ -2536,6 +2537,7 @@ impl Mobs {
         let steps = now.saturating_sub(self.last_tick).min(MAX_STEPS);
         self.last_tick = now;
         let mut events = Vec::new();
+        let mut lighting = world.lighting_sampler();
         // Vanilla orbs expire after five minutes (6,000 server ticks); broadcast
         // destruction so clients do not retain ghosts after the server frees them.
         self.orbs.retain(|id, orb| {
@@ -2596,7 +2598,7 @@ impl Mobs {
             // A delayed poll may cross a 20-tick natural-spawn boundary
             // without landing on it. Evaluate each bounded simulated tick
             // once, instead of silently losing that spawn opportunity.
-            self.spawn_natural(simulated_tick, world, players, &mut events);
+            self.spawn_natural(simulated_tick, world, &mut lighting, players, &mut events);
             let mut shots = Vec::new();
             let mut dead = Vec::new();
             let villagers: Vec<_> = self
@@ -2689,8 +2691,11 @@ impl Mobs {
                 }
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     let p = mob.position;
-                    let (block, sky) =
-                        world.light_at(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+                    let (block, sky) = lighting.light_at(
+                        p.x.floor() as i32,
+                        p.y.floor() as i32,
+                        p.z.floor() as i32,
+                    );
                     // Evaluate light at each simulated tick, not the final catch-up
                     // time: sunset can fall between the bounded steps.
                     mob.bright_spider = spider_bright_light(block, sky, simulated_tick);
@@ -6688,7 +6693,14 @@ mod tests {
         let now = 18_040;
         let mut baseline = Mobs::new_with_difficulty(&world, true, 2);
         let mut baseline_events = Vec::new();
-        baseline.spawn_natural(now, &world, &[valid], &mut baseline_events);
+        let mut baseline_lighting = world.lighting_sampler();
+        baseline.spawn_natural(
+            now,
+            &world,
+            &mut baseline_lighting,
+            &[valid],
+            &mut baseline_events,
+        );
         assert!(!baseline.entities.is_empty());
 
         let snapshot = |mobs: &Mobs| {
@@ -6708,14 +6720,22 @@ mod tests {
             for online in [[bad, valid], [valid, bad]] {
                 let mut mixed = Mobs::new_with_difficulty(&world, true, 2);
                 let mut mixed_events = Vec::new();
-                mixed.spawn_natural(now, &world, &online, &mut mixed_events);
+                let mut mixed_lighting = world.lighting_sampler();
+                mixed.spawn_natural(now, &world, &mut mixed_lighting, &online, &mut mixed_events);
                 assert_eq!(snapshot(&mixed), snapshot(&baseline));
                 assert_eq!(mixed_events.len(), baseline_events.len());
             }
         }
         let mut invalid_only = Mobs::new_with_difficulty(&world, true, 2);
         let mut invalid_events = Vec::new();
-        invalid_only.spawn_natural(now, &world, &invalid, &mut invalid_events);
+        let mut invalid_lighting = world.lighting_sampler();
+        invalid_only.spawn_natural(
+            now,
+            &world,
+            &mut invalid_lighting,
+            &invalid,
+            &mut invalid_events,
+        );
         assert!(invalid_only.entities.is_empty());
         assert!(invalid_events.is_empty());
     }
@@ -6775,7 +6795,8 @@ mod tests {
 
         let mut mobs = Mobs::new_with_difficulty(&world, true, 2);
         let mut events = Vec::new();
-        mobs.spawn_natural(now, &world, &[player], &mut events);
+        let mut lighting = world.lighting_sampler();
+        mobs.spawn_natural(now, &world, &mut lighting, &[player], &mut events);
         assert!(
             mobs.entities.values().any(|mob| mob.kind == Kind::Zombie),
             "second origin must be attempted after the rejected slime pack"

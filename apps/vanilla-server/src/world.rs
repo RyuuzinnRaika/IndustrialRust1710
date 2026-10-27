@@ -5,6 +5,7 @@ mod devices;
 mod ecology;
 mod lighting;
 mod special;
+pub(crate) use lighting::LightSampler;
 pub use special::TntEvent;
 use std::fs::{self, File};
 use std::io::{self, Write};

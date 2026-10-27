@@ -3,6 +3,48 @@
 use super::World;
 use std::collections::{BTreeMap, VecDeque};
 
+const MAX_CACHED_LIGHT_CHUNKS: usize = 32;
+
+/// Bounded per-simulation-tick cache. World state is borrowed immutably for
+/// the sampler's lifetime, so cached light cannot become stale mid-tick.
+pub(crate) struct LightSampler<'a> {
+    world: &'a World,
+    arrays: BTreeMap<(i32, i32), (Vec<u8>, Vec<u8>)>,
+    insertion_order: VecDeque<(i32, i32)>,
+}
+
+impl<'a> LightSampler<'a> {
+    fn new(world: &'a World) -> Self {
+        Self {
+            world,
+            arrays: BTreeMap::new(),
+            insertion_order: VecDeque::new(),
+        }
+    }
+
+    /// Sample the authoritative chunk arrays, computing them at most once per
+    /// chunk while resident in this bounded tick-local cache.
+    pub(crate) fn light_at(&mut self, x: i32, y: i32, z: i32) -> (u8, u8) {
+        if !(0..=255).contains(&y) || !super::in_bounds(x, y, z) {
+            return (0, 0);
+        }
+        let chunk = (x.div_euclid(16), z.div_euclid(16));
+        if !self.arrays.contains_key(&chunk) {
+            if self.arrays.len() == MAX_CACHED_LIGHT_CHUNKS {
+                if let Some(oldest) = self.insertion_order.pop_front() {
+                    self.arrays.remove(&oldest);
+                }
+            }
+            self.arrays
+                .insert(chunk, self.world.light_arrays(chunk.0, chunk.1));
+            self.insertion_order.push_back(chunk);
+        }
+        let slot = index(x, y, z, chunk.0 * 16, chunk.1 * 16);
+        let (block, sky) = &self.arrays[&chunk];
+        (block[slot], sky[slot])
+    }
+}
+
 fn transparent(id: u16) -> bool {
     matches!(id, 0 | 6 | 8..=11 | 18 | 20 | 30 | 31 | 37..=40 | 50 | 55
         | 59 | 60 | 63 | 65 | 66 | 69 | 70 | 72 | 75..=78 | 83 | 90
@@ -28,16 +70,13 @@ fn index(x: i32, y: i32, z: i32, min_x: i32, min_z: i32) -> usize {
 
 impl World {
     /// Sample the same propagated lighting arrays sent to the 1.7.10 client.
-    /// Used sparingly on natural spawn attempts (never once per mob per tick).
+    /// Call `lighting_sampler` once per simulation tick to reuse chunk arrays.
     pub fn light_at(&self, x: i32, y: i32, z: i32) -> (u8, u8) {
-        if !(0..=255).contains(&y) || !super::in_bounds(x, y, z) {
-            return (0, 0);
-        }
-        let cx = x.div_euclid(16);
-        let cz = z.div_euclid(16);
-        let (block, sky) = self.light_arrays(cx, cz);
-        let slot = index(x, y, z, cx * 16, cz * 16);
-        (block[slot], sky[slot])
+        self.lighting_sampler().light_at(x, y, z)
+    }
+
+    pub(crate) fn lighting_sampler(&self) -> LightSampler<'_> {
+        LightSampler::new(self)
     }
 
     /// Returns separate 16x256x16 block-light and sky-light nibble values.
@@ -175,6 +214,25 @@ impl World {
 #[cfg(test)]
 mod regression_tests {
     use super::*;
+
+    #[test]
+    fn tick_sampler_reuses_chunk_arrays_and_bounds_memory() {
+        let world = World::new();
+        let mut sampler = world.lighting_sampler();
+        let first = sampler.light_at(1, 64, 1);
+        assert_eq!(sampler.arrays.len(), 1);
+        assert_eq!(sampler.light_at(15, 64, 15), (0, 15));
+        assert_eq!(sampler.arrays.len(), 1);
+        assert_eq!(first, world.light_at(1, 64, 1));
+
+        for chunk_x in 1..=MAX_CACHED_LIGHT_CHUNKS as i32 {
+            sampler.light_at(chunk_x * 16, 64, 0);
+        }
+        assert_eq!(sampler.arrays.len(), MAX_CACHED_LIGHT_CHUNKS);
+        assert!(!sampler.arrays.contains_key(&(0, 0)));
+        assert_eq!(sampler.light_at(1, 64, 1), first);
+        assert_eq!(sampler.arrays.len(), MAX_CACHED_LIGHT_CHUNKS);
+    }
 
     #[test]
     fn skylight_flows_sideways_under_a_one_block_overhang() {
