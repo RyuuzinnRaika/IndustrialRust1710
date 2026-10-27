@@ -1,5 +1,9 @@
 # IndustrialRust1710 — repository-wide development instructions
 
+## Project-wide policy (mandatory)
+
+Before implementing or merging changes, also follow [docs/PROJECT_POLICIES.md](docs/PROJECT_POLICIES.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for quality gates, safe world-data handling, Minecraft 1.7.10 compatibility claims, PR/merge discipline, and multi-agent coordination. Security concerns must use [SECURITY.md](SECURITY.md), not a public issue containing exploit details. These documents supplement the mandatory Rust-only runtime policy below.
+
 ## Language policy (mandatory)
 
 **Product implementation and runtime behavior must be written in Rust only (`.rs`).**
