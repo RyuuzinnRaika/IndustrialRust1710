@@ -8250,6 +8250,10 @@ fn main() -> io::Result<()> {
             if now > last {
                 let begin = last.saturating_add(1);
                 last = now;
+                let mob_targets = match projectile_mobs.lock() {
+                    Ok(mobs) => mobs.projectile_targets(),
+                    Err(_) => return,
+                };
                 let world = match projectile_world.lock() {
                     Ok(world) => world,
                     Err(_) => return,
@@ -8260,10 +8264,11 @@ fn main() -> io::Result<()> {
                 };
                 let mut actions = throwables::TickResult::default();
                 for tick in begin.max(now.saturating_sub(19))..=now {
-                    let step = objects.tick(&world, tick);
+                    let step = objects.tick_with_mob_targets(&world, tick, &mob_targets);
                     actions.events.extend(step.events);
                     actions.pearl_teleports.extend(step.pearl_teleports);
                     actions.egg_hatches.extend(step.egg_hatches);
+                    actions.mob_hits.extend(step.mob_hits);
                 }
                 drop(objects);
                 let boat_events = match projectile_boats.lock() {
@@ -8311,6 +8316,17 @@ fn main() -> io::Result<()> {
                     }
                 }
                 drop(world);
+                for (mob_id, impact_tick) in actions.mob_hits {
+                    let hit = match projectile_mobs.lock() {
+                        Ok(mut mobs) => mobs.damage_from_dispenser_arrow(mob_id, impact_tick),
+                        Err(_) => return,
+                    };
+                    if let Some((at, events)) = hit {
+                        for event in events {
+                            projectile_hub.broadcast_in_view(at, event);
+                        }
+                    }
+                }
                 for (at, packet) in actions
                     .events
                     .into_iter()
