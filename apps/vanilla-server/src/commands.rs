@@ -612,7 +612,6 @@ mod tests {
         assert!(spawnpoint_args(&["0", "64", "0", "extra"], None).is_err());
     }
 
-
     #[test]
     fn public_commands_are_bounded_and_distinct_from_op_commands() {
         assert_eq!(parse_public("/help"), Some(Ok(PublicCommand::Help)));
