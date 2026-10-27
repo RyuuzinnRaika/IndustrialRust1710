@@ -65,8 +65,8 @@ mod vehicles;
 mod verify_world;
 mod vitals;
 mod whitelist;
-mod workstations;
 mod window_open;
+mod workstations;
 mod world;
 mod worldgen;
 
@@ -3710,7 +3710,11 @@ fn play(
                     );
                     observed_chest_revision = guard.revision();
                     drop(guard);
-                    let slots = if active_chest_partner.is_some() { 54 } else { 27 };
+                    let slots = if active_chest_partner.is_some() {
+                        54
+                    } else {
+                        27
+                    };
                     let opened =
                         window_open::encode(active_window, WindowKind::Chest, "Chest", slots)?;
                     send(s, 0x2d, &opened)?;
@@ -3902,8 +3906,12 @@ fn play(
                     } else {
                         [0; 3]
                     };
-                    let opened =
-                        window_open::encode(active_window, WindowKind::EnchantingTable, "Enchant", 0)?;
+                    let opened = window_open::encode(
+                        active_window,
+                        WindowKind::EnchantingTable,
+                        "Enchant",
+                        0,
+                    )?;
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &inventory.enchanting_window_items(active_window))?;
                     for (property, cost) in enchant_offers.iter().copied().enumerate() {
@@ -3974,8 +3982,12 @@ fn play(
                     } else {
                         next_window + 1
                     };
-                    let opened =
-                        window_open::encode(active_window, WindowKind::CraftingTable, "Crafting", 0)?;
+                    let opened = window_open::encode(
+                        active_window,
+                        WindowKind::CraftingTable,
+                        "Crafting",
+                        0,
+                    )?;
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &inventory.window_items_for(active_window))?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
