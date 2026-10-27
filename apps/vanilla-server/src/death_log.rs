@@ -1,14 +1,17 @@
 //! Protocol 5 player-death announcements and diagnostic, per-world JSONL records.
 //! This is observability only: scoring, drops and respawn remain session-owned.
 use crate::player::PlayerPosition;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
-use std::io::{self, ErrorKind, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_RECORD_BYTES: usize = 2048;
+const MAX_OUTBOX_BYTES: u64 = 8 * 1024;
+const MAX_LOG_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 // A single write_all remains serialized across all concurrent player sessions.
 static DEATH_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -183,6 +186,283 @@ impl DeathRecord<'_> {
             self.tick
         )
     }
+}
+
+
+/// A crash-recoverable, per-player *last event* outbox. This does not claim
+/// atomicity with the NBT player save or deathCount scoreboard. A single
+/// fully-written outbox event is replayable after a process crash.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDeath {
+    version: u8,
+    event_id: String,
+    world_file: String,
+    message: String,
+    entry: Value,
+}
+
+fn invalid(detail: &'static str) -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, detail)
+}
+
+fn outbox_path(player_path: &Path) -> PathBuf {
+    player_path.with_extension("death-outbox.json")
+}
+
+fn sync_dir(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(path)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn regular_file(path: &Path, limit: u64) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() && meta.len() <= limit => Ok(true),
+        Ok(_) => Err(invalid("unsafe or oversized death log file")),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn valid_world_relative(path: &Path) -> bool {
+    path.components().count() <= 3
+        && path.components().count() > 0
+        && path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+        && path.extension().is_some_and(|extension| extension == "irw")
+}
+
+impl StoredDeath {
+    fn new(
+        record: &DeathRecord<'_>,
+        root_world_path: &Path,
+        death_world_path: &Path,
+    ) -> io::Result<Self> {
+        let base = root_world_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let relative = death_world_path
+            .strip_prefix(base)
+            .map_err(|_| invalid("death world path outside root world"))?;
+        if !valid_world_relative(relative) {
+            return Err(invalid("unsafe relative death world path"));
+        }
+        let world_file = relative
+            .to_str()
+            .ok_or_else(|| invalid("non-UTF8 death world path"))?
+            .to_string();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| invalid("invalid system clock"))?
+            .as_millis();
+        let event_id = format!("{:032x}", rand::random::<u128>());
+        let mut entry = record.json(timestamp);
+        entry["event_id"] = Value::String(event_id.clone());
+        let created = Self {
+            version: 1,
+            event_id,
+            world_file,
+            message: record.chat_message(),
+            entry,
+        };
+        created.validate()?;
+        Ok(created)
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if self.version != 1
+            || self.event_id.len() != 32
+            || !self.event_id.bytes().all(|c| c.is_ascii_hexdigit())
+            || self.entry.get("event_id").and_then(Value::as_str)
+                != Some(self.event_id.as_str())
+            || self.entry.get("event").and_then(Value::as_str) != Some("player_death")
+            || self.message.len() > 512
+            || !valid_world_relative(Path::new(&self.world_file))
+        {
+            return Err(invalid("invalid persisted death event"));
+        }
+        Ok(())
+    }
+
+    fn read(path: &Path) -> io::Result<Option<Self>> {
+        if !regular_file(path, MAX_OUTBOX_BYTES)? {
+            return Ok(None);
+        }
+        let bytes = fs::read(path)?;
+        if bytes.len() as u64 > MAX_OUTBOX_BYTES {
+            return Err(invalid("oversized death outbox"));
+        }
+        let stored: Self =
+            serde_json::from_slice(&bytes).map_err(|_| invalid("corrupt death outbox"))?;
+        stored.validate()?;
+        Ok(Some(stored))
+    }
+
+    fn save(&self, path: &Path) -> io::Result<()> {
+        self.validate()?;
+        let payload = serde_json::to_vec(self)?;
+        if payload.len() as u64 > MAX_OUTBOX_BYTES {
+            return Err(invalid("oversized death event"));
+        }
+        if regular_file(path, MAX_OUTBOX_BYTES)? {
+            // Existing outbox must already have been replayed before replacement.
+        }
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let temp = path.with_extension("death-outbox.tmp");
+        // Do not follow arbitrary symlink placeholders during atomic rename.
+        if regular_file(&temp, MAX_OUTBOX_BYTES)? {
+            fs::remove_file(&temp)?;
+        }
+        let mut out = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        out.write_all(&payload)?;
+        out.sync_all()?;
+        drop(out);
+        fs::rename(&temp, path)?;
+        sync_dir(parent)
+    }
+
+    fn append_once(&self, root_world_path: &Path) -> io::Result<bool> {
+        self.validate()?;
+        let base = root_world_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let log_path = base.join(&self.world_file).with_extension("deaths.jsonl");
+        let _guard = DEATH_FILE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| invalid("death file lock poisoned"))?;
+        if !regular_file(&log_path, MAX_LOG_SCAN_BYTES)? {
+            if let Some(parent) = log_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&log_path)?;
+        let size = file.metadata()?.len();
+        if size > MAX_LOG_SCAN_BYTES {
+            return Err(invalid("death log exceeds bounded replay scan"));
+        }
+        let mut offset = 0u64;
+        let mut torn_tail = false;
+        {
+            let mut reader = BufReader::new(&file);
+            loop {
+                let mut line = Vec::new();
+                let read = reader.read_until(b'\n', &mut line)?;
+                if read == 0 {
+                    break;
+                }
+                if line.len() > MAX_RECORD_BYTES {
+                    return Err(invalid("invalid oversized death log entry"));
+                }
+                if !line.ends_with(b"\n") {
+                    torn_tail = true;
+                    break;
+                }
+                let value: Value = serde_json::from_slice(&line)
+                    .map_err(|_| invalid("corrupt existing death log entry"))?;
+                if value.get("event_id").and_then(Value::as_str)
+                    == Some(self.event_id.as_str())
+                {
+                    return Ok(false);
+                }
+                offset += read as u64;
+            }
+        }
+        if torn_tail {
+            // A crash may interrupt the last append. Only discard the
+            // incomplete trailing fragment; never silently alter valid rows.
+            file.set_len(offset)?;
+            file.sync_data()?;
+        }
+        let mut encoded = serde_json::to_vec(&self.entry)?;
+        if encoded.len() >= MAX_RECORD_BYTES {
+            return Err(invalid("oversized JSONL death event"));
+        }
+        encoded.push(b'\n');
+        if offset.saturating_add(encoded.len() as u64) > MAX_LOG_SCAN_BYTES {
+            return Err(invalid("death log rollover required"));
+        }
+        file.seek(SeekFrom::End(0))?;
+        let old_len = file.metadata()?.len();
+        if let Err(error) = file.write_all(&encoded) {
+            let _ = file.set_len(old_len);
+            return Err(error);
+        }
+        file.sync_data()?;
+        Ok(true)
+    }
+}
+
+/// Durable outbox before JSONL publication. The outbox is saved first so a
+/// later logging failure or process crash can be recovered on server startup.
+/// The gameplay caller handles failures without suppressing ordinary respawn.
+pub fn append_recoverable(
+    record: &DeathRecord<'_>,
+    root_world_path: &Path,
+    death_world_path: &Path,
+    player_path: &Path,
+) -> io::Result<()> {
+    let path = outbox_path(player_path);
+    if let Some(previous) = StoredDeath::read(&path)? {
+        previous.append_once(root_world_path)?;
+    }
+    let event = StoredDeath::new(record, root_world_path, death_world_path)?;
+    event.save(&path)?;
+    event.append_once(root_world_path)?;
+    Ok(())
+}
+
+/// Before admitting any player, replay every prepared per-player event. An
+/// event_id de-duplicates a write that completed but crashed before cleanup.
+/// This is log-only replay; it does not touch inventories or scoreboards.
+pub fn recover_pending(root_world_path: &Path) -> io::Result<usize> {
+    let base = root_world_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let players = base.join("players");
+    let mut replayed = 0usize;
+    for directory in [players.clone(), players.join("verified")] {
+        match fs::symlink_metadata(&directory) {
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+            Ok(meta) if meta.file_type().is_dir() => {}
+            _ => return Err(invalid("unsafe players directory for death recovery")),
+        }
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let file = entry.file_name();
+            let Some(filename) = file.to_str() else {
+                continue;
+            };
+            if !filename.ends_with(".death-outbox.json") {
+                continue;
+            }
+            let path = entry.path();
+            let saved = StoredDeath::read(&path)?
+                .ok_or_else(|| invalid("disappeared death outbox"))?;
+            if saved.append_once(root_world_path)? {
+                replayed += 1;
+            }
+        }
+    }
+    Ok(replayed)
 }
 
 #[cfg(test)]
