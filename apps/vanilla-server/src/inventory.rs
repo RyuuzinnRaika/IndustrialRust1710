@@ -235,7 +235,11 @@ impl Inventory {
                     || !item.is_valid()
                     || (!crate::items_1710::enchantable_in_table(item.id) && item.id != 403)
             })
-            || self.ender_chest.iter().flatten().any(|stack| !stack.is_valid())
+            || self
+                .ender_chest
+                .iter()
+                .flatten()
+                .any(|stack| !stack.is_valid())
             || self.slots.iter().flatten().any(|stack| !stack.is_valid())
             || self.cursor.is_some_and(|stack| !stack.is_valid())
         {
