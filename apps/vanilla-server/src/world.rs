@@ -65,8 +65,11 @@ pub struct World {
     pending_device_activations: Vec<(i32, i32, i32)>,
     // Protocol 5 piston animation is published only after the world save.
     pending_piston_actions: Vec<PistonAction>,
-    // Short-lived conservative collision of blocks swept during a push/pull.
-    piston_sweep_ghosts: BTreeMap<Position, u64>,
+    // A committed piston move still occupies moving-block space for three
+    // world ticks. The final block snapshot is durable immediately; this
+    // runtime-only record models the 1.7.10 TileEntityPiston in-flight window
+    // and prevents a sticky piston from pulling a block still extending.
+    piston_sweep_ghosts: BTreeMap<Position, PistonSweep>,
     // Sparse pending client-facing lighting invalidations, not part of IRW files.
     pending_light_chunks: BTreeSet<(i32, i32)>,
     // Monotonic simulation phase; no catch-up while the server is stopped.
@@ -88,6 +91,13 @@ pub struct World {
 pub struct WorldDrop {
     pub pos: (i32, i32, i32),
     pub stack: crate::inventory::Stack,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PistonSweep {
+    expires: u64,
+    facing: u8,
+    extending: bool,
 }
 
 /// A committed piston base transition for Protocol 5 block-action packets.
@@ -264,7 +274,23 @@ impl World {
             && self
                 .piston_sweep_ghosts
                 .get(&(x, y as u8, z))
-                .is_some_and(|expiry| *expiry > self.fluid_phase)
+                .is_some_and(|motion| motion.expires > self.fluid_phase)
+    }
+
+    /// The old 1.7.10 piston implementation skips sticky pulling when the
+    /// target is an outward-moving piston TileEntity with matching facing.
+    /// The block is already committed to its destination in IRW, so consult
+    /// the transient motion record instead of that final block ID.
+    fn piston_extending_at(&self, x: i32, y: i32, z: i32, facing: u8) -> bool {
+        in_bounds(x, y, z)
+            && self
+                .piston_sweep_ghosts
+                .get(&(x, y as u8, z))
+                .is_some_and(|motion| {
+                    motion.expires > self.fluid_phase
+                        && motion.extending
+                        && motion.facing == facing
+                })
     }
 
     /// Bounded per-worker budget; remaining light updates survive the next tick.
@@ -1104,7 +1130,7 @@ impl World {
     pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
         self.fluid_phase = self.fluid_phase.wrapping_add(1);
         self.piston_sweep_ghosts
-            .retain(|_, expiry| *expiry > self.fluid_phase);
+            .retain(|_, motion| motion.expires > self.fluid_phase);
         // Lava updates every fourth server tick, water every tick. Delayed
         // lava positions remain queued rather than getting silently dropped.
         let wet: Vec<Position> = self
@@ -1477,7 +1503,7 @@ impl World {
                 .collect();
             // Conservative swept AABB coverage over three simulation ticks.
             // This does not replace 1.7.10's moving-piston tile-entity model.
-            let mut swept = BTreeSet::new();
+            let mut swept = BTreeMap::new();
             for action in &piston_actions {
                 let (dx, dy, dz) = match action.facing {
                     0 => (0, -1, 0),
@@ -1499,7 +1525,7 @@ impl World {
                     let position = (x, y as u8, z);
                     let before = self.get(x, y, z);
                     if changes.get(&position).is_some_and(|&after| before != after) {
-                        swept.insert(position);
+                        swept.entry(position).or_insert((action.facing, action.extending));
                     }
                 }
             }
@@ -1545,12 +1571,20 @@ impl World {
             self.pending_drops.extend(detached_drops);
             self.pending_device_activations.extend(fired_devices);
             self.pending_piston_actions.extend(piston_actions);
-            for position in swept {
-                if self.piston_sweep_ghosts.len() >= 2048 {
+            for (position, (facing, extending)) in swept {
+                if self.piston_sweep_ghosts.len() >= 2048
+                    && !self.piston_sweep_ghosts.contains_key(&position)
+                {
                     break;
                 }
-                self.piston_sweep_ghosts
-                    .insert(position, self.fluid_phase.saturating_add(3));
+                self.piston_sweep_ghosts.insert(
+                    position,
+                    PistonSweep {
+                        expires: self.fluid_phase.saturating_add(3),
+                        facing,
+                        extending,
+                    },
+                );
             }
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
