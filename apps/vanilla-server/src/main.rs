@@ -2616,9 +2616,16 @@ fn play(
                     tick: now_tick,
                 };
                 println!("{}", record.console_summary());
-                if let Err(error) = record.append(world_path) {
-                    // Optional diagnostic output must not block drops or respawn.
-                    eprintln!("DEATH LOG WRITE ERROR: {error}");
+                if let Err(error) = death_log::append_recoverable(
+                    &record,
+                    root_world_path,
+                    world_path,
+                    player_path,
+                ) {
+                    // The outbox will be replayed after restart if its
+                    // durable preparation completed. Never block respawn on
+                    // an optional diagnostic write.
+                    eprintln!("DEATH LOG OUTBOX ERROR: {error}");
                 }
                 if show_death_messages {
                     hub.broadcast(chat_event(&record.chat_message())?);
@@ -8467,6 +8474,13 @@ fn main() -> io::Result<()> {
     let shared_difficulty = Arc::new(AtomicU8::new(difficulty));
     let rules_path = Arc::new(GameRules::location(&world_path));
     let world_rules = Arc::new(Mutex::new(GameRules::load(&rules_path)?));
+    // Journal recovery has completed before any player is admitted. Replay
+    // durable per-player death outboxes before opening the scoreboard/world
+    // session. Every event_id is appended at most once.
+    let replayed_deaths = death_log::recover_pending(&world_path)?;
+    if replayed_deaths > 0 {
+        println!("Recovered {replayed_deaths} pending player death log event(s)");
+    }
     let scoreboard_path = Arc::new(Scoreboard::location(&world_path));
     let shared_scoreboard = Arc::new(Mutex::new(Scoreboard::load(&scoreboard_path)?));
     clock.set_daylight_cycle(
