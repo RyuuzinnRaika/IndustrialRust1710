@@ -468,8 +468,12 @@ pub fn summon_coordinates(
 /// Java 1.7.10 numeric enchantment IDs; aliases are intentionally excluded
 /// until a versioned name registry is added.
 pub fn enchant_args(id: &str, level: Option<&str>) -> io::Result<(i16, i16)> {
-    let id = id.parse::<i16>().map_err(|_| invalid("enchant ID must be numeric for 1.7.10"))?;
-    let level = level.unwrap_or("1").parse::<i16>()
+    let id = id
+        .parse::<i16>()
+        .map_err(|_| invalid("enchant ID must be numeric for 1.7.10"))?;
+    let level = level
+        .unwrap_or("1")
+        .parse::<i16>()
         .map_err(|_| invalid("enchant level must be a positive number"))?;
     if !(1..=5).contains(&level) || !matches!(id, 0..=7 | 16..=21 | 32..=35 | 48..=51 | 61..=62) {
         return Err(invalid("unknown 1.7.10 enchantment ID or level"));
@@ -480,13 +484,19 @@ pub fn enchant_args(id: &str, level: Option<&str>) -> io::Result<(i16, i16)> {
 /// Read-only legacy block query, where data=-1 tests only the numeric block ID.
 /// The limited named registry can expand without ever accepting 1.13 states.
 pub fn testforblock_args(
-    coords: [&str; 3], name: &str, data: Option<&str>,
+    coords: [&str; 3],
+    name: &str,
+    data: Option<&str>,
     origin: Option<PlayerPosition>,
 ) -> io::Result<(i32, i32, i32, u8, Option<u8>)> {
     if origin.is_none() && coords.iter().any(|part| part.starts_with('~')) {
         return Err(invalid("console coordinates must be absolute"));
     }
-    let origin = origin.unwrap_or(PlayerPosition { x: 0.0, y: 0.0, z: 0.0 });
+    let origin = origin.unwrap_or(PlayerPosition {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    });
     let parse = |text: &str, base: f64| -> io::Result<i32> {
         let value = relative_coordinate(text, base)?.floor();
         if value < i32::MIN as f64 || value >= (i32::MAX as f64 + 1.0) {
@@ -516,7 +526,8 @@ pub fn testforblock_args(
         "redstone_wire" => 55,
         "command_block" => 137,
         _ => safe_setblock_id(bare).or_else(|_| {
-            let numeric = bare.parse::<u8>()
+            let numeric = bare
+                .parse::<u8>()
                 .map_err(|_| invalid("unknown legacy block name"))?;
             if numeric > 175 || (numeric != 0 && !crate::items_1710::exists(i16::from(numeric))) {
                 return Err(invalid("unknown legacy block ID"));
@@ -524,11 +535,17 @@ pub fn testforblock_args(
             Ok(numeric)
         })?,
     };
-    let data = match data.unwrap_or("-1").parse::<i16>()
-        .map_err(|_| invalid("block data must be -1 or 0..15"))? {
+    let data = match data
+        .unwrap_or("-1")
+        .parse::<i16>()
+        .map_err(|_| invalid("block data must be -1 or 0..15"))?
+    {
         -1 => None,
-        0..=15 => Some(data.unwrap_or("0").parse::<u8>()
-            .map_err(|_| invalid("invalid block data"))?),
+        0..=15 => Some(
+            data.unwrap_or("0")
+                .parse::<u8>()
+                .map_err(|_| invalid("invalid block data"))?,
+        ),
         _ => return Err(invalid("block data must be -1 or 0..15")),
     };
     Ok((x, y, z, id, data))
@@ -670,7 +687,11 @@ mod tests {
         assert!(enchant_args("sharpness", None).is_err());
         assert!(enchant_args("70", None).is_err());
         assert!(enchant_args("16", Some("0")).is_err());
-        let pos = PlayerPosition { x: 10.2, y: 66.0, z: -8.9 };
+        let pos = PlayerPosition {
+            x: 10.2,
+            y: 66.0,
+            z: -8.9,
+        };
         assert_eq!(
             testforblock_args(["~", "~-1", "~3"], "minecraft:chest", None, Some(pos)).unwrap(),
             (10, 65, -6, 54, None)

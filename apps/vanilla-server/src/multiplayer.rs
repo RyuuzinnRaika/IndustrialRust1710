@@ -308,16 +308,28 @@ impl Hub {
     }
 
     pub fn request_admin_enchant(&self, target: &str, id: i16, level: i16) -> io::Result<bool> {
-        if !(1..=5).contains(&level)
-            || !matches!(id, 0..=7 | 16..=21 | 32..=35 | 48..=51 | 61..=62)
+        if !(1..=5).contains(&level) || !matches!(id, 0..=7 | 16..=21 | 32..=35 | 48..=51 | 61..=62)
         {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid enchantment"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid enchantment",
+            ));
         }
         let mut body = id.to_be_bytes().to_vec();
         body.extend_from_slice(&level.to_be_bytes());
         let inner = self.0.lock().map_err(|_| poisoned())?;
-        if let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(target)) {
-            enqueue(peer, &Event { id: ADMIN_ENCHANT_EVENT, body });
+        if let Some(peer) = inner
+            .players
+            .values()
+            .find(|p| p.name.eq_ignore_ascii_case(target))
+        {
+            enqueue(
+                peer,
+                &Event {
+                    id: ADMIN_ENCHANT_EVENT,
+                    body,
+                },
+            );
             Ok(true)
         } else {
             Ok(false)

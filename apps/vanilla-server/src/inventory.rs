@@ -628,7 +628,9 @@ impl Inventory {
     /// Target's session commits this staged inventory, never the command caller.
     pub fn command_enchant_held(&mut self, id: i16, level: i16) -> io::Result<bool> {
         let slot = self.held_slot() as usize;
-        let Some(item) = self.slots[slot] else { return Ok(false) };
+        let Some(item) = self.slots[slot] else {
+            return Ok(false);
+        };
         let Some(replacement) = crate::enchanting::command_enchant(item, id, level)? else {
             return Ok(false);
         };

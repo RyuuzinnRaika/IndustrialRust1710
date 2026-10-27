@@ -397,7 +397,6 @@ pub fn apply(item: Stack, cost: u8, seed: u64) -> io::Result<Option<Stack>> {
     }))
 }
 
-
 /// Apply a 1.7.10 command enchantment to the currently held item.
 /// Explicit commands must not spend XP, must not overwrite existing enchants,
 /// and must preserve unknown NBT and legacy RepairCost.
@@ -427,10 +426,14 @@ pub fn command_enchant(item: Stack, id: i16, level: i16) -> io::Result<Option<St
         _ => return Ok(None),
     };
     for entry in &entries {
-        let Value::Compound(fields) = entry else { return Ok(None) };
+        let Value::Compound(fields) = entry else {
+            return Ok(None);
+        };
         let (Some(Value::Short(existing)), Some(Value::Short(existing_level))) =
             (fields.get("id"), fields.get("lvl"))
-        else { return Ok(None) };
+        else {
+            return Ok(None);
+        };
         let Some(limit) = anvil_level_limit(item.id, *existing) else {
             return Ok(None);
         };
@@ -461,10 +464,16 @@ mod tests {
     #[test]
     fn command_enchant_preserves_tags_and_rejects_duplicate_conflict_and_bad_levels() {
         let input = Stack {
-            id: 276, count: 1, damage: 34,
-            nbt: Some(item_nbt::from_value(&Value::Compound(HashMap::from([
-                ("Custom".to_string(), Value::String("preserve".into())),
-            ]))).unwrap()),
+            id: 276,
+            count: 1,
+            damage: 34,
+            nbt: Some(
+                item_nbt::from_value(&Value::Compound(HashMap::from([(
+                    "Custom".to_string(),
+                    Value::String("preserve".into()),
+                )])))
+                .unwrap(),
+            ),
         };
         let sharp = command_enchant(input, 16, 3).unwrap().unwrap();
         assert_eq!(sharp.damage, 34);
@@ -477,7 +486,9 @@ mod tests {
         assert!(command_enchant(sharp, 17, 1).unwrap().is_none());
         assert!(command_enchant(input, 16, 6).unwrap().is_none());
         assert!(command_enchant(input, 32, 1).unwrap().is_none());
-        assert!(command_enchant(Stack { id: 264, ..input }, 16, 1).unwrap().is_none());
+        assert!(command_enchant(Stack { id: 264, ..input }, 16, 1)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
