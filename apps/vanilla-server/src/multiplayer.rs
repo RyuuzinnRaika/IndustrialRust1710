@@ -944,6 +944,78 @@ mod tests {
         ));
     }
     #[test]
+    fn add011_simultaneous_case_insensitive_logins_have_one_owner_and_one_presence() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        const CONTENDERS: usize = 12;
+        let hub = Arc::new(Hub::default());
+        let (observer_id, observer_rx, _) = hub
+            .add(
+                "Observer".into(),
+                "observer-uuid".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(CONTENDERS));
+        let results = thread::scope(|scope| {
+            let mut workers = Vec::new();
+            for i in 0..CONTENDERS {
+                let hub = Arc::clone(&hub);
+                let barrier = Arc::clone(&barrier);
+                workers.push(scope.spawn(move || {
+                    barrier.wait();
+                    let name = if i % 2 == 0 {
+                        "RustTester"
+                    } else {
+                        "rusttester"
+                    };
+                    hub.add(
+                        name.to_string(),
+                        format!("session-uuid-{i}"),
+                        PlayerPosition::default(),
+                    )
+                    .map(|(id, _rx, previous)| (id, previous.len()))
+                }));
+            }
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        let winners: Vec<_> = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .collect();
+        assert_eq!(winners.len(), 1, "only one session can own the identity");
+        assert_eq!(
+            winners[0].1, 1,
+            "only the observer existed before admission"
+        );
+        assert_eq!(hub.count().unwrap(), 2);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(JoinError::Duplicate)))
+                .count(),
+            CONTENDERS - 1
+        );
+        let owner = winners[0].0;
+        assert_ne!(owner, observer_id);
+
+        // The observer sees exactly one player-list addition and one entity
+        // spawn, not a phantom admission by any losing connection.
+        assert_eq!(observer_rx.try_recv().unwrap().id, 0x38);
+        assert_eq!(observer_rx.try_recv().unwrap().id, 0x0c);
+        assert!(observer_rx.try_recv().is_err());
+        hub.remove(owner);
+        assert_eq!(observer_rx.try_recv().unwrap().id, 0x13);
+        assert_eq!(observer_rx.try_recv().unwrap().id, 0x38);
+        assert!(observer_rx.try_recv().is_err());
+        assert_eq!(hub.count().unwrap(), 1);
+    }
+    #[test]
     fn movement_events_and_departure() {
         let hub = Hub::default();
         let (a, _a_rx, _) = hub
