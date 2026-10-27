@@ -1443,6 +1443,10 @@ mod tests {
                         Some([1, 70, 1]),
                         "occupied stair step: block {stair}, facing {facing}, inverted {inverted}"
                     );
+                    let (reverse_t, reverse_cell) = first_solid_block_hit(&world, to, from)
+                        .expect("reverse ray must hit the same stair step");
+                    assert_eq!(reverse_cell, [1, 70, 1]);
+                    assert!((reverse_t - 0.8 / 2.6).abs() < 1e-10);
                     let (from, to) = ray(empty, step_y);
                     assert_eq!(
                         first_solid_block_hit(&world, from, to),
