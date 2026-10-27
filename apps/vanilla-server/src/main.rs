@@ -96,7 +96,7 @@ use maps::Maps;
 use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
-    Event, Hub, JoinError, ADMIN_CLEAR_EVENT, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT,
+    Event, Hub, JoinError, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT,
     ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS,
     PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
 };
@@ -1449,6 +1449,49 @@ fn play(
                 if survival {
                     send(s, 0x1f, &experience.packet())?;
                 }
+                continue;
+            }
+            if event.id == ADMIN_EFFECT_EVENT {
+                if event.body.len() != 5 {
+                    return Err(bad("invalid internal effect payload"));
+                }
+                let action = event.body[0];
+                let kind = event.body[1];
+                let amplifier = event.body[2];
+                let seconds = u16::from_be_bytes(event.body[3..5].try_into().unwrap());
+                if action > 2 || (action != 0 && !commands::valid_effect_kind(kind))
+                    || amplifier > 3 || seconds > 1200
+                    || (action == 2 && seconds == 0)
+                {
+                    return Err(bad("invalid internal effect parameters"));
+                }
+                if action == 0 || action == 1 {
+                    let mut removed = Vec::new();
+                    active_effects.retain(|old| {
+                        if action == 0 || old.kind == kind {
+                            removed.push(old.kind);
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    for removed_kind in removed {
+                        let mut packet = entity_id.to_be_bytes().to_vec();
+                        packet.push(removed_kind);
+                        send(s, 0x1e, &packet)?;
+                    }
+                } else {
+                    let now = clock.ticks();
+                    active_effects.retain(|old| old.kind != kind);
+                    let duration_ticks = u64::from(seconds) * 20;
+                    active_effects.push(ActiveEffect {
+                        kind, amplifier,
+                        expires_at: now.saturating_add(duration_ticks),
+                        next_periodic: now.saturating_add(periodic_effect_interval(kind, amplifier)),
+                    });
+                    send(s, 0x1d, &potion_effect_packet(entity_id, kind, amplifier, duration_ticks as u16))?;
+                }
+                as_chat(s, "Effect command applied.")?;
                 continue;
             }
             if event.id == ADMIN_CLEAR_EVENT {
@@ -2935,7 +2978,7 @@ fn play(
                         Err(usage) => as_chat(s, usage)?,
                         Ok(PublicCommand::Help) => as_chat(
                             s,
-                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /time, /weather, /kick, /ban, /save.",
+                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /time, /weather, /kick, /ban, /save.",
                         )?,
                         Ok(PublicCommand::List) => as_chat(
                             s,
@@ -2980,6 +3023,7 @@ fn play(
                         administration,
                         hardcore,
                         dimension: *session_dimension,
+                        mobs,
                     };
                     let result = run_player_admin_command(
                         &message,
@@ -6507,6 +6551,7 @@ struct PlayerAdminServices<'a> {
     administration: &'a Administration,
     hardcore: bool,
     dimension: dimensions::Dimension,
+    mobs: &'a Mutex<Mobs>,
 }
 /// Authorization is based exclusively on the Mojang-verified session UUID.
 fn run_player_admin_command(
@@ -6523,11 +6568,12 @@ fn run_player_admin_command(
         administration,
         hardcore,
         dimension,
+        mobs,
     } = services;
     let parts: Vec<&str> = message.split_whitespace().collect();
     let minimum_level = match parts.first().copied() {
         Some("/time") | Some("/weather") | Some("/tp") | Some("/teleport") | Some("/gamemode")
-        | Some("/give") | Some("/clear") | Some("/setblock") => 2,
+        | Some("/give") | Some("/clear") | Some("/setblock") | Some("/effect") | Some("/summon") => 2,
         Some("/kick") | Some("/ban") | Some("/pardon") | Some("/pardon-uuid") | Some("/ban-ip")
         | Some("/pardon-ip") => 3,
         Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
@@ -6540,6 +6586,28 @@ fn run_player_admin_command(
         ));
     }
     match parts.as_slice() {
+        ["/effect", target, effect @ ..] => {
+            let request = commands::effect_args(effect)?;
+            if !hub.request_admin_effect(target, request)? {
+                return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+            }
+            Ok(format!("Effect queued for {target}"))
+        }
+        ["/summon", entity, coords @ ..] => {
+            if *dimension != dimensions::Dimension::Overworld {
+                return Err(bad("summon currently supports Overworld only"));
+            }
+            let origin = hub.player_position(actor)?
+                .ok_or_else(|| bad("actor not online"))?;
+            let pos = commands::summon_coordinates(coords, Some(origin))?;
+            let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            let mut entities = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+            let spawn = entities.summon_command(&state, entity, pos)?;
+            drop(entities);
+            drop(state);
+            hub.broadcast_in_dimension_view(*dimension, pos, spawn);
+            Ok(format!("Summoned {entity}"))
+        }
         ["/clear", args @ ..] if args.len() <= 4 => {
             let target = args.first().copied().unwrap_or(actor);
             let (item, data, max) = commands::clear_args(
@@ -6809,7 +6877,7 @@ fn start_clock_console(
             }
             let result: io::Result<()> = match args.as_slice() {
                 ["/help"] | ["/?"] => {
-                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
                     Ok(())
                 }
                 ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
@@ -6881,6 +6949,25 @@ fn start_clock_console(
                         event,
                     );
                     println!("Block set at {bx} {by} {bz}");
+                    Ok(())
+                })(),
+                ["/effect", target, effect @ ..] => (|| -> io::Result<()> {
+                    let request = commands::effect_args(effect)?;
+                    if !hub.request_admin_effect(target, request)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Effect queued for {target}");
+                    Ok(())
+                })(),
+                ["/summon", entity, coords @ ..] => (|| -> io::Result<()> {
+                    let pos = commands::summon_coordinates(coords, None)?;
+                    let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let mut entities = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    let spawn = entities.summon_command(&state, entity, pos)?;
+                    drop(entities);
+                    drop(state);
+                    hub.broadcast_in_dimension_view(dimensions::Dimension::Overworld, pos, spawn);
+                    println!("Summoned {entity}");
                     Ok(())
                 })(),
                 ["/give", target, item, rest @ ..] => (|| -> io::Result<()> {

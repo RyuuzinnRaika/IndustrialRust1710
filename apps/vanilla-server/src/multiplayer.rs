@@ -29,6 +29,8 @@ pub const DISPENSER_ARROW_DAMAGE_EVENT: u32 = u32::MAX - 6;
 /// Validated console/verified-OP item grant; applied by the inventory owner.
 pub const ADMIN_GIVE_EVENT: u32 = u32::MAX - 7;
 pub const ADMIN_CLEAR_EVENT: u32 = u32::MAX - 8;
+/// Target session receives effect changes; console/network never mutates it.
+pub const ADMIN_EFFECT_EVENT: u32 = u32::MAX - 9;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -253,6 +255,31 @@ impl Hub {
                     body,
                 },
             );
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn request_admin_effect(
+        &self, name: &str, operation: crate::commands::EffectRequest,
+    ) -> io::Result<bool> {
+        use crate::commands::EffectRequest;
+        let (action, kind, amplifier, seconds) = match operation {
+            EffectRequest::Clear => (0, 0, 0, 0),
+            EffectRequest::Remove(kind) => (1, kind, 0, 0),
+            EffectRequest::Add { kind, amplifier, seconds } => (2, kind, amplifier, seconds),
+        };
+        if (action != 0 && !crate::commands::valid_effect_kind(kind))
+            || amplifier > 3 || seconds > 1200
+        {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid effect request"));
+        }
+        let mut body = vec![action, kind, amplifier];
+        body.extend_from_slice(&seconds.to_be_bytes());
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        if let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(name)) {
+            enqueue(peer, &Event { id: ADMIN_EFFECT_EVENT, body });
             Ok(true)
         } else {
             Ok(false)

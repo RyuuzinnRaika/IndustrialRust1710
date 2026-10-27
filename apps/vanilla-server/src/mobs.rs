@@ -1197,6 +1197,55 @@ impl Mobs {
         self.entities.insert(id, mob);
         event
     }
+    /// Persist a bounded 1.7.10 Mob summon *before* publishing the spawn
+    /// packet. Reuse the same entity IDs, AI and save format as natural spawns.
+    /// NBT and bosses require their own validated command implementation.
+    pub fn summon_command(
+        &mut self, world: &World, entity: &str, at: PlayerPosition,
+    ) -> io::Result<Event> {
+        let kind = match entity {
+            "Zombie" => Kind::Zombie,
+            "Skeleton" => Kind::Skeleton,
+            "Creeper" => Kind::Creeper,
+            "Spider" => Kind::Spider,
+            "CaveSpider" => Kind::CaveSpider,
+            "Enderman" => Kind::Enderman,
+            "Slime" => Kind::Slime,
+            "Witch" => Kind::Witch,
+            "Cow" => Kind::Cow,
+            "Pig" => Kind::Pig,
+            "Sheep" => Kind::Sheep,
+            "Chicken" => Kind::Chicken,
+            "Horse" | "EntityHorse" => Kind::Horse,
+            "Villager" => Kind::Villager,
+            "VillagerGolem" => Kind::IronGolem,
+            "PigZombie" => Kind::ZombiePigman,
+            "LavaSlime" => Kind::MagmaCube,
+            "Blaze" => Kind::Blaze,
+            "Ghast" => Kind::Ghast,
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported 1.7.10 Mob name")),
+        };
+        if !self.enabled || !world.is_natural() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Mob simulation requires a natural world"));
+        }
+        if !at.is_valid() || physics::collides(world, &at)
+            || self.entities.len() >= MAX_LOADED_MOBS || self.next_id >= 1_000_000
+        {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Mob spawn position/cap invalid"));
+        }
+        if self.difficulty == Some(0) && !kind.peaceful_safe() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "hostile Mob cannot remain in Peaceful"));
+        }
+        let previous_id = self.next_id;
+        let packet = self.insert(kind, at, false);
+        if let Err(error) = self.save(world) {
+            self.entities.remove(&previous_id);
+            self.next_id = previous_id;
+            return Err(error);
+        }
+        Ok(packet)
+    }
+
     /// An egg impact may spawn one baby chicken, under the existing Mob cap.
     pub fn hatch_egg(&mut self, world: &World, at: PlayerPosition) -> Option<Event> {
         if self.entities.len() >= MAX_LOADED_MOBS
