@@ -2,6 +2,7 @@
 //! Straight/sloped rails, corners and collision guards are supported.
 //! Junction switching, vanilla momentum exchange and durable NBT remain TODO.
 use crate::multiplayer::{self, Event};
+use crate::physics;
 use crate::player::PlayerPosition;
 use crate::vehicles::attachment;
 use crate::world::World;
@@ -366,6 +367,51 @@ impl Minecarts {
                 y: c.position.y + 0.1,
                 ..c.position
             })
+    }
+
+    /// Find a supported, collision-free position beside a ridden cart.
+    /// Search is deliberately bounded so a blocked dismount leaves the rider
+    /// mounted instead of placing them inside blocks or below the world.
+    pub fn safe_dismount_position(&self, world: &World, rider: i32) -> Option<PlayerPosition> {
+        let cart = self.carts.values().find(|cart| cart.rider == Some(rider))?;
+        const DIRECTIONS: [(f64, f64); 8] = [
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (1.0, 1.0),
+            (1.0, -1.0),
+            (-1.0, 1.0),
+            (-1.0, -1.0),
+        ];
+        const RADII: [f64; 4] = [0.85, 1.25, 1.75, 2.25];
+        const HEIGHTS: [f64; 9] = [0.0, -1.0, 1.0, -0.5, 0.5, -1.5, 1.5, -2.0, 2.0];
+        let base_y = cart.position.y.floor();
+
+        for dy in HEIGHTS {
+            for radius in RADII {
+                for (dx, dz) in DIRECTIONS {
+                    let candidate = PlayerPosition {
+                        x: cart.position.x + dx * radius,
+                        y: base_y + dy,
+                        z: cart.position.z + dz * radius,
+                    };
+                    if physics::supported(world, &candidate)
+                        && !physics::collides(world, &candidate)
+                    {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Return the attachment packet that restores a client-side dismount when
+    /// no safe server-side position exists.
+    pub fn rider_attachment(&self, rider: i32) -> Option<Event> {
+        let cart = self.carts.values().find(|cart| cart.rider == Some(rider))?;
+        Some(attachment(rider, cart.id))
     }
 
     pub fn dismount(&mut self, rider: i32) -> Option<Event> {
@@ -955,5 +1001,50 @@ mod tests {
         assert!(carts.rider_position(11).is_some());
         assert_eq!(carts.dismount(11).unwrap().id, 0x1b);
         assert!(carts.cart_for(11).is_none());
+    }
+
+    #[test]
+    fn minecart_dismount_chooses_supported_clear_ground_and_preserves_mount_if_blocked() {
+        let mut world = World::new();
+        for x in -5..=5 {
+            for z in -5..=5 {
+                world.import_block(x, 63, z, 2 << 4).unwrap();
+            }
+        }
+        world.import_block(0, 64, 0, 66 << 4).unwrap();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 64.5,
+            z: 0.5,
+        };
+        let mut carts = Minecarts::default();
+        carts.place(&world, at, 0).unwrap();
+        carts.mount(FIRST_ID, 11, at).unwrap();
+
+        let safe = carts.safe_dismount_position(&world, 11).unwrap();
+        assert_eq!(safe.y, 64.0);
+        assert!(physics::supported(&world, &safe));
+        assert!(!physics::collides(&world, &safe));
+        assert!((safe.x - at.x).hypot(safe.z - at.z) >= 0.85);
+
+        let mut enclosed = world.clone();
+        for x in -4..=4 {
+            for z in -4..=4 {
+                if (x, z) == (0, 0) {
+                    continue;
+                }
+                for y in 64..=66 {
+                    enclosed.import_block(x, y, z, 1 << 4).unwrap();
+                }
+            }
+        }
+        assert!(carts.safe_dismount_position(&enclosed, 11).is_none());
+        let restore = carts.rider_attachment(11).unwrap();
+        assert_eq!(restore.id, 0x1b);
+        assert_eq!(
+            i32::from_be_bytes(restore.body[4..8].try_into().unwrap()),
+            FIRST_ID
+        );
+        assert_eq!(carts.cart_for(11), Some(FIRST_ID));
     }
 }

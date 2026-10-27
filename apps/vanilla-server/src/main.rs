@@ -2986,12 +2986,56 @@ fn play(
                         hub.broadcast(event);
                     }
                     drop(state);
-                    if let Some(event) = minecarts
+                    let collision_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let mut cart_state = minecarts
                         .lock()
-                        .map_err(|_| bad("minecarts mutex poisoned"))?
-                        .dismount(entity_id)
+                        .map_err(|_| bad("minecarts mutex poisoned"))?;
+                    let cart_dismount = if let Some(position) =
+                        cart_state.safe_dismount_position(&collision_world, entity_id)
                     {
-                        hub.broadcast(event);
+                        cart_state
+                            .dismount(entity_id)
+                            .map(|event| (event, Some(position)))
+                    } else {
+                        cart_state
+                            .rider_attachment(entity_id)
+                            .map(|event| (event, None))
+                    };
+                    drop(cart_state);
+                    drop(collision_world);
+                    match cart_dismount {
+                        Some((event, Some(position))) => {
+                            *player = position;
+                            location = (position.x, position.y, position.z);
+                            fall.reset(position.y);
+                            idle_gravity.observe_client(now_tick);
+                            player.save_state_in_dimension(
+                                player_path,
+                                *vitals,
+                                session_dimension.protocol_id() as i32,
+                            )?;
+                            let old_chunks = loaded_chunks.clone();
+                            sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                            if loaded_chunks != old_chunks {
+                                let entering =
+                                    loaded_chunks.difference(&old_chunks).copied().collect();
+                                send_visible_signs(s, decorations, &entering)?;
+                                send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
+                            }
+                            // Keep this connection's detach and position
+                            // correction in one ordered stream; other peers
+                            // receive the same detach through the hub.
+                            send(s, event.id, &event.body)?;
+                            hub.broadcast_except(entity_id, event);
+                            send_player_position(s, player)?;
+                            hub.move_player(entity_id, position, yaw, pitch);
+                        }
+                        Some((event, None)) => {
+                            // The client predicts Shift-dismount. Reattach it
+                            // when every bounded candidate is blocked or unsupported.
+                            hub.broadcast(event);
+                        }
+                        None => {}
                     }
                     if let Some(event) = mobs
                         .lock()

@@ -2004,7 +2004,7 @@ fn vanilla_1710_fixed_width_entity_packets_do_not_drop_the_session() {
 }
 
 #[test]
-fn creative_minecart_placement_mount_and_restart_preserve_inventory() {
+fn minecart_dismount_is_safe_in_both_modes_and_restart_preserves_position_inventory() {
     let mut server = NativeServer::start();
     let (mut client, player_id, _) = server.join("RustTester");
 
@@ -2091,6 +2091,57 @@ fn creative_minecart_placement_mount_and_restart_preserve_inventory() {
             && body[8] == 0
     });
 
+    // Creative dismount must move the feet onto the supported ground beside
+    // the cart and send a server-authoritative position correction.
+    let mut steer_vehicle = vec![0; 10];
+    steer_vehicle[9] = 1; // dismount
+    client.write_all(&frame(0x0c, &steer_vehicle)).unwrap();
+    let detached = until_packet(&mut client, 0x1b, |body| {
+        body.len() == 9
+            && body[0..4] == player_id.to_be_bytes()
+            && body[4..8] == (-1i32).to_be_bytes()
+            && body[8] == 0
+    });
+    assert_eq!(detached[4..8], (-1i32).to_be_bytes());
+    let corrected = until_packet(&mut client, 0x08, |body| body.len() == 33);
+    let creative_position = read_position(&corrected);
+    assert_eq!(creative_position[1], 64.0);
+    assert!((creative_position[0] - 2.5).hypot(creative_position[2] - 0.5) >= 0.85);
+
+    // Remount, switch modes through the live server command, then exercise the
+    // identical authoritative dismount path in Survival.
+    client.write_all(&frame(0x02, &interact)).unwrap();
+    until_packet(&mut client, 0x1b, |body| {
+        body.len() == 9
+            && body[0..4] == player_id.to_be_bytes()
+            && body[4..8] == cart_id.to_be_bytes()
+            && body[8] == 0
+    });
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/gamemode survival RustTester\n")
+        .unwrap();
+    assert_eq!(
+        until_packet(&mut client, 0x2b, |body| body == [3, 0, 0, 0, 0]),
+        [3, 0, 0, 0, 0]
+    );
+    server.survival = true;
+    client.write_all(&frame(0x0c, &steer_vehicle)).unwrap();
+    let detached = until_packet(&mut client, 0x1b, |body| {
+        body.len() == 9
+            && body[0..4] == player_id.to_be_bytes()
+            && body[4..8] == (-1i32).to_be_bytes()
+            && body[8] == 0
+    });
+    assert_eq!(detached[4..8], (-1i32).to_be_bytes());
+    let corrected = until_packet(&mut client, 0x08, |body| body.len() == 33);
+    let survival_position = read_position(&corrected);
+    assert_eq!(survival_position[1], 64.0);
+    assert!((survival_position[0] - 2.5).hypot(survival_position[2] - 0.5) >= 0.85);
+
     // Acknowledged placement must already be durable, and Creative must not
     // consume the single cart in the authoritative inventory.
     await_file(&cart_path);
@@ -2146,7 +2197,8 @@ fn creative_minecart_placement_mount_and_restart_preserve_inventory() {
         assert!(server.process.try_wait().unwrap().is_none());
         thread::sleep(Duration::from_millis(50));
     }
-    let (mut rejoined, new_player_id, _) = server.join("RustTester");
+    let (mut rejoined, new_player_id, rejoined_position) = server.join("RustTester");
+    assert_eq!(rejoined_position, survival_position);
     let restored = until_packet(&mut rejoined, 0x0e, is_cart_spawn);
     let mut restored_body = restored.as_slice();
     assert_eq!(read_varint(&mut restored_body).unwrap(), cart_id as u32);

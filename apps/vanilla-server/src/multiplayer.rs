@@ -525,6 +525,17 @@ impl Hub {
             }
         }
     }
+
+    /// Fan out a packet to every peer except the session that sent it.
+    pub fn broadcast_except(&self, excluded_id: i32, packet: Event) {
+        if let Ok(inner) = self.0.lock() {
+            for peer in inner.players.values() {
+                if peer.id != excluded_id {
+                    enqueue(peer, &packet);
+                }
+            }
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -612,6 +623,30 @@ mod tests {
         assert_eq!(b_rx.try_recv().unwrap().id, 0x13);
         assert_eq!(a_rx.try_recv().unwrap().id, 0x13);
         assert!(b_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn broadcast_except_leaves_sender_stream_for_ordered_direct_packets() {
+        let hub = Hub::default();
+        let (alice, alice_rx, _) = hub
+            .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        let (_bob, bob_rx, _) = hub
+            .add("Bob".into(), "uuid-b".into(), PlayerPosition::default())
+            .unwrap();
+        while alice_rx.try_recv().is_ok() {}
+        while bob_rx.try_recv().is_ok() {}
+
+        hub.broadcast_except(
+            alice,
+            Event {
+                id: 0x1b,
+                body: vec![1],
+            },
+        );
+
+        assert!(alice_rx.try_recv().is_err());
+        assert_eq!(bob_rx.try_recv().unwrap().id, 0x1b);
     }
 
     #[test]
