@@ -1446,8 +1446,7 @@ impl World {
                 .iter()
                 .any(|&(x, y, z)| self.pending_chain_tnt.contains(&(x, y as u8, z)));
         // Avoid copying a potentially 65k-position queue on quiet ticks.
-        let mut pending_chain_before =
-            pending_will_change.then(|| self.pending_chain_tnt.clone());
+        let mut pending_chain_before = pending_will_change.then(|| self.pending_chain_tnt.clone());
         for pos in pending_chain_additions {
             self.pending_chain_tnt.insert(pos);
         }
