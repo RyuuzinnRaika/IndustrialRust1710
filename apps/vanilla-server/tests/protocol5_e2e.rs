@@ -2730,10 +2730,10 @@ fn creative_mob_feed_and_attack_keep_items_and_award_kill_rewards() {
     // them without discarding packets needed by the next assertion.
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut saw_xp = false;
-    let mut item_drop = None;
+    let mut saw_item_drop = false;
     let mut saw_death = false;
     for _ in 0..MAX_PACKETS {
-        if saw_xp && item_drop.is_some() && saw_death {
+        if saw_xp && saw_item_drop && saw_death {
             break;
         }
         assert!(Instant::now() < deadline, "cow death packets timed out");
@@ -2751,7 +2751,9 @@ fn creative_mob_feed_and_attack_keep_items_and_award_kill_rewards() {
             0x0e => {
                 let mut payload = body.as_slice();
                 if read_varint(&mut payload).is_ok() && payload.first() == Some(&2) {
-                    assert!(item_drop.replace(body).is_none(), "duplicate cow item drop");
+                    // Beef and leather may each spawn their own item entity.
+                    assert!(body.len() >= 20, "incomplete cow item spawn");
+                    saw_item_drop = true;
                 }
             }
             0x1a if body.len() == 5 && body[..4] == cow_id.to_be_bytes() && body[4] == 3 => {
@@ -2762,10 +2764,7 @@ fn creative_mob_feed_and_attack_keep_items_and_award_kill_rewards() {
         }
     }
     assert!(saw_xp, "missing player-kill XP orb");
-    assert!(
-        item_drop.as_ref().is_some_and(|body: &Vec<u8>| body.len() >= 20),
-        "missing or incomplete cow item drop"
-    );
+    assert!(saw_item_drop, "missing cow item drop");
     assert!(saw_death, "missing cow death status");
     drop(client);
     server.wait_idle();
