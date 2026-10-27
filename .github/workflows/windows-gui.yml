@@ -34,6 +34,15 @@ jobs:
               throw "Invalid syntax in $path : $($errors | Out-String)"
             }
           }
+          # The WinForms assembly must not be loaded repeatedly by the
+          # caller's PowerShell process; it cannot unload a previously compiled type.
+          $launcherSource = Get-Content -LiteralPath 'run-windows.ps1' -Raw
+          if ($launcherSource -notmatch '(?m)^\s*& \$windowsPowerShell .* -NoProfile -STA .* -EncodedCommand \$encodedCommand') {
+            throw 'GUI launch must use a clean STA PowerShell process.'
+          }
+          if ($launcherSource -match '(?m)^\s*& \(Join-Path \$Root ''run-windows-gui.ps1''\)') {
+            throw 'In-process GUI invocation would leave a stale ServerGui type.'
+          }
           # The GUI runs in a PowerShell host that may already own an HWND.
           # A late process-wide text rendering setter crashes at startup.
           $guiSource = Get-Content -LiteralPath 'tools/ServerGui.cs' -Raw
