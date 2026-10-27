@@ -2093,7 +2093,7 @@ mod tests {
         assert!(alice.cursor.is_none());
         assert!(bob.ender_chest[0].is_none());
         assert_eq!(&alice.ender_chest_window_items(3)[..3], &[3, 0, 63]);
-        let restored: Inventory = serde_json::from_slice(&alice.encoded().unwrap()).unwrap();
+        let mut restored: Inventory = serde_json::from_slice(&alice.encoded().unwrap()).unwrap();
         assert_eq!(restored.ender_chest[0], Some(item));
         assert!(restored.ender_chest_click_window(4, 0, 0, 0).is_some());
         assert_eq!(restored.cursor, Some(item));
