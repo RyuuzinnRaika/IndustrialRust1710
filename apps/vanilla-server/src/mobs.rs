@@ -4870,7 +4870,10 @@ mod tests {
             (8, DamageOrigin::Explosion { kind: "Creeper", source_id: Some(500_001) }),
         );
         assert_eq!(mobs.hurt_player(45, player, 21), 0);
-        mobs.pending_blast_damage.insert(45, 8);
+        mobs.pending_blast_damage.insert(
+            45,
+            (8, DamageOrigin::Explosion { kind: "Creeper", source_id: Some(500_001) }),
+        );
         assert!(mobs.hurt_player(45, player, 30) > 0);
         mobs.pending_blast_damage.insert(
             46,
