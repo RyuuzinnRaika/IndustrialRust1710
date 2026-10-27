@@ -1,0 +1,81 @@
+name: TNT 1.7.10 stress validation
+
+on:
+  pull_request:
+    paths:
+      - "tools/tnt_stress_benchmark.py"
+      - "tools/test_tnt_stress_benchmark.py"
+      - ".github/workflows/tnt-stress.yml"
+  workflow_dispatch:
+    inputs:
+      counts:
+        description: "TNT counts (100,500,1000,4096)"
+        required: true
+        default: "100,500,1000,4096"
+        type: string
+      seconds:
+        description: "Seconds of real server execution per count"
+        required: true
+        default: "75"
+        type: string
+      crash_restart:
+        description: "Kill and restart the server halfway through each scenario"
+        required: true
+        default: true
+        type: boolean
+      tnt2_queue:
+        description: "Seed legacy TNT2 pending-chain queue as well"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  parser-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate TNT fixture and trailer parser
+        run: PYTHONPATH=tools python -m unittest discover -s tools -p 'test_tnt_stress_benchmark.py' -v
+
+  live-stress:
+    if: github.event_name == 'workflow_dispatch'
+    needs: parser-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build isolated Rust Minecraft server
+        run: cargo build --release -p vanilla-server
+      - name: Run TNT load with real server and Protocol 5 client
+        env:
+          TNT_COUNTS: ${{ inputs.counts }}
+          TNT_SECONDS: ${{ inputs.seconds }}
+          CRASH_RESTART: ${{ inputs.crash_restart }}
+          TNT2_QUEUE: ${{ inputs.tnt2_queue }}
+        shell: bash
+        run: |
+          args=()
+          if [[ "$CRASH_RESTART" == "true" ]]; then args+=(--inject-crash); fi
+          if [[ "$TNT2_QUEUE" == "true" ]]; then args+=(--tnt2-chain-queue); fi
+          python tools/tnt_stress_benchmark.py \
+            --server target/release/vanilla-server \
+            --output tnt-stress-results \
+            --counts "$TNT_COUNTS" --seconds "$TNT_SECONDS" "${args[@]}"
+      - name: Upload evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tnt-stress-evidence
+          path: tnt-stress-results/
+          if-no-files-found: warn
