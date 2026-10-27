@@ -5059,7 +5059,10 @@ mod tests {
         let seed = hash(now ^ 42);
         assert_eq!(natural_spawn_horizontal_offset(seed), (-68, 13));
         assert!(natural_spawn_passive_roll(seed));
-        assert_eq!(overworld_passive_kind(1, hash(seed ^ 0x31acb4105ff327ab)), Kind::Sheep);
+        assert_eq!(
+            overworld_passive_kind(1, hash(seed ^ 0x31acb4105ff327ab)),
+            Kind::Sheep
+        );
         assert_eq!(world.biome_at(835, 142), 1);
         assert_eq!(world.biome_at(837, 142), 7);
 
@@ -5106,7 +5109,10 @@ mod tests {
         let mut mobs = Mobs::new_with_difficulty(&world, true, 2);
         let mut events = Vec::new();
         mobs.spawn_natural(now, &world, &mut lighting, &[player], &mut events);
-        assert!(!mobs.entities.is_empty(), "the Plains origin must produce a Sheep");
+        assert!(
+            !mobs.entities.is_empty(),
+            "the Plains origin must produce a Sheep"
+        );
         assert_eq!(events.len(), mobs.entities.len());
         for mob in mobs.entities.values() {
             assert_eq!(mob.kind, Kind::Sheep);
