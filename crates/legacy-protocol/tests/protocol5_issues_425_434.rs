@@ -7,13 +7,15 @@ use legacy_protocol::{
 use std::io::{self, Read};
 
 fn rejected_frame(header: &[u8]) {
+    let mut direct = header;
     assert_eq!(
-        read_frame(&mut header.as_ref()).unwrap_err().kind(),
+        read_frame(&mut direct).unwrap_err().kind(),
         io::ErrorKind::InvalidData
     );
     let mut reader = BufferedFrameReader::new();
+    let mut buffered = header;
     assert_eq!(
-        reader.poll(&mut header.as_ref()).unwrap_err().kind(),
+        reader.poll(&mut buffered).unwrap_err().kind(),
         io::ErrorKind::InvalidData
     );
 }
@@ -25,8 +27,9 @@ fn add001_six_byte_varint_and_invalid_fifth_byte_are_rejected() {
         &[0xff, 0xff, 0xff, 0xff, 0x8f, 0][..],
         &[0x80, 0x80, 0x80, 0x80, 0x10][..],
     ] {
+        let mut input = header;
         assert_eq!(
-            read_varint(&mut header.as_ref()).unwrap_err().kind(),
+            read_varint(&mut input).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
         rejected_frame(header);
