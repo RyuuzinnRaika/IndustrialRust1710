@@ -156,6 +156,9 @@ pub struct DimensionWorlds {
     // A path check alone cannot detect rename + replacement by a real directory.
     #[cfg(unix)]
     root_identity: (u64, u64),
+    // DIM-1 and DIM1 can be replaced independently of the root directory.
+    #[cfg(unix)]
+    dimension_directory_identities: [(u64, u64); 2],
     overworld: Arc<Mutex<World>>,
     nether: Arc<Mutex<World>>,
     end: Arc<Mutex<World>>,
@@ -209,11 +212,28 @@ impl DimensionWorlds {
             let meta = fs::symlink_metadata(&manager.root)?;
             (meta.dev(), meta.ino())
         };
+        #[cfg(unix)]
+        let dimension_directory_identities = {
+            use std::os::unix::fs::MetadataExt;
+            let identity = |name: &str| -> io::Result<(u64, u64)> {
+                let meta = fs::symlink_metadata(manager.root.join(name))?;
+                if !meta.file_type().is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "dimension child directory is not a real directory",
+                    ));
+                }
+                Ok((meta.dev(), meta.ino()))
+            };
+            [identity("DIM-1")?, identity("DIM1")?]
+        };
         Ok(Self {
             manager,
             paths,
             #[cfg(unix)]
             root_identity,
+            #[cfg(unix)]
+            dimension_directory_identities,
             overworld: Arc::new(Mutex::new(overworld)),
             nether: Arc::new(Mutex::new(nether)),
             end: Arc::new(Mutex::new(end)),
@@ -285,6 +305,20 @@ impl DimensionWorlds {
                     io::ErrorKind::InvalidData,
                     "dimension root directory replaced after load",
                 ));
+            }
+            // Replacing only DIM-1 or DIM1 leaves the root inode unchanged.
+            // Reject those swaps before publishing the redo journal.
+            for (name, expected) in ["DIM-1", "DIM1"]
+                .into_iter()
+                .zip(self.dimension_directory_identities)
+            {
+                let meta = fs::symlink_metadata(self.manager.root.join(name))?;
+                if !meta.file_type().is_dir() || (meta.dev(), meta.ino()) != expected {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "dimension child directory replaced after load",
+                    ));
+                }
             }
         }
         let dimensions = [Dimension::Overworld, Dimension::Nether, Dimension::End];
@@ -1297,6 +1331,42 @@ mod tests {
 
         drop(worlds);
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_all_rejects_replaced_nether_or_end_directory() {
+        for (directory, filename) in [("DIM-1", "nether.irw"), ("DIM1", "end.irw")] {
+            let base = std::env::temp_dir().join(format!(
+                "ir1710-dimension-child-swap-{}-{}-{:?}",
+                std::process::id(),
+                directory,
+                std::thread::current().id()
+            ));
+            let _ = fs::remove_dir_all(&base);
+            fs::create_dir_all(&base).unwrap();
+            let root = base.join("worlds");
+            let worlds = DimensionWorlds::load_all(DimensionManager::new(&root, 73)).unwrap();
+            let original = fs::read(root.join(directory).join(filename)).unwrap();
+
+            // The root is unchanged, but a child directory was replaced
+            // with a different real directory after loading the worlds.
+            fs::rename(root.join(directory), root.join("original-dimension")).unwrap();
+            fs::create_dir(root.join(directory)).unwrap();
+            assert_eq!(
+                worlds.save_all().unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                fs::read(root.join("original-dimension").join(filename)).unwrap(),
+                original
+            );
+            assert!(!root.join("dimensions.pending-txn.json").exists());
+            assert!(!root.join(directory).join(filename).exists());
+
+            drop(worlds);
+            fs::remove_dir_all(base).unwrap();
+        }
     }
 
     #[cfg(unix)]
