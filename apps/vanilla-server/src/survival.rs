@@ -95,6 +95,17 @@ fn rule(block: u16) -> Option<BlockRule> {
     let damage = (block & 15) as i16;
     let item = |id: i16, damage: i16| Some(BlockDrop { id, damage });
     let (hardness, kind, tier, requires_tool, drop) = match id {
+        // Common 1.7.10 wild plants must be breakable even without tools.
+        // Tall grass / ferns are removed with no guaranteed block item:
+        // optional wheat seeds are decided in additional_drop().
+        31 => (0.0, None, 0, false, None),
+        37 => (0.0, None, 0, false, item(37, 0)), // dandelion
+        38 => (0.0, None, 0, false, item(38, damage)), // flower variants
+        39 | 40 => (0.0, None, 0, false, item(id as i16, 0)),
+        81 => (0.4, None, 0, false, item(81, 0)),  // cactus
+        83 => (0.0, None, 0, false, item(338, 0)), // sugar cane item
+        86 | 91 => (1.0, Some(ToolKind::Axe), 0, false, item(id as i16, 0)),
+        111 => (0.0, None, 0, false, item(111, 0)), // lily pad
         2 | 3 => (0.5, Some(ToolKind::Shovel), 0, false, item(3, 0)),
         12 => (0.5, Some(ToolKind::Shovel), 0, false, item(12, damage)),
         13 => (0.6, Some(ToolKind::Shovel), 0, false, item(13, 0)),
@@ -177,6 +188,7 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
     roll = roll.wrapping_mul(0x94d049bb133111eb);
     roll ^= roll >> 31;
     let (id, count) = match block >> 4 {
+        31 if (block & 3) != 0 && roll.is_multiple_of(8) => (295, 1), // Grass/fern seeds
         18 if block & 3 == 0 && roll.is_multiple_of(200) => (260, 1), // Oak apple
         161 if block & 3 == 1 && roll.is_multiple_of(200) => (260, 1), // Dark oak apple
         18 | 161 if roll.is_multiple_of(20) => (6, 1),                // Matching sapling
@@ -311,6 +323,53 @@ mod tests {
             nbt: None,
         })
     }
+    #[test]
+    fn wild_plants_are_breakable_and_return_legacy_survival_items() {
+        // Block IDs on the left; item IDs/metadata on the right.
+        for (block, metadata, item_id, item_metadata) in [
+            (37, 0, 37, 0),   // dandelion
+            (38, 4, 38, 4),   // tulip/flower variant
+            (39, 0, 39, 0),   // brown mushroom
+            (40, 0, 40, 0),   // red mushroom
+            (81, 0, 81, 0),   // cactus
+            (83, 0, 338, 0),  // sugar cane becomes the cane item
+            (86, 0, 86, 0),   // pumpkin
+            (91, 0, 91, 0),   // jack-o-lantern
+            (111, 0, 111, 0), // lily pad
+        ] {
+            let (_, mined) = mine_rule((block << 4) | metadata, None).unwrap();
+            assert_eq!(
+                mined.drop,
+                Some(BlockDrop {
+                    id: item_id,
+                    damage: item_metadata,
+                }),
+                "unexpected plant drop for block {block}"
+            );
+            assert!(!mined.wear_tool);
+        }
+        for variant in [1u16, 2] {
+            let (time, mined) = mine_rule((31 << 4) | variant, None).unwrap();
+            assert_eq!(time, Duration::from_millis(50));
+            assert_eq!(mined.drop, None);
+            assert!(!mined.wear_tool);
+        }
+        // Removing grass is never a guaranteed seed grant; outcomes remain
+        // deterministic for the same world position and tick.
+        let grass = (31u16 << 4) | 1;
+        let seeds = (0..128u64)
+            .filter_map(|tick| additional_drop(grass, (2, 65, -3), tick))
+            .collect::<Vec<_>>();
+        assert!(!seeds.is_empty());
+        assert!(seeds.len() < 64);
+        assert!(seeds.iter().all(|drop| drop.id == 295 && drop.count == 1));
+        assert_eq!(
+            additional_drop(grass, (2, 65, -3), 7),
+            additional_drop(grass, (2, 65, -3), 7)
+        );
+        assert_eq!(additional_drop(31u16 << 4, (2, 65, -3), 7), None);
+    }
+
     #[test]
     fn base_rules_and_harvest_tiers_are_authoritative() {
         assert!(mine_rule(7 << 4, None).is_none());
