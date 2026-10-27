@@ -1233,12 +1233,8 @@ impl Mobs {
                 ))
             }
         };
-        if !self.enabled || !world.is_natural() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Mob simulation requires a natural world",
-            ));
-        }
+        // Explicit /summon is distinct from *natural* spawning. Flat worlds
+        // must still run AI for summoned mobs even with natural spawning off.
         if !at.is_valid()
             || physics::collides(world, &at)
             || self.entities.len() >= MAX_LOADED_MOBS
@@ -3766,6 +3762,28 @@ fn natural_spawn_location_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn command_summon_in_flat_world_survives_restart_without_enabling_natural_spawns() {
+        let world = World::new();
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-summon-{}-{:?}.mobs.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        assert!(!mobs.enabled);
+        let at = PlayerPosition { x: 0.5, y: 90.0, z: 0.5 };
+        let packet = mobs.summon_command(&world, "Cow", at).unwrap();
+        assert_eq!(packet.id, 0x0f);
+        assert_eq!(mobs.entities.len(), 1);
+        assert!(mobs.summon_command(&world, "minecraft:netherite", at).is_err());
+        let loaded = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        assert_eq!(loaded.entities.len(), 1);
+        assert!(!loaded.enabled);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn natural_spawn_fluid_overlap_is_strict_and_safe_at_i32_limits() {
         // Touching either face of a water/lava block is not a collision.

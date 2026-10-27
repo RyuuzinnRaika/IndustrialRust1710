@@ -87,8 +87,8 @@ These limits prevent accidental inventory loss and incorrect 1.7.10 block NBT.
   Unsupported effects and 1.8+ particle visibility arguments are rejected.
 - `/summon <entity> [x y z]`: supports 1.7.10 capitalized entity names such
   as `Zombie`, `Cow`, `Pig`, `Creeper`, `Skeleton`, and a selected
-  list of other existing Mob types. Requires a natural world and Overworld
-  context; world collision, capacity, Peaceful and position limits are enforced.
+  list of other existing Mob types. Supports flat and natural Overworld
+  worlds; world collision, capacity, Peaceful and position limits are enforced.
   Entities are saved before the spawn packet is broadcast. Commands from
   the host console require absolute coordinates; verified OP players can
   use `~` coordinates or omit the position. Bosses, NBT payloads, selectors,
