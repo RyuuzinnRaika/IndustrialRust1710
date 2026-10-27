@@ -143,7 +143,10 @@ pub fn save(world_path: &Path, point: WorldSpawn) -> io::Result<()> {
         return Err(invalid("oversized world spawn serialization"));
     }
     let temp = path.with_extension("worldspawn.tmp");
-    let mut writer = OpenOptions::new().write(true).create_new(true).open(&temp)?;
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
     if let Err(error) = writer.write_all(&bytes).and_then(|_| writer.sync_all()) {
         drop(writer);
         let _ = fs::remove_file(temp);
@@ -194,10 +197,7 @@ mod tests {
         let spawn = WorldSpawn::new(10, 64, -20).unwrap();
         assert_eq!(spawn.packet().len(), 12);
         assert_eq!(spawn.packet()[0..4], 10i32.to_be_bytes());
-        assert_eq!(
-            spawn.safe_player_position(&world).unwrap().y,
-            64.0
-        );
+        assert_eq!(spawn.safe_player_position(&world).unwrap().y, 64.0);
         assert!(WorldSpawn::new(0, -1, 0).is_err());
         assert!(WorldSpawn::new(i32::MAX, 65, 0).is_err());
     }
