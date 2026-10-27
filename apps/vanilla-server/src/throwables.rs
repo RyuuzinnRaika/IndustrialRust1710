@@ -774,7 +774,7 @@ mod tests {
         let id = *objects.active.keys().next().unwrap();
         let feet = (2.0, 70.5, 0.5);
         assert_eq!(objects.nearby_embedded_arrow(feet), None);
-        assert_eq!(objects.take_embedded_arrow(id, 42), None);
+        assert!(objects.take_embedded_arrow(id, 42).is_none());
         objects.tick(&world, 1);
         for tick in 2..8 {
             objects.tick(&world, tick);
@@ -784,7 +784,7 @@ mod tests {
         assert_eq!(objects.nearby_embedded_arrow(feet), Some(id));
         assert_eq!(objects.nearby_embedded_arrow((8.0, 70.5, 0.5)), None);
         assert_eq!(objects.nearby_embedded_arrow((f64::NAN, 70.5, 0.5)), None);
-        assert_eq!(objects.take_embedded_arrow(id, -1), None);
+        assert!(objects.take_embedded_arrow(id, -1).is_none());
 
         let packets = objects.take_embedded_arrow(id, 42).unwrap();
         assert_eq!(packets[0].id, 0x0d);
@@ -792,7 +792,7 @@ mod tests {
         assert_eq!(&packets[0].body[4..], &42i32.to_be_bytes());
         assert_eq!(packets[1].id, 0x13);
         assert_eq!(objects.nearby_embedded_arrow(feet), None);
-        assert_eq!(objects.take_embedded_arrow(id, 43), None);
+        assert!(objects.take_embedded_arrow(id, 43).is_none());
         assert!(objects.tick(&world, 9).events.is_empty());
     }
 
