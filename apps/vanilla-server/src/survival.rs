@@ -680,6 +680,34 @@ mod tests {
     }
 
     #[test]
+    fn s03_negative_tool_damage_cannot_fast_finish_or_swap_into_active_dig() {
+        // A malformed tool is treated as bare hands throughout the complete
+        // server-authoritative dig, not only by the initial harvest rule.
+        let target = (3, 64, -2);
+        let block = 1_u16 << 4;
+        let bare_minimum = mine_rule(block, None).unwrap().0;
+        assert!(bare_minimum > Duration::from_secs(1));
+
+        for damage in [i16::MIN, -1] {
+            let malformed = stack(270, damage);
+            let mut too_early = MiningProgress::start(target, block, malformed).unwrap();
+            too_early.started = Instant::now() - Duration::from_millis(100);
+            assert!(too_early.finish(target, block, malformed).is_none());
+
+            let mut completed = MiningProgress::start(target, block, malformed).unwrap();
+            completed.started = Instant::now() - bare_minimum;
+            assert_eq!(
+                completed.finish(target, block, malformed),
+                mine_rule(block, None).map(|(_, result)| result)
+            );
+
+            let mut switched = MiningProgress::start(target, block, stack(270, 0)).unwrap();
+            switched.started = Instant::now() - bare_minimum;
+            assert!(switched.finish(target, block, malformed).is_none());
+        }
+    }
+
+    #[test]
     fn matching_tools_mine_faster_and_have_correct_durability() {
         let bare = mine_rule(1 << 4, None).unwrap().0;
         let wood = mine_rule(1 << 4, stack(270, 0)).unwrap().0;
