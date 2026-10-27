@@ -4,6 +4,10 @@
 //! changing the seed algorithm of an existing IRW4 world would regenerate
 //! untouched chunks differently after restart. A future versioned generator
 //! can opt into these primitives without modifying saved IRW1–IRW4 worlds.
+// Isolated A01 layers: not wired into IRW4 world creation.
+#[allow(dead_code)]
+mod island_zoom;
+
 const MULTIPLIER: i64 = 6_364_136_223_846_793_005;
 const ADDEND: i64 = 1_442_695_040_888_963_407;
 
