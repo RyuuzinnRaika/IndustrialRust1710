@@ -1102,9 +1102,7 @@ fn add018_two_survival_clients_collect_one_ground_entity_exactly_once() {
 
     // Both clients must see the same entity before either can claim it.
     for client in [&mut alice, &mut bob] {
-        let entity = until_packet(client, 0x0e, |p| {
-            p.len() == 24 && p[5] == 2
-        });
+        let entity = until_packet(client, 0x0e, |p| p.len() == 24 && p[5] == 2);
         let mut encoded = entity.as_slice();
         assert_eq!(read_varint(&mut encoded).unwrap() as i32, DROP_ID);
         let metadata = until_packet(client, 0x1c, |p| {
@@ -1156,9 +1154,7 @@ fn add018_two_survival_clients_collect_one_ground_entity_exactly_once() {
     server.wait_idle();
 
     let saved = |name: &str| {
-        let path = server.directory.join(format!(
-            "players/{name}.survival.inventory.json"
-        ));
+        let path = server.directory.join(format!("players/{name}.survival.inventory.json"));
         await_file(&path);
         let inventory: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         let total = inventory["slots"]
