@@ -1329,8 +1329,8 @@ impl World {
             .filter(|tnt| tnt.explode_at <= self.fluid_phase)
             .take(4)
             .count();
-        let available = MAX_PRIMED_TNT
-            .saturating_sub(self.primed_tnt.len().saturating_sub(detonating));
+        let available =
+            MAX_PRIMED_TNT.saturating_sub(self.primed_tnt.len().saturating_sub(detonating));
         let mut primed_on_commit = Vec::new();
         let mut deferred = Vec::new();
         for (&(x, y, z), &new) in &changes {
