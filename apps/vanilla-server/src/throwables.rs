@@ -106,7 +106,12 @@ impl Thrown {
 }
 /// Check the full flight segment against a server-owned entity AABB.
 /// Sampling only the end points can skip a narrow/grazing hitbox at high speed.
-fn segment_hits_box(from: PlayerPosition, to: PlayerPosition, min: [f64; 3], max: [f64; 3]) -> bool {
+fn segment_hits_box(
+    from: PlayerPosition,
+    to: PlayerPosition,
+    min: [f64; 3],
+    max: [f64; 3],
+) -> bool {
     let mut entry = 0.0_f64;
     let mut exit = 1.0_f64;
     for (start, end, low, high) in [
@@ -114,7 +119,12 @@ fn segment_hits_box(from: PlayerPosition, to: PlayerPosition, min: [f64; 3], max
         (from.y, to.y, min[1], max[1]),
         (from.z, to.z, min[2], max[2]),
     ] {
-        if !start.is_finite() || !end.is_finite() || !low.is_finite() || !high.is_finite() || low > high {
+        if !start.is_finite()
+            || !end.is_finite()
+            || !low.is_finite()
+            || !high.is_finite()
+            || low > high
+        {
             return false;
         }
         let delta = end - start;
@@ -1115,17 +1125,47 @@ mod tests {
         let first = objects.tick_with_mob_targets(&world, 20, &targets);
         assert_eq!(first.mob_hits, vec![(500_099, 20)]);
         assert!(objects.active.is_empty());
-        assert!(objects.tick_with_mob_targets(&world, 21, &targets).mob_hits.is_empty());
+        assert!(objects
+            .tick_with_mob_targets(&world, 21, &targets)
+            .mob_hits
+            .is_empty());
     }
 
     #[test]
     fn swept_hitbox_rejects_parallel_misses_and_invalid_bounds() {
-        let from = PlayerPosition { x: 0.0, y: 70.0, z: 0.0 };
-        let to = PlayerPosition { x: 2.0, y: 70.0, z: 0.0 };
-        assert!(segment_hits_box(from, to, [0.9, 69.9, -0.1], [1.1, 70.1, 0.1]));
-        assert!(!segment_hits_box(from, to, [0.9, 69.9, 0.1], [1.1, 70.1, 0.2]));
-        assert!(!segment_hits_box(from, to, [0.9, 69.9, -0.1], [1.1, 69.99, 0.1]));
-        assert!(!segment_hits_box(from, to, [f64::NAN, 69.9, -0.1], [1.1, 70.1, 0.1]));
+        let from = PlayerPosition {
+            x: 0.0,
+            y: 70.0,
+            z: 0.0,
+        };
+        let to = PlayerPosition {
+            x: 2.0,
+            y: 70.0,
+            z: 0.0,
+        };
+        assert!(segment_hits_box(
+            from,
+            to,
+            [0.9, 69.9, -0.1],
+            [1.1, 70.1, 0.1]
+        ));
+        assert!(!segment_hits_box(
+            from,
+            to,
+            [0.9, 69.9, 0.1],
+            [1.1, 70.1, 0.2]
+        ));
+        assert!(!segment_hits_box(
+            from,
+            to,
+            [0.9, 69.9, -0.1],
+            [1.1, 69.99, 0.1]
+        ));
+        assert!(!segment_hits_box(
+            from,
+            to,
+            [f64::NAN, 69.9, -0.1],
+            [1.1, 70.1, 0.1]
+        ));
     }
-
 }
