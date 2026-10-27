@@ -9772,7 +9772,6 @@ mod disconnect_diagnostics_tests {
             received_at,
         ));
     }
-
 }
 
 #[cfg(test)]
