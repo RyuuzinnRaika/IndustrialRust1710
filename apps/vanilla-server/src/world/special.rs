@@ -572,8 +572,12 @@ impl World {
 
     /// Additional scheduled state changes are merged into the existing
     /// fluid/ecology/devices single-snapshot commit.
-    pub(super) fn special_changes(&self, budget: usize) -> BTreeMap<Position, u16> {
+    pub(super) fn special_changes(
+        &self,
+        budget: usize,
+    ) -> (BTreeMap<Position, u16>, std::collections::BTreeSet<Position>) {
         let mut changes = BTreeMap::new();
+        let mut blast_cells = std::collections::BTreeSet::new();
         let len = self.pending_devices.len();
         if len > 0 {
             let start = (self.fluid_phase as usize).wrapping_mul(budget) % len;
@@ -703,6 +707,7 @@ impl World {
                                 strength -= (blast_resistance(id) + 0.3) * 0.3;
                                 if strength > 0.0 && blast_breakable(id) {
                                     changes.insert((x, y as u8, z), 0);
+                                    blast_cells.insert((x, y as u8, z));
                                 }
                             }
                             px += dx / length * 0.3;
@@ -714,7 +719,7 @@ impl World {
                 }
             }
         }
-        changes
+        (changes, blast_cells)
     }
 
     /// A weighted pressure plate's metadata is its 0..15 analog output.
