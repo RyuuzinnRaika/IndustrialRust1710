@@ -3251,7 +3251,9 @@ fn play(
                 // player stops moving inside the 50-ms orientation throttle.
                 // Otherwise other clients and server-side mob AI can retain a
                 // permanently different player location.
-                if position_changed || last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
+                if position_changed
+                    || last_movement_broadcast.elapsed() >= Duration::from_millis(50)
+                {
                     hub.move_player(entity_id, candidate, yaw, pitch);
                     last_movement_broadcast = Instant::now();
                 }
@@ -10203,14 +10205,17 @@ mod primed_tnt_protocol5_tests {
     }
 }
 
-
 #[cfg(test)]
 mod protocol5_chunk_transition_regression_tests {
     use super::*;
 
     #[test]
     fn negative_chunk_centers_floor_correctly_and_view_shifts_by_one_column() {
-        let center = chunk_center(&PlayerPosition { x: -0.5, y: 65.0, z: -0.5 });
+        let center = chunk_center(&PlayerPosition {
+            x: -0.5,
+            y: 65.0,
+            z: -0.5,
+        });
         assert_eq!(center, (-1, -1));
         let before = view_chunks(center);
         let after = view_chunks((center.0 + 1, center.1));
