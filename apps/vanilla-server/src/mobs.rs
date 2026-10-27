@@ -5455,7 +5455,10 @@ mod tests {
         let limited_events = spawn_once(&mut nearly_full, &[near, distant]);
         assert_eq!(nearly_full.entities.len(), 158);
         assert_eq!(
-            limited_events.iter().filter(|event| event.id == 0x0f).count(),
+            limited_events
+                .iter()
+                .filter(|event| event.id == 0x0f)
+                .count(),
             1
         );
     }
