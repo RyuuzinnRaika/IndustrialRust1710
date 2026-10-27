@@ -26,6 +26,26 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
 }
 
+/// Convert a bounded world cell to the Protocol 5 fixed-point center.
+/// Never multiply arbitrary positions supplied by a caller without a bounds
+/// check: overflow would panic in debug builds or wrap in optimized builds.
+fn drop_position(block: (i32, i32, i32)) -> io::Result<[i32; 3]> {
+    if !crate::world::in_bounds(block.0, block.1, block.2) {
+        return Err(invalid("ground item location outside world bounds"));
+    }
+    let coordinate = |value: i32| {
+        value
+            .checked_mul(32)
+            .and_then(|fixed| fixed.checked_add(16))
+            .ok_or_else(|| invalid("ground item fixed-point position overflow"))
+    };
+    Ok([
+        coordinate(block.0)?,
+        coordinate(block.1)?,
+        coordinate(block.2)?,
+    ])
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GroundItem {
@@ -37,9 +57,9 @@ impl GroundItem {
     fn valid(&self) -> bool {
         self.id > 1_000_000_000
             && self.stack.is_valid()
-            && self.position[0].div_euclid(32).abs() <= WORLD_LIMIT
-            && (0..=255 * 32).contains(&self.position[1])
-            && self.position[2].div_euclid(32).abs() <= WORLD_LIMIT
+            && (-WORLD_LIMIT..WORLD_LIMIT).contains(&self.position[0].div_euclid(32))
+            && (0..=255).contains(&self.position[1].div_euclid(32))
+            && (-WORLD_LIMIT..WORLD_LIMIT).contains(&self.position[2].div_euclid(32))
     }
     /// 1.7.10 Spawn Object: entity VarInt, type 2, fixed-point positions,
     /// pitch, yaw and zero object data. Follow with 0x1c Metadata (slot 10).
@@ -206,8 +226,8 @@ impl GroundItems {
         if self.is_full() || !stack.is_valid() {
             return Err(invalid("ground-item capacity or stack invalid"));
         }
+        let position = drop_position(block)?;
         let id = self.next_id + 1;
-        let position = [block.0 * 32 + 16, block.1 * 32 + 16, block.2 * 32 + 16];
         let item = GroundItem {
             id,
             position,
@@ -244,6 +264,7 @@ impl GroundItems {
         if !self.has_capacity_for(stacks.len()) || stacks.iter().any(|stack| !stack.is_valid()) {
             return Err(invalid("death-drop capacity or stack invalid"));
         }
+        let position = drop_position(block)?;
         let mut candidate = self.clone();
         let mut inserted = Vec::with_capacity(stacks.len());
         let when_ready = Instant::now() + PICKUP_DELAY;
@@ -251,7 +272,7 @@ impl GroundItems {
             candidate.next_id += 1;
             let item = GroundItem {
                 id: candidate.next_id,
-                position: [block.0 * 32 + 16, block.1 * 32 + 16, block.2 * 32 + 16],
+                position,
                 stack,
             };
             if !item.valid() {
@@ -340,16 +361,34 @@ impl GroundItems {
         self.commit_staged_put(path, staged)
     }
 
+    /// Choose the first *receivable* nearby item rather than the first item
+    /// alone. A full inventory must not let an unstackable/foreign item block
+    /// pickup of a later stack that can still merge into an occupied slot.
+    /// Selection is bounded by MAX_DROPS; the caller journals any transfer.
+    pub fn nearby_ready_with<T>(
+        &self,
+        feet: (f64, f64, f64),
+        mut select: impl FnMut(&GroundItem) -> Option<T>,
+    ) -> Option<(GroundItem, T)> {
+        let now = Instant::now();
+        for item in self.entries.values() {
+            let eligible = self
+                .eligible_after
+                .get(&item.id)
+                .is_some_and(|time| now >= *time);
+            if eligible && item.in_pickup_range(feet) {
+                if let Some(accepted) = select(item) {
+                    return Some((item.clone(), accepted));
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
     pub fn nearby_ready(&self, feet: (f64, f64, f64)) -> Option<GroundItem> {
-        self.entries
-            .values()
-            .find(|item| {
-                self.eligible_after
-                    .get(&item.id)
-                    .is_some_and(|time| Instant::now() >= *time)
-                    && item.in_pickup_range(feet)
-            })
-            .cloned()
+        self.nearby_ready_with(feet, |_| Some(()))
+            .map(|(item, ())| item)
     }
     /// Legacy independent-file path retained for existing unit tests.
     #[cfg(test)]
@@ -368,6 +407,158 @@ impl GroundItems {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn s01_out_of_world_drops_cannot_overflow_or_modify_ground_state() {
+        let initial = GroundItems::default();
+        let item = Stack {
+            id: 17,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        for location in [
+            (i32::MAX, 64, 0),
+            (i32::MIN, 64, 0),
+            (WORLD_LIMIT, 64, 0),
+            (-WORLD_LIMIT - 1, 64, 0),
+            (0, -1, 0),
+            (0, 256, 0),
+            (0, 64, i32::MAX),
+        ] {
+            assert!(initial.stage_put_many(&[item], location).is_err());
+            assert!(initial.entries.is_empty());
+            assert_eq!(initial.next_id, 1_000_000_000);
+            let mut independent = initial.clone();
+            assert!(independent
+                .put(std::path::Path::new("invalid-drop-must-not-write.json"), item, location)
+                .is_err());
+            assert!(independent.entries.is_empty());
+            assert_eq!(independent.next_id, 1_000_000_000);
+        }
+        for location in [(-WORLD_LIMIT, 0, WORLD_LIMIT - 1), (0, 255, 0)] {
+            let (candidate, new_items) = initial.stage_put_many(&[item], location).unwrap();
+            assert_eq!(new_items.len(), 1);
+            assert_eq!(candidate.entries.len(), 1);
+            assert_eq!(new_items[0].position, drop_position(location).unwrap());
+        }
+    }
+
+    #[test]
+    fn s01_compatible_ground_stack_is_not_blocked_by_earlier_unreceivable_item() {
+        use crate::inventory::Inventory;
+
+        let apple = Stack {
+            id: 260,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let cobble = Stack {
+            id: 4,
+            count: 2,
+            damage: 0,
+            nbt: None,
+        };
+        let (mut ground, spawned) = GroundItems::default()
+            .stage_put_many(&[apple, cobble], (0, 64, 0))
+            .unwrap();
+        for item in &spawned {
+            ground
+                .eligible_after
+                .insert(item.id, Instant::now() - Duration::from_secs(1));
+        }
+
+        let mut inventory = Inventory::default();
+        for slot in 9..45 {
+            assert!(inventory
+                .creative_set(
+                    slot,
+                    Some(Stack {
+                        id: 3,
+                        count: 64,
+                        damage: 0,
+                        nbt: None,
+                    }),
+                )
+                .unwrap());
+        }
+        // No empty slots; the earlier apple is impossible to accept. The
+        // later cobble may still merge one item into the existing hotbar.
+        assert!(inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 4,
+                    count: 63,
+                    damage: 0,
+                    nbt: None,
+                }),
+            )
+            .unwrap());
+        let (selected, (credited, amount, slots)) = ground
+            .nearby_ready_with((0.5, 64.0, 0.5), |item| {
+                let mut next = inventory.clone();
+                next.receive_stack_partial(item.stack)
+                    .map(|(count, changed)| (next, count, changed))
+            })
+            .expect("compatible later stack must not be starved");
+        assert_eq!(selected.id, spawned[1].id);
+        assert_eq!(amount, 1);
+        assert_eq!(slots, vec![36]);
+        assert_eq!(credited.held().unwrap().count, 64);
+        assert_eq!(inventory.held().unwrap().count, 63);
+        let (staged, picked, remaining) = ground
+            .stage_take_amount(selected.id, amount)
+            .unwrap()
+            .unwrap();
+        assert_eq!(picked.stack.count, 1);
+        assert_eq!(remaining.unwrap().stack.count, 1);
+        assert_eq!(staged.entries.get(&spawned[0].id).unwrap().stack, apple);
+        assert_eq!(staged.entries.get(&spawned[1].id).unwrap().stack.count, 1);
+    }
+
+    #[test]
+    fn s01_unready_or_distant_drops_never_reach_the_inventory_selector() {
+        let (mut drops, added) = GroundItems::default()
+            .stage_put_many(
+                &[Stack {
+                    id: 17,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                }],
+                (0, 64, 0),
+            )
+            .unwrap();
+        let id = added[0].id;
+        let mut called = false;
+        assert!(drops
+            .nearby_ready_with((0.5, 64.0, 0.5), |_| {
+                called = true;
+                Some(())
+            })
+            .is_none());
+        assert!(!called);
+        drops
+            .eligible_after
+            .insert(id, Instant::now() - Duration::from_secs(1));
+        assert!(drops
+            .nearby_ready_with((10.5, 64.0, 0.5), |_| {
+                called = true;
+                Some(())
+            })
+            .is_none());
+        assert!(!called);
+        assert_eq!(
+            drops
+                .nearby_ready_with((0.5, 64.0, 0.5), |_| Some(()))
+                .unwrap()
+                .0
+                .id,
+            id
+        );
+    }
+
     #[test]
     fn partial_take_keeps_same_item_entity_and_never_loses_remainder() {
         let original = GroundItems::default();

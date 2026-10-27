@@ -1893,43 +1893,46 @@ fn play(
             let mut ground = ground_items
                 .lock()
                 .map_err(|_| io::Error::other("ground items lock poisoned"))?;
-            if let Some(item) = ground.nearby_ready(location) {
-                let mut candidate = inventory.clone();
-                if let Some((count, slots)) = candidate.receive_stack_partial(item.stack) {
-                    if let Some((staged_ground, collected, remainder)) =
-                        ground.stage_take_amount(item.id, count)?
-                    {
-                        journal::commit(
-                            &world_path.with_extension("pending-txn.json"),
-                            &[
-                                (ground_path, staged_ground.encoded()?),
-                                (inventory_path, candidate.encoded()?),
-                            ],
-                        )?;
-                        *ground = staged_ground;
-                        *inventory = candidate;
-                        if let Some(remaining) = remainder {
-                            // A partial pickup keeps the same ground entity;
-                            // update DataWatcher item count instead of
-                            // destroying an entity with items still inside it.
-                            hub.broadcast(remaining.spawn()[1].clone());
-                        } else {
-                            for packet in collected.collected(entity_id) {
-                                hub.broadcast(packet);
-                            }
+            if let Some((item, (candidate, count, slots))) =
+                ground.nearby_ready_with(location, |drop| {
+                    let mut next = inventory.clone();
+                    next.receive_stack_partial(drop.stack)
+                        .map(|(accepted, changed)| (next, accepted, changed))
+                })
+            {
+                if let Some((staged_ground, collected, remainder)) =
+                    ground.stage_take_amount(item.id, count)?
+                {
+                    journal::commit(
+                        &world_path.with_extension("pending-txn.json"),
+                        &[
+                            (ground_path, staged_ground.encoded()?),
+                            (inventory_path, candidate.encoded()?),
+                        ],
+                    )?;
+                    *ground = staged_ground;
+                    *inventory = candidate;
+                    if let Some(remaining) = remainder {
+                        // A partial pickup keeps the same ground entity;
+                        // update DataWatcher item count instead of
+                        // destroying an entity with items still inside it.
+                        hub.broadcast(remaining.spawn()[1].clone());
+                    } else {
+                        for packet in collected.collected(entity_id) {
+                            hub.broadcast(packet);
                         }
-                        for slot in slots {
-                            send(s, 0x2f, &inventory.set_slot(slot)?)?;
-                        }
-                        // A grant is sent only after the inventory and ground
-                        // item transaction commits successfully.
-                        if let Some(key) = Achievements::collected_item_trigger(item.stack.id) {
-                            let mut next_achievements = achievements.clone();
-                            if let Some(packet) = next_achievements.award(key)? {
-                                next_achievements.save(achievements_path)?;
-                                *achievements = next_achievements;
-                                send(s, packet.id, &packet.body)?;
-                            }
+                    }
+                    for slot in slots {
+                        send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                    }
+                    // A grant is sent only after the inventory and ground
+                    // item transaction commits successfully.
+                    if let Some(key) = Achievements::collected_item_trigger(item.stack.id) {
+                        let mut next_achievements = achievements.clone();
+                        if let Some(packet) = next_achievements.award(key)? {
+                            next_achievements.save(achievements_path)?;
+                            *achievements = next_achievements;
+                            send(s, packet.id, &packet.body)?;
                         }
                     }
                 }
