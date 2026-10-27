@@ -591,7 +591,6 @@ fn piston_action_event(action: world::PistonAction) -> Event {
     Event { id: 0x24, body }
 }
 
-
 /// Keep the final authoritative block-change packets from replacing the
 /// client's own 1.7.10 S24 piston animation before its three-tick move ends.
 /// This is visual synchronization only: IRW still commits the resulting blocks
@@ -8250,7 +8249,9 @@ mod piston_client_animation_tests {
         let _ = std::fs::remove_file(&path);
         let mut world = World::new();
         world.update_and_save(&path, -1, 64, 0, 152 << 4).unwrap();
-        world.update_and_save(&path, 0, 64, 0, (33 << 4) | 5).unwrap();
+        world
+            .update_and_save(&path, 0, 64, 0, (33 << 4) | 5)
+            .unwrap();
         world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
         let changed = world.block_tick(&path, 64).unwrap();
         let actions = world.drain_piston_actions();
