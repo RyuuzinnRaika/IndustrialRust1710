@@ -121,10 +121,33 @@ use window_open::WindowKind;
 use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
 
 const MAX_CONNECTIONS: usize = 32;
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 // Internal to Hub; no such packet ID is ever sent on the Protocol 5 wire.
 const CHUNK_RELIGHT_EVENT: u32 = u32::MAX;
 fn bad(reason: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, reason)
+}
+
+fn keepalive_challenge_due(pending_ping: Option<i32>, last_ping: Instant, now: Instant) -> bool {
+    pending_ping.is_none() && now.saturating_duration_since(last_ping) >= KEEPALIVE_INTERVAL
+}
+
+fn accept_keepalive_reply(
+    pending_ping: &mut Option<i32>,
+    ping_time: &mut Instant,
+    pong_time: &mut Instant,
+    reply: i32,
+    received_at: Instant,
+) -> bool {
+    if *pending_ping != Some(reply) {
+        return false;
+    }
+    *pending_ping = None;
+    // Schedule the next challenge relative to this pong. Otherwise, a reply
+    // that arrives near the ten-second boundary can trigger back-to-back pings.
+    *ping_time = received_at;
+    *pong_time = received_at;
+    true
 }
 
 /// Classify failures without treating a normal EOF as a gameplay crash.
@@ -1260,6 +1283,8 @@ fn play(
     // An unsolicited, replayed or cross-session ID must never count as a pong.
     let mut pending_ping: Option<i32> = None;
     let trace_keepalive = std::env::var_os("IR_TRACE_KEEPALIVE").is_some();
+    let mut last_client_packet_at = started;
+    let mut last_client_packet_id = None;
     let mut last_time_tick: u64 = clock.ticks();
     let mut last_vitals_tick = clock.ticks();
     let mut admission_check = started;
@@ -2301,7 +2326,8 @@ fn play(
             send(s, 0x03, &time)?;
             last_time_tick = now_tick;
         }
-        if pending_ping.is_none() && ping_time.elapsed() >= Duration::from_secs(10) {
+        let now = Instant::now();
+        if keepalive_challenge_due(pending_ping, ping_time, now) {
             ping_id = ping_id.wrapping_add(1);
             // ID 0 is emitted unsolicited by the vanilla terrain-loading GUI,
             // so never use it as an actual server-issued heartbeat challenge.
@@ -2310,7 +2336,7 @@ fn play(
             }
             send(s, 0, &ping_id.to_be_bytes())?;
             pending_ping = Some(ping_id);
-            ping_time = Instant::now();
+            ping_time = now;
             if trace_keepalive {
                 eprintln!("keepalive trace: sent challenge id={ping_id}");
             }
@@ -2321,6 +2347,10 @@ fn play(
                     "keepalive trace: timeout pending={pending_ping:?} since_last_pong={}ms since_last_ping={}ms",
                     pong_time.elapsed().as_millis(),
                     ping_time.elapsed().as_millis()
+                );
+                eprintln!(
+                    "keepalive trace: last_client_packet_id={last_client_packet_id:?} age={}ms",
+                    last_client_packet_at.elapsed().as_millis()
                 );
             }
             return Err(bad("keepalive timeout"));
@@ -2333,6 +2363,10 @@ fn play(
         };
         let mut input = Input(&data);
         let id = input.varint()?;
+        if trace_keepalive {
+            last_client_packet_at = Instant::now();
+            last_client_packet_id = Some(id);
+        }
         // Dead players cannot interact with or move through the world until
         // their Protocol 5 Client Status respawn request is accepted.
         if survival && vitals.health <= 0.0 && matches!(id, 4 | 6 | 7 | 8) {
@@ -2743,10 +2777,14 @@ fn play(
                         "keepalive trace: received reply id={reply} pending={pending_ping:?}"
                     );
                 }
-                if pending_ping == Some(reply) {
-                    pending_ping = None;
-                    pong_time = Instant::now();
-                } else if reply != 0 {
+                let accepted = accept_keepalive_reply(
+                    &mut pending_ping,
+                    &mut ping_time,
+                    &mut pong_time,
+                    reply,
+                    Instant::now(),
+                );
+                if !accepted && reply != 0 {
                     return Err(bad("unexpected or replayed keepalive ID"));
                 }
                 // Vanilla 1.7.10's terrain-loading screen emits unsolicited
@@ -9631,6 +9669,36 @@ mod disconnect_diagnostics_tests {
             )),
             "chunk_timeout"
         );
+    }
+
+    #[test]
+    fn next_keepalive_waits_ten_seconds_after_a_delayed_pong() {
+        let delayed_ping = Instant::now() - Duration::from_secs(20);
+        let mut pending_ping = Some(101);
+        let mut ping_time = delayed_ping;
+        let mut pong_time = delayed_ping;
+        let received_at = Instant::now();
+
+        assert!(accept_keepalive_reply(
+            &mut pending_ping,
+            &mut ping_time,
+            &mut pong_time,
+            101,
+            received_at,
+        ));
+        assert_eq!(pending_ping, None);
+        assert_eq!(ping_time, received_at);
+        assert_eq!(pong_time, received_at);
+        assert!(!keepalive_challenge_due(
+            pending_ping,
+            ping_time,
+            received_at + Duration::from_secs(9),
+        ));
+        assert!(keepalive_challenge_due(
+            pending_ping,
+            ping_time,
+            received_at + KEEPALIVE_INTERVAL,
+        ));
     }
 }
 
