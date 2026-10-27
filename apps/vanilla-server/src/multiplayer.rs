@@ -951,7 +951,11 @@ mod tests {
         const CONTENDERS: usize = 12;
         let hub = Arc::new(Hub::default());
         let (observer_id, observer_rx, _) = hub
-            .add("Observer".into(), "observer-uuid".into(), PlayerPosition::default())
+            .add(
+                "Observer".into(),
+                "observer-uuid".into(),
+                PlayerPosition::default(),
+            )
             .unwrap();
         let barrier = Arc::new(Barrier::new(CONTENDERS));
         let results = thread::scope(|scope| {
@@ -961,7 +965,11 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 workers.push(scope.spawn(move || {
                     barrier.wait();
-                    let name = if i % 2 == 0 { "RustTester" } else { "rusttester" };
+                    let name = if i % 2 == 0 {
+                        "RustTester"
+                    } else {
+                        "rusttester"
+                    };
                     hub.add(
                         name.to_string(),
                         format!("session-uuid-{i}"),
@@ -976,9 +984,15 @@ mod tests {
                 .collect::<Vec<_>>()
         });
 
-        let winners: Vec<_> = results.iter().filter_map(|result| result.as_ref().ok()).collect();
+        let winners: Vec<_> = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .collect();
         assert_eq!(winners.len(), 1, "only one session can own the identity");
-        assert_eq!(winners[0].1, 1, "only the observer existed before admission");
+        assert_eq!(
+            winners[0].1, 1,
+            "only the observer existed before admission"
+        );
         assert_eq!(hub.count().unwrap(), 2);
         assert_eq!(
             results
