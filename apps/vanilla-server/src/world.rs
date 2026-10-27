@@ -19,6 +19,7 @@ pub const MIN_CHUNK: i32 = -WORLD_LIMIT / 16;
 pub const MAX_CHUNK: i32 = WORLD_LIMIT / 16 - 1;
 const MAX_EDITS: usize = 65_536;
 const MAX_PRIMED_TNT: usize = 4096;
+const MAX_PENDING_TNT: usize = MAX_EDITS;
 // A loaded 5x5 view contains at most 6_400 surface columns per player.
 // Keep weather observations bounded even after prolonged exploration.
 const MAX_WEATHER_COLUMNS: usize = 16_384;
@@ -78,6 +79,8 @@ pub struct World {
     raining: bool,
     day_time: i64,
     primed_tnt: BTreeMap<i32, special::PrimedTnt>,
+    // Durable overflow queue: a chain-lit block must not be lost on /stop.
+    pending_chain_tnt: BTreeSet<Position>,
     next_tnt_id: i32,
     tnt_events: Vec<special::TntEvent>,
     // Only live worlds bind to a session; standalone conversions and tests
@@ -1372,6 +1375,7 @@ impl World {
             MAX_PRIMED_TNT.saturating_sub(self.primed_tnt.len().saturating_sub(detonating));
         let mut primed_on_commit = Vec::new();
         let mut deferred = Vec::new();
+        let mut pending_chain_additions = BTreeSet::new();
         for (&(x, y, z), &new) in &changes {
             if new == 0 && self.get(x, i32::from(y), z) >> 4 == 46 {
                 if primed_on_commit.len() < available {
@@ -1382,6 +1386,9 @@ impl World {
             }
         }
         for pos in deferred {
+            if self.tnt_hit_by_blast((pos.0, i32::from(pos.1), pos.2)) {
+                pending_chain_additions.insert(pos);
+            }
             changes.remove(&pos);
         }
 
@@ -1409,15 +1416,62 @@ impl World {
             }
         }
         for pos in over_budget {
+            if changes.get(&pos) == Some(&0)
+                && self.get(pos.0, i32::from(pos.1), pos.2) >> 4 == 46
+                && (self.pending_chain_tnt.contains(&pos)
+                    || self.tnt_hit_by_blast((pos.0, i32::from(pos.1), pos.2)))
+            {
+                pending_chain_additions.insert(pos);
+            }
             changes.remove(&pos);
         }
+        // Never spawn an entity for a TNT block whose removal was dropped by
+        // the edit budget. Otherwise /stop persists a TNT block AND entity.
+        primed_on_commit.retain(|&(x, y, z)| changes.get(&(x, y as u8, z)) == Some(&0));
 
+        // The pending chain is in TNT2, so save failures must also roll this
+        // queue back, just like the primed entities and sparse block edits.
+        let stale: Vec<_> = self
+            .pending_chain_tnt
+            .iter()
+            .take(budget)
+            .copied()
+            .filter(|&(x, y, z)| self.get(x, i32::from(y), z) >> 4 != 46)
+            .collect();
+        let pending_will_change = !stale.is_empty()
+            || pending_chain_additions
+                .iter()
+                .any(|pos| !self.pending_chain_tnt.contains(pos))
+            || primed_on_commit
+                .iter()
+                .any(|&(x, y, z)| self.pending_chain_tnt.contains(&(x, y as u8, z)));
+        // Avoid copying a potentially 65k-position queue on quiet ticks.
+        let mut pending_chain_before =
+            pending_will_change.then(|| self.pending_chain_tnt.clone());
+        for pos in pending_chain_additions {
+            self.pending_chain_tnt.insert(pos);
+        }
+        for pos in stale {
+            self.pending_chain_tnt.remove(&pos);
+        }
         // Advance the primed entity state BEFORE the atomic IRW snapshot.
         // On any storage failure, undo the state and newly queued packets.
-        let primed_before = self.primed_tnt.clone();
+        // Do not clone up to 4096 TNT entities on quiet 20TPS ticks.
+        // Only due detonations or new block ignitions mutate this state.
+        let mut primed_before =
+            (detonating != 0 || !primed_on_commit.is_empty()).then(|| self.primed_tnt.clone());
         let tnt_events_before = self.tnt_events.len();
-        self.finalize_tnt(&primed_on_commit);
-        let tnt_changed = self.primed_tnt != primed_before;
+        if primed_before.is_some() {
+            self.finalize_tnt(&primed_on_commit);
+        }
+        // Keep pending markers visible until the shortened fuse is selected.
+        for &(x, y, z) in &primed_on_commit {
+            self.pending_chain_tnt.remove(&(x, y as u8, z));
+        }
+        let pending_chain_changed = pending_chain_before
+            .as_ref()
+            .is_some_and(|before| *before != self.pending_chain_tnt);
+        let tnt_changed = primed_before.is_some();
 
         if !changes.is_empty() {
             // Decaying oak leaves may yield a sapling or apple. Stage these
@@ -1567,7 +1621,12 @@ impl World {
                 self.save(path)
             };
             if let Err(error) = saved {
-                self.primed_tnt = primed_before;
+                if let Some(before) = primed_before.take() {
+                    self.primed_tnt = before;
+                }
+                if let Some(before) = pending_chain_before.take() {
+                    self.pending_chain_tnt = before;
+                }
                 self.tnt_events.truncate(tnt_events_before);
                 self.comparator_ready.clear();
                 for (pos, original) in undo {
@@ -1605,12 +1664,18 @@ impl World {
             }
         } else if !self.comparator_ready.is_empty()
             || tnt_changed
+            || pending_chain_changed
             || (!self.primed_tnt.is_empty() && self.fluid_phase.is_multiple_of(20))
         {
             // Analog-only updates need a successful save even when the
             // comparator's on/off block ID has not changed.
             if let Err(error) = self.save(path) {
-                self.primed_tnt = primed_before;
+                if let Some(before) = primed_before.take() {
+                    self.primed_tnt = before;
+                }
+                if let Some(before) = pending_chain_before.take() {
+                    self.pending_chain_tnt = before;
+                }
                 self.tnt_events.truncate(tnt_events_before);
                 self.comparator_ready.clear();
                 return Err(error);
@@ -2152,14 +2217,35 @@ impl World {
         }
         let trailer = &bytes[blocks_end..];
         if !trailer.is_empty() {
-            if trailer.len() < 6 || &trailer[..4] != b"TNT1" {
+            if trailer.len() < 6 || (&trailer[..4] != b"TNT1" && &trailer[..4] != b"TNT2") {
                 return Err(invalid("unrecognized world entity trailer"));
             }
             let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
-            if primed_count > MAX_PRIMED_TNT || trailer.len() != 6 + primed_count * 20 {
+            let primed_end = 6 + primed_count * 20;
+            if primed_count > MAX_PRIMED_TNT || trailer.len() < primed_end {
                 return Err(invalid("invalid primed TNT trailer length"));
             }
-            for entry in trailer[6..].as_chunks::<20>().0 {
+            if &trailer[..4] == b"TNT2" {
+                let queued = &trailer[primed_end..];
+                if queued.len() < 4 {
+                    return Err(invalid("truncated queued TNT trailer"));
+                }
+                let count = u32::from_be_bytes(queued[..4].try_into().unwrap()) as usize;
+                if count > MAX_PENDING_TNT || queued.len() != 4 + count * 9 {
+                    return Err(invalid("invalid queued TNT trailer length"));
+                }
+                for entry in queued[4..].as_chunks::<9>().0 {
+                    let x = i32::from_be_bytes(entry[..4].try_into().unwrap());
+                    let y = i32::from(entry[4]);
+                    let z = i32::from_be_bytes(entry[5..9].try_into().unwrap());
+                    if !in_bounds(x, y, z) || !world.pending_chain_tnt.insert((x, y as u8, z)) {
+                        return Err(invalid("invalid or duplicate queued TNT position"));
+                    }
+                }
+            } else if trailer.len() != primed_end {
+                return Err(invalid("unexpected TNT1 trailer data"));
+            }
+            for entry in trailer[6..primed_end].as_chunks::<20>().0 {
                 let entity_id = i32::from_be_bytes(entry[..4].try_into().unwrap());
                 let x = i32::from_be_bytes(entry[4..8].try_into().unwrap());
                 let y = i32::from_be_bytes(entry[8..12].try_into().unwrap());
@@ -2289,11 +2375,17 @@ impl World {
             f.write_all(&z.to_be_bytes())?;
             f.write_all(&block.to_be_bytes())?;
         }
-        if !self.primed_tnt.is_empty() {
-            if self.primed_tnt.len() > MAX_PRIMED_TNT {
-                return Err(invalid("primed TNT entity capacity exceeded"));
+        if !self.primed_tnt.is_empty() || !self.pending_chain_tnt.is_empty() {
+            if self.primed_tnt.len() > MAX_PRIMED_TNT
+                || self.pending_chain_tnt.len() > MAX_PENDING_TNT
+            {
+                return Err(invalid("TNT entity or pending queue capacity exceeded"));
             }
-            f.write_all(b"TNT1")?;
+            f.write_all(if self.pending_chain_tnt.is_empty() {
+                b"TNT1"
+            } else {
+                b"TNT2"
+            })?;
             f.write_all(&(self.primed_tnt.len() as u16).to_be_bytes())?;
             for tnt in self.primed_tnt.values() {
                 let remaining = tnt.explode_at.saturating_sub(self.fluid_phase);
@@ -2310,6 +2402,14 @@ impl World {
                 // a zero fuse is invalid on disk and previously aborted
                 // both world-tick writes and the final shutdown save.
                 f.write_all(&(remaining.max(1) as u32).to_be_bytes())?;
+            }
+            if !self.pending_chain_tnt.is_empty() {
+                f.write_all(&(self.pending_chain_tnt.len() as u32).to_be_bytes())?;
+                for &(x, y, z) in &self.pending_chain_tnt {
+                    f.write_all(&x.to_be_bytes())?;
+                    f.write_all(&[y])?;
+                    f.write_all(&z.to_be_bytes())?;
+                }
             }
         }
         Ok(())
