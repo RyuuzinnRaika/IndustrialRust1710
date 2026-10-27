@@ -1851,6 +1851,9 @@ impl World {
             }
             self.edits.insert(key, block);
         }
+        // A player's newer edit cancels an older delayed explosion. Save
+        // the cancellation together with the new block, not after it.
+        let deferred_before = self.pending_blast_edits.remove(&key);
         if let Err(e) = self.save(path) {
             match old {
                 Some(value) => {
@@ -1859,6 +1862,9 @@ impl World {
                 None => {
                     self.edits.remove(&key);
                 }
+            }
+            if let Some(value) = deferred_before {
+                self.pending_blast_edits.insert(key, value);
             }
             return Err(e);
         }
