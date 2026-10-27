@@ -5063,6 +5063,11 @@ mod tests {
             overworld_passive_kind(1, hash(seed ^ 0x31acb4105ff327ab)),
             Kind::Sheep
         );
+        let river_member_roll = hash(seed ^ 2_u64.wrapping_mul(0x517cc1b727220a95));
+        let river_dx = (river_member_roll % 6) as i32 - ((river_member_roll >> 8) % 6) as i32;
+        let river_dz =
+            ((river_member_roll >> 16) % 6) as i32 - ((river_member_roll >> 24) % 6) as i32;
+        assert_eq!((river_dx, river_dz), (2, 0));
         assert_eq!(world.biome_at(835, 142), 1);
         assert_eq!(world.biome_at(837, 142), 7);
 
