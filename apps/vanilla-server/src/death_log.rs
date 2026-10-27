@@ -4,7 +4,7 @@ use crate::player::PlayerPosition;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -248,9 +248,20 @@ impl StoredDeath {
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let relative = death_world_path
-            .strip_prefix(base)
-            .map_err(|_| invalid("death world path outside root world"))?;
+        // Root worlds may be configured as a bare relative filename (with
+        // no explicit "./" component). Handle this without permitting an
+        // unrelated path to escape the trusted world directory.
+        let relative = if death_world_path == root_world_path {
+            Path::new(
+                root_world_path
+                    .file_name()
+                    .ok_or_else(|| invalid("missing root world name"))?,
+            )
+        } else {
+            death_world_path
+                .strip_prefix(base)
+                .map_err(|_| invalid("death world path outside root world"))?
+        };
         if !valid_world_relative(relative) {
             return Err(invalid("unsafe relative death world path"));
         }
@@ -557,6 +568,92 @@ mod tests {
         };
         assert!(record.append(&world).is_err());
         fs::remove_dir(&log_dir).unwrap();
+    }
+
+    #[test]
+    fn crash_recovery_replays_a_torn_jsonl_tail_once() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-death-outbox-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(root.join("players")).unwrap();
+        let world = root.join("overworld.irw");
+        let alice = root.join("players/alice.dat");
+        let record = DeathRecord {
+            player: "Alice",
+            hit: Some(FatalHit {
+                cause: DeathCause::Drowning,
+                previous_health: 2.0,
+                applied_damage: 2.0,
+            }),
+            position: PlayerPosition::default(),
+            dimension: 0,
+            tick: 432,
+        };
+        append_recoverable(&record, &world, &world, &alice).unwrap();
+        let initial = fs::read_to_string(DeathRecord::log_path(&world)).unwrap();
+        let original: Value = serde_json::from_str(initial.trim()).unwrap();
+        let event_id = original["event_id"].as_str().unwrap();
+        assert_eq!(event_id.len(), 32);
+        assert_eq!(recover_pending(&world).unwrap(), 0);
+        assert_eq!(fs::read_to_string(DeathRecord::log_path(&world)).unwrap(), initial);
+
+        // The process crashed after the outbox became durable but before
+        // the JSONL append finished. Recovery trims only the torn suffix.
+        fs::write(DeathRecord::log_path(&world), b"{\"event_id\":\"broken")
+            .unwrap();
+        assert_eq!(recover_pending(&world).unwrap(), 1);
+        let after = fs::read_to_string(DeathRecord::log_path(&world)).unwrap();
+        let restored: Value = serde_json::from_str(after.trim()).unwrap();
+        assert_eq!(restored["event_id"], original["event_id"]);
+        assert_eq!(recover_pending(&world).unwrap(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_new_death_replays_the_last_event_before_replacing_its_outbox() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-death-two-events-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(root.join("players")).unwrap();
+        let world = root.join("overworld.irw");
+        let player = root.join("players/alice.dat");
+        let record = DeathRecord {
+            player: "Alice",
+            hit: None,
+            position: PlayerPosition::default(),
+            dimension: 0,
+            tick: 1,
+        };
+        append_recoverable(&record, &world, &world, &player).unwrap();
+        append_recoverable(&record, &world, &world, &player).unwrap();
+        assert_eq!(recover_pending(&world).unwrap(), 0);
+        let contents = fs::read_to_string(DeathRecord::log_path(&world)).unwrap();
+        let events: Vec<Value> = contents
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_ne!(events[0]["event_id"], events[1]["event_id"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupt_outbox_cannot_modify_a_death_log_or_escape_the_world() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-death-unsafe-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(root.join("players")).unwrap();
+        fs::write(root.join("players/alice.death-outbox.json"), b"{}").unwrap();
+        let world = root.join("overworld.irw");
+        assert!(recover_pending(&world).is_err());
+        assert!(!DeathRecord::log_path(&world).exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
