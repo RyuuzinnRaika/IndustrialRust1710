@@ -6160,13 +6160,21 @@ mod tests {
         assert_eq!(second_client, snapshot);
 
         mobs.save(&world).unwrap();
-        let reloaded = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        let mut reloaded = Mobs::load_or_new(&world, true, 2, &path).unwrap();
         let after_restart: Vec<_> = reloaded
             .spawn_events()
             .map(|event| (event.id, event.body))
             .collect();
         assert_eq!(after_restart, snapshot);
         assert_eq!(reloaded.next_id, mobs.next_id);
+        // Freed parent IDs must stay retired after a restart. A new entity
+        // continues the same global sequence rather than filling old holes.
+        let next_after_restart = reloaded.next_id;
+        assert!(next_after_restart > *ids.iter().max().unwrap());
+        let new_cow = reloaded.insert(Kind::Cow, at, false);
+        assert_packet(&new_cow, 0x0f, next_after_restart);
+        assert_eq!(reloaded.next_id, next_after_restart + 1);
+        assert!(!ids.contains(&next_after_restart));
         let _ = std::fs::remove_file(path);
     }
 
@@ -6194,6 +6202,86 @@ mod tests {
         assert!(mobs.split(parent).is_empty());
         assert!(mobs.spawn_xp(at, 1).is_none());
         assert!(mobs.fire_arrow(None, at, 0.0, 0.0, 1.0, 2).is_none());
+    }
+
+    #[test]
+    fn concurrent_slime_and_magma_deaths_keep_ids_unique_under_shared_mob_lock() {
+        // Two session workers may submit lethal hits at the same instant.
+        // The server serializes access to its shared Mobs state with a mutex;
+        // both split batches must still allocate distinct Protocol 5 IDs.
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let magma_at = PlayerPosition { x: 3.5, ..at };
+        let mut state = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let slime_id = state.next_id;
+        state.insert_sized(Kind::Slime, at, false, 4);
+        let magma_id = state.next_id;
+        state.insert_sized(Kind::MagmaCube, magma_at, false, 4);
+        state.entities.get_mut(&slime_id).unwrap().health = 1;
+        state.entities.get_mut(&magma_id).unwrap().health = 1;
+
+        let shared = std::sync::Mutex::new(state);
+        let start = std::sync::Barrier::new(3);
+        let (slime_events, magma_events) = std::thread::scope(|scope| {
+            let slime = scope.spawn(|| {
+                start.wait();
+                shared
+                    .lock()
+                    .unwrap()
+                    .player_attack(slime_id, at, None, 20)
+                    .unwrap()
+                    .events
+            });
+            let magma = scope.spawn(|| {
+                start.wait();
+                shared
+                    .lock()
+                    .unwrap()
+                    .player_attack(magma_id, magma_at, None, 20)
+                    .unwrap()
+                    .events
+            });
+            start.wait();
+            (slime.join().unwrap(), magma.join().unwrap())
+        });
+
+        for (parent_id, events) in [(slime_id, &slime_events), (magma_id, &magma_events)] {
+            assert_eq!(events[0].id, 0x1a);
+            assert_eq!(events[1].body, multiplayer::destroy(parent_id).body);
+        }
+        let children: Vec<_> = slime_events
+            .iter()
+            .skip(2)
+            .chain(magma_events.iter().skip(2))
+            .collect();
+        assert!((4..=8).contains(&children.len()));
+        let mobs = shared.into_inner().unwrap();
+        assert_eq!(mobs.entities.len(), children.len());
+        assert!(!mobs.entities.contains_key(&slime_id));
+        assert!(!mobs.entities.contains_key(&magma_id));
+        assert_eq!(mobs.next_id, BASE_ID + 2 + children.len() as i32);
+
+        // Every child must appear in the actual spawn event stream exactly
+        // once, regardless of which thread obtained the lock first.
+        for (&id, mob) in &mobs.entities {
+            assert_eq!(mob.id, id);
+            let mut encoded = Vec::new();
+            write_varint(id as u32, &mut encoded);
+            assert_eq!(
+                children
+                    .iter()
+                    .filter(|event| event.id == 0x0f && event.body.starts_with(&encoded))
+                    .count(),
+                1,
+                "concurrent split entity {id} is missing or duplicated"
+            );
+        }
     }
 
     #[test]
