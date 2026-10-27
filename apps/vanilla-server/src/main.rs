@@ -102,7 +102,7 @@ use player::PlayerPosition;
 use scoreboard::Scoreboard;
 use security_limits::{ChatLimiter, ConnectionLimiter};
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, ErrorKind};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -589,6 +589,55 @@ fn piston_action_event(action: world::PistonAction) -> Event {
     body.push(action.facing);
     write_varint(u32::from(action.block_id), &mut body);
     Event { id: 0x24, body }
+}
+
+
+/// Keep the final authoritative block-change packets from replacing the
+/// client's own 1.7.10 S24 piston animation before its three-tick move ends.
+/// This is visual synchronization only: IRW still commits the resulting blocks
+/// atomically before S24 is published. The queue is bounded; overflow falls
+/// back to sending the final block state immediately.
+#[derive(Default)]
+struct PistonClientUpdates {
+    tick: u64,
+    pending: BTreeMap<(i32, i32, i32), u64>,
+}
+
+impl PistonClientUpdates {
+    fn advance(
+        &mut self,
+        world: &World,
+        changed: &[(i32, i32, i32)],
+        actions: &[world::PistonAction],
+    ) -> Vec<Event> {
+        self.tick = self.tick.saturating_add(1);
+        let bases: BTreeSet<_> = actions.iter().map(|action| action.pos).collect();
+        let mut events = Vec::new();
+        for &(x, y, z) in changed {
+            let pos = (x, y, z);
+            if bases.contains(&pos) || world.piston_sweep_at(x, y, z) {
+                if self.pending.len() < 4096 || self.pending.contains_key(&pos) {
+                    self.pending.insert(pos, self.tick.saturating_add(3));
+                } else {
+                    events.push(block_change_event(world, x, y, z));
+                }
+            } else if let Some(deadline) = self.pending.get_mut(&pos) {
+                *deadline = self.tick.saturating_add(3);
+            } else {
+                events.push(block_change_event(world, x, y, z));
+            }
+        }
+        let ready: Vec<_> = self
+            .pending
+            .iter()
+            .filter_map(|(&pos, &deadline)| (deadline <= self.tick).then_some(pos))
+            .collect();
+        for (x, y, z) in ready {
+            self.pending.remove(&(x, y, z));
+            events.push(block_change_event(world, x, y, z));
+        }
+        events
+    }
 }
 
 fn block_change_event(world: &World, x: i32, y: i32, z: i32) -> Event {
@@ -6935,6 +6984,7 @@ fn main() -> io::Result<()> {
         let mut last = furnace_clock.ticks();
         let mut last_clock_snapshot = last;
         let mut last_weather = furnace_clock.weather();
+        let mut piston_client_updates = PistonClientUpdates::default();
         while !tick_shutdown.load(Ordering::Acquire) {
             let now = furnace_clock.ticks();
             if now > last {
@@ -7067,11 +7117,19 @@ fn main() -> io::Result<()> {
                     // save all staged block changes with one world-file commit.
                     match gravity_world.block_tick(&furnace_world_path, 64) {
                         Ok(changed) => {
-                            for action in gravity_world.drain_piston_actions() {
+                            let piston_actions = gravity_world.drain_piston_actions();
+                            for &action in &piston_actions {
                                 furnace_hub.broadcast(piston_action_event(action));
                             }
-                            for (x, y, z) in changed {
-                                furnace_hub.broadcast(block_change_event(&gravity_world, x, y, z));
+                            // Vanilla S24 starts the client's local moving-piston
+                            // tile entity. Do not overwrite it with final S23
+                            // snapshots until the three-tick motion finishes.
+                            for event in piston_client_updates.advance(
+                                &gravity_world,
+                                &changed,
+                                &piston_actions,
+                            ) {
+                                furnace_hub.broadcast(event);
                             }
                             // Execute each persisted rising-edge exactly once.
                             // Both inventory debit and spawned ground entity are
@@ -8176,6 +8234,63 @@ mod h_special_item_transaction_tests {
         );
         assert_eq!(World::load(&world_path).unwrap().get(1, 65, 1), 1 << 4);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod piston_client_animation_tests {
+    use super::*;
+
+    #[test]
+    fn final_block_snapshots_are_delayed_until_client_motion_finishes() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-client-piston-animation-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, -1, 64, 0, 152 << 4).unwrap();
+        world.update_and_save(&path, 0, 64, 0, (33 << 4) | 5).unwrap();
+        world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
+        let changed = world.block_tick(&path, 64).unwrap();
+        let actions = world.drain_piston_actions();
+        assert_eq!(actions.len(), 1);
+        let mut updates = PistonClientUpdates::default();
+        let immediate = updates.advance(&world, &changed, &actions);
+        // Ordinary non-piston updates are still immediate, but moved cells
+        // are not sent ahead of the client-generated animation.
+        assert!(!immediate.iter().any(|event| {
+            event.id == 0x23 && event.body.get(..4) == Some(&0i32.to_be_bytes()[..])
+        }));
+        for _ in 0..2 {
+            assert!(updates.advance(&world, &[], &[]).is_empty());
+        }
+        let ready = updates.advance(&world, &[], &[]);
+        assert!(ready.iter().any(|event| {
+            event.id == 0x23 && event.body.get(..4) == Some(&0i32.to_be_bytes()[..])
+        }));
+        assert!(updates.pending.is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn newer_motion_refreshes_deadline_and_coalesces_final_state() {
+        let world = World::new();
+        let mut updates = PistonClientUpdates::default();
+        let action = world::PistonAction {
+            pos: (0, 64, 0),
+            block_id: 33,
+            facing: 5,
+            extending: true,
+        };
+        assert!(updates.advance(&world, &[(0, 64, 0)], &[action]).is_empty());
+        assert!(updates.advance(&world, &[], &[]).is_empty());
+        assert!(updates.advance(&world, &[(0, 64, 0)], &[action]).is_empty());
+        for _ in 0..2 {
+            assert!(updates.advance(&world, &[], &[]).is_empty());
+        }
+        assert_eq!(updates.advance(&world, &[], &[]).len(), 1);
+        assert!(updates.pending.is_empty());
     }
 }
 
