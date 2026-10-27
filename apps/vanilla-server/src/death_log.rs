@@ -203,8 +203,43 @@ mod tests {
         assert_eq!(data["dimension"], -1);
         assert_eq!(data["server_tick"], 234);
         let wire = serde_json::to_string(&data).unwrap();
-        assert!(!wire.contains("name\\\"\nforge"));
-        assert!(wire.contains("name\\\\\\\"\\nforge"));
+        assert!(!wire.contains('\n'));
+        let decoded: Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(decoded["player"], record.player);
+
+    }
+
+    #[test]
+    fn jsonl_appends_one_valid_line_per_death() {
+        let world = std::env::temp_dir().join(format!(
+            "ir1710-deaths-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path = DeathRecord::log_path(&world);
+        let _ = fs::remove_file(&path);
+        let record = DeathRecord {
+            player: "Alex",
+            hit: Some(FatalHit {
+                cause: DeathCause::Fall,
+                previous_health: 3.0,
+                applied_damage: 3.0,
+            }),
+            position: PlayerPosition::default(),
+            dimension: 0,
+            tick: 42,
+        };
+        record.append(&world).unwrap();
+        record.append(&world).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let entries: Vec<Value> = contents
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["cause"], "fall");
+        assert_eq!(entries[0]["player"], "Alex");
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
