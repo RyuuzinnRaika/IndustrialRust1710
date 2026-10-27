@@ -6285,6 +6285,73 @@ mod tests {
     }
 
     #[test]
+    fn split_snapshots_reject_cross_category_id_aliases_after_restart() {
+        // ADD-045: a persisted split child must never share a Protocol 5 ID
+        // with an arrow or XP orb, even if the snapshot was corrupted.
+        let world = World::natural(20_261_028);
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust-add045-alias-{}-{:?}.mobs.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        let parent_id = mobs.next_id;
+        mobs.insert_sized(Kind::Slime, at, false, 4);
+        mobs.entities.get_mut(&parent_id).unwrap().health = 1;
+        mobs.player_attack(parent_id, at, None, 20).unwrap();
+        let child_id = *mobs.entities.keys().next().unwrap();
+        assert_ne!(child_id, parent_id);
+
+        let arrow_id = mobs.next_id;
+        assert!(mobs.fire_arrow(None, at, 0.0, 0.0, 1.0, 2).is_some());
+        let orb_id = mobs.next_id;
+        assert!(mobs.spawn_xp(at, 5).is_some());
+        mobs.save(&world).unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_ok());
+
+        // Mob/arrow alias: keep the arrow's internal ID consistent with its
+        // map key, so rejection specifically exercises cross-category checks.
+        let original_arrow = mobs.arrows.remove(&arrow_id).unwrap();
+        mobs.arrows.insert(
+            child_id,
+            Arrow {
+                id: child_id,
+                ..original_arrow
+            },
+        );
+        mobs.save(&world).unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
+        mobs.arrows.remove(&child_id);
+        mobs.arrows.insert(arrow_id, original_arrow);
+
+        // Arrow/orb alias: no Mob key overlaps this ID, so the third pair of
+        // category checks cannot be accidentally covered by the first one.
+        let original_orb = mobs.orbs.remove(&orb_id).unwrap();
+        mobs.orbs.insert(arrow_id, original_orb);
+        mobs.save(&world).unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
+        mobs.orbs.remove(&arrow_id);
+        mobs.orbs.insert(orb_id, original_orb);
+
+        // A backward allocator cursor must also be rejected, even with
+        // otherwise unique keys across all three categories.
+        let next_id = mobs.next_id;
+        mobs.next_id = orb_id;
+        mobs.save(&world).unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
+        mobs.next_id = next_id;
+        mobs.save(&world).unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_ok());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn eggs_and_slime_splits_share_the_current_loaded_mob_limit() {
         let world = World::new();
         let at = PlayerPosition {
