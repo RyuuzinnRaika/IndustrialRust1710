@@ -73,12 +73,7 @@ pub struct FatalHit {
 
 /// Capture only the transition from living to dead, not previous nonfatal hits.
 /// This avoids attributing a fatal fall to a mob that attacked minutes earlier.
-pub fn record_fatal(
-    pending: &mut Option<FatalHit>,
-    before: f32,
-    after: f32,
-    cause: DeathCause,
-) {
+pub fn record_fatal(pending: &mut Option<FatalHit>, before: f32, after: f32, cause: DeathCause) {
     if pending.is_none() && before.is_finite() && after.is_finite() && before > 0.0 && after <= 0.0
     {
         *pending = Some(FatalHit {
@@ -137,7 +132,10 @@ impl DeathRecord<'_> {
             .as_millis();
         let mut line = serde_json::to_vec(&self.json(timestamp_ms))?;
         if line.len() >= MAX_RECORD_BYTES {
-            return Err(io::Error::new(ErrorKind::InvalidData, "oversized death event"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "oversized death event",
+            ));
         }
         line.push(b'\n');
         let _guard = DEATH_FILE_LOCK
@@ -213,7 +211,6 @@ mod tests {
         assert!(!wire.contains('\n'));
         let decoded: Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(decoded["player"], record.player);
-
     }
 
     #[test]
