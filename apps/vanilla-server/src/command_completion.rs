@@ -71,7 +71,9 @@ fn players(out: &mut Vec<String>, prefix: &str, online: &[String]) {
 /// Server sends *replacement strings for the last token*, not full commands
 /// (except when the last token itself is a command name).
 pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
-    if text.chars().count() > MAX_REQUEST_CHARS || text.chars().any(|c| matches!(c, '\n' | '\r' | '\t')) {
+    if text.chars().count() > MAX_REQUEST_CHARS
+        || text.chars().any(|c| matches!(c, '\n' | '\r' | '\t'))
+    {
         return Vec::new();
     }
     let trailing_space = text.ends_with(' ');
@@ -84,27 +86,49 @@ pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
     } else if words.is_empty() {
         // Plain '/' is a request for command names.
         add(&mut found, "/", PUBLIC);
-        if op_level >= 2 { add(&mut found, "/", LEVEL_2); }
-        if op_level >= 3 { add(&mut found, "/", LEVEL_3); }
-        if op_level >= 4 { add(&mut found, "/", LEVEL_4); }
+        if op_level >= 2 {
+            add(&mut found, "/", LEVEL_2);
+        }
+        if op_level >= 3 {
+            add(&mut found, "/", LEVEL_3);
+        }
+        if op_level >= 4 {
+            add(&mut found, "/", LEVEL_4);
+        }
     } else if words.len() == 1 && !trailing_space {
         let prefix = words[0];
         add(&mut found, prefix, PUBLIC);
-        if op_level >= 2 { add(&mut found, prefix, LEVEL_2); }
-        if op_level >= 3 { add(&mut found, prefix, LEVEL_3); }
-        if op_level >= 4 { add(&mut found, prefix, LEVEL_4); }
+        if op_level >= 2 {
+            add(&mut found, prefix, LEVEL_2);
+        }
+        if op_level >= 3 {
+            add(&mut found, prefix, LEVEL_3);
+        }
+        if op_level >= 4 {
+            add(&mut found, prefix, LEVEL_4);
+        }
     } else {
         let command = words[0].to_ascii_lowercase();
         if !eligible(&command, op_level) {
             return Vec::new();
         }
-        let index = if trailing_space { words.len() } else { words.len() - 1 };
+        let index = if trailing_space {
+            words.len()
+        } else {
+            words.len() - 1
+        };
         let prefix = if trailing_space { "" } else { words[index] };
-        let previous = words.get(index.saturating_sub(1)).copied().unwrap_or("");
+        let previous = words
+            .get(index.saturating_sub(1))
+            .copied()
+            .unwrap_or("");
         match (command.as_str(), index) {
             ("/tell" | "/msg" | "/w", 1)
-            | ("/give" | "/enchant" | "/effect" | "/kick" | "/ban" | "/pardon"
-               | "/op" | "/deop" | "/clear" | "/permission", 1)
+            | (
+                "/give" | "/enchant" | "/effect" | "/kick" | "/ban" | "/pardon" | "/op"
+                | "/deop" | "/clear" | "/permission",
+                1,
+            )
             | ("/gamemode", 2) => players(&mut found, prefix, online),
             ("/tp" | "/teleport", 1) => {
                 players(&mut found, prefix, online);
@@ -133,8 +157,11 @@ pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
             ("/setblock" | "/testforblock", 4) => add(&mut found, prefix, TERRAIN),
             ("/setblock", 6) => add(&mut found, prefix, &["replace", "keep"]),
             ("/effect", 2) => {
-                add(&mut found, prefix,
-                    &["clear", "1", "10", "17", "19", "speed", "regeneration", "hunger", "poison"]);
+                add(
+                    &mut found,
+                    prefix,
+                    &["clear", "1", "10", "17", "19", "speed", "regeneration", "hunger", "poison"],
+                );
             }
             ("/summon", 1) => add(&mut found, prefix, MOBS),
             ("/permission", 2) => add(&mut found, prefix, &["chat", "build", "interact"]),
@@ -154,7 +181,10 @@ pub fn response_packet(completions: &[String]) -> io::Result<Vec<u8>> {
     if completions.len() > MAX_SUGGESTIONS
         || completions.iter().any(|value| value.chars().count() > 64)
     {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many tab completions"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "too many tab completions",
+        ));
     }
     let mut body = Vec::with_capacity(1024);
     write_varint(completions.len() as u32, &mut body);
