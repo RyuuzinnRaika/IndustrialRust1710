@@ -9726,6 +9726,53 @@ mod disconnect_diagnostics_tests {
             sent_at + Duration::from_secs(41),
         ));
     }
+
+    #[test]
+    fn stale_and_replayed_keepalive_replies_do_not_acknowledge_a_new_challenge() {
+        let sent_at = Instant::now();
+        let mut pending_ping = Some(202);
+        let mut ping_time = sent_at;
+        let mut pong_time = sent_at;
+        let received_at = sent_at + Duration::from_millis(5);
+
+        // 101 was accepted on an earlier challenge, but is not the current
+        // outstanding ID. It must not reset either heartbeat timestamp.
+        assert!(!accept_keepalive_reply(
+            &mut pending_ping,
+            &mut ping_time,
+            &mut pong_time,
+            101,
+            received_at,
+        ));
+        assert_eq!(pending_ping, Some(202));
+        assert_eq!(ping_time, sent_at);
+        assert_eq!(pong_time, sent_at);
+        assert!(keepalive_challenge_expired(
+            pending_ping,
+            sent_at,
+            sent_at + KEEPALIVE_TIMEOUT + Duration::from_millis(1),
+        ));
+
+        // Exactly one matching response may clear the outstanding challenge.
+        assert!(accept_keepalive_reply(
+            &mut pending_ping,
+            &mut ping_time,
+            &mut pong_time,
+            202,
+            received_at,
+        ));
+        assert_eq!(pending_ping, None);
+        assert_eq!(ping_time, received_at);
+        assert_eq!(pong_time, received_at);
+        assert!(!accept_keepalive_reply(
+            &mut pending_ping,
+            &mut ping_time,
+            &mut pong_time,
+            202,
+            received_at,
+        ));
+    }
+
 }
 
 #[cfg(test)]
