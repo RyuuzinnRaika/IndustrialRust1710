@@ -287,9 +287,7 @@ impl World {
                 .piston_sweep_ghosts
                 .get(&(x, y as u8, z))
                 .is_some_and(|motion| {
-                    motion.expires > self.fluid_phase
-                        && motion.extending
-                        && motion.facing == facing
+                    motion.expires > self.fluid_phase && motion.extending && motion.facing == facing
                 })
     }
 
@@ -1525,7 +1523,9 @@ impl World {
                     let position = (x, y as u8, z);
                     let before = self.get(x, y, z);
                     if changes.get(&position).is_some_and(|&after| before != after) {
-                        swept.entry(position).or_insert((action.facing, action.extending));
+                        swept
+                            .entry(position)
+                            .or_insert((action.facing, action.extending));
                     }
                 }
             }
