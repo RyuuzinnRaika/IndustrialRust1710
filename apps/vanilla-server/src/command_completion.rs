@@ -49,7 +49,9 @@ fn eligible(command: &str, op_level: u8) -> bool {
 
 fn add(out: &mut Vec<String>, prefix: &str, options: &[&str]) {
     for &option in options {
-        if option.len() <= 64 && option.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase()) {
+        if option.len() <= 64
+            && option.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase())
+        {
             out.push(option.to_owned());
         }
     }
@@ -69,7 +71,7 @@ fn players(out: &mut Vec<String>, prefix: &str, online: &[String]) {
 /// Server sends *replacement strings for the last token*, not full commands
 /// (except when the last token itself is a command name).
 pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
-    if text.chars().count() > MAX_REQUEST_CHARS || text.contains(['\n', '\r', '\t']) {
+    if text.chars().count() > MAX_REQUEST_CHARS || text.chars().any(|c| matches!(c, '\n' | '\r' | '\t')) {
         return Vec::new();
     }
     let trailing_space = text.ends_with(' ');
