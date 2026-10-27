@@ -115,6 +115,7 @@ pub struct TickResult {
     pub pearl_teleports: Vec<(String, PlayerPosition)>,
     pub egg_hatches: Vec<PlayerPosition>,
     pub mob_hits: Vec<(i32, u64)>,
+    pub player_hits: Vec<i32>,
 }
 impl Throwables {
     /// Pure validation for a device activation. No inventory or entity state
@@ -299,13 +300,25 @@ impl Throwables {
         self.tick_with_mob_targets(world, tick, &[])
     }
 
-    /// Swept projectile samples are compared with server-owned Mob hitboxes,
-    /// never client-supplied hit claims. Block collision takes precedence.
+    /// Preserve the Mob-only API for existing regression tests.
+    #[cfg(test)]
     pub fn tick_with_mob_targets(
         &mut self,
         world: &World,
         tick: u64,
         targets: &[(i32, PlayerPosition, f64, f64)],
+    ) -> TickResult {
+        self.tick_with_targets(world, tick, targets, &[])
+    }
+
+    /// Compare swept samples against server-owned Mob and player hitboxes.
+    /// Solid block collision takes precedence over either entity type.
+    pub fn tick_with_targets(
+        &mut self,
+        world: &World,
+        tick: u64,
+        mob_targets: &[(i32, PlayerPosition, f64, f64)],
+        player_targets: &[(i32, PlayerPosition)],
     ) -> TickResult {
         let mut result = TickResult::default();
         let mut removed = Vec::new();
@@ -342,6 +355,7 @@ impl Throwables {
             let steps = (length * 4.0).ceil().clamp(1.0, 32.0) as usize;
             let mut collision = None;
             let mut mob_collision = None;
+            let mut player_collision = None;
             for index in 1..=steps {
                 let t = index as f64 / steps as f64;
                 let sample = PlayerPosition {
@@ -368,7 +382,7 @@ impl Throwables {
                     break;
                 }
                 let hit_mob = if object.kind == Kind::Arrow {
-                    targets.iter().find(|(_, at, radius, height)| {
+                    mob_targets.iter().find(|(_, at, radius, height)| {
                         (sample.x - at.x).hypot(sample.z - at.z) <= *radius
                             && sample.y >= at.y - 0.25
                             && sample.y <= at.y + *height + 0.25
@@ -380,6 +394,26 @@ impl Throwables {
                     mob_collision = Some((*mob_id, sample));
                     break;
                 }
+                let hit_player = if object.kind == Kind::Arrow {
+                    player_targets.iter().find(|(id, at)| {
+                        *id != object.owner_entity
+                            && (sample.x - at.x).hypot(sample.z - at.z) <= 0.3
+                            && sample.y >= at.y - 0.25
+                            && sample.y <= at.y + 2.05
+                    })
+                } else {
+                    None
+                };
+                if let Some((player_id, _)) = hit_player {
+                    player_collision = Some((*player_id, sample));
+                    break;
+                }
+            }
+            if let Some((player_id, at)) = player_collision {
+                object.at = at;
+                result.player_hits.push(player_id);
+                removed.push(object.id);
+                continue;
             }
             if let Some((mob_id, at)) = mob_collision {
                 object.at = at;
@@ -951,6 +985,67 @@ mod tests {
         )];
         let first = objects.tick_with_mob_targets(&world, 20, &targets);
         assert!(first.mob_hits.is_empty());
+        assert!(objects.active.values().next().unwrap().embedded);
+    }
+    #[test]
+    fn dispenser_arrow_hits_only_one_of_two_players_and_is_removed_once() {
+        let mut objects = Throwables::default();
+        objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
+        let players = [
+            (
+                42,
+                PlayerPosition {
+                    x: 2.0,
+                    y: 70.0,
+                    z: 0.5,
+                },
+            ),
+            (
+                43,
+                PlayerPosition {
+                    x: 2.0,
+                    y: 70.0,
+                    z: 0.5,
+                },
+            ),
+        ];
+        let world = World::new();
+        let hit = objects.tick_with_targets(&world, 20, &[], &players);
+        assert_eq!(hit.player_hits, vec![42]);
+        assert_eq!(
+            hit.events
+                .iter()
+                .filter(|(_, event)| event.id == 0x13)
+                .count(),
+            1
+        );
+        assert!(objects.active.is_empty());
+        assert_eq!(objects.nearby_embedded_arrow((2.0, 70.0, 0.5)), None);
+        let replay = objects.tick_with_targets(&world, 20, &[], &players);
+        assert!(replay.player_hits.is_empty());
+        assert!(replay.events.is_empty());
+    }
+
+    #[test]
+    fn solid_block_shields_player_from_dispenser_arrow() {
+        let mut world = World::new();
+        world.import_block(2, 70, 0, 1 << 4).unwrap();
+        let mut objects = Throwables::default();
+        objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
+        let players = [(
+            42,
+            PlayerPosition {
+                x: 2.5,
+                y: 70.0,
+                z: 0.5,
+            },
+        )];
+        let impact = objects.tick_with_targets(&world, 20, &[], &players);
+        assert!(impact.player_hits.is_empty());
         assert!(objects.active.values().next().unwrap().embedded);
     }
 }
