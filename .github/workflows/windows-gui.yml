@@ -41,4 +41,15 @@ jobs:
           if (-not $quote) { throw 'Missing QuoteArgument method' }
           $actual = [string]$quote.Invoke($null, @('two words'))
           if ($actual -ne '"two words"') { throw "Unexpected argument encoding: $actual" }
-          Write-Host 'PowerShell syntax, WinForms compilation, and quoting smoke test passed.'
+          $normalize = $gui.GetMethod('NormalizeCommand', $flags)
+          if (-not $normalize) { throw 'Missing NormalizeCommand method' }
+          foreach ($case in @(
+            @{ Input = ' list '; Expected = '/list' },
+            @{ Input = '/save'; Expected = '/save' },
+            @{ Input = ' stop '; Expected = '/stop' },
+            @{ Input = '   '; Expected = '' }
+          )) {
+            $actual = [string]$normalize.Invoke($null, @([string]$case.Input))
+            if ($actual -ne $case.Expected) { throw "Console command normalization failed: $($case.Input)" }
+          }
+          Write-Host 'PowerShell syntax, WinForms compilation, and console command smoke tests passed.'
