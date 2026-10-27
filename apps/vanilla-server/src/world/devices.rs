@@ -238,16 +238,79 @@ impl World {
         }
     }
 
+    /// A 1.7.10 dust line points toward neighboring wires (including one
+    /// vertical step) and aligned repeaters/comparators. Other adjacent
+    /// mechanisms do not automatically create a visual/output connection.
+    fn dust_connects_to(&self, x: i32, y: i32, z: i32, dx: i32, dz: i32) -> bool {
+        let nx = x + dx;
+        let nz = z + dz;
+        let neighbor = self.get(nx, y, nz);
+        match neighbor >> 4 {
+            55 => return true,
+            93 | 94 | 149 | 150 => {
+                let (fx, fz) = repeater_direction(neighbor);
+                // A repeater/comparator joins dust on its input or output
+                // axis, but not from the perpendicular locking side.
+                return (fx, fz) == (dx, dz) || (fx, fz) == (-dx, -dz);
+            }
+            _ => {}
+        }
+        let opaque_neighbor = full_conductor(neighbor >> 4);
+        if !opaque_neighbor && y > 0 && self.get(nx, y - 1, nz) >> 4 == 55 {
+            return true;
+        }
+        self.get(x, y + 1, z) == 0
+            && opaque_neighbor
+            && in_bounds(nx, y + 1, nz)
+            && self.get(nx, y + 1, nz) >> 4 == 55
+    }
+
+    /// The output shape is computed from the visible wire connections.
+    /// An isolated 1.7.10 dust cross feeds all four horizontal directions;
+    /// with one connection it forms a straight line in both directions.
+    fn dust_points_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> bool {
+        let (x, y, z) = from;
+        let dx = to.0 - x;
+        let dz = to.2 - z;
+        if to.1 != y || dx.abs() + dz.abs() != 1 {
+            return false;
+        }
+        let west = self.dust_connects_to(x, y, z, -1, 0);
+        let east = self.dust_connects_to(x, y, z, 1, 0);
+        let north = self.dust_connects_to(x, y, z, 0, -1);
+        let south = self.dust_connects_to(x, y, z, 0, 1);
+        let along_x = west || east;
+        let along_z = north || south;
+        if !along_x && !along_z {
+            return true;
+        }
+        if along_x && !along_z {
+            return dz == 0;
+        }
+        if along_z && !along_x {
+            return dx == 0;
+        }
+        match (dx, dz) {
+            (-1, 0) => west,
+            (1, 0) => east,
+            (0, -1) => north,
+            (0, 1) => south,
+            _ => false,
+        }
+    }
+
     /// Directional analog redstone strength; repeaters/comparators have a
     /// single output face. Dust propagates its stored 0..15 strength.
     pub(crate) fn signal_into(&self, from: (i32, i32, i32), to: (i32, i32, i32)) -> u8 {
         let (x, y, z) = from;
         let block = self.get(x, y, z);
         match block >> 4 {
-            // Dust weakly powers horizontal neighbors and the block below,
-            // but never the block directly above it (Java 1.7.10).
-            55 if to == (x, y + 1, z) => 0,
-            55 => (block & 15) as u8,
+            // Dust weakly powers only horizontal faces selected by its wire
+            // shape and the supporting block below. It does not power above.
+            55 if to == (x, y - 1, z) || self.dust_points_into(from, to) => {
+                (block & 15) as u8
+            }
+            55 => 0,
             69 | 77 | 143 => {
                 if block & 8 != 0 {
                     15
@@ -897,6 +960,48 @@ impl World {
 mod redstone_regression_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn isolated_dust_powers_all_four_sides_but_straight_wire_does_not() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, (55 << 4) | 11).unwrap();
+        for target in [(1, 64, 0), (-1, 64, 0), (0, 64, 1), (0, 64, -1)] {
+            assert_eq!(world.signal_into((0, 64, 0), target), 11);
+        }
+        world.import_block(1, 64, 0, 55 << 4).unwrap();
+        assert_eq!(world.signal_into((0, 64, 0), (-1, 64, 0)), 11);
+        assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 11);
+        assert_eq!(world.signal_into((0, 64, 0), (0, 64, 1)), 0);
+        assert_eq!(world.signal_into((0, 64, 0), (0, 64, -1)), 0);
+        assert_eq!(world.strong_signal_into((0, 64, 0), (0, 63, 0)), 11);
+    }
+
+    #[test]
+    fn dust_corner_only_points_toward_connected_wire_directions() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, (55 << 4) | 9).unwrap();
+        world.import_block(1, 64, 0, 55 << 4).unwrap();
+        world.import_block(0, 64, -1, 55 << 4).unwrap();
+        assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 9);
+        assert_eq!(world.signal_into((0, 64, 0), (0, 64, -1)), 9);
+        assert_eq!(world.signal_into((0, 64, 0), (-1, 64, 0)), 0);
+        assert_eq!(world.signal_into((0, 64, 0), (0, 64, 1)), 0);
+    }
+
+    #[test]
+    fn dust_connects_to_aligned_repeaters_and_climbs_single_step() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, (55 << 4) | 13).unwrap();
+        world.import_block(1, 64, 0, (93 << 4) | 1).unwrap();
+        assert_eq!(world.signal_into((0, 64, 0), (0, 64, 1)), 0);
+        world.import_block(1, 64, 0, (93 << 4) | 2).unwrap();
+        assert_eq!(world.signal_into((0, 64, 0), (0, 64, 1)), 13);
+        world.import_block(1, 64, 0, 1 << 4).unwrap();
+        world.import_block(1, 65, 0, 55 << 4).unwrap();
+        assert!(world.dust_connects_to(0, 64, 0, 1, 0));
+        world.import_block(0, 65, 0, 1 << 4).unwrap();
+        assert!(!world.dust_connects_to(0, 64, 0, 1, 0));
+    }
 
     #[test]
     fn torch_support_direction_matches_legacy_metadata() {
