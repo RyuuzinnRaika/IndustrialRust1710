@@ -1324,6 +1324,128 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
 }
 
 #[test]
+fn add016_chest_cursor_survives_disconnect_without_close_window_and_reconnect() {
+    // ADD-016: a dropped TCP socket must not invent a Close Window packet.
+    // Each accepted chest click commits both its durable player cursor and
+    // the shared chest contents before the acknowledgement is published.
+    let server = NativeServer::start();
+    let (mut player, _, _) = server.join("RustTester");
+
+    let creative = |slot: i16, id: i16, count: u8| {
+        let mut data = slot.to_be_bytes().to_vec();
+        data.extend_from_slice(&id.to_be_bytes());
+        data.push(count);
+        data.extend_from_slice(&0i16.to_be_bytes());
+        data.extend_from_slice(&(-1i16).to_be_bytes());
+        frame(0x10, &data)
+    };
+    player.write_all(&creative(36, 54, 1)).unwrap();
+    until_packet(&mut player, 0x2f, |p| p.starts_with(&[0, 0, 36]));
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&54i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    player.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut player, 0x23, |p| {
+        p.len() >= 11 && p[4] == 64 && p[9] == 54
+    });
+    player.write_all(&creative(37, 4, 8)).unwrap();
+    until_packet(&mut player, 0x2f, |p| p.starts_with(&[0, 0, 37]));
+
+    let mut open = 0i32.to_be_bytes().to_vec();
+    open.push(64);
+    open.extend_from_slice(&0i32.to_be_bytes());
+    open.push(1);
+    open.extend_from_slice(&(-1i16).to_be_bytes());
+    open.extend_from_slice(&[8, 8, 8]);
+    let open_chest = |client: &mut TcpStream| {
+        client.write_all(&frame(8, &open)).unwrap();
+        let body = until_packet(client, 0x2d, |p| p.first() == Some(&1));
+        assert_open_window_protocol5(&body, 1, 0, "Chest", 27);
+        let contents = until_packet(client, 0x30, |p| p.starts_with(&[1, 0, 63]));
+        let cursor = until_packet(client, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+        (contents, cursor)
+    };
+    let click = |client: &mut TcpStream, slot: i16, action: i16| {
+        let mut data = vec![1]; // window 1
+        data.extend_from_slice(&slot.to_be_bytes());
+        data.push(0); // left click
+        data.extend_from_slice(&action.to_be_bytes());
+        data.push(0); // regular click
+        data.extend_from_slice(&(-1i16).to_be_bytes()); // untrusted clicked item
+        client.write_all(&frame(0x0e, &data)).unwrap();
+        until_packet(client, 0x32, |p| {
+            p == [1, action.to_be_bytes()[0], action.to_be_bytes()[1], 1]
+        });
+        let contents = until_packet(client, 0x30, |p| p.starts_with(&[1, 0, 63]));
+        let cursor = until_packet(client, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+        (contents, cursor)
+    };
+
+    open_chest(&mut player);
+    // Slot 55 maps to player hotbar slot 37. Move exactly eight cobblestone
+    // from player to chest, then from chest to the carried cursor.
+    let (_, cursor) = click(&mut player, 55, 1);
+    assert_eq!(cursor, [255, 255, 255, 0, 4, 8, 0, 0, 255, 255]);
+    let (contents, cursor) = click(&mut player, 0, 2);
+    assert_eq!(&contents[3..10], &[0, 4, 8, 0, 0, 255, 255]);
+    assert_eq!(cursor, [255, 255, 255, 255, 255]);
+    let (contents, cursor) = click(&mut player, 0, 3);
+    assert_eq!(&contents[3..5], &(-1i16).to_be_bytes());
+    assert_eq!(cursor, [255, 255, 255, 0, 4, 8, 0, 0, 255, 255]);
+
+    // Abrupt disconnect; never send Protocol 5 C0D Close Window.
+    drop(player);
+    server.wait_idle();
+    let player_file = server.directory.join("players/rusttester.inventory.json");
+    let chest_file = server.directory.join("flat.chests.json");
+    await_file(&player_file);
+    await_file(&chest_file);
+    let saved: Value = serde_json::from_slice(&fs::read(&player_file).unwrap()).unwrap();
+    assert_eq!(saved["cursor"]["id"], 4);
+    assert_eq!(saved["cursor"]["count"], 8);
+    assert!(saved["slots"][37].is_null());
+    let chests: Value = serde_json::from_slice(&fs::read(&chest_file).unwrap()).unwrap();
+    assert!(
+        chests["entries"]["0,64,0"]
+            .as_array()
+            .is_none_or(|slots| slots[0].is_null()),
+        "chest slot must not retain items also held on the player cursor"
+    );
+
+    // Rejoin: the server must restore the cursor and allow depositing its
+    // contents exactly once. Repeated disconnects cannot duplicate the stack.
+    let (mut rejoined, _, _) = server.join("RustTester");
+    let (contents, cursor) = open_chest(&mut rejoined);
+    assert_eq!(&contents[3..5], &(-1i16).to_be_bytes());
+    assert_eq!(cursor, [255, 255, 255, 0, 4, 8, 0, 0, 255, 255]);
+    let (contents, cursor) = click(&mut rejoined, 0, 4);
+    assert_eq!(&contents[3..10], &[0, 4, 8, 0, 0, 255, 255]);
+    assert_eq!(cursor, [255, 255, 255, 255, 255]);
+    drop(rejoined);
+    server.wait_idle();
+
+    let saved: Value = serde_json::from_slice(&fs::read(&player_file).unwrap()).unwrap();
+    assert!(saved["cursor"].is_null());
+    assert!(saved["slots"][37].is_null());
+    let chests: Value = serde_json::from_slice(&fs::read(&chest_file).unwrap()).unwrap();
+    assert_eq!(chests["entries"]["0,64,0"][0]["id"], 4);
+    assert_eq!(chests["entries"]["0,64,0"][0]["count"], 8);
+
+    let (mut third, _, _) = server.join("RustTester");
+    let (contents, cursor) = open_chest(&mut third);
+    assert_eq!(&contents[3..10], &[0, 4, 8, 0, 0, 255, 255]);
+    assert_eq!(cursor, [255, 255, 255, 255, 255]);
+    drop(third);
+    server.wait_idle();
+}
+
+#[test]
 fn native_open_window_packets_cover_other_interactive_gui_blocks() {
     // Use real placed blocks and the running server, not just the packet builder.
     // Each case starts with an empty world to avoid layout-dependent interactions.
