@@ -169,6 +169,13 @@ pub fn effective(world_path: &Path, world: &World) -> io::Result<WorldSpawn> {
 }
 
 pub fn player_spawn(world_path: &Path, world: &World) -> io::Result<PlayerPosition> {
+    if world.dimension() != crate::dimensions::Dimension::Overworld {
+        return Ok(PlayerPosition {
+            x: 0.5,
+            y: world.spawn_y(),
+            z: 0.5,
+        });
+    }
     let point = effective(world_path, world)?;
     Ok(point.safe_player_position(world).unwrap_or(PlayerPosition {
         x: 0.5,
@@ -187,7 +194,10 @@ mod tests {
         let spawn = WorldSpawn::new(10, 64, -20).unwrap();
         assert_eq!(spawn.packet().len(), 12);
         assert_eq!(spawn.packet()[0..4], 10i32.to_be_bytes());
-        assert!(spawn.safe_player_position(&world).is_some());
+        assert_eq!(
+            spawn.safe_player_position(&world).unwrap().y,
+            64.0
+        );
         assert!(WorldSpawn::new(0, -1, 0).is_err());
         assert!(WorldSpawn::new(i32::MAX, 65, 0).is_err());
     }
