@@ -5482,17 +5482,20 @@ mod tests {
             y: world.spawn_y(),
             z: 512.5,
         };
-        let adjacent = PlayerPosition {
-            x: 528.5,
-            ..first
-        };
+        let adjacent = PlayerPosition { x: 528.5, ..first };
         let diagonal = PlayerPosition {
             x: 640.5,
             z: 640.5,
             ..first
         };
-        assert_eq!(natural_spawn_capacity(&[first, adjacent], VANILLA_HOSTILE_CAP), 83);
-        assert_eq!(natural_spawn_capacity(&[first, diagonal], VANILLA_HOSTILE_CAP), 135);
+        assert_eq!(
+            natural_spawn_capacity(&[first, adjacent], VANILLA_HOSTILE_CAP),
+            83
+        );
+        assert_eq!(
+            natural_spawn_capacity(&[first, diagonal], VANILLA_HOSTILE_CAP),
+            135
+        );
 
         let filler = PlayerPosition {
             x: 4096.5,
@@ -5515,10 +5518,7 @@ mod tests {
 
         // At the exact union cap, no pack may create a mob or a Protocol 5
         // spawn packet, even though two players are online.
-        for (players, cap) in [
-            (vec![first, adjacent], 83),
-            (vec![first, diagonal], 135),
-        ] {
+        for (players, cap) in [(vec![first, adjacent], 83), (vec![first, diagonal], 135)] {
             let mut full = seeded_mobs(cap);
             assert!(spawn_once(&mut full, &players).is_empty());
             assert_eq!(full.entities.len(), cap);
@@ -5526,7 +5526,10 @@ mod tests {
             let mut almost_full = seeded_mobs(cap - 1);
             let events = spawn_once(&mut almost_full, &players);
             let spawned = almost_full.entities.len() - (cap - 1);
-            assert!(spawned <= 1, "a pack must not exceed the overlapping union cap");
+            assert!(
+                spawned <= 1,
+                "a pack must not exceed the overlapping union cap"
+            );
             assert_eq!(
                 events.iter().filter(|event| event.id == 0x0f).count(),
                 spawned,
