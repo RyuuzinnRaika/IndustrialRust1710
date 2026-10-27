@@ -290,10 +290,7 @@ impl Throwables {
         self.active.remove(&id)?;
         let mut body = id.to_be_bytes().to_vec();
         body.extend_from_slice(&collector.to_be_bytes());
-        Some([
-            Event { id: 0x0d, body },
-            multiplayer::destroy(id),
-        ])
+        Some([Event { id: 0x0d, body }, multiplayer::destroy(id)])
     }
 
     pub fn tick(&mut self, world: &World, tick: u64) -> TickResult {
