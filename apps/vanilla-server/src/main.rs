@@ -6919,11 +6919,18 @@ fn handle(
             .map_err(|_| bad("mob mutex poisoned"))?
             .save(&guard)
     };
-    let player_saved = player_state.save_state_in_dimension(
-        &player_file,
-        player_vitals,
-        session_dimension.protocol_id() as i32,
-    );
+    // If a fatal redo transaction failed, its durable journal may still
+    // contain the authoritative dead state. Never bypass that redo with
+    // an independent disconnect-time NBT write; startup must recover it.
+    let player_saved = if result.is_err() && player_vitals.health <= 0.0 {
+        Ok(())
+    } else {
+        player_state.save_state_in_dimension(
+            &player_file,
+            player_vitals,
+            session_dimension.protocol_id() as i32,
+        )
+    };
     let inventory_saved = inventory_state.save(&inventory_file);
     let experience_saved = experience_state.save(&experience_file);
     let achievements_saved = achievements_state.save(&achievements_file);
