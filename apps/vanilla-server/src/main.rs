@@ -1030,7 +1030,7 @@ fn play(
                 }
                 active_window = 0;
                 active_chest = None;
-                    active_ender_chest = None;
+                active_ender_chest = None;
                 active_chest_partner = None;
                 active_furnace = None;
                 active_hopper = None;
@@ -2498,7 +2498,7 @@ fn play(
                                         active_window = 0;
                                     }
                                     active_chest = None;
-                    active_ender_chest = None;
+                                    active_ender_chest = None;
                                     active_chest_partner = None;
                                     active_furnace = None;
                                     active_hopper = None;
@@ -3683,7 +3683,11 @@ fn play(
                         == 130
                 {
                     active_window = next_window;
-                    next_window = if next_window >= 100 { 1 } else { next_window + 1 };
+                    next_window = if next_window >= 100 {
+                        1
+                    } else {
+                        next_window + 1
+                    };
                     active_chest = None;
                     active_chest_partner = None;
                     active_ender_chest = Some((x, y, z));
@@ -3693,12 +3697,8 @@ fn play(
                     active_brewer = None;
                     active_anvil = None;
                     active_enchant = None;
-                    let opened = window_open::encode(
-                        active_window,
-                        WindowKind::Chest,
-                        "Ender Chest",
-                        27,
-                    )?;
+                    let opened =
+                        window_open::encode(active_window, WindowKind::Chest, "Ender Chest", 27)?;
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &inventory.ender_chest_window_items(active_window))?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
