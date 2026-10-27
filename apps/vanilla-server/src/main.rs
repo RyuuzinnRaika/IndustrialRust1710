@@ -13,6 +13,7 @@ mod brewing;
 mod chests;
 mod chunk_pipeline;
 mod clock;
+mod command_completion;
 mod commands;
 mod crafting;
 mod decorations;
@@ -2703,6 +2704,17 @@ fn play(
             continue;
         }
         match id {
+            20 => {
+                // Protocol 5 C14 Tab Complete is one string. Reply with
+                // S3A's VarInt count and last-token replacement strings.
+                // Completion never executes a command or grants OP access.
+                let query = input.string(command_completion::MAX_REQUEST_CHARS)?;
+                input.finish()?;
+                let level = administration.operator_level(name, verified_uuid)?;
+                let online_names = hub.names()?;
+                let suggestions = command_completion::complete(&query, level, &online_names);
+                send(s, 0x3a, &command_completion::response_packet(&suggestions)?)?;
+            }
             18 => {
                 // Protocol 5 C12: Int X, Short Y, Int Z, four Strings.
                 // Reject unsolicited edits; only the placing player gets S36.
