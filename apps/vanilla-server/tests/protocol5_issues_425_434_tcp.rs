@@ -268,9 +268,11 @@ fn malformed_and_fragmented_protocol5_connections_are_isolated() {
     must_close(invalid_look);
     server.wait_online(0);
 
-    // #433 ADD-009: response ID 0 before any server challenge is not a pong.
+    // #433 ADD-009: unsolicited nonzero challenge responses are forbidden.
     let mut replay = server.login("RustTester");
-    replay.write_all(&frame(0, &0i32.to_be_bytes())).unwrap();
+    replay
+        .write_all(&frame(0, &0x12345678i32.to_be_bytes()))
+        .unwrap();
     must_close(replay);
     server.wait_online(0);
 
@@ -279,5 +281,47 @@ fn malformed_and_fragmented_protocol5_connections_are_isolated() {
     server.wait_online(1);
     // Graceful TCP half-close allows server to retire this one session.
     final_login.shutdown(Shutdown::Both).unwrap();
+    server.wait_online(0);
+}
+
+#[test]
+fn vanilla_1710_terrain_loading_keepalives_preserve_challenge_validation() {
+    let server = Server::launch();
+    let mut socket = server.login("RustTester");
+    server.wait_online(1);
+
+    // GuiDownloadTerrain in vanilla 1.7.10 sends new C00PacketKeepAlive()
+    // (the default ID 0), even before receiving any S00 challenge.
+    // These packets are not a heartbeat reply and must not disconnect.
+    for _ in 0..3 {
+        socket.write_all(&frame(0, &0i32.to_be_bytes())).unwrap();
+        server.wait_online(1);
+    }
+
+    // Wait for a real server-issued challenge (about 10 seconds); drain
+    // normal Play packets while reading from the same Protocol 5 TCP stream.
+    socket
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let challenge = loop {
+        assert!(Instant::now() < deadline, "no server KeepAlive challenge");
+        let (id, payload) = receive(&mut socket);
+        if id == 0 {
+            break payload;
+        }
+    };
+    assert_eq!(challenge.len(), 4);
+    assert_ne!(challenge, 0i32.to_be_bytes());
+
+    // The loading screen may continue sending ID 0 after a challenge.
+    // Only an exact matching reply can acknowledge the challenge.
+    socket.write_all(&frame(0, &0i32.to_be_bytes())).unwrap();
+    socket.write_all(&frame(0, &challenge)).unwrap();
+    server.wait_online(1);
+
+    // A second answer to the same challenge is a replay and is rejected.
+    socket.write_all(&frame(0, &challenge)).unwrap();
+    must_close(socket);
     server.wait_online(0);
 }

@@ -1961,6 +1961,11 @@ fn play(
         }
         if pending_ping.is_none() && ping_time.elapsed() >= Duration::from_secs(10) {
             ping_id = ping_id.wrapping_add(1);
+            // ID 0 is emitted unsolicited by the vanilla terrain-loading GUI,
+            // so never use it as an actual server-issued heartbeat challenge.
+            if ping_id == 0 {
+                ping_id = 1;
+            }
             send(s, 0, &ping_id.to_be_bytes())?;
             pending_ping = Some(ping_id);
             ping_time = Instant::now();
@@ -2318,11 +2323,16 @@ fn play(
             0 => {
                 let reply = input.i32()?;
                 input.finish()?;
-                if pending_ping != Some(reply) {
+                if pending_ping == Some(reply) {
+                    pending_ping = None;
+                    pong_time = Instant::now();
+                } else if reply != 0 {
                     return Err(bad("unexpected or replayed keepalive ID"));
                 }
-                pending_ping = None;
-                pong_time = Instant::now();
+                // Vanilla 1.7.10's terrain-loading screen emits unsolicited
+                // C00 KeepAlive packets with the default ID 0. Ignore them
+                // without marking a server challenge answered or refreshing
+                // the liveness timeout; still reject other unsolicited IDs.
             }
             1 => {
                 let message = input.string(100)?;
