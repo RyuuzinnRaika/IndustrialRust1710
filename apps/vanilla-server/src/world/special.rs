@@ -26,6 +26,34 @@ pub enum TntEvent {
     },
 }
 
+// Resistance approximations for vanilla 1.7.10's ray attenuation. Keep
+// unsupported inventories intact until explosion drops become transactional.
+fn blast_resistance(id: u16) -> f64 {
+    match id {
+        7 | 119 | 120 | 137 => 18_000_000.0,
+        49 | 130 => 1_200.0,
+        8..=11 => 500.0,
+        1 | 4 | 14..=16 | 21 | 41 | 42 | 48 | 56 | 57 | 73 | 74 | 98 => 6.0,
+        2 | 3 | 12 | 13 | 24 | 80 | 82 | 159 | 172 => 2.5,
+        5 | 17 | 35 | 47 | 53 | 58 | 85 | 86 | 96 | 162 => 3.0,
+        20 | 95 | 102 | 160 => 1.5,
+        18 | 31 | 32 | 37 | 38 | 50 | 55 | 59 | 78 | 79 | 83 | 106 => 0.2,
+        46 => 0.0,
+        _ => 1.0,
+    }
+}
+
+fn blast_breakable(id: u16) -> bool {
+    !matches!(
+        id,
+        7 | 49 | 90 | 119 | 120 | 130
+            // Containers have separate persistent inventories and tile NBT.
+            // Never silently erase their blocks without journaling their contents.
+            | 23 | 54 | 61 | 62 | 63 | 68 | 84 | 116 | 117
+            | 137 | 138 | 145 | 146 | 154 | 158
+    )
+}
+
 type StagedBlockBatch = (World, Vec<(i32, i32, i32)>);
 pub type StagedSpecialItem = (World, Vec<(i32, i32, i32)>, Option<Stack>, bool);
 
@@ -115,6 +143,38 @@ impl World {
         }
     }
 
+    /// The positions are needed when a player joins after TNT was ignited.
+    /// Read-only: joining does not consume the worker's spawn-event queue.
+    pub fn visible_primed_tnt(
+        &self,
+        around: crate::player::PlayerPosition,
+    ) -> Vec<(i32, (i32, i32, i32))> {
+        self.primed_tnt
+            .values()
+            .filter(|tnt| {
+                (f64::from(tnt.pos.0) + 0.5 - around.x).abs() <= 48.0
+                    && (f64::from(tnt.pos.1) + 0.5 - around.y).abs() <= 48.0
+                    && (f64::from(tnt.pos.2) + 0.5 - around.z).abs() <= 48.0
+            })
+            .map(|tnt| (tnt.entity_id, tnt.pos))
+            .collect()
+    }
+
+    pub(super) fn tnt_hit_by_blast(&self, pos: (i32, i32, i32)) -> bool {
+        self.primed_tnt
+            .values()
+            .filter(|tnt| tnt.explode_at <= self.fluid_phase)
+            .take(4)
+            .any(|tnt| {
+                let (dx, dy, dz) = (
+                    i64::from(pos.0) - i64::from(tnt.pos.0),
+                    i64::from(pos.1) - i64::from(tnt.pos.1),
+                    i64::from(pos.2) - i64::from(tnt.pos.2),
+                );
+                dx * dx + dy * dy + dz * dz <= 36
+            })
+    }
+
     /// Publish only events from committed state.
     pub fn drain_tnt_events(&mut self) -> Vec<TntEvent> {
         std::mem::take(&mut self.tnt_events)
@@ -128,23 +188,9 @@ impl World {
             .take(4)
             .copied()
             .collect();
-        // Distinguish explosion-induced TNT from redstone ignition before
-        // removing detonated entities. Vanilla 1.7.10 gives chain TNT a
-        // shortened fuse, while redstone-lit TNT retains the full 80 ticks.
-        // Use a stable position/tick hash, not a global RNG, so a persisted
-        // world produces reproducible fuse deadlines after recovery.
-        let chain_fuse = |pos: (i32, i32, i32)| -> Option<u64> {
-            let in_blast = expired.iter().any(|tnt| {
-                let (dx, dy, dz) = (
-                    i64::from(pos.0) - i64::from(tnt.pos.0),
-                    i64::from(pos.1) - i64::from(tnt.pos.1),
-                    i64::from(pos.2) - i64::from(tnt.pos.2),
-                );
-                dx * dx + dy * dy + dz * dz <= 9
-            });
-            if !in_blast {
-                return None;
-            }
+        // Preserve the 1.7.10 10..29 tick chain fuse even for TNT that
+        // waited in the durable overflow queue across a server restart.
+        let short_fuse = |pos: (i32, i32, i32)| -> u64 {
             let mut seed = self.fluid_phase
                 ^ (pos.0 as u32 as u64).wrapping_mul(0x9E3779B185EBCA87)
                 ^ (pos.1 as u32 as u64).wrapping_mul(0xC2B2AE3D27D4EB4F)
@@ -153,11 +199,23 @@ impl World {
             seed = seed.wrapping_mul(0xBF58476D1CE4E5B9);
             seed ^= seed >> 27;
             seed = seed.wrapping_mul(0x94D049BB133111EB);
-            Some(10 + ((seed ^ (seed >> 31)) % 20))
+            10 + ((seed ^ (seed >> 31)) % 20)
         };
         let primed_fuses: Vec<_> = newly_primed
             .iter()
-            .map(|&pos| (pos, chain_fuse(pos).unwrap_or(80)))
+            .map(|&pos| {
+                let queued = self
+                    .pending_chain_tnt
+                    .contains(&(pos.0, pos.1 as u8, pos.2));
+                (
+                    pos,
+                    if queued || self.tnt_hit_by_blast(pos) {
+                        short_fuse(pos)
+                    } else {
+                        80
+                    },
+                )
+            })
             .collect();
         for tnt in expired {
             self.primed_tnt.remove(&tnt.entity_id);
@@ -595,26 +653,62 @@ impl World {
                 }
             }
         }
+        for &(x, y, z) in self.pending_chain_tnt.iter().take(budget) {
+            if self.get(x, i32::from(y), z) >> 4 == 46 {
+                changes.insert((x, y, z), 0);
+            }
+        }
         for tnt in self
             .primed_tnt
             .values()
             .filter(|t| t.explode_at <= self.fluid_phase)
             .take(4)
         {
-            let (x, y, z) = tnt.pos;
-            for dx in -3i32..=3 {
-                for dy in -3i32..=3 {
-                    for dz in -3i32..=3 {
-                        if dx * dx + dy * dy + dz * dz > 9 {
+            // Vanilla Explosion.doExplosionA: cast 1352 rays from the faces
+            // of a 16^3 cube, stepping by 0.3 and attenuating by resistance.
+            // Per-entity seeded strengths make restart/replay deterministic.
+            let (tx, ty, tz) = tnt.pos;
+            for ix in 0..16 {
+                for iy in 0..16 {
+                    for iz in 0..16 {
+                        if ix != 0 && ix != 15 && iy != 0 && iy != 15 && iz != 0 && iz != 15 {
                             continue;
                         }
-                        let (px, py, pz) = (x + dx, y + dy, z + dz);
-                        if !in_bounds(px, py, pz) {
-                            continue;
-                        }
-                        let id = self.get(px, py, pz) >> 4;
-                        if id != 0 && !matches!(id, 7 | 49 | 90 | 119 | 120) {
-                            changes.insert((px, py as u8, pz), 0);
+                        let (dx, dy, dz) = (
+                            f64::from(ix) / 15.0 * 2.0 - 1.0,
+                            f64::from(iy) / 15.0 * 2.0 - 1.0,
+                            f64::from(iz) / 15.0 * 2.0 - 1.0,
+                        );
+                        let length = (dx * dx + dy * dy + dz * dz).sqrt();
+                        let mut px = f64::from(tx) + 0.5;
+                        let mut py = f64::from(ty) + 0.5;
+                        let mut pz = f64::from(tz) + 0.5;
+                        let mut seed = (tnt.entity_id as u64)
+                            ^ self.fluid_phase.rotate_left(19)
+                            ^ ((ix * 256 + iy * 16 + iz) as u64);
+                        seed ^= seed >> 30;
+                        seed = seed.wrapping_mul(0xBF58476D1CE4E5B9);
+                        seed ^= seed >> 27;
+                        let random =
+                            (seed.wrapping_mul(0x94D049BB133111EB) >> 40) as f64 / 16_777_216.0;
+                        let mut strength = 4.0 * (0.7 + random * 0.6);
+                        while strength > 0.0 {
+                            let (x, y, z) =
+                                (px.floor() as i32, py.floor() as i32, pz.floor() as i32);
+                            if !in_bounds(x, y, z) {
+                                break;
+                            }
+                            let id = self.get(x, y, z) >> 4;
+                            if id != 0 {
+                                strength -= (blast_resistance(id) + 0.3) * 0.3;
+                                if strength > 0.0 && blast_breakable(id) {
+                                    changes.insert((x, y as u8, z), 0);
+                                }
+                            }
+                            px += dx / length * 0.3;
+                            py += dy / length * 0.3;
+                            pz += dz / length * 0.3;
+                            strength -= 0.225;
                         }
                     }
                 }
@@ -1109,6 +1203,77 @@ mod tests {
         assert!(world.primed_tnt.is_empty());
         assert!(World::load(&path).unwrap().primed_tnt.is_empty());
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn blast_rays_respect_obsidian_and_do_not_erase_container_inventory() {
+        let path = file("tnt-ray-resistance");
+        let mut world = World::new();
+        world.import_block(0, 100, 0, 49 << 4).unwrap();
+        world.import_block(1, 100, 0, 1 << 4).unwrap();
+        world.import_block(0, 100, 1, 54 << 4).unwrap();
+        assert!(world.spawn_primed_tnt(0, 100, 0, 1));
+        world.save(&path).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 100, 0) >> 4, 49);
+        assert_eq!(world.get(1, 100, 0) >> 4, 1);
+        assert_eq!(world.get(0, 100, 1) >> 4, 54);
+        let mut air_blast = World::new();
+        air_blast.import_block(1, 100, 0, 1 << 4).unwrap();
+        assert!(air_blast.spawn_primed_tnt(0, 100, 0, 1));
+        air_blast.block_tick(&path, 64).unwrap();
+        assert_eq!(air_blast.get(1, 100, 0), 0);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn overflow_chain_ignition_survives_shutdown_and_resumes_when_slots_free() {
+        let path = file("tnt-overflow-queue");
+        let mut world = World::new();
+        for x in 1..=3 {
+            world.import_block(x, 200, 0, 46 << 4).unwrap();
+        }
+        for _ in 0..(MAX_PRIMED_TNT - 1) {
+            assert!(world.spawn_primed_tnt(1000, 200, 0, 1000));
+        }
+        assert!(world.spawn_primed_tnt(0, 200, 0, 1));
+        world.save(&path).unwrap();
+        world.drain_tnt_events();
+
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.primed_tnt.len(), MAX_PRIMED_TNT);
+        assert_eq!(world.pending_chain_tnt.len(), 2);
+        assert_eq!(world.get(1, 200, 0), 0);
+        assert_eq!(world.get(2, 200, 0) >> 4, 46);
+        assert_eq!(world.get(3, 200, 0) >> 4, 46);
+        let mut recovered = World::load(&path).unwrap();
+        assert_eq!(recovered.pending_chain_tnt.len(), 2);
+        // Release artificial load, then save and restart once more.
+        recovered.primed_tnt.retain(|_, tnt| tnt.pos.0 < 10);
+        recovered.save(&path).unwrap();
+        let mut resumed = World::load(&path).unwrap();
+        resumed.block_tick(&path, 64).unwrap();
+        assert!(resumed.pending_chain_tnt.is_empty());
+        assert_eq!(resumed.get(2, 200, 0), 0);
+        assert_eq!(resumed.get(3, 200, 0), 0);
+        assert_eq!(resumed.primed_tnt.len(), 3);
+        assert!(World::load(&path).unwrap().pending_chain_tnt.is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn joining_late_sees_primed_tnt_without_consuming_events() {
+        let mut world = World::new();
+        assert!(world.spawn_primed_tnt(5, 80, 5, 80));
+        assert!(world.spawn_primed_tnt(200, 80, 5, 80));
+        let near = world.visible_primed_tnt(crate::player::PlayerPosition {
+            x: 5.5,
+            y: 80.0,
+            z: 5.5,
+        });
+        assert_eq!(near.len(), 1);
+        assert_eq!(near[0].1, (5, 80, 5));
+        assert_eq!(world.drain_tnt_events().len(), 2);
     }
 
     #[test]
