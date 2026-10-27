@@ -1,8 +1,7 @@
 name: Rust-only Minecraft 1.7.10 CI
+# Rust CI is not run automatically. Enable only after explicit user authorization.
+# Local/offline Rust validation is documented separately.
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
