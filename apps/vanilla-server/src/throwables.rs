@@ -213,7 +213,7 @@ fn fence_connects_to(world: &World, cell: [i32; 3], fence: u16, dx: i32, dz: i32
         || matches!(
             neighbor,
             1..=5 | 7 | 12..=17 | 19 | 21..=25 | 35 | 41..=43 | 45..=49
-                | 56..=58 | 61 | 62 | 73 | 74 | 80 | 82 | 84 | 87..=89
+                | 56..=58 | 61 | 62 | 73 | 74 | 80 | 82 | 84 | 87
                 | 97..=100 | 103 | 110 | 112 | 121 | 123..=125 | 129
                 | 133 | 137 | 152 | 153 | 155 | 158 | 159 | 162 | 170
                 | 172 | 173
@@ -222,7 +222,8 @@ fn fence_connects_to(world: &World, cell: [i32; 3], fence: u16, dx: i32, dz: i32
 
 /// Collision shape of a 1.7.10 wooden (85) or nether-brick (113) fence.
 /// The central post is 1/4 block wide; connected arms extend to the
-/// neighboring block edge. All collision parts rise 1.5 blocks high.
+/// neighboring block edge. Ray tracing uses the one-block-high selection
+/// bounds, not the 1.5-block-tall entity collision boxes.
 fn fence_entry(
     world: &World,
     from: PlayerPosition,
@@ -235,7 +236,7 @@ fn fence_entry(
         from,
         to,
         [x + 0.375, y, z + 0.375],
-        [x + 0.625, y + 1.5, z + 0.625],
+        [x + 0.625, y + 1.0, z + 0.625],
     );
     for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
         if !fence_connects_to(world, cell, fence, dx, dz) {
@@ -251,7 +252,7 @@ fn fence_entry(
             from,
             to,
             [x + min_x, y, z + min_z],
-            [x + max_x, y + 1.5, z + max_z],
+            [x + max_x, y + 1.0, z + max_z],
         );
         first = [first, arm].into_iter().flatten().min_by(f64::total_cmp);
     }
@@ -324,19 +325,6 @@ fn first_solid_block_hit(
                 }
             } else {
                 return Some((entry, cell));
-            }
-        }
-        // Fence collision extends half a block above its own voxel. A ray
-        // entirely in the upper air cell must still test the fence below.
-        if cell[1] > 0 {
-            let below = [cell[0], cell[1] - 1, cell[2]];
-            let below_id = world.get(below[0], below[1], below[2]) >> 4;
-            if matches!(below_id, 85 | 113) {
-                if let Some(t) = fence_entry(world, from, to, below, below_id) {
-                    if t >= entry {
-                        return Some((t, below));
-                    }
-                }
             }
         }
         if cell == end {
@@ -1547,6 +1535,8 @@ mod tests {
             first_solid_block_hit(&world, from, to).map(|hit| hit.1),
             Some([1, 70, 1])
         );
+        // Vanilla's projectile ray trace uses the 1-block selection shape,
+        // whereas the fence's entity collision boxes reach 1.5 blocks.
         let high_from = PlayerPosition {
             x: 0.2,
             y: 71.25,
@@ -1556,15 +1546,18 @@ mod tests {
             x: 2.8,
             ..high_from
         };
-        let (t, cell) = first_solid_block_hit(&world, high_from, high_to).unwrap();
-        assert_eq!(cell, [1, 70, 1]);
-        assert!((t - 1.175 / 2.6).abs() < 1e-10);
-        let above_from = PlayerPosition {
-            y: 71.6,
+        assert_eq!(first_solid_block_hit(&world, high_from, high_to), None);
+        let low_from = PlayerPosition {
+            y: 70.95,
             ..high_from
         };
-        let above_to = PlayerPosition { y: 71.6, ..high_to };
-        assert_eq!(first_solid_block_hit(&world, above_from, above_to), None);
+        let low_to = PlayerPosition {
+            y: 70.95,
+            ..high_to
+        };
+        let (t, cell) = first_solid_block_hit(&world, low_from, low_to).unwrap();
+        assert_eq!(cell, [1, 70, 1]);
+        assert!((t - 1.175 / 2.6).abs() < 1e-10);
     }
 
     #[test]
