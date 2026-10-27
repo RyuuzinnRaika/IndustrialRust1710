@@ -2330,6 +2330,14 @@ fn minecart_dismount_is_safe_in_both_modes_and_restart_preserves_position_invent
     let creative_position = read_position(&corrected);
     assert_eq!(creative_position[1], 64.0);
     assert!((creative_position[0] - 2.5).hypot(creative_position[2] - 0.5) >= 0.85);
+    // A real 1.7.10 client acknowledges S08 with C04 before interacting.
+    // Do not remount from the obsolete pre-dismount client position.
+    send_position(
+        &mut client,
+        creative_position[0],
+        creative_position[1],
+        creative_position[2],
+    );
 
     // Remount, switch modes through the live server command, then exercise the
     // identical authoritative dismount path in Survival.
