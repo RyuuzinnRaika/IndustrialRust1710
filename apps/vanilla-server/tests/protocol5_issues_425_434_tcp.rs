@@ -66,8 +66,9 @@ impl Server {
         let s = loop {
             match TcpStream::connect(("127.0.0.1", self.port)) {
                 Ok(socket) => break socket,
-                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused
-                    && Instant::now() < deadline =>
+                Err(error)
+                    if error.kind() == io::ErrorKind::ConnectionRefused
+                        && Instant::now() < deadline =>
                 {
                     thread::sleep(Duration::from_millis(50));
                 }
@@ -174,7 +175,7 @@ fn must_close(mut socket: TcpStream) {
                 // handshake; security assertions remain unchanged.
                 thread::sleep(Duration::from_millis(100));
                 return;
-            },
+            }
             Ok(_) => {}
             Err(error)
                 if matches!(
