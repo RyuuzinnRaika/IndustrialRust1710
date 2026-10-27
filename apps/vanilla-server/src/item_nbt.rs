@@ -331,7 +331,12 @@ mod tests {
         let illegal = [10, 0, 0, 9, 0, 1, b'l', 0, 0, 0, 0, 1, 0];
         // Correct scalar tag, but its payload is truncated.
         let truncated = [10, 0, 0, 4, 0, 1, b'n', 0, 0, 0];
-        for bytes in [negative.as_slice(), enormous.as_slice(), illegal.as_slice(), truncated.as_slice()] {
+        for bytes in [
+            negative.as_slice(),
+            enormous.as_slice(),
+            illegal.as_slice(),
+            truncated.as_slice(),
+        ] {
             assert!(validate_nbt_wire(bytes).is_err());
             assert!(intern(&gzip_raw(bytes)).is_err());
         }
