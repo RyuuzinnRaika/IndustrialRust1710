@@ -25,12 +25,7 @@ where
 
     let stride = width + 2;
     let parent_height = height + 2;
-    let source = parent(
-        x.wrapping_sub(1),
-        z.wrapping_sub(1),
-        stride,
-        parent_height,
-    );
+    let source = parent(x.wrapping_sub(1), z.wrapping_sub(1), stride, parent_height);
     assert_eq!(source.len(), stride * parent_height);
 
     let mut result = Vec::with_capacity(width * height);
