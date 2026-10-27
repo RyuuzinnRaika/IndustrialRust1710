@@ -126,6 +126,28 @@ const CHUNK_RELIGHT_EVENT: u32 = u32::MAX;
 fn bad(reason: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, reason)
 }
+
+/// Classify failures without treating a normal EOF as a gameplay crash.
+fn disconnect_category(error: &io::Error) -> &'static str {
+    if error.to_string().contains("keepalive timeout") {
+        return "keepalive_timeout";
+    }
+    if error.to_string().contains("chunk compression deadline")
+        || error.to_string().contains("chunk compression queue busy")
+    {
+        return "chunk_timeout";
+    }
+    match error.kind() {
+        ErrorKind::UnexpectedEof
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe => "peer_closed",
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => "io_timeout",
+        ErrorKind::InvalidData | ErrorKind::InvalidInput => "invalid_packet_or_state",
+        ErrorKind::PermissionDenied => "access_denied",
+        _ => "server_io_or_state",
+    }
+}
 struct Input<'a>(&'a [u8]);
 impl<'a> Input<'a> {
     fn take(&mut self, n: usize) -> io::Result<&'a [u8]> {
@@ -5649,7 +5671,8 @@ fn handle(
             hardcore,
             difficulty: difficulty.load(Ordering::Acquire),
         },
-    )?;
+    )
+    .map_err(|error| io::Error::new(error.kind(), format!("join initialization: {error}")))?;
     if survival {
         send(&mut s, 0x1f, &experience_state.packet())?;
     }
@@ -5841,7 +5864,7 @@ fn handle(
     inventory_saved?;
     experience_saved?;
     achievements_saved?;
-    result
+    result.map_err(|error| io::Error::new(error.kind(), format!("active play session: {error}")))
 }
 /// Services required to execute a level-gated in-game administrative command.
 struct PlayerAdminServices<'a> {
@@ -8178,8 +8201,12 @@ fn main() -> io::Result<()> {
                 },
                 ip_permit,
             ) {
-                if e.kind() != ErrorKind::UnexpectedEof {
-                    eprintln!("client disconnected: {e}");
+                let category = disconnect_category(&e);
+                if category != "peer_closed" {
+                    eprintln!(
+                        "client disconnected: category={category} io_kind={:?} reason={e}",
+                        e.kind()
+                    );
                 }
             }
         }));
@@ -9039,5 +9066,48 @@ mod session_dimension_routing_tests {
         drop(admission);
         drop(worlds);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod disconnect_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn expected_disconnect_and_protocol_errors_get_distinct_categories() {
+        assert_eq!(
+            disconnect_category(&io::Error::from(ErrorKind::UnexpectedEof)),
+            "peer_closed"
+        );
+        assert_eq!(
+            disconnect_category(&io::Error::from(ErrorKind::ConnectionReset)),
+            "peer_closed"
+        );
+        assert_eq!(
+            disconnect_category(&io::Error::from(ErrorKind::TimedOut)),
+            "io_timeout"
+        );
+        assert_eq!(
+            disconnect_category(&bad("unexpected or replayed keepalive ID")),
+            "invalid_packet_or_state"
+        );
+        assert_eq!(
+            disconnect_category(&bad("keepalive timeout")),
+            "keepalive_timeout"
+        );
+        assert_eq!(
+            disconnect_category(&io::Error::new(
+                ErrorKind::WouldBlock,
+                "chunk compression queue busy",
+            )),
+            "chunk_timeout"
+        );
+        assert_eq!(
+            disconnect_category(&io::Error::new(
+                ErrorKind::TimedOut,
+                "chunk compression deadline exceeded",
+            )),
+            "chunk_timeout"
+        );
     }
 }
