@@ -1227,9 +1227,7 @@ fn play(
                 // The owning session computes displacement using its CURRENT
                 // player coordinates. Hub's last position is merely a cache
                 // and could be stale when the worker's event is delivered.
-                if *session_dimension == dimensions::Dimension::Overworld
-                    && vitals.health > 0.0
-                {
+                if *session_dimension == dimensions::Dimension::Overworld && vitals.health > 0.0 {
                     let base = (
                         i32::from_be_bytes(event.body[0..4].try_into().unwrap()),
                         i32::from_be_bytes(event.body[4..8].try_into().unwrap()),
