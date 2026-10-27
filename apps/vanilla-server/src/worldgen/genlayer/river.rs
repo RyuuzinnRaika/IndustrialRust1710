@@ -183,12 +183,18 @@ mod tests {
         assert!(whole.contains(&-1));
         for dz in (0..8).rev() {
             for dx in (0..8).rev() {
-              
+                let cell = river_map(-17 + dx, -17 + dz, 1, 1, parent);
+                assert_eq!(cell[0], whole[(dz * 8 + dx) as usize]);
+            }
+        }
+        assert!(river_map(0, 0, 8, 0, parent).is_empty());
+    }
+
     #[test]
     fn river_init_wraps_java_int_coordinates_at_both_boundaries() {
-        // Independent Java-long GenLayerRiverInit oracle using the same
-        // patterned parent as the other golden fixtures. Java evaluates
-        // (x + dx) and (z + dz) in signed int before initChunkSeed(long,long).
+        // Independent Python verification of Java-long GenLayerRiverInit
+        // with the same patterned parent as the other golden fixtures.
+        // Java int addition wraps before initChunkSeed(long, long).
         let cases: [(i64, i32, i32, [i32; 12]); 2] = [
             (
                 42,
@@ -222,10 +228,5 @@ mod tests {
             }
         }
     }
-  let cell = river_map(-17 + dx, -17 + dz, 1, 1, parent);
-                assert_eq!(cell[0], whole[(dz * 8 + dx) as usize]);
-            }
-        }
-        assert!(river_map(0, 0, 8, 0, parent).is_empty());
-    }
+
 }
