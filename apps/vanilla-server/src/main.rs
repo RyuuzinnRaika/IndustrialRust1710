@@ -100,6 +100,7 @@ use multiplayer::{
     Event, Hub, JoinError, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT, ADMIN_ENCHANT_EVENT,
     ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT,
     DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
+    SessionEvents,
 };
 use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
@@ -112,7 +113,6 @@ use std::io::{self, BufRead, ErrorKind};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1165,7 +1165,7 @@ struct PlayerSession<'a> {
     scoreboard_path: &'a Path,
     hub: &'a Hub,
     entity_id: i32,
-    events: &'a Receiver<Event>,
+    events: &'a SessionEvents,
     administration: &'a Administration,
     peer_ip: IpAddr,
     verified_uuid: Option<&'a str>,

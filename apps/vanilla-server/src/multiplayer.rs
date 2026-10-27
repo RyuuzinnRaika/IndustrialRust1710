@@ -8,8 +8,8 @@ use crate::world::VIEW_DISTANCE;
 use legacy_protocol::{write_string, write_varint};
 use std::collections::BTreeMap;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 
 pub const MAX_PLAYERS: usize = 8;
@@ -38,6 +38,38 @@ pub struct Event {
     pub id: u32,
     pub body: Vec<u8>,
 }
+
+/// An outbound event is valid only for the dimension epoch in which it was
+/// enqueued. Global chat, tab-list updates and administrator commands are
+/// independent of world changes, so they do not carry an epoch.
+struct QueuedEvent {
+    packet: Event,
+    epoch: Option<u64>,
+}
+
+/// The owning session consumes this mailbox. A portal/respawn transition
+/// invalidates world packets that were queued before the new dimension loaded.
+pub struct SessionEvents {
+    rx: Receiver<QueuedEvent>,
+    epoch: Arc<AtomicU64>,
+}
+
+impl SessionEvents {
+    pub fn try_recv(&self) -> Result<Event, TryRecvError> {
+        loop {
+            let queued = self.rx.try_recv()?;
+            if queued
+                .epoch
+                .is_none_or(|epoch| epoch == self.epoch.load(Ordering::Acquire))
+            {
+                return Ok(queued.packet);
+            }
+            // Discard a stale world packet rather than delivering it into the
+            // next dimension. Continue draining without blocking the session.
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Peer {
     pub id: i32,
@@ -46,7 +78,8 @@ pub struct Peer {
     pub position: PlayerPosition,
     /// Entity visibility is isolated by dimension, not by coordinates alone.
     pub dimension: Dimension,
-    tx: SyncSender<Event>,
+    tx: SyncSender<QueuedEvent>,
+    epoch: Arc<AtomicU64>,
     overloaded: Arc<AtomicBool>,
 }
 #[derive(Default)]
@@ -61,8 +94,30 @@ fn poisoned() -> io::Error {
     io::Error::other("multiplayer lock poisoned")
 }
 
+fn stamp_event(peer: &Peer, packet: Event) -> QueuedEvent {
+    // 0x02 chat and 0x38 tab-list are global in Protocol 5. A privileged
+    // action still applies after a portal transfer; ordinary gameplay events,
+    // including piston pushes, relights and projectile damage, do not.
+    let global = matches!(
+        packet.id,
+        0x02
+            | 0x38
+            | ADMIN_TELEPORT_EVENT
+            | ADMIN_KICK_EVENT
+            | ADMIN_GAMEMODE_EVENT
+            | ADMIN_GIVE_EVENT
+            | ADMIN_CLEAR_EVENT
+            | ADMIN_EFFECT_EVENT
+            | ADMIN_ENCHANT_EVENT
+    );
+    QueuedEvent {
+        epoch: (!global).then(|| peer.epoch.load(Ordering::Relaxed)),
+        packet,
+    }
+}
+
 fn enqueue(peer: &Peer, packet: &Event) {
-    match peer.tx.try_send(packet.clone()) {
+    match peer.tx.try_send(stamp_event(peer, packet.clone())) {
         Ok(()) => {}
         Err(TrySendError::Full(_)) => {
             // Drop the whole session rather than silently losing a state update.
@@ -369,10 +424,13 @@ impl Hub {
             return Ok(false);
         };
         peer.tx
-            .try_send(Event {
-                id: ADMIN_GAMEMODE_EVENT,
-                body: vec![mode],
-            })
+            .try_send(stamp_event(
+                peer,
+                Event {
+                    id: ADMIN_GAMEMODE_EVENT,
+                    body: vec![mode],
+                },
+            ))
             .map_err(|_| {
                 peer.overloaded.store(true, Ordering::Release);
                 io::Error::other("target session mailbox unavailable")
@@ -393,10 +451,13 @@ impl Hub {
             return Ok(false);
         }
         peer.tx
-            .try_send(Event {
-                id: DISPENSER_ARROW_DAMAGE_EVENT,
-                body: Vec::new(),
-            })
+            .try_send(stamp_event(
+                peer,
+                Event {
+                    id: DISPENSER_ARROW_DAMAGE_EVENT,
+                    body: Vec::new(),
+                },
+            ))
             .map_err(|_| {
                 peer.overloaded.store(true, Ordering::Release);
                 io::Error::other("target session damage mailbox unavailable")
@@ -428,7 +489,7 @@ impl Hub {
             body.extend_from_slice(&coord.to_be_bytes());
         }
         peer.tx
-            .try_send(Event { id: event_id, body })
+            .try_send(stamp_event(peer, Event { id: event_id, body }))
             .map_err(|_| {
                 peer.overloaded.store(true, Ordering::Release);
                 io::Error::other("target session mailbox unavailable")
@@ -452,10 +513,13 @@ impl Hub {
             return Ok(false);
         };
         peer.tx
-            .try_send(Event {
-                id: ADMIN_KICK_EVENT,
-                body: reason.as_bytes().to_vec(),
-            })
+            .try_send(stamp_event(
+                peer,
+                Event {
+                    id: ADMIN_KICK_EVENT,
+                    body: reason.as_bytes().to_vec(),
+                },
+            ))
             .map_err(|_| {
                 peer.overloaded.store(true, Ordering::Release);
                 io::Error::other("target session mailbox unavailable")
@@ -486,7 +550,7 @@ impl Hub {
         name: String,
         uuid: String,
         position: PlayerPosition,
-    ) -> Result<(i32, Receiver<Event>, Vec<Peer>), JoinError> {
+    ) -> Result<(i32, SessionEvents, Vec<Peer>), JoinError> {
         self.add_in_dimension(name, uuid, position, Dimension::Overworld)
     }
 
@@ -496,7 +560,7 @@ impl Hub {
         uuid: String,
         position: PlayerPosition,
         dimension: Dimension,
-    ) -> Result<(i32, Receiver<Event>, Vec<Peer>), JoinError> {
+    ) -> Result<(i32, SessionEvents, Vec<Peer>), JoinError> {
         let mut inner = self.0.lock().map_err(|_| JoinError::Full)?;
         if inner.players.len() >= MAX_PLAYERS {
             return Err(JoinError::Full);
@@ -509,6 +573,7 @@ impl Hub {
             return Err(JoinError::Duplicate);
         }
         let (tx, rx) = sync_channel(QUEUE_CAPACITY);
+        let epoch = Arc::new(AtomicU64::new(0));
         let existing = inner.players.values().cloned().collect::<Vec<_>>();
         // A monotonically increasing entity ID prevents reuse on reconnect.
         if inner.next_id == i32::MAX {
@@ -523,6 +588,7 @@ impl Hub {
             position,
             dimension,
             tx,
+            epoch: Arc::clone(&epoch),
             overloaded: Arc::new(AtomicBool::new(false)),
         };
         // Existing players learn of the new user in queue order.
@@ -535,7 +601,7 @@ impl Hub {
             }
         }
         inner.players.insert(id, peer);
-        Ok((id, rx, existing))
+        Ok((id, SessionEvents { rx, epoch }, existing))
     }
     pub fn remove(&self, id: i32) {
         if let Ok(mut inner) = self.0.lock() {
@@ -631,6 +697,10 @@ impl Hub {
         current.position = position;
         let arriving = current.clone();
         let arrival_spawn = spawn(&arriving)?;
+        // The Hub mutex serializes this epoch change with every enqueue.
+        // Events from the former world remain in the bounded queue but are
+        // ignored when the owning session next drains its mailbox.
+        current.epoch.fetch_add(1, Ordering::AcqRel);
         let departure_destroy = destroy(id);
         for other in inner.players.values() {
             if other.id == id {
@@ -1282,5 +1352,85 @@ mod tests {
         assert!(!hub.request_dispenser_arrow_damage(bob).unwrap());
         assert!(!hub.request_dispenser_arrow_damage(999).unwrap());
         assert!(bob_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn add015_queued_old_dimension_chunk_entity_and_block_packets_are_discarded() {
+        let hub = Hub::default();
+        let pos = PlayerPosition::default();
+        let (alice, rx, _) = hub
+            .add_in_dimension("Alice".into(), "uuid-a".into(), pos, Dimension::Overworld)
+            .unwrap();
+
+        // The outgoing mailbox is deliberately not consumed before the portal.
+        for id in [0x21, 0x0c, 0x23, u32::MAX] {
+            hub.broadcast_in_dimension(
+                Dimension::Overworld,
+                Event { id, body: vec![1] },
+            );
+        }
+        assert!(hub.change_dimension(alice, Dimension::Nether, pos).unwrap());
+        for id in [0x21, 0x0c, 0x23] {
+            hub.broadcast_in_dimension(
+                Dimension::Nether,
+                Event { id, body: vec![2] },
+            );
+        }
+        for id in [0x21, 0x0c, 0x23] {
+            let packet = rx.try_recv().unwrap();
+            assert_eq!(packet.id, id);
+            assert_eq!(packet.body, [2]);
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn add015_old_epoch_does_not_reappear_after_round_trip_to_same_dimension() {
+        let hub = Hub::default();
+        let pos = PlayerPosition::default();
+        let (alice, rx, _) = hub.add("Alice".into(), "uuid-a".into(), pos).unwrap();
+        hub.broadcast_in_dimension(
+            Dimension::Overworld,
+            Event { id: 0x23, body: vec![1] },
+        );
+        assert!(hub.change_dimension(alice, Dimension::Nether, pos).unwrap());
+        hub.broadcast_in_dimension(
+            Dimension::Nether,
+            Event { id: 0x23, body: vec![2] },
+        );
+        assert!(hub.change_dimension(alice, Dimension::Overworld, pos).unwrap());
+        hub.broadcast_in_dimension(
+            Dimension::Overworld,
+            Event { id: 0x23, body: vec![3] },
+        );
+        assert_eq!(rx.try_recv().unwrap().body, [3]);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn add015_global_chat_and_administrator_kick_survive_dimension_change() {
+        let hub = Hub::default();
+        let pos = PlayerPosition::default();
+        let (alice, rx, _) = hub.add("Alice".into(), "uuid-a".into(), pos).unwrap();
+        hub.broadcast(Event { id: 0x02, body: vec![42] });
+        hub.broadcast_in_dimension(
+            Dimension::Overworld,
+            Event { id: 0x23, body: vec![1] },
+        );
+        assert!(hub.request_admin_kick("Alice", "Stop").unwrap());
+        assert!(hub.change_dimension(alice, Dimension::Nether, pos).unwrap());
+        assert_eq!(rx.try_recv().unwrap().body, [42]);
+        assert_eq!(rx.try_recv().unwrap().id, ADMIN_KICK_EVENT);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn add015_old_projectile_damage_does_not_apply_in_new_dimension() {
+        let hub = Hub::default();
+        let pos = PlayerPosition::default();
+        let (alice, rx, _) = hub.add("Alice".into(), "uuid-a".into(), pos).unwrap();
+        assert!(hub.request_dispenser_arrow_damage(alice).unwrap());
+        assert!(hub.change_dimension(alice, Dimension::Nether, pos).unwrap());
+        assert!(rx.try_recv().is_err());
     }
 }
