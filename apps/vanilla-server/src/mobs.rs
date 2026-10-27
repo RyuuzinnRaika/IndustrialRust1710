@@ -602,8 +602,14 @@ fn facing_packets(id: i32, yaw: f32, pitch: f32) -> [Event; 2] {
     let mut head = id.to_be_bytes().to_vec();
     head.push(angle(yaw));
     [
-        Event { id: 0x16, body: look }, // S16 Entity Look
-        Event { id: 0x19, body: head }, // S19 Entity Head Look
+        Event {
+            id: 0x16,
+            body: look,
+        }, // S16 Entity Look
+        Event {
+            id: 0x19,
+            body: head,
+        }, // S19 Entity Head Look
     ]
 }
 
@@ -2939,7 +2945,12 @@ impl Mobs {
                 if matches!(mob.kind, Kind::Ghast | Kind::Blaze) {
                     if let Some(next) = flying_step(world, mob.kind, mob.position, target, now) {
                         mob.position = next;
-                        events.push(multiplayer::teleport(mob.id, &next, facing_yaw, facing_pitch));
+                        events.push(multiplayer::teleport(
+                            mob.id,
+                            &next,
+                            facing_yaw,
+                            facing_pitch,
+                        ));
                     }
                     continue;
                 }
@@ -3001,7 +3012,12 @@ impl Mobs {
                     navigation::advance_step(world, mob.position, waypoint, speed)
                 {
                     mob.position = candidate;
-                    events.push(multiplayer::teleport(mob.id, &candidate, facing_yaw, facing_pitch));
+                    events.push(multiplayer::teleport(
+                            mob.id,
+                            &candidate,
+                            facing_yaw,
+                            facing_pitch,
+                        ));
                 } else if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     // Both spider variants climb alongside a wall, never through it.
                     let front = PlayerPosition {
@@ -3021,7 +3037,12 @@ impl Mobs {
                         };
                         if climbed.is_valid() && !physics::collides(world, &climbed) {
                             mob.position = climbed;
-                            events.push(multiplayer::teleport(mob.id, &climbed, facing_yaw, facing_pitch));
+                            events.push(multiplayer::teleport(
+                            mob.id,
+                            &climbed,
+                            facing_yaw,
+                            facing_pitch,
+                        ));
                         }
                     }
                 }
@@ -7543,16 +7564,27 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod protocol5_facing_regression_tests {
     use super::*;
 
     #[test]
     fn mob_looks_towards_player_on_both_axes() {
-        let origin = PlayerPosition { x: 0.5, y: 64.0, z: 0.5 };
-        let east = PlayerPosition { x: 5.5, y: 64.0, z: 0.5 };
-        let north = PlayerPosition { x: 0.5, y: 66.0, z: -5.5 };
+        let origin = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let east = PlayerPosition {
+            x: 5.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let north = PlayerPosition {
+            x: 0.5,
+            y: 66.0,
+            z: -5.5,
+        };
         let (yaw, pitch) = facing_angles(origin, east);
         assert!((yaw + 90.0).abs() < 0.01);
         assert_eq!(pitch, 0.0);
