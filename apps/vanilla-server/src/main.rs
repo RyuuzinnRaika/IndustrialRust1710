@@ -6696,6 +6696,9 @@ fn command_setworldspawn(
     point: world_spawn::WorldSpawn,
 ) -> io::Result<String> {
     let _lock = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+    if _lock.dimension() != dimensions::Dimension::Overworld {
+        return Err(bad("world spawn must be set in Overworld"));
+    }
     world_spawn::save(root_world_path, point)?;
     drop(_lock);
     hub.broadcast(Event {
