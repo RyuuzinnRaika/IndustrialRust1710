@@ -1418,16 +1418,15 @@ impl Mobs {
             vec![mob.status(2), mob.health_metadata()]
         };
         if killed {
-            if let Some(mob) = self.entities.remove(&id) {
-                if let Some(drop) = mob.death_drop() {
-                    self.pending_drops.push(drop);
-                }
-                self.pending_drops.extend(mob.extra_death_drops());
-                if mob.kind == Kind::EnderDragon {
-                    self.dragon_defeated = true;
-                }
-                events.extend(self.split(mob));
+            let mob = self.entities.remove(&id)?;
+            if let Some(drop) = mob.death_drop() {
+                self.pending_drops.push(drop);
             }
+            self.pending_drops.extend(mob.extra_death_drops());
+            if mob.kind == Kind::EnderDragon {
+                self.dragon_defeated = true;
+            }
+            events.extend(self.split(mob));
         }
         Some((at, events))
     }
