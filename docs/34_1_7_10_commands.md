@@ -114,3 +114,13 @@ These commands share the existing verified-OP level-2 gate and console audit log
 - Neither command yet implements arbitrary target selectors, new
   blockstate syntax or command-block success-count integration.
 - Planned ordered follow-up: https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/649
+
+## Roadmap item 03: /seed
+
+- `/seed` displays the actual persisted IRW world generation seed to
+  verified in-game OP level 2 or the host console. It uses the active
+  world state, not an untrusted player packet or inferred default.
+- Flat IRW1 worlds have no persisted seed. The command reports an error
+  rather than showing a fictional value; the save format is not rewritten.
+- Invalid or extra arguments are rejected. Tests cover both seeded and
+  legacy flat worlds.
