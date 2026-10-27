@@ -889,6 +889,40 @@ fn periodic_effect_interval(kind: u8, amplifier: u8) -> u64 {
     (base.checked_shr(u32::from(amplifier)).unwrap_or(0)).max(1)
 }
 
+/// Recover multi-dimension player transactions from the journal loaded
+/// during server startup, not a new journal in DIM-1/DIM1. The persistent
+/// player identity files live under the Overworld save root in every dimension.
+fn food_journal_path(world_path: &Path, player_path: &Path) -> io::Result<PathBuf> {
+    let player_dir = player_path
+        .parent()
+        .ok_or_else(|| bad("player save without parent"))?;
+    let players_dir = if player_dir.file_name().is_some_and(|s| s == "verified") {
+        player_dir
+            .parent()
+            .ok_or_else(|| bad("verified player save without players root"))?
+    } else {
+        player_dir
+    };
+    if players_dir.file_name().is_none_or(|name| name != "players") {
+        return Err(bad("player save must be inside players directory"));
+    }
+    let root = players_dir
+        .parent()
+        .ok_or_else(|| bad("player save missing world root"))?;
+    if world_path.parent() == Some(root) {
+        return Ok(world_path.with_extension("pending-txn.json"));
+    }
+    let dimension_folder = world_path
+        .parent()
+        .ok_or_else(|| bad("dimension world missing parent"))?;
+    if dimension_folder.parent() != Some(root)
+        || !matches!(dimension_folder.file_name().and_then(|x| x.to_str()), Some("DIM-1" | "DIM1"))
+    {
+        return Err(bad("player save outside dimension root"));
+    }
+    Ok(root.join("overworld.pending-txn.json"))
+}
+
 /// Publish the food-item debit and its resulting Health/Food NBT in one
 /// recoverable redo generation. Never swap live state or send client packets
 /// until both files have been committed. Journal replay resolves interrupted
@@ -906,8 +940,9 @@ fn commit_food_consumption(
 ) -> io::Result<()> {
     let inventory_bytes = staged_inventory.encoded()?;
     let player_bytes = player.encoded_state_in_dimension(staged_vitals, dimension)?;
+    let log_path = food_journal_path(world_path, player_path)?;
     journal::commit(
-        &world_path.with_extension("pending-txn.json"),
+        &log_path,
         &[
             (inventory_path, inventory_bytes),
             (player_path, player_bytes),
@@ -9382,6 +9417,29 @@ mod survival_food_journal_tests {
         assert_eq!(inventory, before_inv);
         assert_eq!(vitals, before_vitals);
         assert!(!world.with_extension("pending-txn.json").exists());
+        let nether_path = root.join("DIM-1/nether.irw");
+        let end_path = root.join("DIM1/end.irw");
+        let expected_log = root.join("overworld.pending-txn.json");
+        for dimension_world in [&nether_path, &end_path] {
+            assert_eq!(
+                food_journal_path(dimension_world, &player_path).unwrap(),
+                expected_log
+            );
+            let verified = PlayerPosition::authenticated_location(
+                &world,
+                "d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca",
+            )
+            .unwrap();
+            assert_eq!(
+                food_journal_path(dimension_world, &verified).unwrap(),
+                expected_log
+            );
+            assert!(food_journal_path(
+                &root.join("other/nether.irw"),
+                &player_path
+            )
+            .is_err());
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 }
