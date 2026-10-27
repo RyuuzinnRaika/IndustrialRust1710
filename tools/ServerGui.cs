@@ -127,9 +127,12 @@ namespace IndustrialRust1710
             log.ReadOnly = true;
             log.BackColor = Color.White;
             log.ForeColor = Color.Black;
-            log.WordWrap = false;
+            // Long client disconnect reasons must remain readable without
+            // dragging a horizontal scrollbar across the server window.
+            log.WordWrap = true;
+            log.ScrollBars = RichTextBoxScrollBars.Vertical;
             log.Font = new Font("Consolas", 9F);
-            log.HideSelection = false;
+            log.HideSelection = true;
 
             TableLayoutPanel input = new TableLayoutPanel();
             input.Dock = DockStyle.Fill;
@@ -260,12 +263,34 @@ namespace IndustrialRust1710
                 online.Remove(left.Groups[1].Value);
                 UpdatePlayers();
             }
-            // Bound the log memory usage even for noisy servers.
-            if (log.TextLength > 220000) {
-                log.Select(0, 70000);
+            // Keep selection and the reading position when an operator is
+            // copying older logs; follow new output only when already at tail.
+            int previousLength = log.TextLength;
+            int start = log.SelectionStart;
+            int length = log.SelectionLength;
+            bool followTail = length == 0 && start >= previousLength;
+            int trimmed = 0;
+            // Bound log memory even if the Rust server produces noisy output.
+            if (previousLength > 220000) {
+                trimmed = 70000;
+                log.Select(0, trimmed);
                 log.SelectedText = "";
             }
-            log.AppendText(line + Environment.NewLine);
+            // The server's original lines remain unchanged for join/leave parsing.
+            log.AppendText("[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
+                line + Environment.NewLine);
+            if (followTail) {
+                log.Select(log.TextLength, 0);
+                log.ScrollToCaret();
+            } else {
+                int restore = Math.Max(0, start - trimmed);
+                log.Select(restore, Math.Min(length, log.TextLength - restore));
+            }
+            if (line.IndexOf("category=keepalive_timeout", StringComparison.OrdinalIgnoreCase) >= 0) {
+                status.Text = "Client disconnected: KeepAlive timeout (check client log)";
+            } else if (joined.Success) {
+                status.Text = "Running (Minecraft Java 1.7.10)";
+            }
         }
 
         private void UpdatePlayers()
@@ -371,12 +396,26 @@ namespace IndustrialRust1710
             }
         }
 
+        // Accept vanilla-style console commands without requiring a leading slash.
+        // Keep this function side-effect-free so CI can regression-test it.
+        private static string NormalizeCommand(string value)
+        {
+            string line = value.Trim();
+            if (line.Length == 0) return "";
+            return line.StartsWith("/", StringComparison.Ordinal) ? line : "/" + line;
+        }
+
         private void SendCurrentCommand()
         {
-            string line = command.Text.Trim();
+            string line = NormalizeCommand(command.Text);
             if (line.Length == 0) return;
-            // Vanilla's GUI accepts "list". This Rust server currently expects "/list".
-            if (!line.StartsWith("/", StringComparison.Ordinal)) line = "/" + line;
+            // A typed stop command must use the exact same graceful shutdown
+            // path as the Stop button and closing the window.
+            if (string.Equals(line, "/stop", StringComparison.OrdinalIgnoreCase)) {
+                RequestStop();
+                if (stopping) command.Clear();
+                return;
+            }
             if (SendCommand(line)) {
                 AppendLog("> " + line);
                 command.Clear();
