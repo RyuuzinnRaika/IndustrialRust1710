@@ -86,3 +86,50 @@ tested with fault injection.
       once durable event IDs/redo recovery are implemented.
 - [ ] Confirm `sync_data` and retry I/O do not cause pathological 20TPS stalls
       during bursts of deaths.
+
+
+## D02 continuation: durable last-event outbox and crash replay
+
+A per-player last-death outbox is now saved atomically before the JSONL
+append. Files live next to a player's saved NBT, for example
+\`players/alex.death-outbox.json\` or
+\`players/verified/<uuid>.death-outbox.json\`.
+
+Each generated death event has a random 128-bit \`event_id\` stored both in the
+outbox and its JSONL entry. On startup the server scans only those two player
+directories, validates the bounded JSON outboxes, and appends events missing
+from their corresponding world/dimension death logs. Repeated recovery does
+not duplicate an event ID; a torn trailing JSONL line is removed and replaced
+by a complete copy of the durable outbox event.
+
+The append path is **serialized**, scans at most 64 MiB of existing log data,
+and invokes \`sync_data()\` after each new row. The 64 MiB bound is intentional:
+if reached, manual log rotation is required rather than allocating
+unbounded memory or silently duplicating old IDs.
+
+Failure policy: invalid/symlinked/outsize outboxes and corrupt complete
+JSONL rows cause recovery to fail closed, with a visible startup error rather
+than discarding evidence. Normal death/respawn remains best-effort if the
+diagnostic outbox cannot be created during play.
+
+### D02 still outstanding
+
+This outbox is saved after the player HP transition is written and after the
+existing scoreboard death increment in the session. **A crash between these
+operations can still leave a missing death event or an inconsistent score.**
+The outbox protects only events whose preparation completed. Achieving strict
+cross-file exactly-once requires a single redo transaction for **player HP,
+scoreboard and the event outbox**, plus tested power-failure recovery. The
+current improvement must **not** be represented as full D02 completion.
+
+### Manual and local tests
+
+- [ ] \`cargo fmt --all -- --check\`
+- [ ] \`cargo test -p vanilla-server death_log\`
+- [ ] \`cargo clippy --workspace --all-targets -- -D warnings\`
+- [ ] Kill the server after outbox preparation but before/after JSONL write,
+      restart and verify exactly one \`event_id\` row.
+- [ ] Verify two successive deaths of one player produce two different IDs.
+- [ ] Verify an invalid outbox fails closed, without modifying world files.
+- [ ] Verify existing legacy death rows lacking \`event_id\` remain readable.
+- [ ] Check TPS cost as JSONL approaches 64 MiB.
