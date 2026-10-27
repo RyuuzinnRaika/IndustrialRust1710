@@ -165,7 +165,8 @@ impl Vitals {
         self.add_exhaustion(horizontal_blocks.min(64.0) as f32 * per_block)
     }
 
-    /// Kept for older callers: normal difficulty (2).
+    /// Test-only shortcut for Normal difficulty; gameplay loads live difficulty.
+    #[cfg(test)]
     pub fn tick(&mut self, steps: u64) -> bool {
         self.tick_with_difficulty(steps, 2)
     }
