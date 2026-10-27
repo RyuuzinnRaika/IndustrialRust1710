@@ -916,7 +916,10 @@ fn food_journal_path(world_path: &Path, player_path: &Path) -> io::Result<PathBu
         .parent()
         .ok_or_else(|| bad("dimension world missing parent"))?;
     if dimension_folder.parent() != Some(root)
-        || !matches!(dimension_folder.file_name().and_then(|x| x.to_str()), Some("DIM-1" | "DIM1"))
+        || !matches!(
+            dimension_folder.file_name().and_then(|x| x.to_str()),
+            Some("DIM-1" | "DIM1")
+        )
     {
         return Err(bad("player save outside dimension root"));
     }
@@ -9434,11 +9437,7 @@ mod survival_food_journal_tests {
                 food_journal_path(dimension_world, &verified).unwrap(),
                 expected_log
             );
-            assert!(food_journal_path(
-                &root.join("other/nether.irw"),
-                &player_path
-            )
-            .is_err());
+            assert!(food_journal_path(&root.join("other/nether.irw"), &player_path).is_err());
         }
         std::fs::remove_dir_all(root).unwrap();
     }
