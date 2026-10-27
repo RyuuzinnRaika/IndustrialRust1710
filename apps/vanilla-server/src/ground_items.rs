@@ -26,6 +26,26 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
 }
 
+/// Convert a bounded world cell to the Protocol 5 fixed-point center.
+/// Never multiply arbitrary positions supplied by a caller without a bounds
+/// check: overflow would panic in debug builds or wrap in optimized builds.
+fn drop_position(block: (i32, i32, i32)) -> io::Result<[i32; 3]> {
+    if !crate::world::in_bounds(block.0, block.1, block.2) {
+        return Err(invalid("ground item location outside world bounds"));
+    }
+    let coordinate = |value: i32| {
+        value
+            .checked_mul(32)
+            .and_then(|fixed| fixed.checked_add(16))
+            .ok_or_else(|| invalid("ground item fixed-point position overflow"))
+    };
+    Ok([
+        coordinate(block.0)?,
+        coordinate(block.1)?,
+        coordinate(block.2)?,
+    ])
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GroundItem {
@@ -206,8 +226,8 @@ impl GroundItems {
         if self.is_full() || !stack.is_valid() {
             return Err(invalid("ground-item capacity or stack invalid"));
         }
+        let position = drop_position(block)?;
         let id = self.next_id + 1;
-        let position = [block.0 * 32 + 16, block.1 * 32 + 16, block.2 * 32 + 16];
         let item = GroundItem {
             id,
             position,
@@ -244,6 +264,7 @@ impl GroundItems {
         if !self.has_capacity_for(stacks.len()) || stacks.iter().any(|stack| !stack.is_valid()) {
             return Err(invalid("death-drop capacity or stack invalid"));
         }
+        let position = drop_position(block)?;
         let mut candidate = self.clone();
         let mut inserted = Vec::with_capacity(stacks.len());
         let when_ready = Instant::now() + PICKUP_DELAY;
@@ -251,7 +272,7 @@ impl GroundItems {
             candidate.next_id += 1;
             let item = GroundItem {
                 id: candidate.next_id,
-                position: [block.0 * 32 + 16, block.1 * 32 + 16, block.2 * 32 + 16],
+                position,
                 stack,
             };
             if !item.valid() {
@@ -386,6 +407,42 @@ impl GroundItems {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn s01_out_of_world_drops_cannot_overflow_or_modify_ground_state() {
+        let initial = GroundItems::default();
+        let item = Stack {
+            id: 17,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        for location in [
+            (i32::MAX, 64, 0),
+            (i32::MIN, 64, 0),
+            (WORLD_LIMIT, 64, 0),
+            (-WORLD_LIMIT - 1, 64, 0),
+            (0, -1, 0),
+            (0, 256, 0),
+            (0, 64, i32::MAX),
+        ] {
+            assert!(initial.stage_put_many(&[item], location).is_err());
+            assert!(initial.entries.is_empty());
+            assert_eq!(initial.next_id, 1_000_000_000);
+            let mut independent = initial.clone();
+            assert!(independent
+                .put(std::path::Path::new("invalid-drop-must-not-write.json"), item, location)
+                .is_err());
+            assert!(independent.entries.is_empty());
+            assert_eq!(independent.next_id, 1_000_000_000);
+        }
+        for location in [(-WORLD_LIMIT, 0, WORLD_LIMIT - 1), (0, 255, 0)] {
+            let (candidate, new_items) = initial.stage_put_many(&[item], location).unwrap();
+            assert_eq!(new_items.len(), 1);
+            assert_eq!(candidate.entries.len(), 1);
+            assert_eq!(new_items[0].position, drop_position(location).unwrap());
+        }
+    }
+
     #[test]
     fn s01_compatible_ground_stack_is_not_blocked_by_earlier_unreceivable_item() {
         use crate::inventory::Inventory;

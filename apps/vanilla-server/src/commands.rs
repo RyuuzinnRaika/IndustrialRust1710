@@ -551,6 +551,66 @@ pub fn testforblock_args(
     Ok((x, y, z, id, data))
 }
 
+/// Bounded Java 1.7.10 /spawnpoint coordinates. Only integer block
+/// locations and '~'-relative coordinates are used (never 1.13 local '^').
+/// The caller selects a target online player and the target's owning session
+/// validates that the actual Overworld location has space for a respawn.
+pub fn spawnpoint_args(
+    coordinates: &[&str],
+    origin: Option<PlayerPosition>,
+) -> io::Result<crate::spawnpoint::Spawnpoint> {
+    if coordinates.len() != 3 {
+        return Err(invalid("Usage: /spawnpoint [player] [x y z]"));
+    }
+    if origin.is_none() && coordinates.iter().any(|value| value.starts_with('~')) {
+        return Err(invalid("console spawnpoint requires absolute coordinates"));
+    }
+    let base = origin.unwrap_or(PlayerPosition {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    });
+    let bases = [base.x, base.y, base.z];
+    let mut values = [0i32; 3];
+    for (index, source) in coordinates.iter().enumerate() {
+        let value = relative_coordinate(source, bases[index])?.floor();
+        if value < i32::MIN as f64 || value >= i32::MAX as f64 + 1.0 {
+            return Err(invalid("spawnpoint coordinate out of range"));
+        }
+        values[index] = value as i32;
+    }
+    crate::spawnpoint::Spawnpoint::new(values[0], values[1], values[2])
+}
+
+/// Legacy 1.7.10 /setworldspawn [x y z]. The 1.16+ yaw argument,
+/// 1.13+ '^' local coordinates, nonfinite and overflowing input are rejected.
+pub fn setworldspawn_args(
+    coordinates: &[&str],
+    origin: Option<PlayerPosition>,
+) -> io::Result<crate::world_spawn::WorldSpawn> {
+    if coordinates.len() != 3 {
+        return Err(invalid("Usage: /setworldspawn [x y z]"));
+    }
+    if origin.is_none() && coordinates.iter().any(|part| part.starts_with('~')) {
+        return Err(invalid("console setworldspawn requires absolute coordinates"));
+    }
+    let origin = origin.unwrap_or(PlayerPosition {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    });
+    let base = [origin.x, origin.y, origin.z];
+    let mut values = [0i32; 3];
+    for (index, text) in coordinates.iter().enumerate() {
+        let value = relative_coordinate(text, base[index])?.floor();
+        if value < i32::MIN as f64 || value >= i32::MAX as f64 + 1.0 {
+            return Err(invalid("world spawn coordinate outside integer bounds"));
+        }
+        values[index] = value as i32;
+    }
+    crate::world_spawn::WorldSpawn::new(values[0], values[1], values[2])
+}
+
 /// 1.7.10 /seed must expose a real persisted world seed, never make up a
 /// value for the legacy IRW1 flat-world format which stores no seed.
 pub fn seed_text(world: &crate::world::World) -> io::Result<String> {
@@ -563,6 +623,50 @@ pub fn seed_text(world: &crate::world::World) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawnpoint_1710_coordinates_reject_invalid_and_console_relative() {
+        let origin = PlayerPosition { x: -2.8, y: 65.0, z: 3.3 };
+        let parsed = spawnpoint_args(&["~", "~", "~1"], Some(origin)).unwrap();
+        assert_eq!(parsed.coords(), (-3, 65, 4));
+        assert_eq!(
+            spawnpoint_args(&["10", "64", "-20"], None).unwrap().coords(),
+            (10, 64, -20)
+        );
+        assert!(spawnpoint_args(&["~", "64", "0"], None).is_err());
+        assert!(spawnpoint_args(&["0", "0", "0"], None).is_err());
+        assert!(spawnpoint_args(&["0", "255", "0"], None).is_err());
+        assert!(spawnpoint_args(&["NaN", "64", "0"], None).is_err());
+        assert!(spawnpoint_args(&["0", "64"], None).is_err());
+        assert!(spawnpoint_args(&["0", "64", "0", "extra"], None).is_err());
+    }
+
+    #[test]
+    fn setworldspawn_1710_coordinate_parser_is_strict() {
+        let origin = PlayerPosition {
+            x: -2.4,
+            y: 65.1,
+            z: 3.1,
+        };
+        assert_eq!(
+            setworldspawn_args(&["~", "~", "~1"], Some(origin))
+                .unwrap()
+                .coordinates(),
+            (-3, 65, 4)
+        );
+        assert_eq!(
+            setworldspawn_args(&["10", "64", "-3"], None)
+                .unwrap()
+                .coordinates(),
+            (10, 64, -3)
+        );
+        assert!(setworldspawn_args(&["~", "64", "2"], None).is_err());
+        assert!(setworldspawn_args(&["0", "-1", "0"], None).is_err());
+        assert!(setworldspawn_args(&["0", "256", "0"], None).is_err());
+        assert!(setworldspawn_args(&["^0", "65", "0"], Some(origin)).is_err());
+        assert!(setworldspawn_args(&["NaN", "65", "0"], Some(origin)).is_err());
+        assert!(setworldspawn_args(&["0", "65", "0", "yaw"], Some(origin)).is_err());
+    }
 
     #[test]
     fn public_commands_are_bounded_and_distinct_from_op_commands() {
