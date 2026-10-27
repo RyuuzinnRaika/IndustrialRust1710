@@ -702,8 +702,8 @@ mod tests {
             assert_eq!(world.get(2, 70, 0) >> 4, liquid);
             let mut objects = Throwables::default();
             objects
-            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
-            .unwrap();
+                .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+                .unwrap();
 
             let result = objects.tick(&world, 1);
             assert_eq!(objects.active.len(), 1, "liquid block {liquid}");
@@ -1222,8 +1222,8 @@ mod tests {
         world.import_block(2, 70, 0, 1 << 4).unwrap();
         let mut objects = Throwables::default();
         objects
-                .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
-                .unwrap();
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
         // The old 0.22-block sampling saw stone at x=2.08 before checking
         // the segment from x=1.86, skipping this mob at x=1.94.
         let targets = [(
