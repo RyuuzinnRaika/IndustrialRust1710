@@ -90,7 +90,10 @@ impl Server {
     fn wait_online(&self, expected: u64) {
         let until = Instant::now() + Duration::from_secs(8);
         while self.status_online() != expected {
-            assert!(Instant::now() < until, "online count never became {expected}");
+            assert!(
+                Instant::now() < until,
+                "online count never became {expected}"
+            );
             thread::sleep(Duration::from_millis(50));
         }
     }
@@ -157,10 +160,17 @@ fn must_close(mut socket: TcpStream) {
             {
                 return
             }
-            Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) => {}
             Err(error) => panic!("unexpected socket error: {error}"),
         }
-        assert!(Instant::now() < deadline, "server retained malformed TCP session");
+        assert!(
+            Instant::now() < deadline,
+            "server retained malformed TCP session"
+        );
     }
 }
 
@@ -173,7 +183,9 @@ fn bad_handshake(server: &Server, data: &[u8]) {
 
 fn bad_login(server: &Server, payload: &[u8]) {
     let mut socket = server.connect();
-    socket.write_all(&handshake(server.port, "localhost", 2)).unwrap();
+    socket
+        .write_all(&handshake(server.port, "localhost", 2))
+        .unwrap();
     socket.write_all(payload).unwrap();
     must_close(socket);
     assert_eq!(server.status_online(), 0);
@@ -193,7 +205,8 @@ fn malformed_and_fragmented_protocol5_connections_are_isolated() {
 
     // #427 ADD-003: invalid multibyte Login name is a connection error.
     bad_login(&server, &frame(0, &[2, 0xc3, 0x28]));
-    bad_login(&server, &frame(0, &[3, 0xe3, 0x81])); // truncated UTF-8
+    // Truncated UTF-8 on the declared Login username payload.
+    bad_login(&server, &frame(0, &[3, 0xe3, 0x81]));
     // #428 ADD-004: too-long host and too-long Login username.
     bad_handshake(&server, &handshake(server.port, &"h".repeat(256), 2));
     bad_login(&server, &frame(0, &mc_string(&"X".repeat(17))));
@@ -262,7 +275,7 @@ fn malformed_and_fragmented_protocol5_connections_are_isolated() {
     server.wait_online(0);
 
     // Valid clients continue to authenticate and remain unaffected.
-    let mut final_login = server.login("RustTester");
+    let final_login = server.login("RustTester");
     server.wait_online(1);
     // Graceful TCP half-close allows server to retire this one session.
     final_login.shutdown(Shutdown::Both).unwrap();
