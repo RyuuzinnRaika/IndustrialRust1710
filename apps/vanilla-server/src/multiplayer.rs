@@ -32,6 +32,8 @@ pub const ADMIN_CLEAR_EVENT: u32 = u32::MAX - 8;
 /// Target session receives effect changes; console/network never mutates it.
 pub const ADMIN_EFFECT_EVENT: u32 = u32::MAX - 9;
 pub const ADMIN_ENCHANT_EVENT: u32 = u32::MAX - 10;
+/// Session-owned persisted /spawnpoint change (not a wire packet).
+pub const ADMIN_SPAWNPOINT_EVENT: u32 = u32::MAX - 11;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -334,6 +336,42 @@ impl Hub {
         } else {
             Ok(false)
         }
+    }
+
+    /// Queue an Overworld-only per-player respawn point to the target's owning
+    /// session. The mailbox contains just block coordinates, never file paths.
+    pub fn request_admin_spawnpoint(
+        &self,
+        target: &str,
+        point: crate::spawnpoint::Spawnpoint,
+    ) -> io::Result<bool> {
+        let (x, y, z) = point.coords();
+        let mut body = Vec::with_capacity(12);
+        body.extend_from_slice(&x.to_be_bytes());
+        body.extend_from_slice(&y.to_be_bytes());
+        body.extend_from_slice(&z.to_be_bytes());
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(peer) = inner
+            .players
+            .values()
+            .find(|p| p.name.eq_ignore_ascii_case(target))
+        else {
+            return Ok(false);
+        };
+        if peer.dimension != Dimension::Overworld {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "spawnpoint target must be in the Overworld",
+            ));
+        }
+        enqueue(
+            peer,
+            &Event {
+                id: ADMIN_SPAWNPOINT_EVENT,
+                body,
+            },
+        );
+        Ok(true)
     }
 
     /// UUID attached to the currently admitted peer. Caller must ensure the
@@ -996,6 +1034,33 @@ mod tests {
         assert_eq!(cara_rx.try_recv().unwrap().id, 0x38);
         assert!(cara_rx.try_recv().is_err());
     }
+    #[test]
+    fn spawnpoint_mailbox_is_owned_by_overworld_target() {
+        let hub = Hub::default();
+        let (_, rx, _) = hub
+            .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        hub.add_in_dimension(
+            "NetherUser".into(),
+            "uuid-n".into(),
+            PlayerPosition::default(),
+            Dimension::Nether,
+        )
+        .unwrap();
+        let point = crate::spawnpoint::Spawnpoint::new(-15, 65, 20).unwrap();
+        assert!(!hub.request_admin_spawnpoint("NotOnline", point).unwrap());
+        assert!(hub.request_admin_spawnpoint("NetherUser", point).is_err());
+        assert!(hub.request_admin_spawnpoint("aLiCe", point).unwrap());
+        // The Nether player still appears in the global tab list.
+        assert_eq!(rx.try_recv().unwrap().id, 0x38);
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.id, ADMIN_SPAWNPOINT_EVENT);
+        assert_eq!(event.body.len(), 12);
+        assert_eq!(&event.body[0..4], &(-15i32).to_be_bytes());
+        assert_eq!(&event.body[4..8], &(65i32).to_be_bytes());
+        assert_eq!(&event.body[8..12], &(20i32).to_be_bytes());
+    }
+
     #[test]
     fn queue_overflow_marks_session_unhealthy_instead_of_silent_desync() {
         let hub = Hub::default();

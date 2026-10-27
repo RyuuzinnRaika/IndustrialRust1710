@@ -55,6 +55,7 @@ mod online_auth;
 mod physics;
 mod player;
 mod scoreboard;
+mod spawnpoint;
 mod security_limits;
 mod server_config;
 mod session_lock;
@@ -98,8 +99,9 @@ use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
     Event, Hub, JoinError, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT, ADMIN_ENCHANT_EVENT,
-    ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT,
-    DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
+    ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT, ADMIN_SPAWNPOINT_EVENT,
+    ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT,
+    PISTON_PUSH_EVENT,
 };
 use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
@@ -1418,6 +1420,34 @@ fn play(
             ));
         }
         while let Ok(event) = events.try_recv() {
+            if event.id == ADMIN_SPAWNPOINT_EVENT {
+                if event.body.len() != 12 {
+                    return Err(bad("invalid internal spawnpoint payload"));
+                }
+                let point = spawnpoint::Spawnpoint::new(
+                    i32::from_be_bytes(event.body[0..4].try_into().unwrap()),
+                    i32::from_be_bytes(event.body[4..8].try_into().unwrap()),
+                    i32::from_be_bytes(event.body[8..12].try_into().unwrap()),
+                )?;
+                if *session_dimension != dimensions::Dimension::Overworld {
+                    as_chat(s, "Spawnpoint rejected: Overworld only.")?;
+                    continue;
+                }
+                let is_safe = {
+                    let current_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    point.safe_in(&current_world)
+                };
+                if !is_safe {
+                    as_chat(s, "Spawnpoint rejected: choose a clear, supported location.")?;
+                    continue;
+                }
+                // Only the player's session writes its own UUID/name-scoped
+                // data. A failed save cannot publish a successful result.
+                spawnpoint::save(player_path, point)?;
+                let (x, y, z) = point.coords();
+                as_chat(s, &format!("Spawnpoint set to {x} {y} {z}."))?;
+                continue;
+            }
             if event.id == ADMIN_GAMEMODE_EVENT {
                 if event.body.len() != 1 || event.body[0] > 1 {
                     return Err(bad("invalid internal gamemode"));
@@ -3034,7 +3064,7 @@ fn play(
                         Err(usage) => as_chat(s, usage)?,
                         Ok(PublicCommand::Help) => as_chat(
                             s,
-                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /enchant, /testforblock, /seed, /time, /weather, /kick, /ban, /save.",
+                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /enchant, /testforblock, /seed, /spawnpoint, /time, /weather, /kick, /ban, /save.",
                         )?,
                         Ok(PublicCommand::List) => as_chat(
                             s,
@@ -4586,6 +4616,9 @@ fn play(
                         let mut candidate = inventory.clone();
                         candidate.set_bed_spawn(x, y, z)?;
                         candidate.save(inventory_path)?;
+                        // A newly claimed bed supersedes an earlier /spawnpoint.
+                        // The override is kept separately from mode inventories.
+                        spawnpoint::clear(player_path)?;
                         *inventory = candidate;
                         let mut packet = Vec::new();
                         packet.extend_from_slice(&entity_id.to_be_bytes());
@@ -5945,7 +5978,16 @@ fn play(
                     };
                     let origin = {
                         let fallback = safe_spawn(respawn_world)?;
-                        if let Some((x, y, z)) = inventory.bed_spawn() {
+                        if let Some(point) = spawnpoint::load(player_path)? {
+                            let guard = respawn_world
+                                .lock()
+                                .map_err(|_| bad("world mutex poisoned"))?;
+                            if point.safe_in(&guard) {
+                                point.position()
+                            } else {
+                                fallback
+                            }
+                        } else if let Some((x, y, z)) = inventory.bed_spawn() {
                             let guard = respawn_world
                                 .lock()
                                 .map_err(|_| bad("world mutex poisoned"))?;
@@ -6708,7 +6750,8 @@ fn run_player_admin_command(
         | Some("/summon")
         | Some("/enchant")
         | Some("/testforblock")
-        | Some("/seed") => 2,
+        | Some("/seed")
+        | Some("/spawnpoint") => 2,
         Some("/kick") | Some("/ban") | Some("/pardon") | Some("/pardon-uuid") | Some("/ban-ip")
         | Some("/pardon-ip") => 3,
         Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
@@ -6724,6 +6767,27 @@ fn run_player_admin_command(
         ["/seed"] => {
             let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             commands::seed_text(&state)
+        }
+        ["/spawnpoint"] | ["/spawnpoint", _] | ["/spawnpoint", _, _, _, _] => {
+            let target = if parts.len() == 1 { actor } else { parts[1] };
+            let point = if parts.len() == 5 {
+                if *dimension != dimensions::Dimension::Overworld {
+                    return Err(bad("relative spawnpoint requires Overworld sender"));
+                }
+                let origin = hub
+                    .player_position(actor)?
+                    .ok_or_else(|| bad("actor not online"))?;
+                commands::spawnpoint_args(&parts[2..], Some(origin))?
+            } else {
+                let current = hub
+                    .player_position(target)?
+                    .ok_or_else(|| bad("target not online"))?;
+                spawnpoint::Spawnpoint::from_position(current)?
+            };
+            if !hub.request_admin_spawnpoint(target, point)? {
+                return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+            }
+            Ok(format!("Spawnpoint update queued for {target}"))
         }
         ["/enchant", target, enchant, rest @ ..] if rest.len() <= 1 => {
             let (id, level) = commands::enchant_args(enchant, rest.first().copied())?;
@@ -7041,7 +7105,7 @@ fn start_clock_console(
             }
             let result: io::Result<()> = match args.as_slice() {
                 ["/help"] | ["/?"] => {
-                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /seed /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /seed /spawnpoint /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
                     Ok(())
                 }
                 ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
@@ -7071,6 +7135,25 @@ fn start_clock_console(
                 ["/seed"] => (|| -> io::Result<()> {
                     let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     println!("{}", commands::seed_text(&state)?);
+                    Ok(())
+                })(),
+                ["/spawnpoint", target] => (|| -> io::Result<()> {
+                    let position = hub
+                        .player_position(target)?
+                        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "target not online"))?;
+                    let point = spawnpoint::Spawnpoint::from_position(position)?;
+                    if !hub.request_admin_spawnpoint(target, point)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Spawnpoint update queued for {target}");
+                    Ok(())
+                })(),
+                ["/spawnpoint", target, x, y, z] => (|| -> io::Result<()> {
+                    let point = commands::spawnpoint_args(&[x, y, z], None)?;
+                    if !hub.request_admin_spawnpoint(target, point)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Spawnpoint update queued for {target}");
                     Ok(())
                 })(),
                 ["/enchant", target, enchant, rest @ ..] if rest.len() <= 1 => {

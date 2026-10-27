@@ -124,3 +124,38 @@ These commands share the existing verified-OP level-2 gate and console audit log
   rather than showing a fictional value; the save format is not rewritten.
 - Invalid or extra arguments are rejected. Tests cover both seeded and
   legacy flat worlds.
+
+## Roadmap item 04: /spawnpoint (implementation PR; validation pending)
+
+- Legacy 1.7.10 forms: `/spawnpoint`, `/spawnpoint <player>`,
+  and `/spawnpoint <player> <x> <y> <z>`. OP level 2 or host console.
+  All targets must be **online** and in the Overworld. No `@a` selectors
+  or newer `angle` argument. For a named player with no coordinates, use
+  that player's current block position. In-game `~` coordinates are
+  relative to the authenticated command sender; console coordinates
+  must be absolute.
+- Reject unknown/malformed arguments, overflows, coordinates outside the
+  1.7.10 world limits, unsafe spawn positions, and target sessions in the
+  Nether/End. A clear two-block space with nearby support is required;
+  this is a deliberate first-phase safety restriction.
+- The target's **own session thread** persists its respawn coordinates
+  in a versioned `.spawnpoint.json` sidecar beside its player `.dat`
+  file, preserving online-mode UUID separation. The write uses a temporary
+  file and rename before success is reported. Periodic movement saves,
+  gamemode inventory swaps, and portal moves never overwrite the setting.
+- On a survival death, a still-safe command-set spawn wins over an earlier
+  bed spawn. A *new* successful bed use clears the explicit command override.
+  Invalidated/obstructed command spawn points fall back to the normal
+  world spawn (rather than spawning inside terrain). Console updates are
+  audit-logged and queued like existing `/give` and `/enchant`.
+- This does **not** alter the global world spawn / Protocol 5 compass
+  spawn-position packet: `/setworldspawn` is separate roadmap item 05.
+
+Manual acceptance (still required before merge): verify authenticated OP
+and console commands; offline-mode impersonation fails OP permission;
+survival death and respawn after a full restart; bed supersession;
+missing/corrupt sidecar; /spawnpoint from/to Nether/End is refused;
+stress repeated changes while players move; verify old player NBT is intact.
+
+Version cross-check:
+https://minecraft.wiki/w/Commands/spawnpoint
