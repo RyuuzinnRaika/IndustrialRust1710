@@ -528,7 +528,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn dispenser_egg_hatch_supports_zero_one_and_four_chicks_without_duplication() {
         // Frozen deterministic impact fixtures. Vanilla's rare four-chick
