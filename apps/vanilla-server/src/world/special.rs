@@ -80,6 +80,38 @@ impl World {
         self.primed_tnt.values().any(|tnt| tnt.explode_at <= next)
     }
 
+    /// Preserve pre-explosion ray occlusion without cloning every wake queue,
+    /// light cache, and distant block edit in a large active world.
+    /// Blast damage reaches at most 8 blocks from TNT (power 4); a 12-block
+    /// envelope also covers all 27 body-sample ray endpoints.
+    pub fn blast_exposure_snapshot(&self) -> World {
+        let mut edits = BTreeMap::new();
+        let deadline = self.fluid_phase.saturating_add(1);
+        for tnt in self
+            .primed_tnt
+            .values()
+            .filter(|tnt| tnt.explode_at <= deadline)
+            .take(4)
+        {
+            let (cx, cy, cz) = tnt.pos;
+            for (&(x, y, z), &block) in self.edits.range(
+                (cx.saturating_sub(12), 0, i32::MIN)
+                    ..=(cx.saturating_add(12), u8::MAX, i32::MAX),
+            ) {
+                if (i64::from(y) - i64::from(cy)).abs() <= 12
+                    && (i64::from(z) - i64::from(cz)).abs() <= 12
+                {
+                    edits.insert((x, y, z), block);
+                }
+            }
+        }
+        World {
+            edits,
+            generation: self.generation,
+            ..World::default()
+        }
+    }
+
     /// Publish only events from committed state.
     pub fn drain_tnt_events(&mut self) -> Vec<TntEvent> {
         std::mem::take(&mut self.tnt_events)
@@ -916,6 +948,21 @@ mod tests {
         let again = World::load(&path).unwrap();
         assert!(again.primed_tnt.is_empty());
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn tnt_exposure_snapshot_keeps_nearby_shields_without_distant_world_state() {
+        let mut world = World::new();
+        world.import_block(2, 80, 0, 49 << 4).unwrap();
+        world.import_block(40, 80, 0, 49 << 4).unwrap();
+        world.spawn_primed_tnt(0, 80, 0, 1);
+        let snapshot = world.blast_exposure_snapshot();
+        assert_eq!(snapshot.get(2, 80, 0), world.get(2, 80, 0));
+        assert_eq!(snapshot.get(40, 80, 0), 0);
+        assert_eq!(snapshot.edits.len(), 1);
+        assert!(snapshot.pending_devices.is_empty());
+        assert!(snapshot.primed_tnt.is_empty());
+        assert_eq!(snapshot.generation, world.generation);
     }
 
     #[test]
