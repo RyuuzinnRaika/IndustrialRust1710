@@ -594,6 +594,7 @@ pub fn seed_text(world: &crate::world::World) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn spawnpoint_1710_coordinates_reject_invalid_and_console_relative() {
         let origin = PlayerPosition { x: -2.8, y: 65.0, z: 3.3 };
