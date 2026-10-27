@@ -2400,9 +2400,9 @@ impl Mobs {
                     candidate.y.floor() as i32,
                     candidate.z.floor() as i32,
                 );
-                // Pack members can cross a biome boundary. Validate their
-                // biome independently, not just the initial pack origin.
-                if overworld && !overworld_biome_allows_natural_spawn(world.biome_at(cx, cz)) {
+                // Every pack member rechecks its own biome and ground,
+                // including species-specific entries at biome boundaries.
+                if !natural_pack_member_biome_ok(world, kind, (cx, cy, cz), is_passive) {
                     continue;
                 }
                 let candidate_light = if overworld {
@@ -2425,12 +2425,6 @@ impl Mobs {
                 } else {
                     None
                 };
-                if is_passive
-                    && (world.get(cx, cy - 1, cz) >> 4 != 2
-                        || !overworld_biome_allows_passive_species(world.biome_at(cx, cz), kind))
-                {
-                    continue;
-                }
                 if kind == Kind::Blaze && world.get(cx, cy - 1, cz) >> 4 != 112 {
                     continue;
                 }
@@ -2453,11 +2447,6 @@ impl Mobs {
                         candidate_light.unwrap_or_else(|| lighting.light_at(cx, cy, cz)),
                     )
                 {
-                    continue;
-                }
-                // A pack cannot extend a plains/savanna-only horse spawn into
-                // an adjacent forest or mountain biome.
-                if kind == Kind::Horse && horse_spawn_weight(world.biome_at(cx, cz)) == 0 {
                     continue;
                 }
                 let current_category = self
@@ -3364,6 +3353,26 @@ fn overworld_biome_allows_passive_spawn(biome: u8) -> bool {
 fn overworld_biome_allows_passive_species(biome: u8, kind: Kind) -> bool {
     overworld_biome_allows_passive_spawn(biome)
         && (kind != Kind::Horse || horse_spawn_weight(biome) > 0)
+}
+
+/// Apply the destination biome's spawn list to every pack member, not just
+/// the first successful origin. Ground support alone does not make a river,
+/// ocean, beach, or mesa grass patch eligible for ordinary farm animals.
+fn natural_pack_member_biome_ok(
+    world: &World,
+    kind: Kind,
+    at: (i32, i32, i32),
+    passive: bool,
+) -> bool {
+    if world.dimension() != crate::dimensions::Dimension::Overworld {
+        return true;
+    }
+    let (x, y, z) = at;
+    let biome = world.biome_at(x, z);
+    overworld_biome_allows_natural_spawn(biome)
+        && (!passive
+            || (world.get(x, y - 1, z) >> 4 == 2
+                && overworld_biome_allows_passive_species(biome, kind)))
 }
 
 fn overworld_passive_kind(biome: u8, roll: u64) -> Kind {
@@ -4984,6 +4993,60 @@ mod tests {
         for biome in [1, 4, 5, 6, 35] {
             assert!(overworld_biome_allows_passive_spawn(biome));
         }
+    }
+
+    #[test]
+    fn irw4_plains_pack_members_recheck_river_biome_on_real_world_columns() {
+        // Fixed IRW4 seed and two nearby columns on opposite sides of a
+        // Plains (1) -> River (7) boundary. Both receive identical grass
+        // support and air clearance; biome alone must reject river animals.
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        let plains = (835, 142);
+        let river = (837, 142);
+        assert_eq!(world.biome_at(plains.0, plains.1), 1);
+        assert_eq!(world.biome_at(river.0, river.1), 7);
+        let mut positions = Vec::new();
+        for (x, z) in [plains, river] {
+            let y = world.surface_height_at(x, z).unwrap() + 1;
+            world.import_block(x, y - 1, z, 2 << 4).unwrap();
+            world.import_block(x, y, z, 0).unwrap();
+            world.import_block(x, y + 1, z, 0).unwrap();
+            positions.push((x, y, z));
+        }
+        let plains_at = positions[0];
+        let river_at = positions[1];
+        for kind in [Kind::Cow, Kind::Sheep, Kind::Horse] {
+            assert!(natural_pack_member_biome_ok(&world, kind, plains_at, true));
+            assert!(
+                !natural_pack_member_biome_ok(&world, kind, river_at, true),
+                "{kind:?} crossed into River despite valid grass"
+            );
+        }
+        // River's ordinary hostile list remains available. Do not reject
+        // monster packs just because the passive spawn list is empty.
+        assert!(natural_pack_member_biome_ok(
+            &world,
+            Kind::Zombie,
+            river_at,
+            false
+        ));
+        // The per-member light gate remains independent of biome/ground.
+        assert!(natural_spawn_species_light_ok(
+            Kind::Cow,
+            42,
+            plains_at,
+            (9, 0),
+            6000,
+            true
+        ));
+        assert!(!natural_spawn_species_light_ok(
+            Kind::Cow,
+            42,
+            plains_at,
+            (8, 0),
+            6000,
+            true
+        ));
     }
 
     #[test]
