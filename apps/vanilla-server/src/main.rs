@@ -364,15 +364,34 @@ struct InitialPlayer<'a> {
     hardcore: bool,
     difficulty: u8,
 }
-fn primed_tnt_spawn_body(entity_id: i32, pos: (i32, i32, i32)) -> Vec<u8> {
+fn primed_tnt_spawn_precise_body(entity_id: i32, position_fp: [i32; 3]) -> Vec<u8> {
     let mut body = Vec::new();
     write_varint(entity_id as u32, &mut body);
     body.push(50); // Protocol 5 Spawn Object: primed TNT.
-    for coordinate in [pos.0, pos.1, pos.2] {
-        body.extend_from_slice(&(coordinate * 32 + 16).to_be_bytes());
+    for coordinate in position_fp {
+        body.extend_from_slice(&coordinate.div_euclid(128).to_be_bytes());
     }
     body.extend_from_slice(&[0, 0]);
     body.extend_from_slice(&0i32.to_be_bytes());
+    body
+}
+
+fn primed_tnt_spawn_body(entity_id: i32, pos: (i32, i32, i32)) -> Vec<u8> {
+    primed_tnt_spawn_precise_body(
+        entity_id,
+        [pos.0 * 4096 + 2048, pos.1 * 4096, pos.2 * 4096 + 2048],
+    )
+}
+
+/// Protocol 5 (1.7.10) S18 Entity Teleport: Int entity ID, Int x/y/z in
+/// 1/32-block units, Yaw byte, Pitch byte. No on-ground boolean in 1.7.
+fn primed_tnt_teleport_body(entity_id: i32, position_fp: [i32; 3]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(18);
+    body.extend_from_slice(&entity_id.to_be_bytes());
+    for coordinate in position_fp {
+        body.extend_from_slice(&coordinate.div_euclid(128).to_be_bytes());
+    }
+    body.extend_from_slice(&[0, 0]);
     body
 }
 
@@ -445,9 +464,9 @@ fn join(
     let primed = world
         .lock()
         .map_err(|_| bad("world mutex poisoned"))?
-        .visible_primed_tnt(*position);
-    for (id, pos) in primed {
-        send(s, 0x0e, &primed_tnt_spawn_body(id, pos))?;
+        .visible_primed_tnt_precise(*position);
+    for (id, position_fp) in primed {
+        send(s, 0x0e, &primed_tnt_spawn_precise_body(id, position_fp))?;
     }
 
     // Clientbound 0x30 / 0x09: authoritative Creative inventory and hotbar.
@@ -7881,6 +7900,26 @@ fn main() -> io::Result<()> {
                                         let body = primed_tnt_spawn_body(entity_id, (x, y, z));
                                         furnace_hub.broadcast(Event { id: 0x0e, body });
                                     }
+                                    world::TntEvent::Move {
+                                        entity_id,
+                                        position_fp,
+                                    } => {
+                                        let position = PlayerPosition {
+                                            x: f64::from(position_fp[0]) / 4096.0,
+                                            y: f64::from(position_fp[1]) / 4096.0,
+                                            z: f64::from(position_fp[2]) / 4096.0,
+                                        };
+                                        furnace_hub.broadcast_in_view(
+                                            position,
+                                            Event {
+                                                id: 0x18,
+                                                body: primed_tnt_teleport_body(
+                                                    entity_id,
+                                                    position_fp,
+                                                ),
+                                            },
+                                        );
+                                    }
                                     world::TntEvent::Explode {
                                         entity_id,
                                         pos: (x, y, z),
@@ -9456,5 +9495,29 @@ mod survival_food_journal_tests {
             assert!(food_journal_path(&root.join("other/nether.irw"), &player_path).is_err());
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod primed_tnt_protocol5_tests {
+    use super::*;
+
+    #[test]
+    fn entity_teleport_uses_1_7_10_s18_int_id_and_fixed_coordinates() {
+        let encoded = primed_tnt_teleport_body(10_000_001, [2048, 64 * 4096, -2048]);
+        assert_eq!(encoded.len(), 18);
+        assert_eq!(&encoded[0..4], &10_000_001i32.to_be_bytes());
+        assert_eq!(&encoded[4..8], &16i32.to_be_bytes());
+        assert_eq!(&encoded[8..12], &(64 * 32i32).to_be_bytes());
+        assert_eq!(&encoded[12..16], &(-16i32).to_be_bytes());
+        assert_eq!(&encoded[16..18], &[0, 0]);
+    }
+
+    #[test]
+    fn late_join_spawn_retains_subblock_precision() {
+        let encoded = primed_tnt_spawn_precise_body(10_000_001, [2048, 66 * 4096, 2048]);
+        assert_eq!(encoded[0], 0x81); // entity ID starts as Protocol 5 VarInt
+        assert_eq!(encoded[4], 50); // TNT object type
+        assert_eq!(&encoded[5..9], &16i32.to_be_bytes());
     }
 }
