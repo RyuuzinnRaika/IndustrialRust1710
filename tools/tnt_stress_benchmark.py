@@ -73,10 +73,11 @@ def tnt_snapshot_count(path: Path) -> tuple[str, int]:
     trailer = raw[end:]
     if not trailer:
         return "none", 0
-    if len(trailer) < 6 or trailer[:4] not in (b"TNT1", b"TNT2", b"TNT3"):
+    if len(trailer) < 6 or trailer[:4] not in (b"TNT1", b"TNT2", b"TNT3", b"TNT4"):
         raise ValueError("unknown entity trailer")
     primed = struct.unpack(">H", trailer[4:6])[0]
-    if primed > 4096 or len(trailer) < 6 + 20 * primed:
+    entity_stride = 44 if trailer[:4] == b"TNT4" else 20
+    if primed > 4096 or len(trailer) < 6 + entity_stride * primed:
         raise ValueError("truncated TNT entity trailer")
     return trailer[:4].decode("ascii"), primed
 
