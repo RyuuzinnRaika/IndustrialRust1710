@@ -2383,6 +2383,7 @@ fn play(
                 let previous_health = vitals.health;
                 vitals.health = (vitals.health - total).max(0.0);
                 let cause = match sources {
+                    HazardAttribution::Single(HazardCause::Cactus) => DeathCause::Cactus,
                     HazardAttribution::Single(HazardCause::Drowning) => DeathCause::Drowning,
                     HazardAttribution::Single(HazardCause::Suffocation) => DeathCause::Suffocation,
                     HazardAttribution::Single(HazardCause::Lava) => DeathCause::Lava,
