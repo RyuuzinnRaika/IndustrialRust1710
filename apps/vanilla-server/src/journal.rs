@@ -3,7 +3,9 @@
 //! A failure during application leaves the journal in place and locks further
 //! journal writes until the operator restarts and recovery succeeds.
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -144,6 +146,7 @@ fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
         || name.ends_with(".decorations.json")
         || name.ends_with(".dispensers.json")
         || name.ends_with(".maps.json")
+        || name.ends_with(".boats.json")
         || name.ends_with(".minecarts.json")
         || name.ends_with(".hanging.json")
         || name.ends_with(".drops.json")
@@ -408,6 +411,24 @@ mod tests {
         let unknown = home.join("flat.unknown.json");
         assert!(commit(&journal, &[(unknown.as_path(), saved.to_vec())]).is_err());
         assert!(commit(&journal, &[]).is_err());
+        assert!(!journal.exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn boat_sidecar_is_an_allowed_journal_target() {
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-one-boat-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let journal = home.join("flat.pending-txn.json");
+        let boats = home.join("flat.boats.json");
+        let snapshot = br#"{"version":1,"next":0,"boats":[]}"#;
+        commit(&journal, &[(boats.as_path(), snapshot.to_vec())]).unwrap();
+        assert_eq!(fs::read(&boats).unwrap(), snapshot);
         assert!(!journal.exists());
         fs::remove_dir_all(home).unwrap();
     }

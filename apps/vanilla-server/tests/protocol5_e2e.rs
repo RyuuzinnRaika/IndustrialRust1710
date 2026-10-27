@@ -36,6 +36,15 @@ impl NativeServer {
         Self::start_with_mode(false)
     }
     fn start_with_mode(survival: bool) -> Self {
+        Self::start_with_mode_and_items(survival, &[])
+    }
+    fn start_with_mode_and_items(survival: bool, items: &[(usize, i16)]) -> Self {
+        Self::start_with_seed(survival, items, false)
+    }
+    fn start_with_mode_and_cow(survival: bool, items: &[(usize, i16)]) -> Self {
+        Self::start_with_seed(survival, items, true)
+    }
+    fn start_with_seed(survival: bool, items: &[(usize, i16)], cow: bool) -> Self {
         let exclusive = SERVER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -58,6 +67,89 @@ impl NativeServer {
             serde_json::to_vec(&whitelist).unwrap(),
         )
         .unwrap();
+        if !items.is_empty() {
+            let mut slots = (0..45).map(|_| Value::Null).collect::<Vec<_>>();
+            for &(slot, id) in items {
+                slots[slot] = json!({"id": id, "count": 1, "damage": 0});
+            }
+            let inventory = json!({
+                "version": 1,
+                "selected": 0,
+                "slots": slots,
+                "cursor": null,
+                "workbench": [null, null, null, null, null, null, null, null, null],
+                "anvil_inputs": [null, null],
+                "enchant_input": null,
+                "ender_chest": [null, null, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, null],
+                "bed_spawn": null
+            });
+            fs::create_dir_all(directory.join("players")).unwrap();
+            let inventory_name = if survival {
+                "rusttester.survival.inventory.json"
+            } else {
+                "rusttester.inventory.json"
+            };
+            fs::write(
+                directory.join("players").join(inventory_name),
+                serde_json::to_vec(&inventory).unwrap(),
+            )
+            .unwrap();
+        }
+        if cow {
+            let mobs = json!({
+                "format": 1,
+                "seed": null,
+                "dimension": "Overworld",
+                "state": {
+                    "entities": {
+                        "500000": {
+                            "id": 500000,
+                            "kind": "Cow",
+                            "position": {"x": 0.5, "y": 65.0, "z": 0.5},
+                            "health": 10,
+                            "hit_tick": 0,
+                            "far_from_player_ticks": 0,
+                            "bite_tick": 0,
+                            "fuse": 0,
+                            "breed_tick": 0,
+                            "love_until": 0,
+                            "baby": false,
+                            "age_ticks": 0,
+                            "waypoint": null,
+                            "sheared": false,
+                            "next_egg_tick": 6000,
+                            "profession": 0,
+                            "size": 1,
+                            "anger_until": 0,
+                            "zombie_villager": false,
+                            "can_break_wooden_doors": false,
+                            "door_break_target": null,
+                            "door_break_started": 0,
+                            "saddled": false,
+                            "tamed": false,
+                            "tame_progress": 0,
+                            "fence_anchor": null
+                        }
+                    },
+                    "arrows": {},
+                    "orbs": {},
+                    "last_tick": 0,
+                    "last_graze_tick": 0,
+                    "spawner_next_tick": {},
+                    "next_id": 500001,
+                    "dragon_defeated": false,
+                    "enabled": false,
+                    "difficulty": 3
+                }
+            });
+            fs::write(
+                directory.join("flat.mobs.json"),
+                serde_json::to_vec(&mobs).unwrap(),
+            )
+            .unwrap();
+        }
         let reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
@@ -2212,6 +2304,337 @@ fn minecart_dismount_is_safe_in_both_modes_and_restart_preserves_position_invent
     let saved: Value = serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
     assert_eq!(saved["slots"][36]["id"], 328);
     assert_eq!(saved["slots"][36]["count"], 1);
+    drop(rejoined);
+    server.wait_idle();
+}
+
+#[test]
+fn creative_boat_placement_keeps_item_and_restores_boat_after_restart() {
+    let mut server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+    let creative_slot = |id: i16| {
+        let mut payload = 36i16.to_be_bytes().to_vec();
+        payload.extend_from_slice(&id.to_be_bytes());
+        payload.push(1);
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        frame(0x10, &payload)
+    };
+    let place = |x: i32, y: u8, id: i16| {
+        let mut payload = x.to_be_bytes().to_vec();
+        payload.push(y);
+        payload.extend_from_slice(&0i32.to_be_bytes());
+        payload.push(1); // top face
+        payload.extend_from_slice(&id.to_be_bytes());
+        payload.push(1);
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        payload.extend_from_slice(&[8, 8, 8]);
+        frame(0x08, &payload)
+    };
+    let is_boat_spawn = |body: &[u8]| {
+        let mut remaining = body;
+        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&1)
+    };
+
+    client.write_all(&creative_slot(326)).unwrap();
+    until_packet(&mut client, 0x2f, |body| {
+        body.len() == 10 && body[3..5] == 326i16.to_be_bytes()
+    });
+    client.write_all(&place(2, 63, 326)).unwrap();
+    until_packet(&mut client, 0x23, |body| {
+        body.len() == 11
+            && body[0..4] == 2i32.to_be_bytes()
+            && body[4] == 64
+            && body[5..9] == 0i32.to_be_bytes()
+            && body[9] == 8
+    });
+
+    client.write_all(&creative_slot(333)).unwrap();
+    until_packet(&mut client, 0x2f, |body| {
+        body.len() == 10 && body[3..5] == 333i16.to_be_bytes()
+    });
+    client.write_all(&place(2, 64, 333)).unwrap();
+    let spawned = until_packet(&mut client, 0x0e, is_boat_spawn);
+    let mut spawn_body = spawned.as_slice();
+    let boat_id = i32::try_from(read_varint(&mut spawn_body).unwrap()).unwrap();
+    assert_eq!(spawn_body[0], 1, "Spawn Object must identify a boat");
+
+    let boat_path = server.directory.join("flat.boats.json");
+    await_file(&boat_path);
+    let saved: Value = serde_json::from_slice(&fs::read(&boat_path).unwrap()).unwrap();
+    assert_eq!(saved["boats"].as_array().unwrap().len(), 1);
+    assert_eq!(saved["boats"][0]["id"].as_i64(), Some(i64::from(boat_id)));
+
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/stop\n")
+        .unwrap();
+    until_packet(&mut client, 0x40, |_| true);
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        if let Some(status) = server.process.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "server failed graceful shutdown: {status}"
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "server did not stop");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let inventory_path = server.directory.join("players/rusttester.inventory.json");
+    let inventory: Value = serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    assert_eq!(inventory["slots"][36]["id"], 333);
+    assert_eq!(inventory["slots"][36]["count"], 1);
+    drop(client);
+
+    server.process = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
+        .args(["--bind", &format!("127.0.0.1:{}", server.port)])
+        .arg("--whitelist")
+        .arg(server.directory.join("whitelist.json"))
+        .arg("--world")
+        .arg(server.directory.join("flat.irw"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if TcpStream::connect(("127.0.0.1", server.port)).is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "native server did not restart");
+        assert!(server.process.try_wait().unwrap().is_none());
+        thread::sleep(Duration::from_millis(50));
+    }
+    let (mut rejoined, _, _) = server.join("RustTester");
+    let restored = until_packet(&mut rejoined, 0x0e, is_boat_spawn);
+    let mut restored_body = restored.as_slice();
+    assert_eq!(read_varint(&mut restored_body).unwrap(), boat_id as u32);
+    assert_eq!(restored_body[0], 1);
+    let mut attack = boat_id.to_be_bytes().to_vec();
+    attack.push(1);
+    rejoined.write_all(&frame(0x02, &attack)).unwrap();
+    until_packet(&mut rejoined, 0x13, |body| {
+        body.len() == 5 && body[0] == 1 && body[1..] == boat_id.to_be_bytes()
+    });
+    drop(rejoined);
+    server.wait_idle();
+    let saved: Value = serde_json::from_slice(&fs::read(&boat_path).unwrap()).unwrap();
+    assert!(saved["boats"].as_array().unwrap().is_empty());
+    let saved: Value =
+        serde_json::from_slice(&fs::read(server.directory.join("flat.drops.json")).unwrap())
+            .unwrap();
+    assert!(saved["entries"].as_object().unwrap().is_empty());
+}
+
+#[test]
+fn survival_boat_consumes_item_and_drops_boat_when_broken() {
+    let server = NativeServer::start_with_mode_and_items(true, &[(36, 326), (37, 333)]);
+    let (mut client, _, _) = server.join("RustTester");
+    let place = |x: i32, y: u8, id: i16| {
+        let mut payload = x.to_be_bytes().to_vec();
+        payload.push(y);
+        payload.extend_from_slice(&0i32.to_be_bytes());
+        payload.push(1); // top face
+        payload.extend_from_slice(&id.to_be_bytes());
+        payload.push(1);
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        payload.extend_from_slice(&[8, 8, 8]);
+        frame(0x08, &payload)
+    };
+    client.write_all(&place(2, 63, 326)).unwrap();
+    until_packet(&mut client, 0x23, |body| {
+        body.len() == 11
+            && body[0..4] == 2i32.to_be_bytes()
+            && body[4] == 64
+            && body[5..9] == 0i32.to_be_bytes()
+            && body[9] == 8
+    });
+    client.write_all(&frame(0x09, &1i16.to_be_bytes())).unwrap();
+    client.write_all(&place(2, 64, 333)).unwrap();
+    let spawned = until_packet(&mut client, 0x0e, |body| {
+        let mut remaining = body;
+        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&1)
+    });
+    let mut spawn_body = spawned.as_slice();
+    let boat_id = i32::try_from(read_varint(&mut spawn_body).unwrap()).unwrap();
+    assert_eq!(spawn_body[0], 1);
+    let inventory: Value = serde_json::from_slice(
+        &fs::read(
+            server
+                .directory
+                .join("players/rusttester.survival.inventory.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        inventory["slots"][37].is_null(),
+        "Survival boat was consumed"
+    );
+
+    let mut attack = boat_id.to_be_bytes().to_vec();
+    attack.push(1);
+    client.write_all(&frame(0x02, &attack)).unwrap();
+    until_packet(&mut client, 0x13, |body| {
+        body.len() == 5 && body[0] == 1 && body[1..] == boat_id.to_be_bytes()
+    });
+    let dropped = until_packet(&mut client, 0x0e, |body| {
+        let mut remaining = body;
+        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&2)
+    });
+    assert!(
+        dropped.len() >= 20,
+        "boat item drop spawn packet is complete"
+    );
+    drop(client);
+    server.wait_idle();
+    let inventory: Value = serde_json::from_slice(
+        &fs::read(
+            server
+                .directory
+                .join("players/rusttester.survival.inventory.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        inventory["slots"][37].is_null(),
+        "Survival boat was consumed"
+    );
+    let drops: Value =
+        serde_json::from_slice(&fs::read(server.directory.join("flat.drops.json")).unwrap())
+            .unwrap();
+    let entries = drops["entries"].as_object().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.values().next().unwrap()["stack"]["id"], 333);
+}
+
+#[test]
+fn creative_mob_feed_and_attack_keep_items_and_award_kill_rewards() {
+    let server = NativeServer::start_with_mode_and_cow(false, &[(36, 296), (37, 267)]);
+    let (mut client, _, _) = server.join("RustTester");
+    let cow = until_packet(&mut client, 0x0f, |body| {
+        let mut remaining = body;
+        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&92)
+    });
+    let mut cow_body = cow.as_slice();
+    let cow_id = i32::try_from(read_varint(&mut cow_body).unwrap()).unwrap();
+    assert_eq!(cow_id, 500_000);
+
+    let mut interact = cow_id.to_be_bytes().to_vec();
+    interact.push(0);
+    client.write_all(&frame(0x02, &interact)).unwrap();
+    until_packet(&mut client, 0x1a, |body| {
+        body.len() == 5 && body[..4] == cow_id.to_be_bytes() && body[4] == 18
+    });
+
+    client.write_all(&frame(0x09, &1i16.to_be_bytes())).unwrap();
+    let mut attack = cow_id.to_be_bytes().to_vec();
+    attack.push(1);
+    client.write_all(&frame(0x02, &attack)).unwrap();
+    until_packet(&mut client, 0x1c, |body| {
+        body.len() == 10
+            && body[..4] == cow_id.to_be_bytes()
+            && body[4] == ((3 << 5) | 6)
+            && body[5..9] == 4.0f32.to_be_bytes()
+    });
+    thread::sleep(Duration::from_millis(550));
+    client.write_all(&frame(0x02, &attack)).unwrap();
+    until_packet(&mut client, 0x11, |_| true); // player-kill XP orb
+    let item_drop = until_packet(&mut client, 0x0e, |body| {
+        let mut remaining = body;
+        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&2)
+    });
+    assert!(item_drop.len() >= 20);
+    until_packet(&mut client, 0x1a, |body| {
+        body.len() == 5 && body[..4] == cow_id.to_be_bytes() && body[4] == 3
+    });
+    drop(client);
+    server.wait_idle();
+
+    let inventory: Value = serde_json::from_slice(
+        &fs::read(server.directory.join("players/rusttester.inventory.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(inventory["slots"][36]["id"], 296);
+    assert_eq!(inventory["slots"][36]["count"], 1);
+    assert_eq!(inventory["slots"][37]["id"], 267);
+    assert_eq!(inventory["slots"][37]["damage"], 0);
+    let drops: Value =
+        serde_json::from_slice(&fs::read(server.directory.join("flat.drops.json")).unwrap())
+            .unwrap();
+    assert_eq!(drops["entries"].as_object().unwrap().len(), 1);
+    assert_eq!(
+        drops["entries"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()["stack"]["id"],
+        363
+    );
+    let mobs: Value =
+        serde_json::from_slice(&fs::read(server.directory.join("flat.mobs.json")).unwrap())
+            .unwrap();
+    assert!(mobs["state"]["last_tick"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn survival_mob_feed_consumes_food_and_attack_wears_sword() {
+    let server = NativeServer::start_with_mode_and_cow(true, &[(36, 296), (37, 267)]);
+    let (mut client, _, _) = server.join("RustTester");
+    let cow = until_packet(&mut client, 0x0f, |body| {
+        let mut remaining = body;
+        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&92)
+    });
+    let mut cow_body = cow.as_slice();
+    let cow_id = i32::try_from(read_varint(&mut cow_body).unwrap()).unwrap();
+    assert_eq!(cow_id, 500_000);
+
+    let mut interact = cow_id.to_be_bytes().to_vec();
+    interact.push(0);
+    client.write_all(&frame(0x02, &interact)).unwrap();
+    until_packet(&mut client, 0x1a, |body| {
+        body.len() == 5 && body[..4] == cow_id.to_be_bytes() && body[4] == 18
+    });
+    let inventory_path = server
+        .directory
+        .join("players/rusttester.survival.inventory.json");
+    let inventory: Value = serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    assert!(
+        inventory["slots"][36].is_null(),
+        "Survival feed consumed wheat"
+    );
+
+    client.write_all(&frame(0x09, &1i16.to_be_bytes())).unwrap();
+    let mut attack = cow_id.to_be_bytes().to_vec();
+    attack.push(1);
+    client.write_all(&frame(0x02, &attack)).unwrap();
+    until_packet(&mut client, 0x1c, |body| {
+        body.len() == 10
+            && body[..4] == cow_id.to_be_bytes()
+            && body[4] == ((3 << 5) | 6)
+            && body[5..9] == 4.0f32.to_be_bytes()
+    });
+    let inventory: Value = serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    assert_eq!(inventory["slots"][37]["damage"], 1);
+    drop(client);
+    server.wait_idle();
+    let (mut rejoined, _, _) = server.join("RustTester");
+    let restored_cow = until_packet(&mut rejoined, 0x0f, |body| {
+        let mut remaining = body;
+        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&92)
+    });
+    let mut restored_body = restored_cow.as_slice();
+    assert_eq!(read_varint(&mut restored_body).unwrap(), 500_000);
     drop(rejoined);
     server.wait_idle();
 }

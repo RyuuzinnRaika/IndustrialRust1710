@@ -1693,7 +1693,7 @@ fn play(
             }
         }
         // The first active session advances the shared mob simulation.
-        if survival && vitals.health > 0.0 {
+        if vitals.health > 0.0 {
             let participants = hub.participants()?;
             let players = hub.positions()?;
             // Read the rule before taking world/mob locks to preserve lock order.
@@ -1720,9 +1720,13 @@ fn play(
                 creatures.break_wooden_doors(&mut w, world_path, now_tick, &players)?;
             let explosions = creatures.take_explosions();
             updates.extend(creatures.queue_explosion_hits(&w, &explosions, &participants));
-            updates.extend(creatures.take_player_effects(entity_id, *player, now_tick));
-            let hurt =
+            let effects = creatures.take_player_effects(entity_id, *player, now_tick);
+            if survival {
+                updates.extend(effects);
+            }
+            let incoming =
                 creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
+            let hurt = if survival { incoming } else { 0 };
             let drops = creatures.take_drops();
             drop(creatures);
             for (x, y, z) in grazed_blocks.into_iter().chain(broken_doors) {
@@ -2415,12 +2419,31 @@ fn play(
                         hub.broadcast(attach);
                         continue;
                     }
-                    // The remaining animal interactions debit items or wear
-                    // tools and are currently implemented for Survival only.
+                    let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+                    // Feeding works in both modes; Creative gets the effect
+                    // without consuming the selected food item.
+                    let mut candidate = inventory.clone();
+                    let can_pay = !survival || candidate.consume_held();
+                    if can_pay {
+                        if let Some(events) =
+                            creatures.feed(target_id, *player, inventory.held(), now_tick)
+                        {
+                            if survival {
+                                candidate.save(inventory_path)?;
+                                *inventory = candidate;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                            }
+                            for event in events {
+                                hub.broadcast(event);
+                            }
+                            continue;
+                        }
+                    }
+                    // Other animal interactions debit items or wear tools,
+                    // and remain unavailable in Creative.
                     if !survival {
                         continue;
                     }
-                    let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
                     // Leashes and saddles must debit a real held item before
                     // changing the shared entity. Never trust the client slot.
                     if inventory.held().is_some_and(|item| item.id == 420)
@@ -2521,28 +2544,70 @@ fn play(
                             continue;
                         }
                     }
-                    if let Some(events) =
-                        creatures.feed(target_id, *player, inventory.held(), now_tick)
-                    {
-                        let mut candidate = inventory.clone();
-                        if candidate.consume_held() {
-                            candidate.save(inventory_path)?;
-                            *inventory = candidate;
-                            send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                            for event in events {
-                                hub.broadcast(event);
-                            }
-                        }
-                    }
                 }
-                if survival && vitals.health > 0.0 && action == 1 {
-                    if let Some(events) = boats
-                        .lock()
-                        .map_err(|_| bad("boats mutex poisoned"))?
-                        .break_boat(target_id, *player)
-                    {
+                if vitals.health > 0.0 && action == 1 {
+                    let boat_break = {
+                        let mut boats = boats.lock().map_err(|_| bad("boats mutex poisoned"))?;
+                        let mut staged = boats.clone();
+                        if let Some((events, position)) = staged.break_boat(target_id, *player) {
+                            let boat_file = Boats::location(world_path);
+                            let journal_path = world_path.with_extension("pending-txn.json");
+                            let dropped = if survival {
+                                let mut ground = ground_items
+                                    .lock()
+                                    .map_err(|_| bad("ground items mutex poisoned"))?;
+                                if !ground.has_capacity_for(1) {
+                                    None
+                                } else {
+                                    let at = (
+                                        position.x.floor() as i32,
+                                        position.y.floor() as i32,
+                                        position.z.floor() as i32,
+                                    );
+                                    let (staged_ground, spawned) = ground.stage_put_many(
+                                        &[Stack {
+                                            id: 333,
+                                            count: 1,
+                                            damage: 0,
+                                            nbt: None,
+                                        }],
+                                        at,
+                                    )?;
+                                    journal::commit(
+                                        &journal_path,
+                                        &[
+                                            (boat_file.as_path(), staged.encoded()?),
+                                            (ground_path, staged_ground.encoded()?),
+                                        ],
+                                    )?;
+                                    *ground = staged_ground;
+                                    Some(spawned)
+                                }
+                            } else {
+                                journal::commit(
+                                    &journal_path,
+                                    &[(boat_file.as_path(), staged.encoded()?)],
+                                )?;
+                                Some(Vec::new())
+                            };
+                            if let Some(dropped) = dropped {
+                                *boats = staged;
+                                Some((events, dropped))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some((events, dropped)) = boat_break {
                         for event in events {
                             hub.broadcast(event);
+                        }
+                        for item in dropped {
+                            for event in item.spawn() {
+                                hub.broadcast(event);
+                            }
                         }
                         continue;
                     }
@@ -2551,11 +2616,13 @@ fn play(
                         creatures.player_attack(target_id, *player, inventory.held(), now_tick);
                     drop(creatures);
                     if let Some(hit) = result {
-                        let mut next_inventory = inventory.clone();
-                        if next_inventory.wear_held_tool() {
-                            next_inventory.save(inventory_path)?;
-                            *inventory = next_inventory;
-                            send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                        if survival {
+                            let mut next_inventory = inventory.clone();
+                            if next_inventory.wear_held_tool() {
+                                next_inventory.save(inventory_path)?;
+                                *inventory = next_inventory;
+                                send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                            }
                         }
                         if hit.experience > 0 {
                             let at = hit
@@ -3647,8 +3714,7 @@ fn play(
                     continue;
                 }
                 // Boat item 333 places a bounded entity on a water block.
-                if survival
-                    && (0..=5).contains(&face)
+                if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
                     && inventory.held().is_some_and(|item| item.id == 333)
@@ -3662,19 +3728,40 @@ fn play(
                     };
                     let mut state = boats.lock().map_err(|_| bad("boats mutex poisoned"))?;
                     if state.can_place(&water, spawn_at) {
-                        let mut candidate = inventory.clone();
-                        if candidate.consume_held() {
-                            candidate.save(inventory_path)?;
-                            let spawned =
-                                state.place(&water, spawn_at, now_tick).ok_or_else(|| {
-                                    bad("boat vanished between preflight and placement")
-                                })?;
+                        let candidate = if survival {
+                            let mut candidate = inventory.clone();
+                            if !candidate.consume_held() {
+                                continue;
+                            }
+                            Some(candidate)
+                        } else {
+                            None
+                        };
+                        let mut staged = state.clone();
+                        let spawned = staged
+                            .place(&water, spawn_at, now_tick)
+                            .ok_or_else(|| bad("boat vanished between preflight and placement"))?;
+                        let boat_file = Boats::location(world_path);
+                        if let Some(candidate) = candidate {
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[
+                                    (inventory_path, candidate.encoded()?),
+                                    (boat_file.as_path(), staged.encoded()?),
+                                ],
+                            )?;
                             *inventory = candidate;
-                            drop(state);
-                            drop(water);
                             send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                            hub.broadcast_in_view(spawn_at, spawned);
+                        } else {
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &[(boat_file.as_path(), staged.encoded()?)],
+                            )?;
                         }
+                        *state = staged;
+                        drop(state);
+                        drop(water);
+                        hub.broadcast_in_view(spawn_at, spawned);
                     }
                     continue;
                 }
@@ -5969,9 +6056,8 @@ fn handle(
             send(&mut s, spawn.id, &spawn.body)?;
         }
     }
-    // Send existing persisted items to newly joining clients. They are
-    // independent of the player's chunk updates in this bounded prototype.
-    if survival {
+    // Send world-owned entities to players in either game mode.
+    {
         let ground = ground_items
             .lock()
             .map_err(|_| io::Error::other("ground items lock poisoned"))?;
@@ -7330,24 +7416,22 @@ fn main() -> io::Result<()> {
     };
     let mobs = Arc::new(Mutex::new({
         let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        // Game mode controls player damage and item costs, not world Mob AI.
         Mobs::load_or_new(
             &guard,
-            survival,
+            true,
             difficulty,
             &world_path.with_extension("mobs.json"),
         )?
     }));
     let throwables = Arc::new(Mutex::new(Throwables::default()));
-    let boats = Arc::new(Mutex::new(Boats::default()));
+    let boat_path = Arc::new(Boats::location(&world_path));
+    let boats = Arc::new(Mutex::new(Boats::load(&boat_path, clock.ticks())?));
     let minecart_path = Arc::new(Minecarts::location(&world_path));
     let minecarts = Arc::new(Mutex::new(Minecarts::load(&minecart_path, clock.ticks())?));
     let fishing = Arc::new(Mutex::new(Fishing::default()));
     let ground_path = Arc::new(GroundItems::location(&world_path));
-    let ground_items = Arc::new(Mutex::new(if survival {
-        GroundItems::load(&ground_path)?
-    } else {
-        GroundItems::default()
-    }));
+    let ground_items = Arc::new(Mutex::new(GroundItems::load(&ground_path)?));
     let chest_path = Arc::new(Chests::location(&world_path));
     let chests = Arc::new(Mutex::new(Chests::load(&chest_path)?));
     let furnace_path = Arc::new(Furnaces::location(&world_path));
@@ -8236,6 +8320,7 @@ fn main() -> io::Result<()> {
     let projectile_hub = Arc::clone(&hub);
     let projectile_mobs = Arc::clone(&mobs);
     let projectile_boats = Arc::clone(&boats);
+    let projectile_boat_file = Arc::clone(&boat_path);
     let projectile_carts = Arc::clone(&minecarts);
     let projectile_cart_file = Arc::clone(&minecart_path);
     let projectile_world_file = Arc::clone(&path);
@@ -8243,6 +8328,8 @@ fn main() -> io::Result<()> {
     let projectile_shutdown = Arc::clone(&shutdown);
     let projectile_thread = thread::spawn(move || {
         let mut last = projectile_clock.ticks();
+        let mut last_boat_checkpoint = last;
+        let mut last_boat_bytes: Option<Vec<u8>> = None;
         let mut last_cart_checkpoint = last;
         let mut last_cart_bytes: Option<Vec<u8>> = None;
         while !projectile_shutdown.load(Ordering::Acquire) {
@@ -8272,7 +8359,30 @@ fn main() -> io::Result<()> {
                 }
                 drop(objects);
                 let boat_events = match projectile_boats.lock() {
-                    Ok(mut state) => state.tick(&world, now),
+                    Ok(mut state) => {
+                        let events = state.tick(&world, now);
+                        if now.saturating_sub(last_boat_checkpoint) >= 20 {
+                            let bytes = match state.encoded() {
+                                Ok(bytes) => bytes,
+                                Err(error) => {
+                                    eprintln!("BOAT ENCODING ERROR: {error}");
+                                    return;
+                                }
+                            };
+                            if last_boat_bytes.as_ref() != Some(&bytes) {
+                                if let Err(error) = journal::commit(
+                                    &projectile_world_file.with_extension("pending-txn.json"),
+                                    &[(&*projectile_boat_file, bytes.clone())],
+                                ) {
+                                    eprintln!("BOAT CHECKPOINT ERROR: {error}");
+                                    return;
+                                }
+                                last_boat_bytes = Some(bytes);
+                            }
+                            last_boat_checkpoint = now;
+                        }
+                        events
+                    }
                     Err(_) => return,
                 };
                 let minecart_events = match projectile_carts.lock() {
@@ -8346,6 +8456,20 @@ fn main() -> io::Result<()> {
         }
         // A normal /stop also checkpoints the final sub-second position.
         if let Ok(_world) = projectile_world.lock() {
+            if let Ok(state) = projectile_boats.lock() {
+                match state.encoded() {
+                    Ok(bytes) if last_boat_bytes.as_ref() != Some(&bytes) => {
+                        if let Err(error) = journal::commit(
+                            &projectile_world_file.with_extension("pending-txn.json"),
+                            &[(&*projectile_boat_file, bytes)],
+                        ) {
+                            eprintln!("BOAT FINAL CHECKPOINT ERROR: {error}");
+                        }
+                    }
+                    Err(error) => eprintln!("BOAT FINAL ENCODING ERROR: {error}"),
+                    _ => {}
+                }
+            }
             if let Ok(state) = projectile_carts.lock() {
                 match state.encoded() {
                     Ok(bytes) if last_cart_bytes.as_ref() != Some(&bytes) => {

@@ -4,10 +4,20 @@ use crate::multiplayer::{self, Event};
 use crate::player::PlayerPosition;
 use crate::world::World;
 use legacy_protocol::write_varint;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
 
 const FIRST_ID: i32 = 1_400_000;
 const LIMIT: usize = 64;
+const SAVE_VERSION: u8 = 1;
+const MAX_SAVE_BYTES: u64 = 128 * 1024;
+
+fn invalid(message: &'static str) -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, message)
+}
 
 #[derive(Clone, Debug)]
 struct Boat {
@@ -42,12 +52,131 @@ pub fn attachment(entity: i32, mount: i32) -> Event {
     Event { id: 0x1b, body }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Boats {
     next: i32,
     active: BTreeMap<i32, Boat>,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoatSave {
+    version: u8,
+    next: i32,
+    boats: Vec<StoredBoat>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredBoat {
+    id: i32,
+    position: PlayerPosition,
+    velocity: [f64; 2],
+    heading: f32,
+}
 impl Boats {
+    pub fn location(world_path: &Path) -> PathBuf {
+        world_path.with_extension("boats.json")
+    }
+
+    fn stored_snapshot(&self) -> io::Result<BoatSave> {
+        if self.active.len() > LIMIT || self.next < 0 || FIRST_ID.checked_add(self.next).is_none() {
+            return Err(invalid("boat registry exceeds bounds"));
+        }
+        let snapshot = BoatSave {
+            version: SAVE_VERSION,
+            next: self.next,
+            boats: self
+                .active
+                .values()
+                .map(|boat| StoredBoat {
+                    id: boat.id,
+                    position: boat.position,
+                    velocity: boat.velocity,
+                    heading: boat.heading,
+                })
+                .collect(),
+        };
+        Self::validate_snapshot(&snapshot)?;
+        Ok(snapshot)
+    }
+
+    fn validate_snapshot(snapshot: &BoatSave) -> io::Result<()> {
+        if snapshot.version != SAVE_VERSION || snapshot.next < 0 || snapshot.boats.len() > LIMIT {
+            return Err(invalid("invalid boat snapshot metadata"));
+        }
+        let next = FIRST_ID
+            .checked_add(snapshot.next)
+            .ok_or_else(|| invalid("boat identifier overflow"))?;
+        let mut previous = FIRST_ID - 1;
+        for boat in &snapshot.boats {
+            if boat.id <= previous
+                || boat.id < FIRST_ID
+                || boat.id >= next
+                || !boat.position.is_valid()
+                || boat
+                    .velocity
+                    .iter()
+                    .any(|v| !v.is_finite() || v.abs() > 0.35)
+                || !boat.heading.is_finite()
+                || !(0.0..360.0).contains(&boat.heading)
+            {
+                return Err(invalid("invalid or duplicate saved boat"));
+            }
+            previous = boat.id;
+        }
+        Ok(())
+    }
+
+    pub fn encoded(&self) -> io::Result<Vec<u8>> {
+        let bytes = serde_json::to_vec(&self.stored_snapshot()?)
+            .map_err(|_| invalid("encode boat snapshot"))?;
+        if bytes.len() as u64 > MAX_SAVE_BYTES {
+            return Err(invalid("boat snapshot is too large"));
+        }
+        Ok(bytes)
+    }
+
+    /// Loads permanent boat state while intentionally dropping session-local riders.
+    pub fn load(path: &Path, tick: u64) -> io::Result<Self> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_file() || metadata.len() > MAX_SAVE_BYTES {
+            return Err(invalid("boat save file type or size invalid"));
+        }
+        let bytes = fs::read(path)?;
+        if bytes.len() as u64 > MAX_SAVE_BYTES {
+            return Err(invalid("boat save file grew beyond size cap"));
+        }
+        let snapshot: BoatSave =
+            serde_json::from_slice(&bytes).map_err(|_| invalid("invalid boat snapshot JSON"))?;
+        Self::validate_snapshot(&snapshot)?;
+        let active = snapshot
+            .boats
+            .into_iter()
+            .map(|saved| {
+                (
+                    saved.id,
+                    Boat {
+                        id: saved.id,
+                        position: saved.position,
+                        velocity: saved.velocity,
+                        heading: saved.heading,
+                        rider: None,
+                        forward: 0.0,
+                        strafe: 0.0,
+                        last_tick: tick,
+                    },
+                )
+            })
+            .collect();
+        Ok(Self {
+            next: snapshot.next,
+            active,
+        })
+    }
+
     pub fn can_place(&self, world: &World, at: PlayerPosition) -> bool {
         self.active.len() < LIMIT
             && self.next.checked_add(FIRST_ID).is_some()
@@ -133,7 +262,11 @@ impl Boats {
         boat.strafe = 0.0;
         Some(attachment(rider, -1))
     }
-    pub fn break_boat(&mut self, id: i32, player: PlayerPosition) -> Option<Vec<Event>> {
+    pub fn break_boat(
+        &mut self,
+        id: i32,
+        player: PlayerPosition,
+    ) -> Option<(Vec<Event>, PlayerPosition)> {
         let boat = self.active.get(&id)?;
         if (boat.position.x - player.x).hypot(boat.position.z - player.z) > 5.0 {
             return None;
@@ -144,7 +277,7 @@ impl Boats {
             events.push(attachment(rider, -1));
         }
         events.push(multiplayer::destroy(id));
-        Some(events)
+        Some((events, boat.position))
     }
     /// Advances each boat at most once per server tick, independent of client packet rate.
     /// Only a valid water column can propel a boat; solid obstacles stop its motion.
@@ -209,6 +342,8 @@ impl Boats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
     #[test]
     fn boat_spawn_mount_and_bounded_controls() {
         let world = World::new();
@@ -224,5 +359,39 @@ mod tests {
         assert!(!boats.control(2, f32::NAN, 0.0, 0.0));
         assert!(world.get(0, 65, 0) != 8 << 4 || !boats.can_place(&world, at));
         assert_eq!(attachment(2, 5).body.len(), 9);
+    }
+
+    #[test]
+    fn boat_snapshot_restores_entity_without_session_rider() {
+        let root = std::env::temp_dir().join(format!("ir1710-boat-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let world_path = root.join("flat.irw");
+        let path = Boats::location(&world_path);
+        let mut world = World::new();
+        world
+            .update_and_save(&world_path, 0, 64, 0, 8 << 4)
+            .unwrap();
+        let position = PlayerPosition {
+            x: 0.5,
+            y: 64.45,
+            z: 0.5,
+        };
+        let mut boats = Boats::default();
+        let spawn = boats.place(&world, position, 1).unwrap();
+        let mut spawn_body = spawn.body.as_slice();
+        let id = i32::try_from(legacy_protocol::read_varint(&mut spawn_body).unwrap()).unwrap();
+        assert!(boats.mount(id, 17, position).is_some());
+        fs::write(&path, boats.encoded().unwrap()).unwrap();
+
+        let restored = Boats::load(&path, 100).unwrap();
+        let events = restored.snapshot(position);
+        assert_eq!(events.len(), 1, "session-local rider must not be restored");
+        let mut restored_body = events[0].body.as_slice();
+        assert_eq!(
+            legacy_protocol::read_varint(&mut restored_body).unwrap(),
+            id as u32
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

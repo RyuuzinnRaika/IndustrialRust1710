@@ -1,6 +1,8 @@
 //! Restricted and crash-aware tiny administrative overrides.
 //! Never trust an offline player's chat message with these settings.
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::Path;
 
