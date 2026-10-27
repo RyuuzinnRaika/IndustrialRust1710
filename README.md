@@ -12,6 +12,8 @@
 
 **図解で全体を把握する:** [アーキテクチャ・通信・Tick・保存・移行・CI（Mermaid 6テーマ）](docs/00_プロジェクト図解.md)
 
+**GitHub Actionsを使わず自宅のUbuntuサーバでRust検証:** [ローカルCargo CIの実行・systemd毎時検証・ログ確認](docs/local-rust-ci-no-actions.md)。公開PRを自動実行する仕組みではなく、信頼した`main`だけを独立環境で検査します。
+
 ## まず全体を知る
 
 ```mermaid
