@@ -173,6 +173,37 @@ fn solid_projectile_block(block: u16) -> bool {
         )
 }
 
+/// Straight 1.7.10 stair steps occupy a full half-height base and a
+/// facing-dependent quarter-volume step. Corner joins need a separate
+/// neighbor-aware shape and are not covered by this helper.
+fn straight_stair_entry(
+    from: PlayerPosition,
+    to: PlayerPosition,
+    cell: [i32; 3],
+    metadata: u16,
+) -> Option<f64> {
+    let [x, y, z] = cell.map(f64::from);
+    let inverted = metadata & 4 != 0;
+    let base_bottom = if inverted { y + 0.5 } else { y };
+    let step_bottom = if inverted { y } else { y + 0.5 };
+    let base = segment_box_entry(
+        from,
+        to,
+        [x, base_bottom, z],
+        [x + 1.0, base_bottom + 0.5, z + 1.0],
+    );
+    let mut step_min = [x, step_bottom, z];
+    let mut step_max = [x + 1.0, step_bottom + 0.5, z + 1.0];
+    match metadata & 3 {
+        0 => step_min[0] += 0.5, // east
+        1 => step_max[0] -= 0.5, // west
+        2 => step_min[2] += 0.5, // south
+        _ => step_max[2] -= 0.5, // north
+    }
+    let step = segment_box_entry(from, to, step_min, step_max);
+    [base, step].into_iter().flatten().min_by(f64::total_cmp)
+}
+
 /// Traverse each voxel crossed by the flight segment in parametric order.
 /// Sampling endpoints alone can miss a grazing wall and incorrectly shield
 /// an entity that is actually in front of the wall.
@@ -218,6 +249,15 @@ fn first_solid_block_hit(
                         f64::from(cell[2]) + 1.0,
                     ],
                 ) {
+                    if t >= entry {
+                        return Some((t, cell));
+                    }
+                }
+            } else if matches!(
+                block,
+                53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164
+            ) {
+                if let Some(t) = straight_stair_entry(from, to, cell, state & 15) {
                     if t >= entry {
                         return Some((t, cell));
                     }
@@ -1363,6 +1403,59 @@ mod tests {
                     first_solid_block_hit(&world, from, to).unwrap().1,
                     [1, 70, 0]
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn projectile_ray_respects_straight_stair_steps_and_inverted_halves() {
+        // 1.7.10 stair metadata: east/west/south/north in bits 0-1,
+        // upside-down in bit 2. Test both the occupied step and its void.
+        for stair in [53u16, 67, 156] {
+            for (facing, occupied, empty, along_x) in [
+                (0, 1.75, 1.25, false),
+                (1, 1.25, 1.75, false),
+                (2, 1.75, 1.25, true),
+                (3, 1.25, 1.75, true),
+            ] {
+                for inverted in [false, true] {
+                    let mut world = World::new();
+                    let metadata = facing | if inverted { 4 } else { 0 };
+                    world.import_block(1, 70, 1, (stair << 4) | metadata).unwrap();
+                    let ray = |offset: f64, y: f64| {
+                        if along_x {
+                            (
+                                PlayerPosition { x: 0.2, y, z: offset },
+                                PlayerPosition { x: 2.8, y, z: offset },
+                            )
+                        } else {
+                            (
+                                PlayerPosition { x: offset, y, z: 0.2 },
+                                PlayerPosition { x: offset, y, z: 2.8 },
+                            )
+                        }
+                    };
+                    let step_y = if inverted { 70.25 } else { 70.75 };
+                    let base_y = if inverted { 70.75 } else { 70.25 };
+                    let (from, to) = ray(occupied, step_y);
+                    assert_eq!(
+                        first_solid_block_hit(&world, from, to).map(|hit| hit.1),
+                        Some([1, 70, 1]),
+                        "occupied stair step: block {stair}, facing {facing}, inverted {inverted}"
+                    );
+                    let (from, to) = ray(empty, step_y);
+                    assert_eq!(
+                        first_solid_block_hit(&world, from, to),
+                        None,
+                        "empty stair step: block {stair}, facing {facing}, inverted {inverted}"
+                    );
+                    let (from, to) = ray(empty, base_y);
+                    assert_eq!(
+                        first_solid_block_hit(&world, from, to).map(|hit| hit.1),
+                        Some([1, 70, 1]),
+                        "stair base: block {stair}, facing {facing}, inverted {inverted}"
+                    );
+                }
             }
         }
     }
