@@ -2701,7 +2701,16 @@ impl World {
             guard.verify()?;
         }
         // Keep the original on filesystems that disallow atomic replacement.
-        fs::rename(temp, path)
+        fs::rename(&temp, path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "replace world save {} from {}: {error}",
+                    path.display(),
+                    temp.display()
+                ),
+            )
+        })
     }
     /// Copy only the generation identity and edits capable of affecting a
     /// Protocol 5 chunk (including its 15-block light-source halo).
