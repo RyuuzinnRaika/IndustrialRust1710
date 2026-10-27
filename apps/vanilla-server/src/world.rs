@@ -1408,9 +1408,19 @@ impl World {
                                 295
                             }
                         }
-                        66 => 66,
-                        37 | 38 => id as i16,
-                        70 | 72 | 77 | 143 => id as i16,
+                        // Piston-destroy reaction still drops the block's
+                        // *item*, including powered/detector/activator rails.
+                        27 | 28 | 66 | 157 => id as i16,
+                        37..=40 => id as i16,
+                        63 | 68 => 323, // signs use the standing-sign item
+                        65 | 69 | 70 | 72 | 77 | 131 | 143 | 147 | 148 => id as i16,
+                        132 => 287, // tripwire drops string
+                        149 | 150 => 404, // comparator item, not powered block
+                        30 => 287, // cobweb without silk touch
+                        81 | 83 | 111 | 171 => id as i16,
+                        127 => 351, // cocoa beans (brown dye)
+                        115 => 372, // nether wart item
+                        175 => 175, // double-height flower
                         75 | 76 => 76,
                         93 | 94 => 356,
                         141 => 391,
@@ -1426,8 +1436,10 @@ impl World {
                     };
                     let stack = crate::inventory::Stack {
                         id: item_id,
-                        count: 1,
-                        damage: if matches!(id, 6 | 38) {
+                        count: if id == 127 { (1 + ((old & 12) >> 2)) as u8 } else { 1 },
+                        damage: if id == 127 {
+                            3 // cocoa item/dye damage
+                        } else if matches!(id, 6 | 38 | 171 | 175) {
                             (old & 15) as i16
                         } else {
                             0
@@ -4199,6 +4211,42 @@ mod tests {
             .iter()
             .any(|drop| { drop.pos == (1, 64, 0) && drop.stack.id == 50 }));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn piston_destruction_drops_rail_and_device_item_ids() {
+        for (block_id, metadata, expected_item, expected_damage) in [
+            (27u16, 0u16, 27i16, 0i16),    // powered rail
+            (28, 0, 28, 0),               // detector rail
+            (157, 0, 157, 0),             // activator rail
+            (69, 1, 69, 0),               // lever
+            (149, 0, 404, 0),             // comparator
+            (68, 2, 323, 0),              // wall sign
+            (132, 0, 287, 0),             // tripwire string
+            (127, 8, 351, 3),             // cocoa beans
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "ir1710-piston-items-{}-{block_id}.irw",
+                std::process::id()
+            ));
+            let _ = fs::remove_file(&path);
+            let mut world = World::new();
+            world.update_and_save(&path, -1, 64, 0, 152 << 4).unwrap();
+            world.update_and_save(&path, 0, 64, 0, (33 << 4) | 5).unwrap();
+            world.update_and_save(&path, 1, 64, 0, (block_id << 4) | metadata).unwrap();
+            world.block_tick(&path, 64).unwrap();
+            assert_eq!(world.get(1, 64, 0) >> 4, 34, "block {block_id}");
+            let drops = world.drain_drops();
+            assert!(
+                drops.iter().any(|drop| {
+                    drop.pos == (1, 64, 0)
+                        && drop.stack.id == expected_item
+                        && drop.stack.damage == expected_damage
+                }),
+                "piston silently discarded item {block_id}: {drops:?}"
+            );
+            fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
