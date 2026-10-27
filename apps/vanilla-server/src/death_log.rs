@@ -149,7 +149,16 @@ impl DeathRecord<'_> {
             fs::create_dir_all(parent)?;
         }
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        file.write_all(&line)
+        let previous_len = file.metadata()?.len();
+        if let Err(error) = file.write_all(&line) {
+            // A short write must not leave an invalid JSON fragment in the
+            // middle of the next player's event. Keep the original error.
+            let _ = file.set_len(previous_len);
+            return Err(error);
+        }
+        // Flush the append before returning to the owning player session.
+        // Not an atomic transaction with player NBT or the death scoreboard.
+        file.sync_data()
     }
 
     pub fn console_summary(&self) -> String {
