@@ -2276,7 +2276,7 @@ fn play(
                     HazardAttribution::Single(HazardCause::Lava) => DeathCause::Lava,
                     HazardAttribution::Single(HazardCause::Fire) => DeathCause::Fire,
                     HazardAttribution::Single(HazardCause::Burning) => DeathCause::Burning,
-                    HazardAttribution::Mixed => DeathCause::CombatOrExplosion,
+                    HazardAttribution::Mixed => DeathCause::MixedHazards,
                     HazardAttribution::None => DeathCause::Unknown,
                 };
                 death_log::record_fatal(
