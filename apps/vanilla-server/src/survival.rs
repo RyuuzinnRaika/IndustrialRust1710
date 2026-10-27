@@ -708,6 +708,40 @@ mod tests {
     }
 
     #[test]
+    fn s03_negative_tool_damage_cannot_bypass_environment_mining_penalties() {
+        // Invalid durability is bare-hand mining even if the player starts
+        // submerged and becomes airborne before the finish packet arrives.
+        let target = (-3, 63, 5);
+        let block = 1_u16 << 4;
+        let bare_minimum = mine_rule(block, None).unwrap().0;
+        for damage in [i16::MIN, -1] {
+            let malformed = stack(270, damage);
+            let mut early = MiningProgress::start_with_environment(
+                target, block, malformed, true, true,
+            )
+            .unwrap();
+            early.started = Instant::now() - bare_minimum.saturating_mul(5);
+            assert!(
+                early
+                    .finish_with_environment(target, block, malformed, true, false)
+                    .is_none(),
+                "invalid damage {damage} bypassed the airborne penalty"
+            );
+
+            let mut complete = MiningProgress::start_with_environment(
+                target, block, malformed, true, true,
+            )
+            .unwrap();
+            complete.started = Instant::now() - bare_minimum.saturating_mul(25);
+            assert_eq!(
+                complete.finish_with_environment(target, block, malformed, true, false),
+                mine_rule(block, None).map(|(_, result)| result),
+                "invalid damage {damage} changed the bare-hand harvest result"
+            );
+        }
+    }
+
+    #[test]
     fn matching_tools_mine_faster_and_have_correct_durability() {
         let bare = mine_rule(1 << 4, None).unwrap().0;
         let wood = mine_rule(1 << 4, stack(270, 0)).unwrap().0;
