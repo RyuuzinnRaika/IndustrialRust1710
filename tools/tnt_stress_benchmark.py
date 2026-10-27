@@ -44,7 +44,7 @@ def seed_irw(path: Path, count: int, *, chain_queue: bool = False) -> None:
     for index in range(count):
         x = (index % 64) * 24
         z = (index // 64) * 24
-        data += struct.pack(">iiiiI", BASE_ENTITY_ID + index, x, 200, z, 1)
+        data += struct.pack(">iiiiI", BASE_ENTITY_ID + index, x, 200, z, 160)
     if chain_queue:
         data += struct.pack(">I", 1)
         data += struct.pack(">iBi", -16, 200, 0)
@@ -109,6 +109,9 @@ def run_profile(server: Path, output: Path, count: int, duration: float,
     crashed_remaining = None
     peak_rss = None
     crashed = False
+    observed_explosions = 0
+    observed_teleports = 0
+    captured_packets = 0
     with (folder / "server.log").open("wb") as log:
         child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=log,
                                  stderr=subprocess.STDOUT, cwd=folder)
@@ -120,7 +123,6 @@ def run_profile(server: Path, output: Path, count: int, duration: float,
                 raise RuntimeError(client.failure or "Protocol 5 login timed out")
             started = time.monotonic()
             deadline = started + duration
-            crash_at = started + min(3, duration / 2)
             while time.monotonic() < deadline:
                 if child.poll() is not None:
                     raise RuntimeError(f"server exited early: {child.returncode}")
@@ -130,8 +132,15 @@ def run_profile(server: Path, output: Path, count: int, duration: float,
                 rss = read_rss(child.pid)
                 if rss is not None:
                     peak_rss = max(peak_rss or 0, rss)
-                if inject_crash and not crashed and time.monotonic() >= crash_at:
+                # Only kill AFTER an actual explosion packet is seen, not
+                # during startup or idle warmup (important for 100 TNT).
+                if inject_crash and not crashed and any(
+                    item.explosion_packets for item in clients
+                ):
                     for item in clients:
+                        captured_packets += item.packets
+                        observed_explosions += item.explosion_packets
+                        observed_teleports += item.entity_teleports
                         item.close()
                     clients.clear()
                     child.kill()  # Deliberately simulate process termination.
@@ -146,7 +155,11 @@ def run_profile(server: Path, output: Path, count: int, duration: float,
                         raise RuntimeError(client.failure or "reconnect after crash timed out")
                     crashed = True
                 time.sleep(min(0.2, max(0, deadline - time.monotonic())))
-            packet_count = sum(item.packets for item in clients)
+            if inject_crash and not crashed:
+                raise RuntimeError("no explosion packet observed; crash test was not exercised")
+            packet_count = captured_packets + sum(item.packets for item in clients)
+            explosions = observed_explosions + sum(item.explosion_packets for item in clients)
+            teleports = observed_teleports + sum(item.entity_teleports for item in clients)
             keepalives = sum(item.keepalives for item in clients)
             for item in clients:
                 item.close()
@@ -178,7 +191,8 @@ def run_profile(server: Path, output: Path, count: int, duration: float,
         "after_format": after[0], "remaining_tnt": after[1],
         "crash_remaining_tnt": crashed_remaining,
         "process_kill_restart_verified": crashed,
-        "client_packets": packet_count, "keepalives": keepalives,
+        "client_packets": packet_count, "explosion_packets": explosions,
+        "entity_teleports": teleports, "keepalives": keepalives,
         "peak_rss_bytes_linux": peak_rss, "elapsed_seconds": duration,
         "world_file_bytes": world.stat().st_size,
     })
@@ -203,8 +217,8 @@ def main() -> int:
         parser.error("--counts must contain comma-separated integers")
     if not counts or len(counts) != len(set(counts)) or any(v not in PROFILES for v in counts):
         parser.error(f"--counts must be unique entries from {PROFILES}")
-    if not math.isfinite(args.seconds) or not 5 <= args.seconds <= 3600:
-        parser.error("--seconds must be between 5 and 3600")
+    if not math.isfinite(args.seconds) or not 15 <= args.seconds <= 3600:
+        parser.error("--seconds must be between 15 and 3600")
     server = args.server.resolve(strict=True)
     if not server.is_file():
         parser.error("--server must be a compiled Rust server")
