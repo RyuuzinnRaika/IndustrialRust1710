@@ -515,7 +515,10 @@ fn native_1710_minecart_checkpoint_keeps_survival_session_and_movement_alive() {
     server.wait_idle();
 
     let (rejoined, _, saved) = server.join("Positioner");
-    assert_eq!(saved[0], 1.5, "movement after the minecart checkpoint was lost");
+    assert_eq!(
+        saved[0], 1.5,
+        "movement after the minecart checkpoint was lost"
+    );
     assert_eq!(saved[2], 0.5);
     drop(rejoined);
     server.wait_idle();
