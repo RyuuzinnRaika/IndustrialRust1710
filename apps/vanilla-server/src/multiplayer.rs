@@ -32,6 +32,8 @@ pub const ADMIN_CLEAR_EVENT: u32 = u32::MAX - 8;
 /// Target session receives effect changes; console/network never mutates it.
 pub const ADMIN_EFFECT_EVENT: u32 = u32::MAX - 9;
 pub const ADMIN_ENCHANT_EVENT: u32 = u32::MAX - 10;
+/// Session-owned persisted /spawnpoint change (not a wire packet).
+pub const ADMIN_SPAWNPOINT_EVENT: u32 = u32::MAX - 11;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -334,6 +336,42 @@ impl Hub {
         } else {
             Ok(false)
         }
+    }
+
+    /// Queue an Overworld-only per-player respawn point to the target's owning
+    /// session. The mailbox contains just block coordinates, never file paths.
+    pub fn request_admin_spawnpoint(
+        &self,
+        target: &str,
+        point: crate::spawnpoint::Spawnpoint,
+    ) -> io::Result<bool> {
+        let (x, y, z) = point.coords();
+        let mut body = Vec::with_capacity(12);
+        body.extend_from_slice(&x.to_be_bytes());
+        body.extend_from_slice(&y.to_be_bytes());
+        body.extend_from_slice(&z.to_be_bytes());
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(peer) = inner
+            .players
+            .values()
+            .find(|p| p.name.eq_ignore_ascii_case(target))
+        else {
+            return Ok(false);
+        };
+        if peer.dimension != Dimension::Overworld {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "spawnpoint target must be in the Overworld",
+            ));
+        }
+        enqueue(
+            peer,
+            &Event {
+                id: ADMIN_SPAWNPOINT_EVENT,
+                body,
+            },
+        );
+        Ok(true)
     }
 
     /// UUID attached to the currently admitted peer. Caller must ensure the
