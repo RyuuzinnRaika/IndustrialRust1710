@@ -3014,7 +3014,10 @@ mod tests {
         assert_eq!(inv.slots[36].unwrap().count, 64);
         let before = inv.clone();
         assert_eq!(inv.receive_stack_partial(Stack { count: 4, ..apple }), None);
-        assert_eq!(inv, before, "full inventory must never consume ground items");
+        assert_eq!(
+            inv, before,
+            "full inventory must never consume ground items"
+        );
         inv.slots[9] = None;
         assert_eq!(
             inv.receive_stack_partial(Stack { count: 4, ..apple }),
