@@ -1097,10 +1097,8 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     open.extend_from_slice(&[8, 8, 8]);
     alice.write_all(&frame(8, &open)).unwrap();
     let opened = until_packet(&mut alice, 0x2d, |p| p.first() == Some(&1));
-    assert_eq!(opened.last(), Some(&3));
-    assert!(opened
-        .windows(b"minecraft:furnace".len())
-        .any(|s| s == b"minecraft:furnace"));
+    // 1.7.10 Open Window: id, numeric type 2, UTF-8 title, slots, title flag.
+    assert_eq!(opened, [1, 2, 7, b'F', b'u', b'r', b'n', b'a', b'c', b'e', 3, 1]);
     until_packet(&mut alice, 0x30, |p| p.starts_with(&[1, 0, 39]));
     for property in 0..3u8 {
         until_packet(&mut alice, 0x31, |p| {
