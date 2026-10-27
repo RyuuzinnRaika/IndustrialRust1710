@@ -28,6 +28,19 @@ class SeededTntTest(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 seed_irw(target, 100)
 
+    def test_tnt4_kinematic_trailer_count(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root) / "world.irw"
+            seed_irw(target, 100)
+            old = target.read_bytes()
+            expanded = bytearray(old[:8] + b"TNT4" + old[12:14])
+            for i in range(100):
+                expanded += old[14 + 20 * i:14 + 20 * (i + 1)]
+                expanded += bytes(24)  # three positions and three velocities
+            expanded += bytes(8)  # empty chain + blast queues
+            target.write_bytes(expanded)
+            self.assertEqual(tnt_snapshot_count(target), ("TNT4", 100))
+
     def test_corrupted_or_unsupported_trailer_fails_closed(self):
         with tempfile.TemporaryDirectory() as root:
             target = Path(root) / "world.irw"
