@@ -151,7 +151,7 @@ class SyntheticClient:
         # Remain within a tiny bounded square; we are testing protocol/TPS,
         # not world exploration or game-play AI. C04 carries feet and stance.
         dx = 0.02 if iteration % 2 else 0.0
-        payload = struct.pack(">ddddB", x + dx, y + 1.62, y, z, 1)
+        payload = struct.pack(">ddddB", x + dx, y, y + 1.62, z, 1)
         self.send(4, payload)
 
     def close(self) -> None:

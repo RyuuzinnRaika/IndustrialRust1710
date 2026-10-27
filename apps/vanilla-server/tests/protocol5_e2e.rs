@@ -308,11 +308,25 @@ fn await_file(path: &Path) {
 }
 fn send_position(s: &mut TcpStream, x: f64, y: f64, z: f64) {
     let mut data = Vec::new();
-    for v in [x, y + 1.62, y, z] {
+    // C04: X, feet Y, stance (eye height), Z, onGround.
+    // Match the 1.7.10 client instead of mirroring a server-side decoder bug.
+    for v in [x, y, y + 1.62, z] {
         data.extend_from_slice(&v.to_be_bytes());
     }
     data.push(1);
     s.write_all(&frame(4, &data)).unwrap();
+}
+
+fn send_position_and_look(s: &mut TcpStream, x: f64, y: f64, z: f64) {
+    let mut data = Vec::new();
+    // C06 uses the same double order as C04, followed by yaw and pitch.
+    for v in [x, y, y + 1.62, z] {
+        data.extend_from_slice(&v.to_be_bytes());
+    }
+    data.extend_from_slice(&90.0_f32.to_be_bytes());
+    data.extend_from_slice(&0.0_f32.to_be_bytes());
+    data.push(1);
+    s.write_all(&frame(6, &data)).unwrap();
 }
 fn send_fragments(s: &mut TcpStream, packet: &[u8], pieces: &[usize]) {
     let mut index = 0;
@@ -472,6 +486,32 @@ fn console_gamemode_changes_live_protocol5_and_keeps_inventories_isolated() {
     assert_eq!(joined[6], 3, "new Join Game must contain Hard difficulty");
     drop(second);
     drop(client);
+    server.wait_idle();
+}
+
+#[test]
+fn native_1710_c04_c06_use_feet_y_not_eye_height() {
+    let server = NativeServer::start();
+    let (mut client, _, initial) = server.join("Positioner");
+    assert_eq!(initial, [0.5, 65.0, 0.5]);
+
+    // Real 1.7.10 C04 and C06 both put feet Y *before* stance (Y + 1.62).
+    // A decoder that swaps these fields incorrectly persists eye height as
+    // player position, causing collision rejection / rubber-banding.
+    send_position(&mut client, 1.5, 65.0, 0.5);
+    send_position_and_look(&mut client, 2.5, 65.0, 0.5);
+
+    // Chat is processed after both position frames on this TCP session.
+    client.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    until_packet(&mut client, 2, |body| {
+        body.windows(10).any(|window| window == b"Online (1)")
+    });
+    drop(client);
+    server.wait_idle();
+
+    let (rejoined, _, restored) = server.join("Positioner");
+    assert_eq!(restored, [2.5, 65.0, 0.5], "feet Y must survive the save");
+    drop(rejoined);
     server.wait_idle();
 }
 
