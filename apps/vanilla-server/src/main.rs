@@ -930,25 +930,29 @@ fn food_journal_path(world_path: &Path, player_path: &Path) -> io::Result<PathBu
 /// recoverable redo generation. Never swap live state or send client packets
 /// until both files have been committed. Journal replay resolves interrupted
 /// file replacement before the next player session is admitted.
-fn commit_food_consumption(
-    world_path: &Path,
-    player_path: &Path,
-    inventory_path: &Path,
-    player: &PlayerPosition,
+struct FoodSave<'a> {
+    world_path: &'a Path,
+    player_path: &'a Path,
+    inventory_path: &'a Path,
+    player: &'a PlayerPosition,
     dimension: i32,
+}
+
+fn commit_food_consumption(
+    save: FoodSave<'_>,
     inventory: &mut Inventory,
     vitals: &mut Vitals,
     staged_inventory: Inventory,
     staged_vitals: Vitals,
 ) -> io::Result<()> {
     let inventory_bytes = staged_inventory.encoded()?;
-    let player_bytes = player.encoded_state_in_dimension(staged_vitals, dimension)?;
-    let log_path = food_journal_path(world_path, player_path)?;
+    let player_bytes = save.player.encoded_state_in_dimension(staged_vitals, save.dimension)?;
+    let log_path = food_journal_path(save.world_path, save.player_path)?;
     journal::commit(
         &log_path,
         &[
-            (inventory_path, inventory_bytes),
-            (player_path, player_bytes),
+            (save.inventory_path, inventory_bytes),
+            (save.player_path, player_bytes),
         ],
     )?;
     *inventory = staged_inventory;
@@ -1973,11 +1977,13 @@ fn play(
                                         (after.health - 6.0 * f32::from(amplifier + 1)).max(0.0);
                                 }
                                 commit_food_consumption(
-                                    world_path,
-                                    player_path,
-                                    inventory_path,
-                                    player,
-                                    session_dimension.protocol_id() as i32,
+                                    FoodSave {
+                                        world_path,
+                                        player_path,
+                                        inventory_path,
+                                        player,
+                                        dimension: session_dimension.protocol_id() as i32,
+                                    },
                                     inventory,
                                     vitals,
                                     remaining,
@@ -2050,11 +2056,13 @@ fn play(
                                     // Food debit, returned bowl and Health/Food NBT
                                     // must commit in one durable redo generation.
                                     commit_food_consumption(
-                                        world_path,
-                                        player_path,
-                                        inventory_path,
-                                        player,
-                                        session_dimension.protocol_id() as i32,
+                                        FoodSave {
+                                            world_path,
+                                            player_path,
+                                            inventory_path,
+                                            player,
+                                            dimension: session_dimension.protocol_id() as i32,
+                                        },
                                         inventory,
                                         vitals,
                                         remaining,
@@ -9354,9 +9362,11 @@ mod survival_food_journal_tests {
         let player_path = PlayerPosition::location(&world, "RustTester");
         let inventory_path = Inventory::location(&player_path);
         let player = PlayerPosition::default();
-        let mut vitals = Vitals::default();
-        vitals.food = 10;
-        vitals.saturation = 1.0;
+        let mut vitals = Vitals {
+            food: 10,
+            saturation: 1.0,
+            ..Vitals::default()
+        };
         player
             .save_state_in_dimension(&player_path, vitals, -1)
             .unwrap();
@@ -9380,11 +9390,13 @@ mod survival_food_journal_tests {
             nbt: None,
         }));
         commit_food_consumption(
-            &world,
-            &player_path,
-            &inventory_path,
-            &player,
-            -1,
+            FoodSave {
+                world_path: &world,
+                player_path: &player_path,
+                inventory_path: &inventory_path,
+                player: &player,
+                dimension: -1,
+            },
             &mut inventory,
             &mut vitals,
             after_inv.clone(),
@@ -9406,11 +9418,13 @@ mod survival_food_journal_tests {
         let before_vitals = vitals;
         let bad_player = root.join("level.dat");
         let fail = commit_food_consumption(
-            &world,
-            &bad_player,
-            &inventory_path,
-            &player,
-            -1,
+            FoodSave {
+                world_path: &world,
+                player_path: &bad_player,
+                inventory_path: &inventory_path,
+                player: &player,
+                dimension: -1,
+            },
             &mut inventory,
             &mut vitals,
             after_inv,
