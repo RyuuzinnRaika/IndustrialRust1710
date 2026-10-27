@@ -2789,3 +2789,36 @@ fn survival_mob_feed_consumes_food_and_attack_wears_sword() {
     drop(rejoined);
     server.wait_idle();
 }
+
+#[test]
+fn tab_complete_protocol5_returns_public_commands_and_online_player_names() {
+    let server = NativeServer::start();
+    let (mut player, _, _) = server.join("RustTester");
+    // Vanilla 1.7.10 C14 contains exactly one String, no Brigadier request ID.
+    let read_completions = |socket: &mut TcpStream, query: &str| -> Vec<String> {
+        socket.write_all(&frame(0x14, &mc_string(query))).unwrap();
+        let payload = until_packet(socket, 0x3a, |_| true);
+        let mut cursor = Cursor::new(&payload);
+        let count = cursor.read_varint().unwrap();
+        assert!((0..=32).contains(&count));
+        let completions = (0..count)
+            .map(|_| cursor.read_string(64).unwrap().to_owned())
+            .collect::<Vec<_>>();
+        cursor.finish().unwrap();
+        completions
+    };
+    assert_eq!(read_completions(&mut player, "/te"), vec!["/tell"]);
+    assert!(read_completions(&mut player, "/gi").is_empty());
+    assert!(read_completions(&mut player, "/op").is_empty());
+    assert!(read_completions(&mut player, "/help ").is_empty());
+    assert_eq!(read_completions(&mut player, "/tell Rus"), vec!["RustTester"]);
+    assert_eq!(read_completions(&mut player, "/msg Pos"), Vec::<String>::new());
+    // A second player appears in the real Hub names list.
+    let (other, _, _) = server.join("Positioner");
+    assert_eq!(
+        read_completions(&mut player, "/msg Pos"),
+        vec!["Positioner"]
+    );
+    drop(other);
+    drop(player);
+}
