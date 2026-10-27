@@ -93,6 +93,37 @@ impl World {
             .take(4)
             .copied()
             .collect();
+        // Distinguish explosion-induced TNT from redstone ignition before
+        // removing detonated entities. Vanilla 1.7.10 gives chain TNT a
+        // shortened fuse, while redstone-lit TNT retains the full 80 ticks.
+        // Use a stable position/tick hash, not a global RNG, so a persisted
+        // world produces reproducible fuse deadlines after recovery.
+        let chain_fuse = |pos: (i32, i32, i32)| -> Option<u64> {
+            let in_blast = expired.iter().any(|tnt| {
+                let (dx, dy, dz) = (
+                    i64::from(pos.0) - i64::from(tnt.pos.0),
+                    i64::from(pos.1) - i64::from(tnt.pos.1),
+                    i64::from(pos.2) - i64::from(tnt.pos.2),
+                );
+                dx * dx + dy * dy + dz * dz <= 9
+            });
+            if !in_blast {
+                return None;
+            }
+            let mut seed = self.fluid_phase
+                ^ (pos.0 as u32 as u64).wrapping_mul(0x9E3779B185EBCA87)
+                ^ (pos.1 as u32 as u64).wrapping_mul(0xC2B2AE3D27D4EB4F)
+                ^ (pos.2 as u32 as u64).wrapping_mul(0x165667B19E3779F9);
+            seed ^= seed >> 30;
+            seed = seed.wrapping_mul(0xBF58476D1CE4E5B9);
+            seed ^= seed >> 27;
+            seed = seed.wrapping_mul(0x94D049BB133111EB);
+            Some(10 + ((seed ^ (seed >> 31)) % 20))
+        };
+        let primed_fuses: Vec<_> = newly_primed
+            .iter()
+            .map(|&pos| (pos, chain_fuse(pos).unwrap_or(80)))
+            .collect();
         for tnt in expired {
             self.primed_tnt.remove(&tnt.entity_id);
             self.tnt_events.push(TntEvent::Explode {
@@ -100,8 +131,8 @@ impl World {
                 pos: tnt.pos,
             });
         }
-        for &(x, y, z) in newly_primed {
-            self.spawn_primed_tnt(x, y, z, 25);
+        for ((x, y, z), fuse) in primed_fuses {
+            self.spawn_primed_tnt(x, y, z, fuse);
         }
     }
 
@@ -802,6 +833,21 @@ mod tests {
             .iter()
             .any(|event| { matches!(event, TntEvent::Explode { .. }) }));
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn chain_tnt_has_shortened_fuse_and_redstone_keeps_eighty_ticks() {
+        let mut w = World::new();
+        w.fluid_phase = 100;
+        w.spawn_primed_tnt(0, 80, 0, 1);
+        w.drain_tnt_events();
+        w.fluid_phase = 101;
+        w.finalize_tnt(&[(1, 80, 0), (20, 80, 0)]);
+        let near = w.primed_tnt.values().find(|t| t.pos == (1, 80, 0)).unwrap();
+        let far = w.primed_tnt.values().find(|t| t.pos == (20, 80, 0)).unwrap();
+        assert!((10..=29).contains(&(near.explode_at - w.fluid_phase)));
+        assert_eq!(far.explode_at - w.fluid_phase, 80);
+        assert_eq!(w.drain_tnt_events().iter().filter(|e| matches!(e, TntEvent::Explode { .. })).count(), 1);
     }
 
     #[test]
