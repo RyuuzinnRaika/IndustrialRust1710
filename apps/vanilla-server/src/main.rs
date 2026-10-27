@@ -2051,14 +2051,10 @@ fn play(
                 );
                 // Save once per blast, not once per destroyed block. Publish
                 // no block updates or explosion graphics before durable state.
-                let changed =
-                    w.creeper_blast_and_save(world_path, center, explosion.radius)?;
+                let changed = w.creeper_blast_and_save(world_path, center, explosion.radius)?;
                 hub.broadcast_in_view(explosion.position, explosion.packet());
                 for (x, y, z) in changed {
-                    hub.broadcast_in_view(
-                        explosion.position,
-                        block_change_event(&w, x, y, z),
-                    );
+                    hub.broadcast_in_view(explosion.position, block_change_event(&w, x, y, z));
                 }
             }
             drop(w);
