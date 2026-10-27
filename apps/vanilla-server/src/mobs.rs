@@ -6256,7 +6256,10 @@ mod tests {
             1
         );
         assert!(old.take_drops().is_empty());
-        assert!(old.tick(roll_tick + 1, &world, &[far]).iter().all(|event| event.id != 0x13));
+        assert!(old
+            .tick(roll_tick + 1, &world, &[far])
+            .iter()
+            .all(|event| event.id != 0x13));
     }
 
     #[test]
