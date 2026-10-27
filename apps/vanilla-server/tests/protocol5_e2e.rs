@@ -18,13 +18,7 @@ static SERVER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // Inspect the actual server TCP payload, not the shared encoder, to detect
 // 1.8+ strings/JSON titles accidentally sent to a 1.7.10 client.
-fn assert_open_window_protocol5(
-    body: &[u8],
-    window_id: u8,
-    kind: u8,
-    title: &str,
-    slots: u8,
-) {
+fn assert_open_window_protocol5(body: &[u8], window_id: u8, kind: u8, title: &str, slots: u8) {
     let mut expected = vec![window_id, kind, title.len() as u8];
     expected.extend_from_slice(title.as_bytes());
     expected.extend_from_slice(&[slots, 1]);
