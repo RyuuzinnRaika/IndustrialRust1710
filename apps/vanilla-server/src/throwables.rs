@@ -935,7 +935,9 @@ mod tests {
         let mut world = World::new();
         world.import_block(2, 70, 0, 1 << 4).unwrap();
         let mut objects = Throwables::default();
-        objects.launch_dispenser(262, (0, 70, 0), (1, 0, 0)).unwrap();
+        objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
         let targets = [(
             500_002,
             PlayerPosition {
