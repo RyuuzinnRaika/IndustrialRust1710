@@ -1048,5 +1048,4 @@ mod tests {
         assert!(impact.player_hits.is_empty());
         assert!(objects.active.values().next().unwrap().embedded);
     }
-
 }
