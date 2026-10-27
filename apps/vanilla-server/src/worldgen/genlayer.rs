@@ -12,6 +12,8 @@ mod add_snow;
 #[allow(dead_code)]
 mod biome;
 #[allow(dead_code)]
+mod deep_ocean;
+#[allow(dead_code)]
 mod edge;
 #[allow(dead_code)]
 mod island_zoom;
