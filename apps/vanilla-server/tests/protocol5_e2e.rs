@@ -15,6 +15,21 @@ const MAX_PACKETS: usize = 160;
 // These end-to-end tests reserve ephemeral ports before spawning binaries.
 // Serialize reservations and process lifetime to prevent cross-test port races.
 static SERVER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// Inspect the actual server TCP payload, not the shared encoder, to detect
+// 1.8+ strings/JSON titles accidentally sent to a 1.7.10 client.
+fn assert_open_window_protocol5(
+    body: &[u8],
+    window_id: u8,
+    kind: u8,
+    title: &str,
+    slots: u8,
+) {
+    let mut expected = vec![window_id, kind, title.len() as u8];
+    expected.extend_from_slice(title.as_bytes());
+    expected.extend_from_slice(&[slots, 1]);
+    assert_eq!(body, expected, "invalid 1.7.10 Open Window payload");
+}
 struct NativeServer {
     _exclusive_test_run: std::sync::MutexGuard<'static, ()>,
     process: Child,
@@ -927,9 +942,7 @@ fn native_protocol5_crafting_inventory_and_workbench_gui_roundtrip() {
     use_table.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &use_table)).unwrap();
     let opened = until_packet(&mut client, 0x2d, |p| p.first() == Some(&1));
-    assert!(opened
-        .windows("minecraft:crafting_table".len())
-        .any(|w| w == b"minecraft:crafting_table"));
+    assert_open_window_protocol5(&opened, 1, 1, "Crafting", 0);
     until_packet(&mut client, 0x30, |p| p.starts_with(&[1, 0, 46]));
     until_packet(&mut client, 0x2f, |p| p.starts_with(&[255, 255, 255]));
 
@@ -1006,8 +1019,7 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
     open.extend_from_slice(&[8, 8, 8]);
     alice.write_all(&frame(8, &open)).unwrap();
     let opened = until_packet(&mut alice, 0x2d, |p| p.first() == Some(&1));
-    assert_eq!(*opened.last().unwrap(), 27);
-    assert!(opened.windows(15).any(|part| part == b"minecraft:chest"));
+    assert_open_window_protocol5(&opened, 1, 0, "Chest", 27);
     until_packet(&mut alice, 0x30, |p| p.starts_with(&[1, 0, 63]));
     until_packet(&mut alice, 0x2f, |p| p.starts_with(&[255, 255, 255]));
 
@@ -1041,7 +1053,7 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
     let (mut bob, _, _) = server.join("TwinAlpha");
     bob.write_all(&frame(8, &open)).unwrap();
     let second = until_packet(&mut bob, 0x2d, |p| p.first() == Some(&1));
-    assert_eq!(*second.last().unwrap(), 27);
+    assert_open_window_protocol5(&second, 1, 0, "Chest", 27);
     let second_items = until_packet(&mut bob, 0x30, |p| p.starts_with(&[1, 0, 63]));
     assert_eq!(&second_items[3..10], &[0, 4, 5, 0, 0, 255, 255]);
     until_packet(&mut bob, 0x2f, |p| p.starts_with(&[255, 255, 255]));
@@ -1163,7 +1175,8 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     // A second viewer gets the existing result and current progress properties.
     let (mut bob, _, _) = server.join("TwinAlpha");
     bob.write_all(&frame(8, &open)).unwrap();
-    until_packet(&mut bob, 0x2d, |p| p.first() == Some(&1));
+    let second_window = until_packet(&mut bob, 0x2d, |p| p.first() == Some(&1));
+    assert_open_window_protocol5(&second_window, 1, 2, "Furnace", 3);
     let items = until_packet(&mut bob, 0x30, |p| p.starts_with(&[1, 0, 39]));
     assert!(items.windows(7).any(|s| s == [1, 9, 1, 0, 0, 255, 255]));
     for property in 0..3u8 {
