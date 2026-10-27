@@ -171,7 +171,16 @@ impl GroundItems {
         file.write_all(&data)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(temporary, path)
+        fs::rename(&temporary, path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "replace ground-item save {} from {}: {error}",
+                    path.display(),
+                    temporary.display()
+                ),
+            )
+        })
     }
     pub fn is_full(&self) -> bool {
         self.entries.len() >= MAX_DROPS || self.next_id == i32::MAX
