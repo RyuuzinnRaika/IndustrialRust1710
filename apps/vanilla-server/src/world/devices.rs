@@ -35,6 +35,17 @@ fn repeater_direction(meta: u16) -> (i32, i32) {
 
 /// Comparator compare mode preserves rear input only when it is at least
 /// the strongest side input. Subtract mode removes that side strength.
+/// Coordinates of the block to which a legacy redstone torch is attached.
+fn redstone_torch_support(x: i32, y: i32, z: i32, metadata: u16) -> (i32, i32, i32) {
+    match metadata & 7 {
+        1 => (x - 1, y, z),
+        2 => (x + 1, y, z),
+        3 => (x, y, z - 1),
+        4 => (x, y, z + 1),
+        _ => (x, y - 1, z),
+    }
+}
+
 fn comparator_strength(rear: u8, side: u8, subtract: bool) -> u8 {
     if subtract {
         rear.saturating_sub(side)
@@ -260,16 +271,9 @@ impl World {
             }
             147 | 148 | 151 => (block & 15) as u8,
             76 => {
-                // A redstone torch weakly powers every adjacent face except
-                // the block supporting it. Its strong output points up only.
-                let attached = match block & 7 {
-                    1 => (x - 1, y, z),
-                    2 => (x + 1, y, z),
-                    3 => (x, y, z - 1),
-                    4 => (x, y, z + 1),
-                    _ => (x, y - 1, z),
-                };
-                if to == attached {
+                // Torch activation is the inverse of the block it is
+                // attached to. The unlit block 75 emits no signal.
+                if to == redstone_torch_support(x, y, z, block) {
                     0
                 } else {
                     15
@@ -617,6 +621,32 @@ impl World {
             let y = i32::from(y);
             let current = self.get(x, y, z);
             match current >> 4 {
+                75 | 76 => {
+                    let pos = (x, y as u8, z);
+                    let support = redstone_torch_support(x, y, z, current);
+                    let should_light = !self.power_into(support, (x, y, z));
+                    let lit = current >> 4 == 76;
+                    if should_light == lit {
+                        self.pending_torches.remove(&pos);
+                    } else {
+                        // Redstone torches take one redstone tick (two game
+                        // ticks) to invert an updated attachment block.
+                        let entry = self
+                            .pending_torches
+                            .entry(pos)
+                            .or_insert((self.fluid_phase + 2, should_light));
+                        if entry.1 != should_light {
+                            *entry = (self.fluid_phase + 2, should_light);
+                        }
+                        if entry.0 <= self.fluid_phase {
+                            changes.insert(
+                                pos,
+                                ((if should_light { 76u16 } else { 75u16 }) << 4) | (current & 15),
+                            );
+                            self.pending_torches.remove(&pos);
+                        }
+                    }
+                }
                 93 | 94 => {
                     let (dx, dz) = repeater_direction(current);
                     let pos = (x, y as u8, z);
@@ -867,6 +897,81 @@ impl World {
 mod redstone_regression_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn torch_support_direction_matches_legacy_metadata() {
+        for (metadata, support) in [
+            (1u16, (-1, 64, 0)),
+            (2, (1, 64, 0)),
+            (3, (0, 64, -1)),
+            (4, (0, 64, 1)),
+            (5, (0, 63, 0)),
+        ] {
+            assert_eq!(redstone_torch_support(0, 64, 0, metadata), support);
+        }
+    }
+
+    #[test]
+    fn torch_inverts_powered_attachment_after_two_world_ticks() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-torch-invert-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        // Torch stands on a stone support. A lever fixed to its west face
+        // strongly powers that support, but not the torch itself.
+        world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
+        world
+            .update_and_save(&path, 0, 65, 0, (76 << 4) | 5)
+            .unwrap();
+        world
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 2)
+            .unwrap();
+        assert_eq!(world.signal_into((0, 65, 0), (1, 65, 0)), 15);
+        world
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 10)
+            .unwrap();
+        world.block_tick(&path, 64).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 65, 0) >> 4, 76);
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 65, 0), (75 << 4) | 5);
+        assert_eq!(world.signal_into((0, 65, 0), (1, 65, 0)), 0);
+        world
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 2)
+            .unwrap();
+        for _ in 0..3 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(0, 65, 0), (76 << 4) | 5);
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(0, 65, 0), (76 << 4) | 5);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn powered_support_below_dust_feeds_full_strength_without_a_side_wire() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-dust-vertical-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 64, 0, 152 << 4).unwrap();
+        world.update_and_save(&path, 0, 65, 0, 55 << 4).unwrap();
+        world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, 1, 65, 0, 55 << 4).unwrap();
+        world.update_and_save(&path, 2, 64, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, 2, 65, 0, 55 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 65, 0) & 15, 15);
+        world.block_tick(&path, 64).unwrap();
+        // The redstone block also strongly powers the adjacent support,
+        // so its first wire is directly energized at 15, not attenuated.
+        assert_eq!(world.get(1, 65, 0) & 15, 15);
+        for _ in 0..3 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(2, 65, 0) & 15, 14);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn redstone_dust_strongly_powers_its_support_but_not_side_blocks() {
