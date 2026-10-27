@@ -2571,16 +2571,28 @@ fn creative_mob_feed_and_attack_keep_items_and_award_kill_rewards() {
     let drops: Value =
         serde_json::from_slice(&fs::read(server.directory.join("flat.drops.json")).unwrap())
             .unwrap();
-    assert_eq!(drops["entries"].as_object().unwrap().len(), 1);
-    assert_eq!(
-        drops["entries"]
-            .as_object()
-            .unwrap()
-            .values()
-            .next()
-            .unwrap()["stack"]["id"],
-        363
-    );
+    // A killed adult cow may drop beef *and* a separate leather stack.
+    // Do not hide duplicate beef or unrelated drops behind a total count.
+    let entries = drops["entries"].as_object().unwrap();
+    let mut beef = 0;
+    let mut leather = 0;
+    for entry in entries.values() {
+        let stack = &entry["stack"];
+        let count = stack["count"].as_u64().unwrap();
+        match stack["id"].as_i64() {
+            Some(363) => {
+                beef += 1;
+                assert!((1..=3).contains(&count), "cow beef count out of range");
+            }
+            Some(334) => {
+                leather += 1;
+                assert!((1..=2).contains(&count), "cow leather count out of range");
+            }
+            other => panic!("unexpected cow death drop: {other:?}"),
+        }
+    }
+    assert_eq!(beef, 1, "cow must drop beef exactly once");
+    assert!(leather <= 1, "cow must not duplicate leather stacks");
     let mobs: Value =
         serde_json::from_slice(&fs::read(server.directory.join("flat.mobs.json")).unwrap())
             .unwrap();
