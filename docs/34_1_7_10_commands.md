@@ -125,6 +125,58 @@ These commands share the existing verified-OP level-2 gate and console audit log
 - Invalid or extra arguments are rejected. Tests cover both seeded and
   legacy flat worlds.
 
+## Roadmap items 05–07: world spawn, player gamerule, player difficulty (Draft)
+
+The following changes are implemented in a separate branch and **must not be
+reported as merged or validated** until Rust tests, local release build,
+native 1.7.10 sessions, and the prior item 04 are checked.
+
+### 05 `/setworldspawn [x y z]`
+
+- Present in Minecraft Java **1.7.2+**. `/setworldspawn` uses the verified
+  level-2 OP's current Overworld block location. `/setworldspawn x y z`
+  supports 1.7.10 `~` relative coordinates for in-game senders; console
+  needs three absolute coordinates.
+- No 1.16+ yaw argument or 1.13+ local `^` coordinates.
+- The world spawn is stored as an atomic, bounded `.worldspawn.json`
+  **IRW sidecar** beside the server's active world file; unlike native Anvil,
+  IRW has no writable `level.dat` spawn metadata yet. The original save
+  format remains unchanged.
+- Save completes before a Protocol 5 **S05 Spawn Position (0x05)** packet is
+  broadcast. New joins get the stored value, and default world-spawn
+  respawns use it when a safe surface is available. Missing values retain
+  legacy origin (0, surface, 0). Invalid/corrupt sidecars fail closed.
+- Invalid positions, other dimensions, and malformed console forms are
+  rejected. Existing explicit bed/command-spawn overrides are not changed.
+
+### 06 `/gamerule <name> [true|false]` (in-game verified OP)
+
+- OP level 2 can read/change the same authoritative rules as the host console:
+  `doDaylightCycle`, `keepInventory`, `doMobSpawning`.
+- Not-yet-implemented legacy rules are rejected rather than advertised as
+  working. Only exact `true`/`false` accepted.
+- Uses the same file-backed mutation helper as console; writes to disk
+  before publishing the shared state, including the live daylight clock.
+
+### 07 `/difficulty <0|1|2|3|peaceful|easy|normal|hard>`
+
+- OP level 2 uses the same bounds, durable override, Mob lock and AtomicU8
+  update as the console. Hardcore remains hard (3).
+- Tick-side Vitals and Mob logic consult the live difficulty; on Protocol 5
+  the difficulty in S01 Join Game and S07 Respawn reflects it on new
+  join/respawn, not via an invented 1.8+ packet.
+- `/difficulty query` is a host-console maintenance extension only, not
+  advertised as a vanilla 1.7.10 client command.
+
+Manual acceptance: restart and confirm each setting persists; compare
+console and verified in-game OP behavior; test permission-denied in
+offline-mode; reject malformed arguments, unknown gamerules, and non-finite
+spawn coordinates; verify S05 spawn packets, compass behavior and survival
+respawn with no bed; check hardcore lock and live Mob changes.
+
+Sources: https://mcasset.cloud/1.7.10-pre4/assets/minecraft/lang/en_US.lang
+and https://minecraft.wiki/w/Commands/setworldspawn
+
 ## Roadmap item 04: /spawnpoint (implementation PR; validation pending)
 
 - Legacy 1.7.10 forms: `/spawnpoint`, `/spawnpoint <player>`,

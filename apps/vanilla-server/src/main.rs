@@ -73,6 +73,7 @@ mod whitelist;
 mod window_open;
 mod workstations;
 mod world;
+mod world_spawn;
 mod worldgen;
 
 use achievements::Achievements;
@@ -477,6 +478,7 @@ fn primed_tnt_teleport_body(entity_id: i32, position_fp: [i32; 3]) -> Vec<u8> {
 fn join(
     s: &mut Connection,
     world: &Mutex<World>,
+    root_world_path: &Path,
     clock: &Clock,
     entity_id: i32,
     initial: InitialPlayer<'_>,
@@ -512,16 +514,11 @@ fn join(
     abilities.extend_from_slice(&0.1f32.to_be_bytes());
     send(s, 0x39, &abilities)?;
 
-    let mut spawn = Vec::new();
-    let surface = world
-        .lock()
-        .map_err(|_| bad("world mutex poisoned"))?
-        .spawn_y() as i32
-        - 1;
-    for coordinate in [0i32, surface, 0] {
-        spawn.extend_from_slice(&coordinate.to_be_bytes());
-    }
-    send(s, 0x05, &spawn)?;
+    let spawn = {
+        let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        world_spawn::effective(root_world_path, &state)?
+    };
+    send(s, 0x05, &spawn.packet())?;
     send(s, 0x06, &health_packet(vitals))?;
     let mut time = Vec::new();
     time.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
@@ -565,12 +562,9 @@ fn join(
     Ok(())
 }
 
-fn safe_spawn(world: &Mutex<World>) -> io::Result<PlayerPosition> {
-    let y = world
-        .lock()
-        .map_err(|_| bad("world mutex poisoned"))?
-        .spawn_y();
-    Ok(PlayerPosition { x: 0.5, y, z: 0.5 })
+fn safe_spawn(world: &Mutex<World>, root_world_path: &Path) -> io::Result<PlayerPosition> {
+    let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+    world_spawn::player_spawn(root_world_path, &state)
 }
 fn chunk_center(player: &PlayerPosition) -> (i32, i32) {
     (
@@ -1167,6 +1161,7 @@ struct PlayerSession<'a> {
     game_rules: &'a Mutex<GameRules>,
     scoreboard: &'a Mutex<Scoreboard>,
     scoreboard_path: &'a Path,
+    root_world_path: &'a Path,
     hub: &'a Hub,
     entity_id: i32,
     events: &'a Receiver<Event>,
@@ -1318,6 +1313,7 @@ fn play(
         game_rules,
         scoreboard,
         scoreboard_path,
+        root_world_path,
         hub,
         entity_id,
         events,
@@ -3140,7 +3136,7 @@ fn play(
                         Err(usage) => as_chat(s, usage)?,
                         Ok(PublicCommand::Help) => as_chat(
                             s,
-                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /enchant, /testforblock, /seed, /spawnpoint, /time, /weather, /kick, /ban, /save.",
+                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /enchant, /testforblock, /seed, /spawnpoint, /setworldspawn, /gamerule, /difficulty, /time, /weather, /kick, /ban, /save.",
                         )?,
                         Ok(PublicCommand::List) => as_chat(
                             s,
@@ -3186,6 +3182,9 @@ fn play(
                         hardcore,
                         dimension: *session_dimension,
                         mobs,
+                        root_world_path,
+                        game_rules,
+                        difficulty_state: difficulty,
                     };
                     let result = run_player_admin_command(
                         &message,
@@ -6060,7 +6059,7 @@ fn play(
                         world
                     };
                     let origin = {
-                        let fallback = safe_spawn(respawn_world)?;
+                        let fallback = safe_spawn(respawn_world, root_world_path)?;
                         if let Some(point) = spawnpoint::load(player_path)? {
                             let guard = respawn_world
                                 .lock()
@@ -6516,7 +6515,7 @@ fn handle(
         return Ok(());
     }
     if !player_file.exists() && !player_file.with_extension("json").exists() {
-        player_state = safe_spawn(&world)?;
+        player_state = safe_spawn(&world, path.as_path())?;
     }
     // Separate survival resources from old Creative inventories to prevent
     // player-selected Creative stacks becoming free Survival items.
@@ -6587,6 +6586,7 @@ fn handle(
     if let Err(error) = join(
         &mut s,
         &world,
+        path.as_path(),
         &clock,
         entity_id,
         InitialPlayer {
@@ -6734,6 +6734,7 @@ fn handle(
             game_rules: &game_rules,
             scoreboard: &scoreboard,
             scoreboard_path: &scoreboard_path,
+            root_world_path: path.as_path(),
             hub: &hub,
             entity_id,
             events: &events,
@@ -6792,6 +6793,78 @@ fn handle(
     achievements_saved?;
     result.map_err(|error| io::Error::new(error.kind(), format!("active play session: {error}")))
 }
+/// One implementation for console and verified-OP gamerule changes. Query
+/// never writes; mutations become live only after the sidecar has been saved.
+fn command_gamerule(
+    rules: &Mutex<GameRules>,
+    rules_path: &Path,
+    clock: &Clock,
+    key: &str,
+    value: Option<&str>,
+) -> io::Result<String> {
+    let mut current = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
+    if let Some(value) = value {
+        let enabled = match value {
+            "true" => true,
+            "false" => false,
+            _ => return Err(bad("gamerule value must be true or false")),
+        };
+        let mut candidate = *current;
+        candidate.set(key, enabled)?;
+        candidate.save(rules_path)?;
+        *current = candidate;
+        if key == "doDaylightCycle" {
+            clock.set_daylight_cycle(enabled);
+        }
+        Ok(format!("{key} = {enabled}"))
+    } else {
+        let value = current.get(key).ok_or_else(|| bad("unsupported game rule"))?;
+        Ok(format!("{key} = {value}"))
+    }
+}
+
+/// Difficulty takes the Mob lock before writing the durable override. A
+/// command cannot publish a new gameplay difficulty if the disk write fails.
+fn command_difficulty(
+    mobs: &Mutex<Mobs>,
+    state: &AtomicU8,
+    difficulty_path: &Path,
+    hardcore: bool,
+    requested: &str,
+) -> io::Result<u8> {
+    let next = admin_state::parse_difficulty(requested)?;
+    if hardcore && next != 3 {
+        return Err(bad("hardcore difficulty must remain hard (3)"));
+    }
+    let mut mobs = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+    admin_state::write(difficulty_path, next, 3)?;
+    mobs.set_difficulty(next);
+    state.store(next, Ordering::Release);
+    Ok(next)
+}
+
+/// Server-wide spawn position uses the same authoritative 1.7.10 S05 packet
+/// for joining clients and currently connected clients (compass update).
+fn command_setworldspawn(
+    world: &Mutex<World>,
+    root_world_path: &Path,
+    hub: &Hub,
+    point: world_spawn::WorldSpawn,
+) -> io::Result<String> {
+    let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+    if guard.dimension() != dimensions::Dimension::Overworld {
+        return Err(bad("world spawn must be set in Overworld"));
+    }
+    world_spawn::save(root_world_path, point)?;
+    drop(guard);
+    hub.broadcast(Event {
+        id: 0x05,
+        body: point.packet(),
+    });
+    let (x, y, z) = point.coordinates();
+    Ok(format!("World spawn set to {x} {y} {z}"))
+}
+
 /// Services required to execute a level-gated in-game administrative command.
 struct PlayerAdminServices<'a> {
     hub: &'a Hub,
@@ -6802,6 +6875,9 @@ struct PlayerAdminServices<'a> {
     hardcore: bool,
     dimension: dimensions::Dimension,
     mobs: &'a Mutex<Mobs>,
+    root_world_path: &'a Path,
+    game_rules: &'a Mutex<GameRules>,
+    difficulty_state: &'a AtomicU8,
 }
 /// Authorization is based exclusively on the Mojang-verified session UUID.
 fn run_player_admin_command(
@@ -6819,6 +6895,9 @@ fn run_player_admin_command(
         hardcore,
         dimension,
         mobs,
+        root_world_path,
+        game_rules,
+        difficulty_state,
     } = services;
     let parts: Vec<&str> = message.split_whitespace().collect();
     let minimum_level = match parts.first().copied() {
@@ -6835,7 +6914,10 @@ fn run_player_admin_command(
         | Some("/enchant")
         | Some("/testforblock")
         | Some("/seed")
-        | Some("/spawnpoint") => 2,
+        | Some("/spawnpoint")
+        | Some("/setworldspawn")
+        | Some("/gamerule")
+        | Some("/difficulty") => 2,
         Some("/kick") | Some("/ban") | Some("/pardon") | Some("/pardon-uuid") | Some("/ban-ip")
         | Some("/pardon-ip") => 3,
         Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
@@ -6872,6 +6954,44 @@ fn run_player_admin_command(
                 return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
             }
             Ok(format!("Spawnpoint update queued for {target}"))
+        }
+        ["/setworldspawn"] | ["/setworldspawn", _, _, _] => {
+            if *dimension != dimensions::Dimension::Overworld {
+                return Err(bad("world spawn must be set from Overworld"));
+            }
+            let origin = hub
+                .player_position(actor)?
+                .ok_or_else(|| bad("actor not online"))?;
+            let point = if parts.len() == 1 {
+                world_spawn::WorldSpawn::from_position(origin)?
+            } else {
+                commands::setworldspawn_args(&parts[1..], Some(origin))?
+            };
+            command_setworldspawn(world, root_world_path, hub, point)
+        }
+        ["/gamerule", key] => command_gamerule(
+            game_rules,
+            &GameRules::location(root_world_path),
+            clock,
+            key,
+            None,
+        ),
+        ["/gamerule", key, value] => command_gamerule(
+            game_rules,
+            &GameRules::location(root_world_path),
+            clock,
+            key,
+            Some(value),
+        ),
+        ["/difficulty", requested] => {
+            let next = command_difficulty(
+                mobs,
+                difficulty_state,
+                &root_world_path.with_extension("difficulty"),
+                *hardcore,
+                requested,
+            )?;
+            Ok(format!("Difficulty set to {next}"))
         }
         ["/enchant", target, enchant, rest @ ..] if rest.len() <= 1 => {
             let (id, level) = commands::enchant_args(enchant, rest.first().copied())?;
@@ -7189,7 +7309,7 @@ fn start_clock_console(
             }
             let result: io::Result<()> = match args.as_slice() {
                 ["/help"] | ["/?"] => {
-                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /seed /spawnpoint /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /seed /spawnpoint /setworldspawn /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
                     Ok(())
                 }
                 ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
@@ -7238,6 +7358,14 @@ fn start_clock_console(
                         return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
                     }
                     println!("Spawnpoint update queued for {target}");
+                    Ok(())
+                })(),
+                ["/setworldspawn", x, y, z] => (|| -> io::Result<()> {
+                    let point = commands::setworldspawn_args(&[x, y, z], None)?;
+                    println!(
+                        "{}",
+                        command_setworldspawn(&world, &world_path, &hub, point)?
+                    );
                     Ok(())
                 })(),
                 ["/enchant", target, enchant, rest @ ..] if rest.len() <= 1 => {
@@ -7364,40 +7492,27 @@ fn start_clock_console(
                     Ok(())
                 }
                 ["/difficulty", requested] => (|| -> io::Result<()> {
-                    let next = admin_state::parse_difficulty(requested)?;
-                    if hardcore && next != 3 {
-                        return Err(bad("hardcore difficulty must remain hard (3)"));
-                    }
-                    // Do not publish the change until its restart override is
-                    // durable and the mob state is ready to observe it.
-                    let mut state = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
-                    admin_state::write(&difficulty_path, next, 3)?;
-                    state.set_difficulty(next);
-                    difficulty_state.store(next, Ordering::Release);
-                    println!("Difficulty set to {next} (new joins/respawns see updated setting)");
+                    let next = command_difficulty(
+                        &mobs,
+                        &difficulty_state,
+                        &difficulty_path,
+                        hardcore,
+                        requested,
+                    )?;
+                    println!(
+                        "Difficulty set to {next} (new joins/respawns see updated setting)"
+                    );
                     Ok(())
                 })(),
                 ["/gamerule", key] => (|| -> io::Result<()> {
-                    let rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
-                    let value = rules.get(key).ok_or_else(|| bad("unsupported game rule"))?;
-                    println!("{key} = {value}");
+                    println!("{}", command_gamerule(&rules, &rules_path, &clock, key, None)?);
                     Ok(())
                 })(),
                 ["/gamerule", key, value] => (|| -> io::Result<()> {
-                    let value = match *value {
-                        "true" => true,
-                        "false" => false,
-                        _ => return Err(bad("gamerule value must be true or false")),
-                    };
-                    let mut rules = rules.lock().map_err(|_| bad("game rules mutex poisoned"))?;
-                    let mut candidate = *rules;
-                    candidate.set(key, value)?;
-                    candidate.save(&rules_path)?;
-                    *rules = candidate;
-                    if *key == "doDaylightCycle" {
-                        clock.set_daylight_cycle(value);
-                    }
-                    println!("{key} = {value}");
+                    println!(
+                        "{}",
+                        command_gamerule(&rules, &rules_path, &clock, key, Some(value))?
+                    );
                     Ok(())
                 })(),
                 ["/scoreboard", operation @ ..] => (|| -> io::Result<()> {
@@ -10849,5 +10964,106 @@ mod primed_tnt_protocol5_tests {
         assert_eq!(encoded[0], 0x81); // entity ID starts as Protocol 5 VarInt
         assert_eq!(encoded[4], 50); // TNT object type
         assert_eq!(&encoded[5..9], &16i32.to_be_bytes());
+    }
+}
+
+#[cfg(test)]
+mod command_world_settings_tests {
+    use super::*;
+
+    #[test]
+    fn setworldspawn_commits_before_sending_protocol5_spawn_packet() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-command-worldspawn-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let world = Mutex::new(World::default());
+        let hub = Hub::default();
+        let (_, rx, _) = hub
+            .add("Tester".into(), "uuid".into(), PlayerPosition::default())
+            .unwrap();
+        let point = world_spawn::WorldSpawn::new(15, 64, -20).unwrap();
+        assert_eq!(
+            command_setworldspawn(&world, &path, &hub, point).unwrap(),
+            "World spawn set to 15 64 -20"
+        );
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.id, 0x05);
+        assert_eq!(event.body, point.packet());
+        assert_eq!(world_spawn::load(&path).unwrap(), Some(point));
+        assert_eq!(
+            safe_spawn(&world, &path).unwrap(),
+            PlayerPosition {
+                x: 15.5,
+                y: 64.0,
+                z: -19.5,
+            }
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gamerule_player_and_console_share_durable_validation() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-command-rules-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("rules.json");
+        let rules = Mutex::new(GameRules::default());
+        let (clock, clock_thread) = Clock::start_at(0);
+        assert_eq!(
+            command_gamerule(&rules, &file, &clock, "keepInventory", None).unwrap(),
+            "keepInventory = false"
+        );
+        assert!(command_gamerule(&rules, &file, &clock, "keepInventory", Some("1")).is_err());
+        assert!(command_gamerule(&rules, &file, &clock, "spawnRadius", Some("1")).is_err());
+        assert_eq!(
+            command_gamerule(&rules, &file, &clock, "keepInventory", Some("true")).unwrap(),
+            "keepInventory = true"
+        );
+        assert!(GameRules::load(&file).unwrap().keep_inventory());
+        assert_eq!(
+            command_gamerule(&rules, &file, &clock, "doDaylightCycle", Some("false")).unwrap(),
+            "doDaylightCycle = false"
+        );
+        assert!(!GameRules::load(&file).unwrap().daylight_cycle());
+        clock.stop();
+        clock_thread.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn difficulty_rejects_hardcore_downgrade_and_persists_before_publishing() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-command-difficulty-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let difficulty_path = root.join("difficulty");
+        let mobs_path = root.join("mobs.json");
+        let mobs = Mutex::new(
+            Mobs::load_or_new(&World::default(), true, 2, &mobs_path).unwrap(),
+        );
+        let state = AtomicU8::new(2);
+        assert!(command_difficulty(&mobs, &state, &difficulty_path, true, "easy").is_err());
+        assert_eq!(state.load(Ordering::Acquire), 2);
+        assert!(!difficulty_path.exists());
+        assert!(command_difficulty(&mobs, &state, &difficulty_path, false, "4").is_err());
+        assert_eq!(
+            command_difficulty(&mobs, &state, &difficulty_path, false, "hard").unwrap(),
+            3
+        );
+        assert_eq!(state.load(Ordering::Acquire), 3);
+        assert_eq!(admin_state::read(&difficulty_path, 3).unwrap(), Some(3));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
