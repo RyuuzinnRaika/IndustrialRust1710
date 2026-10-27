@@ -220,12 +220,22 @@ mod tests {
             }
             values
         };
-        assert_eq!(edge_map(42, 2, EdgeMode::CoolWarm, (0, 0, 1, 1), parent), [2]);
-        assert_eq!(edge_map(42, 2, EdgeMode::HeatIce, (4, 0, 1, 1), parent), [3]);
-        // Only diagonal warm land is present, so the cold cell stays cold.
-        assert_eq!(edge_map(42, 2, EdgeMode::HeatIce, (0, 4, 1, 1), parent), [4]);
         assert_eq!(
-            edge_map(42, 3, EdgeMode::Special, (10, 10, 1, 1), |_, _, _, _| vec![0]),
+            edge_map(42, 2, EdgeMode::CoolWarm, (0, 0, 1, 1), parent),
+            [2]
+        );
+        assert_eq!(
+            edge_map(42, 2, EdgeMode::HeatIce, (4, 0, 1, 1), parent),
+            [3]
+        );
+        // Only diagonal warm land is present, so the cold cell stays cold.
+        assert_eq!(
+            edge_map(42, 2, EdgeMode::HeatIce, (0, 4, 1, 1), parent),
+            [4]
+        );
+        let ocean_parent = |_, _, _, _| vec![0];
+        assert_eq!(
+            edge_map(42, 3, EdgeMode::Special, (10, 10, 1, 1), ocean_parent),
             [0]
         );
     }
