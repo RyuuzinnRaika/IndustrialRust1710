@@ -2693,7 +2693,12 @@ impl World {
             fs::create_dir_all(parent)?;
         }
         let temp = path.with_extension("tmp");
-        let mut f = File::create(&temp)?;
+        let mut f = File::create(&temp).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("create temporary world save {}: {error}", temp.display()),
+            )
+        })?;
         self.write_to(&mut f)?;
         f.sync_all()?;
         drop(f);
