@@ -2118,13 +2118,13 @@ impl Mobs {
         {
             return;
         }
-        // A malformed player snapshot must not consume one of the four
-        // bounded origin attempts while other online players are valid.
-        // Keep the same validity rule as the chunk-union mob-cap calculation.
+        // Mob-cap accounting includes finite player heights outside build
+        // limits, but these snapshots must not anchor a spawn attempt. Only
+        // in-world players may consume one of the four bounded origin rolls.
         let valid_players: Vec<_> = players
             .iter()
             .copied()
-            .filter(|player| natural_spawn_player_chunk(*player).is_some())
+            .filter(PlayerPosition::is_valid)
             .collect();
         if valid_players.is_empty() {
             return;
@@ -6591,6 +6591,19 @@ mod tests {
             },
             PlayerPosition {
                 x: f64::from(i32::MAX) + 1.0,
+                ..valid
+            },
+            // These are valid for chunk-union mob-cap accounting, but not
+            // for choosing an in-world natural-spawn origin.
+            PlayerPosition { y: -1.0, ..valid },
+            PlayerPosition { y: 256.0, ..valid },
+            PlayerPosition { y: 300.0, ..valid },
+            PlayerPosition {
+                x: f64::from(crate::world::WORLD_LIMIT),
+                ..valid
+            },
+            PlayerPosition {
+                z: -f64::from(crate::world::WORLD_LIMIT),
                 ..valid
             },
         ];
