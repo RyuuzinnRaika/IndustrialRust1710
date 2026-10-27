@@ -104,3 +104,32 @@ fn irw4_save_and_reload_preserve_seed_and_negative_coordinate_terrain() {
     }
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn irw4_seed_42_near_spawn_is_not_superflat() {
+    // The Windows no-argument launcher selects IRW4 Overworld seed 42.
+    // Check the generator itself, not just that packet bytes match a flat
+    // source. Sample both sides of zero and several chunk boundaries.
+    let world = World::expanded(42, Dimension::Overworld);
+    let mut min_height = i32::MAX;
+    let mut max_height = i32::MIN;
+    let mut biome_ids = std::collections::BTreeSet::new();
+    for x in (-64..=64).step_by(16) {
+        for z in (-64..=64).step_by(16) {
+            let surface = world
+                .surface_height_at(x, z)
+                .expect("IRW4 Overworld must have a generated surface");
+            min_height = min_height.min(surface);
+            max_height = max_height.max(surface);
+            biome_ids.insert(world.biome_at(x, z));
+        }
+    }
+    assert!(
+        max_height - min_height >= 12,
+        "seed 42 terrain collapsed to a nearly flat plane: {min_height}..={max_height}"
+    );
+    assert!(
+        biome_ids.len() >= 3,
+        "seed 42 should expose multiple biome families near spawn: {biome_ids:?}"
+    );
+}
