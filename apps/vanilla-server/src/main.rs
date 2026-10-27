@@ -3406,6 +3406,11 @@ fn play(
                 }
                 let new_chunk_center = chunk_center(&candidate);
                 if new_chunk_center != previous_chunk_center {
+                    // Publish authoritative position BEFORE expensive chunk
+                    // generation/compression/socket writes can block this
+                    // session. Otherwise a creeper may hit a stale Hub point.
+                    hub.move_player(entity_id, candidate, yaw, pitch);
+                    last_movement_broadcast = Instant::now();
                     let old_chunks = loaded_chunks.clone();
                     sync_chunks(s, world, &mut loaded_chunks, new_chunk_center)?;
                     if loaded_chunks != old_chunks {
@@ -3413,15 +3418,11 @@ fn play(
                         send_visible_signs(s, decorations, &entering)?;
                         send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                     }
-                }
-                // The Hub owns the position consulted by Mob targeting,
-                // explosions, pickups and every other session. Throttling
-                // network broadcasts must never throttle this authoritative
-                // state: a burst of movement could otherwise leave it stale.
-                if position_changed {
-                    if last_movement_broadcast.elapsed() >= Duration::from_millis(50)
-                        || new_chunk_center != previous_chunk_center
-                    {
+                } else if position_changed {
+                    // The Hub owns the position consulted by Mob targeting,
+                    // explosions, pickups and other sessions. Throttle only
+                    // peer packet fanout, never authoritative state updates.
+                    if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                         hub.move_player(entity_id, candidate, yaw, pitch);
                         last_movement_broadcast = Instant::now();
                     } else {
