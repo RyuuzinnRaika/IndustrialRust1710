@@ -1379,6 +1379,28 @@ impl Mobs {
         self.entities.values().map(|mob| mob.position).collect()
     }
 
+    /// Push server-owned living entities displaced by an extending piston.
+    /// The caller must durably save Mobs before publishing these teleports.
+    pub fn push_by_piston(
+        &mut self,
+        world: &World,
+        piston: &crate::world::PistonAction,
+    ) -> Vec<Event> {
+        if !piston.extending {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        for mob in self.entities.values_mut() {
+            if let Some(next) =
+                physics::piston_push_candidate(world, &mob.position, piston.pos, piston.facing)
+            {
+                mob.position = next;
+                events.push(multiplayer::teleport(mob.id, &next, 0.0, 0.0));
+            }
+        }
+        events
+    }
+
     pub fn spawn_events(&self) -> impl Iterator<Item = Event> + '_ {
         self.entities
             .values()
