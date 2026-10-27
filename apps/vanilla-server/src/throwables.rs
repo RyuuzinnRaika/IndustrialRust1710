@@ -366,18 +366,22 @@ impl Throwables {
                     collision = Some(sample);
                     break;
                 }
-                if object.kind == Kind::Arrow {
-                    if let Some((mob_id, _, _, _)) = targets.iter().find(|(_, at, radius, height)| {
+                let hit_mob = if object.kind == Kind::Arrow {
+                    targets.iter().find(|(_, at, radius, height)| {
                         (sample.x - at.x).hypot(sample.z - at.z) <= *radius
                             && sample.y >= at.y - 0.25
                             && sample.y <= at.y + *height + 0.25
-                    }) {
-                        mob_collision = Some(*mob_id);
-                        break;
-                    }
+                    })
+                } else {
+                    None
+                };
+                if let Some((mob_id, _, _, _)) = hit_mob {
+                    mob_collision = Some((*mob_id, sample));
+                    break;
                 }
             }
-            if let Some(mob_id) = mob_collision {
+            if let Some((mob_id, at)) = mob_collision {
+                object.at = at;
                 result.mob_hits.push((mob_id, tick));
                 removed.push(object.id);
                 continue;
@@ -895,7 +899,9 @@ mod tests {
     #[test]
     fn dispenser_arrow_hits_mob_once_and_never_becomes_collectible() {
         let mut objects = Throwables::default();
-        let (at, _) = objects.launch_dispenser(262, (0, 70, 0), (1, 0, 0)).unwrap();
+        let (at, _) = objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
         let targets = [(
             500_001,
             PlayerPosition {
@@ -909,7 +915,14 @@ mod tests {
         let world = World::new();
         let first = objects.tick_with_mob_targets(&world, 20, &targets);
         assert_eq!(first.mob_hits, vec![(500_001, 20)]);
-        assert_eq!(first.events.iter().filter(|(_, event)| event.id == 0x13).count(), 1);
+        assert_eq!(
+            first
+                .events
+                .iter()
+                .filter(|(_, event)| event.id == 0x13)
+                .count(),
+            1
+        );
         assert!(objects.active.is_empty());
         assert_eq!(objects.nearby_embedded_arrow((2.0, 70.0, at.z)), None);
         let second = objects.tick_with_mob_targets(&world, 20, &targets);
@@ -937,5 +950,4 @@ mod tests {
         assert!(first.mob_hits.is_empty());
         assert!(objects.active.values().next().unwrap().embedded);
     }
-
 }
