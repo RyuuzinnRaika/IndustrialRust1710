@@ -2714,17 +2714,61 @@ fn creative_mob_feed_and_attack_keep_items_and_award_kill_rewards() {
             && body[4] == ((3 << 5) | 6)
             && body[5..9] == 4.0f32.to_be_bytes()
     });
-    thread::sleep(Duration::from_millis(550));
+    // The damage cooldown is ten server ticks, not 550ms of wall time.
+    // Wait for two consecutive S03 time updates (20 server ticks apart)
+    // after the first-hit health metadata, even if the server is overloaded.
+    let first_time = until_packet(&mut client, 0x03, |body| body.len() == 16);
+    let first_tick = i64::from_be_bytes(first_time[..8].try_into().unwrap());
+    until_packet(&mut client, 0x03, |body| {
+        body.len() == 16
+            && i64::from_be_bytes(body[..8].try_into().unwrap())
+                >= first_tick.saturating_add(20)
+    });
     client.write_all(&frame(0x02, &attack)).unwrap();
-    until_packet(&mut client, 0x11, |_| true); // player-kill XP orb
-    let item_drop = until_packet(&mut client, 0x0e, |body| {
-        let mut remaining = body;
-        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&2)
-    });
-    assert!(item_drop.len() >= 20);
-    until_packet(&mut client, 0x1a, |body| {
-        body.len() == 5 && body[..4] == cow_id.to_be_bytes() && body[4] == 3
-    });
+
+    // The server may broadcast XP, item drops, and death status in different
+    // orders. Observe all three without discarding earlier valid packets.
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut saw_xp = false;
+    let mut saw_drop = false;
+    let mut saw_death = false;
+    for _ in 0..MAX_PACKETS {
+        if saw_xp && saw_drop && saw_death {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for cow death: xp={saw_xp}, drop={saw_drop}, death={saw_death}"
+        );
+        let (id, body) = receive(&mut client);
+        match id {
+            0 if body.len() == 4 => client.write_all(&frame(0, &body)).unwrap(),
+            0x11 => {
+                let mut payload = body.as_slice();
+                read_varint(&mut payload).unwrap();
+                assert_eq!(payload.len(), 14, "invalid XP orb packet");
+                assert_eq!(i16::from_be_bytes(payload[12..14].try_into().unwrap()), 2);
+                saw_xp = true;
+            }
+            0x0e => {
+                let mut payload = body.as_slice();
+                if read_varint(&mut payload).is_ok() && payload.first() == Some(&2) {
+                    assert!(body.len() >= 20, "incomplete cow item spawn packet");
+                    saw_drop = true;
+                }
+            }
+            0x1a if body.len() == 5
+                && body[..4] == cow_id.to_be_bytes()
+                && body[4] == 3 =>
+            {
+                saw_death = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_xp, "missing player-kill XP orb");
+    assert!(saw_drop, "missing cow item drop");
+    assert!(saw_death, "missing cow death status");
     drop(client);
     server.wait_idle();
 
