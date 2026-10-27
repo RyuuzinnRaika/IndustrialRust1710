@@ -842,11 +842,17 @@ impl World {
                 // Top-half clicks operate on the bottom-half metadata.
                 let lower_y = if old & 8 != 0 { y - 1 } else { y };
                 let bottom = self.get(x, lower_y, z);
+                // Only an intact two-block wooden door can be operated.
+                // Send BOTH halves after the durable bottom-half toggle: the
+                // 1.7.10 client caches both halves for its door render state.
                 if bottom >> 4 == id
                     && bottom & 8 == 0
+                    && self.get(x, lower_y + 1, z) >> 4 == id
+                    && self.get(x, lower_y + 1, z) & 8 != 0
                     && self.update_and_save(path, x, lower_y, z, bottom ^ 4)?
                 {
                     touched.push((x, lower_y, z));
+                    touched.push((x, lower_y + 1, z));
                 }
                 return Ok(touched);
             }
@@ -1551,6 +1557,30 @@ mod redstone_regression_tests {
             w.block_tick(&path, 64).unwrap();
         }
         assert_eq!(w.comparator_outputs.get(&(0, 64, 0)), Some(&1));
+        fs::remove_file(path).unwrap();
+    }
+
+
+    #[test]
+    fn wooden_door_clicks_on_either_half_persist_and_resync_both_halves() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-door-toggle-sync-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        assert!(world.place_door(&path, 0, 64, 0, 64, 0).unwrap());
+        let closed_lower = world.get(0, 64, 0);
+        let upper = world.get(0, 65, 0);
+        assert_eq!(world.interact_device(&path, 0, 65, 0).unwrap(),
+                   vec![(0, 64, 0), (0, 65, 0)]);
+        assert_eq!(world.get(0, 64, 0), closed_lower ^ 4);
+        assert_eq!(world.get(0, 65, 0), upper);
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), closed_lower ^ 4);
+        assert_eq!(world.interact_device(&path, 0, 64, 0).unwrap(),
+                   vec![(0, 64, 0), (0, 65, 0)]);
+        assert_eq!(world.get(0, 64, 0), closed_lower);
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), closed_lower);
         fs::remove_file(path).unwrap();
     }
 
