@@ -5366,6 +5366,26 @@ struct ServerContext {
     online_mode: bool,
     auth_key: Option<Arc<ServerIdentity>>,
 }
+/// Resolve the live world for the *current* player dimension. The admission
+/// world is not necessarily the world active when the session disconnects.
+fn session_world(
+    admission: &Arc<Mutex<World>>,
+    dimensions: Option<&dimensions::DimensionWorlds>,
+    current: dimensions::Dimension,
+) -> Arc<Mutex<World>> {
+    dimensions.map_or_else(|| Arc::clone(admission), |worlds| worlds.world(current))
+}
+
+/// Player data remains rooted at the original world path, but gameplay writes
+/// must use the IRW file for the player's actual dimension.
+fn session_world_path<'a>(
+    initial: &'a Path,
+    dimensions: Option<&'a dimensions::DimensionWorlds>,
+    current: dimensions::Dimension,
+) -> &'a Path {
+    dimensions.map_or(initial, |worlds| worlds.path_ref(current))
+}
+
 fn handle(
     s: TcpStream,
     context: ServerContext,
@@ -5537,11 +5557,7 @@ fn handle(
     } else {
         initial_dimension
     };
-    let world = if let Some(worlds) = dimension_worlds.as_ref() {
-        worlds.world(admission_dimension)
-    } else {
-        world
-    };
+    let world = session_world(&world, dimension_worlds.as_deref(), admission_dimension);
     if hardcore && player_vitals.health <= 0.0 {
         login_disconnect(
             &mut s,
@@ -5714,10 +5730,12 @@ fn handle(
         send(&mut s, object.id, &object.body)?;
     }
     let mut session_dimension = admission_dimension;
+    let admission_world_path =
+        session_world_path(path.as_path(), dimension_worlds.as_deref(), admission_dimension);
     let result = play(
         &mut s,
         &world,
-        &path,
+        admission_world_path,
         &name,
         &whitelist_path,
         &clock,
@@ -5773,8 +5791,14 @@ fn handle(
     // Save even on a clean disconnect, timeout, or access revocation.
     // Snapshot living entities on disconnect, not only on periodic 20TPS ticks.
     // Always lock world before mobs to match the gameplay tick lock order.
+    // A portal may have changed the active dimension since login. Never save
+    // the shared Mob state against a stale admission world at disconnect.
+    let disconnect_world =
+        session_world(&world, dimension_worlds.as_deref(), session_dimension);
     let mob_saved = {
-        let guard = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        let guard = disconnect_world
+            .lock()
+            .map_err(|_| bad("world mutex poisoned"))?;
         mobs.lock()
             .map_err(|_| bad("mob mutex poisoned"))?
             .save(&guard)
@@ -8971,5 +8995,48 @@ mod legacy_placement_orientation_tests {
             piston_placement_facing(90.0, (8.0, 67.0, 0.5), (0, 64, 0)),
             5
         );
+    }
+}
+
+#[cfg(test)]
+mod session_dimension_routing_tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_and_disconnect_select_active_dimension_not_admission_world() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-session-routing-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let worlds = dimensions::DimensionWorlds::load_all(
+            dimensions::DimensionManager::new(&root, 42),
+        )
+        .unwrap();
+        let admission = worlds.world(dimensions::Dimension::Overworld);
+        for current in [
+            dimensions::Dimension::Overworld,
+            dimensions::Dimension::Nether,
+            dimensions::Dimension::End,
+        ] {
+            let active = session_world(&admission, Some(&worlds), current);
+            assert!(Arc::ptr_eq(&active, &worlds.world(current)));
+            assert_eq!(
+                session_world_path(Path::new("wrong.irw"), Some(&worlds), current),
+                worlds.path_ref(current)
+            );
+        }
+        let standalone = Arc::new(Mutex::new(World::new()));
+        assert!(Arc::ptr_eq(
+            &session_world(&standalone, None, dimensions::Dimension::Nether),
+            &standalone
+        ));
+        assert_eq!(
+            session_world_path(Path::new("single.irw"), None, dimensions::Dimension::Nether),
+            Path::new("single.irw")
+        );
+        drop(admission);
+        drop(worlds);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
