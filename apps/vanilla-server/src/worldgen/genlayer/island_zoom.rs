@@ -78,14 +78,13 @@ fn mode_or_random(rng: &mut GenLayerRng, a: i32, b: i32, c: i32, d: i32) -> i32 
 /// One vanilla GenLayerZoom step over an arbitrary rectangular parent layer.
 /// Uses arithmetic shift for negative coordinates and reproduces the exact
 /// per-cell random draw order (south, east, then diagonal).
-fn zoom_map_impl<F>(
+fn zoom_map_impl<F, const FUZZY: bool>(
     world_seed: i64,
     layer_salt: i64,
     x: i32,
     z: i32,
     width: usize,
     height: usize,
-    fuzzy: bool,
     parent: F,
 ) -> Vec<i32>
 where
@@ -118,7 +117,7 @@ where
             expanded[index] = a;
             expanded[index + stride] = choose_two(&mut rng, a, c);
             expanded[index + 1] = choose_two(&mut rng, a, b);
-            expanded[index + stride + 1] = if fuzzy {
+            expanded[index + stride + 1] = if FUZZY {
                 match rng.next_int(4) {
                     0 => a,
                     1 => b,
@@ -153,7 +152,7 @@ pub(super) fn zoom_map<F>(
 where
     F: Fn(i32, i32, usize, usize) -> Vec<i32>,
 {
-    zoom_map_impl(world_seed, layer_salt, x, z, width, height, false, parent)
+    zoom_map_impl::<_, false>(world_seed, layer_salt, x, z, width, height, parent)
 }
 
 /// GenLayerFuzzyZoom uses the same interpolation and RNG draw order as Zoom,
@@ -171,7 +170,7 @@ pub(super) fn fuzzy_zoom_map<F>(
 where
     F: Fn(i32, i32, usize, usize) -> Vec<i32>,
 {
-    zoom_map_impl(world_seed, layer_salt, x, z, width, height, true, parent)
+    zoom_map_impl::<_, true>(world_seed, layer_salt, x, z, width, height, parent)
 }
 
 #[cfg(test)]
