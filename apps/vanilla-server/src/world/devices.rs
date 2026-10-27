@@ -711,10 +711,7 @@ impl World {
                     let (dx, dy, dz) = facing(current);
                     let (bx, by, bz) = (x - dx, y - dy, z - dz);
                     let base = self.get(bx, by, bz);
-                    if !matches!(base >> 4, 29 | 33)
-                        || base & 8 == 0
-                        || base & 7 != face
-                    {
+                    if !matches!(base >> 4, 29 | 33) || base & 8 == 0 || base & 7 != face {
                         changes.insert((x, y as u8, z), 0);
                     }
                 }
@@ -1503,8 +1500,12 @@ mod redstone_regression_tests {
         ));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
-        world.update_and_save(&path, 0, 64, 0, (33 << 4) | 13).unwrap();
-        world.update_and_save(&path, 1, 64, 0, (34 << 4) | 5).unwrap();
+        world
+            .update_and_save(&path, 0, 64, 0, (33 << 4) | 13)
+            .unwrap();
+        world
+            .update_and_save(&path, 1, 64, 0, (34 << 4) | 5)
+            .unwrap();
         world.update_and_save(&path, 0, 64, 0, 0).unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(1, 64, 0), 0);
