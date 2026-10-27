@@ -652,6 +652,34 @@ mod tests {
     }
 
     #[test]
+    fn s03_invalid_tool_damage_never_accelerates_mining_or_consumes_durability() {
+        // Cover every recognized tool family, not only pickaxes. A malformed
+        // signed damage value must behave like an empty hand for mining.
+        for (tool_id, block_id) in [
+            (270_i16, 1_u16),  // pickaxe / stone
+            (269, 3),          // shovel / dirt
+            (271, 17),         // axe / log
+            (268, 3),          // sword / dirt
+            (290, 3),          // hoe / dirt
+        ] {
+            let bare = mine_rule(block_id << 4, None).unwrap();
+            for damage in [i16::MIN, -1] {
+                let malformed = stack(tool_id, damage);
+                assert_eq!(
+                    tool_max_uses(malformed.unwrap()),
+                    None,
+                    "tool {tool_id}, damage {damage}"
+                );
+                assert_eq!(
+                    mine_rule(block_id << 4, malformed).unwrap(),
+                    bare,
+                    "tool {tool_id}, damage {damage}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn matching_tools_mine_faster_and_have_correct_durability() {
         let bare = mine_rule(1 << 4, None).unwrap().0;
         let wood = mine_rule(1 << 4, stack(270, 0)).unwrap().0;
