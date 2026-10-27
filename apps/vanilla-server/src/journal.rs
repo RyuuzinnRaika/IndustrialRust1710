@@ -3,10 +3,13 @@
 //! A failure during application leaves the journal in place and locks further
 //! journal writes until the operator restarts and recovery succeeds.
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+// `File` is only needed to fsync a directory handle, which is a Unix-only step.
+#[cfg(unix)]
+use std::fs::File;
 
 const VERSION: u8 = 1;
 // JSON stores payload bytes as integer arrays (up to four characters per

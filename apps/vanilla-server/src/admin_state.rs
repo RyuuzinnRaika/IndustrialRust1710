@@ -1,7 +1,10 @@
 //! Restricted and crash-aware tiny administrative overrides.
 //! Never trust an offline player's chat message with these settings.
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
+// `File` is only needed to fsync a parent directory, which is a Unix-only step.
+#[cfg(unix)]
+use std::fs::File;
 use std::path::Path;
 
 fn invalid() -> io::Error {
