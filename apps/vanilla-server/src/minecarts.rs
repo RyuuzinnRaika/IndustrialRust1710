@@ -10,7 +10,7 @@ use legacy_protocol::write_varint;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 const FIRST_ID: i32 = 1_500_000;
@@ -267,7 +267,15 @@ impl Minecarts {
         if len > MAX_SAVE_BYTES {
             return Err(invalid("minecart file is too large"));
         }
-        let bytes = fs::read(path)?;
+        // A file can grow after the metadata check. Bound the actual read
+        // to the maximum accepted size plus one sentinel byte so that a
+        // concurrent writer cannot cause an unbounded allocation.
+        let file = fs::File::open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(invalid("minecart save must be a regular file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_SAVE_BYTES + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_SAVE_BYTES {
             return Err(invalid("minecart file is too large"));
         }
@@ -649,6 +657,27 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         fs::remove_file(link).unwrap();
         fs::remove_file(target).unwrap();
+    }
+
+    #[test]
+    fn minecart_snapshot_size_limit_accepts_boundary_and_rejects_one_extra_byte() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-carts-size-limit-{}.json",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+
+        let mut bytes = Minecarts::default().encoded().unwrap();
+        bytes.resize(MAX_SAVE_BYTES as usize, b' ');
+        fs::write(&path, &bytes).unwrap();
+        let restored = Minecarts::load(&path, 42).unwrap();
+        assert!(restored.carts.is_empty());
+
+        bytes.push(b' ');
+        fs::write(&path, &bytes).unwrap();
+        let error = Minecarts::load(&path, 42).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
