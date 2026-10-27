@@ -6947,7 +6947,7 @@ fn main() -> io::Result<()> {
                     // sampled before the explosion clears intervening walls.
                     let tnt_exposure = gravity_world
                         .tnt_detonates_next_tick()
-                        .then(|| gravity_world.clone());
+                        .then(|| gravity_world.blast_exposure_snapshot());
                     // Queued fluid and redstone updates use the same tick and
                     // save all staged block changes with one world-file commit.
                     match gravity_world.block_tick(&furnace_world_path, 64) {
