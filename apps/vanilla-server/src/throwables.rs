@@ -349,9 +349,17 @@ impl Throwables {
                 removed.push(object.id);
             } else {
                 object.at = destination;
-                object.velocity[0] *= 0.99;
-                object.velocity[1] = object.velocity[1] * 0.99 - object.kind.gravity();
-                object.velocity[2] *= 0.99;
+                // In vanilla 1.7.10, projectiles lose more momentum in water
+                // than in air. Lava is traversable but does not use water drag.
+                let block = world.get(
+                    destination.x.floor() as i32,
+                    destination.y.floor() as i32,
+                    destination.z.floor() as i32,
+                ) >> 4;
+                let drag = if matches!(block, 8 | 9) { 0.8 } else { 0.99 };
+                object.velocity[0] *= drag;
+                object.velocity[1] = object.velocity[1] * drag - object.kind.gravity();
+                object.velocity[2] *= drag;
                 result.events.push((
                     object.at,
                     multiplayer::teleport(object.id, &object.at, 0.0, 0.0),
@@ -482,6 +490,29 @@ mod tests {
             assert_eq!(result.events.len(), 1, "liquid block {liquid}");
             assert_ne!(result.events[0].1.id, 0x13, "liquid block {liquid}");
             assert!(objects.active.values().next().unwrap().at.x > 2.0);
+        }
+    }
+
+    #[test]
+    fn projectiles_slow_down_in_water_but_not_lava() {
+        // Source and flowing water apply the vanilla 0.8 drag coefficient.
+        // Air and lava retain the normal 0.99 coefficient.
+        for (block, drag) in [(0u16, 0.99), (8, 0.8), (9, 0.8), (10, 0.99), (11, 0.99)] {
+            let mut world = World::new();
+            if block != 0 {
+                world.import_block(2, 70, 0, block << 4).unwrap();
+            }
+            for item in [262, 332, 344] {
+                let mut objects = Throwables::default();
+                objects
+                    .launch_dispenser(item, (0, 70, 0), (1, 0, 0))
+                    .unwrap();
+                let result = objects.tick(&world, 1);
+                assert_eq!(result.events.len(), 1, "block={block} item={item}");
+                let projectile = objects.active.values().next().unwrap();
+                assert!((projectile.velocity[0] - 1.1 * drag).abs() < 1e-10);
+                assert!((projectile.velocity[1] + projectile.kind.gravity()).abs() < 1e-10);
+            }
         }
     }
 
