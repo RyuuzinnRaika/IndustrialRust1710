@@ -142,7 +142,15 @@ impl WorldSessionLock {
             .create(true)
             .truncate(false) // Never alter the file before acquiring its lock.
             .open(&lock_file)?;
-        FileExt::try_lock_exclusive(&file)?;
+        FileExt::try_lock_exclusive(&file).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "world session lock is busy at {} (another server or filesystem process may own it): {error}",
+                    lock_file.display()
+                ),
+            )
+        })?;
         let duration = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| io::Error::new(ErrorKind::InvalidData, "system clock before epoch"))?;
