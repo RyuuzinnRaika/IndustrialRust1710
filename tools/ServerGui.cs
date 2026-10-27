@@ -56,8 +56,11 @@ namespace IndustrialRust1710
 
         public static int Run(string exe, string[] args, string directory)
         {
+            // This is hosted inside Windows PowerShell, which may already have
+            // created an HWND. Changing the process-wide text-rendering default
+            // after that point throws InvalidOperationException. Leave it to the
+            // host and only enable visual styles here.
             Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
             using (ServerGui window = new ServerGui(exe, args, directory))
             {
                 Application.Run(window);

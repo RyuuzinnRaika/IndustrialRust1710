@@ -34,6 +34,12 @@ jobs:
               throw "Invalid syntax in $path : $($errors | Out-String)"
             }
           }
+          # The GUI runs in a PowerShell host that may already own an HWND.
+          # A late process-wide text rendering setter crashes at startup.
+          $guiSource = Get-Content -LiteralPath 'tools/ServerGui.cs' -Raw
+          if ($guiSource -match '(?m)^\s*Application\.SetCompatibleTextRenderingDefault\s*\(') {
+            throw 'WinForms text rendering default must not be set from hosted GUI startup.'
+          }
           Add-Type -Path (Resolve-Path 'tools/ServerGui.cs').Path -ReferencedAssemblies @('System.Windows.Forms', 'System.Drawing') -ErrorAction Stop
           $gui = [IndustrialRust1710.ServerGui]
           $flags = [System.Reflection.BindingFlags]'Static,NonPublic'
