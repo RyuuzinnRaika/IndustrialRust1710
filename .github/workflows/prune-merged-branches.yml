@@ -1,6 +1,6 @@
 name: Prune merged branches safely
 on:
-  # Rerun safe cleanup after the merged redstone and protocol movement fixes.
+  # Final approved one-shot prune after PR 597 integration on 2026-10-27.
   push:
     branches: [main]
     paths:
