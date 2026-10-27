@@ -814,7 +814,12 @@ mod tests {
         };
         hub.record_player_position(alice, actual);
         assert_eq!(
-            hub.participants().unwrap().into_iter().find(|p| p.0 == alice).unwrap().1,
+            hub.participants()
+                .unwrap()
+                .into_iter()
+                .find(|p| p.0 == alice)
+                .unwrap()
+                .1,
             actual
         );
         assert!(bob_rx.try_recv().is_err());
