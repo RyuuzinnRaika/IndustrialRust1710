@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly IndustrialRust1710 local Rust verification (no GitHub Actions)
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5min
+Unit=industrialrust-local-ci.service
+
+[Install]
+WantedBy=timers.target
