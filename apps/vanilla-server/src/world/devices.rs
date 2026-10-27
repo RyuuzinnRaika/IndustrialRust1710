@@ -476,10 +476,10 @@ impl World {
         // block directly above them (BUD behavior).
         // Front-face power does not directly energize the piston itself.
         // Above-block indirect power remains valid for Java QC/BUD.
-        let on = NEIGHBORS.iter().filter(|&&(ox, oy, oz)| (ox, oy, oz) != (dx, dy, dz))
-            .any(|&(ox, oy, oz)| {
-                self.power_into((x + ox, y + oy, z + oz), (x, y, z))
-            })
+        let on = NEIGHBORS
+            .iter()
+            .filter(|&&(ox, oy, oz)| (ox, oy, oz) != (dx, dy, dz))
+            .any(|&(ox, oy, oz)| self.power_into((x + ox, y + oy, z + oz), (x, y, z)))
             || (in_bounds(x, y + 1, z) && self.powered_near(x, y + 1, z));
         if extended == on {
             return;
