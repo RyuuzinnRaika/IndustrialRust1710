@@ -100,8 +100,7 @@ fn stamp_event(peer: &Peer, packet: Event) -> QueuedEvent {
     // including piston pushes, relights and projectile damage, do not.
     let global = matches!(
         packet.id,
-        0x02
-            | 0x38
+        0x02 | 0x38
             | ADMIN_TELEPORT_EVENT
             | ADMIN_KICK_EVENT
             | ADMIN_GAMEMODE_EVENT
@@ -1364,17 +1363,11 @@ mod tests {
 
         // The outgoing mailbox is deliberately not consumed before the portal.
         for id in [0x21, 0x0c, 0x23, u32::MAX] {
-            hub.broadcast_in_dimension(
-                Dimension::Overworld,
-                Event { id, body: vec![1] },
-            );
+            hub.broadcast_in_dimension(Dimension::Overworld, Event { id, body: vec![1] });
         }
         assert!(hub.change_dimension(alice, Dimension::Nether, pos).unwrap());
         for id in [0x21, 0x0c, 0x23] {
-            hub.broadcast_in_dimension(
-                Dimension::Nether,
-                Event { id, body: vec![2] },
-            );
+            hub.broadcast_in_dimension(Dimension::Nether, Event { id, body: vec![2] });
         }
         for id in [0x21, 0x0c, 0x23] {
             let packet = rx.try_recv().unwrap();
@@ -1391,17 +1384,28 @@ mod tests {
         let (alice, rx, _) = hub.add("Alice".into(), "uuid-a".into(), pos).unwrap();
         hub.broadcast_in_dimension(
             Dimension::Overworld,
-            Event { id: 0x23, body: vec![1] },
+            Event {
+                id: 0x23,
+                body: vec![1],
+            },
         );
         assert!(hub.change_dimension(alice, Dimension::Nether, pos).unwrap());
         hub.broadcast_in_dimension(
             Dimension::Nether,
-            Event { id: 0x23, body: vec![2] },
+            Event {
+                id: 0x23,
+                body: vec![2],
+            },
         );
-        assert!(hub.change_dimension(alice, Dimension::Overworld, pos).unwrap());
+        assert!(hub
+            .change_dimension(alice, Dimension::Overworld, pos)
+            .unwrap());
         hub.broadcast_in_dimension(
             Dimension::Overworld,
-            Event { id: 0x23, body: vec![3] },
+            Event {
+                id: 0x23,
+                body: vec![3],
+            },
         );
         assert_eq!(rx.try_recv().unwrap().body, [3]);
         assert!(rx.try_recv().is_err());
@@ -1412,10 +1416,16 @@ mod tests {
         let hub = Hub::default();
         let pos = PlayerPosition::default();
         let (alice, rx, _) = hub.add("Alice".into(), "uuid-a".into(), pos).unwrap();
-        hub.broadcast(Event { id: 0x02, body: vec![42] });
+        hub.broadcast(Event {
+            id: 0x02,
+            body: vec![42],
+        });
         hub.broadcast_in_dimension(
             Dimension::Overworld,
-            Event { id: 0x23, body: vec![1] },
+            Event {
+                id: 0x23,
+                body: vec![1],
+            },
         );
         assert!(hub.request_admin_kick("Alice", "Stop").unwrap());
         assert!(hub.change_dimension(alice, Dimension::Nether, pos).unwrap());
