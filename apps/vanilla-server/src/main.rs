@@ -1397,7 +1397,13 @@ fn play(
                     send(s, 0x06, &health_packet(*vitals))?;
                     let mut hurt = entity_id.to_be_bytes().to_vec();
                     hurt.push(2); // Protocol 5 Entity Status: hurt animation.
-                    hub.broadcast_in_view(*player, Event { id: 0x1a, body: hurt });
+                    hub.broadcast_in_view(
+                        *player,
+                        Event {
+                            id: 0x1a,
+                            body: hurt,
+                        },
+                    );
                 }
                 continue;
             }
