@@ -321,6 +321,7 @@ impl GroundItems {
         Ok(inserted)
     }
 
+    #[cfg(test)]
     pub fn put_many(
         &mut self,
         path: &Path,
