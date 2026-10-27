@@ -102,7 +102,7 @@ fn rule(block: u16) -> Option<BlockRule> {
         37 => (0.0, None, 0, false, item(37, 0)), // dandelion
         38 => (0.0, None, 0, false, item(38, damage)), // flower variants
         39 | 40 => (0.0, None, 0, false, item(id as i16, 0)),
-        81 => (0.4, None, 0, false, item(81, 0)), // cactus
+        81 => (0.4, None, 0, false, item(81, 0)),  // cactus
         83 => (0.0, None, 0, false, item(338, 0)), // sugar cane item
         86 | 91 => (1.0, Some(ToolKind::Axe), 0, false, item(id as i16, 0)),
         111 => (0.0, None, 0, false, item(111, 0)), // lily pad
