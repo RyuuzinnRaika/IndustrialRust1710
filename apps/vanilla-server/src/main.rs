@@ -1447,8 +1447,10 @@ fn play(
                 .map_err(|_| io::Error::other("ground items lock poisoned"))?;
             if let Some(item) = ground.nearby_ready(location) {
                 let mut candidate = inventory.clone();
-                if let Some(slots) = candidate.receive_stack(item.stack) {
-                    if let Some((staged_ground, collected)) = ground.stage_take(item.id)? {
+                if let Some((count, slots)) = candidate.receive_stack_partial(item.stack) {
+                    if let Some((staged_ground, collected, remainder)) =
+                        ground.stage_take_amount(item.id, count)?
+                    {
                         journal::commit(
                             &world_path.with_extension("pending-txn.json"),
                             &[
@@ -1458,8 +1460,15 @@ fn play(
                         )?;
                         *ground = staged_ground;
                         *inventory = candidate;
-                        for packet in collected.collected(entity_id) {
-                            hub.broadcast(packet);
+                        if let Some(remaining) = remainder {
+                            // A partial pickup keeps the same ground entity;
+                            // update DataWatcher item count instead of
+                            // destroying an entity with items still inside it.
+                            hub.broadcast(remaining.spawn()[1].clone());
+                        } else {
+                            for packet in collected.collected(entity_id) {
+                                hub.broadcast(packet);
+                            }
                         }
                         for slot in slots {
                             send(s, 0x2f, &inventory.set_slot(slot)?)?;

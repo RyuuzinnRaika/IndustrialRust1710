@@ -372,6 +372,36 @@ impl Inventory {
         }
         None
     }
+    /// Pick up as many items as can fit without losing the remaining ground
+    /// stack. Unlike receive_stack(), this accepts a partial transfer; the
+    /// calling session must journal the updated inventory and ground entity
+    /// in the same transaction before notifying the client.
+    pub fn receive_stack_partial(&mut self, item: Stack) -> Option<(u8, Vec<i16>)> {
+        if !item.is_valid() {
+            return None;
+        }
+        let mut capacity = 0u16;
+        for slot in (36..45).chain(9..36) {
+            capacity += match self.slots[slot] {
+                None => u16::from(item.max_count()),
+                Some(current)
+                    if current.id == item.id
+                        && current.damage == item.damage
+                        && current.nbt == item.nbt =>
+                {
+                    u16::from(current.max_count().saturating_sub(current.count))
+                }
+                _ => 0,
+            };
+        }
+        let count = u16::from(item.count).min(capacity) as u8;
+        if count == 0 {
+            return None;
+        }
+        let changed = self.receive_stack(Stack { count, ..item })?;
+        Some((count, changed))
+    }
+
     /// Q removes one held item; Ctrl+Q removes the entire held stack.
     /// Take an outside-window cursor drop. The caller MUST commit this debit
     /// together with the spawned ground-item snapshot before publishing state.
@@ -2958,6 +2988,42 @@ mod tests {
         assert!(inventory.fill_milk_bucket());
         assert_eq!(inventory.held().unwrap().count, 1);
         assert_eq!(inventory.slots[9].unwrap().id, 335);
+    }
+
+    #[test]
+    fn partial_ground_pickup_only_moves_available_space() {
+        let mut inv = Inventory::default();
+        let full = Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        for slot in 9..45 {
+            inv.slots[slot] = Some(full);
+        }
+        let apple = Stack {
+            id: 260,
+            count: 63,
+            damage: 0,
+            nbt: None,
+        };
+        inv.slots[36] = Some(apple);
+        let picked = inv.receive_stack_partial(Stack { count: 5, ..apple });
+        assert_eq!(picked, Some((1, vec![36])));
+        assert_eq!(inv.slots[36].unwrap().count, 64);
+        let before = inv.clone();
+        assert_eq!(inv.receive_stack_partial(Stack { count: 4, ..apple }), None);
+        assert_eq!(
+            inv, before,
+            "full inventory must never consume ground items"
+        );
+        inv.slots[9] = None;
+        assert_eq!(
+            inv.receive_stack_partial(Stack { count: 4, ..apple }),
+            Some((4, vec![9]))
+        );
+        assert_eq!(inv.slots[9].unwrap().count, 4);
     }
 
     #[test]
