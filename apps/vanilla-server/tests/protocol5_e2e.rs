@@ -491,7 +491,7 @@ fn console_gamemode_changes_live_protocol5_and_keeps_inventories_isolated() {
 
 #[test]
 fn native_1710_c04_c06_use_feet_y_not_eye_height() {
-    let mut server = NativeServer::start();
+    let server = NativeServer::start();
     let (mut client, _, initial) = server.join("Positioner");
     assert_eq!(initial, [0.5, 65.0, 0.5]);
 
