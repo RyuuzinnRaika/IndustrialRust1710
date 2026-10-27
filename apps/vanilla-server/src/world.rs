@@ -1318,6 +1318,33 @@ impl World {
             }
         }
 
+        // A burst can clear hundreds of generated stone/dirt cells, each
+        // of which creates a new sparse edit. Near the legacy IRW 65,536-edit
+        // capacity, never let the entire world tick or /stop fail because
+        // the blast would allocate more overrides than can be persisted.
+        // Prefer deletions of existing edits; defer excess new overrides.
+        let released = changes
+            .iter()
+            .filter(|(&(x, y, z), &next)| {
+                self.edits.contains_key(&(x, y, z)) && next == self.base_block(x, y, z)
+            })
+            .count();
+        let mut remaining_edit_slots =
+            MAX_EDITS.saturating_sub(self.edits.len().saturating_sub(released));
+        let mut over_budget = Vec::new();
+        for (&(x, y, z), &next) in &changes {
+            if !self.edits.contains_key(&(x, y, z)) && next != self.base_block(x, y, z) {
+                if remaining_edit_slots == 0 {
+                    over_budget.push((x, y, z));
+                } else {
+                    remaining_edit_slots -= 1;
+                }
+            }
+        }
+        for pos in over_budget {
+            changes.remove(&pos);
+        }
+
         // Apply the exact final block changes, after fluid/redstone merging.
         // TNT removed from the world must have a reserved primed-entity slot:
         // overflowing the 4096-entity IRW trailer used to abort both gameplay
