@@ -53,7 +53,11 @@ mod tests {
             let mut expected = vec![42, wire_type, title.len() as u8];
             expected.extend_from_slice(title.as_bytes());
             expected.extend_from_slice(&[slots, 1]);
-            assert_eq!(encode(42, kind, title, slots).unwrap(), expected, "{kind:?}");
+            assert_eq!(
+                encode(42, kind, title, slots).unwrap(),
+                expected,
+                "{kind:?}"
+            );
         }
     }
 
