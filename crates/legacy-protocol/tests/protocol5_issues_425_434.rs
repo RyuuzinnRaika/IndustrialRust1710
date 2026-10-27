@@ -119,8 +119,8 @@ fn add006_protocol5_uses_an_uncompressed_packet_id_directly_after_length() {
     handshake.insert(0, 3);
     let mut modern = Vec::new();
     write_frame(&mut modern, &handshake).unwrap();
-    let (packet_id, _) =
-        packet_id_and_body(&read_frame(&mut modern.as_slice()).unwrap()).unwrap();
+    let modern_decoded = read_frame(&mut modern.as_slice()).unwrap();
+    let (packet_id, _) = packet_id_and_body(&modern_decoded).unwrap();
     assert_eq!(packet_id, 3);
 }
 
@@ -142,7 +142,11 @@ impl Read for ChunkReader<'_> {
 
 #[test]
 fn add010_bytewise_and_coalesced_packets_restore_identical_order() {
-    let payloads = [vec![0x00, 0x05], vec![0x09, 0x02], vec![0x01, 0x03, b'a', b'b']];
+    let payloads = [
+        vec![0x00, 0x05],
+        vec![0x09, 0x02],
+        vec![0x01, 0x03, b'a', b'b'],
+    ];
     let mut wire = Vec::new();
     for payload in &payloads {
         write_frame(&mut wire, payload).unwrap();
