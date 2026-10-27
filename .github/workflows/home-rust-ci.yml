@@ -1,0 +1,111 @@
+name: Rust CI (home Linux, trusted manual)
+
+# IndustrialRust1710 is public. Never execute unreviewed pull_request
+# or pull_request_target code on a persistent home-server runner.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: industrialrust-home-rust-ci
+  cancel-in-progress: false
+
+jobs:
+  rust-home:
+    # Only the repo owner can explicitly start a trusted main-branch build.
+    if: github.repository == 'RyuuzinnRaika/IndustrialRust1710' && github.ref == 'refs/heads/main' && github.actor == 'RyuuzinnRaika'
+    runs-on: [self-hosted, Linux, X64, industrialrust-ci]
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      # RUNNER_TEMP is under the dedicated runner's NAS/HDD work directory.
+      CARGO_TARGET_DIR: ${{ runner.temp }}/industrialrust1710-target
+    steps:
+      - name: Verify dedicated NAS/HDD environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          case "$RUNNER_TEMP" in
+            /mnt/nas_storage/*) ;;
+            *) echo "RUNNER_TEMP is not on /mnt/nas_storage: $RUNNER_TEMP" >&2; exit 1 ;;
+          esac
+          case "$HOME" in
+            /mnt/nas_storage/*) ;;
+            *) echo "Runner HOME must be on /mnt/nas_storage: $HOME" >&2; exit 1 ;;
+          esac
+          for tool in git rustup cargo rustc python3; do
+            command -v "$tool" >/dev/null || { echo "Missing: $tool" >&2; exit 1; }
+          done
+          echo "Runner: $RUNNER_NAME ($RUNNER_OS/$RUNNER_ARCH)"
+          df -h "$RUNNER_TEMP"
+          rustc --version
+          cargo --version
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Discard prior Cargo outputs (no incremental/cache action)
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$CARGO_TARGET_DIR" in
+            "$RUNNER_TEMP"/industrialrust1710-target) ;;
+            *) echo "Unsafe target path" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$CARGO_TARGET_DIR"
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Native Minecraft Protocol 5 / Anvil regression tests
+        run: cargo test --workspace --all-targets
+
+      - name: Deny Rust lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build optimized Rust binaries
+        run: cargo build --release -p vanilla-server -p legacy-status-server
+
+      - name: Record build SHA256 and runner provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-evidence
+          sha256sum "$CARGO_TARGET_DIR/release/vanilla-server" \
+                    "$CARGO_TARGET_DIR/release/legacy-status-server" > ci-evidence/SHA256SUMS
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "runner=$RUNNER_NAME"
+            echo "os=$RUNNER_OS"
+            echo "rustc=$(rustc --version)"
+            echo "cargo=$(cargo --version)"
+            echo "workflow_run=$GITHUB_RUN_ID"
+          } > ci-evidence/BUILD-MANIFEST.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: industrialrust1710-home-ci-${{ github.sha }}
+          path: ci-evidence/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove this run's Cargo build outputs
+        if: always()
+        shell: bash
+        run: |
+          case "$CARGO_TARGET_DIR" in
+            "$RUNNER_TEMP"/industrialrust1710-target)
+              rm -rf -- "$CARGO_TARGET_DIR" ;;
+            *)
+              echo "Refusing unsafe cleanup path: $CARGO_TARGET_DIR" >&2 ;;
+          esac
