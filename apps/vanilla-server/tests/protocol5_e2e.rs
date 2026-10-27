@@ -1063,6 +1063,84 @@ fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
 }
 
 #[test]
+fn add017_kick_during_inventory_click_preserves_exactly_one_stack_on_reconnect() {
+    // Kick is requested on the console thread while a second TCP click is
+    // arriving. Either the click committed first or the kick fenced it:
+    // neither outcome may duplicate or discard the carried stack.
+    let mut server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+
+    let mut creative = 36i16.to_be_bytes().to_vec();
+    creative.extend_from_slice(&4i16.to_be_bytes()); // cobblestone
+    creative.push(6);
+    creative.extend_from_slice(&0i16.to_be_bytes());
+    creative.extend_from_slice(&(-1i16).to_be_bytes());
+    client.write_all(&frame(0x10, &creative)).unwrap();
+    until_packet(&mut client, 0x2f, |p| {
+        p == [0, 0, 36, 0, 4, 6, 0, 0, 255, 255]
+    });
+
+    let click = |slot: i16, action: i16| {
+        let mut data = vec![0u8]; // Window 0
+        data.extend_from_slice(&slot.to_be_bytes());
+        data.push(0); // left click
+        data.extend_from_slice(&action.to_be_bytes());
+        data.push(0); // normal click
+        data.extend_from_slice(&(-1i16).to_be_bytes());
+        frame(0x0e, &data)
+    };
+    client.write_all(&click(36, 1)).unwrap();
+    until_packet(&mut client, 0x32, |p| p == [0, 0, 1, 1]);
+    until_packet(&mut client, 0x30, |_| true);
+    until_packet(&mut client, 0x2f, |p| {
+        p == [255, 255, 255, 0, 4, 6, 0, 0, 255, 255]
+    });
+
+    // The second click attempts to move the carried stack into slot 10.
+    // The two independent transports (stdin and TCP) intentionally race.
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/kick RustTester Inventory check\n")
+        .unwrap();
+    let _ = client.write_all(&click(10, 2));
+    let reason = until_packet(&mut client, 0x40, |_| true);
+    assert!(String::from_utf8_lossy(&reason).contains("Inventory check"));
+    drop(client);
+    server.wait_idle();
+
+    let save = server.directory.join("players/rusttester.inventory.json");
+    await_file(&save);
+    let inventory: Value = serde_json::from_slice(&fs::read(&save).unwrap()).unwrap();
+    let count = |item: &Value| -> u64 {
+        if item.is_null() {
+            0
+        } else {
+            assert_eq!(item["id"], 4, "unexpected replacement item");
+            item["count"].as_u64().unwrap()
+        }
+    };
+    assert!(inventory["slots"][36].is_null());
+    let carried = count(&inventory["cursor"]);
+    let placed = count(&inventory["slots"][10]);
+    assert!(
+        (carried == 6 && placed == 0) || (carried == 0 && placed == 6),
+        "kick must leave exactly one committed version: {inventory}"
+    );
+
+    // A fresh session reads the durable state. A Kick must not leave a stale
+    // in-memory copy that later overwrites this committed cursor/slot state.
+    let (rejoined, _, _) = server.join("RustTester");
+    let reloaded: Value = serde_json::from_slice(&fs::read(&save).unwrap()).unwrap();
+    assert_eq!(count(&reloaded["cursor"]), carried);
+    assert_eq!(count(&reloaded["slots"][10]), placed);
+    drop(rejoined);
+    server.wait_idle();
+}
+
+#[test]
 fn native_click_window_is_authoritative_and_persists_carried_stack() {
     let server = NativeServer::start();
     let (mut client, _, _) = server.join("RustTester");

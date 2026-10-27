@@ -137,6 +137,20 @@ fn bad(reason: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, reason)
 }
 
+/// Never overwrite a redo journal's authoritative inventory snapshot with
+/// older session memory. Failed multi-file transactions are completed on the
+/// next startup; a kick or socket failure must preserve their recovery data.
+fn save_inventory_without_pending_redo(
+    world_path: &Path,
+    inventory_path: &Path,
+    inventory: &Inventory,
+) -> io::Result<()> {
+    if world_path.with_extension("pending-txn.json").exists() {
+        return Err(bad("pending inventory transaction requires restart recovery"));
+    }
+    inventory.save(inventory_path)
+}
+
 fn keepalive_challenge_due(pending_ping: Option<i32>, last_ping: Instant, now: Instant) -> bool {
     pending_ping.is_none() && now.saturating_duration_since(last_ping) >= KEEPALIVE_INTERVAL
 }
@@ -1612,6 +1626,15 @@ fn play(
             if event.id == ADMIN_KICK_EVENT {
                 let reason = std::str::from_utf8(&event.body)
                     .map_err(|_| bad("invalid administrator kick event"))?;
+                // The owning session already completed or cancelled the
+                // previous click before reading this event. Save the cursor
+                // and inventory before announcing a successful Kick.
+                save_inventory_without_pending_redo(world_path, inventory_path, inventory)?;
+                player.save_state_in_dimension(
+                    player_path,
+                    *vitals,
+                    session_dimension.protocol_id() as i32,
+                )?;
                 let mut payload = Vec::new();
                 write_string(&json!({"text":reason}).to_string(), &mut payload)?;
                 send(s, 0x40, &payload)?;
@@ -2567,6 +2590,12 @@ fn play(
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(e),
         };
+        // A kick may have been requested while a fragmented TCP packet was
+        // being read. A packet already executing may finish its transaction,
+        // but after the kick was queued no fresh client action may begin.
+        if hub.kick_pending(entity_id) {
+            continue;
+        }
         let mut input = Input(&data);
         let id = input.varint()?;
         if trace_keepalive {
@@ -6602,7 +6631,11 @@ fn handle(
         player_vitals,
         session_dimension.protocol_id() as i32,
     );
-    let inventory_saved = inventory_state.save(&inventory_file);
+    let inventory_saved = save_inventory_without_pending_redo(
+        session_world_path(path.as_path(), dimension_worlds.as_deref(), session_dimension),
+        &inventory_file,
+        &inventory_state,
+    );
     let experience_saved = experience_state.save(&experience_file);
     let achievements_saved = achievements_state.save(&achievements_file);
     if let Ok(mut state) = boats.lock() {
@@ -10649,5 +10682,54 @@ mod primed_tnt_protocol5_tests {
         assert_eq!(encoded[0], 0x81); // entity ID starts as Protocol 5 VarInt
         assert_eq!(encoded[4], 50); // TNT object type
         assert_eq!(&encoded[5..9], &16i32.to_be_bytes());
+    }
+}
+
+#[cfg(test)]
+mod add017_kick_inventory_recovery_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn pending_redo_is_not_overwritten_by_a_kick_or_disconnect_save() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-add017-kick-redo-{}-{suffix}",
+            std::process::id()
+        ));
+        let world = root.join("flat.irw");
+        let saved = root.join("players").join("rusttester.inventory.json");
+        let original = Inventory::default();
+        original.save(&saved).unwrap();
+        let before = std::fs::read(&saved).unwrap();
+
+        let redo = world.with_extension("pending-txn.json");
+        std::fs::write(&redo, b"prepared redo must be replayed on restart").unwrap();
+        let mut changed = original.clone();
+        changed
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 4,
+                    count: 5,
+                    damage: 0,
+                    nbt: None,
+                }),
+            )
+            .unwrap();
+        assert!(
+            save_inventory_without_pending_redo(&world, &saved, &changed).is_err(),
+            "disconnect must not overwrite a prepared transaction"
+        );
+        assert_eq!(std::fs::read(&saved).unwrap(), before);
+        // Once recovery has completed (simulated by removing the prepared
+        // journal), a normal clean disconnect may persist the inventory.
+        std::fs::remove_file(redo).unwrap();
+        save_inventory_without_pending_redo(&world, &saved, &changed).unwrap();
+        assert_eq!(Inventory::load(&saved).unwrap(), changed);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

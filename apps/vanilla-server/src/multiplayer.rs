@@ -17,7 +17,7 @@ pub const MAX_PLAYERS: usize = 8;
 pub const ADMIN_TELEPORT_EVENT: u32 = u32::MAX - 1;
 /// Internal mailbox event that applies the 1.7.10 ender-pearl health penalty.
 pub const PEARL_TELEPORT_EVENT: u32 = u32::MAX - 2;
-/// A session-owned safe Kick: the session sends Disconnect, then persists state.
+/// A session-owned Kick: stop accepting new packets, save inventory, then disconnect.
 pub const ADMIN_KICK_EVENT: u32 = u32::MAX - 3;
 /// Console-only mode change, distinct from the internal Kick mailbox event.
 pub const ADMIN_GAMEMODE_EVENT: u32 = u32::MAX - 4;
@@ -48,6 +48,9 @@ pub struct Peer {
     pub dimension: Dimension,
     tx: SyncSender<Event>,
     overloaded: Arc<AtomicBool>,
+    /// Set when a kick has entered the session mailbox. Client packet dispatch
+    /// reads this flag before executing an inventory or world mutation.
+    kick_requested: Arc<AtomicBool>,
 }
 #[derive(Default)]
 struct Inner {
@@ -62,6 +65,10 @@ fn poisoned() -> io::Error {
 }
 
 fn enqueue(peer: &Peer, packet: &Event) {
+    if packet.id == ADMIN_KICK_EVENT {
+        // Includes /stop broadcasts, not only targeted console kicks.
+        peer.kick_requested.store(true, Ordering::Release);
+    }
     match peer.tx.try_send(packet.clone()) {
         Ok(()) => {}
         Err(TrySendError::Full(_)) => {
@@ -154,6 +161,21 @@ impl Hub {
                     .players
                     .get(&id)
                     .map(|peer| !peer.overloaded.load(Ordering::Acquire))
+            })
+            .unwrap_or(false)
+    }
+    /// A successfully queued kick fences new client actions, even if the
+    /// owner thread has not drained its mailbox yet. The current packet may
+    /// finish its durable transaction; no later packet may begin.
+    pub fn kick_pending(&self, id: i32) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|inner| {
+                inner
+                    .players
+                    .get(&id)
+                    .map(|peer| peer.kick_requested.load(Ordering::Acquire))
             })
             .unwrap_or(false)
     }
@@ -451,6 +473,10 @@ impl Hub {
         else {
             return Ok(false);
         };
+        // A repeat request must not enqueue duplicate Disconnect packets.
+        if peer.kick_requested.load(Ordering::Acquire) {
+            return Ok(true);
+        }
         peer.tx
             .try_send(Event {
                 id: ADMIN_KICK_EVENT,
@@ -460,6 +486,8 @@ impl Hub {
                 peer.overloaded.store(true, Ordering::Release);
                 io::Error::other("target session mailbox unavailable")
             })?;
+        // Publish the fence only after the mailbox has accepted the kick.
+        peer.kick_requested.store(true, Ordering::Release);
         Ok(true)
     }
 
@@ -524,6 +552,7 @@ impl Hub {
             dimension,
             tx,
             overloaded: Arc::new(AtomicBool::new(false)),
+            kick_requested: Arc::new(AtomicBool::new(false)),
         };
         // Existing players learn of the new user in queue order.
         let presence = list_entry(&peer.name, true).map_err(|_| JoinError::Full)?;
@@ -1328,5 +1357,47 @@ mod tests {
         assert!(!hub.request_dispenser_arrow_damage(bob).unwrap());
         assert!(!hub.request_dispenser_arrow_damage(999).unwrap());
         assert!(bob_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn add017_kick_fences_client_input_without_removing_session_owner() {
+        let hub = Hub::default();
+        let (id, rx, _) = hub
+            .add("RustTester".into(), "uuid".into(), PlayerPosition::default())
+            .unwrap();
+        assert!(!hub.kick_pending(id));
+        assert!(hub.request_admin_kick("rusttester", "Stop").unwrap());
+        assert!(hub.kick_pending(id));
+        assert!(hub.is_healthy(id));
+        assert_eq!(hub.count().unwrap(), 1);
+        assert!(hub.request_admin_kick("RustTester", "Again").unwrap());
+        let packet = rx.try_recv().unwrap();
+        assert_eq!(packet.id, ADMIN_KICK_EVENT);
+        assert_eq!(packet.body, b"Stop");
+        assert!(rx.try_recv().is_err(), "duplicate kick must not be queued");
+        hub.remove(id);
+        assert!(!hub.kick_pending(id));
+    }
+
+    #[test]
+    fn add017_shutdown_kick_broadcast_fences_all_sessions() {
+        let hub = Hub::default();
+        let (alice, alice_rx, _) = hub
+            .add("Alice".into(), "a".into(), PlayerPosition::default())
+            .unwrap();
+        let (bob, bob_rx, _) = hub
+            .add("Bob".into(), "b".into(), PlayerPosition::default())
+            .unwrap();
+        // Joining Bob notifies Alice of tab-list and entity presence.
+        while alice_rx.try_recv().is_ok() {}
+        assert!(bob_rx.try_recv().is_err());
+        hub.broadcast(Event {
+            id: ADMIN_KICK_EVENT,
+            body: b"Server shutdown".to_vec(),
+        });
+        assert!(hub.kick_pending(alice));
+        assert!(hub.kick_pending(bob));
+        assert_eq!(alice_rx.try_recv().unwrap().id, ADMIN_KICK_EVENT);
+        assert_eq!(bob_rx.try_recv().unwrap().id, ADMIN_KICK_EVENT);
     }
 }
