@@ -423,7 +423,12 @@ fn join(
 
     // Bound per-session outstanding compression jobs, including simultaneous
     // logins. Encoding is done off the world tick mutex by shared workers.
-    send_chunk_batch(s, world, view_chunks(chunk_center(position)))?;
+    send_chunk_batch(
+        s,
+        world,
+        chunk_center(position),
+        view_chunks(chunk_center(position)),
+    )?;
 
     // Clientbound 0x30 / 0x09: authoritative Creative inventory and hotbar.
     send(s, 0x30, &inventory.window_items())?;
@@ -474,27 +479,53 @@ fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipel
     };
     chunk_pipeline::submit(cx, cz, mask, data)
 }
+/// Send the chunk under the player first so the loading screen can display
+/// usable terrain before remote columns. Deterministic for any arrival order
+/// and safe at signed-coordinate limits.
+fn prioritize_chunk_view(
+    coords: impl IntoIterator<Item = (i32, i32)>,
+    center: (i32, i32),
+) -> Vec<(i32, i32)> {
+    let mut chunks: Vec<_> = coords.into_iter().collect();
+    chunks.sort_unstable_by_key(|&(x, z)| {
+        let dx = (i64::from(x) - i64::from(center.0)).abs();
+        let dz = (i64::from(z) - i64::from(center.1)).abs();
+        (dx + dz, dz, dx, z, x)
+    });
+    chunks
+}
+
 /// Submit at most eight chunks per session before draining them in wire order.
 /// This avoids a large per-client raw-chunk backlog when players join together.
 fn send_chunk_batch(
     s: &mut Connection,
     world: &Mutex<World>,
+    center: (i32, i32),
     coords: impl IntoIterator<Item = (i32, i32)>,
 ) -> io::Result<()> {
     let mut pending = Vec::with_capacity(chunk_pipeline::SESSION_BATCH_LIMIT);
     let mut deadline = Instant::now() + chunk_pipeline::BATCH_DEADLINE;
-    for (cx, cz) in coords {
-        pending.push(queue_chunk(world, cx, cz)?);
+    for (cx, cz) in prioritize_chunk_view(coords, center) {
+        let chunk = queue_chunk(world, cx, cz).map_err(|error| {
+            io::Error::new(error.kind(), format!("prepare chunk ({cx}, {cz}): {error}"))
+        })?;
+        pending.push(((cx, cz), chunk));
         if pending.len() == chunk_pipeline::SESSION_BATCH_LIMIT {
-            for chunk in pending.drain(..) {
-                send(s, 0x21, &chunk.finish_before(deadline)?)?;
+            for ((cx, cz), chunk) in pending.drain(..) {
+                let data = chunk.finish_before(deadline).map_err(|error| {
+                    io::Error::new(error.kind(), format!("encode chunk ({cx}, {cz}): {error}"))
+                })?;
+                send(s, 0x21, &data)?;
             }
             // Reset only after the bounded batch has drained, not for each chunk.
             deadline = Instant::now() + chunk_pipeline::BATCH_DEADLINE;
         }
     }
-    for chunk in pending {
-        send(s, 0x21, &chunk.finish_before(deadline)?)?;
+    for ((cx, cz), chunk) in pending {
+        let data = chunk.finish_before(deadline).map_err(|error| {
+            io::Error::new(error.kind(), format!("encode chunk ({cx}, {cz}): {error}"))
+        })?;
+        send(s, 0x21, &data)?;
     }
     Ok(())
 }
@@ -567,7 +598,7 @@ fn sync_chunks(
     for &(cx, cz) in loaded.difference(&desired) {
         unload_chunk(s, cx, cz)?;
     }
-    send_chunk_batch(s, world, desired.difference(loaded).copied())?;
+    send_chunk_batch(s, world, center, desired.difference(loaded).copied())?;
     *loaded = desired;
     Ok(())
 }
@@ -9109,5 +9140,42 @@ mod disconnect_diagnostics_tests {
             )),
             "chunk_timeout"
         );
+    }
+}
+
+#[cfg(test)]
+mod chunk_priority_tests {
+    use super::*;
+
+    #[test]
+    fn initial_chunk_view_starts_with_player_column_in_any_iteration_order() {
+        let center = (-2, 3);
+        let chunks = view_chunks(center);
+        let ordered = prioritize_chunk_view(chunks.iter().copied().rev(), center);
+        assert_eq!(ordered.len(), chunks.len());
+        assert_eq!(ordered[0], center);
+        let distances: Vec<i64> = ordered
+            .iter()
+            .map(|&(x, z)| {
+                (i64::from(x) - i64::from(center.0)).abs()
+                    + (i64::from(z) - i64::from(center.1)).abs()
+            })
+            .collect();
+        assert!(distances.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(
+            ordered,
+            prioritize_chunk_view(chunks.iter().copied(), center)
+        );
+    }
+
+    #[test]
+    fn chunk_prioritization_handles_negative_and_extreme_coordinates() {
+        let center = (i32::MIN, i32::MAX);
+        let coords = [(i32::MAX, i32::MIN), center, (i32::MIN + 1, i32::MAX)];
+        let actual = prioritize_chunk_view(coords, center);
+        assert_eq!(actual[0], center);
+        assert_eq!(actual[1], (i32::MIN + 1, i32::MAX));
+        assert_eq!(actual[2], (i32::MAX, i32::MIN));
+        assert!(prioritize_chunk_view([], center).is_empty());
     }
 }
