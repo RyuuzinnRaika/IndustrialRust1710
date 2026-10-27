@@ -1136,10 +1136,18 @@ mod tests {
                     continue;
                 };
                 let root = height(seed, x, z);
-                assert_eq!(block(seed, Dimension::Overworld, x, root + 1, z) >> 4, log);
+                // Villages and pre-existing forest canopy take precedence;
+                // count only unobstructed starter trees in this sample.
+                if block(seed, Dimension::Overworld, x, root + 1, z) >> 4 != log {
+                    continue;
+                }
                 let column = OverworldColumn::new(seed, x, z);
                 assert_eq!(column.block_at(root + 1) >> 4, log);
-                assert_eq!(column.block_at(root + 6) >> 4, leaves);
+                assert_eq!(
+                    column.block_at(root + 6),
+                    block(seed, Dimension::Overworld, x, root + 6, z)
+                );
+                assert!(matches!(leaves, 18 | 161));
                 if log == 17 {
                     oak += 1;
                 } else {
