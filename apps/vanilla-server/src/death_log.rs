@@ -5,9 +5,12 @@ use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_RECORD_BYTES: usize = 2048;
+// A single write_all remains serialized across all concurrent player sessions.
+static DEATH_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeathCause {
@@ -137,6 +140,10 @@ impl DeathRecord<'_> {
             return Err(io::Error::new(ErrorKind::InvalidData, "oversized death event"));
         }
         line.push(b'\n');
+        let _guard = DEATH_FILE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| io::Error::other("death file lock poisoned"))?;
         let path = Self::log_path(world_path);
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
