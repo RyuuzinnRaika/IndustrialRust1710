@@ -572,8 +572,15 @@ impl World {
 
     /// Additional scheduled state changes are merged into the existing
     /// fluid/ecology/devices single-snapshot commit.
-    pub(super) fn special_changes(&self, budget: usize) -> BTreeMap<Position, u16> {
+    pub(super) fn special_changes(
+        &self,
+        budget: usize,
+    ) -> (
+        BTreeMap<Position, u16>,
+        std::collections::BTreeSet<Position>,
+    ) {
         let mut changes = BTreeMap::new();
+        let mut blast_cells = std::collections::BTreeSet::new();
         let len = self.pending_devices.len();
         if len > 0 {
             let start = (self.fluid_phase as usize).wrapping_mul(budget) % len;
@@ -703,6 +710,7 @@ impl World {
                                 strength -= (blast_resistance(id) + 0.3) * 0.3;
                                 if strength > 0.0 && blast_breakable(id) {
                                     changes.insert((x, y as u8, z), 0);
+                                    blast_cells.insert((x, y as u8, z));
                                 }
                             }
                             px += dx / length * 0.3;
@@ -714,7 +722,7 @@ impl World {
                 }
             }
         }
-        changes
+        (changes, blast_cells)
     }
 
     /// A weighted pressure plate's metadata is its 0..15 analog output.
@@ -1274,6 +1282,62 @@ mod tests {
         assert_eq!(near.len(), 1);
         assert_eq!(near[0].1, (5, 80, 5));
         assert_eq!(world.drain_tnt_events().len(), 2);
+    }
+
+    #[test]
+    fn saturated_world_replays_blast_blocks_after_restart_and_freeing_edit_slots() {
+        let path = file("tnt-durable-blast-backlog");
+        let mut world = World::new();
+        // Fill the exact 65536 IRW edit budget far from the blast so
+        // destroying generated grass would need a 65537th sparse edit.
+        for n in 0..super::super::MAX_EDITS {
+            world.edits.insert(
+                (1000 + (n % 256) as i32, 100, 1000 + (n / 256) as i32),
+                49 << 4,
+            );
+        }
+        assert!(world.spawn_primed_tnt(0, 64, 0, 1));
+        world.save(&path).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert!(!world.pending_blast_edits.is_empty());
+        assert!(world.pending_blast_edits.len() <= super::super::MAX_PENDING_BLAST);
+        let (&pos, &expected) = world.pending_blast_edits.iter().next().unwrap();
+        assert_eq!(world.get(pos.0, i32::from(pos.1), pos.2), expected);
+        let mut restored = World::load(&path).unwrap();
+        assert_eq!(restored.pending_blast_edits, world.pending_blast_edits);
+        // A normal player edit can free one sparse slot. Next tick retries
+        // a delayed destruction; no new TNT event should be emitted.
+        restored.update_and_save(&path, 1000, 100, 1000, 0).unwrap();
+        restored.drain_tnt_events();
+        restored.block_tick(&path, 64).unwrap();
+        assert_eq!(restored.get(pos.0, i32::from(pos.1), pos.2), 0);
+        assert!(!restored.pending_blast_edits.contains_key(&pos));
+        assert!(restored.drain_tnt_events().is_empty());
+        assert_eq!(
+            World::load(&path)
+                .unwrap()
+                .get(pos.0, i32::from(pos.1), pos.2),
+            0
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn player_edit_cancels_old_delayed_blast_even_after_restart() {
+        let path = file("tnt-blast-player-wins");
+        let mut world = World::new();
+        world.import_block(2, 100, 0, 1 << 4).unwrap();
+        world.pending_blast_edits.insert((2, 100, 0), 1 << 4);
+        world.save(&path).unwrap();
+        // Unlike replay, an explicit replacement must invalidate the stale
+        // TNT3 queue in the *same* save.
+        world.update_and_save(&path, 2, 100, 0, 4 << 4).unwrap();
+        assert!(world.pending_blast_edits.is_empty());
+        let mut restored = World::load(&path).unwrap();
+        assert!(restored.pending_blast_edits.is_empty());
+        restored.block_tick(&path, 64).unwrap();
+        assert_eq!(restored.get(2, 100, 0), 4 << 4);
+        fs::remove_file(path).ok();
     }
 
     #[test]

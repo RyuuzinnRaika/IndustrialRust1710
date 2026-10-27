@@ -20,6 +20,7 @@ pub const MAX_CHUNK: i32 = WORLD_LIMIT / 16 - 1;
 const MAX_EDITS: usize = 65_536;
 const MAX_PRIMED_TNT: usize = 4096;
 const MAX_PENDING_TNT: usize = MAX_EDITS;
+const MAX_PENDING_BLAST: usize = MAX_EDITS;
 // A loaded 5x5 view contains at most 6_400 surface columns per player.
 // Keep weather observations bounded even after prolonged exploration.
 const MAX_WEATHER_COLUMNS: usize = 16_384;
@@ -84,6 +85,8 @@ pub struct World {
     primed_tnt: BTreeMap<i32, special::PrimedTnt>,
     // Durable overflow queue: a chain-lit block must not be lost on /stop.
     pending_chain_tnt: BTreeSet<Position>,
+    // TNT3: explosion removals deferred by IRW edit capacity.
+    pending_blast_edits: BTreeMap<Position, u16>,
     next_tnt_id: i32,
     tnt_events: Vec<special::TntEvent>,
     // Only live worlds bind to a session; standalone conversions and tests
@@ -1173,7 +1176,8 @@ impl World {
         let supported: Vec<Position> = self.pending_support.iter().take(budget).copied().collect();
         let mut changes: BTreeMap<Position, u16> = self.ecology_changes(budget);
         changes.extend(self.device_changes(budget));
-        changes.extend(self.special_changes(budget));
+        let (special, blast_cells) = self.special_changes(budget);
+        changes.extend(special);
         // Timed redstone components must release power on the authoritative
         // world tick, not merely disappear from the in-memory timer table.
         // Stage their reset in the same durable snapshot as other updates.
@@ -1373,6 +1377,13 @@ impl World {
             }
         }
 
+        // Retry persisted blast edits if their original blocks are untouched.
+        for (&(x, y, z), &expected) in self.pending_blast_edits.iter().take(budget) {
+            if self.get(x, i32::from(y), z) == expected {
+                changes.entry((x, y, z)).or_insert(0);
+            }
+        }
+
         // Apply the exact final block changes, after fluid/redstone merging.
         // TNT removed from the world must have a reserved primed-entity slot:
         // overflowing the 4096-entity IRW trailer used to abort both gameplay
@@ -1428,7 +1439,16 @@ impl World {
                 }
             }
         }
+        let mut delayed_blast = BTreeMap::new();
         for pos in over_budget {
+            if blast_cells.contains(&pos)
+                && changes.get(&pos) == Some(&0)
+                && self.get(pos.0, i32::from(pos.1), pos.2) >> 4 != 46
+                && !self.pending_blast_edits.contains_key(&pos)
+                && self.pending_blast_edits.len() + delayed_blast.len() < MAX_PENDING_BLAST
+            {
+                delayed_blast.insert(pos, self.get(pos.0, i32::from(pos.1), pos.2));
+            }
             if changes.get(&pos) == Some(&0)
                 && self.get(pos.0, i32::from(pos.1), pos.2) >> 4 == 46
                 && (self.pending_chain_tnt.contains(&pos)
@@ -1441,6 +1461,36 @@ impl World {
         // Never spawn an entity for a TNT block whose removal was dropped by
         // the edit budget. Otherwise /stop persists a TNT block AND entity.
         primed_on_commit.retain(|&(x, y, z)| changes.get(&(x, y as u8, z)) == Some(&0));
+
+        // Persist newly delayed explosions and discard entries only when
+        // their block change has committed or its original block is gone.
+        let finished_blast: Vec<_> = self
+            .pending_blast_edits
+            .iter()
+            .take(budget)
+            .filter(|&(pos, &expected)| {
+                changes.contains_key(pos) || self.get(pos.0, i32::from(pos.1), pos.2) != expected
+            })
+            .map(|(&pos, _)| pos)
+            .collect();
+        let blast_queue_mutates = !finished_blast.is_empty() || !delayed_blast.is_empty();
+        let mut pending_blast_before =
+            blast_queue_mutates.then(|| self.pending_blast_edits.clone());
+        for pos in finished_blast {
+            // A replay removed by the edit budget is still pending.
+            if changes.contains_key(&pos)
+                || self
+                    .pending_blast_edits
+                    .get(&pos)
+                    .is_some_and(|&expected| self.get(pos.0, i32::from(pos.1), pos.2) != expected)
+            {
+                self.pending_blast_edits.remove(&pos);
+            }
+        }
+        self.pending_blast_edits.extend(delayed_blast);
+        let pending_blast_changed = pending_blast_before
+            .as_ref()
+            .is_some_and(|before| *before != self.pending_blast_edits);
 
         // The pending chain is in TNT2, so save failures must also roll this
         // queue back, just like the primed entities and sparse block edits.
@@ -1639,6 +1689,9 @@ impl World {
                 if let Some(before) = pending_chain_before.take() {
                     self.pending_chain_tnt = before;
                 }
+                if let Some(before) = pending_blast_before.take() {
+                    self.pending_blast_edits = before;
+                }
                 self.tnt_events.truncate(tnt_events_before);
                 self.comparator_ready.clear();
                 for (pos, original) in undo {
@@ -1677,6 +1730,7 @@ impl World {
         } else if !self.comparator_ready.is_empty()
             || tnt_changed
             || pending_chain_changed
+            || pending_blast_changed
             || (!self.primed_tnt.is_empty() && self.fluid_phase.is_multiple_of(20))
         {
             // Analog-only updates need a successful save even when the
@@ -1687,6 +1741,9 @@ impl World {
                 }
                 if let Some(before) = pending_chain_before.take() {
                     self.pending_chain_tnt = before;
+                }
+                if let Some(before) = pending_blast_before.take() {
+                    self.pending_blast_edits = before;
                 }
                 self.tnt_events.truncate(tnt_events_before);
                 self.comparator_ready.clear();
@@ -1796,6 +1853,9 @@ impl World {
             }
             self.edits.insert(key, block);
         }
+        // A player's newer edit cancels an older delayed explosion. Save
+        // the cancellation together with the new block, not after it.
+        let deferred_before = self.pending_blast_edits.remove(&key);
         if let Err(e) = self.save(path) {
             match old {
                 Some(value) => {
@@ -1804,6 +1864,9 @@ impl World {
                 None => {
                     self.edits.remove(&key);
                 }
+            }
+            if let Some(value) = deferred_before {
+                self.pending_blast_edits.insert(key, value);
             }
             return Err(e);
         }
@@ -2229,7 +2292,11 @@ impl World {
         }
         let trailer = &bytes[blocks_end..];
         if !trailer.is_empty() {
-            if trailer.len() < 6 || (&trailer[..4] != b"TNT1" && &trailer[..4] != b"TNT2") {
+            if trailer.len() < 6
+                || (&trailer[..4] != b"TNT1"
+                    && &trailer[..4] != b"TNT2"
+                    && &trailer[..4] != b"TNT3")
+            {
                 return Err(invalid("unrecognized world entity trailer"));
             }
             let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
@@ -2237,21 +2304,51 @@ impl World {
             if primed_count > MAX_PRIMED_TNT || trailer.len() < primed_end {
                 return Err(invalid("invalid primed TNT trailer length"));
             }
-            if &trailer[..4] == b"TNT2" {
+            if &trailer[..4] == b"TNT2" || &trailer[..4] == b"TNT3" {
                 let queued = &trailer[primed_end..];
                 if queued.len() < 4 {
                     return Err(invalid("truncated queued TNT trailer"));
                 }
                 let count = u32::from_be_bytes(queued[..4].try_into().unwrap()) as usize;
-                if count > MAX_PENDING_TNT || queued.len() != 4 + count * 9 {
+                let chain_end = 4 + count * 9;
+                if count > MAX_PENDING_TNT || queued.len() < chain_end {
                     return Err(invalid("invalid queued TNT trailer length"));
                 }
-                for entry in queued[4..].as_chunks::<9>().0 {
+                if &trailer[..4] == b"TNT2" && queued.len() != chain_end {
+                    return Err(invalid("unexpected TNT2 trailer data"));
+                }
+                for entry in queued[4..chain_end].as_chunks::<9>().0 {
                     let x = i32::from_be_bytes(entry[..4].try_into().unwrap());
                     let y = i32::from(entry[4]);
                     let z = i32::from_be_bytes(entry[5..9].try_into().unwrap());
                     if !in_bounds(x, y, z) || !world.pending_chain_tnt.insert((x, y as u8, z)) {
                         return Err(invalid("invalid or duplicate queued TNT position"));
+                    }
+                }
+                if &trailer[..4] == b"TNT3" {
+                    let pending = &queued[chain_end..];
+                    if pending.len() < 4 {
+                        return Err(invalid("truncated blast backlog"));
+                    }
+                    let count = u32::from_be_bytes(pending[..4].try_into().unwrap()) as usize;
+                    if count > MAX_PENDING_BLAST || pending.len() != 4 + count * 11 {
+                        return Err(invalid("invalid blast backlog length"));
+                    }
+                    for item in pending[4..].as_chunks::<11>().0 {
+                        let x = i32::from_be_bytes(item[..4].try_into().unwrap());
+                        let y = item[4];
+                        let z = i32::from_be_bytes(item[5..9].try_into().unwrap());
+                        let expected = u16::from_be_bytes(item[9..11].try_into().unwrap());
+                        if !in_bounds(x, i32::from(y), z)
+                            || expected == 0
+                            || expected >> 4 == 46
+                            || world
+                                .pending_blast_edits
+                                .insert((x, y, z), expected)
+                                .is_some()
+                        {
+                            return Err(invalid("invalid deferred explosion"));
+                        }
                     }
                 }
             } else if trailer.len() != primed_end {
@@ -2390,16 +2487,22 @@ impl World {
             f.write_all(&z.to_be_bytes())?;
             f.write_all(&block.to_be_bytes())?;
         }
-        if !self.primed_tnt.is_empty() || !self.pending_chain_tnt.is_empty() {
+        if !self.primed_tnt.is_empty()
+            || !self.pending_chain_tnt.is_empty()
+            || !self.pending_blast_edits.is_empty()
+        {
             if self.primed_tnt.len() > MAX_PRIMED_TNT
                 || self.pending_chain_tnt.len() > MAX_PENDING_TNT
+                || self.pending_blast_edits.len() > MAX_PENDING_BLAST
             {
                 return Err(invalid("TNT entity or pending queue capacity exceeded"));
             }
-            f.write_all(if self.pending_chain_tnt.is_empty() {
-                b"TNT1"
-            } else {
+            f.write_all(if !self.pending_blast_edits.is_empty() {
+                b"TNT3"
+            } else if !self.pending_chain_tnt.is_empty() {
                 b"TNT2"
+            } else {
+                b"TNT1"
             })?;
             f.write_all(&(self.primed_tnt.len() as u16).to_be_bytes())?;
             for tnt in self.primed_tnt.values() {
@@ -2418,12 +2521,21 @@ impl World {
                 // both world-tick writes and the final shutdown save.
                 f.write_all(&(remaining.max(1) as u32).to_be_bytes())?;
             }
-            if !self.pending_chain_tnt.is_empty() {
+            if !self.pending_chain_tnt.is_empty() || !self.pending_blast_edits.is_empty() {
                 f.write_all(&(self.pending_chain_tnt.len() as u32).to_be_bytes())?;
                 for &(x, y, z) in &self.pending_chain_tnt {
                     f.write_all(&x.to_be_bytes())?;
                     f.write_all(&[y])?;
                     f.write_all(&z.to_be_bytes())?;
+                }
+            }
+            if !self.pending_blast_edits.is_empty() {
+                f.write_all(&(self.pending_blast_edits.len() as u32).to_be_bytes())?;
+                for (&(x, y, z), &expected) in &self.pending_blast_edits {
+                    f.write_all(&x.to_be_bytes())?;
+                    f.write_all(&[y])?;
+                    f.write_all(&z.to_be_bytes())?;
+                    f.write_all(&expected.to_be_bytes())?;
                 }
             }
         }
