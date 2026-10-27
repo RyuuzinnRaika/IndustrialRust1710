@@ -114,6 +114,7 @@ pub struct TickResult {
     pub events: Vec<(PlayerPosition, Event)>,
     pub pearl_teleports: Vec<(String, PlayerPosition)>,
     pub egg_hatches: Vec<PlayerPosition>,
+    pub mob_hits: Vec<(i32, u64)>,
 }
 impl Throwables {
     /// Pure validation for a device activation. No inventory or entity state
@@ -293,7 +294,19 @@ impl Throwables {
         Some([Event { id: 0x0d, body }, multiplayer::destroy(id)])
     }
 
+    #[cfg(test)]
     pub fn tick(&mut self, world: &World, tick: u64) -> TickResult {
+        self.tick_with_mob_targets(world, tick, &[])
+    }
+
+    /// Swept projectile samples are compared with server-owned Mob hitboxes,
+    /// never client-supplied hit claims. Block collision takes precedence.
+    pub fn tick_with_mob_targets(
+        &mut self,
+        world: &World,
+        tick: u64,
+        targets: &[(i32, PlayerPosition, f64, f64)],
+    ) -> TickResult {
         let mut result = TickResult::default();
         let mut removed = Vec::new();
         for object in self.active.values_mut() {
@@ -328,6 +341,7 @@ impl Throwables {
                 .hypot(destination.z - previous.z);
             let steps = (length * 4.0).ceil().clamp(1.0, 32.0) as usize;
             let mut collision = None;
+            let mut mob_collision = None;
             for index in 1..=steps {
                 let t = index as f64 / steps as f64;
                 let sample = PlayerPosition {
@@ -353,6 +367,25 @@ impl Throwables {
                     collision = Some(sample);
                     break;
                 }
+                let hit_mob = if object.kind == Kind::Arrow {
+                    targets.iter().find(|(_, at, radius, height)| {
+                        (sample.x - at.x).hypot(sample.z - at.z) <= *radius
+                            && sample.y >= at.y - 0.25
+                            && sample.y <= at.y + *height + 0.25
+                    })
+                } else {
+                    None
+                };
+                if let Some((mob_id, _, _, _)) = hit_mob {
+                    mob_collision = Some((*mob_id, sample));
+                    break;
+                }
+            }
+            if let Some((mob_id, at)) = mob_collision {
+                object.at = at;
+                result.mob_hits.push((mob_id, tick));
+                removed.push(object.id);
+                continue;
             }
             if let Some(at) = collision {
                 // Destroy packets are broadcast to observers near this position.
@@ -863,5 +896,61 @@ mod tests {
         assert!(state.launch(10, 3, "Steve", at, 0.0, 0.0).is_none());
         assert_eq!(state.snapshot(at).len(), 3);
         assert!(!state.tick(&World::new(), 1).events.is_empty());
+    }
+    #[test]
+    fn dispenser_arrow_hits_mob_once_and_never_becomes_collectible() {
+        let mut objects = Throwables::default();
+        let (at, _) = objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
+        let targets = [(
+            500_001,
+            PlayerPosition {
+                x: 2.0,
+                y: 70.0,
+                z: at.z,
+            },
+            0.55,
+            1.4,
+        )];
+        let world = World::new();
+        let first = objects.tick_with_mob_targets(&world, 20, &targets);
+        assert_eq!(first.mob_hits, vec![(500_001, 20)]);
+        assert_eq!(
+            first
+                .events
+                .iter()
+                .filter(|(_, event)| event.id == 0x13)
+                .count(),
+            1
+        );
+        assert!(objects.active.is_empty());
+        assert_eq!(objects.nearby_embedded_arrow((2.0, 70.0, at.z)), None);
+        let second = objects.tick_with_mob_targets(&world, 20, &targets);
+        assert!(second.mob_hits.is_empty());
+        assert!(second.events.is_empty());
+    }
+
+    #[test]
+    fn solid_block_prevents_dispenser_arrow_hitting_mob_behind_it() {
+        let mut world = World::new();
+        world.import_block(2, 70, 0, 1 << 4).unwrap();
+        let mut objects = Throwables::default();
+        objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
+        let targets = [(
+            500_002,
+            PlayerPosition {
+                x: 2.5,
+                y: 70.0,
+                z: 0.5,
+            },
+            0.5,
+            1.8,
+        )];
+        let first = objects.tick_with_mob_targets(&world, 20, &targets);
+        assert!(first.mob_hits.is_empty());
+        assert!(objects.active.values().next().unwrap().embedded);
     }
 }
