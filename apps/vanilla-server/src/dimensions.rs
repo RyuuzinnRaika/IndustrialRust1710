@@ -669,8 +669,9 @@ pub fn portal_target(world: &World, x: i32, y: i32, z: i32) -> Option<Dimension>
 pub fn portal_contact_ready(source: Dimension, target: Dimension, elapsed_ticks: u64) -> bool {
     match (source, target) {
         (Dimension::Overworld, Dimension::End) | (Dimension::End, Dimension::Overworld) => true,
-        (Dimension::Overworld, Dimension::Nether)
-        | (Dimension::Nether, Dimension::Overworld) => elapsed_ticks >= 80,
+        (Dimension::Overworld, Dimension::Nether) | (Dimension::Nether, Dimension::Overworld) => {
+            elapsed_ticks >= 80
+        }
         _ => false,
     }
 }
@@ -827,8 +828,16 @@ mod tests {
     use super::*;
     #[test]
     fn end_portals_are_instant_in_both_directions_but_nether_requires_contact() {
-        assert!(portal_contact_ready(Dimension::Overworld, Dimension::End, 0));
-        assert!(portal_contact_ready(Dimension::End, Dimension::Overworld, 0));
+        assert!(portal_contact_ready(
+            Dimension::Overworld,
+            Dimension::End,
+            0
+        ));
+        assert!(portal_contact_ready(
+            Dimension::End,
+            Dimension::Overworld,
+            0
+        ));
         for (source, target) in [
             (Dimension::Overworld, Dimension::Nether),
             (Dimension::Nether, Dimension::Overworld),
@@ -841,7 +850,11 @@ mod tests {
             Dimension::Overworld,
             1000
         ));
-        assert!(!portal_contact_ready(Dimension::End, Dimension::Nether, 1000));
+        assert!(!portal_contact_ready(
+            Dimension::End,
+            Dimension::Nether,
+            1000
+        ));
     }
     #[test]
     fn portal_detection_rejects_orphaned_and_broken_nether_frames() {
