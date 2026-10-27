@@ -5137,6 +5137,47 @@ mod tests {
             );
             assert_ne!((x, z), (837, 142), "River member bypassed its spawn list");
         }
+
+        // C21: The same live pack loop must honor the *animal* cap, not only
+        // the monster cap tested elsewhere. In Java 1.7.10 one player's
+        // 17x17 eligible-chunk union gives floor(10 * 289 / 256) = 11.
+        // Place existing cows away from the origin so body collisions cannot
+        // mask an accidental cap overshoot.
+        assert_eq!(natural_spawn_capacity(&[player], VANILLA_PASSIVE_CAP), 11);
+        let filler = PlayerPosition {
+            x: 4096.5,
+            y: 65.0,
+            z: 4096.5,
+        };
+        let spawn_with_animals = |preexisting: usize| {
+            let mut capped = Mobs::new_with_difficulty(&world, true, 2);
+            for _ in 0..preexisting {
+                capped.insert(Kind::Cow, filler, false);
+            }
+            let mut packets = Vec::new();
+            let mut sampler = world.lighting_sampler();
+            capped.spawn_natural(now, &world, &mut sampler, &[player], &mut packets);
+            assert_eq!(
+                packets.iter().filter(|event| event.id == 0x0f).count(),
+                capped.entities.len() - preexisting,
+                "each live spawn must have exactly one Protocol 5 notification"
+            );
+            capped
+                .entities
+                .values()
+                .filter(|mob| mob.kind.counts_toward_natural_cap(true))
+                .count()
+        };
+        assert_eq!(
+            spawn_with_animals(11),
+            11,
+            "a full animal cap must block new sheep"
+        );
+        assert_eq!(
+            spawn_with_animals(10),
+            11,
+            "one free animal slot must admit exactly one sheep, not a full pack"
+        );
     }
 
     #[test]
