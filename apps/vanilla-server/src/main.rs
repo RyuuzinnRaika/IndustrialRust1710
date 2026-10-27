@@ -2547,12 +2547,13 @@ fn play(
                 idle_gravity.observe_client(now_tick);
             } // flying/onGround
             4 | 6 => {
-                // Minecraft 1.7.10 / Protocol 5 C04/C06 wire order:
-                // X, stance (eye height), feet Y, Z. Never use stance as
-                // collision-box feet Y: it is normally about 1.62 blocks higher.
+                // Vanilla 1.7.10 C04/C06 wire order is X, feet Y, stance, Z.
+                // C03PacketPlayer.C04/C06 writePacketData serializes Y *before*
+                // stance. Reversing these values causes Survival to see the eye
+                // height as feet Y and reject normal movement as a collision.
                 let x = input.f64()?;
-                let _stance = input.f64()?;
                 let y = input.f64()?;
+                let stance = input.f64()?;
                 let z = input.f64()?;
                 if id == 6 {
                     yaw = input.f32()?;
@@ -2563,7 +2564,11 @@ fn play(
                 }
                 input.u8()?;
                 input.finish()?;
-                if !x.is_finite() || !y.is_finite() || !z.is_finite() || !(0.0..256.0).contains(&y)
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || !stance.is_finite()
+                    || !z.is_finite()
+                    || !(0.0..256.0).contains(&y)
                 {
                     return Err(bad("invalid player coordinates"));
                 }
