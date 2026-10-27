@@ -1767,7 +1767,7 @@ fn movement_and_collision_corrections_preserve_the_players_view() {
 
 #[test]
 fn collision_correction_rejects_queued_nearby_client_movement_until_ack() {
-    let mut server = NativeServer::start_with_mode(true);
+    let server = NativeServer::start_with_mode(true);
     let (mut client, _, _) = server.join("RustTester");
     send_position(&mut client, 0.7, 64.0, 0.5);
     send_position(&mut client, 0.7, 60.0, 0.5);
