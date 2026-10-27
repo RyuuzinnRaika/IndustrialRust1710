@@ -6603,7 +6603,7 @@ mod tests {
                 ..valid
             },
             PlayerPosition {
-                z: -f64::from(crate::world::WORLD_LIMIT),
+                z: -f64::from(crate::world::WORLD_LIMIT) - 1.0,
                 ..valid
             },
         ];
