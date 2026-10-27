@@ -308,7 +308,11 @@ impl Throwables {
                 object.at = at;
                 if object.kind == Kind::Arrow {
                     object.embedded = true;
-                    let (x, y, z) = (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+                    let (x, y, z) = (
+                        at.x.floor() as i32,
+                        at.y.floor() as i32,
+                        at.z.floor() as i32,
+                    );
                     object.embedded_block = Some((x, y, z, world.get(x, y, z)));
                     // Vanilla counts the 1200-tick lifetime from entering the block,
                     // not from launch. Flight time must not shorten embedded lifetime.
