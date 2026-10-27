@@ -54,3 +54,35 @@ Get-Content .\world.deaths.jsonl -Tail 20
 ワールドファイル名は実際の `--world` パスへ読み替えてください。サバイバルで落下・溺水・空腹・炎上・矢・Mob・エンダーパールの各死亡を再現し、(1)チャット通知が1回のみ、(2)JSONLに各死因と座標が残る、(3)ゲームルールがfalseでもログは残る、(4)死亡回数とドロップが従来どおり、(5)リスポーン後に新しい死亡が記録できることを確認してください。
 
 **注意**: これは**死亡ログの詳細化**であり、未実装の被ダメージ源を実装する変更ではありません。大きな高負荷検証を始める前にワールドのバックアップを取ってください。
+
+
+## D02: fail-safe logging improvements (partial)
+
+The death announcement and diagnostic append happen **before** the potentially
+failing death-drop journal transaction. A failed inventory/drop commit therefore
+does not skip the first death message and diagnostic log.
+
+A successful JSONL append now calls `sync_data()` before returning, and a
+short/failed `write_all` attempts to truncate the partial suffix. A separate
+test simulates an unwritable diagnostic destination. The diagnostic log is still
+best-effort: an I/O error is reported to the console and does not block
+ordinary death-drop/respawn processing.
+
+**Not yet complete:** This is not a multi-file transaction. A power failure
+after player health becomes zero but before scoreboard/death-log processing can
+still lose the death-log event, and a crash between multiple durable files can
+leave a temporarily inconsistent score. Strict cross-restart exactly-once
+semantics require an outbox/checkpoint protocol keyed by a durable unique death
+ID and redo/recovery logic shared with the player, scoreboard and inventory
+journal. Do not mark D02 fully accepted until this has been implemented and
+tested with fault injection.
+
+### D02 validation
+
+- [ ] Fail a death-drop commit and verify that the death log still exists.
+- [ ] Fail the death-log destination and verify that ordinary death/respawn
+      continues without a process crash (error visible to an administrator).
+- [ ] Crash/restart after each checkpoint and confirm no loss/duplication
+      once durable event IDs/redo recovery are implemented.
+- [ ] Confirm `sync_data` and retry I/O do not cause pathological 20TPS stalls
+      during bursts of deaths.
