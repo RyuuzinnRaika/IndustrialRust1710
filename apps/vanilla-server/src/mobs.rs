@@ -969,8 +969,8 @@ fn blast_damage(world: &World, blast: &Explosion, target: PlayerPosition) -> u8 
         .floor()
         .clamp(0.0, 255.0) as u8
 }
-/// Projectile collisions must intersect the mob's body, not its feet.
-fn projectile_hits_mob(mob: &Mob, point: PlayerPosition) -> bool {
+/// Shared 1.7.10 Mob collision dimensions for arrows and their tick snapshots.
+fn projectile_hitbox(mob: &Mob) -> (f64, f64) {
     let (radius, height) = match mob.kind {
         Kind::Ghast => (2.0, 4.0),
         Kind::EnderDragon => (4.0, 8.0),
@@ -986,6 +986,11 @@ fn projectile_hits_mob(mob: &Mob, point: PlayerPosition) -> bool {
         Kind::Cow | Kind::Pig | Kind::Sheep => (0.55, 1.4),
         _ => (0.45, if mob.baby { 1.0 } else { 1.95 }),
     };
+    (radius, height)
+}
+/// Projectile collisions must intersect the mob's body, not its feet.
+fn projectile_hits_mob(mob: &Mob, point: PlayerPosition) -> bool {
+    let (radius, height) = projectile_hitbox(mob);
     (point.x - mob.position.x).hypot(point.z - mob.position.z) <= radius
         && point.y >= mob.position.y - 0.25
         && point.y <= mob.position.y + height + 0.25
@@ -1377,6 +1382,55 @@ impl Mobs {
     /// contact sensors. Does not expose client-provided movement or mutate AI.
     pub fn contact_positions(&self) -> Vec<PlayerPosition> {
         self.entities.values().map(|mob| mob.position).collect()
+    }
+
+    /// Read-only, bounded hitboxes for dispenser arrows. No Mob state is
+    /// modified while the projectile worker advances its physics.
+    pub fn projectile_targets(&self) -> Vec<(i32, PlayerPosition, f64, f64)> {
+        self.entities
+            .values()
+            .filter(|mob| mob.health > 0)
+            .map(|mob| {
+                let (radius, height) = projectile_hitbox(mob);
+                (mob.id, mob.position, radius, height)
+            })
+            .collect()
+    }
+
+    /// Apply one server-confirmed dispenser arrow hit. Damage and death drops
+    /// are authoritative; the normal invulnerability window prevents duplicate
+    /// damage when multiple projectiles strike in the same tick.
+    pub fn damage_from_dispenser_arrow(
+        &mut self,
+        id: i32,
+        tick: u64,
+    ) -> Option<(PlayerPosition, Vec<Event>)> {
+        let mob = self.entities.get_mut(&id)?;
+        if mob.hit_tick != 0 && tick.saturating_sub(mob.hit_tick) < 10 {
+            return None;
+        }
+        mob.hit_tick = tick;
+        mob.health -= 2;
+        let killed = mob.health <= 0;
+        let at = mob.position;
+        let mut events = if killed {
+            vec![mob.status(3), multiplayer::destroy(id)]
+        } else {
+            vec![mob.status(2), mob.health_metadata()]
+        };
+        if killed {
+            if let Some(mob) = self.entities.remove(&id) {
+                if let Some(drop) = mob.death_drop() {
+                    self.pending_drops.push(drop);
+                }
+                self.pending_drops.extend(mob.extra_death_drops());
+                if mob.kind == Kind::EnderDragon {
+                    self.dragon_defeated = true;
+                }
+                events.extend(self.split(mob));
+            }
+        }
+        Some((at, events))
     }
 
     /// Push server-owned living entities displaced by an extending piston.
@@ -7111,4 +7165,30 @@ mod tests {
         assert_eq!(mobs.arrows.len(), 1);
         assert_eq!(mobs.arrows.values().next().unwrap().spawn().id, 0x0e);
     }
+    #[test]
+    fn dispenser_arrow_mob_damage_and_death_are_not_duplicated() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition {
+            x: 2.0,
+            y: 70.0,
+            z: 0.5,
+        };
+        let id = mobs.next_id;
+        mobs.insert(Kind::Cow, at, false);
+        let initial_health = mobs.entities[&id].health;
+        assert!(mobs.projectile_targets().iter().any(|target| target.0 == id));
+        let (hit_at, events) = mobs.damage_from_dispenser_arrow(id, 20).unwrap();
+        assert_eq!(hit_at.x, at.x);
+        assert_eq!(events.len(), 2);
+        assert_eq!(mobs.entities[&id].health, initial_health - 2);
+        assert!(mobs.damage_from_dispenser_arrow(id, 20).is_none());
+        assert_eq!(mobs.entities[&id].health, initial_health - 2);
+        mobs.entities.get_mut(&id).unwrap().health = 2;
+        let (_, events) = mobs.damage_from_dispenser_arrow(id, 30).unwrap();
+        assert!(events.iter().any(|event| event.id == 0x13));
+        assert!(!mobs.entities.contains_key(&id));
+        assert!(mobs.damage_from_dispenser_arrow(id, 40).is_none());
+        assert!(mobs.projectile_targets().iter().all(|target| target.0 != id));
+    }
+
 }
