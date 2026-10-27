@@ -2184,14 +2184,19 @@ impl World {
             f.write_all(&(self.primed_tnt.len() as u16).to_be_bytes())?;
             for tnt in self.primed_tnt.values() {
                 let remaining = tnt.explode_at.saturating_sub(self.fluid_phase);
-                if remaining == 0 || remaining > u64::from(u32::MAX) {
+                if remaining > u64::from(u32::MAX) {
                     return Err(invalid("invalid primed TNT fuse"));
                 }
                 f.write_all(&tnt.entity_id.to_be_bytes())?;
                 f.write_all(&tnt.pos.0.to_be_bytes())?;
                 f.write_all(&tnt.pos.1.to_be_bytes())?;
                 f.write_all(&tnt.pos.2.to_be_bytes())?;
-                f.write_all(&(remaining as u32).to_be_bytes())?;
+                // A tick processes at most four detonations. If more than
+                // four TNT share a deadline, the remaining entities are
+                // overdue but still valid. Persist those as due next tick:
+                // a zero fuse is invalid on disk and previously aborted
+                // both world-tick writes and the final shutdown save.
+                f.write_all(&(remaining.max(1) as u32).to_be_bytes())?;
             }
         }
         Ok(())
