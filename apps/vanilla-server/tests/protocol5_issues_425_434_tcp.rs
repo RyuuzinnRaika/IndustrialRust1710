@@ -303,16 +303,24 @@ fn add011_two_simultaneous_tcp_logins_have_exactly_one_play_owner() {
             let start = Arc::clone(&barrier);
             thread::spawn(move || {
                 start.wait();
-                socket.write_all(&frame(0, &mc_string("RustTester"))).unwrap();
+                socket
+                    .write_all(&frame(0, &mc_string("RustTester")))
+                    .unwrap();
                 let (packet_id, _) = receive(&mut socket);
                 (packet_id, socket)
             })
         })
         .collect();
-    let mut results: Vec<_> = threads.into_iter().map(|join| join.join().unwrap()).collect();
+    let mut results: Vec<_> = threads
+        .into_iter()
+        .map(|join| join.join().unwrap())
+        .collect();
     results.sort_by_key(|(packet_id, _)| *packet_id);
     assert_eq!(
-        results.iter().map(|(packet_id, _)| *packet_id).collect::<Vec<_>>(),
+        results
+            .iter()
+            .map(|(packet_id, _)| *packet_id)
+            .collect::<Vec<_>>(),
         vec![0, 2],
         "one Login Disconnect and one Login Success are required",
     );
