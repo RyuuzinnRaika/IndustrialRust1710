@@ -63,8 +63,7 @@ pub(crate) fn is_dispenser_projectile(item_id: i16) -> bool {
 /// chicks instead of one. Derive both rolls from the same stable server-side
 /// value so clients cannot influence the outcome or duplicate the hatch.
 fn egg_hatch_count(tick: u64, entity_id: i32) -> usize {
-    let roll = (tick ^ (entity_id as u64).wrapping_mul(0x9e3779b97f4a7c15))
-        .rotate_left(17);
+    let roll = (tick ^ (entity_id as u64).wrapping_mul(0x9e3779b97f4a7c15)).rotate_left(17);
     if roll & 7 != 0 {
         0
     } else if (roll >> 3) & 31 == 0 {
