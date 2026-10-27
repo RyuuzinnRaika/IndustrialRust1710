@@ -21,6 +21,10 @@ Shell/PowerShell wrappers may perform minimal platform setup, environment checks
 4. Check `cargo fmt --all -- --check`, `cargo test --workspace --all-targets`, and `cargo clippy --workspace --all-targets -- -D warnings` where possible; explicitly report unrun tests and client/Windows-only verification.
 5. When reviewing a pull request, reject new Python/C#/Java-based product implementations, even if they appear in `tools/` or are called from a launcher.
 
+## Detailed operational policies (mandatory)
+
+Follow the [38 auditable policy rules](docs/POLICY_RULES.md) covering Rust-only implementation and quality, GitHub review and risk-tiered auto-merge, autonomous AI coordination, tests and completion claims, world-data security, and Minecraft Java 1.7.10 compatibility. Every rule defines its purpose, scope, required and prohibited actions, verification, and exceptions. Before autonomous merges classify the PR as L/M/H; H-risk changes require explicit administrator approval, and no pending/failed required CI may be treated as success. These rules do not imply GitHub branch protection is already configured.
+
 ## Existing migration debt — do not silently expand
 
 As of 2026-10-27, `tools/maintenance_supervisor.py` is an existing Python **runtime/process supervisor**, `scripts/prune_merged_pr_branches.py` is an existing Python **repository operations tool**, and `tools/ServerGui.cs` is an existing C# **Windows administrator GUI**. They predate this rule and are **not** examples of permitted new implementations. Preserve their behavior until safely replaced by tested Rust implementations; do not add new product functionality to them. Track migration in [issue #635](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/635).
