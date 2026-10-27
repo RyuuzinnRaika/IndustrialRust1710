@@ -7425,6 +7425,7 @@ fn main() -> io::Result<()> {
         let mut telemetry =
             telemetry::TickTelemetry::new(furnace_world_path.with_extension("metrics.jsonl"));
         let mut last = furnace_clock.ticks();
+        let mut last_clock_missed = furnace_clock.missed_tick_deadlines();
         let mut last_clock_snapshot = last;
         let mut last_weather = furnace_clock.weather();
         let mut piston_client_updates = PistonClientUpdates::default();
@@ -7433,7 +7434,12 @@ fn main() -> io::Result<()> {
             if now > last {
                 let worker_started = Instant::now();
                 let steps = (now - last).min(20) as u32;
-                let missed = (now - last).saturating_sub(u64::from(steps));
+                let clock_missed = furnace_clock.missed_tick_deadlines();
+                let skipped_deadlines = clock_missed.saturating_sub(last_clock_missed);
+                last_clock_missed = clock_missed;
+                let missed = (now - last)
+                    .saturating_sub(u64::from(steps))
+                    .saturating_add(skipped_deadlines);
                 last = now;
                 // One small durable write per second, with no replay of
                 // elapsed wall-clock downtime after an unexpected stop.
@@ -8130,6 +8136,17 @@ fn main() -> io::Result<()> {
                 );
             }
             thread::sleep(Duration::from_millis(10));
+        }
+        let trailing_clock_missed = furnace_clock
+            .missed_tick_deadlines()
+            .saturating_sub(last_clock_missed);
+        if trailing_clock_missed > 0 {
+            telemetry.record(
+                Duration::ZERO,
+                0,
+                trailing_clock_missed,
+                furnace_hub.count().unwrap_or(0),
+            );
         }
         // The timer usually stops between ten-second telemetry reports.
         // Persist that final partial window before the worker is joined.

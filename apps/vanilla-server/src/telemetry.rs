@@ -4,7 +4,7 @@ use serde_json::json;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const REPORT_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_SAMPLES: usize = 4096;
@@ -12,6 +12,7 @@ const MAX_SAMPLES: usize = 4096;
 pub struct TickTelemetry {
     path: PathBuf,
     started: Instant,
+    window_start_unix_ms: u64,
     samples_ms: Vec<f64>,
     processed_ticks: u64,
     missed_ticks: u64,
@@ -25,6 +26,7 @@ impl TickTelemetry {
         Self {
             path,
             started: Instant::now(),
+            window_start_unix_ms: unix_time_ms(),
             samples_ms: Vec::new(),
             processed_ticks: 0,
             missed_ticks: 0,
@@ -76,6 +78,7 @@ impl TickTelemetry {
         }
         self.flush(players)?;
         self.started = Instant::now();
+        self.window_start_unix_ms = unix_time_ms();
         self.processed_ticks = 0;
         self.missed_ticks = 0;
         self.players_min = None;
@@ -98,6 +101,9 @@ impl TickTelemetry {
         let measured_tps = self.processed_ticks as f64 / elapsed.max(f64::EPSILON);
         let row = json!({
             "schema_version": 2,
+            "process_id": std::process::id(),
+            "window_start_unix_ms": self.window_start_unix_ms,
+            "window_end_unix_ms": unix_time_ms(),
             "window_seconds": elapsed,
             "processed_ticks": self.processed_ticks,
             "missed_ticks": self.missed_ticks,
@@ -122,6 +128,14 @@ impl TickTelemetry {
             .open(&self.path)?;
         writeln!(file, "{row}")
     }
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn percentile(sorted: &[f64], probability: f64) -> f64 {
@@ -185,6 +199,9 @@ mod tests {
         let line = std::fs::read_to_string(&path).unwrap();
         let report: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(report["schema_version"], 2);
+        assert_eq!(report["process_id"], std::process::id());
+        assert!(report["window_start_unix_ms"].as_u64().is_some());
+        assert!(report["window_end_unix_ms"].as_u64().is_some());
         assert_eq!(report["processed_ticks"], 10);
         assert_eq!(report["missed_ticks"], 1);
         assert_eq!(report["mspt_samples"], 10);

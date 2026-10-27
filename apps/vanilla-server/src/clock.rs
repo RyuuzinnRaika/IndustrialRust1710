@@ -12,6 +12,10 @@ const TICK: Duration = Duration::from_millis(50);
 const SNAPSHOT_MAGIC_V1: &[u8; 4] = b"IRT1";
 const SNAPSHOT_MAGIC_V2: &[u8; 4] = b"IRT2";
 
+fn missed_tick_deadlines(lateness: Duration) -> u64 {
+    (lateness.as_nanos() / TICK.as_nanos()).min(u128::from(u64::MAX)) as u64
+}
+
 /// Clock metadata is deliberately separate from the IRW save and compatible
 /// with existing 20-byte IRT1 tick snapshots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +28,7 @@ pub struct ClockSnapshot {
 #[derive(Default)]
 pub struct Clock {
     ticks: AtomicU64,
+    missed_tick_deadlines: AtomicU64,
     running: AtomicBool,
     time_offset: AtomicU64,
     weather_override: AtomicU8, // 0=automatic, 1=clear, 2=rain, 3=thunder
@@ -44,6 +49,7 @@ impl Clock {
     pub fn start_from(snapshot: ClockSnapshot) -> (Arc<Self>, JoinHandle<()>) {
         let clock = Arc::new(Self {
             ticks: AtomicU64::new(snapshot.ticks),
+            missed_tick_deadlines: AtomicU64::new(0),
             running: AtomicBool::new(true),
             time_offset: AtomicU64::new(snapshot.time_offset),
             weather_override: AtomicU8::new(snapshot.weather_override),
@@ -54,14 +60,23 @@ impl Clock {
             let mut next = Instant::now() + TICK;
             while worker.running.load(Ordering::Acquire) {
                 let now = Instant::now();
-                if now < next {
+                let missed = if now < next {
                     thread::sleep(next - now);
+                    0
                 } else {
-                    // Avoid unbounded "catch-up" work after a stall.
+                    let missed = missed_tick_deadlines(now.duration_since(next));
+                    // Avoid unbounded catch-up work after a stall while
+                    // preserving skipped deadlines for server telemetry.
                     next = now;
-                }
+                    missed
+                };
                 if !worker.running.load(Ordering::Acquire) {
                     break;
+                }
+                if missed > 0 {
+                    worker
+                        .missed_tick_deadlines
+                        .fetch_add(missed, Ordering::AcqRel);
                 }
                 // World age advances even when the daylight cycle is disabled.
                 // Reverse its contribution to the time offset so the same
@@ -169,6 +184,9 @@ impl Clock {
     pub fn ticks(&self) -> u64 {
         self.ticks.load(Ordering::Acquire)
     }
+    pub fn missed_tick_deadlines(&self) -> u64 {
+        self.missed_tick_deadlines.load(Ordering::Acquire)
+    }
     pub fn set_daylight_cycle(&self, enabled: bool) {
         self.daylight_cycle.store(enabled, Ordering::Release);
     }
@@ -251,6 +269,7 @@ mod tests {
         let initial = 24_000 * 3 + 37;
         let clock = Clock {
             ticks: AtomicU64::new(initial),
+            missed_tick_deadlines: AtomicU64::new(0),
             running: AtomicBool::new(false),
             time_offset: AtomicU64::new(0),
             weather_override: AtomicU8::new(0),
@@ -323,5 +342,12 @@ mod tests {
         assert_eq!(clock.day_time(), 6000 + count as i64);
         clock.stop();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn clock_stall_deadlines_are_counted_without_replaying_ticks() {
+        assert_eq!(missed_tick_deadlines(Duration::from_millis(49)), 0);
+        assert_eq!(missed_tick_deadlines(Duration::from_millis(50)), 1);
+        assert_eq!(missed_tick_deadlines(Duration::from_secs(672)), 13_440);
     }
 }
