@@ -51,7 +51,24 @@ $offlineMode = @($ServerArgs | Where-Object { $offlineFlags -contains $_ }).Coun
 $desktop = ($env:OS -eq 'Windows_NT') -and [Environment]::UserInteractive -and (-not [Console]::IsInputRedirected) -and (-not [Console]::IsOutputRedirected)
 if (-not $NoGui -and $desktop -and -not $offlineMode) {
     Write-Host 'Opening classic Minecraft server window (Stats / Players / Log and chat)...'
-    & (Join-Path $Root 'run-windows-gui.ps1') -ServerExe $exe -WhitelistPath $whitelist -ServerArgs $ServerArgs
+    # Keep the WinForms Add-Type assembly isolated from the caller. Windows
+    # PowerShell cannot unload a compiled type, so after a source update a
+    # second invocation in the same console would reuse the previous type
+    # (or fail with TYPE_ALREADY_EXISTS).
+    $guiScript = Join-Path $Root 'run-windows-gui.ps1'
+    $windowsPowerShell = (Get-Command 'powershell.exe' -CommandType Application -ErrorAction Stop).Source
+
+    # -File in Windows PowerShell 5.1 cannot reliably bind array arguments
+    # supplied by a native caller. Encode a safely quoted command instead;
+    # every argument remains one literal PowerShell string, even with quotes.
+    function Quote-GuiArgument([string]$value) {
+        return "'" + $value.Replace("'", "''") + "'"
+    }
+    $quotedArgs = @($ServerArgs | ForEach-Object { Quote-GuiArgument $_ })
+    $argsLiteral = '@(' + ($quotedArgs -join ', ') + ')'
+    $guiCommand = "& $(Quote-GuiArgument $guiScript) -ServerExe $(Quote-GuiArgument $exe) -WhitelistPath $(Quote-GuiArgument $whitelist) -ServerArgs $argsLiteral"
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($guiCommand))
+    & $windowsPowerShell -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -EncodedCommand $encodedCommand
     exit $LASTEXITCODE
 }
 & $exe --whitelist $whitelist @ServerArgs
