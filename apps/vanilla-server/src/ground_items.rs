@@ -261,6 +261,38 @@ impl GroundItems {
         Ok(Some((candidate, item)))
     }
 
+    /// Stage a bounded partial pickup without destroying the remaining
+    /// ground entity. Callers must atomically journal this snapshot together
+    /// with the player's newly credited inventory. An unchanged remainder
+    /// keeps its original entity ID and eligibility time.
+    pub fn stage_take_amount(
+        &self,
+        id: i32,
+        count: u8,
+    ) -> io::Result<Option<(Self, GroundItem, Option<GroundItem>)>> {
+        let Some(item) = self.entries.get(&id).cloned() else {
+            return Ok(None);
+        };
+        if count == 0 || count > item.stack.count {
+            return Err(invalid("invalid partial ground item pickup count"));
+        }
+        let mut candidate = self.clone();
+        let mut collected = item.clone();
+        collected.stack.count = count;
+        let remainder = if count == item.stack.count {
+            candidate.entries.remove(&id);
+            candidate.eligible_after.remove(&id);
+            None
+        } else {
+            let mut remaining = item;
+            remaining.stack.count -= count;
+            candidate.entries.insert(id, remaining.clone());
+            Some(remaining)
+        };
+        candidate.encoded()?;
+        Ok(Some((candidate, collected, remainder)))
+    }
+
     #[cfg(test)]
     pub fn put_many(
         &mut self,
@@ -302,6 +334,42 @@ impl GroundItems {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_take_keeps_same_item_entity_and_never_loses_remainder() {
+        let original = GroundItems::default();
+        let stack = Stack {
+            id: 260,
+            count: 5,
+            damage: 0,
+            nbt: None,
+        };
+        let (initial, spawned) = original
+            .stage_put_many(&[stack], (0, 65, 0))
+            .unwrap();
+        let id = spawned[0].id;
+        assert!(initial.stage_take_amount(id, 0).is_err());
+        assert!(initial.stage_take_amount(id, 6).is_err());
+        let (partial, picked, remainder) = initial
+            .stage_take_amount(id, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(picked.stack.count, 2);
+        let remaining = remainder.unwrap();
+        assert_eq!(remaining.id, id);
+        assert_eq!(remaining.stack.count, 3);
+        assert_eq!(partial.entries.get(&id), Some(&remaining));
+        assert_eq!(partial.eligible_after.get(&id), initial.eligible_after.get(&id));
+        assert_eq!(initial.entries.get(&id).unwrap().stack.count, 5);
+        let (empty, rest, no_remainder) = partial
+            .stage_take_amount(id, 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rest.stack.count, 3);
+        assert!(no_remainder.is_none());
+        assert!(!empty.entries.contains_key(&id));
+        assert!(!empty.eligible_after.contains_key(&id));
+    }
+
     #[test]
     fn inventory_and_ground_moves_use_one_recoverable_journal() {
         use crate::inventory::Inventory;
