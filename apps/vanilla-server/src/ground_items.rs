@@ -250,6 +250,7 @@ impl GroundItems {
 
     /// Snapshot an item removal. The caller commits it together with the
     /// receiver's inventory before publishing either in-memory state.
+    #[cfg(test)]
     pub fn stage_take(&self, id: i32) -> io::Result<Option<(Self, GroundItem)>> {
         let Some(item) = self.entries.get(&id).cloned() else {
             return Ok(None);
