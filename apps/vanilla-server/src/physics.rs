@@ -807,10 +807,10 @@ mod group_b_collision_tests {
     #[test]
     fn piston_heads_have_legacy_plate_and_rod_collision_in_all_six_directions() {
         for facing in 0..=5 {
-            let shapes = shapes(34, facing);
-            assert_eq!(shapes.len(), 2, "missing head shapes for facing {facing}");
-            let plate = shapes[0];
-            let rod = shapes[1];
+            let volumes = shapes(34, facing);
+            assert_eq!(volumes.len(), 2, "missing head shapes for facing {facing}");
+            let plate = volumes[0];
+            let rod = volumes[1];
             let spans = [
                 (plate.x1 - plate.x0, rod.x1 - rod.x0),
                 (plate.y1 - plate.y0, rod.y1 - rod.y0),
