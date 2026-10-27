@@ -103,6 +103,25 @@ Windows の通常の対話型ターミナルから `.\run-windows.ps1` を起動
 
 `--expanded-seed` の初回起動は新しい保存先を使ってください。既存IRW1の平坦ワールドは、起動フラグを変えるだけで地形が切り替わることはありません。既存ワールドを必ずバックアップしてから試してください。起動・CIのテスト結果と無改造クライアントでの目視検証は別々に確認してください。
 
+### 移動中の切断・MINECART CHECKPOINT ERROR（Windows）
+
+`MINECART CHECKPOINT ERROR: expected 2 to 4 transaction participants` は、**旧版のバイナリ／ソース**でトロッコの定期保存（1ファイル）を古いジャーナル制限（2〜4ファイル）に通した時のエラーです。最新版の `journal.rs` は **1〜8ファイル**に対応しています。サバイバルモードやC04/C06移動の問題と混同せず、まず実行ソースを確認してください。
+
+**サーバーを正常に停止**し、リポジトリのルートの PowerShell で実行します。
+
+```powershell
+git switch main
+git pull --ff-only origin main
+git rev-parse --short HEAD
+Select-String -Path .\apps\vanilla-server\src\journal.rs -Pattern 'expected 1 to 8 transaction participants'
+cargo clean -p vanilla-server
+.\run-windows.ps1 -NoGui
+```
+
+`Select-String` に `expected 1 to 8 transaction participants` が出なければ、実行しているディレクトリが違うか、Git の更新に失敗しています。エラーが残る場合は `git rev-parse HEAD` と最初のエラーメッセージ全文を記録してください。**ワールド、`.minecarts.json`、`.pending-txn.json` を削除しないでください**。未完了のジャーナルはサーバー起動時にリプレイする設計です。
+
+最新版には、実サーバーを起動し、20ティック後のトロッコ保存ファイル作成と、その後のサバイバル移動・再接続を確認する TCP 回帰テストが含まれます（`native_1710_minecart_checkpoint_keeps_survival_session_and_movement_alive`）。それでも切断される場合は、無改造1.7.10実機のサーバーログとクライアントログの両方で原因を切り分けます。
+
 ## 複数ディメンションの起動（A10・試験機能）
 
 IRW4の3ディメンションを1つのワールドルートにまとめて管理する場合は、`--expanded-seed` と `--dimension-root` を併用します。
