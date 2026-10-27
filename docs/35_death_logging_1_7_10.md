@@ -54,3 +54,34 @@ Get-Content .\world.deaths.jsonl -Tail 20
 ワールドファイル名は実際の `--world` パスへ読み替えてください。サバイバルで落下・溺水・空腹・炎上・矢・Mob・エンダーパールの各死亡を再現し、(1)チャット通知が1回のみ、(2)JSONLに各死因と座標が残る、(3)ゲームルールがfalseでもログは残る、(4)死亡回数とドロップが従来どおり、(5)リスポーン後に新しい死亡が記録できることを確認してください。
 
 **注意**: これは**死亡ログの詳細化**であり、未実装の被ダメージ源を実装する変更ではありません。大きな高負荷検証を始める前にワールドのバックアップを取ってください。
+
+
+## D01: attacker and explosion provenance (follow-up)
+
+The server now keeps the identity of the actual origin alongside each pending damage event:
+- Direct melee: Mob species and server-owned entity ID.
+- Projectiles: projectile kind plus firing Mob species/entity ID captured **at launch**, not inferred from who is nearby at death. This survives shooter despawn while the projectile is in flight.
+- Explosions: Creeper, Ghast Fireball, Wither Skull and TNT, retaining their source entity IDs when available.
+- Wither effect: distinct from melee and projectile impacts.
+- **Concurrent, different damage origins**: `mixed_damage` rather than claiming an arbitrary Mob killed the player.
+
+The death JSONL schema includes nullable `source_type` and `source_entity_id` fields. Source IDs identify the **in-world entity** and are not Mojang account IDs, and `source_type` names a server-observed species or explosion origin; neither is supplied by the untrusted client.
+
+Example:
+```json
+{"event":"player_death","player":"Alex","cause":"mob","source_type":"Zombie","source_entity_id":500002,"dimension":0}
+```
+(The example omits required timestamp/position/damage fields for readability.)
+
+**Limitations**: Multiple different hits coalesced into one HP update remain `mixed_damage`, not a single credited killer. Explicit player-vs-player damage attribution is not available until the PvP damage path exists. This change does not invent modded entity names. Projectiles continue to use the existing position-based target selection; disambiguation for two players overlapping at the same coordinates remains a separate gameplay fix.
+
+### Additional acceptance criteria
+
+- [ ] Mob melee death emits `was slain by Zombie` and a matching entity ID.
+- [ ] Skeleton arrow death retains the original shooter ID even if the skeleton despawns before impact.
+- [ ] TNT/creeper explosions report separate types; concurrent blast and projectile become `mixed_damage`.
+- [ ] Invulnerability grace suppresses both damage and corresponding false death attribution.
+- [ ] Saved 1.7.10 Mob snapshots without `shooter_kind` load via Serde defaults.
+- [ ] `cargo fmt --all -- --check`, `cargo test -p vanilla-server`, `cargo clippy --workspace --all-targets -- -D warnings`, release build and native 1.7.10 tests **locally**.
+
+GitHub Actions Rust CI must remain disabled. Do not launch or rerun it.
