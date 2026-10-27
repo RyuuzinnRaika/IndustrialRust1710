@@ -2582,7 +2582,6 @@ impl Mobs {
                 events.push(spawn);
             }
         }
-        self.spawn_from_spawners(now, world, players, &mut events);
         // Despawn and natural-spawn chunk selection must agree about valid
         // player coordinates. Finite X/Z outside the i32 block range are
         // corrupt snapshots, not distant players; finite Y outside build
@@ -2595,9 +2594,11 @@ impl Mobs {
             // Reusing `now` for every step would repeat one 1/800 despawn
             // roll rather than giving each elapsed tick its own chance.
             let simulated_tick = now - (steps - 1 - step);
-            // A delayed poll may cross a 20-tick natural-spawn boundary
-            // without landing on it. Evaluate each bounded simulated tick
-            // once, instead of silently losing that spawn opportunity.
+            // A delayed poll may cross a 20-tick spawner or natural-spawn
+            // boundary without landing on it. Run both against the simulated
+            // tick so neither attempt is lost; persisted spawner cooldowns
+            // still prevent duplicate activation on subsequent ticks.
+            self.spawn_from_spawners(simulated_tick, world, players, &mut events);
             self.spawn_natural(simulated_tick, world, &mut lighting, players, &mut events);
             let mut shots = Vec::new();
             let mut dead = Vec::new();
@@ -4203,6 +4204,44 @@ mod tests {
         mobs.spawn_from_spawners(10_000, &world, &[player], &mut second);
         assert!(second.is_empty());
     }
+    #[test]
+    fn dungeon_spawner_catches_up_twenty_tick_boundary_without_duplicate_spawn() {
+        let seed = 42;
+        let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+        let (x, y, z) = crate::worldgen::dungeon_spawner_in_cell(seed, 0, 0);
+        for dx in -4..=4 {
+            for dz in -4..=4 {
+                for (height, block) in [(y - 1, 1 << 4), (y, 0), (y + 1, 0)] {
+                    world.import_block(x + dx, height, z + dz, block).unwrap();
+                }
+            }
+        }
+        world.import_block(x, y, z, 52 << 4).unwrap();
+        let player = PlayerPosition {
+            x: f64::from(x) + 0.5,
+            y: f64::from(y) + 2.0,
+            z: f64::from(z) + 0.5,
+        };
+        let mut mobs = Mobs::new_with_difficulty(&world, true, 2);
+        mobs.set_natural_spawning(false);
+        let key = format!("{x},{y},{z}");
+
+        // The server is polled at 19 and 21, never at the actual 20-tick
+        // spawner boundary. The bounded catch-up must still activate it.
+        assert!(mobs.tick(19, &world, &[player]).is_empty());
+        assert!(!mobs.spawner_next_tick.contains_key(&key));
+        let events = mobs.tick(21, &world, &[player]);
+        assert_eq!(events.iter().filter(|event| event.id == 0x0f).count(), 1);
+        assert_eq!(mobs.entities.len(), 1);
+        let cooldown = mobs.spawner_next_tick[&key];
+        assert!(cooldown > 21);
+
+        // Repeated session polling at the same tick must not rerun a spawner.
+        assert!(mobs.tick(21, &world, &[player]).is_empty());
+        assert_eq!(mobs.entities.len(), 1);
+        assert_eq!(mobs.spawner_next_tick[&key], cooldown);
+    }
+
     #[test]
     fn living_health_metadata_is_shared_on_spawn_and_after_damage() {
         let mut mobs = Mobs::default();
