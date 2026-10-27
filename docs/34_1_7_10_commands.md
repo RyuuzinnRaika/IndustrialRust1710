@@ -159,7 +159,7 @@ stress repeated changes while players move; verify old player NBT is intact.
 
 Version cross-check:
 https://minecraft.wiki/w/Commands/spawnpoint
-## Vanilla 1.7.10 Tab completion (Draft)
+## Vanilla 1.7.10 Tab completion
 
 Press **Tab** in the vanilla Java 1.7.10 chat/command input. The unmodified
 client sends C14 `Tab Complete` (play/serverbound packet `0x14`), containing
@@ -188,12 +188,12 @@ with deduplicated, deterministic ordering. The vanilla client owns
 display/cycling/selection; no new GUI or mod is required.
 
 Regression checks: Rust unit tests cover command names, OP isolation,
-partial username matching, argument keywords, invalid input, and the S3A
+partial username matching, /spawnpoint targets, /setworldspawn,\n/gamerule, /difficulty arguments, invalid input, and the S3A
 VarInt/string wire format. A native Protocol 5 TCP integration test sends
 a real C14 and checks the S3A response, including that unauthorized
 players cannot enumerate OP-only commands.
 
-No GitHub Actions are required or invoked by this feature. Before merging,
+No GitHub Actions are required or invoked by this feature. For local acceptance,
 run `cargo fmt --all -- --check`, `cargo test -p vanilla-server`,
 `cargo clippy --workspace --all-targets -- -D warnings`, and verify the
 actual Java 1.7.10 client's Tab suggestions on Windows.
