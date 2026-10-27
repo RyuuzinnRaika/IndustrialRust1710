@@ -94,7 +94,7 @@ use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
     Event, Hub, JoinError, ADMIN_GAMEMODE_EVENT, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT,
-    MAX_PLAYERS, PEARL_TELEPORT_EVENT,
+    MAX_PLAYERS, PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
 };
 use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
@@ -1218,6 +1218,48 @@ fn play(
                 }
                 hub.move_player(entity_id, *player, yaw, pitch);
                 last_movement_broadcast = Instant::now();
+                continue;
+            }
+            if event.id == PISTON_PUSH_EVENT {
+                if event.body.len() != 13 {
+                    return Err(bad("invalid internal piston push payload"));
+                }
+                // The owning session computes displacement using its CURRENT
+                // player coordinates. Hub's last position is merely a cache
+                // and could be stale when the worker's event is delivered.
+                if *session_dimension == dimensions::Dimension::Overworld
+                    && vitals.health > 0.0
+                {
+                    let base = (
+                        i32::from_be_bytes(event.body[0..4].try_into().unwrap()),
+                        i32::from_be_bytes(event.body[4..8].try_into().unwrap()),
+                        i32::from_be_bytes(event.body[8..12].try_into().unwrap()),
+                    );
+                    let facing = event.body[12];
+                    let next = {
+                        let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                        physics::piston_push_candidate(&w, player, base, facing)
+                    };
+                    if let Some(next) = next {
+                        next.save_state_in_dimension(
+                            player_path,
+                            *vitals,
+                            session_dimension.protocol_id() as i32,
+                        )?;
+                        *player = next;
+                        location = (next.x, next.y, next.z);
+                        fall = FallTracker::new(next.y);
+                        idle_gravity = IdleGravity::new(clock.ticks());
+                        let old_chunks = loaded_chunks.clone();
+                        sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
+                        let entering = loaded_chunks.difference(&old_chunks).copied().collect();
+                        send_visible_signs(s, decorations, &entering)?;
+                        send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
+                        send_player_position(s, player)?;
+                        hub.move_player(entity_id, *player, yaw, pitch);
+                        last_movement_broadcast = Instant::now();
+                    }
+                }
                 continue;
             }
             if event.id == CHUNK_RELIGHT_EVENT {
@@ -7219,6 +7261,20 @@ fn main() -> io::Result<()> {
                             let piston_actions = gravity_world.drain_piston_actions();
                             for &action in &piston_actions {
                                 furnace_hub.broadcast(piston_action_event(action));
+                                if action.extending {
+                                    // The client animates the block, but only
+                                    // the owning player session may persist a
+                                    // collision-induced position correction.
+                                    let mut body = Vec::with_capacity(13);
+                                    for coord in [action.pos.0, action.pos.1, action.pos.2] {
+                                        body.extend_from_slice(&coord.to_be_bytes());
+                                    }
+                                    body.push(action.facing);
+                                    furnace_hub.broadcast(Event {
+                                        id: PISTON_PUSH_EVENT,
+                                        body,
+                                    });
+                                }
                             }
                             // Vanilla S24 starts the client's local moving-piston
                             // tile entity. Do not overwrite it with final S23
