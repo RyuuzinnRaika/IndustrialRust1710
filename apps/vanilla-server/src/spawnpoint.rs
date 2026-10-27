@@ -70,9 +70,16 @@ impl Spawnpoint {
         if !world::in_bounds(self.x, self.y + 1, self.z) {
             return false;
         }
-        let ground = world.get(self.x, self.y - 1, self.z) >> 4;
-        ground != 0
-            && !matches!(ground, 8..=11 | 30..=32)
+        // The legacy flat spawn is one block above the nearest support
+        // surface. Accept at most a one-block drop, but never an unbounded fall.
+        let has_ground = (1..=2).any(|distance| {
+            if self.y < distance {
+                return false;
+            }
+            let block = world.get(self.x, self.y - distance, self.z) >> 4;
+            block != 0 && !matches!(block, 8..=11 | 30..=32)
+        });
+        has_ground
             && world.get(self.x, self.y, self.z) == 0
             && world.get(self.x, self.y + 1, self.z) == 0
     }
@@ -100,24 +107,15 @@ pub fn load(player_file: &Path) -> io::Result<Option<Spawnpoint>> {
         serde_json::from_slice(&raw).map_err(|_| invalid("invalid spawnpoint JSON"))?;
     if parsed.version != VERSION
         || parsed.dimension != 0
-        || SelfCheck::checked(parsed).is_none()
+        || Spawnpoint::new(parsed.x, parsed.y, parsed.z).ok() != Some(parsed)
     {
         return Err(invalid("invalid or incompatible spawnpoint record"));
     }
     Ok(Some(parsed))
 }
 
-// Make the persisted validity check share exactly the command validation.
-struct SelfCheck;
-impl SelfCheck {
-    fn checked(record: Spawnpoint) -> Option<Spawnpoint> {
-        (Spawnpoint::new(record.x, record.y, record.z).ok() == Some(record))
-            .then_some(record)
-    }
-}
-
 pub fn save(player_file: &Path, spawnpoint: Spawnpoint) -> io::Result<()> {
-    if SelfCheck::checked(spawnpoint).is_none() {
+    if Spawnpoint::new(spawnpoint.x, spawnpoint.y, spawnpoint.z).ok() != Some(spawnpoint) {
         return Err(invalid("invalid spawnpoint to save"));
     }
     let path = storage_path(player_file);
