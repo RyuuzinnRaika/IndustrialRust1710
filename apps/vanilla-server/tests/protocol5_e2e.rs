@@ -2754,10 +2754,7 @@ fn creative_mob_feed_and_attack_keep_items_and_award_kill_rewards() {
                     assert!(item_drop.replace(body).is_none(), "duplicate cow item drop");
                 }
             }
-            0x1a if body.len() == 5
-                && body[..4] == cow_id.to_be_bytes()
-                && body[4] == 3 =>
-            {
+            0x1a if body.len() == 5 && body[..4] == cow_id.to_be_bytes() && body[4] == 3 => {
                 assert!(!saw_death, "duplicate cow death status");
                 saw_death = true;
             }
