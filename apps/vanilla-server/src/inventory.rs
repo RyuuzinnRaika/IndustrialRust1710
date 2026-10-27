@@ -464,6 +464,51 @@ impl Inventory {
         self.drag = Drag::default();
     }
 
+    /// Remove player-owned inventory stacks according to the Java 1.7.10
+    /// clear command. Ender Chest and external container storage are excluded.
+    /// max_count=0 queries only; -1 removes all matching items.
+    /// Call on a cloned inventory and persist it before publishing packets.
+    pub fn clear_matching(
+        &mut self,
+        item_id: Option<i16>,
+        data: Option<i16>,
+        max_count: i32,
+    ) -> (u32, u32) {
+        let mut found = 0u32;
+        let mut removed = 0u32;
+        let limit = if max_count == -1 {
+            u32::MAX
+        } else {
+            max_count.max(0) as u32
+        };
+        for slot in self.slots[1..45]
+            .iter_mut()
+            .chain(self.workbench.iter_mut())
+            .chain(self.anvil_inputs.iter_mut())
+            .chain(std::iter::once(&mut self.enchant_input))
+            .chain(std::iter::once(&mut self.cursor))
+        {
+            let Some(mut stack) = *slot else { continue };
+            if item_id.is_some_and(|id| id != stack.id)
+                || data.is_some_and(|variant| variant != stack.damage)
+            {
+                continue;
+            }
+            found = found.saturating_add(u32::from(stack.count));
+            let debit = u32::from(stack.count).min(limit.saturating_sub(removed));
+            if debit == 0 {
+                continue;
+            }
+            removed += debit;
+            stack.count -= debit as u8;
+            *slot = (stack.count > 0).then_some(stack);
+        }
+        if removed > 0 {
+            self.drag = Drag::default();
+        }
+        (found, removed)
+    }
+
     /// Commit one server-owned held item consumption (Survival only).
     pub fn consume_held(&mut self) -> bool {
         let slot = &mut self.slots[36 + self.selected as usize];
@@ -1959,6 +2004,34 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn admin_clear_is_bounded_handles_variants_and_preserves_ender_chest() {
+        let mut inventory = Inventory::default();
+        let stack = Stack {
+            id: 35,
+            damage: 2,
+            count: 12,
+            nbt: None,
+        };
+        inventory.slots[36] = Some(stack);
+        inventory.slots[37] = Some(Stack {
+            damage: 3,
+            count: 7,
+            ..stack
+        });
+        inventory.cursor = Some(Stack { count: 2, ..stack });
+        inventory.ender_chest[0] = Some(stack);
+        assert_eq!(inventory.clear_matching(Some(35), Some(2), 0), (14, 0));
+        assert_eq!(inventory.slots[36], Some(stack));
+        assert_eq!(inventory.clear_matching(Some(35), Some(2), 5), (14, 5));
+        assert_eq!(inventory.slots[36].unwrap().count, 7);
+        assert_eq!(inventory.clear_matching(Some(35), Some(2), -1), (9, 9));
+        assert!(inventory.slots[36].is_none());
+        assert!(inventory.cursor.is_none());
+        assert_eq!(inventory.slots[37].unwrap().count, 7);
+        assert_eq!(inventory.ender_chest[0], Some(stack));
+    }
+
     #[test]
     fn outside_drop_cursor_only_debits_requested_quantity() {
         let original = Stack {

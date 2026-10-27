@@ -57,3 +57,21 @@ legacy time aliases, relative coordinate validation and give argument bounds.
 For acceptance, test with **two vanilla 1.7.10 clients** and verify that
 an offline-mode player gets permission denied for `/give`, `/tp`,
 `/gamemode` regardless of their displayed username.
+
+## Phase 2: /clear and /setblock
+
+- `/clear [player] [item] [data=-1] [maxCount=-1]`: on a verified OP
+  or as `/clear <player> ...` on the host console. No item means all normal
+  player inventory items; Ender Chest and external storage remain untouched.
+  `maxCount=0` is read-only counting. Writes are owned, saved and resynced
+  by the target player's session.
+- `/setblock <x> <y> <z> <block> [data=0] [replace|keep]`: accepts
+  absolute coordinates from console; in-game OPs may use `~` offsets.
+  This phase intentionally supports a curated whitelist of ordinary terrain
+  blocks and numeric IDs only. It rejects overwriting existing TileEntities,
+  blocks requiring live tile data, and `destroy` mode (drops are not yet
+  transaction-safe). The world is saved before a Protocol 5 block-change packet
+  reaches players in the same dimension.
+- No target selectors such as `@a` or `@p` yet; name-only targets are used.
+
+These limits prevent accidental inventory loss and incorrect 1.7.10 block NBT.
