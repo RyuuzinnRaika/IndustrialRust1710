@@ -308,9 +308,9 @@ fn await_file(path: &Path) {
 }
 fn send_position(s: &mut TcpStream, x: f64, y: f64, z: f64) {
     let mut data = Vec::new();
-    // Real Minecraft 1.7.10 / Protocol 5 C04: X, stance, feet Y, Z.
+    // Vanilla Minecraft 1.7.10 C04PacketPlayerPosition: X, feet Y, stance, Z.
     // Do not copy the 1.8+ packet ordering into this 1.7.10 test client.
-    for v in [x, y + 1.62, y, z] {
+    for v in [x, y, y + 1.62, z] {
         data.extend_from_slice(&v.to_be_bytes());
     }
     data.push(1);
@@ -319,8 +319,8 @@ fn send_position(s: &mut TcpStream, x: f64, y: f64, z: f64) {
 
 fn send_position_and_look(s: &mut TcpStream, x: f64, y: f64, z: f64) {
     let mut data = Vec::new();
-    // Protocol 5 C06: X, stance, feet Y, Z, yaw, pitch, onGround.
-    for v in [x, y + 1.62, y, z] {
+    // Vanilla 1.7.10 C06PacketPlayerPosLook: X, feet Y, stance, Z, yaw, pitch, onGround.
+    for v in [x, y, y + 1.62, z] {
         data.extend_from_slice(&v.to_be_bytes());
     }
     data.extend_from_slice(&90.0_f32.to_be_bytes());
@@ -490,18 +490,25 @@ fn console_gamemode_changes_live_protocol5_and_keeps_inventories_isolated() {
 }
 
 #[test]
-fn native_1710_c04_c06_decode_stance_then_feet_y() {
+fn native_1710_c04_c06_decode_feet_y_before_stance() {
     let server = NativeServer::start();
     let (mut client, _, initial) = server.join("Positioner");
     assert_eq!(initial, [0.5, 65.0, 0.5]);
 
-    // 1.7.10 C04/C06 put stance (Y + 1.62) *before* feet Y.
-    // A decoder that swaps the two reads the stance as collision-box Y,
-    // rejecting Survival movement or causing visible rubber-banding.
+    // The unmodified 1.7.10 client writes [X, feet Y, stance, Z].
+    // Assert C04 independently, so a broken C04 cannot be hidden by C06.
     send_position(&mut client, 1.5, 65.0, 0.5);
-    send_position_and_look(&mut client, 2.5, 65.0, 0.5);
+    client.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    until_packet(&mut client, 2, |body| {
+        body.windows(10).any(|window| window == b"Online (1)")
+    });
+    drop(client);
+    server.wait_idle();
 
-    // Chat is processed after both position frames on this TCP session.
+    let (mut client, _, restored) = server.join("Positioner");
+    assert_eq!(restored, [1.5, 65.0, 0.5], "C04 feet Y must be saved");
+    // C06 adds rotation, but preserves the same vanilla coordinate order.
+    send_position_and_look(&mut client, 2.5, 65.0, 0.5);
     client.write_all(&frame(1, &mc_string("/list"))).unwrap();
     until_packet(&mut client, 2, |body| {
         body.windows(10).any(|window| window == b"Online (1)")
@@ -510,20 +517,28 @@ fn native_1710_c04_c06_decode_stance_then_feet_y() {
     server.wait_idle();
 
     let (rejoined, _, restored) = server.join("Positioner");
-    assert_eq!(restored, [2.5, 65.0, 0.5], "feet Y must survive the save");
+    assert_eq!(restored, [2.5, 65.0, 0.5], "C06 feet Y must be saved");
     drop(rejoined);
     server.wait_idle();
 }
 
 #[test]
-fn native_1710_survival_c04_c06_stance_precedes_feet_y() {
+fn native_1710_survival_c04_c06_feet_y_precedes_stance() {
     let server = NativeServer::start_with_mode(true);
     let (mut client, _, _) = server.join("Positioner");
 
-    // Vanilla Protocol 5 movement travels over TCP as [X, stance, feet Y, Z].
-    // In Survival the collision validator uses feet Y, not eye-level stance.
-    // Stand at Y=64 on the flat world after falling from initial spawn Y=65.
+    // Collision checks must use the second wire double (feet Y), not
+    // the third wire double (eye-height stance). Test C04 and C06 separately.
     send_position(&mut client, 1.5, 64.0, 0.5);
+    client.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    until_packet(&mut client, 2, |body| {
+        body.windows(10).any(|window| window == b"Online (1)")
+    });
+    drop(client);
+    server.wait_idle();
+
+    let (mut client, _, restored) = server.join("Positioner");
+    assert_eq!(restored, [1.5, 64.0, 0.5], "Survival C04 feet Y");
     send_position_and_look(&mut client, 2.5, 64.0, 0.5);
     client.write_all(&frame(1, &mc_string("/list"))).unwrap();
     until_packet(&mut client, 2, |body| {
@@ -533,11 +548,7 @@ fn native_1710_survival_c04_c06_stance_precedes_feet_y() {
     server.wait_idle();
 
     let (rejoined, _, restored) = server.join("Positioner");
-    assert_eq!(
-        restored,
-        [2.5, 64.0, 0.5],
-        "Survival must save accepted feet position, not eye-height stance"
-    );
+    assert_eq!(restored, [2.5, 64.0, 0.5], "Survival C06 feet Y");
     drop(rejoined);
     server.wait_idle();
 }
