@@ -963,6 +963,7 @@ fn play(
     let mut active_window: u8 = 0;
     let mut active_chest: Option<ChestPosition> = None;
     let mut active_chest_partner: Option<ChestPosition> = None;
+    let mut active_ender_chest: Option<ChestPosition> = None;
     let mut active_furnace: Option<FurnacePosition> = None;
     let mut active_hopper: Option<HopperPosition> = None;
     let mut active_device: Option<DevicePosition> = None;
@@ -1029,6 +1030,7 @@ fn play(
                 }
                 active_window = 0;
                 active_chest = None;
+                    active_ender_chest = None;
                 active_chest_partner = None;
                 active_furnace = None;
                 active_hopper = None;
@@ -2496,6 +2498,7 @@ fn play(
                                         active_window = 0;
                                     }
                                     active_chest = None;
+                    active_ender_chest = None;
                                     active_chest_partner = None;
                                     active_furnace = None;
                                     active_hopper = None;
@@ -3642,6 +3645,7 @@ fn play(
                         next_window + 1
                     };
                     active_chest = None;
+                    active_ender_chest = None;
                     active_chest_partner = None;
                     active_furnace = Some(pos);
                     active_hopper = None;
@@ -3666,6 +3670,40 @@ fn play(
                     send(s, 0x2f, &inventory.cursor_packet())?;
                     continue;
                 }
+                // Ender Chest storage follows the player, not the block:
+                // all Ender Chests in every dimension open the same 27 slots.
+                if (0..=5).contains(&face)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                    && world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(x, y, z)
+                        >> 4
+                        == 130
+                {
+                    active_window = next_window;
+                    next_window = if next_window >= 100 { 1 } else { next_window + 1 };
+                    active_chest = None;
+                    active_chest_partner = None;
+                    active_ender_chest = Some((x, y, z));
+                    active_furnace = None;
+                    active_hopper = None;
+                    active_device = None;
+                    active_brewer = None;
+                    active_anvil = None;
+                    active_enchant = None;
+                    let opened = window_open::encode(
+                        active_window,
+                        WindowKind::Chest,
+                        "Ender Chest",
+                        27,
+                    )?;
+                    send(s, 0x2d, &opened)?;
+                    send(s, 0x30, &inventory.ender_chest_window_items(active_window))?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                    continue;
+                }
                 if (0..=5).contains(&face)
                     && world::in_bounds(x, y, z)
                     && near(location, x, y, z)
@@ -3686,6 +3724,7 @@ fn play(
                     };
                     let pos = (x, y, z);
                     active_chest = Some(pos);
+                    active_ender_chest = None;
                     active_chest_partner = world
                         .lock()
                         .map_err(|_| bad("world mutex poisoned"))
@@ -3741,6 +3780,7 @@ fn play(
                     };
                     active_brewer = Some(pos);
                     active_chest = None;
+                    active_ender_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
@@ -3800,6 +3840,7 @@ fn play(
                     };
                     active_device = Some(pos);
                     active_chest = None;
+                    active_ender_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
@@ -3849,6 +3890,7 @@ fn play(
                     active_anvil = None;
                     active_enchant = None;
                     active_chest = None;
+                    active_ender_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
                     observed_hopper_revision = guard.revision();
@@ -3892,6 +3934,7 @@ fn play(
                         next_window + 1
                     };
                     active_chest = None;
+                    active_ender_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
@@ -3940,6 +3983,7 @@ fn play(
                         next_window + 1
                     };
                     active_chest = None;
+                    active_ender_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
@@ -3970,6 +4014,7 @@ fn play(
                     // Window 0 is always the player's personal 2x2 grid.
                     active_window = next_window;
                     active_chest = None;
+                    active_ender_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
@@ -4292,7 +4337,26 @@ fn play(
                     }
                     requested_window = false;
                 }
-                if let Some(pos) = active_enchant {
+                if let Some(pos) = active_ender_chest {
+                    let still_open = world
+                        .lock()
+                        .map_err(|_| bad("world mutex poisoned"))?
+                        .get(pos.0, pos.1, pos.2)
+                        >> 4
+                        == 130
+                        && near(location, pos.0, pos.1, pos.2);
+                    let mut candidate = inventory.clone();
+                    accepted |= still_open
+                        && requested_window
+                        && candidate
+                            .ender_chest_click_window(active_window, slot, button, mode)
+                            .is_some();
+                    if accepted && candidate != *inventory {
+                        candidate.save(inventory_path)?;
+                        *inventory = candidate;
+                    }
+                    response_items = inventory.ender_chest_window_items(active_window);
+                } else if let Some(pos) = active_enchant {
                     let still_open = world
                         .lock()
                         .map_err(|_| bad("world mutex poisoned"))?
@@ -4711,6 +4775,7 @@ fn play(
                     // deleting them when the player closes a crafting window.
                     active_window = 0;
                     active_chest = None;
+                    active_ender_chest = None;
                     active_chest_partner = None;
                     active_furnace = None;
                     active_hopper = None;
