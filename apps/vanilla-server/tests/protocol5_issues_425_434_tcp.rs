@@ -1,0 +1,270 @@
+//! TCP-level acceptance tests for ADD-001..010 (Protocol 5).
+//! Unit tests cover byte decoding / bounded NBT; these drive a real server.
+use legacy_protocol::{read_frame, read_varint, write_string, write_varint, Cursor};
+use serde_json::{json, Value};
+use std::fs;
+use std::io::{self, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+struct Server {
+    child: Child,
+    dir: PathBuf,
+    port: u16,
+}
+
+impl Server {
+    fn launch() -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "industrialrust1710-p5-security-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("whitelist.json"),
+            serde_json::to_vec(&json!([
+                {"name": "RustTester"},
+                {"name": "LongName12345678"}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let child = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
+            .args(["--bind", &format!("127.0.0.1:{port}")])
+            .arg("--whitelist")
+            .arg(dir.join("whitelist.json"))
+            .arg("--world")
+            .arg(dir.join("security.irw"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let server = Self { child, dir, port };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(Instant::now() < deadline, "test server failed to bind");
+            thread::sleep(Duration::from_millis(40));
+        }
+        server
+    }
+
+    fn connect(&self) -> TcpStream {
+        let s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        s.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+        s
+    }
+
+    fn status_online(&self) -> u64 {
+        let mut s = self.connect();
+        s.write_all(&handshake(self.port, "localhost", 1)).unwrap();
+        s.write_all(&frame(0, &[])).unwrap();
+        let (id, payload) = receive(&mut s);
+        assert_eq!(id, 0);
+        let mut c = Cursor::new(&payload);
+        let value: Value = serde_json::from_str(c.read_string(65536).unwrap()).unwrap();
+        c.finish().unwrap();
+        assert_eq!(value["version"]["protocol"], 5);
+        value["players"]["online"].as_u64().unwrap()
+    }
+
+    fn login(&self, name: &str) -> TcpStream {
+        let mut s = self.connect();
+        s.write_all(&handshake(self.port, "localhost", 2)).unwrap();
+        s.write_all(&frame(0, &mc_string(name))).unwrap();
+        let (id, payload) = receive(&mut s);
+        assert_eq!(id, 2, "login {name} rejected: {payload:?}");
+        s
+    }
+
+    fn wait_online(&self, expected: u64) {
+        let until = Instant::now() + Duration::from_secs(8);
+        while self.status_online() != expected {
+            assert!(Instant::now() < until, "online count never became {expected}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn varint(v: u32) -> Vec<u8> {
+    let mut b = Vec::new();
+    write_varint(v, &mut b);
+    b
+}
+
+fn mc_string(value: &str) -> Vec<u8> {
+    let mut b = Vec::new();
+    write_string(value, &mut b).unwrap();
+    b
+}
+
+fn frame(id: u32, payload: &[u8]) -> Vec<u8> {
+    let mut data = varint(id);
+    data.extend_from_slice(payload);
+    let mut output = varint(data.len() as u32);
+    output.extend_from_slice(&data);
+    output
+}
+
+fn handshake(port: u16, host: &str, next: u32) -> Vec<u8> {
+    let mut body = varint(5);
+    body.extend_from_slice(&mc_string(host));
+    body.extend_from_slice(&port.to_be_bytes());
+    body.extend_from_slice(&varint(next));
+    frame(0, &body)
+}
+
+fn receive(stream: &mut TcpStream) -> (u32, Vec<u8>) {
+    let packet = read_frame(stream).expect("TCP packet missing");
+    let mut input = packet.as_slice();
+    let id = read_varint(&mut input).unwrap();
+    (id, input.to_vec())
+}
+
+fn must_close(mut socket: TcpStream) {
+    // Read through any pending Login Disconnect / Join chunks; the remote
+    // endpoint must close because the packet is malformed, not because this
+    // test closed its own write half.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut bytes = [0; 65536];
+    loop {
+        match socket.read(&mut bytes) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                return
+            }
+            Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => {}
+            Err(error) => panic!("unexpected socket error: {error}"),
+        }
+        assert!(Instant::now() < deadline, "server retained malformed TCP session");
+    }
+}
+
+fn bad_handshake(server: &Server, data: &[u8]) {
+    let mut socket = server.connect();
+    socket.write_all(data).unwrap();
+    must_close(socket);
+    assert_eq!(server.status_online(), 0);
+}
+
+fn bad_login(server: &Server, payload: &[u8]) {
+    let mut socket = server.connect();
+    socket.write_all(&handshake(server.port, "localhost", 2)).unwrap();
+    socket.write_all(payload).unwrap();
+    must_close(socket);
+    assert_eq!(server.status_online(), 0);
+}
+
+#[test]
+fn malformed_and_fragmented_protocol5_connections_are_isolated() {
+    let server = Server::launch();
+    assert_eq!(server.status_online(), 0);
+
+    // #425 ADD-001: 6-byte VarInt must not allocate a payload.
+    bad_handshake(&server, &[0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
+    // #426 ADD-002: zero, negative and over-limit framed payloads.
+    bad_handshake(&server, &[0]);
+    bad_handshake(&server, &[0xff, 0xff, 0xff, 0xff, 0x0f]);
+    bad_handshake(&server, &[0x81, 0x80, 0x40]); // 1 MiB + 1 bytes
+
+    // #427 ADD-003: invalid multibyte Login name is a connection error.
+    bad_login(&server, &frame(0, &[2, 0xc3, 0x28]));
+    bad_login(&server, &frame(0, &[3, 0xe3, 0x81])); // truncated UTF-8
+    // #428 ADD-004: too-long host and too-long Login username.
+    bad_handshake(&server, &handshake(server.port, &"h".repeat(256), 2));
+    bad_login(&server, &frame(0, &mc_string(&"X".repeat(17))));
+
+    // #429 ADD-005: a Play packet cannot run in Status or Login state.
+    let mut status = server.connect();
+    status
+        .write_all(&handshake(server.port, "localhost", 1))
+        .unwrap();
+    status.write_all(&frame(4, &[0; 33])).unwrap();
+    must_close(status);
+    bad_login(&server, &frame(4, &[0; 33]));
+    // #430 ADD-006: a modern compressed-style packet is not Protocol 5.
+    let mut status = server.connect();
+    status
+        .write_all(&handshake(server.port, "localhost", 1))
+        .unwrap();
+    status.write_all(&frame(0, &[0])).unwrap(); // extra data-length field
+    must_close(status);
+
+    // #434 ADD-010: one-byte TCP writes and back-to-back frames both login.
+    let mut split = server.connect();
+    for byte in handshake(server.port, "localhost", 2) {
+        split.write_all(&[byte]).unwrap();
+    }
+    for byte in frame(0, &mc_string("LongName12345678")) {
+        split.write_all(&[byte]).unwrap();
+    }
+    assert_eq!(receive(&mut split).0, 2);
+    server.wait_online(1);
+    drop(split);
+    server.wait_online(0);
+
+    let mut coalesced = server.connect();
+    let mut bytes = handshake(server.port, "localhost", 2);
+    bytes.extend_from_slice(&frame(0, &mc_string("RustTester")));
+    coalesced.write_all(&bytes).unwrap();
+    assert_eq!(receive(&mut coalesced).0, 2);
+    server.wait_online(1);
+    drop(coalesced);
+    server.wait_online(0);
+
+    // #432 ADD-008: non-finite world coordinates and rotations are fatal.
+    let mut invalid_position = server.login("RustTester");
+    let mut pos = Vec::new();
+    for n in [f64::NAN, 65.0, 64.0, 0.5] {
+        pos.extend_from_slice(&n.to_be_bytes());
+    }
+    pos.push(1); // onGround
+    invalid_position.write_all(&frame(4, &pos)).unwrap();
+    must_close(invalid_position);
+    server.wait_online(0);
+
+    let mut invalid_look = server.login("RustTester");
+    let mut look = f32::INFINITY.to_be_bytes().to_vec();
+    look.extend_from_slice(&0.0f32.to_be_bytes());
+    look.push(1); // onGround
+    invalid_look.write_all(&frame(5, &look)).unwrap();
+    must_close(invalid_look);
+    server.wait_online(0);
+
+    // #433 ADD-009: response ID 0 before any server challenge is not a pong.
+    let mut replay = server.login("RustTester");
+    replay.write_all(&frame(0, &0i32.to_be_bytes())).unwrap();
+    must_close(replay);
+    server.wait_online(0);
+
+    // Valid clients continue to authenticate and remain unaffected.
+    let mut final_login = server.login("RustTester");
+    server.wait_online(1);
+    // Graceful TCP half-close allows server to retire this one session.
+    final_login.shutdown(Shutdown::Both).unwrap();
+    server.wait_online(0);
+}
