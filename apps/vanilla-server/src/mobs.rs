@@ -5472,6 +5472,73 @@ mod tests {
     }
 
     #[test]
+    fn natural_spawn_live_pack_respects_overlapping_player_chunk_caps() {
+        // Two players one chunk apart share 16x17 chunks. Their union is
+        // 306 chunks, not 578: the 1.7.10 hostile cap is 83, not 158.
+        // Exercise the real spawn loop rather than only natural_mob_cap.
+        let world = World::natural(0);
+        let first = PlayerPosition {
+            x: 512.5,
+            y: world.spawn_y(),
+            z: 512.5,
+        };
+        let adjacent = PlayerPosition { x: 528.5, ..first };
+        let diagonal = PlayerPosition {
+            x: 640.5,
+            z: 640.5,
+            ..first
+        };
+        assert_eq!(
+            natural_spawn_capacity(&[first, adjacent], VANILLA_HOSTILE_CAP),
+            83
+        );
+        assert_eq!(
+            natural_spawn_capacity(&[first, diagonal], VANILLA_HOSTILE_CAP),
+            135
+        );
+
+        let filler = PlayerPosition {
+            x: 4096.5,
+            y: 65.0,
+            z: 4096.5,
+        };
+        let seeded_mobs = |count| {
+            let mut mobs = Mobs::new_with_difficulty(&world, true, 2);
+            for _ in 0..count {
+                mobs.insert(Kind::Zombie, filler, false);
+            }
+            mobs
+        };
+        let spawn_once = |mobs: &mut Mobs, players: &[PlayerPosition]| {
+            let mut events = Vec::new();
+            let mut lighting = world.lighting_sampler();
+            mobs.spawn_natural(18_040, &world, &mut lighting, players, &mut events);
+            events
+        };
+
+        // At the exact union cap, no pack may create a mob or a Protocol 5
+        // spawn packet, even though two players are online.
+        for (players, cap) in [(vec![first, adjacent], 83), (vec![first, diagonal], 135)] {
+            let mut full = seeded_mobs(cap);
+            assert!(spawn_once(&mut full, &players).is_empty());
+            assert_eq!(full.entities.len(), cap);
+
+            let mut almost_full = seeded_mobs(cap - 1);
+            let events = spawn_once(&mut almost_full, &players);
+            let spawned = almost_full.entities.len() - (cap - 1);
+            assert!(
+                spawned <= 1,
+                "a pack must not exceed the overlapping union cap"
+            );
+            assert_eq!(
+                events.iter().filter(|event| event.id == 0x0f).count(),
+                spawned,
+                "each newly spawned mob needs one Protocol 5 spawn event"
+            );
+        }
+    }
+
+    #[test]
     fn natural_mob_cap_diagonal_overlap_and_border_membership() {
         let a = PlayerPosition {
             x: 0.5,
