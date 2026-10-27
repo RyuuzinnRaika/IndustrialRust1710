@@ -2204,7 +2204,7 @@ impl Mobs {
             // Species has not been chosen yet: demanding ground support here
             // silently excludes every otherwise valid flying Ghast. Validate
             // the selected species' body below for each attempted pack member.
-            if !natural_spawn_origin_ok(world, position, players) {
+            if !natural_spawn_origin_ok(world, position, &valid_players) {
                 continue;
             }
             let biome = world.biome_at(x, z);
@@ -2314,7 +2314,7 @@ impl Mobs {
                     }
                 };
                 if !candidate.is_valid()
-                    || !natural_spawn_location_ok(world, candidate, players)
+                    || !natural_spawn_location_ok(world, candidate, &valid_players)
                     || !natural_spawn_body_ok(world, kind, candidate, size)
                     || !natural_spawn_entity_clearance(&self.entities, kind, candidate, size)
                 {
