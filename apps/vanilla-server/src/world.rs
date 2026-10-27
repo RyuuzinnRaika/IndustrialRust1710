@@ -53,6 +53,9 @@ pub struct World {
     pending_weather_order: VecDeque<Position>,
     pending_devices: BTreeSet<Position>,
     pending_repeaters: BTreeMap<Position, (u64, bool)>,
+    // Java 1.7.10 torches invert their supporting block after a two-game-tick
+    // delay. A timestamped target prevents instantaneous oscillation.
+    pending_torches: BTreeMap<Position, (u64, bool)>,
     // Comparator analog output (0..15) is not encoded in block metadata.
     // Reconstructed by queued evaluation after loading IRW snapshots.
     comparator_outputs: BTreeMap<Position, u8>,
@@ -1071,6 +1074,9 @@ impl World {
             ) {
                 self.pending_support.insert(pos);
             }
+            if !matches!(id, 75 | 76) {
+                self.pending_torches.remove(&pos);
+            }
             if matches!(
                 id,
                 23 | 27
@@ -1078,6 +1084,8 @@ impl World {
                     | 33
                     | 34
                     | 46
+                    | 75
+                    | 76
                     | 93
                     | 94
                     | 131
@@ -1119,7 +1127,7 @@ impl World {
                     55 => {
                         self.pending_circuit.insert(pos);
                     }
-                    27 | 29 | 33 | 93 | 94 | 149 | 150 | 157 => {
+                    27 | 29 | 33 | 75 | 76 | 93 | 94 | 149 | 150 | 157 => {
                         self.pending_devices.insert(pos);
                     }
                     _ => {}
@@ -1332,6 +1340,13 @@ impl World {
                 continue;
             }
             let mut strongest = 0u16;
+            // Redstone torches, redstone blocks and strongly powered opaque
+            // supports beneath the wire also provide power. Previously this
+            // code inspected only horizontal neighbours and could not energize
+            // dust placed directly on a powered block.
+            strongest = strongest.max(u16::from(
+                self.signal_into((x, y - 1, z), (x, y, z)),
+            ));
             for (nx, nz) in [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)] {
                 // Dust climbs one block when there is air above the
                 // current dust, or descends along a block edge.
@@ -2340,6 +2355,9 @@ impl World {
                 block >> 4,
                 23 | 27 | 29 | 33 | 46 | 93 | 94 | 131 | 147 | 148 | 149 | 150 | 151 | 157 | 158
             ) {
+                world.pending_devices.insert((x, y, z));
+            }
+            if matches!(block >> 4, 75 | 76) {
                 world.pending_devices.insert((x, y, z));
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
