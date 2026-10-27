@@ -68,6 +68,7 @@ struct Thrown {
     at: PlayerPosition,
     velocity: [f64; 3],
     age: u16,
+    embedded: bool,
 }
 impl Thrown {
     fn spawn(&self) -> Event {
@@ -158,6 +159,7 @@ impl Throwables {
                 f64::from(dz) * 1.1,
             ],
             age: 0,
+            embedded: false,
         };
         let packet = object.spawn();
         self.active.insert(id, object);
@@ -221,6 +223,7 @@ impl Throwables {
                 y.cos() * p.cos() * speed,
             ],
             age: 0,
+            embedded: false,
         };
         let packet = object.spawn();
         self.active.insert(id, object);
@@ -238,6 +241,14 @@ impl Throwables {
         let mut removed = Vec::new();
         for object in self.active.values_mut() {
             object.age = object.age.saturating_add(1);
+            // Vanilla arrows remain in their impact block for 60 seconds.
+            // They must not repeatedly collide or emit movement while embedded.
+            if object.embedded {
+                if object.age >= 1200 {
+                    removed.push(object.id);
+                }
+                continue;
+            }
             let previous = object.at;
             let destination = PlayerPosition {
                 x: previous.x + object.velocity[0],
@@ -280,6 +291,15 @@ impl Throwables {
                 // Keep the impact point, not the previous tick's location, so
                 // clients near the collision also receive the removal.
                 object.at = at;
+                if object.kind == Kind::Arrow {
+                    object.embedded = true;
+                    object.velocity = [0.0; 3];
+                    result.events.push((
+                        at,
+                        multiplayer::teleport(object.id, &at, 0.0, 0.0),
+                    ));
+                    continue;
+                }
                 if object.kind == Kind::Pearl {
                     // The existing session-owned teleport path validates and
                     // durably persists the player position before syncing.
@@ -443,9 +463,9 @@ mod tests {
     }
 
     #[test]
-    fn dispenser_projectile_hits_solid_behind_liquid_exactly_once() {
-        // Passing through a liquid must not skip the solid block behind it,
-        // and the resulting Destroy packet must only be sent once.
+    fn dispenser_arrow_embeds_behind_liquid_without_duplicate_impact() {
+        // Liquids are traversable, but an arrow must stay embedded when it
+        // reaches the solid block rather than immediately being destroyed.
         for liquid in [8u16, 11] {
             let mut world = World::new();
             world.import_block(2, 70, 0, liquid << 4).unwrap();
@@ -458,25 +478,23 @@ mod tests {
 
             let first = objects.tick(&world, 1);
             assert_eq!(objects.active.len(), 1, "liquid block {liquid}");
-            assert_eq!(first.events.len(), 1, "liquid block {liquid}");
-            assert_ne!(first.events[0].1.id, 0x13);
+            assert_eq!(first.events.len(), 1);
+            assert_eq!(first.events[0].1.id, 0x18);
 
-            let second = objects.tick(&world, 2);
-            assert!(objects.active.is_empty(), "liquid block {liquid}");
-            assert_eq!(second.events.len(), 1, "liquid block {liquid}");
-            let (impact, packet) = &second.events[0];
-            assert_eq!(packet.id, 0x13);
-            assert_eq!(
-                i32::from_be_bytes(packet.body[1..5].try_into().unwrap()),
-                projectile_id
-            );
-            assert!((3.0..3.3).contains(&impact.x), "impact={impact:?}");
+            let impact = objects.tick(&world, 2);
+            assert_eq!(impact.events.len(), 1);
+            assert_eq!(impact.events[0].1.id, 0x18);
+            let arrow = objects.active.get(&projectile_id).unwrap();
+            assert!(arrow.embedded);
+            assert_eq!(arrow.velocity, [0.0; 3]);
+            assert!((3.0..3.3).contains(&arrow.at.x), "impact={:?}", arrow.at);
             assert!(objects.tick(&world, 3).events.is_empty());
+            assert_eq!(objects.active.len(), 1);
         }
     }
 
     #[test]
-    fn dispenser_projectile_destroy_is_broadcast_from_impact_position() {
+    fn dispenser_arrow_stays_in_block_then_expires_at_1200_ticks() {
         let mut objects = Throwables::default();
         let mut world = World::new();
         world.import_block(2, 70, 0, 1 << 4).unwrap();
@@ -486,18 +504,35 @@ mod tests {
         let projectile_id = *objects.active.keys().next().unwrap();
         assert!(origin.x < 2.0);
 
-        let result = objects.tick(&world, 1);
+        let impact = objects.tick(&world, 1);
+        assert_eq!(objects.active.len(), 1);
+        assert_eq!(impact.events.len(), 1);
+        let (at, packet) = &impact.events[0];
+        assert_eq!(packet.id, 0x18);
+        assert_eq!(
+            i32::from_be_bytes(packet.body[0..4].try_into().unwrap()),
+            projectile_id
+        );
+        assert!((2.0..2.3).contains(&at.x), "impact={at:?}");
+        assert!((at.y - 70.5).abs() < 1e-10);
+        assert!(objects.active.get(&projectile_id).unwrap().embedded);
+
+        for tick in 2..1200 {
+            assert!(objects.tick(&world, tick).events.is_empty());
+        }
+        assert_eq!(objects.active.len(), 1);
+        let expired = objects.tick(&world, 1200);
         assert!(objects.active.is_empty());
-        assert_eq!(result.events.len(), 1);
-        let (at, packet) = &result.events[0];
+        assert_eq!(expired.events.len(), 1);
+        let (at, packet) = &expired.events[0];
         assert_eq!(packet.id, 0x13);
         assert_eq!(packet.body[0], 1);
         assert_eq!(
             i32::from_be_bytes(packet.body[1..5].try_into().unwrap()),
             projectile_id
         );
-        assert!((2.0..2.3).contains(&at.x), "impact={at:?}");
-        assert!((at.y - 70.5).abs() < 1e-10);
+        assert!((2.0..2.3).contains(&at.x), "expiry={at:?}");
+        assert!(objects.tick(&world, 1201).events.is_empty());
     }
 
     #[test]
