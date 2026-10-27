@@ -971,7 +971,7 @@ fn blast_damage(world: &World, blast: &Explosion, target: PlayerPosition) -> u8 
 }
 /// Shared 1.7.10 Mob collision dimensions for arrows and their tick snapshots.
 fn projectile_hitbox(mob: &Mob) -> (f64, f64) {
-    let (radius, height) = match mob.kind {
+    match mob.kind {
         Kind::Ghast => (2.0, 4.0),
         Kind::EnderDragon => (4.0, 8.0),
         Kind::Wither => (0.9, 3.5),
@@ -985,8 +985,7 @@ fn projectile_hitbox(mob: &Mob) -> (f64, f64) {
         Kind::Chicken => (0.3, 0.7),
         Kind::Cow | Kind::Pig | Kind::Sheep => (0.55, 1.4),
         _ => (0.45, if mob.baby { 1.0 } else { 1.95 }),
-    };
-    (radius, height)
+    }
 }
 /// Projectile collisions must intersect the mob's body, not its feet.
 fn projectile_hits_mob(mob: &Mob, point: PlayerPosition) -> bool {
@@ -7176,7 +7175,10 @@ mod tests {
         let id = mobs.next_id;
         mobs.insert(Kind::Cow, at, false);
         let initial_health = mobs.entities[&id].health;
-        assert!(mobs.projectile_targets().iter().any(|target| target.0 == id));
+        assert!(mobs
+            .projectile_targets()
+            .iter()
+            .any(|target| target.0 == id));
         let (hit_at, events) = mobs.damage_from_dispenser_arrow(id, 20).unwrap();
         assert_eq!(hit_at.x, at.x);
         assert_eq!(events.len(), 2);
@@ -7188,7 +7190,9 @@ mod tests {
         assert!(events.iter().any(|event| event.id == 0x13));
         assert!(!mobs.entities.contains_key(&id));
         assert!(mobs.damage_from_dispenser_arrow(id, 40).is_none());
-        assert!(mobs.projectile_targets().iter().all(|target| target.0 != id));
+        assert!(mobs
+            .projectile_targets()
+            .iter()
+            .all(|target| target.0 != id));
     }
-
 }
