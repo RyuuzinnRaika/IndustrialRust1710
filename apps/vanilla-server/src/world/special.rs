@@ -1714,6 +1714,62 @@ mod tests {
                 world.pending_buttons.get(&key),
                 Some(&(world.fluid_phase + 10))
             );
+            // The refreshed analog output must remain active until tick 10
+            // after last contact, including when the release save fails.
+            assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), expected_level as u8);
+            for _ in 0..9 {
+                world.block_tick(&path, 64).unwrap();
+                assert_eq!(world.get(0, 64, 0), (id << 4) | expected_level);
+            }
+            fs::create_dir(&staging).unwrap();
+            assert!(world.block_tick(&path, 64).is_err());
+            assert_eq!(world.get(0, 64, 0), (id << 4) | expected_level);
+            assert!(world.pending_buttons.contains_key(&key));
+            fs::remove_dir(&staging).unwrap();
+
+            assert!(world.block_tick(&path, 64).unwrap().contains(&(0, 64, 0)));
+            assert_eq!(world.get(0, 64, 0), id << 4);
+            assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 0);
+            assert!(!world.pending_buttons.contains_key(&key));
+            assert_eq!(World::load(&path).unwrap().get(0, 64, 0), id << 4);
+            fs::remove_file(&path).unwrap();
+        }
+    }
+
+    #[test]
+    fn weighted_plate_failed_analog_change_expires_at_original_deadline() {
+        for id in [147u16, 148] {
+            let path = std::env::temp_dir().join(format!(
+                "ir1710-b11-weighted-original-deadline-{}-{id}.irw",
+                std::process::id()
+            ));
+            let staging = path.with_extension("tmp");
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_dir(&staging);
+
+            let mut world = World::new();
+            world.import_block(0, 64, 0, id << 4).unwrap();
+            assert!(world.press_weighted_plate(&path, 0, 64, 0, 1).unwrap());
+            let key = (0, 64, 0);
+            let deadline = world.pending_buttons[&key];
+            world.fluid_phase += 1;
+            fs::create_dir(&staging).unwrap();
+            let new_count = if id == 147 { 7 } else { 11 };
+            assert!(world
+                .press_weighted_plate(&path, 0, 64, 0, new_count)
+                .is_err());
+            fs::remove_dir(&staging).unwrap();
+
+            assert_eq!(world.get(0, 64, 0), (id << 4) | 1);
+            assert_eq!(world.pending_buttons.get(&key), Some(&deadline));
+            for _ in 0..8 {
+                world.block_tick(&path, 64).unwrap();
+                assert_eq!(world.get(0, 64, 0), (id << 4) | 1);
+            }
+            assert!(world.block_tick(&path, 64).unwrap().contains(&(0, 64, 0)));
+            assert_eq!(world.get(0, 64, 0), id << 4);
+            assert_eq!(World::load(&path).unwrap().get(0, 64, 0), id << 4);
+            assert!(!world.pending_buttons.contains_key(&key));
             fs::remove_file(&path).unwrap();
         }
     }
