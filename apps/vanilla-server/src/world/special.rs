@@ -844,10 +844,20 @@ mod tests {
         w.fluid_phase = 101;
         w.finalize_tnt(&[(1, 80, 0), (20, 80, 0)]);
         let near = w.primed_tnt.values().find(|t| t.pos == (1, 80, 0)).unwrap();
-        let far = w.primed_tnt.values().find(|t| t.pos == (20, 80, 0)).unwrap();
+        let far = w
+            .primed_tnt
+            .values()
+            .find(|t| t.pos == (20, 80, 0))
+            .unwrap();
         assert!((10..=29).contains(&(near.explode_at - w.fluid_phase)));
         assert_eq!(far.explode_at - w.fluid_phase, 80);
-        assert_eq!(w.drain_tnt_events().iter().filter(|e| matches!(e, TntEvent::Explode { .. })).count(), 1);
+        assert_eq!(
+            w.drain_tnt_events()
+                .iter()
+                .filter(|e| matches!(e, TntEvent::Explode { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]
