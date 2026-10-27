@@ -7276,6 +7276,29 @@ fn main() -> io::Result<()> {
                                     });
                                 }
                             }
+                            if piston_actions.iter().any(|action| action.extending) {
+                                let mut creatures = match tnt_mobs.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                let mut pushed = Vec::new();
+                                for action in &piston_actions {
+                                    pushed.extend(creatures.push_by_piston(&gravity_world, action));
+                                }
+                                if !pushed.is_empty() {
+                                    // World blocks were committed before this
+                                    // point. Persist mob relocation before
+                                    // publishing teleport packets to clients.
+                                    if let Err(error) = creatures.save(&gravity_world) {
+                                        eprintln!("PISTON MOB STORAGE ERROR: {error}");
+                                        return;
+                                    }
+                                }
+                                drop(creatures);
+                                for packet in pushed {
+                                    furnace_hub.broadcast(packet);
+                                }
+                            }
                             // Vanilla S24 starts the client's local moving-piston
                             // tile entity. Do not overwrite it with final S23
                             // snapshots until the three-tick motion finishes.
