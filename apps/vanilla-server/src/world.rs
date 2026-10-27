@@ -1347,10 +1347,7 @@ impl World {
                     // with its head or the last shifted solid. The destroyed
                     // attachment still drops an item even if the new cell is
                     // non-air. Other replacement paths retain prior behavior.
-                    if old == 0
-                        || (next != 0
-                            && (next == old || !devices::piston_breakable(old)))
-                    {
+                    if old == 0 || (next != 0 && (next == old || !devices::piston_breakable(old))) {
                         return None;
                     }
                     let pos = (x, i32::from(y), z);
@@ -4101,14 +4098,21 @@ mod tests {
         ));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
-        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
-        world.update_and_save(&path, 0, 64, 0, (33 << 4) | 5).unwrap();
-        world.update_and_save(&path, 1, 64, 0, (50 << 4) | 5).unwrap();
+        world
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 8)
+            .unwrap();
+        world
+            .update_and_save(&path, 0, 64, 0, (33 << 4) | 5)
+            .unwrap();
+        world
+            .update_and_save(&path, 1, 64, 0, (50 << 4) | 5)
+            .unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(1, 64, 0) >> 4, 34);
-        assert!(world.drain_drops().iter().any(|drop| {
-            drop.pos == (1, 64, 0) && drop.stack.id == 50
-        }));
+        assert!(world
+            .drain_drops()
+            .iter()
+            .any(|drop| { drop.pos == (1, 64, 0) && drop.stack.id == 50 }));
         fs::remove_file(path).unwrap();
     }
 
