@@ -4,6 +4,10 @@
 
 > **開発途中です。** 現在のRust実装と「無改造のMinecraft 1.7.10で完全に遊べること」は同義ではありません。機能ごとにコード・CI・実クライアント検証を分けて確認してください。Forge/FML Modの実行・互換機能は現時点の主対象ではありません。
 
+## 開発の優先順位・やることリスト
+
+**[統合TODO（Issue #660）](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/660)** に、直近の修正順、各グループの担当、次の1PR単位、完了条件を集約しています。毎時の割当・PR統合履歴は [Issue #347](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/347)、最終のバニラサバイバル完成条件は [Issue #20](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/20) を参照してください。古い監査の未完了項目は、必ず最新のmain・PR・実機テスト証跡と照合します。
+
 ## プロジェクト共通ポリシー
 
 開発者とAIエージェントは、[プロジェクトポリシー](docs/PROJECT_POLICIES.md)に従ってください。参加・PR手順は[CONTRIBUTING.md](CONTRIBUTING.md)、脆弱性の非公開報告方法は[SECURITY.md](SECURITY.md)、実装言語と既存の移行例外は[AGENTS.md](AGENTS.md)で確認できます。CI通過と無改造Minecraft 1.7.10実機検証は区別して報告してください。
