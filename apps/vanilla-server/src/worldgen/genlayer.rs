@@ -19,6 +19,8 @@ mod island_zoom;
 mod river;
 #[allow(dead_code)]
 mod river_mix;
+#[allow(dead_code)]
+mod smooth;
 
 const MULTIPLIER: i64 = 6_364_136_223_846_793_005;
 const ADDEND: i64 = 1_442_695_040_888_963_407;
