@@ -563,9 +563,19 @@ pub fn piston_push_candidate(
             piston.2 + dz * step,
         );
         world.piston_sweep_at(x, y, z)
-            && overlap(player.x - HALF_WIDTH, player.x + HALF_WIDTH, x as f64, x as f64 + 1.0)
+            && overlap(
+                player.x - HALF_WIDTH,
+                player.x + HALF_WIDTH,
+                x as f64,
+                x as f64 + 1.0,
+            )
             && overlap(player.y, player.y + HEIGHT, y as f64, y as f64 + 1.0)
-            && overlap(player.z - HALF_WIDTH, player.z + HALF_WIDTH, z as f64, z as f64 + 1.0)
+            && overlap(
+                player.z - HALF_WIDTH,
+                player.z + HALF_WIDTH,
+                z as f64,
+                z as f64 + 1.0,
+            )
     });
     if !intersects {
         return None;
@@ -899,22 +909,23 @@ mod group_b_collision_tests {
         let _ = std::fs::remove_file(&path);
         let mut world = World::new();
         world.update_and_save(&path, -1, 64, 0, 152 << 4).unwrap();
-        world.update_and_save(&path, 0, 64, 0, (33 << 4) | 5).unwrap();
+        world
+            .update_and_save(&path, 0, 64, 0, (33 << 4) | 5)
+            .unwrap();
         world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
         world.block_tick(&path, 64).unwrap();
-        let caught = PlayerPosition { x: 2.5, y: 64.0, z: 0.5 };
+        let caught = PlayerPosition {
+            x: 2.5,
+            y: 64.0,
+            z: 0.5,
+        };
         assert_eq!(
             piston_push_candidate(&world, &caught, (0, 64, 0), 5),
             Some(PlayerPosition { x: 3.5, ..caught })
         );
         assert_eq!(piston_push_candidate(&world, &caught, (0, 64, 0), 6), None);
         assert_eq!(
-            piston_push_candidate(
-                &world,
-                &PlayerPosition { x: 5.5, ..caught },
-                (0, 64, 0),
-                5
-            ),
+            piston_push_candidate(&world, &PlayerPosition { x: 5.5, ..caught }, (0, 64, 0), 5),
             None
         );
         world.update_and_save(&path, 3, 64, 0, 7 << 4).unwrap();
