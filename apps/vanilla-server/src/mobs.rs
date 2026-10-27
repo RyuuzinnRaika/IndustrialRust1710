@@ -6214,6 +6214,52 @@ mod tests {
     }
 
     #[test]
+    fn hostile_random_despawn_requires_more_than_600_distant_ticks_without_loot() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let far = PlayerPosition { x: 40.5, ..at };
+        let mut young = Mobs::default();
+        young.insert(Kind::Creeper, at, false);
+        let id = young.next_id - 1;
+        let roll_tick = (1000_u64..100_000)
+            .find(|tick| hash(*tick ^ id as u64).is_multiple_of(800))
+            .expect("a deterministic 1/800 despawn roll");
+
+        // The age threshold is strict: a successful roll at exactly 600
+        // distant ticks must not despawn the mob or create loot.
+        young.last_tick = roll_tick - 1;
+        young.entities.get_mut(&id).unwrap().far_from_player_ticks = 599;
+        let young_events = young.tick(roll_tick, &world, &[far]);
+        assert!(young.entities.contains_key(&id));
+        assert_eq!(young.entities[&id].far_from_player_ticks, 600);
+        assert!(!young_events.iter().any(|event| event.id == 0x13));
+        assert!(young.take_drops().is_empty());
+
+        // The same deterministic roll becomes eligible after 600 full ticks.
+        // Despawning sends exactly one entity removal, never death loot or XP.
+        let mut old = Mobs::default();
+        old.insert(Kind::Creeper, at, false);
+        assert_eq!(old.next_id - 1, id);
+        old.last_tick = roll_tick - 1;
+        old.entities.get_mut(&id).unwrap().far_from_player_ticks = 600;
+        let old_events = old.tick(roll_tick, &world, &[far]);
+        assert!(!old.entities.contains_key(&id));
+        assert_eq!(
+            old_events
+                .iter()
+                .filter(|event| event.id == 0x13 && event.body == multiplayer::destroy(id).body)
+                .count(),
+            1
+        );
+        assert!(old.take_drops().is_empty());
+        assert!(old.tick(roll_tick + 1, &world, &[far]).iter().all(|event| event.id != 0x13));
+    }
+
+    #[test]
     fn legacy_mob_snapshots_default_missing_far_player_age_to_zero() {
         let mut mobs = Mobs::default();
         let at = PlayerPosition {
