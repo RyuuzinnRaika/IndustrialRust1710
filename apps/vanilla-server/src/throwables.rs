@@ -104,6 +104,47 @@ impl Thrown {
         Event { id: 0x0e, body }
     }
 }
+/// Check the full flight segment against a server-owned entity AABB.
+/// Sampling only the end points can skip a narrow/grazing hitbox at high speed.
+fn segment_hits_box(
+    from: PlayerPosition,
+    to: PlayerPosition,
+    min: [f64; 3],
+    max: [f64; 3],
+) -> bool {
+    let mut entry = 0.0_f64;
+    let mut exit = 1.0_f64;
+    for (start, end, low, high) in [
+        (from.x, to.x, min[0], max[0]),
+        (from.y, to.y, min[1], max[1]),
+        (from.z, to.z, min[2], max[2]),
+    ] {
+        if !start.is_finite()
+            || !end.is_finite()
+            || !low.is_finite()
+            || !high.is_finite()
+            || low > high
+        {
+            return false;
+        }
+        let delta = end - start;
+        if delta == 0.0 {
+            if start < low || start > high {
+                return false;
+            }
+        } else {
+            let t0 = (low - start) / delta;
+            let t1 = (high - start) / delta;
+            entry = entry.max(t0.min(t1));
+            exit = exit.min(t0.max(t1));
+            if entry > exit {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[derive(Clone, Default)]
 pub struct Throwables {
     next_id: i32,
@@ -381,11 +422,22 @@ impl Throwables {
                     collision = Some(sample);
                     break;
                 }
+                let previous_sample_t = (index - 1) as f64 / steps as f64;
+                let segment_start = PlayerPosition {
+                    x: previous.x + (destination.x - previous.x) * previous_sample_t,
+                    y: previous.y + (destination.y - previous.y) * previous_sample_t,
+                    z: previous.z + (destination.z - previous.z) * previous_sample_t,
+                };
                 let hit_mob = if object.kind == Kind::Arrow {
                     mob_targets.iter().find(|(_, at, radius, height)| {
-                        (sample.x - at.x).hypot(sample.z - at.z) <= *radius
-                            && sample.y >= at.y - 0.25
-                            && sample.y <= at.y + *height + 0.25
+                        *radius >= 0.0
+                            && *height >= 0.0
+                            && segment_hits_box(
+                                segment_start,
+                                sample,
+                                [at.x - radius, at.y - 0.25, at.z - radius],
+                                [at.x + radius, at.y + height + 0.25, at.z + radius],
+                            )
                     })
                 } else {
                     None
@@ -397,9 +449,12 @@ impl Throwables {
                 let hit_player = if object.kind == Kind::Arrow {
                     player_targets.iter().find(|(id, at)| {
                         *id != object.owner_entity
-                            && (sample.x - at.x).hypot(sample.z - at.z) <= 0.3
-                            && sample.y >= at.y - 0.25
-                            && sample.y <= at.y + 2.05
+                            && segment_hits_box(
+                                segment_start,
+                                sample,
+                                [at.x - 0.3, at.y - 0.25, at.z - 0.3],
+                                [at.x + 0.3, at.y + 2.05, at.z + 0.3],
+                            )
                     })
                 } else {
                     None
@@ -1047,5 +1102,70 @@ mod tests {
         let impact = objects.tick_with_targets(&world, 20, &[], &players);
         assert!(impact.player_hits.is_empty());
         assert!(objects.active.values().next().unwrap().embedded);
+    }
+    #[test]
+    fn dispenser_arrow_hits_narrow_mob_between_old_discrete_samples() {
+        // The first tick travels from x=1.2 to x=2.3. Old 0.22-block
+        // point samples skipped a 0.04-radius entity centered at x=1.53.
+        let mut objects = Throwables::default();
+        objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
+        let targets = [(
+            500_099,
+            PlayerPosition {
+                x: 1.53,
+                y: 70.0,
+                z: 0.5,
+            },
+            0.04,
+            1.0,
+        )];
+        let world = World::new();
+        let first = objects.tick_with_mob_targets(&world, 20, &targets);
+        assert_eq!(first.mob_hits, vec![(500_099, 20)]);
+        assert!(objects.active.is_empty());
+        assert!(objects
+            .tick_with_mob_targets(&world, 21, &targets)
+            .mob_hits
+            .is_empty());
+    }
+
+    #[test]
+    fn swept_hitbox_rejects_parallel_misses_and_invalid_bounds() {
+        let from = PlayerPosition {
+            x: 0.0,
+            y: 70.0,
+            z: 0.0,
+        };
+        let to = PlayerPosition {
+            x: 2.0,
+            y: 70.0,
+            z: 0.0,
+        };
+        assert!(segment_hits_box(
+            from,
+            to,
+            [0.9, 69.9, -0.1],
+            [1.1, 70.1, 0.1]
+        ));
+        assert!(!segment_hits_box(
+            from,
+            to,
+            [0.9, 69.9, 0.1],
+            [1.1, 70.1, 0.2]
+        ));
+        assert!(!segment_hits_box(
+            from,
+            to,
+            [0.9, 69.9, -0.1],
+            [1.1, 69.99, 0.1]
+        ));
+        assert!(!segment_hits_box(
+            from,
+            to,
+            [f64::NAN, 69.9, -0.1],
+            [1.1, 70.1, 0.1]
+        ));
     }
 }

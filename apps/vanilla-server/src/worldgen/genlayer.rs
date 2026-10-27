@@ -9,6 +9,8 @@
 mod add_island;
 #[allow(dead_code)]
 mod island_zoom;
+#[allow(dead_code)]
+mod river;
 
 const MULTIPLIER: i64 = 6_364_136_223_846_793_005;
 const ADDEND: i64 = 1_442_695_040_888_963_407;
