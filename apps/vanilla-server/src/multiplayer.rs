@@ -1055,6 +1055,8 @@ mod tests {
         assert!(!hub.request_admin_spawnpoint("NotOnline", point).unwrap());
         assert!(hub.request_admin_spawnpoint("NetherUser", point).is_err());
         assert!(hub.request_admin_spawnpoint("aLiCe", point).unwrap());
+        // The Nether player still appears in the global tab list.
+        assert_eq!(rx.try_recv().unwrap().id, 0x38);
         let event = rx.try_recv().unwrap();
         assert_eq!(event.id, ADMIN_SPAWNPOINT_EVENT);
         assert_eq!(event.body.len(), 12);
