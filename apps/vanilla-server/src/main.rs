@@ -2605,17 +2605,8 @@ fn play(
                     .map_err(|_| bad("game rules mutex poisoned"))?;
                 (rules.keep_inventory(), rules.show_death_messages())
             };
-            if !keep_inventory {
-                commit_death_drops(
-                    inventory,
-                    inventory_path,
-                    ground_items,
-                    ground_path,
-                    world_path,
-                    hub,
-                    location,
-                )?;
-            }
+            // Record the death before attempting inventory/drop I/O: if the
+            // drop journal cannot commit, the fatal event is still observable.
             if newly_dead {
                 let record = DeathRecord {
                     player: name,
@@ -2632,6 +2623,17 @@ fn play(
                 if show_death_messages {
                     hub.broadcast(chat_event(&record.chat_message())?);
                 }
+            }
+            if !keep_inventory {
+                commit_death_drops(
+                    inventory,
+                    inventory_path,
+                    ground_items,
+                    ground_path,
+                    world_path,
+                    hub,
+                    location,
+                )?;
             }
             if hardcore {
                 // Persist the dead state before ending the connection. Future
