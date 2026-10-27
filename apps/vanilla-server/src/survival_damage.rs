@@ -3,6 +3,15 @@ use crate::inventory::Inventory;
 use crate::player::PlayerPosition;
 use crate::world::World;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HazardCause {
+    Drowning,
+    Suffocation,
+    Lava,
+    Fire,
+    Burning,
+}
+
 #[derive(Debug, Default)]
 pub struct Hazards {
     air: u16,
@@ -27,6 +36,17 @@ impl Hazards {
         tick: u64,
         inventory: &Inventory,
     ) -> f32 {
+        self.tick_detailed(world, pos, tick, inventory).0
+    }
+
+    /// Report the source that actually inflicted damage this tick.
+    pub fn tick_detailed(
+        &mut self,
+        world: &World,
+        pos: PlayerPosition,
+        tick: u64,
+        inventory: &Inventory,
+    ) -> (f32, Option<HazardCause>) {
         let (x, y, z) = (
             pos.x.floor() as i32,
             pos.y.floor() as i32,
@@ -37,11 +57,13 @@ impl Hazards {
         let submerged = matches!(head, 8 | 9);
         let mut raw = 0.0_f32;
         let mut bypass = 0.0_f32;
+        let mut cause = None;
         if submerged {
             self.air = self.air.saturating_sub(1);
             self.wet_ticks = self.wet_ticks.saturating_add(1);
             if self.air == 0 && self.wet_ticks.is_multiple_of(20) {
                 bypass += 2.0;
+                cause = Some(HazardCause::Drowning);
             }
         } else {
             self.air = 300;
@@ -89,12 +111,16 @@ impl Hazards {
         {
             self.last_suffocation_hit = tick;
             bypass += 1.0;
+            if cause.is_none() {
+                cause = Some(HazardCause::Suffocation);
+            }
         }
         if matches!(feet, 10 | 11) {
             self.fire_ticks = self.fire_ticks.max(100);
             if tick.saturating_sub(self.last_fire_hit) >= 10 {
                 self.last_fire_hit = tick;
                 raw += 4.0;
+                cause = Some(HazardCause::Lava);
             }
         } else if feet == 51 {
             self.fire_ticks = self.fire_ticks.max(80);
@@ -104,12 +130,18 @@ impl Hazards {
             if !matches!(feet, 10 | 11) && tick.saturating_sub(self.last_fire_hit) >= 20 {
                 self.last_fire_hit = tick;
                 raw += 1.0;
+                cause = Some(if feet == 51 {
+                    HazardCause::Fire
+                } else {
+                    HazardCause::Burning
+                });
             }
         } else if submerged {
             self.fire_ticks = 0;
         }
         let points = inventory.armor_points().min(20) as f32;
-        (raw * (25.0 - points) / 25.0).ceil() + bypass
+        let damage = (raw * (25.0 - points) / 25.0).ceil() + bypass;
+        (damage, if damage > 0.0 { cause } else { None })
     }
 }
 #[cfg(test)]
@@ -125,5 +157,19 @@ mod tests {
             damage += hazard.tick(&world, PlayerPosition::default(), t, &Inventory::default());
         }
         assert!(damage >= 2.0);
+        let mut under_water = Hazards::new();
+        let mut cause = None;
+        for t in 1..=320 {
+            let (points, source) = under_water.tick_detailed(
+                &world,
+                PlayerPosition::default(),
+                t,
+                &Inventory::default(),
+            );
+            if points > 0.0 {
+                cause = source;
+            }
+        }
+        assert_eq!(cause, Some(HazardCause::Drowning));
     }
 }
