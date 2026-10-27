@@ -32,6 +32,7 @@ namespace IndustrialRust1710
         private bool stopping;
         private bool closing;
         private bool exitObserved;
+        private bool serverStarted;
         private int result = 1;
         private DateTime previousSample = DateTime.MinValue;
         private TimeSpan previousCpu = TimeSpan.Zero;
@@ -68,6 +69,8 @@ namespace IndustrialRust1710
         {
             SplitContainer split = new SplitContainer();
             split.Dock = DockStyle.Fill;
+            // Establish bounds before assigning minimum panel sizes.
+            split.Size = new Size(990, 570);
             split.Orientation = Orientation.Vertical;
             split.SplitterWidth = 6;
             split.Panel1MinSize = 245;
@@ -220,6 +223,7 @@ namespace IndustrialRust1710
                     if (e.Data != null) Enqueue(e.Data);
                 };
                 server.Start();
+                serverStarted = true;
                 server.StandardInput.AutoFlush = true;
                 server.BeginOutputReadLine();
                 server.BeginErrorReadLine();
@@ -287,7 +291,7 @@ namespace IndustrialRust1710
                 AppendLog(line);
                 drained++;
             }
-            if (server == null) return;
+            if (server == null || !serverStarted) return;
             try {
                 if (server.HasExited) {
                     if (!exitObserved) {
@@ -381,7 +385,7 @@ namespace IndustrialRust1710
 
         private bool SendCommand(string line)
         {
-            if (server == null || server.HasExited || stopping) return false;
+            if (server == null || !serverStarted || server.HasExited || stopping) return false;
             try {
                 server.StandardInput.WriteLine(line);
                 return true;
@@ -393,7 +397,7 @@ namespace IndustrialRust1710
 
         private void RequestStop()
         {
-            if (stopping || server == null || server.HasExited) return;
+            if (stopping || server == null || !serverStarted || server.HasExited) return;
             if (SendCommand("/stop")) {
                 stopping = true;
                 stop.Enabled = false;
@@ -406,7 +410,7 @@ namespace IndustrialRust1710
 
         private void OnClosing(object sender, FormClosingEventArgs e)
         {
-            if (server == null || server.HasExited) return;
+            if (server == null || !serverStarted || server.HasExited) return;
             e.Cancel = true;
             closing = true;
             RequestStop();
