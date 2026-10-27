@@ -18,6 +18,7 @@ pub const VIEW_DISTANCE: i32 = 2; // Send a 5x5 chunk window per connected playe
 pub const MIN_CHUNK: i32 = -WORLD_LIMIT / 16;
 pub const MAX_CHUNK: i32 = WORLD_LIMIT / 16 - 1;
 const MAX_EDITS: usize = 65_536;
+const MAX_PRIMED_TNT: usize = 4096;
 // A loaded 5x5 view contains at most 6_400 surface columns per player.
 // Keep weather observations bounded even after prolonged exploration.
 const MAX_WEATHER_COLUMNS: usize = 16_384;
@@ -1147,18 +1148,6 @@ impl World {
                 changes.entry((x, y, z)).or_insert(reset);
             }
         }
-        // Retain the old block identity until the world snapshot has committed.
-        let primed_on_commit: Vec<_> = changes
-            .iter()
-            .filter_map(|(&(x, y, z), &new)| {
-                (new == 0 && self.get(x, i32::from(y), z) >> 4 == 46).then_some((
-                    x,
-                    i32::from(y),
-                    z,
-                ))
-            })
-            .collect();
-
         for &(x, y, z) in &wet {
             let y = i32::from(y);
             let block = self.get(x, y, z);
@@ -1328,6 +1317,61 @@ impl World {
             if current & 15 != strongest {
                 changes.insert((x, y as u8, z), (55 << 4) | strongest);
             }
+        }
+
+        // Apply the exact final block changes, after fluid/redstone merging.
+        // TNT removed from the world must have a reserved primed-entity slot:
+        // overflowing the 4096-entity IRW trailer used to abort both gameplay
+        // saves and the final /stop save. Leave excess TNT blocks in place,
+        // rather than erasing them or creating an unpersistable entity.
+        let detonating = self
+            .primed_tnt
+            .values()
+            .filter(|tnt| tnt.explode_at <= self.fluid_phase)
+            .take(4)
+            .count();
+        let available =
+            MAX_PRIMED_TNT.saturating_sub(self.primed_tnt.len().saturating_sub(detonating));
+        let mut primed_on_commit = Vec::new();
+        let mut deferred = Vec::new();
+        for (&(x, y, z), &new) in &changes {
+            if new == 0 && self.get(x, i32::from(y), z) >> 4 == 46 {
+                if primed_on_commit.len() < available {
+                    primed_on_commit.push((x, i32::from(y), z));
+                } else {
+                    deferred.push((x, y, z));
+                }
+            }
+        }
+        for pos in deferred {
+            changes.remove(&pos);
+        }
+
+        // A burst can clear hundreds of generated stone/dirt cells, each
+        // of which creates a new sparse edit. Near the legacy IRW 65,536-edit
+        // capacity, never let the entire world tick or /stop fail because
+        // the blast would allocate more overrides than can be persisted.
+        // Prefer deletions of existing edits; defer excess new overrides.
+        let released = changes
+            .iter()
+            .filter(|(&(x, y, z), &next)| {
+                self.edits.contains_key(&(x, y, z)) && next == self.base_block(x, y, z)
+            })
+            .count();
+        let mut remaining_edit_slots =
+            MAX_EDITS.saturating_sub(self.edits.len().saturating_sub(released));
+        let mut over_budget = Vec::new();
+        for (&(x, y, z), &next) in &changes {
+            if !self.edits.contains_key(&(x, y, z)) && next != self.base_block(x, y, z) {
+                if remaining_edit_slots == 0 {
+                    over_budget.push((x, y, z));
+                } else {
+                    remaining_edit_slots -= 1;
+                }
+            }
+        }
+        for pos in over_budget {
+            changes.remove(&pos);
         }
 
         // Advance the primed entity state BEFORE the atomic IRW snapshot.
@@ -2048,7 +2092,7 @@ impl World {
                 return Err(invalid("unrecognized world entity trailer"));
             }
             let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
-            if primed_count > 4096 || trailer.len() != 6 + primed_count * 20 {
+            if primed_count > MAX_PRIMED_TNT || trailer.len() != 6 + primed_count * 20 {
                 return Err(invalid("invalid primed TNT trailer length"));
             }
             for entry in trailer[6..].as_chunks::<20>().0 {
@@ -2182,21 +2226,26 @@ impl World {
             f.write_all(&block.to_be_bytes())?;
         }
         if !self.primed_tnt.is_empty() {
-            if self.primed_tnt.len() > 4096 {
+            if self.primed_tnt.len() > MAX_PRIMED_TNT {
                 return Err(invalid("primed TNT entity capacity exceeded"));
             }
             f.write_all(b"TNT1")?;
             f.write_all(&(self.primed_tnt.len() as u16).to_be_bytes())?;
             for tnt in self.primed_tnt.values() {
                 let remaining = tnt.explode_at.saturating_sub(self.fluid_phase);
-                if remaining == 0 || remaining > u64::from(u32::MAX) {
+                if remaining > u64::from(u32::MAX) {
                     return Err(invalid("invalid primed TNT fuse"));
                 }
                 f.write_all(&tnt.entity_id.to_be_bytes())?;
                 f.write_all(&tnt.pos.0.to_be_bytes())?;
                 f.write_all(&tnt.pos.1.to_be_bytes())?;
                 f.write_all(&tnt.pos.2.to_be_bytes())?;
-                f.write_all(&(remaining as u32).to_be_bytes())?;
+                // A tick processes at most four detonations. If more than
+                // four TNT share a deadline, the remaining entities are
+                // overdue but still valid. Persist those as due next tick:
+                // a zero fuse is invalid on disk and previously aborted
+                // both world-tick writes and the final shutdown save.
+                f.write_all(&(remaining.max(1) as u32).to_be_bytes())?;
             }
         }
         Ok(())

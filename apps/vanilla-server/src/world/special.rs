@@ -1,6 +1,6 @@
 //! Minecraft 1.7.10 special blocks, driven by World::block_tick (20TPS).
 //! All multi-cell player actions are staged and saved as a single IRW snapshot.
-use super::{in_bounds, Position, World};
+use super::{in_bounds, Position, World, MAX_PRIMED_TNT};
 use crate::inventory::Stack;
 use std::collections::BTreeMap;
 use std::io;
@@ -30,7 +30,10 @@ type StagedBlockBatch = (World, Vec<(i32, i32, i32)>);
 pub type StagedSpecialItem = (World, Vec<(i32, i32, i32)>, Option<Stack>, bool);
 
 impl World {
-    fn spawn_primed_tnt(&mut self, x: i32, y: i32, z: i32, fuse: u64) {
+    fn spawn_primed_tnt(&mut self, x: i32, y: i32, z: i32, fuse: u64) -> bool {
+        if self.primed_tnt.len() >= MAX_PRIMED_TNT {
+            return false;
+        }
         self.next_tnt_id = if self.next_tnt_id < 10_000_000 {
             10_000_001
         } else {
@@ -49,6 +52,7 @@ impl World {
             entity_id,
             pos: (x, y, z),
         });
+        true
     }
 
     /// Test-only direct ignition uses the same atomic block/entity staging
@@ -80,6 +84,37 @@ impl World {
         self.primed_tnt.values().any(|tnt| tnt.explode_at <= next)
     }
 
+    /// Preserve pre-explosion ray occlusion without cloning every wake queue,
+    /// light cache, and distant block edit in a large active world.
+    /// Blast damage reaches at most 8 blocks from TNT (power 4); a 12-block
+    /// envelope also covers all 27 body-sample ray endpoints.
+    pub fn blast_exposure_snapshot(&self) -> World {
+        let mut edits = BTreeMap::new();
+        let deadline = self.fluid_phase.saturating_add(1);
+        for tnt in self
+            .primed_tnt
+            .values()
+            .filter(|tnt| tnt.explode_at <= deadline)
+            .take(4)
+        {
+            let (cx, cy, cz) = tnt.pos;
+            for (&(x, y, z), &block) in self.edits.range(
+                (cx.saturating_sub(12), 0, i32::MIN)..=(cx.saturating_add(12), u8::MAX, i32::MAX),
+            ) {
+                if (i64::from(y) - i64::from(cy)).abs() <= 12
+                    && (i64::from(z) - i64::from(cz)).abs() <= 12
+                {
+                    edits.insert((x, y, z), block);
+                }
+            }
+        }
+        World {
+            edits,
+            generation: self.generation,
+            ..World::default()
+        }
+    }
+
     /// Publish only events from committed state.
     pub fn drain_tnt_events(&mut self) -> Vec<TntEvent> {
         std::mem::take(&mut self.tnt_events)
@@ -93,6 +128,37 @@ impl World {
             .take(4)
             .copied()
             .collect();
+        // Distinguish explosion-induced TNT from redstone ignition before
+        // removing detonated entities. Vanilla 1.7.10 gives chain TNT a
+        // shortened fuse, while redstone-lit TNT retains the full 80 ticks.
+        // Use a stable position/tick hash, not a global RNG, so a persisted
+        // world produces reproducible fuse deadlines after recovery.
+        let chain_fuse = |pos: (i32, i32, i32)| -> Option<u64> {
+            let in_blast = expired.iter().any(|tnt| {
+                let (dx, dy, dz) = (
+                    i64::from(pos.0) - i64::from(tnt.pos.0),
+                    i64::from(pos.1) - i64::from(tnt.pos.1),
+                    i64::from(pos.2) - i64::from(tnt.pos.2),
+                );
+                dx * dx + dy * dy + dz * dz <= 9
+            });
+            if !in_blast {
+                return None;
+            }
+            let mut seed = self.fluid_phase
+                ^ (pos.0 as u32 as u64).wrapping_mul(0x9E3779B185EBCA87)
+                ^ (pos.1 as u32 as u64).wrapping_mul(0xC2B2AE3D27D4EB4F)
+                ^ (pos.2 as u32 as u64).wrapping_mul(0x165667B19E3779F9);
+            seed ^= seed >> 30;
+            seed = seed.wrapping_mul(0xBF58476D1CE4E5B9);
+            seed ^= seed >> 27;
+            seed = seed.wrapping_mul(0x94D049BB133111EB);
+            Some(10 + ((seed ^ (seed >> 31)) % 20))
+        };
+        let primed_fuses: Vec<_> = newly_primed
+            .iter()
+            .map(|&pos| (pos, chain_fuse(pos).unwrap_or(80)))
+            .collect();
         for tnt in expired {
             self.primed_tnt.remove(&tnt.entity_id);
             self.tnt_events.push(TntEvent::Explode {
@@ -100,8 +166,11 @@ impl World {
                 pos: tnt.pos,
             });
         }
-        for &(x, y, z) in newly_primed {
-            self.spawn_primed_tnt(x, y, z, 25);
+        for ((x, y, z), fuse) in primed_fuses {
+            // The block worker reserves free slots before removing TNT blocks.
+            // Never create an unpersistable 4097th entity.
+            let spawned = self.spawn_primed_tnt(x, y, z, fuse);
+            debug_assert!(spawned, "unreserved TNT ignition");
         }
     }
 
@@ -394,6 +463,10 @@ impl World {
                 changes = self.bonemeal_changes(x, y, z);
                 (None, false)
             } else if target == 46 && held.id == 259 {
+                if self.primed_tnt.len() >= MAX_PRIMED_TNT {
+                    // Do not remove the TNT block if no entity can be saved.
+                    return Ok(None);
+                }
                 changes.insert((x, y as u8, z), 0);
                 (None, true)
             } else {
@@ -805,6 +878,31 @@ mod tests {
     }
 
     #[test]
+    fn chain_tnt_has_shortened_fuse_and_redstone_keeps_eighty_ticks() {
+        let mut w = World::new();
+        w.fluid_phase = 100;
+        w.spawn_primed_tnt(0, 80, 0, 1);
+        w.drain_tnt_events();
+        w.fluid_phase = 101;
+        w.finalize_tnt(&[(1, 80, 0), (20, 80, 0)]);
+        let near = w.primed_tnt.values().find(|t| t.pos == (1, 80, 0)).unwrap();
+        let far = w
+            .primed_tnt
+            .values()
+            .find(|t| t.pos == (20, 80, 0))
+            .unwrap();
+        assert!((10..=29).contains(&(near.explode_at - w.fluid_phase)));
+        assert_eq!(far.explode_at - w.fluid_phase, 80);
+        assert_eq!(
+            w.drain_tnt_events()
+                .iter()
+                .filter(|e| matches!(e, TntEvent::Explode { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn tnt_preblast_snapshot_is_only_needed_when_fuse_expires() {
         let path = file("tnt-snapshot-signal");
         let mut world = World::new();
@@ -859,6 +957,157 @@ mod tests {
         // Even in empty air, the expired entity was removed durably.
         let again = World::load(&path).unwrap();
         assert!(again.primed_tnt.is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn tnt_exposure_snapshot_keeps_nearby_shields_without_distant_world_state() {
+        let mut world = World::new();
+        world.import_block(2, 80, 0, 49 << 4).unwrap();
+        world.import_block(40, 80, 0, 49 << 4).unwrap();
+        world.spawn_primed_tnt(0, 80, 0, 1);
+        let snapshot = world.blast_exposure_snapshot();
+        assert_eq!(snapshot.get(2, 80, 0), world.get(2, 80, 0));
+        assert_eq!(snapshot.get(40, 80, 0), 0);
+        assert_eq!(snapshot.edits.len(), 1);
+        assert!(snapshot.pending_devices.is_empty());
+        assert!(snapshot.primed_tnt.is_empty());
+        assert_eq!(snapshot.generation, world.generation);
+    }
+
+    #[test]
+    fn simultaneous_tnt_backlog_survives_tick_save_and_graceful_shutdown() {
+        let path = file("tnt-overdue-backlog");
+        let mut world = World::new();
+        // Twelve entities expire together, more than the four allowed per tick.
+        // Keep them well apart to avoid unrelated terrain/chain behavior.
+        for x in 0..12 {
+            world.spawn_primed_tnt(x * 12, 200, 0, 1);
+        }
+        world.save(&path).unwrap();
+        world.drain_tnt_events();
+
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.primed_tnt.len(), 8);
+        assert_eq!(
+            world
+                .drain_tnt_events()
+                .iter()
+                .filter(|event| matches!(event, TntEvent::Explode { .. }))
+                .count(),
+            4
+        );
+        // This is the real graceful-shutdown save path. Previously the eight
+        // overdue fuses produced "invalid primed TNT fuse" and aborted stop.
+        world.save(&path).unwrap();
+        let mut restarted = World::load(&path).unwrap();
+        assert_eq!(restarted.primed_tnt.len(), 8);
+        restarted.drain_tnt_events();
+        for expected in [4, 0] {
+            restarted.block_tick(&path, 64).unwrap();
+            assert_eq!(restarted.primed_tnt.len(), expected);
+            assert_eq!(
+                restarted
+                    .drain_tnt_events()
+                    .iter()
+                    .filter(|event| matches!(event, TntEvent::Explode { .. }))
+                    .count(),
+                4
+            );
+        }
+        assert!(World::load(&path).unwrap().primed_tnt.is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn explosion_near_irw_edit_limit_does_not_abort_tick_or_stop_save() {
+        let path = file("tnt-edits-capacity");
+        let mut world = World::new();
+        // Fill the sparse-edit map with distant blocks; generated grass and
+        // dirt near this blast would otherwise allocate unpersistable edits.
+        for n in 0..super::super::MAX_EDITS {
+            world.edits.insert(
+                (1000 + (n % 256) as i32, 100, 1000 + (n / 256) as i32),
+                49 << 4,
+            );
+        }
+        assert!(world.spawn_primed_tnt(0, 63, 0, 1));
+        world.save(&path).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert!(world.primed_tnt.is_empty());
+        assert_eq!(world.edits.len(), super::super::MAX_EDITS);
+        world.save(&path).unwrap();
+        assert!(World::load(&path).unwrap().primed_tnt.is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn tnt_capacity_defers_chain_blocks_instead_of_failing_the_save() {
+        let path = file("tnt-capacity");
+        let mut world = World::new();
+        for x in 1..=3 {
+            world.import_block(x, 100, 0, 46 << 4).unwrap();
+        }
+        for x in 0..(MAX_PRIMED_TNT - 1) {
+            assert!(world.spawn_primed_tnt(100 + x as i32, 100, 40, 80));
+        }
+        assert!(world.spawn_primed_tnt(0, 100, 0, 1));
+        assert!(!world.spawn_primed_tnt(9, 100, 0, 80));
+        assert!(world
+            .stage_special_item(
+                1,
+                100,
+                0,
+                Stack {
+                    id: 259,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                },
+            )
+            .unwrap()
+            .is_none());
+
+        world.save(&path).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.primed_tnt.len(), MAX_PRIMED_TNT);
+        assert_eq!(world.get(1, 100, 0), 0);
+        assert_eq!(world.get(2, 100, 0) >> 4, 46);
+        assert_eq!(world.get(3, 100, 0) >> 4, 46);
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.primed_tnt.len(), MAX_PRIMED_TNT);
+        assert_eq!(restored.get(3, 100, 0) >> 4, 46);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn two_hundred_fifty_six_simultaneous_tnt_resume_without_lost_explosions() {
+        let path = file("tnt-256-burst");
+        let mut world = World::new();
+        for x in 0..256 {
+            assert!(world.spawn_primed_tnt(x * 20, 200, 0, 1));
+        }
+        world.save(&path).unwrap();
+        world.drain_tnt_events();
+        let mut detonated = std::collections::BTreeSet::new();
+        for tick in 0..64 {
+            world.block_tick(&path, 64).unwrap();
+            for event in world.drain_tnt_events() {
+                if let TntEvent::Explode { entity_id, .. } = event {
+                    assert!(detonated.insert(entity_id), "duplicate TNT detonation");
+                }
+            }
+            assert_eq!(detonated.len(), ((tick + 1) * 4) as usize);
+            if tick == 31 {
+                // Simulate /stop and restart halfway through an overdue queue.
+                world.save(&path).unwrap();
+                world = World::load(&path).unwrap();
+                world.drain_tnt_events();
+            }
+        }
+        assert_eq!(detonated.len(), 256);
+        assert!(world.primed_tnt.is_empty());
+        assert!(World::load(&path).unwrap().primed_tnt.is_empty());
         fs::remove_file(path).ok();
     }
 
