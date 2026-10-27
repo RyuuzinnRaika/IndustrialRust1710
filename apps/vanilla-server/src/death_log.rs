@@ -259,6 +259,27 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_diagnostic_destination_returns_error_not_panic() {
+        let world = std::env::temp_dir().join(format!(
+            "ir1710-death-failed-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let log_dir = DeathRecord::log_path(&world);
+        let _ = fs::remove_file(&log_dir);
+        fs::create_dir_all(&log_dir).unwrap();
+        let record = DeathRecord {
+            player: "Alex",
+            hit: None,
+            position: PlayerPosition::default(),
+            dimension: 0,
+            tick: 3,
+        };
+        assert!(record.append(&world).is_err());
+        fs::remove_dir(&log_dir).unwrap();
+    }
+
+    #[test]
     fn existing_dead_player_has_safe_fallback_without_fabricated_cause() {
         let record = DeathRecord {
             player: "Alex",
