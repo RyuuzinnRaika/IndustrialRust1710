@@ -155,7 +155,31 @@ fn rule(block: u16) -> Option<BlockRule> {
         69 => (0.5, None, 0, false, item(69, 0)),  // lever
         76 => (0.0, None, 0, false, item(76, 0)),  // redstone torch
         5 => (2.0, Some(ToolKind::Axe), 0, false, item(5, damage)),
-        17 | 162 => (2.0, Some(ToolKind::Axe), 0, false, item(id as i16, damage)),
+        // The upper two log metadata bits encode the axis, not the item species.
+        // Re-mining a sideways log must not mint an orientation-specific item.
+        17 => (2.0, Some(ToolKind::Axe), 0, false, item(17, damage & 3)),
+        162 => (2.0, Some(ToolKind::Axe), 0, false, item(162, damage & 1)),
+        // Standalone early-game building materials. Their orientation/top-half
+        // bits belong to the placed block and must not leak into the drop.
+        53 | 134 | 135 | 136 | 163 | 164 => (
+            2.0,
+            Some(ToolKind::Axe),
+            0,
+            false,
+            item(id as i16, 0),
+        ), // oak/spruce/birch/jungle/acacia/dark oak stairs
+        67 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(67, 0)), // cobblestone stairs
+        65 => (0.4, Some(ToolKind::Axe), 0, false, item(65, 0)), // ladder
+        85 | 107 => (2.0, Some(ToolKind::Axe), 0, false, item(id as i16, 0)), // fence/gate
+        96 => (3.0, Some(ToolKind::Axe), 0, false, item(96, 0)), // trapdoor
+        126 if damage & 7 <= 5 => (
+            2.0,
+            Some(ToolKind::Axe),
+            0,
+            false,
+            item(126, damage & 7),
+        ), // half wooden slab (species retained, upper-half flag stripped)
+        44 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(44, damage & 7)),
         54 => (2.5, Some(ToolKind::Axe), 0, false, item(54, 0)),
         58 => (2.5, Some(ToolKind::Axe), 0, false, item(58, 0)),
         61 | 62 => (3.5, Some(ToolKind::Pickaxe), 0, true, item(61, 0)),
@@ -323,6 +347,134 @@ mod tests {
             nbt: None,
         })
     }
+    #[test]
+    fn s01_log_orientation_is_not_an_inventory_item_variant() {
+        // Pre-flattening log metadata has species in its low bits and axis in
+        // its upper bits. Item metadata only carries the wood species.
+        for (block, species_count) in [(17u16, 4u16), (162u16, 2u16)] {
+            for species in 0..species_count {
+                for axis in [0u16, 4, 8, 12] {
+                    let (_, mined) = mine_rule((block << 4) | species | axis, None).unwrap();
+                    assert_eq!(
+                        mined.drop,
+                        Some(BlockDrop {
+                            id: block as i16,
+                            damage: species as i16,
+                        }),
+                        "log block {block}, species {species}, axis {axis}"
+                    );
+                    assert!(!mined.wear_tool);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn s05_basic_shelter_blocks_have_legacy_drops_and_tool_requirements() {
+        // A stair's orientation and upside-down bit are block state, not item NBT.
+        for block in [53u16, 134, 135, 136, 163, 164, 65, 85, 107, 96] {
+            for facing in [0u16, 4, 8] {
+                let (bare_time, mined) = mine_rule((block << 4) | facing, None).unwrap();
+                assert_eq!(
+                    mined.drop,
+                    Some(BlockDrop {
+                        id: block as i16,
+                        damage: 0,
+                    }),
+                    "expected one matching, orientation-free item for {block}"
+                );
+                assert!(!mined.wear_tool);
+                assert!(bare_time >= Duration::from_millis(50));
+            }
+        }
+        for kind in 0..=5u16 {
+            for top in [0u16, 8] {
+                let (_, mined) = mine_rule((126 << 4) | top | kind, None).unwrap();
+                assert_eq!(
+                    mined.drop,
+                    Some(BlockDrop {
+                        id: 126,
+                        damage: kind as i16,
+                    })
+                );
+            }
+        }
+        for kind in 0..=7u16 {
+            for top in [0u16, 8] {
+                let block = (44 << 4) | top | kind;
+                assert_eq!(mine_rule(block, None).unwrap().1.drop, None);
+                assert_eq!(
+                    mine_rule(block, stack(270, 0)).unwrap().1.drop,
+                    Some(BlockDrop {
+                        id: 44,
+                        damage: kind as i16,
+                    })
+                );
+            }
+        }
+        assert_eq!(mine_rule(67 << 4, None).unwrap().1.drop, None);
+        assert_eq!(
+            mine_rule((67 << 4) | 4, stack(270, 0)).unwrap().1.drop,
+            Some(BlockDrop { id: 67, damage: 0 })
+        );
+        // Multiblock doors/beds are deliberately not changed by this patch:
+        // they require the other half and drop to be transacted together.
+        assert!(mine_rule(64 << 4, None).is_none());
+        assert!(mine_rule(26 << 4, None).is_none());
+        assert!(mine_rule(7 << 4, None).is_none());
+    }
+
+    #[test]
+    fn s01_to_s04_minimum_resource_chain_matches_1710_recipe_primitives() {
+        let st = |id| Some(Stack {
+            id,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        });
+        let wood = mine_rule(17 << 4, None).unwrap().1.drop.unwrap();
+        let planks = crate::crafting::result(&[st(wood.id), None, None, None], 2).unwrap();
+        assert_eq!((planks.id, planks.count), (5, 4));
+        let sticks = crate::crafting::result(&[st(5), None, st(5), None], 2).unwrap();
+        assert_eq!((sticks.id, sticks.count), (280, 4));
+        let workbench = crate::crafting::result(&[st(5); 4], 2).unwrap();
+        assert_eq!(workbench.id, 58);
+        let wooden_pick = crate::crafting::result(
+            &[st(5), st(5), st(5), None, st(280), None, None, st(280), None],
+            3,
+        )
+        .unwrap();
+        assert_eq!(wooden_pick.id, 270);
+        let cobble = mine_rule(1 << 4, Some(wooden_pick))
+            .unwrap()
+            .1
+            .drop
+            .unwrap();
+        assert_eq!(cobble.id, 4);
+        let stone_pick = crate::crafting::result(
+            &[st(4), st(4), st(4), None, st(280), None, None, st(280), None],
+            3,
+        )
+        .unwrap();
+        assert_eq!(stone_pick.id, 274);
+        assert_eq!(mine_rule(15 << 4, Some(wooden_pick)).unwrap().1.drop, None);
+        let iron_ore = mine_rule(15 << 4, Some(stone_pick))
+            .unwrap()
+            .1
+            .drop
+            .unwrap();
+        assert_eq!(iron_ore.id, 15);
+        let furnace = crate::crafting::result(
+            &[st(4), st(4), st(4), st(4), None, st(4), st(4), st(4), st(4)],
+            3,
+        )
+        .unwrap();
+        assert_eq!(furnace.id, 61);
+        assert_eq!(crate::furnaces::recipe(st(iron_ore.id).unwrap()).unwrap().id, 265);
+        // This is a rules-only smoke test, not proof of live item transfers,
+        // inventory debits, client packets, furnace ticks, or persistence.
+    }
+
     #[test]
     fn wild_plants_are_breakable_and_return_legacy_survival_items() {
         // Block IDs on the left; item IDs/metadata on the right.
