@@ -699,6 +699,25 @@ impl World {
                     }
                 }
                 29 | 33 => self.push_piston(x, y, z, current, &mut changes),
+                34 => {
+                    // A head whose extended base was mined must not survive
+                    // as an invisible, permanently solid orphan. Validate
+                    // the base on the next neighbour/tick notification.
+                    let face = current & 7;
+                    if face > 5 {
+                        changes.insert((x, y as u8, z), 0);
+                        continue;
+                    }
+                    let (dx, dy, dz) = facing(current);
+                    let (bx, by, bz) = (x - dx, y - dy, z - dz);
+                    let base = self.get(bx, by, bz);
+                    if !matches!(base >> 4, 29 | 33)
+                        || base & 8 == 0
+                        || base & 7 != face
+                    {
+                        changes.insert((x, y as u8, z), 0);
+                    }
+                }
                 _ => {}
             }
         }
@@ -1474,6 +1493,22 @@ mod redstone_regression_tests {
         world.push_piston(0, 64, 0, piston, &mut changes);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes.get(&(2, 64, 0)), Some(&0));
+    }
+
+    #[test]
+    fn orphan_piston_head_is_removed_after_base_is_destroyed() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-piston-orphan-head-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 64, 0, (33 << 4) | 13).unwrap();
+        world.update_and_save(&path, 1, 64, 0, (34 << 4) | 5).unwrap();
+        world.update_and_save(&path, 0, 64, 0, 0).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(1, 64, 0), 0);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
