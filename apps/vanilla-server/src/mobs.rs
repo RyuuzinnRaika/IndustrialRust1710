@@ -2580,7 +2580,6 @@ impl Mobs {
                 events.push(spawn);
             }
         }
-        self.spawn_natural(now, world, players, &mut events);
         self.spawn_from_spawners(now, world, players, &mut events);
         // Despawn and natural-spawn chunk selection must agree about valid
         // player coordinates. Finite X/Z outside the i32 block range are
@@ -2594,6 +2593,10 @@ impl Mobs {
             // Reusing `now` for every step would repeat one 1/800 despawn
             // roll rather than giving each elapsed tick its own chance.
             let simulated_tick = now - (steps - 1 - step);
+            // A delayed poll may cross a 20-tick natural-spawn boundary
+            // without landing on it. Evaluate each bounded simulated tick
+            // once, instead of silently losing that spawn opportunity.
+            self.spawn_natural(simulated_tick, world, players, &mut events);
             let mut shots = Vec::new();
             let mut dead = Vec::new();
             let villagers: Vec<_> = self
@@ -6715,6 +6718,32 @@ mod tests {
         invalid_only.spawn_natural(now, &world, &invalid, &mut invalid_events);
         assert!(invalid_only.entities.is_empty());
         assert!(invalid_events.is_empty());
+    }
+
+    #[test]
+    fn natural_spawning_catch_up_does_not_skip_a_crossed_twenty_tick_boundary() {
+        // The poll ends at 18_041, but the two simulated ticks include
+        // 18_040. The old now-only gate skipped the entire spawn attempt.
+        let world = World::natural(0);
+        let player = PlayerPosition {
+            x: 512.5,
+            y: world.spawn_y(),
+            z: 512.5,
+        };
+        let mut mobs = Mobs::new_with_difficulty(&world, true, 2);
+        mobs.last_tick = 18_039;
+        let events = mobs.tick(18_041, &world, &[player]);
+        assert!(
+            mobs.entities.values().any(|mob| mob.kind == Kind::Zombie),
+            "the crossed 20-tick boundary must trigger the eligible pack"
+        );
+        assert!(
+            events.iter().any(|event| event.id == 0x0f),
+            "the spawned mob must be announced to Protocol 5 clients"
+        );
+        let entity_count = mobs.entities.len();
+        assert!(mobs.tick(18_041, &world, &[player]).is_empty());
+        assert_eq!(mobs.entities.len(), entity_count);
     }
 
     #[test]
