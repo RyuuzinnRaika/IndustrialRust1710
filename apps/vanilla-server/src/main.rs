@@ -13,6 +13,7 @@ mod brewing;
 mod chests;
 mod chunk_pipeline;
 mod clock;
+mod command_completion;
 mod commands;
 mod crafting;
 mod decorations;
@@ -2588,6 +2589,17 @@ fn play(
             continue;
         }
         match id {
+            20 => {
+                // Java 1.7.10 C14 Tab Complete: one length-prefixed string.
+                // Reply with S3A: VarInt count + one string per last-token match.
+                // Nothing is executed; completion cannot bypass command auth.
+                let query = input.string(command_completion::MAX_REQUEST_CHARS)?;
+                input.finish()?;
+                let level = administration.operator_level(name, verified_uuid)?;
+                let online_names = hub.names()?;
+                let suggestions = command_completion::complete(&query, level, &online_names);
+                send(s, 0x3a, &command_completion::response_packet(&suggestions)?)?;
+            }
             18 => {
                 // Protocol 5 C12: Int X, Short Y, Int Z, four Strings.
                 // Reject unsolicited edits; only the placing player gets S36.
