@@ -1,0 +1,44 @@
+name: Windows Minecraft GUI smoke test
+on:
+  pull_request:
+    paths:
+      - "tools/ServerGui.cs"
+      - "run-windows.ps1"
+      - "run-windows-gui.ps1"
+      - ".github/workflows/windows-gui.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tools/ServerGui.cs"
+      - "run-windows.ps1"
+      - "run-windows-gui.ps1"
+      - ".github/workflows/windows-gui.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile-windows-gui:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check PowerShell syntax and compile WinForms source
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($path in @('run-windows.ps1', 'run-windows-gui.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path).Path, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -ne 0) {
+              throw "Invalid syntax in $path : $($errors | Out-String)"
+            }
+          }
+          Add-Type -Path (Resolve-Path 'tools/ServerGui.cs').Path -ReferencedAssemblies @('System.Windows.Forms', 'System.Drawing') -ErrorAction Stop
+          $gui = [IndustrialRust1710.ServerGui]
+          $flags = [System.Reflection.BindingFlags]'Static,NonPublic'
+          $quote = $gui.GetMethod('QuoteArgument', $flags)
+          if (-not $quote) { throw 'Missing QuoteArgument method' }
+          $actual = [string]$quote.Invoke($null, @('two words'))
+          if ($actual -ne '"two words"') { throw "Unexpected argument encoding: $actual" }
+          Write-Host 'PowerShell syntax, WinForms compilation, and quoting smoke test passed.'
