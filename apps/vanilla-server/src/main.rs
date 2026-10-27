@@ -2531,11 +2531,12 @@ fn play(
                 idle_gravity.observe_client(now_tick);
             } // flying/onGround
             4 | 6 => {
-                // Protocol 5 C04/C06: X, feet Y, stance (eye height), Z.
-                // The stance is not the player's collision-box/feet position.
+                // Minecraft 1.7.10 / Protocol 5 C04/C06 wire order:
+                // X, stance (eye height), feet Y, Z. Never use stance as
+                // collision-box feet Y: it is normally about 1.62 blocks higher.
                 let x = input.f64()?;
-                let y = input.f64()?;
                 let _stance = input.f64()?;
+                let y = input.f64()?;
                 let z = input.f64()?;
                 if id == 6 {
                     yaw = input.f32()?;
