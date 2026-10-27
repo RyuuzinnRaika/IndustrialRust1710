@@ -604,6 +604,53 @@ fn block_change_event(world: &World, x: i32, y: i32, z: i32) -> Event {
         body: data,
     }
 }
+/// Legacy 1.7.10 chest/furnace/piston front faces (BlockFurnace,
+/// BlockChest and BlockPistonBase#onBlockPlacedBy).
+fn horizontal_placement_facing(yaw: f32) -> u16 {
+    let quadrant = ((f64::from(yaw) * 4.0 / 360.0 + 0.5).floor() as i32).rem_euclid(4);
+    match quadrant {
+        0 => 2, // north
+        1 => 5, // east
+        2 => 3, // south
+        _ => 4, // west
+    }
+}
+
+/// 1.7.10 pistons use the placer, not the clicked block face. If the
+/// player's eyes are sufficiently above/below a nearby piston, it faces
+/// vertically; otherwise it faces back toward the placer.
+fn piston_placement_facing(
+    yaw: f32,
+    player: (f64, f64, f64),
+    target: (i32, i32, i32),
+) -> u16 {
+    if (player.0 - f64::from(target.0)).abs() < 2.0
+        && (player.2 - f64::from(target.2)).abs() < 2.0
+    {
+        let eye_y = player.1 + 1.82;
+        if eye_y - f64::from(target.1) > 2.0 {
+            return 1;
+        }
+        if f64::from(target.1) - eye_y > 0.0 {
+            return 0;
+        }
+    }
+    horizontal_placement_facing(yaw)
+}
+
+/// Protocol 5 clicked-face -> 1.7.10 wall/floor torch metadata.
+/// Undersides cannot support vanilla or redstone torches.
+fn torch_attachment_metadata(face: i8) -> Option<u16> {
+    match face {
+        1 => Some(5), // floor
+        2 => Some(3), // north support
+        3 => Some(4), // south support
+        4 => Some(1), // west support
+        5 => Some(2), // east support
+        _ => None,
+    }
+}
+
 fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
     let dx = player.0 - (x as f64 + 0.5);
     let dy = player.1 - (y as f64 + 0.5);
@@ -4042,7 +4089,32 @@ fn play(
                             };
                             let invalid_chest_merge =
                                 block_id == 54 && !can_place_chest(&w, (nx, ny, nz));
-                            let metadata = if block_id == 63 {
+                            // A double chest must share one front direction.
+                            // The front is perpendicular to the adjoining axis.
+                            let chest_partner = if block_id == 54 {
+                                [(nx - 1, ny, nz), (nx + 1, ny, nz),
+                                 (nx, ny, nz - 1), (nx, ny, nz + 1)]
+                                    .into_iter()
+                                    .find(|&(cx, cy, cz)| w.get(cx, cy, cz) >> 4 == 54)
+                            } else {
+                                None
+                            };
+                            let metadata = if block_id == 54 {
+                                let preferred = horizontal_placement_facing(yaw);
+                                match chest_partner {
+                                    Some((cx, _, _)) if cx != nx => {
+                                        if matches!(preferred, 2 | 3) { preferred }
+                                        else if location.2 > f64::from(nz) + 0.5 { 3 } else { 2 }
+                                    }
+                                    Some(_) => {
+                                        if matches!(preferred, 4 | 5) { preferred }
+                                        else if location.0 > f64::from(nx) + 0.5 { 5 } else { 4 }
+                                    }
+                                    None => preferred,
+                                }
+                            } else if matches!(block_id, 61 | 62 | 146) {
+                                horizontal_placement_facing(yaw)
+                            } else if block_id == 63 {
                                 ((yaw.rem_euclid(360.0) * 16.0 / 360.0).round() as u16) & 15
                             } else if block_id == 68 {
                                 face as u16
@@ -4056,17 +4128,10 @@ fn play(
                                     5 => 3,
                                     _ => 0,
                                 }
-                            } else if matches!(block_id, 50 | 77 | 143) {
-                                match face {
-                                    1 => 5,
-                                    2 => 3,
-                                    3 => 4,
-                                    4 => 1,
-                                    5 => 2,
-                                    _ => 5,
-                                }
+                            } else if matches!(block_id, 50 | 75 | 76 | 77 | 143) {
+                                torch_attachment_metadata(face).unwrap_or(0)
                             } else if matches!(block_id, 29 | 33) {
-                                face as u16
+                                piston_placement_facing(yaw, location, (nx, ny, nz))
                             } else if block_id == 96 {
                                 match face {
                                     2 => 1,
@@ -4107,6 +4172,8 @@ fn play(
                                 && w.can_support(nx, ny, nz, (block_id << 4) | metadata)
                                 && block_id != 7
                                 && (block_id != 131 || (2..=5).contains(&face))
+                                && (!matches!(block_id, 50 | 75 | 76)
+                                    || torch_attachment_metadata(face).is_some())
                                 && !invalid_chest_merge
                                 && w.get(x, y, z) != 0
                                 && w.get(nx, ny, nz) == 0
@@ -4133,6 +4200,12 @@ fn play(
                                         remaining.save(inventory_path)?;
                                         match if matches!(block_id, 64 | 71) {
                                             w.place_door(world_path, nx, ny, nz, block_id, metadata)
+                                        } else if let Some(partner) = chest_partner {
+                                            w.update_many_and_save(world_path, &[
+                                                (nx, ny, nz, (block_id << 4) | metadata),
+                                                (partner.0, partner.1, partner.2,
+                                                 (block_id << 4) | metadata),
+                                            ])
                                         } else {
                                             w.update_and_save(
                                                 world_path,
@@ -4159,6 +4232,12 @@ fn play(
                                 } else {
                                     changed = if matches!(block_id, 64 | 71) {
                                         w.place_door(world_path, nx, ny, nz, block_id, metadata)?
+                                    } else if let Some(partner) = chest_partner {
+                                        w.update_many_and_save(world_path, &[
+                                            (nx, ny, nz, (block_id << 4) | metadata),
+                                            (partner.0, partner.1, partner.2,
+                                             (block_id << 4) | metadata),
+                                        ])?
                                     } else {
                                         w.update_and_save(
                                             world_path,
@@ -4184,6 +4263,13 @@ fn play(
                         let event = block_change_event(&w, nx, ny, nz);
                         if changed {
                             hub.broadcast(event);
+                            if let Some(partner) = if w.get(nx, ny, nz) >> 4 == 54 {
+                                chest_neighbor(&w, (nx, ny, nz))
+                            } else {
+                                None
+                            } {
+                                hub.broadcast(block_change_event(&w, partner.0, partner.1, partner.2));
+                            }
                             if matches!(w.get(nx, ny, nz) >> 4, 63 | 68) {
                                 let pos = (nx, ny, nz);
                                 // A block change must precede S36 sign editor.
@@ -8486,5 +8572,37 @@ mod b13_trapped_double_chest_tests {
         let mut full_slots = vec![Some(full); 54];
         assert!(!dispensers::insert_one_into_window(&mut full_slots, single));
         assert_eq!(full_slots, vec![Some(full); 54]);
+    }
+}
+
+
+#[cfg(test)]
+mod legacy_placement_orientation_tests {
+    use super::*;
+
+    #[test]
+    fn torch_attachment_matches_every_clicked_face() {
+        for (face, metadata) in [(1, 5), (2, 3), (3, 4), (4, 1), (5, 2)] {
+            assert_eq!(torch_attachment_metadata(face), Some(metadata));
+        }
+        assert_eq!(torch_attachment_metadata(0), None);
+        assert_eq!(torch_attachment_metadata(-1), None);
+    }
+
+    #[test]
+    fn furnace_chest_and_piston_front_tracks_placer_yaw() {
+        for (yaw, expected) in [(0.0, 2), (90.0, 5), (180.0, 3), (270.0, 4),
+                                (-90.0, 4), (360.0, 2)] {
+            assert_eq!(horizontal_placement_facing(yaw), expected);
+            assert_eq!(piston_placement_facing(yaw, (0.5, 64.0, 0.5), (1, 65, 1)), expected);
+        }
+    }
+
+    #[test]
+    fn piston_nearby_height_controls_vertical_orientation() {
+        assert_eq!(piston_placement_facing(90.0, (0.5, 67.0, 0.5), (0, 64, 0)), 1);
+        assert_eq!(piston_placement_facing(90.0, (0.5, 60.0, 0.5), (0, 64, 0)), 0);
+        // A distant placing player uses horizontal facing even at a large height gap.
+        assert_eq!(piston_placement_facing(90.0, (8.0, 67.0, 0.5), (0, 64, 0)), 5);
     }
 }
