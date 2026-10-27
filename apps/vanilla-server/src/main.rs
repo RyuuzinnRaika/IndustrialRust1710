@@ -1342,6 +1342,7 @@ fn play(
     let mut yaw: f32 = 0.0;
     let mut pitch: f32 = 0.0;
     let trace_movement = std::env::var_os("IR_TRACE_MOVEMENT").is_some();
+    let trace_mining = std::env::var_os("IR_TRACE_MINING").is_some();
     let mut last_movement_trace = Instant::now() - Duration::from_secs(2);
     let mut last_look_trace = Instant::now() - Duration::from_secs(2);
     let mut last_movement_broadcast = Instant::now() - Duration::from_millis(50);
@@ -2701,6 +2702,9 @@ fn play(
         // Before C04/C06 confirms the authoritative destination, ignore
         // every location-sensitive action from the old client view.
         if pending_teleport.is_some() && TeleportGate::blocks_world_action(id) {
+            if trace_mining && id == 7 {
+                eprintln!("mining trace: packet ignored while position correction is pending; server={player:?}");
+            }
             mining = None;
             continue;
         }
@@ -3736,6 +3740,9 @@ fn play(
             }
             7 => {
                 if !permissions.build {
+                    if trace_mining {
+                        eprintln!("mining trace: packet refused because build permission is disabled");
+                    }
                     continue;
                 }
                 let action = input.i8()?;
@@ -3824,7 +3831,9 @@ fn play(
                                     ),
                                 });
                             }
-                            mining = if world::in_bounds(x, y, z) && near(location, x, y, z) {
+                            let in_reach =
+                                world::in_bounds(x, y, z) && near(location, x, y, z);
+                            mining = if in_reach {
                                 let (submerged, grounded) = mining_environment(&w, player);
                                 MiningProgress::start_with_environment(
                                     target,
@@ -3836,10 +3845,18 @@ fn play(
                             } else {
                                 None
                             };
+                            if trace_mining && mining.is_none() {
+                                eprintln!(
+                                    "mining trace: start refused target={target:?} server={player:?} in_reach={in_reach} block={} held={:?}",
+                                    w.get(x, y, z) >> 4,
+                                    inventory.held().map(|item| item.id)
+                                );
+                            }
                         }
                         1 => mining = None,
                         2 => {
                             let attempt = mining.take();
+                            let had_start = attempt.is_some();
                             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                             let (submerged, grounded) = mining_environment(&w, player);
                             let result = attempt.and_then(|m| {
@@ -3851,6 +3868,13 @@ fn play(
                                     grounded,
                                 )
                             });
+                            if trace_mining && result.is_none() {
+                                eprintln!(
+                                    "mining trace: finish refused target={target:?} server={player:?} had_start={had_start} block={} held={:?} head_submerged={submerged} grounded={grounded}",
+                                    w.get(x, y, z) >> 4,
+                                    inventory.held().map(|item| item.id)
+                                );
+                            }
                             let mut changed = false;
                             if world::in_bounds(x, y, z) && near(location, x, y, z) {
                                 if let Some(result) = result {

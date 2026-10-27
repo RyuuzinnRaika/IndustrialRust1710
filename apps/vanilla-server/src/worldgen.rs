@@ -669,6 +669,46 @@ fn village(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
     }
     None
 }
+/// Add *only* missing starter trees to IRW4 plains and savannas. Existing
+/// forest/taiga/jungle tree positions and palettes are left untouched. The
+/// extra canopy is considered after the original generator's trees so older
+/// trunks and leaves always win at overlapping coordinates.
+///
+/// IRW4 is coordinate-addressable, not stored chunk-by-chunk: these additions
+/// also appear in old, unedited areas after upgrading. Player-edited blocks
+/// still override this base terrain; back up worlds before upgrading.
+fn supplementary_tree(seed: u64, x: i32, z: i32) -> Option<(u16, u16)> {
+    if x.abs() < 12 && z.abs() < 12 {
+        return None; // keep the established safe spawn square
+    }
+    // Most nearby coordinates are not candidates. Hash before calling
+    // expensive biome/noise functions in the 5x5 canopy lookup.
+    let roll = hash(seed ^ 0x5ce3_77ea, x, 0, z);
+    if !roll.is_multiple_of(144) && !roll.is_multiple_of(80) {
+        return None;
+    }
+    let kind = biome(seed, x, z);
+    let chance = match kind {
+        1 => 144, // plains: scattered oak, never dense forest
+        35 => 80, // savanna: scattered acacia
+        _ => return None,
+    };
+    if !roll.is_multiple_of(chance) || height(seed, x, z) < SEA + 2 {
+        return None;
+    }
+    // Never replace a root with the original tall-grass/flower selection.
+    // This retains the old flora-before-tree priority and avoids floating logs.
+    let grass_roll = hash(seed ^ 0x771e, x, 0, z);
+    if grass_roll.is_multiple_of(29) || grass_roll.is_multiple_of(5) {
+        return None;
+    }
+    if kind == 35 {
+        Some((162, 161)) // 1.7.10 acacia log and leaves
+    } else {
+        Some((17, 18)) // oak
+    }
+}
+
 fn aboveground(seed: u64, x: i32, y: i32, z: i32, top: i32, id: u8) -> u16 {
     if y <= top {
         return AIR;
@@ -725,6 +765,26 @@ fn aboveground(seed: u64, x: i32, y: i32, z: i32, top: i32, id: u8) -> u16 {
             let radius = if y >= root + 7 { 1 } else { 2 };
             if (tx - x).abs() <= radius && (tz - z).abs() <= radius && y >= root + 4 {
                 return state(18, metadata | 4); // player-placed decay disabled for generated canopy
+            }
+        }
+    }
+    // Preserve every old-generated tree first, then add sparse non-forest
+    // starter trees. Compare with OverworldColumn's second canopy pass.
+    for tx in x - 2..=x + 2 {
+        for tz in z - 2..=z + 2 {
+            let Some((trunk, leaves)) = supplementary_tree(seed, tx, tz) else {
+                continue;
+            };
+            let root = height(seed, tx, tz);
+            if y < root + 1 || y > root + 7 {
+                continue;
+            }
+            if tx == x && tz == z && y <= root + 5 {
+                return b(trunk);
+            }
+            let radius = if y >= root + 7 { 1 } else { 2 };
+            if (tx - x).abs() <= radius && (tz - z).abs() <= radius && y >= root + 4 {
+                return state(leaves, 4);
             }
         }
     }
@@ -800,6 +860,31 @@ impl OverworldColumn {
                             .then_some(state(18, metadata | 4))
                     };
                     // Preserve the point generator's first matching tree.
+                    if canopy[y as usize].is_none() {
+                        canopy[y as usize] = block;
+                    }
+                }
+            }
+        }
+        // A second pass ensures the original IRW4 forest/taiga/jungle
+        // canopy is never replaced by supplementary plains/savanna trees.
+        for tx in x - 2..=x + 2 {
+            for tz in z - 2..=z + 2 {
+                let Some((trunk, leaves)) = supplementary_tree(seed, tx, tz) else {
+                    continue;
+                };
+                let root = height(seed, tx, tz);
+                for y in root + 1..=root + 7 {
+                    if !(0..=255).contains(&y) {
+                        continue;
+                    }
+                    let block = if tx == x && tz == z && y <= root + 5 {
+                        Some(b(trunk))
+                    } else {
+                        let radius = if y >= root + 7 { 1 } else { 2 };
+                        ((tx - x).abs() <= radius && (tz - z).abs() <= radius && y >= root + 4)
+                            .then_some(state(leaves, 4))
+                    };
                     if canopy[y as usize].is_none() {
                         canopy[y as usize] = block;
                     }
@@ -1039,6 +1124,72 @@ pub fn biome_for_dimension(seed: u64, dim: Dimension, x: i32, z: i32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_plains_and_savanna_trees_supply_early_survival_wood() {
+        let seed = 42;
+        let mut oak = 0;
+        let mut acacia = 0;
+        for x in 16..160 {
+            for z in 16..160 {
+                let Some((log, leaves)) = supplementary_tree(seed, x, z) else {
+                    continue;
+                };
+                let root = height(seed, x, z);
+                // Villages and pre-existing forest canopy take precedence;
+                // count only unobstructed starter trees in this sample.
+                if block(seed, Dimension::Overworld, x, root + 1, z) >> 4 != log {
+                    continue;
+                }
+                let column = OverworldColumn::new(seed, x, z);
+                assert_eq!(column.block_at(root + 1) >> 4, log);
+                assert_eq!(
+                    column.block_at(root + 6),
+                    block(seed, Dimension::Overworld, x, root + 6, z)
+                );
+                assert!(matches!(leaves, 18 | 161));
+                if log == 17 {
+                    oak += 1;
+                } else {
+                    acacia += 1;
+                }
+            }
+        }
+        assert!(oak + acacia > 0, "seed 42 should offer reachable starter trees");
+        assert!(supplementary_tree(seed, 0, 0).is_none());
+    }
+
+    #[test]
+    fn supplementary_tree_canopy_matches_point_generation_across_chunk_edges() {
+        let seed = 42;
+        let mut checked = 0;
+        for x in 16..112 {
+            for z in 16..112 {
+                if supplementary_tree(seed, x, z).is_none() {
+                    continue;
+                }
+                for dx in -2..=2 {
+                    for dz in -2..=2 {
+                        let tx = x + dx;
+                        let tz = z + dz;
+                        let column = OverworldColumn::new(seed, tx, tz);
+                        for y in height(seed, x, z) + 1..=height(seed, x, z) + 7 {
+                            assert_eq!(
+                                column.block_at(y),
+                                block(seed, Dimension::Overworld, tx, y, tz),
+                                "tree=({x},{z}), column=({tx},{tz}), y={y}"
+                            );
+                        }
+                    }
+                }
+                checked += 1;
+                if checked >= 3 {
+                    return;
+                }
+            }
+        }
+        assert!(checked > 0, "no supplementary seed-42 trees to verify");
+    }
 
     #[test]
     fn cached_overworld_columns_match_point_generation_at_every_height() {
