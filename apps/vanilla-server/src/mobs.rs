@@ -5050,6 +5050,88 @@ mod tests {
     }
 
     #[test]
+    fn irw4_natural_pack_loop_does_not_spawn_sheep_across_plains_river_edge() {
+        // Exercise spawn_natural itself, not only its per-member predicate.
+        // Seed 42 at tick 58_400 selects a passive Sheep pack with origin
+        // (835, 142); member 2 probes (837, 142) in the adjacent River.
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        let now = 58_400_u64;
+        let seed = hash(now ^ 42);
+        assert_eq!(natural_spawn_horizontal_offset(seed), (-68, 13));
+        assert!(natural_spawn_passive_roll(seed));
+        assert_eq!(
+            overworld_passive_kind(1, hash(seed ^ 0x31acb4105ff327ab)),
+            Kind::Sheep
+        );
+        let river_member_roll = hash(seed ^ 2_u64.wrapping_mul(0x517cc1b727220a95));
+        let river_dx = (river_member_roll % 6) as i32 - ((river_member_roll >> 8) % 6) as i32;
+        let river_dz =
+            ((river_member_roll >> 16) % 6) as i32 - ((river_member_roll >> 24) % 6) as i32;
+        assert_eq!((river_dx, river_dz), (2, 0));
+        assert_eq!(world.biome_at(835, 142), 1);
+        assert_eq!(world.biome_at(837, 142), 7);
+
+        // Make all four deterministic pack columns equally standable.
+        // River rejection must come from its spawn list, not missing grass,
+        // collision, water, or insufficient light.
+        for (dx, dz) in [(0, 0), (3, -1), (2, 0), (2, 1)] {
+            let (x, z) = (835 + dx, 142 + dz);
+            let y = world.surface_height_at(x, z).unwrap() + 1;
+            world.import_block(x, y - 1, z, 2 << 4).unwrap();
+            world.import_block(x, y, z, 0).unwrap();
+            world.import_block(x, y + 1, z, 0).unwrap();
+        }
+        let player = PlayerPosition {
+            x: 903.5,
+            y: world.spawn_y(),
+            z: 129.5,
+        };
+        let river_y = world.surface_height_at(837, 142).unwrap() + 1;
+        let river_at = PlayerPosition {
+            x: 837.5,
+            y: f64::from(river_y),
+            z: 142.5,
+        };
+        assert!(natural_spawn_location_ok(&world, river_at, &[player]));
+        assert!(natural_spawn_body_ok(&world, Kind::Sheep, river_at, 1));
+        let mut lighting = world.lighting_sampler();
+        let light = lighting.light_at(837, river_y, 142);
+        assert!(natural_spawn_species_light_ok(
+            Kind::Sheep,
+            42,
+            (837, river_y, 142),
+            light,
+            now,
+            true
+        ));
+        assert!(!natural_pack_member_biome_ok(
+            &world,
+            Kind::Sheep,
+            (837, river_y, 142),
+            true
+        ));
+
+        let mut mobs = Mobs::new_with_difficulty(&world, true, 2);
+        let mut events = Vec::new();
+        mobs.spawn_natural(now, &world, &mut lighting, &[player], &mut events);
+        assert!(
+            !mobs.entities.is_empty(),
+            "the Plains origin must produce a Sheep"
+        );
+        assert_eq!(events.len(), mobs.entities.len());
+        for mob in mobs.entities.values() {
+            assert_eq!(mob.kind, Kind::Sheep);
+            let x = mob.position.x.floor() as i32;
+            let z = mob.position.z.floor() as i32;
+            assert!(
+                overworld_biome_allows_passive_species(world.biome_at(x, z), mob.kind),
+                "pack member spawned in forbidden biome at ({x}, {z})"
+            );
+            assert_ne!((x, z), (837, 142), "River member bypassed its spawn list");
+        }
+    }
+
+    #[test]
     fn swamp_slimes_obey_moon_phase_light_and_height_without_affecting_cave_slimes() {
         let full_moon = 18_000_u64;
         let new_moon = full_moon + 4 * 24_000;
