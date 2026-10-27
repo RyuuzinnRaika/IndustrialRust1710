@@ -343,6 +343,72 @@ fn add011_two_simultaneous_tcp_logins_have_exactly_one_play_owner() {
 }
 
 #[test]
+fn add012_reconnect_never_allows_old_socket_to_overwrite_new_inventory_save() {
+    let server = Server::launch();
+    let inventory_path = server.dir.join("players/rusttester.inventory.json");
+
+    let join_play = |socket: &mut TcpStream| {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            assert!(Instant::now() < deadline, "server did not complete Join");
+            if receive(socket).0 == 0x08 {
+                return;
+            }
+        }
+    };
+
+    let write_slot = |socket: &mut TcpStream, id: i16, count: u8| {
+        let mut item = 36i16.to_be_bytes().to_vec();
+        item.extend_from_slice(&id.to_be_bytes());
+        item.push(count);
+        item.extend_from_slice(&0i16.to_be_bytes());
+        item.extend_from_slice(&(-1i16).to_be_bytes());
+        socket.write_all(&frame(0x10, &item)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(Instant::now() < deadline, "Creative SetSlot not acknowledged");
+            let (packet_id, body) = receive(socket);
+            if packet_id == 0x2f && body.starts_with(&[0, 0, 36]) {
+                assert_eq!(&body[3..5], &id.to_be_bytes());
+                assert_eq!(body[5], count);
+                return;
+            }
+        }
+    };
+
+    let mut previous = server.login("RustTester");
+    join_play(&mut previous);
+    write_slot(&mut previous, 1, 3);
+    let mut stale = previous.try_clone().unwrap();
+    previous.shutdown(Shutdown::Both).unwrap();
+    drop(previous);
+    server.wait_online(0);
+
+    let first: Value = serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    assert_eq!(first["slots"][36]["id"], 1);
+    assert_eq!(first["slots"][36]["count"], 3);
+
+    let mut current = server.login("RustTester");
+    join_play(&mut current);
+    write_slot(&mut current, 4, 7);
+    server.wait_online(1);
+
+    // Even though the old TCP handle still exists locally, the socket has
+    // been shut down and cannot enqueue a stale Creative inventory mutation.
+    assert!(stale.write_all(&frame(0x10, &[0, 36, 0, 1, 64, 0, 0, 255, 255])).is_err());
+    current.shutdown(Shutdown::Both).unwrap();
+    drop(current);
+    server.wait_online(0);
+
+    let saved: Value = serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    assert_eq!(saved["slots"][36]["id"], 4);
+    assert_eq!(saved["slots"][36]["count"], 7);
+}
+
+#[test]
 fn add004_protocol_version_and_255_character_hostname_boundaries() {
     let server = Server::launch();
     // Both sides of Protocol 5 must fail closed as a Login Disconnect,
