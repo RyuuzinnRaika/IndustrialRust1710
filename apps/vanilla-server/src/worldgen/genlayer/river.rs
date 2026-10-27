@@ -49,13 +49,7 @@ fn river_value(value: i32) -> i32 {
 
 /// Return vanilla river biome ID 7 at parity boundaries, -1 elsewhere.
 /// The parent must provide a one-cell halo on each side.
-pub(super) fn river_map<F>(
-    x: i32,
-    z: i32,
-    width: usize,
-    height: usize,
-    parent: F,
-) -> Vec<i32>
+pub(super) fn river_map<F>(x: i32, z: i32, width: usize, height: usize, parent: F) -> Vec<i32>
 where
     F: Fn(i32, i32, usize, usize) -> Vec<i32>,
 {
@@ -107,8 +101,8 @@ mod tests {
                 -17,
                 7,
                 [
-                    0, 200180, 67228, 104735, 162757, 0, 67680, 53593, 242866, 196279, 0,
-                    166102, 82371, 82228, 92907, 0,
+                    0, 200180, 67228, 104735, 162757, 0, 67680, 53593, 242866, 196279, 0, 166102,
+                    82371, 82228, 92907, 0,
                 ],
             ),
             (
@@ -116,8 +110,8 @@ mod tests {
                 -1,
                 -1,
                 [
-                    0, 202994, 275038, 154255, 68591, 0, 37521, 51931, 270528, 30686, 0,
-                    43064, 82196, 104695, 231861, 0,
+                    0, 202994, 275038, 154255, 68591, 0, 37521, 51931, 270528, 30686, 0, 43064,
+                    82196, 104695, 231861, 0,
                 ],
             ),
             (
@@ -125,8 +119,8 @@ mod tests {
                 15,
                 -17,
                 [
-                    0, 95386, 95058, 17879, 188901, 0, 267528, 220190, 254762, 28541, 0,
-                    123506, 263510, 222818, 261019, 0,
+                    0, 95386, 95058, 17879, 188901, 0, 267528, 220190, 254762, 28541, 0, 123506,
+                    263510, 222818, 261019, 0,
                 ],
             ),
         ] {
@@ -143,15 +137,7 @@ mod tests {
         let whole = river_init_map(42, 100, -17, -17, 8, 8, patterned_parent);
         for dz in (0..8).rev() {
             for dx in (0..8).rev() {
-                let single = river_init_map(
-                    42,
-                    100,
-                    -17 + dx,
-                    -17 + dz,
-                    1,
-                    1,
-                    patterned_parent,
-                );
+                let single = river_init_map(42, 100, -17 + dx, -17 + dz, 1, 1, patterned_parent);
                 assert_eq!(single[0], whole[(dz * 8 + dx) as usize]);
             }
         }
@@ -160,7 +146,10 @@ mod tests {
 
     #[test]
     fn river_detects_parity_edges_but_not_equal_parity_values() {
-        assert_eq!(river_map(0, 0, 4, 4, |_, _, w, h| vec![2; w * h]), vec![-1; 16]);
+        assert_eq!(
+            river_map(0, 0, 4, 4, |_, _, w, h| vec![2; w * h]),
+            vec![-1; 16]
+        );
         assert_eq!(
             river_map(0, 0, 1, 1, |_, _, _, _| vec![2, 2, 2, 2, 3, 2, 2, 2, 2]),
             vec![7]
