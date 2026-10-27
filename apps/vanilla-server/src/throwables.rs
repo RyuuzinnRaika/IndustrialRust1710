@@ -166,7 +166,11 @@ fn segment_point(from: PlayerPosition, to: PlayerPosition, t: f64) -> PlayerPosi
 }
 
 fn solid_projectile_block(block: u16) -> bool {
-    block != 0 && !matches!(block, 6 | 8 | 9 | 10 | 11 | 31 | 32 | 37 | 38 | 39 | 40 | 50 | 78)
+    block != 0
+        && !matches!(
+            block,
+            6 | 8 | 9 | 10 | 11 | 31 | 32 | 37 | 38 | 39 | 40 | 50 | 78
+        )
 }
 
 /// Traverse each voxel crossed by the flight segment in parametric order.
@@ -511,9 +515,7 @@ impl Throwables {
                 }
             }
             let mob_t = mob_hit.map_or(f64::INFINITY, |(t, _)| t);
-            if let Some((t, player_id)) =
-                player_hit.filter(|(t, _)| *t < block_t && *t < mob_t)
-            {
+            if let Some((t, player_id)) = player_hit.filter(|(t, _)| *t < block_t && *t < mob_t) {
                 object.at = segment_point(previous, destination, t);
                 result.player_hits.push(player_id);
                 removed.push(object.id);
@@ -700,8 +702,8 @@ mod tests {
             assert_eq!(world.get(2, 70, 0) >> 4, liquid);
             let mut objects = Throwables::default();
             objects
-                .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
-                .unwrap();
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
 
             let result = objects.tick(&world, 1);
             assert_eq!(objects.active.len(), 1, "liquid block {liquid}");
@@ -1219,12 +1221,18 @@ mod tests {
         let mut world = World::new();
         world.import_block(2, 70, 0, 1 << 4).unwrap();
         let mut objects = Throwables::default();
-        objects.launch_dispenser(262, (0, 70, 0), (1, 0, 0)).unwrap();
+        objects
+                .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+                .unwrap();
         // The old 0.22-block sampling saw stone at x=2.08 before checking
         // the segment from x=1.86, skipping this mob at x=1.94.
         let targets = [(
             500_123,
-            PlayerPosition { x: 1.94, y: 70.0, z: 0.5 },
+            PlayerPosition {
+                x: 1.94,
+                y: 70.0,
+                z: 0.5,
+            },
             0.03,
             1.0,
         )];
@@ -1239,10 +1247,16 @@ mod tests {
         world.import_block(2, 70, 0, 1 << 4).unwrap();
         for (player_x, should_hit) in [(2.2, true), (2.6, false)] {
             let mut objects = Throwables::default();
-            objects.launch_dispenser(262, (0, 70, 0), (1, 0, 0)).unwrap();
+            objects
+                .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+                .unwrap();
             let players = [(
                 42,
-                PlayerPosition { x: player_x, y: 70.0, z: 0.5 },
+                PlayerPosition {
+                    x: player_x,
+                    y: 70.0,
+                    z: 0.5,
+                },
             )];
             let hit = objects.tick_with_targets(&world, 20, &[], &players);
             assert_eq!(!hit.player_hits.is_empty(), should_hit);
@@ -1258,12 +1272,19 @@ mod tests {
     fn first_wall_intersection_uses_exact_voxel_and_negative_direction() {
         let mut world = World::new();
         world.import_block(1, 70, 0, 1 << 4).unwrap();
-        let from = PlayerPosition { x: 2.8, y: 70.5, z: 0.5 };
-        let to = PlayerPosition { x: 0.8, y: 70.5, z: 0.5 };
+        let from = PlayerPosition {
+            x: 2.8,
+            y: 70.5,
+            z: 0.5,
+        };
+        let to = PlayerPosition {
+            x: 0.8,
+            y: 70.5,
+            z: 0.5,
+        };
         let (t, cell) = first_solid_block_hit(&world, from, to).unwrap();
         assert_eq!(cell, [1, 70, 0]);
         assert!((t - 0.4).abs() < 1e-10);
         assert_eq!(first_solid_block_hit(&World::new(), from, to), None);
     }
-
 }
