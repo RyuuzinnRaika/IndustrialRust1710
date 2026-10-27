@@ -75,9 +75,9 @@ mod worldgen;
 use achievements::Achievements;
 use admin::Administration;
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
-use commands::PublicCommand;
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
+use commands::PublicCommand;
 use decorations::Decorations;
 use dispensers::{Devices, Position as DevicePosition};
 use experience::Experience;
@@ -96,8 +96,9 @@ use maps::Maps;
 use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
-    Event, Hub, JoinError, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT,
-    DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
+    Event, Hub, JoinError, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT,
+    ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT,
+    PISTON_PUSH_EVENT,
 };
 use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
@@ -1421,7 +1422,10 @@ fn play(
                 let mut fits = true;
                 while remaining > 0 {
                     let count = remaining.min(items_1710::max_count(id));
-                    if candidate.receive_stack(commands::stack(id, count, damage)).is_none() {
+                    if candidate
+                        .receive_stack(commands::stack(id, count, damage))
+                        .is_none()
+                    {
                         fits = false;
                         break;
                     }
@@ -6427,8 +6431,8 @@ fn run_player_admin_command(
     } = services;
     let parts: Vec<&str> = message.split_whitespace().collect();
     let minimum_level = match parts.first().copied() {
-        Some("/time") | Some("/weather") | Some("/tp") | Some("/teleport")
-        | Some("/gamemode") | Some("/give") => 2,
+        Some("/time") | Some("/weather") | Some("/tp") | Some("/teleport") | Some("/gamemode")
+        | Some("/give") => 2,
         Some("/kick") | Some("/ban") | Some("/pardon") | Some("/pardon-uuid") | Some("/ban-ip")
         | Some("/pardon-ip") => 3,
         Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
@@ -6443,7 +6447,9 @@ fn run_player_admin_command(
     match parts.as_slice() {
         ["/time", "query", "daytime"] => Ok(format!("Daytime: {}", clock.day_time())),
         ["/time", "add", ticks] => {
-            let ticks = ticks.parse::<u64>().map_err(|_| bad("invalid time addition"))?;
+            let ticks = ticks
+                .parse::<u64>()
+                .map_err(|_| bad("invalid time addition"))?;
             clock.set_day_time((clock.day_time() as u64 + ticks % 24_000) % 24_000)?;
             let mut body = Vec::with_capacity(16);
             body.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
@@ -6452,7 +6458,9 @@ fn run_player_admin_command(
             Ok(format!("Daytime: {}", clock.day_time()))
         }
         ["/tp" | "/teleport", x, y, z] => {
-            let origin = hub.player_position(actor)?.ok_or_else(|| bad("actor not online"))?;
+            let origin = hub
+                .player_position(actor)?
+                .ok_or_else(|| bad("actor not online"))?;
             let dest = commands::teleport_coordinates(x, y, z, origin)?;
             if !hub.request_admin_teleport(actor, dest)? {
                 return Err(bad("actor not online"));
@@ -6460,7 +6468,9 @@ fn run_player_admin_command(
             Ok(format!("Teleport queued for {actor}"))
         }
         ["/tp" | "/teleport", target, x, y, z] => {
-            let origin = hub.player_position(target)?.ok_or_else(|| bad("target not online"))?;
+            let origin = hub
+                .player_position(target)?
+                .ok_or_else(|| bad("target not online"))?;
             let dest = commands::teleport_coordinates(x, y, z, origin)?;
             if !hub.request_admin_teleport(target, dest)? {
                 return Err(bad("target not online"));
@@ -6676,14 +6686,18 @@ fn start_clock_console(
                     println!("{text}");
                     Ok(())
                 })(),
-                ["/tell" | "/msg" | "/w", target, words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
-                    let msg = words.join(" ");
-                    if !hub.send_to_name(target, chat_event(&format!("[Server -> you] {msg}"))?)? {
-                        return Err(io::Error::new(ErrorKind::NotFound, "player not online"));
-                    }
-                    println!("[Server -> {target}] {msg}");
-                    Ok(())
-                })(),
+                ["/tell" | "/msg" | "/w", target, words @ ..] if !words.is_empty() => {
+                    (|| -> io::Result<()> {
+                        let msg = words.join(" ");
+                        if !hub
+                            .send_to_name(target, chat_event(&format!("[Server -> you] {msg}"))?)?
+                        {
+                            return Err(io::Error::new(ErrorKind::NotFound, "player not online"));
+                        }
+                        println!("[Server -> {target}] {msg}");
+                        Ok(())
+                    })()
+                }
                 ["/give", target, item, rest @ ..] => (|| -> io::Result<()> {
                     let (id, count, damage) = commands::give_args(item, rest)?;
                     if !hub.request_admin_give(target, id, count, damage)? {
@@ -6810,40 +6824,48 @@ fn start_clock_console(
                     println!("Daytime: {}", clock.day_time());
                     Ok(())
                 }
-                ["/time", "set", requested] | ["/time", "add", requested] => (|| -> io::Result<()> {
-                    let requested = if args[1] == "add" {
-                        let delta = requested.parse::<u64>().map_err(|_| bad("invalid time addition"))?;
-                        (clock.day_time() as u64 + delta % 24_000) % 24_000
-                    } else {
-                        commands::time_value(requested)?
-                    };
-                    clock.set_day_time(requested)?;
-                    clock.save_ticks(&clock_path)?;
-                    let mut body = Vec::with_capacity(16);
-                    body.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
-                    body.extend_from_slice(&clock.day_time().to_be_bytes());
-                    hub.broadcast(Event { id: 0x03, body });
-                    println!("Daytime set to {}", clock.day_time());
-                    Ok(())
-                })(),
+                ["/time", "set", requested] | ["/time", "add", requested] => {
+                    (|| -> io::Result<()> {
+                        let requested = if args[1] == "add" {
+                            let delta = requested
+                                .parse::<u64>()
+                                .map_err(|_| bad("invalid time addition"))?;
+                            (clock.day_time() as u64 + delta % 24_000) % 24_000
+                        } else {
+                            commands::time_value(requested)?
+                        };
+                        clock.set_day_time(requested)?;
+                        clock.save_ticks(&clock_path)?;
+                        let mut body = Vec::with_capacity(16);
+                        body.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
+                        body.extend_from_slice(&clock.day_time().to_be_bytes());
+                        hub.broadcast(Event { id: 0x03, body });
+                        println!("Daytime set to {}", clock.day_time());
+                        Ok(())
+                    })()
+                }
                 ["/weather", "query"] => {
                     let (rain, thunder) = clock.weather();
                     println!("Weather: rain={rain} thunder={thunder}");
                     Ok(())
                 }
-                ["/weather", "set", kind] | ["/weather", kind] if matches!(*kind, "clear" | "rain" | "thunder") => (|| -> io::Result<()> {
-                    clock.set_weather(kind)?;
-                    clock.save_ticks(&clock_path)?;
-                    for body in clock.weather_packets() {
-                        hub.broadcast(Event { id: 0x2b, body });
-                    }
-                    println!("Weather set to {kind}");
-                    Ok(())
-                })(),
+                ["/weather", "set", kind] | ["/weather", kind]
+                    if matches!(*kind, "clear" | "rain" | "thunder") =>
+                {
+                    (|| -> io::Result<()> {
+                        clock.set_weather(kind)?;
+                        clock.save_ticks(&clock_path)?;
+                        for body in clock.weather_packets() {
+                            hub.broadcast(Event { id: 0x2b, body });
+                        }
+                        println!("Weather set to {kind}");
+                        Ok(())
+                    })()
+                }
                 ["/tp" | "/teleport", name, x, y, z] => (|| -> io::Result<()> {
-                    let origin = hub.player_position(name)?.ok_or_else(|| {
-                        io::Error::new(ErrorKind::NotFound, "target not online")
-                    })?;
+                    let origin = hub
+                        .player_position(name)?
+                        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "target not online"))?;
                     let position = commands::teleport_coordinates(x, y, z, origin)?;
                     if !hub.request_admin_teleport(name, position)? {
                         return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
