@@ -2103,7 +2103,10 @@ fn play(
         }
         // A real 1.7.10 client predicts gravity while sending movement.
         // After six silent server ticks we integrate vertical gravity here.
-        if survival && vitals.health > 0.0 {
+        // Do not integrate server-side idle gravity while a teleport or
+        // collision correction is pending acknowledgement. Ordinary silent
+        // airborne clients still fall under the regular 20TPS fallback.
+        if survival && vitals.health > 0.0 && pending_teleport.is_none() {
             let gravity_world = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let simulated = idle_gravity.advance(&gravity_world, player, now_tick);
             let grounded = simulated
@@ -2146,6 +2149,9 @@ fn play(
                         hub.broadcast(block_change_event(&soil, fx, fy, fz));
                     }
                 }
+                // Continue simulating silent airborne clients until landing.
+                // The position ACK gate is used for rejected client movement,
+                // not for each step of continuous server-side gravity.
                 send_player_position(s, player, yaw, pitch)?;
                 if damage != 0 {
                     send(s, 0x06, &health_packet(*vitals))?;
@@ -3144,12 +3150,20 @@ fn play(
                 if !candidate.is_valid() {
                     // Sparse world positions are validated against the global world limit.
                     send_player_position(s, player, yaw, pitch)?;
+                    pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
+                    idle_gravity.observe_client(now_tick);
+                    if trace_movement {
+                        eprintln!("movement trace: out-of-bounds correction pending_ack received={candidate:?} target={player:?}");
+                    }
                     continue;
                 }
                 if let Some(gate) = pending_teleport.as_mut() {
                     if gate.acknowledges(candidate) {
                         pending_teleport = None;
                         idle_gravity.observe_client(now_tick);
+                        if trace_movement {
+                            eprintln!("movement trace: correction acknowledged received={candidate:?} server={player:?}");
+                        }
                         // The destination is already authoritative and persisted.
                         // A matching position report is only its acknowledgement,
                         // not another move that should trigger collision/fall damage.
@@ -3157,6 +3171,9 @@ fn play(
                     }
                     if gate.should_resend(Instant::now()) {
                         send_player_position(s, player, yaw, pitch)?;
+                        if trace_movement {
+                            eprintln!("movement trace: correction resent received={candidate:?} target={player:?}");
+                        }
                     }
                     continue;
                 }
@@ -3195,7 +3212,20 @@ fn play(
                             );
                             last_movement_trace = Instant::now();
                         }
+                        // A rejected movement is a server-authoritative
+                        // correction, just like /tp. Wait for the client's
+                        // C04/C06 acknowledgement before accepting another
+                        // input position or a position-dependent world action.
+                        // Otherwise queued stale movement can repeatedly
+                        // overwrite or reject the position after S08.
                         send_player_position(s, player, yaw, pitch)?;
+                        pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
+                        idle_gravity.observe_client(now_tick);
+                        if trace_movement {
+                            eprintln!(
+                                "movement trace: correction pending_ack from={player:?} received={candidate:?}"
+                            );
+                        }
                         continue;
                     }
                     let landed = physics::supported(&collision_world, &candidate);

@@ -4,7 +4,10 @@
 use crate::player::PlayerPosition;
 use std::time::{Duration, Instant};
 
-const ACK_TOLERANCE: f64 = 0.25;
+// The 1.7.10 client immediately answers S08 with C06 at the exact
+// position. A quarter-block tolerance can mistake queued old movement for
+// an acknowledgement, reopening the rubber-band loop.
+const ACK_TOLERANCE: f64 = 1.0 / 16.0;
 const RESEND_INTERVAL: Duration = Duration::from_secs(1);
 const ACK_TIMEOUT: Duration = Duration::from_secs(12);
 
@@ -68,6 +71,8 @@ mod tests {
         assert!(!gate.acknowledges(at(f64::NAN, 70.0, -40.5)));
         assert!(gate.acknowledges(at(80.5, 70.0, -40.5)));
         assert!(gate.acknowledges(at(80.55, 70.05, -40.55)));
+        assert!(!gate.acknowledges(at(80.7, 70.0, -40.5)));
+        assert!(!gate.acknowledges(at(80.5, 70.2, -40.5)));
     }
 
     #[test]
