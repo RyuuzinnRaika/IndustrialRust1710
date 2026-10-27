@@ -81,12 +81,9 @@ fn is_player_state(relative: &Path) -> bool {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
     };
     match parts.as_slice() {
-        [Some("players"), Some(filename)] => filename
-            .strip_suffix(".dat")
-            .is_some_and(name_ok),
-        [Some("players"), Some("verified"), Some(filename)] => filename
-            .strip_suffix(".dat")
-            .is_some_and(|id| {
+        [Some("players"), Some(filename)] => filename.strip_suffix(".dat").is_some_and(name_ok),
+        [Some("players"), Some("verified"), Some(filename)] => {
+            filename.strip_suffix(".dat").is_some_and(|id| {
                 id.len() == 36
                     && id.bytes().enumerate().all(|(i, c)| {
                         if matches!(i, 8 | 13 | 18 | 23) {
@@ -95,7 +92,8 @@ fn is_player_state(relative: &Path) -> bool {
                             c.is_ascii_digit() || (b'a'..=b'f').contains(&c)
                         }
                     })
-            }),
+            })
+        }
         _ => false,
     }
 }
@@ -112,9 +110,7 @@ fn validate_target(relative: &Path, bytes: &[u8]) -> io::Result<()> {
     if bytes.len() > target_limit(relative) {
         return Err(invalid("journal target too big"));
     }
-    if is_player_state(relative)
-        && (bytes.len() > 8192 || !bytes.starts_with(&[0x1f, 0x8b]))
-    {
+    if is_player_state(relative) && (bytes.len() > 8192 || !bytes.starts_with(&[0x1f, 0x8b])) {
         return Err(invalid("invalid journaled player gzip NBT"));
     }
     if is_anvil_region(relative) {
