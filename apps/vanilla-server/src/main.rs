@@ -71,6 +71,7 @@ mod whitelist;
 mod window_open;
 mod workstations;
 mod world;
+mod world_spawn;
 mod worldgen;
 
 use achievements::Achievements;
@@ -473,6 +474,7 @@ fn primed_tnt_teleport_body(entity_id: i32, position_fp: [i32; 3]) -> Vec<u8> {
 fn join(
     s: &mut Connection,
     world: &Mutex<World>,
+    root_world_path: &Path,
     clock: &Clock,
     entity_id: i32,
     initial: InitialPlayer<'_>,
@@ -508,16 +510,11 @@ fn join(
     abilities.extend_from_slice(&0.1f32.to_be_bytes());
     send(s, 0x39, &abilities)?;
 
-    let mut spawn = Vec::new();
-    let surface = world
-        .lock()
-        .map_err(|_| bad("world mutex poisoned"))?
-        .spawn_y() as i32
-        - 1;
-    for coordinate in [0i32, surface, 0] {
-        spawn.extend_from_slice(&coordinate.to_be_bytes());
-    }
-    send(s, 0x05, &spawn)?;
+    let spawn = {
+        let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+        world_spawn::effective(root_world_path, &state)?
+    };
+    send(s, 0x05, &spawn.packet())?;
     send(s, 0x06, &health_packet(vitals))?;
     let mut time = Vec::new();
     time.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
@@ -561,12 +558,9 @@ fn join(
     Ok(())
 }
 
-fn safe_spawn(world: &Mutex<World>) -> io::Result<PlayerPosition> {
-    let y = world
-        .lock()
-        .map_err(|_| bad("world mutex poisoned"))?
-        .spawn_y();
-    Ok(PlayerPosition { x: 0.5, y, z: 0.5 })
+fn safe_spawn(world: &Mutex<World>, root_world_path: &Path) -> io::Result<PlayerPosition> {
+    let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+    world_spawn::player_spawn(root_world_path, &state)
 }
 fn chunk_center(player: &PlayerPosition) -> (i32, i32) {
     (
@@ -1163,6 +1157,7 @@ struct PlayerSession<'a> {
     game_rules: &'a Mutex<GameRules>,
     scoreboard: &'a Mutex<Scoreboard>,
     scoreboard_path: &'a Path,
+    root_world_path: &'a Path,
     hub: &'a Hub,
     entity_id: i32,
     events: &'a Receiver<Event>,
@@ -1314,6 +1309,7 @@ fn play(
         game_rules,
         scoreboard,
         scoreboard_path,
+        root_world_path,
         hub,
         entity_id,
         events,
@@ -5914,7 +5910,7 @@ fn play(
                         world
                     };
                     let origin = {
-                        let fallback = safe_spawn(respawn_world)?;
+                        let fallback = safe_spawn(respawn_world, root_world_path)?;
                         if let Some((x, y, z)) = inventory.bed_spawn() {
                             let guard = respawn_world
                                 .lock()
@@ -6360,7 +6356,7 @@ fn handle(
         return Ok(());
     }
     if !player_file.exists() && !player_file.with_extension("json").exists() {
-        player_state = safe_spawn(&world)?;
+        player_state = safe_spawn(&world, path.as_path())?;
     }
     // Separate survival resources from old Creative inventories to prevent
     // player-selected Creative stacks becoming free Survival items.
@@ -6431,6 +6427,7 @@ fn handle(
     if let Err(error) = join(
         &mut s,
         &world,
+        path.as_path(),
         &clock,
         entity_id,
         InitialPlayer {
@@ -6578,6 +6575,7 @@ fn handle(
             game_rules: &game_rules,
             scoreboard: &scoreboard,
             scoreboard_path: &scoreboard_path,
+            root_world_path: path.as_path(),
             hub: &hub,
             entity_id,
             events: &events,
