@@ -432,6 +432,53 @@ fn send_fragments(s: &mut TcpStream, packet: &[u8], pieces: &[usize]) {
 }
 
 #[test]
+fn add014_teleport_rejects_old_position_until_destination_ack() {
+    let mut server = NativeServer::start();
+    let (mut player, _, origin) = server.join("RustTester");
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/tp RustTester 4.5 65 0.5\n")
+        .unwrap();
+
+    let destination_packet = until_packet(&mut player, 0x08, |packet| {
+        (read_position(packet)[0] - 4.5).abs() < 0.01
+    });
+    let destination = read_position(&destination_packet);
+    assert!((destination[1] - 65.0).abs() < 0.01);
+
+    // 1.7.10's queued C04 from the old view is not proof of arrival.
+    // It must cause another authoritative S08 rather than moving the server
+    // back to the old location. Pending world-action C07 is discarded.
+    thread::sleep(Duration::from_millis(1100));
+    send_position(&mut player, origin[0], origin[1], origin[2]);
+    let repeated = until_packet(&mut player, 0x08, |packet| {
+        (read_position(packet)[0] - 4.5).abs() < 0.01
+    });
+    assert!((read_position(&repeated)[0] - 4.5).abs() < 0.01);
+    let mut dig = vec![0u8];
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(64);
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(1);
+    player.write_all(&frame(7, &dig)).unwrap();
+
+    // Only the destination C04 acknowledges S08. Ordinary position reports
+    // after that must work; disconnect/reconnect reads the new saved location.
+    send_position(&mut player, destination[0], destination[1], destination[2]);
+    send_position(&mut player, 5.5, 65.0, 0.5);
+    thread::sleep(Duration::from_millis(150));
+    drop(player);
+    server.wait_idle();
+    let (reconnected, _, saved) = server.join("RustTester");
+    assert!((saved[0] - 5.5).abs() < 0.05, "reconnect restored {saved:?}");
+    drop(reconnected);
+    server.wait_idle();
+}
+
+#[test]
 fn f54_stop_drains_two_live_protocol5_players_and_persists_their_state() {
     let mut server = NativeServer::start();
     let (mut first, _, _) = server.join("TwinAlpha");
