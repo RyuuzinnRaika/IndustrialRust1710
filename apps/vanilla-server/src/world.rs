@@ -2347,7 +2347,10 @@ mod tests {
         assert!(biomes.len() >= 3, "expanded world lacks biome variation");
 
         let (mask, data) = world.chunk_data(0, 0);
-        assert_eq!(mask, 0x01ff, "expanded Overworld must stream terrain sections");
+        assert_eq!(
+            mask, 0x01ff,
+            "expanded Overworld must stream terrain sections"
+        );
         // Protocol 5 chunk data ends with 256 column biome IDs in Z-major order.
         let transmitted_biomes = &data[data.len() - 256..];
         for z in [0, 7, 15] {
