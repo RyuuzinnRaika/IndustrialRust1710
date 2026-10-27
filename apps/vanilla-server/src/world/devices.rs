@@ -532,6 +532,14 @@ impl World {
             // A neighboring piston's head may occupy this cell. Only retract
             // the head that points in the same direction as this piston.
             let head_block = self.get(head.0, head.1, head.2);
+            if block >> 4 == 29 {
+                let far = (head.0 + dx, head.1 + dy, head.2 + dz);
+                if in_bounds(far.0, far.1, far.2)
+                    && changes.contains_key(&(far.0, far.1 as u8, far.2))
+                {
+                    return;
+                }
+            }
             if head_block >> 4 == 34 && (head_block & 7) == (block & 7) {
                 changes.insert((head.0, head.1 as u8, head.2), 0);
                 if block >> 4 == 29 {
