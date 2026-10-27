@@ -17,6 +17,8 @@ if [[ $# -gt 1 || "$mode" != "--once" && "$mode" != "--if-changed" ]]; then
 fi
 
 repo_url="https://github.com/RyuuzinnRaika/IndustrialRust1710.git"
+# systemd services do not inherit interactive shell startup files.
+export PATH="$HOME/.cargo/bin:$PATH"
 ci_root="${IR_CI_ROOT:-$HOME/industrialrust1710-ci}"
 if [[ "$ci_root" != /* || "$ci_root" == "/" || "$ci_root" == "$HOME" ]]; then
   echo "IR_CI_ROOT must be a dedicated absolute directory, not / or HOME." >&2
@@ -65,7 +67,6 @@ stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log="$ci_root/reports/$stamp-$$.log"
 manifest="$ci_root/reports/$stamp-$$.txt"
 start_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-export PATH="$HOME/.cargo/bin:$PATH"
 export CARGO_INCREMENTAL=0
 export CARGO_TARGET_DIR="$ci_root/cargo-target"
 export CARGO_TERM_COLOR=never
