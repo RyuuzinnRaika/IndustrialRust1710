@@ -100,7 +100,7 @@ use legacy_protocol::{
 };
 use maps::Maps;
 use minecarts::Minecarts;
-use mobs::Mobs;
+use mobs::{DamageOrigin, Mobs};
 use multiplayer::{
     Event, Hub, JoinError, SessionEvents, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT, ADMIN_ENCHANT_EVENT,
     ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT, ADMIN_SPAWNPOINT_EVENT,
@@ -122,7 +122,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use survival::MiningProgress;
-use survival_damage::{HazardCause, Hazards};
+use survival_damage::{HazardAttribution, HazardCause, Hazards};
 use teleport_gate::TeleportGate;
 use throwables::Throwables;
 use vehicles::Boats;
@@ -2154,11 +2154,11 @@ fn play(
                 updates.extend(effects);
             }
             let incoming =
-                creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
+                creatures.hurt_player_detailed(entity_id, *player, now_tick, vitals.health);
             // Broadcast one animation per actual melee hit, with the health
             // result; simply subtracting HP does not animate the attacker.
             updates.extend(creatures.take_melee_animations());
-            let hurt = if survival { incoming } else { 0 };
+            let hurt = if survival { incoming.amount } else { 0 };
             let drops = creatures.take_drops();
             drop(creatures);
             for (x, y, z) in grazed_blocks.into_iter().chain(broken_doors) {
@@ -2210,11 +2210,23 @@ fn play(
                 }
                 let previous_health = vitals.health;
                 vitals.health = (vitals.health - damage.ceil()).max(0.0);
+                let cause = match incoming.origin {
+                    DamageOrigin::Mob { kind, entity_id } => DeathCause::Mob { kind, entity_id },
+                    DamageOrigin::Projectile { kind, shooter_kind, shooter_id } => {
+                        DeathCause::Projectile { kind, shooter_kind, shooter_id }
+                    }
+                    DamageOrigin::Explosion { kind, source_id } => {
+                        DeathCause::Explosion { kind, source_id }
+                    }
+                    DamageOrigin::WitherEffect => DeathCause::WitherEffect,
+                    DamageOrigin::Mixed => DeathCause::Mixed,
+                    DamageOrigin::Unknown => DeathCause::CombatOrExplosion,
+                };
                 death_log::record_fatal(
                     &mut fatal_hit,
                     previous_health,
                     vitals.health,
-                    DeathCause::CombatOrExplosion,
+                    cause,
                 );
                 save_damage_state(
                         &player,
@@ -2355,14 +2367,14 @@ fn play(
         }
         if survival && vitals.health > 0.0 && now_tick > last_hazards_tick {
             let mut total = 0.0f32;
-            let mut last_source = None;
+            let mut sources = HazardAttribution::None;
             let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let steps = (now_tick - last_hazards_tick).min(4);
             for t in last_hazards_tick + 1..=last_hazards_tick + steps {
                 let (damage, source) = hazards.tick_detailed(&w, *player, t, inventory);
                 total += damage;
                 if damage > 0.0 {
-                    last_source = source;
+                    sources = sources.combine(source);
                 }
             }
             last_hazards_tick = now_tick;
@@ -2370,13 +2382,14 @@ fn play(
             if total > 0.0 {
                 let previous_health = vitals.health;
                 vitals.health = (vitals.health - total).max(0.0);
-                let cause = match last_source {
-                    Some(HazardCause::Drowning) => DeathCause::Drowning,
-                    Some(HazardCause::Suffocation) => DeathCause::Suffocation,
-                    Some(HazardCause::Lava) => DeathCause::Lava,
-                    Some(HazardCause::Fire) => DeathCause::Fire,
-                    Some(HazardCause::Burning) => DeathCause::Burning,
-                    None => DeathCause::Unknown,
+                let cause = match sources {
+                    HazardAttribution::Single(HazardCause::Drowning) => DeathCause::Drowning,
+                    HazardAttribution::Single(HazardCause::Suffocation) => DeathCause::Suffocation,
+                    HazardAttribution::Single(HazardCause::Lava) => DeathCause::Lava,
+                    HazardAttribution::Single(HazardCause::Fire) => DeathCause::Fire,
+                    HazardAttribution::Single(HazardCause::Burning) => DeathCause::Burning,
+                    HazardAttribution::Mixed => DeathCause::MixedHazards,
+                    HazardAttribution::None => DeathCause::Unknown,
                 };
                 death_log::record_fatal(
                     &mut fatal_hit,
@@ -9317,6 +9330,10 @@ fn main() -> io::Result<()> {
                                                 z: f64::from(z) + 0.5,
                                             },
                                             radius: 4.0,
+                                            origin: DamageOrigin::Explosion {
+                                                kind: "TNT",
+                                                source_id: Some(entity_id),
+                                            },
                                         });
                                         furnace_hub.broadcast(multiplayer::destroy(entity_id));
                                         let mut body = Vec::new();
