@@ -2284,7 +2284,7 @@ impl World {
         }
         let trailer = &bytes[blocks_end..];
         if !trailer.is_empty() {
-            if trailer.len() < 6 || (&trailer[..4] != b"TNT1" && &trailer[..4] != b"TNT2") {
+            if trailer.len() < 6 || (&trailer[..4] != b"TNT1" && &trailer[..4] != b"TNT2" && &trailer[..4] != b"TNT3") {
                 return Err(invalid("unrecognized world entity trailer"));
             }
             let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
@@ -2292,21 +2292,48 @@ impl World {
             if primed_count > MAX_PRIMED_TNT || trailer.len() < primed_end {
                 return Err(invalid("invalid primed TNT trailer length"));
             }
-            if &trailer[..4] == b"TNT2" {
+            if &trailer[..4] == b"TNT2" || &trailer[..4] == b"TNT3" {
                 let queued = &trailer[primed_end..];
                 if queued.len() < 4 {
                     return Err(invalid("truncated queued TNT trailer"));
                 }
                 let count = u32::from_be_bytes(queued[..4].try_into().unwrap()) as usize;
-                if count > MAX_PENDING_TNT || queued.len() != 4 + count * 9 {
+                let chain_end = 4 + count * 9;
+                if count > MAX_PENDING_TNT || queued.len() < chain_end {
                     return Err(invalid("invalid queued TNT trailer length"));
                 }
-                for entry in queued[4..].as_chunks::<9>().0 {
+                if &trailer[..4] == b"TNT2" && queued.len() != chain_end {
+                    return Err(invalid("unexpected TNT2 trailer data"));
+                }
+                for entry in queued[4..chain_end].as_chunks::<9>().0 {
                     let x = i32::from_be_bytes(entry[..4].try_into().unwrap());
                     let y = i32::from(entry[4]);
                     let z = i32::from_be_bytes(entry[5..9].try_into().unwrap());
                     if !in_bounds(x, y, z) || !world.pending_chain_tnt.insert((x, y as u8, z)) {
                         return Err(invalid("invalid or duplicate queued TNT position"));
+                    }
+                }
+                if &trailer[..4] == b"TNT3" {
+                    let pending = &queued[chain_end..];
+                    if pending.len() < 4 {
+                        return Err(invalid("truncated blast backlog"));
+                    }
+                    let count = u32::from_be_bytes(pending[..4].try_into().unwrap()) as usize;
+                    if count > MAX_PENDING_BLAST || pending.len() != 4 + count * 11 {
+                        return Err(invalid("invalid blast backlog length"));
+                    }
+                    for item in pending[4..].as_chunks::<11>().0 {
+                        let x = i32::from_be_bytes(item[..4].try_into().unwrap());
+                        let y = item[4];
+                        let z = i32::from_be_bytes(item[5..9].try_into().unwrap());
+                        let expected = u16::from_be_bytes(item[9..11].try_into().unwrap());
+                        if !in_bounds(x, i32::from(y), z)
+                            || expected == 0
+                            || expected >> 4 == 46
+                            || world.pending_blast_edits.insert((x, y, z), expected).is_some()
+                        {
+                            return Err(invalid("invalid deferred explosion"));
+                        }
                     }
                 }
             } else if trailer.len() != primed_end {
@@ -2445,16 +2472,22 @@ impl World {
             f.write_all(&z.to_be_bytes())?;
             f.write_all(&block.to_be_bytes())?;
         }
-        if !self.primed_tnt.is_empty() || !self.pending_chain_tnt.is_empty() {
+        if !self.primed_tnt.is_empty()
+            || !self.pending_chain_tnt.is_empty()
+            || !self.pending_blast_edits.is_empty()
+        {
             if self.primed_tnt.len() > MAX_PRIMED_TNT
                 || self.pending_chain_tnt.len() > MAX_PENDING_TNT
+                || self.pending_blast_edits.len() > MAX_PENDING_BLAST
             {
                 return Err(invalid("TNT entity or pending queue capacity exceeded"));
             }
-            f.write_all(if self.pending_chain_tnt.is_empty() {
-                b"TNT1"
-            } else {
+            f.write_all(if !self.pending_blast_edits.is_empty() {
+                b"TNT3"
+            } else if !self.pending_chain_tnt.is_empty() {
                 b"TNT2"
+            } else {
+                b"TNT1"
             })?;
             f.write_all(&(self.primed_tnt.len() as u16).to_be_bytes())?;
             for tnt in self.primed_tnt.values() {
@@ -2473,12 +2506,21 @@ impl World {
                 // both world-tick writes and the final shutdown save.
                 f.write_all(&(remaining.max(1) as u32).to_be_bytes())?;
             }
-            if !self.pending_chain_tnt.is_empty() {
+            if !self.pending_chain_tnt.is_empty() || !self.pending_blast_edits.is_empty() {
                 f.write_all(&(self.pending_chain_tnt.len() as u32).to_be_bytes())?;
                 for &(x, y, z) in &self.pending_chain_tnt {
                     f.write_all(&x.to_be_bytes())?;
                     f.write_all(&[y])?;
                     f.write_all(&z.to_be_bytes())?;
+                }
+            }
+            if !self.pending_blast_edits.is_empty() {
+                f.write_all(&(self.pending_blast_edits.len() as u32).to_be_bytes())?;
+                for (&(x, y, z), &expected) in &self.pending_blast_edits {
+                    f.write_all(&x.to_be_bytes())?;
+                    f.write_all(&[y])?;
+                    f.write_all(&z.to_be_bytes())?;
+                    f.write_all(&expected.to_be_bytes())?;
                 }
             }
         }
