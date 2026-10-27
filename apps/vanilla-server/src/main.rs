@@ -3650,10 +3650,12 @@ fn play(
                     let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
                     last_furnace_view = guard.get(pos);
                     drop(guard);
-                    let mut opened = vec![active_window];
-                    write_string("minecraft:furnace", &mut opened)?;
-                    write_string(&json!({"text":"Furnace"}).to_string(), &mut opened)?;
-                    opened.push(3);
+                    // Protocol 5 (Minecraft 1.7.10) uses a numeric window type,
+                    // a plain-string title, a slot count and a title-override boolean.
+                    // The namespaced string/JSON form belongs to later protocols.
+                    let mut opened = vec![active_window, 2]; // 2 = furnace
+                    write_string("Furnace", &mut opened)?;
+                    opened.extend_from_slice(&[3, 1]); // 3 slots, use supplied title
                     send(s, 0x2d, &opened)?;
                     send(
                         s,
