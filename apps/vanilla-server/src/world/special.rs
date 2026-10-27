@@ -909,6 +909,50 @@ mod tests {
     }
 
     #[test]
+    fn simultaneous_tnt_backlog_survives_tick_save_and_graceful_shutdown() {
+        let path = file("tnt-overdue-backlog");
+        let mut world = World::new();
+        // Twelve entities expire together, more than the four allowed per tick.
+        // Keep them well apart to avoid unrelated terrain/chain behavior.
+        for x in 0..12 {
+            world.spawn_primed_tnt(x * 12, 200, 0, 1);
+        }
+        world.save(&path).unwrap();
+        world.drain_tnt_events();
+
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.primed_tnt.len(), 8);
+        assert_eq!(
+            world
+                .drain_tnt_events()
+                .iter()
+                .filter(|event| matches!(event, TntEvent::Explode { .. }))
+                .count(),
+            4
+        );
+        // This is the real graceful-shutdown save path. Previously the eight
+        // overdue fuses produced "invalid primed TNT fuse" and aborted stop.
+        world.save(&path).unwrap();
+        let mut restarted = World::load(&path).unwrap();
+        assert_eq!(restarted.primed_tnt.len(), 8);
+        restarted.drain_tnt_events();
+        for expected in [4, 0] {
+            restarted.block_tick(&path, 64).unwrap();
+            assert_eq!(restarted.primed_tnt.len(), expected);
+            assert_eq!(
+                restarted
+                    .drain_tnt_events()
+                    .iter()
+                    .filter(|event| matches!(event, TntEvent::Explode { .. }))
+                    .count(),
+                4
+            );
+        }
+        assert!(World::load(&path).unwrap().primed_tnt.is_empty());
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn malformed_tnt_trailer_fails_closed() {
         let path = file("tnt-corrupt");
         let mut world = World::new();
