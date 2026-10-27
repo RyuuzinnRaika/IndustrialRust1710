@@ -46,7 +46,7 @@ impl TeleportGate {
 
     /// C02 entity interaction, C07 digging/dropping, C08 placement/use
     /// and C12 sign edits all mutate world state at a client-chosen location.
-    pub fn blocks_world_action(packet_id: u32) -> bool {
+    pub fn blocks_world_action(packet_id: i32) -> bool {
         matches!(packet_id, 2 | 7 | 8 | 18)
     }
 }
