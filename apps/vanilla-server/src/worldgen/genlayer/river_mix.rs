@@ -80,9 +80,7 @@ mod tests {
                 |_, _, _, _| biomes.to_vec(),
                 |_, _, _, _| rivers.to_vec()
             ),
-            biomes.map(|v| v).iter().enumerate().map(|(i, &v)| {
-                if i == 3 { 11 } else { v }
-            }).collect::<Vec<_>>()
+            [12, 14, 1, 11, 24, 0]
         );
     }
 
