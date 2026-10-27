@@ -443,6 +443,39 @@ mod tests {
     }
 
     #[test]
+    fn dispenser_projectile_hits_solid_behind_liquid_exactly_once() {
+        // Passing through a liquid must not skip the solid block behind it,
+        // and the resulting Destroy packet must only be sent once.
+        for liquid in [8u16, 11] {
+            let mut world = World::new();
+            world.import_block(2, 70, 0, liquid << 4).unwrap();
+            world.import_block(3, 70, 0, 1 << 4).unwrap();
+            let mut objects = Throwables::default();
+            objects
+                .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+                .unwrap();
+            let projectile_id = *objects.active.keys().next().unwrap();
+
+            let first = objects.tick(&world, 1);
+            assert_eq!(objects.active.len(), 1, "liquid block {liquid}");
+            assert_eq!(first.events.len(), 1, "liquid block {liquid}");
+            assert_ne!(first.events[0].1.id, 0x13);
+
+            let second = objects.tick(&world, 2);
+            assert!(objects.active.is_empty(), "liquid block {liquid}");
+            assert_eq!(second.events.len(), 1, "liquid block {liquid}");
+            let (impact, packet) = &second.events[0];
+            assert_eq!(packet.id, 0x13);
+            assert_eq!(
+                i32::from_be_bytes(packet.body[1..5].try_into().unwrap()),
+                projectile_id
+            );
+            assert!((3.0..3.3).contains(&impact.x), "impact={impact:?}");
+            assert!(objects.tick(&world, 3).events.is_empty());
+        }
+    }
+
+    #[test]
     fn dispenser_projectile_destroy_is_broadcast_from_impact_position() {
         let mut objects = Throwables::default();
         let mut world = World::new();
