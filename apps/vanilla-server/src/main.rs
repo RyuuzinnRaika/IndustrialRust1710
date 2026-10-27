@@ -13,6 +13,7 @@ mod brewing;
 mod chests;
 mod chunk_pipeline;
 mod clock;
+mod commands;
 mod crafting;
 mod decorations;
 mod dimensions;
@@ -74,6 +75,7 @@ mod worldgen;
 use achievements::Achievements;
 use admin::Administration;
 use brewing::{Brewer, Brewers, Position as BrewerPosition};
+use commands::PublicCommand;
 use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use decorations::Decorations;
@@ -94,7 +96,7 @@ use maps::Maps;
 use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
-    Event, Hub, JoinError, ADMIN_GAMEMODE_EVENT, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT,
+    Event, Hub, JoinError, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT,
     DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
 };
 use online_auth::{Connection, ServerIdentity};
@@ -346,6 +348,11 @@ fn as_chat(s: &mut Connection, message: &str) -> io::Result<()> {
     let mut bytes = Vec::new();
     write_string(&json!({"text": message}).to_string(), &mut bytes)?;
     send(s, 0x02, &bytes)
+}
+fn chat_event(message: &str) -> io::Result<Event> {
+    let mut body = Vec::new();
+    write_string(&json!({"text": message}).to_string(), &mut body)?;
+    Ok(Event { id: 0x02, body })
 }
 fn login_disconnect(s: &mut Connection, reason: &str) -> io::Result<()> {
     let mut payload = Vec::new();
@@ -1395,6 +1402,41 @@ fn play(
                 if survival {
                     send(s, 0x1f, &experience.packet())?;
                 }
+                continue;
+            }
+            if event.id == ADMIN_GIVE_EVENT {
+                if event.body.len() != 5 {
+                    return Err(bad("invalid internal give event"));
+                }
+                let id = i16::from_be_bytes(event.body[0..2].try_into().unwrap());
+                let total = event.body[2];
+                let damage = i16::from_be_bytes(event.body[3..5].try_into().unwrap());
+                if !(1..=64).contains(&total) || !items_1710::valid_damage(id, damage) {
+                    return Err(bad("invalid internal give item"));
+                }
+                // Prepare every stack first; failure leaves the original
+                // inventory unchanged. Only the owning session may modify it.
+                let mut candidate = inventory.clone();
+                let mut remaining = total;
+                let mut fits = true;
+                while remaining > 0 {
+                    let count = remaining.min(items_1710::max_count(id));
+                    if candidate.receive_stack(commands::stack(id, count, damage)).is_none() {
+                        fits = false;
+                        break;
+                    }
+                    remaining -= count;
+                }
+                if !fits {
+                    as_chat(s, "Give failed: not enough free inventory space.")?;
+                    continue;
+                }
+                candidate.save(inventory_path.as_path())?;
+                *inventory = candidate;
+                // Client inventory window 0 is authoritative even when another
+                // container is open. Opening inventory again shows saved items.
+                send(s, 0x30, &inventory.window_items())?;
+                as_chat(s, &format!("Received {total} item(s) (ID {id})."))?;
                 continue;
             }
             if event.id == ADMIN_KICK_EVENT {
@@ -2814,16 +2856,37 @@ fn play(
                     as_chat(s, "Chat message rejected by spam filter.")?;
                     continue;
                 }
-                if message == "/help" {
-                    as_chat(
-                        s,
-                        "Commands: /help, /list. Verified OPs may use /save, /kick, /ban and other level-gated commands.",
-                    )?;
-                } else if message == "/list" {
-                    as_chat(
-                        s,
-                        &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")),
-                    )?;
+                if let Some(parsed) = commands::parse_public(&message) {
+                    match parsed {
+                        Err(usage) => as_chat(s, usage)?,
+                        Ok(PublicCommand::Help) => as_chat(
+                            s,
+                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /time, /weather, /kick, /ban, /save.",
+                        )?,
+                        Ok(PublicCommand::List) => as_chat(
+                            s,
+                            &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")),
+                        )?,
+                        Ok(PublicCommand::Me(action)) => {
+                            if !permissions.chat {
+                                as_chat(s, "Chat permission denied.")?;
+                            } else {
+                                hub.broadcast(chat_event(&format!("* {name} {action}"))?);
+                            }
+                        }
+                        Ok(PublicCommand::Tell { target, message: body }) => {
+                            if !permissions.chat {
+                                as_chat(s, "Chat permission denied.")?;
+                            } else if !hub.send_to_name(
+                                target,
+                                chat_event(&format!("[{name} -> you] {body}"))?,
+                            )? {
+                                as_chat(s, "That player is not online.")?;
+                            } else {
+                                as_chat(s, &format!("[you -> {target}] {body}"))?;
+                            }
+                        }
+                    }
                 } else if message.starts_with('/') {
                     // Offline names never supply a verified UUID. Refuse all
                     // administrative mutations before attempting an audit log.
@@ -2841,6 +2904,7 @@ fn play(
                         world_path,
                         clock,
                         administration,
+                        hardcore,
                     };
                     let result = run_player_admin_command(
                         &message,
@@ -6344,6 +6408,7 @@ struct PlayerAdminServices<'a> {
     world_path: &'a Path,
     clock: &'a Clock,
     administration: &'a Administration,
+    hardcore: bool,
 }
 /// Authorization is based exclusively on the Mojang-verified session UUID.
 fn run_player_admin_command(
@@ -6358,10 +6423,12 @@ fn run_player_admin_command(
         world_path,
         clock,
         administration,
+        hardcore,
     } = services;
     let parts: Vec<&str> = message.split_whitespace().collect();
     let minimum_level = match parts.first().copied() {
-        Some("/time") | Some("/weather") => 2,
+        Some("/time") | Some("/weather") | Some("/tp") | Some("/teleport")
+        | Some("/gamemode") | Some("/give") => 2,
         Some("/kick") | Some("/ban") | Some("/pardon") | Some("/pardon-uuid") | Some("/ban-ip")
         | Some("/pardon-ip") => 3,
         Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
@@ -6374,6 +6441,50 @@ fn run_player_admin_command(
         ));
     }
     match parts.as_slice() {
+        ["/time", "query", "daytime"] => Ok(format!("Daytime: {}", clock.day_time())),
+        ["/time", "add", ticks] => {
+            let ticks = ticks.parse::<u64>().map_err(|_| bad("invalid time addition"))?;
+            clock.set_day_time((clock.day_time() as u64 + ticks % 24_000) % 24_000)?;
+            let mut body = Vec::with_capacity(16);
+            body.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
+            body.extend_from_slice(&clock.day_time().to_be_bytes());
+            hub.broadcast(Event { id: 0x03, body });
+            Ok(format!("Daytime: {}", clock.day_time()))
+        }
+        ["/tp" | "/teleport", x, y, z] => {
+            let origin = hub.player_position(actor)?.ok_or_else(|| bad("actor not online"))?;
+            let dest = commands::teleport_coordinates(x, y, z, origin)?;
+            if !hub.request_admin_teleport(actor, dest)? {
+                return Err(bad("actor not online"));
+            }
+            Ok(format!("Teleport queued for {actor}"))
+        }
+        ["/tp" | "/teleport", target, x, y, z] => {
+            let origin = hub.player_position(target)?.ok_or_else(|| bad("target not online"))?;
+            let dest = commands::teleport_coordinates(x, y, z, origin)?;
+            if !hub.request_admin_teleport(target, dest)? {
+                return Err(bad("target not online"));
+            }
+            Ok(format!("Teleport queued for {target}"))
+        }
+        ["/gamemode", mode, rest @ ..] if rest.len() <= 1 => {
+            if *hardcore {
+                return Err(bad("gamemode changes are forbidden in hardcore"));
+            }
+            let mode = admin_state::parse_gamemode(mode)?;
+            let target = rest.first().copied().unwrap_or(actor);
+            if !hub.request_admin_gamemode(target, mode)? {
+                return Err(bad("target not online"));
+            }
+            Ok(format!("Gamemode change queued for {target}"))
+        }
+        ["/give", target, item, rest @ ..] => {
+            let (id, amount, data) = commands::give_args(item, rest)?;
+            if !hub.request_admin_give(target, id, amount, data)? {
+                return Err(bad("target not online"));
+            }
+            Ok(format!("Give queued: {amount} x {id} for {target}"))
+        }
         ["/save"] => {
             world
                 .lock()
@@ -6425,7 +6536,7 @@ fn run_player_admin_command(
             Ok(format!("IP unbanned {address}"))
         }
         ["/time", "set", ticks] => {
-            let ticks = ticks.parse::<u64>().map_err(|_| bad("invalid time"))?;
+            let ticks = commands::time_value(ticks)?;
             clock.set_day_time(ticks)?;
             let mut body = Vec::with_capacity(16);
             body.extend_from_slice(&(clock.ticks() as i64).to_be_bytes());
@@ -6433,7 +6544,7 @@ fn run_player_admin_command(
             hub.broadcast(Event { id: 0x03, body });
             Ok(format!("Time set by {actor}"))
         }
-        ["/weather", "set", state] => {
+        ["/weather", "set", state] | ["/weather", state] => {
             clock.set_weather(state)?;
             for body in clock.weather_packets() {
                 hub.broadcast(Event { id: 0x2b, body });
@@ -6549,6 +6660,38 @@ fn start_clock_console(
                 break;
             }
             let result: io::Result<()> = match args.as_slice() {
+                ["/help"] | ["/?"] => {
+                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    Ok(())
+                }
+                ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
+                    let text = words.join(" ");
+                    hub.broadcast(chat_event(&format!("[Server] {text}"))?);
+                    println!("[Server] {text}");
+                    Ok(())
+                })(),
+                ["/me", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
+                    let text = format!("* Server {}", words.join(" "));
+                    hub.broadcast(chat_event(&text)?);
+                    println!("{text}");
+                    Ok(())
+                })(),
+                ["/tell" | "/msg" | "/w", target, words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
+                    let msg = words.join(" ");
+                    if !hub.send_to_name(target, chat_event(&format!("[Server -> you] {msg}"))?)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "player not online"));
+                    }
+                    println!("[Server -> {target}] {msg}");
+                    Ok(())
+                })(),
+                ["/give", target, item, rest @ ..] => (|| -> io::Result<()> {
+                    let (id, count, damage) = commands::give_args(item, rest)?;
+                    if !hub.request_admin_give(target, id, count, damage)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Give queued: {count} x {id} for {target}");
+                    Ok(())
+                })(),
                 ["/gamemode", requested, target] => (|| -> io::Result<()> {
                     if hardcore {
                         return Err(bad("gamemode changes are forbidden in hardcore"));
@@ -6667,10 +6810,13 @@ fn start_clock_console(
                     println!("Daytime: {}", clock.day_time());
                     Ok(())
                 }
-                ["/time", "set", requested] => (|| -> io::Result<()> {
-                    let requested = requested
-                        .parse::<u64>()
-                        .map_err(|_| bad("invalid daytime value"))?;
+                ["/time", "set", requested] | ["/time", "add", requested] => (|| -> io::Result<()> {
+                    let requested = if args[1] == "add" {
+                        let delta = requested.parse::<u64>().map_err(|_| bad("invalid time addition"))?;
+                        (clock.day_time() as u64 + delta % 24_000) % 24_000
+                    } else {
+                        commands::time_value(requested)?
+                    };
                     clock.set_day_time(requested)?;
                     clock.save_ticks(&clock_path)?;
                     let mut body = Vec::with_capacity(16);
@@ -6685,7 +6831,7 @@ fn start_clock_console(
                     println!("Weather: rain={rain} thunder={thunder}");
                     Ok(())
                 }
-                ["/weather", "set", kind] => (|| -> io::Result<()> {
+                ["/weather", "set", kind] | ["/weather", kind] if matches!(*kind, "clear" | "rain" | "thunder") => (|| -> io::Result<()> {
                     clock.set_weather(kind)?;
                     clock.save_ticks(&clock_path)?;
                     for body in clock.weather_packets() {
@@ -6694,17 +6840,11 @@ fn start_clock_console(
                     println!("Weather set to {kind}");
                     Ok(())
                 })(),
-                ["/tp", name, x, y, z] => (|| -> io::Result<()> {
-                    let parse = |value: &str| {
-                        value
-                            .parse::<f64>()
-                            .map_err(|_| bad("invalid teleport coordinate"))
-                    };
-                    let position = PlayerPosition {
-                        x: parse(x)?,
-                        y: parse(y)?,
-                        z: parse(z)?,
-                    };
+                ["/tp" | "/teleport", name, x, y, z] => (|| -> io::Result<()> {
+                    let origin = hub.player_position(name)?.ok_or_else(|| {
+                        io::Error::new(ErrorKind::NotFound, "target not online")
+                    })?;
+                    let position = commands::teleport_coordinates(x, y, z, origin)?;
                     if !hub.request_admin_teleport(name, position)? {
                         return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
                     }

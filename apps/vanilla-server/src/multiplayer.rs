@@ -3,6 +3,7 @@
 //! No Pumpkin code is copied or linked.
 use crate::dimensions::Dimension;
 use crate::player::PlayerPosition;
+use crate::items_1710;
 use crate::world::VIEW_DISTANCE;
 use legacy_protocol::{write_string, write_varint};
 use std::collections::BTreeMap;
@@ -25,6 +26,8 @@ pub const ADMIN_GAMEMODE_EVENT: u32 = u32::MAX - 4;
 pub const PISTON_PUSH_EVENT: u32 = u32::MAX - 5;
 /// Server-owned dispenser arrow hit; the session persists HP before notifying.
 pub const DISPENSER_ARROW_DAMAGE_EVENT: u32 = u32::MAX - 6;
+/// Validated console/verified-OP item grant; applied by the inventory owner.
+pub const ADMIN_GIVE_EVENT: u32 = u32::MAX - 7;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -156,6 +159,40 @@ impl Hub {
     pub fn names(&self) -> io::Result<Vec<String>> {
         let inner = self.0.lock().map_err(|_| poisoned())?;
         Ok(inner.players.values().map(|p| p.name.clone()).collect())
+    }
+     /// Resolve a live player's authoritative last-reported position.
+    pub fn player_position(&self, name: &str) -> io::Result<Option<PlayerPosition>> {
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        Ok(inner.players.values().find(|p| p.name.eq_ignore_ascii_case(name)).map(|p| p.position))
+    }
+
+    /// Deliver one packet to a connected player without broadcasting a whisper.
+    pub fn send_to_name(&self, name: &str, packet: Event) -> io::Result<bool> {
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        if let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(name)) {
+            enqueue(peer, &packet);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Command grants must not mutate another thread's inventory directly.
+    pub fn request_admin_give(&self, name: &str, id: i16, count: u8, damage: i16) -> io::Result<bool> {
+        if !(1..=64).contains(&count) || !items_1710::valid_damage(id, damage) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid give item"));
+        }
+        let mut body = Vec::with_capacity(5);
+        body.extend_from_slice(&id.to_be_bytes());
+        body.push(count);
+        body.extend_from_slice(&damage.to_be_bytes());
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        if let Some(peer) = inner.players.values().find(|p| p.name.eq_ignore_ascii_case(name)) {
+            enqueue(peer, &Event { id: ADMIN_GIVE_EVENT, body });
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
     /// UUID attached to the currently admitted peer. Caller must ensure the
     /// server is configured online-mode before treating it as authenticated.
