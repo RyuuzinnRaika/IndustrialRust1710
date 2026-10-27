@@ -343,27 +343,22 @@ mod tests {
             damage: 0,
             nbt: None,
         };
-        let (initial, spawned) = original
-            .stage_put_many(&[stack], (0, 65, 0))
-            .unwrap();
+        let (initial, spawned) = original.stage_put_many(&[stack], (0, 65, 0)).unwrap();
         let id = spawned[0].id;
         assert!(initial.stage_take_amount(id, 0).is_err());
         assert!(initial.stage_take_amount(id, 6).is_err());
-        let (partial, picked, remainder) = initial
-            .stage_take_amount(id, 2)
-            .unwrap()
-            .unwrap();
+        let (partial, picked, remainder) = initial.stage_take_amount(id, 2).unwrap().unwrap();
         assert_eq!(picked.stack.count, 2);
         let remaining = remainder.unwrap();
         assert_eq!(remaining.id, id);
         assert_eq!(remaining.stack.count, 3);
         assert_eq!(partial.entries.get(&id), Some(&remaining));
-        assert_eq!(partial.eligible_after.get(&id), initial.eligible_after.get(&id));
+        assert_eq!(
+            partial.eligible_after.get(&id),
+            initial.eligible_after.get(&id)
+        );
         assert_eq!(initial.entries.get(&id).unwrap().stack.count, 5);
-        let (empty, rest, no_remainder) = partial
-            .stage_take_amount(id, 3)
-            .unwrap()
-            .unwrap();
+        let (empty, rest, no_remainder) = partial.stage_take_amount(id, 3).unwrap().unwrap();
         assert_eq!(rest.stack.count, 3);
         assert!(no_remainder.is_none());
         assert!(!empty.entries.contains_key(&id));
