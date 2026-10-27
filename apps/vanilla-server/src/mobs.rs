@@ -255,8 +255,16 @@ impl Mob {
         }
         body.extend_from_slice(&[0, 0]); // flags byte
         if self.baby {
-            body.push((2 << 5) | 12); // metadata index 12, type 2 (int)
-            body.extend_from_slice(&(-24000i32).to_be_bytes());
+            if matches!(self.kind, Kind::Zombie | Kind::ZombiePigman) {
+                // Zombie and pig-zombie use a byte child flag at index 12.
+                // Sending the ageable-mob integer here makes 1.7.10's
+                // EntityZombie cast the watcher value to Byte and crash.
+                body.extend_from_slice(&[12, 1]);
+            } else {
+                // Other ageable mobs encode their growing age as an integer.
+                body.push((2 << 5) | 12); // metadata index 12, type 2 (int)
+                body.extend_from_slice(&(-24000i32).to_be_bytes());
+            }
         }
         if self.kind == Kind::Zombie && self.zombie_villager {
             // Protocol 5 / Java 1.7.10: zombie DataWatcher byte 13
@@ -6411,7 +6419,8 @@ mod tests {
         assert!(size.body.windows(2).any(|bytes| bytes == [16, 4]));
         assert_eq!(mobs.entities.get(&0).unwrap().health, 16);
         let baby = mobs.insert(Kind::Zombie, pos, true);
-        assert!(baby
+        assert!(baby.body.windows(2).any(|bytes| bytes == [12, 1]));
+        assert!(!baby
             .body
             .windows(5)
             .any(|bytes| bytes == [76, 255, 255, 162, 64]));
@@ -6420,6 +6429,13 @@ mod tests {
             .body
             .windows(5)
             .any(|bytes| bytes == [80, 0, 0, 0, 0]));
+        let baby_pigman = mobs.insert(Kind::ZombiePigman, pos, true);
+        assert!(baby_pigman.body.windows(2).any(|bytes| bytes == [12, 1]));
+        let baby_cow = mobs.insert(Kind::Cow, pos, true);
+        assert!(baby_cow
+            .body
+            .windows(5)
+            .any(|bytes| bytes == [76, 255, 255, 162, 64]));
     }
 
     #[test]

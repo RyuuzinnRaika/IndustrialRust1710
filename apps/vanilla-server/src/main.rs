@@ -1259,6 +1259,7 @@ fn play(
     // Only one outstanding server-issued KeepAlive may refresh liveness.
     // An unsolicited, replayed or cross-session ID must never count as a pong.
     let mut pending_ping: Option<i32> = None;
+    let trace_keepalive = std::env::var_os("IR_TRACE_KEEPALIVE").is_some();
     let mut last_time_tick: u64 = clock.ticks();
     let mut last_vitals_tick = clock.ticks();
     let mut admission_check = started;
@@ -2310,8 +2311,18 @@ fn play(
             send(s, 0, &ping_id.to_be_bytes())?;
             pending_ping = Some(ping_id);
             ping_time = Instant::now();
+            if trace_keepalive {
+                eprintln!("keepalive trace: sent challenge id={ping_id}");
+            }
         }
         if pong_time.elapsed() > Duration::from_secs(40) {
+            if trace_keepalive {
+                eprintln!(
+                    "keepalive trace: timeout pending={pending_ping:?} since_last_pong={}ms since_last_ping={}ms",
+                    pong_time.elapsed().as_millis(),
+                    ping_time.elapsed().as_millis()
+                );
+            }
             return Err(bad("keepalive timeout"));
         }
         let data = match packet_reader.poll(s) {
@@ -2727,6 +2738,11 @@ fn play(
             0 => {
                 let reply = input.i32()?;
                 input.finish()?;
+                if trace_keepalive {
+                    eprintln!(
+                        "keepalive trace: received reply id={reply} pending={pending_ping:?}"
+                    );
+                }
                 if pending_ping == Some(reply) {
                     pending_ping = None;
                     pong_time = Instant::now();
