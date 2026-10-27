@@ -122,6 +122,7 @@ use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
 
 const MAX_CONNECTIONS: usize = 32;
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(40);
 // Internal to Hub; no such packet ID is ever sent on the Protocol 5 wire.
 const CHUNK_RELIGHT_EVENT: u32 = u32::MAX;
 fn bad(reason: &'static str) -> io::Error {
@@ -130,6 +131,10 @@ fn bad(reason: &'static str) -> io::Error {
 
 fn keepalive_challenge_due(pending_ping: Option<i32>, last_ping: Instant, now: Instant) -> bool {
     pending_ping.is_none() && now.saturating_duration_since(last_ping) >= KEEPALIVE_INTERVAL
+}
+
+fn keepalive_challenge_expired(pending_ping: Option<i32>, sent_at: Instant, now: Instant) -> bool {
+    pending_ping.is_some() && now.saturating_duration_since(sent_at) > KEEPALIVE_TIMEOUT
 }
 
 fn accept_keepalive_reply(
@@ -2336,12 +2341,12 @@ fn play(
             }
             send(s, 0, &ping_id.to_be_bytes())?;
             pending_ping = Some(ping_id);
-            ping_time = now;
+            ping_time = Instant::now();
             if trace_keepalive {
                 eprintln!("keepalive trace: sent challenge id={ping_id}");
             }
         }
-        if pong_time.elapsed() > Duration::from_secs(40) {
+        if keepalive_challenge_expired(pending_ping, ping_time, Instant::now()) {
             if trace_keepalive {
                 eprintln!(
                     "keepalive trace: timeout pending={pending_ping:?} since_last_pong={}ms since_last_ping={}ms",
@@ -9698,6 +9703,26 @@ mod disconnect_diagnostics_tests {
             pending_ping,
             ping_time,
             received_at + KEEPALIVE_INTERVAL,
+        ));
+    }
+
+    #[test]
+    fn keepalive_timeout_counts_from_the_outstanding_challenge() {
+        let sent_at = Instant::now();
+        assert!(!keepalive_challenge_expired(
+            Some(101),
+            sent_at,
+            sent_at + Duration::from_secs(32),
+        ));
+        assert!(keepalive_challenge_expired(
+            Some(101),
+            sent_at,
+            sent_at + Duration::from_secs(41),
+        ));
+        assert!(!keepalive_challenge_expired(
+            None,
+            sent_at,
+            sent_at + Duration::from_secs(41),
         ));
     }
 }

@@ -325,3 +325,48 @@ fn vanilla_1710_terrain_loading_keepalives_preserve_challenge_validation() {
     must_close(socket);
     server.wait_online(0);
 }
+
+#[test]
+fn keepalive_challenge_allows_full_response_timeout() {
+    let server = Server::launch();
+    let mut socket = server.login("RustTester");
+    server.wait_online(1);
+    socket
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let challenge = loop {
+        assert!(Instant::now() < deadline, "no server KeepAlive challenge");
+        let (id, payload) = receive(&mut socket);
+        if id == 0 {
+            break payload;
+        }
+    };
+
+    // Keep ordinary player traffic flowing while delaying the answer. A
+    // challenge sent ten seconds after the last pong must still have the full
+    // 40-second reply window; the previous check expired after ~30 s.
+    for _ in 0..32 {
+        socket.write_all(&frame(3, &[1])).unwrap();
+        thread::sleep(Duration::from_secs(1));
+    }
+    assert_eq!(server.status_online(), 1, "challenge expired too early");
+    socket.write_all(&frame(0, &challenge)).unwrap();
+
+    // A new challenge proves the late response was actually accepted, rather
+    // than merely leaving the session open until the original timeout.
+    let next_deadline = Instant::now() + Duration::from_secs(15);
+    let next_challenge = loop {
+        assert!(
+            Instant::now() < next_deadline,
+            "late reply was not accepted"
+        );
+        let (id, payload) = receive(&mut socket);
+        if id == 0 {
+            break payload;
+        }
+    };
+    assert_ne!(next_challenge, challenge);
+    socket.write_all(&frame(0, &next_challenge)).unwrap();
+    assert_eq!(server.status_online(), 1);
+}
