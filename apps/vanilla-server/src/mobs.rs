@@ -2352,7 +2352,7 @@ impl Mobs {
                 };
                 if is_passive
                     && (world.get(cx, cy - 1, cz) >> 4 != 2
-                        || !overworld_biome_allows_passive_spawn(world.biome_at(cx, cz)))
+                        || !overworld_biome_allows_passive_species(world.biome_at(cx, cz), kind))
                 {
                     continue;
                 }
@@ -3273,6 +3273,14 @@ fn overworld_biome_allows_passive_spawn(biome: u8) -> bool {
         biome,
         0 | 2 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 24 | 25 | 26 | 130 | 140
     ) && !matches!(biome, 37..=39 | 165..=167)
+}
+
+/// Every member of a natural passive pack must have its species in the
+/// destination biome's spawn list. In 1.7.10 horses are listed only in
+/// Plains/Savanna variants, even if an adjacent Forest has grass and light.
+fn overworld_biome_allows_passive_species(biome: u8, kind: Kind) -> bool {
+    overworld_biome_allows_passive_spawn(biome)
+        && (kind != Kind::Horse || horse_spawn_weight(biome) > 0)
 }
 
 fn overworld_passive_kind(biome: u8, roll: u64) -> Kind {
@@ -4795,6 +4803,24 @@ mod tests {
         }
         for biome in [1, 4, 5, 6] {
             assert!(overworld_biome_allows_passive_spawn(biome));
+        }
+    }
+
+    #[test]
+    fn horse_pack_members_cannot_cross_into_biomes_without_horse_entries() {
+        // A pack may start in Plains or Savanna, but its later members
+        // must not appear in an adjacent Forest, Taiga or Swamp on grass.
+        for biome in [1, 129, 35, 36, 163, 164] {
+            assert!(overworld_biome_allows_passive_species(biome, Kind::Horse));
+            assert!(overworld_biome_allows_passive_species(biome, Kind::Cow));
+        }
+        for biome in [4, 5, 6, 18, 27] {
+            assert!(!overworld_biome_allows_passive_species(biome, Kind::Horse));
+            assert!(overworld_biome_allows_passive_species(biome, Kind::Cow));
+        }
+        for biome in [0, 14, 16, 25, 37, 165] {
+            assert!(!overworld_biome_allows_passive_species(biome, Kind::Horse));
+            assert!(!overworld_biome_allows_passive_species(biome, Kind::Cow));
         }
     }
 
