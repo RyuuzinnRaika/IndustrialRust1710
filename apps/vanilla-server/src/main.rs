@@ -2438,7 +2438,7 @@ fn play(
                 location = (x, y, z);
                 *player = candidate;
                 // A10: server-authoritative source-frame and destination validation.
-                // Nether requires 4 seconds' contact; the End activates on entry.
+                // Nether requires 4 seconds' contact; End gateways activate in either direction.
                 if let Some(worlds) = dimension_worlds {
                     let px = x.floor() as i32;
                     let py = y.floor() as i32;
@@ -2459,8 +2459,11 @@ fn play(
                                 _ => now_tick,
                             };
                             portal_since = Some((target, entered_at));
-                            let is_ready = target == dimensions::Dimension::End
-                                || now_tick.saturating_sub(entered_at) >= 80;
+                            let is_ready = dimensions::portal_contact_ready(
+                                *session_dimension,
+                                target,
+                                now_tick.saturating_sub(entered_at),
+                            );
                             if is_ready {
                                 if let Some(arrival) =
                                     worlds.resolve_portal(*session_dimension, bx, by, bz)?
