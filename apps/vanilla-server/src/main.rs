@@ -1851,7 +1851,7 @@ fn play(
                 let mut candidate = inventory.clone();
                 if let Some((count, slots)) = candidate.receive_stack_partial(item.stack) {
                     if let Some((staged_ground, collected, remainder)) =
-                        ground.stage_take_amount(item.id, count)?
+                        ground.stage_claim_ready(item.id, count, location)?
                     {
                         journal::commit(
                             &world_path.with_extension("pending-txn.json"),
