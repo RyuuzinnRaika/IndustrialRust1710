@@ -11,7 +11,22 @@ use std::path::Path;
 pub(super) struct PrimedTnt {
     pub(super) entity_id: i32,
     pub(super) pos: (i32, i32, i32),
+    // Signed 1/4096 block units: deterministic, finite, and serializable.
+    pub(super) position_fp: [i32; 3],
+    pub(super) velocity_fp: [i32; 3],
     pub(super) explode_at: u64,
+}
+
+impl PrimedTnt {
+    pub(super) fn legacy(entity_id: i32, pos: (i32, i32, i32), explode_at: u64) -> Self {
+        Self {
+            entity_id,
+            pos,
+            position_fp: [pos.0 * 4096 + 2048, pos.1 * 4096, pos.2 * 4096 + 2048],
+            velocity_fp: [0, 0, 0],
+            explode_at,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +38,10 @@ pub enum TntEvent {
     Explode {
         entity_id: i32,
         pos: (i32, i32, i32),
+    },
+    Move {
+        entity_id: i32,
+        position_fp: [i32; 3],
     },
 }
 
@@ -68,14 +87,19 @@ impl World {
             self.next_tnt_id.saturating_add(1)
         };
         let entity_id = self.next_tnt_id;
-        self.primed_tnt.insert(
-            entity_id,
-            PrimedTnt {
-                entity_id,
-                pos: (x, y, z),
-                explode_at: self.fluid_phase.saturating_add(fuse),
-            },
-        );
+        let mut tnt =
+            PrimedTnt::legacy(entity_id, (x, y, z), self.fluid_phase.saturating_add(fuse));
+        // The vanilla 1.7.10 TNT entity starts with a 0.2 upward kick
+        // and a small horizontal impulse, derived deterministically here.
+        let angle = f64::from((entity_id as u32).wrapping_mul(2654435761) % 65536)
+            * std::f64::consts::TAU
+            / 65536.0;
+        tnt.velocity_fp = [
+            (-angle.sin() * 0.02 * 4096.0).round() as i32,
+            (0.2f64 * 4096.0).round() as i32,
+            (-angle.cos() * 0.02 * 4096.0).round() as i32,
+        ];
+        self.primed_tnt.insert(entity_id, tnt);
         self.tnt_events.push(TntEvent::Spawn {
             entity_id,
             pos: (x, y, z),
@@ -102,6 +126,90 @@ impl World {
         staged.save(path)?;
         *self = staged;
         Ok(true)
+    }
+
+    /// Move active primed TNT using 1.7.10's gravity, friction and ground
+    /// bounce. Position and velocity use fixed-point to survive IRW restart.
+    /// World reads occur before the map entry is replaced, so collision is
+    /// based on the authoritative, still-committed block state.
+    pub(super) fn advance_tnt_physics(&mut self) {
+        let ids: Vec<_> = self.primed_tnt.keys().copied().collect();
+        for id in ids {
+            let Some(mut tnt) = self.primed_tnt.get(&id).copied() else {
+                continue;
+            };
+            let mut xyz = tnt.position_fp.map(|value| f64::from(value) / 4096.0);
+            let mut vel = tnt.velocity_fp.map(|value| f64::from(value) / 4096.0);
+            vel[1] -= 0.04;
+            // Horizontal collision uses the TNT's own (approximately
+            // one-block) bounds. Do not phase through an opaque wall.
+            for axis in [0, 2] {
+                let next = xyz[axis] + vel[axis];
+                let mut candidate = xyz;
+                candidate[axis] = next;
+                let cell = [
+                    candidate[0].floor() as i32,
+                    candidate[1].floor() as i32,
+                    candidate[2].floor() as i32,
+                ];
+                let id = self.get(cell[0], cell[1], cell[2]) >> 4;
+                if !matches!(id, 0 | 6 | 8..=11 | 18 | 31 | 37..=40 | 50 | 55 | 78) {
+                    vel[axis] = 0.0;
+                } else {
+                    xyz[axis] = next;
+                }
+            }
+            let next_y = (xyz[1] + vel[1]).clamp(0.0, 255.0);
+            let foot_cell = (next_y - 0.01).floor() as i32;
+            let floor_id = self.get(xyz[0].floor() as i32, foot_cell, xyz[2].floor() as i32) >> 4;
+            let grounded = vel[1] <= 0.0
+                && !matches!(floor_id, 0 | 6 | 8..=11 | 18 | 31 | 37..=40 | 50 | 55 | 78);
+            if grounded {
+                xyz[1] = f64::from(foot_cell + 1);
+            } else {
+                xyz[1] = next_y;
+            }
+            for value in &mut vel {
+                *value *= 0.98;
+            }
+            if grounded {
+                vel[0] *= 0.7;
+                vel[2] *= 0.7;
+                vel[1] *= -0.5;
+            }
+            let next_position = xyz.map(|value| (value * 4096.0).round() as i32);
+            tnt.velocity_fp = vel.map(|value| (value * 4096.0).round() as i32);
+            tnt.position_fp = next_position;
+            tnt.pos = (
+                next_position[0].div_euclid(4096),
+                next_position[1].div_euclid(4096),
+                next_position[2].div_euclid(4096),
+            );
+            if in_bounds(tnt.pos.0, tnt.pos.1, tnt.pos.2) {
+                self.primed_tnt.insert(id, tnt);
+                self.tnt_events.push(TntEvent::Move {
+                    entity_id: id,
+                    position_fp: next_position,
+                });
+            }
+        }
+    }
+
+    /// Exact coordinates for late join: no client needs to wait for the
+    /// next move event to discover an already active TNT entity.
+    pub fn visible_primed_tnt_precise(
+        &self,
+        around: crate::player::PlayerPosition,
+    ) -> Vec<(i32, [i32; 3])> {
+        self.primed_tnt
+            .values()
+            .filter(|tnt| {
+                (f64::from(tnt.position_fp[0]) / 4096.0 - around.x).abs() <= 48.0
+                    && (f64::from(tnt.position_fp[1]) / 4096.0 - around.y).abs() <= 48.0
+                    && (f64::from(tnt.position_fp[2]) / 4096.0 - around.z).abs() <= 48.0
+            })
+            .map(|tnt| (tnt.entity_id, tnt.position_fp))
+            .collect()
     }
 
     /// The existing world worker can take a pre-detonation snapshot only
@@ -145,6 +253,7 @@ impl World {
 
     /// The positions are needed when a player joins after TNT was ignited.
     /// Read-only: joining does not consume the worker's spawn-event queue.
+    #[cfg(test)] // Compatibility probe; live packet stream uses fixed-point view.
     pub fn visible_primed_tnt(
         &self,
         around: crate::player::PlayerPosition,
@@ -969,7 +1078,10 @@ mod tests {
         assert_eq!(world.drain_tnt_events().len(), 1);
         for _ in 0..79 {
             world.block_tick(&path, 64).unwrap();
-            assert!(world.drain_tnt_events().is_empty());
+            assert!(world
+                .drain_tnt_events()
+                .iter()
+                .all(|event| !matches!(event, TntEvent::Explode { .. })));
         }
         world.block_tick(&path, 64).unwrap();
         assert!(world
@@ -1337,6 +1449,85 @@ mod tests {
         assert!(restored.pending_blast_edits.is_empty());
         restored.block_tick(&path, 64).unwrap();
         assert_eq!(restored.get(2, 100, 0), 4 << 4);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn primed_tnt_falls_bounces_and_keeps_motion_across_restart() {
+        let path = file("tnt4-motion-restart");
+        let mut world = World::new();
+        assert!(world.spawn_primed_tnt(0, 75, 0, 80));
+        world.save(&path).unwrap();
+        world.drain_tnt_events();
+        let before = *world.primed_tnt.values().next().unwrap();
+        assert!(before.velocity_fp[1] > 0);
+        for _ in 0..25 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        let moved = *world.primed_tnt.values().next().unwrap();
+        assert!(moved.position_fp[1] < before.position_fp[1]);
+        assert!(moved.pos.1 >= 64);
+        assert!(world
+            .drain_tnt_events()
+            .iter()
+            .any(|event| matches!(event, TntEvent::Move { .. })));
+        let mut loaded = World::load(&path).unwrap();
+        let recovered = *loaded.primed_tnt.values().next().unwrap();
+        assert_eq!(recovered.pos, moved.pos);
+        assert_eq!(recovered.position_fp, moved.position_fp);
+        assert_eq!(recovered.velocity_fp, moved.velocity_fp);
+        // IRW fuses are relative; runtime deadlines must not be compared
+        // across a server restart with a reset world tick counter.
+        assert_eq!(recovered.explode_at, moved.explode_at - world.fluid_phase);
+        loaded.block_tick(&path, 64).unwrap();
+        assert_ne!(
+            loaded.primed_tnt.values().next().unwrap().position_fp,
+            moved.position_fp
+        );
+        // The TNT4 on-disk motion can be loaded again after /stop.
+        let replay = World::load(&path).unwrap();
+        let active = loaded.primed_tnt.values().next().unwrap();
+        let persisted = replay.primed_tnt.values().next().unwrap();
+        assert_eq!(active.position_fp, persisted.position_fp);
+        assert_eq!(active.velocity_fp, persisted.velocity_fp);
+        assert_eq!(persisted.explode_at, active.explode_at - loaded.fluid_phase);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_tnt1_tnt2_tnt3_snapshots_still_load_into_tnt4_physics() {
+        let path = file("tnt4-legacy-read");
+        let mut world = World::new();
+        assert!(world.spawn_primed_tnt(2, 200, 3, 80));
+        world.save(&path).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(&bytes[8..12], b"TNT4");
+        // All legacy formats encode 20 bytes per TNT entity.
+        let mut legacy = bytes[..8].to_vec();
+        legacy.extend_from_slice(b"TNT1");
+        legacy.extend_from_slice(&1u16.to_be_bytes());
+        legacy.extend_from_slice(&bytes[14..34]);
+        for version in [1, 2, 3] {
+            let mut source = legacy.clone();
+            source[8..12].copy_from_slice(match version {
+                1 => b"TNT1",
+                2 => b"TNT2",
+                _ => b"TNT3",
+            });
+            if version >= 2 {
+                source.extend_from_slice(&0u32.to_be_bytes());
+            }
+            if version == 3 {
+                source.extend_from_slice(&0u32.to_be_bytes());
+            }
+            fs::write(&path, &source).unwrap();
+            let restored = World::load(&path).unwrap();
+            let entity = restored.primed_tnt.values().next().unwrap();
+            assert_eq!(entity.pos, (2, 200, 3));
+            assert_eq!(entity.velocity_fp, [0; 3]);
+            restored.save(&path).unwrap();
+            assert_eq!(&fs::read(&path).unwrap()[8..12], b"TNT4");
+        }
         fs::remove_file(path).ok();
     }
 
