@@ -112,15 +112,31 @@ JSONL rows cause recovery to fail closed, with a visible startup error rather
 than discarding evidence. Normal death/respawn remains best-effort if the
 diagnostic outbox cannot be created during play.
 
-### D02 still outstanding
+### D02 atomic death-accounting improvement
 
-This outbox is saved after the player HP transition is written and after the
-existing scoreboard death increment in the session. **A crash between these
-operations can still leave a missing death event or an inconsistent score.**
-The outbox protects only events whose preparation completed. Achieving strict
-cross-file exactly-once requires a single redo transaction for **player HP,
-scoreboard and the event outbox**, plus tested power-failure recovery. The
-current improvement must **not** be represented as full D02 completion.
+For the seven identified fatal-damage paths, the first HP transition to zero
+now uses the existing bounded \`pending-txn.json\` redo journal to commit
+**three participants in one transaction**:
+
+1. The player's gzip-NBT position/vitals (including 0 HP)
+2. The player's new \`*.death-outbox.json\` event ID and full death event
+3. The world scoreboard image with the incremented \`deathCount\` objective
+
+The scoreboard is updated in memory and broadcast **only after** the redo
+commit succeeds. A repeated dead-session loop cannot increment deathCount
+again, and the JSONL log replays the committed outbox ID once. The journal
+target whitelist now admits **only identity-scoped** player death outboxes and
+root-level scoreboard files; symlinks remain prohibited.
+
+If a fatal journal application fails, disconnect-time player NBT save is
+suppressed so it cannot overwrite prepared redo targets before recovery.
+
+The fallback for any *unrecognized future* fatal damage path still uses the
+legacy separate scoreboard+outbox sequence; it must eventually be replaced by
+the shared fatal transaction wrapper. The entire change requires **Rust
+formatting, unit/integration tests, failpoint-based recovery and a 1.7.10
+native client run before being considered accepted**. Source-only inspection
+does not establish full D02 completion.
 
 ### Manual and local tests
 
@@ -132,4 +148,9 @@ current improvement must **not** be represented as full D02 completion.
 - [ ] Verify two successive deaths of one player produce two different IDs.
 - [ ] Verify an invalid outbox fails closed, without modifying world files.
 - [ ] Verify existing legacy death rows lacking \`event_id\` remain readable.
+- [ ] Power-fail between prepare, journal rename, each target rename, and
+      journal cleanup; recover and verify NBT HP/outbox/deathCount agree.
+- [ ] Repeated fatal loop and reconnect cannot increase deathCount twice.
+- [ ] The old, uncategorized fatal-path fallback is replaced by the same redo
+      transaction before D02 is marked fully complete.
 - [ ] Check TPS cost as JSONL approaches 64 MiB.
