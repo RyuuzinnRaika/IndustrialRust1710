@@ -5164,7 +5164,7 @@ mod tests {
         let edge = |x: f64, z: f64| PlayerPosition { x, y: 65.0, z };
         let limit = f64::from(crate::world::WORLD_LIMIT);
         let max = edge(limit - 0.5, limit - 0.5);
-        let min = edge(-limit + 0.5, -limit + 0.5);
+        let min = edge(-limit, -limit);
         assert_eq!(natural_mob_cap(&[max], 70), 79);
         assert_eq!(natural_mob_cap(&[min], 10), 11);
         assert_eq!(natural_mob_cap(&[max, max], 70), 79);
@@ -5172,14 +5172,14 @@ mod tests {
         assert!(natural_spawn_chunk_eligible(max, &[max]));
         assert!(natural_spawn_chunk_eligible(min, &[min]));
 
-        // Exact positive and negative borders are excluded by PlayerPosition
-        // validation. They must not add chunks, protect mobs from despawning,
+        // The positive border is exclusive, but the negative border is inclusive.
+        // Out-of-world coordinates must not protect mobs from despawning,
         // or make a candidate chunk eligible.
         for outside in [
             edge(limit, 0.5),
-            edge(-limit, 0.5),
+            edge(-limit - 0.5, 0.5),
             edge(0.5, limit),
-            edge(0.5, -limit),
+            edge(0.5, -limit - 0.5),
             edge(f64::from(i32::MAX), 0.5),
             edge(f64::from(i32::MIN), 0.5),
         ] {
@@ -5410,15 +5410,15 @@ mod tests {
         assert!(mobs.entities.contains_key(&id));
         assert_eq!(mobs.entities[&id].far_from_player_ticks, 600);
 
-        // Near the signed block boundary, an invalid coordinate can look
-        // closer than a real distant player. Ignore it for the nearest-player
-        // test rather than incorrectly protecting the mob from despawn.
+        // Near the world border, an invalid coordinate can look closer than
+        // a real distant player. Ignore it for the nearest-player test.
+        let limit = f64::from(crate::world::WORLD_LIMIT);
         let edge = PlayerPosition {
-            x: f64::from(i32::MAX) - 2.5,
+            x: limit - 2.5,
             ..at
         };
         let outside = PlayerPosition {
-            x: f64::from(i32::MAX) + 1.0,
+            x: limit + 1.0,
             ..at
         };
         assert!(distance_to_players(edge, &[outside, at]) > 128.0);
