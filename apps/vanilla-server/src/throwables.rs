@@ -300,7 +300,8 @@ impl Throwables {
         self.tick_with_mob_targets(world, tick, &[])
     }
 
-    /// Preserve the Mob-only API for existing callers and regression tests.
+    /// Preserve the Mob-only API for existing regression tests.
+    #[cfg(test)]
     pub fn tick_with_mob_targets(
         &mut self,
         world: &World,
@@ -393,16 +394,19 @@ impl Throwables {
                     mob_collision = Some((*mob_id, sample));
                     break;
                 }
-                if object.kind == Kind::Arrow {
-                    if let Some((player_id, _)) = player_targets.iter().find(|(id, at)| {
+                let hit_player = if object.kind == Kind::Arrow {
+                    player_targets.iter().find(|(id, at)| {
                         *id != object.owner_entity
                             && (sample.x - at.x).hypot(sample.z - at.z) <= 0.3
                             && sample.y >= at.y - 0.25
                             && sample.y <= at.y + 2.05
-                    }) {
-                        player_collision = Some((*player_id, sample));
-                        break;
-                    }
+                    })
+                } else {
+                    None
+                };
+                if let Some((player_id, _)) = hit_player {
+                    player_collision = Some((*player_id, sample));
+                    break;
                 }
             }
             if let Some((player_id, at)) = player_collision {
@@ -990,13 +994,33 @@ mod tests {
             .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
             .unwrap();
         let players = [
-            (42, PlayerPosition { x: 2.0, y: 70.0, z: 0.5 }),
-            (43, PlayerPosition { x: 2.0, y: 70.0, z: 0.5 }),
+            (
+                42,
+                PlayerPosition {
+                    x: 2.0,
+                    y: 70.0,
+                    z: 0.5,
+                },
+            ),
+            (
+                43,
+                PlayerPosition {
+                    x: 2.0,
+                    y: 70.0,
+                    z: 0.5,
+                },
+            ),
         ];
         let world = World::new();
         let hit = objects.tick_with_targets(&world, 20, &[], &players);
         assert_eq!(hit.player_hits, vec![42]);
-        assert_eq!(hit.events.iter().filter(|(_, event)| event.id == 0x13).count(), 1);
+        assert_eq!(
+            hit.events
+                .iter()
+                .filter(|(_, event)| event.id == 0x13)
+                .count(),
+            1
+        );
         assert!(objects.active.is_empty());
         assert_eq!(objects.nearby_embedded_arrow((2.0, 70.0, 0.5)), None);
         let replay = objects.tick_with_targets(&world, 20, &[], &players);
@@ -1012,7 +1036,14 @@ mod tests {
         objects
             .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
             .unwrap();
-        let players = [(42, PlayerPosition { x: 2.5, y: 70.0, z: 0.5 })];
+        let players = [(
+            42,
+            PlayerPosition {
+                x: 2.5,
+                y: 70.0,
+                z: 0.5,
+            },
+        )];
         let impact = objects.tick_with_targets(&world, 20, &[], &players);
         assert!(impact.player_hits.is_empty());
         assert!(objects.active.values().next().unwrap().embedded);
