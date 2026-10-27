@@ -18,15 +18,13 @@ pub(super) fn edge_map<F>(
     world_seed: i64,
     layer_salt: i64,
     mode: EdgeMode,
-    x: i32,
-    z: i32,
-    width: usize,
-    height: usize,
+    area: (i32, i32, usize, usize),
     parent: F,
 ) -> Vec<i32>
 where
     F: Fn(i32, i32, usize, usize) -> Vec<i32>,
 {
+    let (x, z, width, height) = area;
     if width == 0 || height == 0 {
         return Vec::new();
     }
@@ -144,7 +142,7 @@ mod tests {
             (EdgeMode::CoolWarm, cool_warm),
             (EdgeMode::HeatIce, heat_ice),
         ] {
-            let actual = edge_map(42, 2, mode, -17, -17, 8, 8, patterned_parent);
+            let actual = edge_map(42, 2, mode, (-17, -17, 8, 8), patterned_parent);
             assert_eq!(hex_rows(&actual), expected, "mode={mode:?}");
         }
         let special_cases = [
@@ -195,7 +193,7 @@ mod tests {
             ),
         ];
         for (seed, x, z, expected) in special_cases {
-            let actual = edge_map(seed, 3, EdgeMode::Special, x, z, 8, 8, patterned_parent);
+            let actual = edge_map(seed, 3, EdgeMode::Special, (x, z, 8, 8), patterned_parent);
             assert_eq!(hex_rows(&actual), expected, "seed={seed} at ({x},{z})");
         }
     }
@@ -222,12 +220,12 @@ mod tests {
             }
             values
         };
-        assert_eq!(edge_map(42, 2, EdgeMode::CoolWarm, 0, 0, 1, 1, parent), [2]);
-        assert_eq!(edge_map(42, 2, EdgeMode::HeatIce, 4, 0, 1, 1, parent), [3]);
+        assert_eq!(edge_map(42, 2, EdgeMode::CoolWarm, (0, 0, 1, 1), parent), [2]);
+        assert_eq!(edge_map(42, 2, EdgeMode::HeatIce, (4, 0, 1, 1), parent), [3]);
         // Only diagonal warm land is present, so the cold cell stays cold.
-        assert_eq!(edge_map(42, 2, EdgeMode::HeatIce, 0, 4, 1, 1, parent), [4]);
+        assert_eq!(edge_map(42, 2, EdgeMode::HeatIce, (0, 4, 1, 1), parent), [4]);
         assert_eq!(
-            edge_map(42, 3, EdgeMode::Special, 10, 10, 1, 1, |_, _, _, _| vec![0]),
+            edge_map(42, 3, EdgeMode::Special, (10, 10, 1, 1), |_, _, _, _| vec![0]),
             [0]
         );
     }
@@ -235,10 +233,10 @@ mod tests {
     #[test]
     fn split_requests_match_negative_chunk_boundaries_for_all_modes() {
         for mode in [EdgeMode::CoolWarm, EdgeMode::HeatIce, EdgeMode::Special] {
-            let whole = edge_map(42, 3, mode, -17, -17, 8, 8, patterned_parent);
+            let whole = edge_map(42, 3, mode, (-17, -17, 8, 8), patterned_parent);
             for dz in (0..8).rev() {
                 for dx in (0..8).rev() {
-                    let cell = edge_map(42, 3, mode, -17 + dx, -17 + dz, 1, 1, patterned_parent);
+                    let cell = edge_map(42, 3, mode, (-17 + dx, -17 + dz, 1, 1), patterned_parent);
                     assert_eq!(cell[0], whole[(dz * 8 + dx) as usize]);
                 }
             }
@@ -249,8 +247,8 @@ mod tests {
     fn zero_sized_requests_do_not_evaluate_parent() {
         for mode in [EdgeMode::CoolWarm, EdgeMode::HeatIce, EdgeMode::Special] {
             let no_parent = |_, _, _, _| -> Vec<i32> { panic!("parent called") };
-            assert!(edge_map(42, 2, mode, 0, 0, 0, 8, no_parent).is_empty());
-            assert!(edge_map(42, 2, mode, 0, 0, 8, 0, no_parent).is_empty());
+            assert!(edge_map(42, 2, mode, (0, 0, 0, 8), no_parent).is_empty());
+            assert!(edge_map(42, 2, mode, (0, 0, 8, 0), no_parent).is_empty());
         }
     }
 }
