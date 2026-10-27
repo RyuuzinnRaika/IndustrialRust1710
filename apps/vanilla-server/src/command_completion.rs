@@ -13,7 +13,7 @@ const PUBLIC: &[&str] = &["/help", "/?", "/list", "/me", "/tell", "/msg", "/w"];
 const LEVEL_2: &[&str] = &[
     "/time", "/weather", "/tp", "/teleport", "/gamemode", "/give",
     "/clear", "/setblock", "/effect", "/summon", "/enchant",
-    "/testforblock", "/seed", "/spawnpoint",
+    "/testforblock", "/seed", "/spawnpoint", "/setworldspawn", "/gamerule", "/difficulty",
 ];
 const LEVEL_3: &[&str] = &[
     "/kick", "/ban", "/pardon", "/pardon-uuid", "/ban-ip", "/pardon-ip",
@@ -143,7 +143,7 @@ pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
             ("/tell" | "/msg" | "/w", 1)
             | (
                 "/give" | "/enchant" | "/effect" | "/kick" | "/ban" | "/pardon" | "/op"
-                | "/deop" | "/clear" | "/permission",
+                | "/deop" | "/clear" | "/permission" | "/spawnpoint",
                 1,
             )
             | ("/gamemode", 2) => players(&mut found, prefix, online),
@@ -153,8 +153,12 @@ pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
             }
             ("/tp" | "/teleport", 2..=4)
             | ("/spawnpoint", 2..=4)
+            | ("/setworldspawn", 1..=3)
             | ("/summon", 2..=4)
             | ("/setblock" | "/testforblock", 1..=3) => add(&mut found, prefix, &["~"]),
+            ("/gamerule", 1) => add(&mut found, prefix, &["keepInventory", "doDaylightCycle", "doMobSpawning", "showDeathMessages"]),
+            ("/gamerule", 2) => add(&mut found, prefix, &["true", "false"]),
+            ("/difficulty", 1) => add(&mut found, prefix, &["0", "1", "2", "3", "peaceful", "easy", "normal", "hard"]),
             ("/gamemode", 1) => {
                 add(&mut found, prefix, &["survival", "creative", "0", "1"]);
             }
@@ -241,6 +245,10 @@ mod tests {
         assert_eq!(complete("/tell st", 0, &people), vec!["Stefan", "Steve"]);
         assert_eq!(complete("/give St", 2, &people), vec!["Stefan", "Steve"]);
         assert_eq!(complete("/spawnpoint St", 2, &people), vec!["Stefan", "Steve"]);
+        assert_eq!(complete("/difficulty h", 2, &people), vec!["hard"]);
+        assert_eq!(complete("/gamerule showD", 2, &people), vec!["showDeathMessages"]);
+        assert_eq!(complete("/gamerule showDeathMessages f", 2, &people), vec!["false"]);
+        assert_eq!(complete("/setworldspawn ~", 2, &people), vec!["~"]);
         assert_eq!(complete("/gamemode c", 2, &people), vec!["creative"]);
         assert_eq!(complete("/weather r", 2, &people), vec!["rain"]);
         assert_eq!(complete("/time set n", 2, &people), vec!["night"]);
@@ -260,6 +268,8 @@ mod tests {
         assert!(complete("/execute ", 4, &people).is_empty());
         assert!(complete("/op St", 0, &people).is_empty());
         assert!(complete("/give St", 0, &people).is_empty());
+        assert!(complete("/spawnpoint St", 0, &people).is_empty());
+        assert!(complete("/difficulty", 0, &people).is_empty());
         assert!(complete("/\n", 4, &people).is_empty());
     }
     #[test]
