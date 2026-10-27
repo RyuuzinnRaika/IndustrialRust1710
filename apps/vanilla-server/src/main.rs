@@ -946,7 +946,9 @@ fn commit_food_consumption(
     staged_vitals: Vitals,
 ) -> io::Result<()> {
     let inventory_bytes = staged_inventory.encoded()?;
-    let player_bytes = save.player.encoded_state_in_dimension(staged_vitals, save.dimension)?;
+    let player_bytes = save
+        .player
+        .encoded_state_in_dimension(staged_vitals, save.dimension)?;
     let log_path = food_journal_path(save.world_path, save.player_path)?;
     journal::commit(
         &log_path,
