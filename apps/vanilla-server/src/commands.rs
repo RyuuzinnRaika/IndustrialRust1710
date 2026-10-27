@@ -550,6 +550,15 @@ pub fn testforblock_args(
     };
     Ok((x, y, z, id, data))
 }
+
+/// 1.7.10 /seed must expose a real persisted world seed, never make up a
+/// value for the legacy IRW1 flat-world format which stores no seed.
+pub fn seed_text(world: &crate::world::World) -> io::Result<String> {
+    world.natural_seed()
+        .map(|seed| format!("World seed: {seed}"))
+        .ok_or_else(|| invalid("this flat world has no persisted seed"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,6 +713,12 @@ mod tests {
         assert!(testforblock_args(["0", "256", "3"], "stone", None, None).is_err());
         assert!(testforblock_args(["0", "64", "3"], "stone", Some("16"), None).is_err());
         assert!(testforblock_args(["0", "64", "3"], "netherite_block", None, None).is_err());
+    }
+
+    #[test]
+    fn seed_query_never_invents_flat_world_seed() {
+        assert_eq!(seed_text(&crate::world::World::natural(42)).unwrap(), "World seed: 42");
+        assert!(seed_text(&crate::world::World::new()).is_err());
     }
 
     #[test]

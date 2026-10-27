@@ -3037,7 +3037,7 @@ fn play(
                         Err(usage) => as_chat(s, usage)?,
                         Ok(PublicCommand::Help) => as_chat(
                             s,
-                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /enchant, /testforblock, /time, /weather, /kick, /ban, /save.",
+                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /enchant, /testforblock, /seed, /time, /weather, /kick, /ban, /save.",
                         )?,
                         Ok(PublicCommand::List) => as_chat(
                             s,
@@ -6671,7 +6671,8 @@ fn run_player_admin_command(
         | Some("/effect")
         | Some("/summon")
         | Some("/enchant")
-        | Some("/testforblock") => 2,
+        | Some("/testforblock")
+        | Some("/seed") => 2,
         Some("/kick") | Some("/ban") | Some("/pardon") | Some("/pardon-uuid") | Some("/ban-ip")
         | Some("/pardon-ip") => 3,
         Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
@@ -6684,6 +6685,10 @@ fn run_player_admin_command(
         ));
     }
     match parts.as_slice() {
+        ["/seed"] => {
+            let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            commands::seed_text(&state)
+        }
         ["/enchant", target, enchant, rest @ ..] if rest.len() <= 1 => {
             let (id, level) = commands::enchant_args(enchant, rest.first().copied())?;
             if !hub.request_admin_enchant(target, id, level)? {
@@ -7000,7 +7005,7 @@ fn start_clock_console(
             }
             let result: io::Result<()> = match args.as_slice() {
                 ["/help"] | ["/?"] => {
-                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /seed /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
                     Ok(())
                 }
                 ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
@@ -7027,6 +7032,11 @@ fn start_clock_console(
                         Ok(())
                     })()
                 }
+                ["/seed"] => (|| -> io::Result<()> {
+                    let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    println!("{}", commands::seed_text(&state)?);
+                    Ok(())
+                })(),
                 ["/enchant", target, enchant, rest @ ..] if rest.len() <= 1 => {
                     (|| -> io::Result<()> {
                         let (id, level) = commands::enchant_args(enchant, rest.first().copied())?;
