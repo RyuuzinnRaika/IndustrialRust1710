@@ -374,6 +374,96 @@ pub fn clear_args(
     }
     Ok((id, data, max))
 }
+
+/// Only effects supported by the current authoritative survival tick are
+/// accepted. Additional effect IDs need server-side movement/damage rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectRequest {
+    Clear,
+    Remove(u8),
+    Add {
+        kind: u8,
+        amplifier: u8,
+        seconds: u16,
+    },
+}
+pub fn valid_effect_kind(kind: u8) -> bool {
+    matches!(kind, 1 | 10 | 17 | 19)
+}
+pub fn effect_args(parts: &[&str]) -> io::Result<EffectRequest> {
+    if parts.len() == 1 && parts[0] == "clear" {
+        return Ok(EffectRequest::Clear);
+    }
+    if parts.is_empty() || parts.len() > 3 {
+        return Err(invalid(
+            "Usage: /effect <player> <id|clear> [seconds] [amplifier]",
+        ));
+    }
+    let kind = match parts[0] {
+        "speed" => 1,
+        "regeneration" => 10,
+        "hunger" => 17,
+        "poison" => 19,
+        text => text
+            .parse::<u8>()
+            .map_err(|_| invalid("unknown legacy effect"))?,
+    };
+    if !valid_effect_kind(kind) {
+        return Err(invalid("effect not yet implemented by the server"));
+    }
+    let seconds = parts
+        .get(1)
+        .copied()
+        .unwrap_or("30")
+        .parse::<u16>()
+        .map_err(|_| invalid("effect duration must be 0..1200 seconds"))?;
+    if seconds > 1200 {
+        return Err(invalid("effect duration must be 0..1200 seconds"));
+    }
+    let amplifier = parts
+        .get(2)
+        .copied()
+        .unwrap_or("0")
+        .parse::<u8>()
+        .map_err(|_| invalid("effect amplifier must be 0..3"))?;
+    if amplifier > 3 {
+        return Err(invalid("effect amplifier must be 0..3"));
+    }
+    if seconds == 0 {
+        return Ok(EffectRequest::Remove(kind));
+    }
+    Ok(EffectRequest::Add {
+        kind,
+        amplifier,
+        seconds,
+    })
+}
+
+/// /summon <LegacyEntityName> [x y z]. The pre-1.8 optional SNBT compound
+/// is rejected until entity NBT validation is implemented.
+pub fn summon_coordinates(
+    args: &[&str],
+    origin: Option<PlayerPosition>,
+) -> io::Result<PlayerPosition> {
+    let coords = match args {
+        [] => return origin.ok_or_else(|| invalid("console /summon requires x y z")),
+        [x, y, z] => [*x, *y, *z],
+        _ => {
+            return Err(invalid(
+                "Usage: /summon <entity> [x y z] (NBT not implemented)",
+            ))
+        }
+    };
+    if origin.is_none() && coords.iter().any(|v| v.starts_with('~')) {
+        return Err(invalid("console summon requires absolute coordinates"));
+    }
+    let origin = origin.unwrap_or(PlayerPosition {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    });
+    teleport_coordinates(coords[0], coords[1], coords[2], origin)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +549,49 @@ mod tests {
         assert!(clear_args(Some("netherite_ingot"), None, None).is_err());
         assert!(clear_args(Some("diamond"), None, Some("-2")).is_err());
         assert!(clear_args(None, Some("0"), None).is_err());
+    }
+
+    #[test]
+    fn effect_command_enforces_1710_syntax_and_server_implemented_ids() {
+        assert_eq!(effect_args(&["clear"]).unwrap(), EffectRequest::Clear);
+        assert_eq!(
+            effect_args(&["10", "0"]).unwrap(),
+            EffectRequest::Remove(10)
+        );
+        assert_eq!(
+            effect_args(&["poison", "30", "1"]).unwrap(),
+            EffectRequest::Add {
+                kind: 19,
+                amplifier: 1,
+                seconds: 30
+            }
+        );
+        assert!(effect_args(&["night_vision"]).is_err());
+        assert!(effect_args(&["regeneration", "1201"]).is_err());
+        assert!(effect_args(&["regeneration", "30", "4"]).is_err());
+        assert!(effect_args(&["give", "Bob", "10"]).is_err());
+        assert!(effect_args(&["speed", "1", "0", "true"]).is_err());
+    }
+
+    #[test]
+    fn summon_arguments_reject_nbt_and_unverified_console_relative_origin() {
+        let player = PlayerPosition {
+            x: 7.0,
+            y: 70.0,
+            z: 9.0,
+        };
+        assert_eq!(summon_coordinates(&[], Some(player)).unwrap(), player);
+        assert_eq!(
+            summon_coordinates(&["~1", "~", "10"], Some(player)).unwrap(),
+            PlayerPosition {
+                x: 8.0,
+                y: 70.0,
+                z: 10.0
+            }
+        );
+        assert!(summon_coordinates(&[], None).is_err());
+        assert!(summon_coordinates(&["~", "64", "1"], None).is_err());
+        assert!(summon_coordinates(&["1", "64", "2", "{CustomName:A}"], Some(player)).is_err());
     }
 
     #[test]

@@ -1197,6 +1197,70 @@ impl Mobs {
         self.entities.insert(id, mob);
         event
     }
+    /// Persist a bounded 1.7.10 Mob summon *before* publishing the spawn
+    /// packet. Reuse the same entity IDs, AI and save format as natural spawns.
+    /// NBT and bosses require their own validated command implementation.
+    pub fn summon_command(
+        &mut self,
+        world: &World,
+        entity: &str,
+        at: PlayerPosition,
+    ) -> io::Result<Event> {
+        let kind = match entity {
+            "Zombie" => Kind::Zombie,
+            "Skeleton" => Kind::Skeleton,
+            "Creeper" => Kind::Creeper,
+            "Spider" => Kind::Spider,
+            "CaveSpider" => Kind::CaveSpider,
+            "Enderman" => Kind::Enderman,
+            "Slime" => Kind::Slime,
+            "Witch" => Kind::Witch,
+            "Cow" => Kind::Cow,
+            "Pig" => Kind::Pig,
+            "Sheep" => Kind::Sheep,
+            "Chicken" => Kind::Chicken,
+            "Horse" | "EntityHorse" => Kind::Horse,
+            "Villager" => Kind::Villager,
+            "VillagerGolem" => Kind::IronGolem,
+            "PigZombie" => Kind::ZombiePigman,
+            "LavaSlime" => Kind::MagmaCube,
+            "Blaze" => Kind::Blaze,
+            "Ghast" => Kind::Ghast,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unsupported 1.7.10 Mob name",
+                ))
+            }
+        };
+        // Explicit /summon is distinct from *natural* spawning. Flat worlds
+        // must still run AI for summoned mobs even with natural spawning off.
+        if !at.is_valid()
+            || physics::collides(world, &at)
+            || self.entities.len() >= MAX_LOADED_MOBS
+            || self.next_id >= 1_000_000
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Mob spawn position/cap invalid",
+            ));
+        }
+        if self.difficulty == Some(0) && !kind.peaceful_safe() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "hostile Mob cannot remain in Peaceful",
+            ));
+        }
+        let previous_id = self.next_id;
+        let packet = self.insert(kind, at, false);
+        if let Err(error) = self.save(world) {
+            self.entities.remove(&previous_id);
+            self.next_id = previous_id;
+            return Err(error);
+        }
+        Ok(packet)
+    }
+
     /// An egg impact may spawn one baby chicken, under the existing Mob cap.
     pub fn hatch_egg(&mut self, world: &World, at: PlayerPosition) -> Option<Event> {
         if self.entities.len() >= MAX_LOADED_MOBS
@@ -3698,6 +3762,34 @@ fn natural_spawn_location_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn command_summon_in_flat_world_survives_restart_without_enabling_natural_spawns() {
+        let world = World::new();
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-summon-{}-{:?}.mobs.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        assert!(!mobs.enabled);
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 90.0,
+            z: 0.5,
+        };
+        let packet = mobs.summon_command(&world, "Cow", at).unwrap();
+        assert_eq!(packet.id, 0x0f);
+        assert_eq!(mobs.entities.len(), 1);
+        assert!(mobs
+            .summon_command(&world, "minecraft:netherite", at)
+            .is_err());
+        let loaded = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        assert_eq!(loaded.entities.len(), 1);
+        assert!(!loaded.enabled);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn natural_spawn_fluid_overlap_is_strict_and_safe_at_i32_limits() {
         // Touching either face of a water/lava block is not a collision.

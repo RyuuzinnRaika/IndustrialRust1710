@@ -75,3 +75,23 @@ an offline-mode player gets permission denied for `/give`, `/tp`,
 - No target selectors such as `@a` or `@p` yet; name-only targets are used.
 
 These limits prevent accidental inventory loss and incorrect 1.7.10 block NBT.
+
+## Phase 3: /effect and /summon (Java 1.7.10)
+
+- `/effect <player> <id|name> [seconds=30] [amplifier=0]`, and
+  `/effect <player> clear`. Seconds `0` removes just that effect.
+  Currently accepted IDs are `1` Speed, `10` Regeneration, `17`
+  Hunger, `19` Poison: these use the existing per-session status-effect
+  clock and Protocol 5 add/remove packets. Durations are bounded to
+  1200 seconds, amplifier to 0..3. The server does not persist effects on logout.
+  Unsupported effects and 1.8+ particle visibility arguments are rejected.
+- `/summon <entity> [x y z]`: supports 1.7.10 capitalized entity names such
+  as `Zombie`, `Cow`, `Pig`, `Creeper`, `Skeleton`, and a selected
+  list of other existing Mob types. Supports flat and natural Overworld
+  worlds; world collision, capacity, Peaceful and position limits are enforced.
+  Entities are saved before the spawn packet is broadcast. Commands from
+  the host console require absolute coordinates; verified OP players can
+  use `~` coordinates or omit the position. Bosses, NBT payloads, selectors,
+  and entities without existing AI are not yet supported.
+
+These commands share the existing verified-OP level-2 gate and console audit log.
