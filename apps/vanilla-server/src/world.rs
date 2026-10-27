@@ -1464,12 +1464,12 @@ impl World {
 
         // Persist newly delayed explosions and discard entries only when
         // their block change has committed or its original block is gone.
-        let finished_blast: Vec<_> = self.pending_blast_edits
+        let finished_blast: Vec<_> = self
+            .pending_blast_edits
             .iter()
             .take(budget)
             .filter(|&(pos, &expected)| {
-                changes.contains_key(pos)
-                    || self.get(pos.0, i32::from(pos.1), pos.2) != expected
+                changes.contains_key(pos) || self.get(pos.0, i32::from(pos.1), pos.2) != expected
             })
             .map(|(&pos, _)| pos)
             .collect();
@@ -1479,15 +1479,17 @@ impl World {
         for pos in finished_blast {
             // A replay removed by the edit budget is still pending.
             if changes.contains_key(&pos)
-                || self.pending_blast_edits.get(&pos).is_some_and(|&expected| {
-                    self.get(pos.0, i32::from(pos.1), pos.2) != expected
-                })
+                || self
+                    .pending_blast_edits
+                    .get(&pos)
+                    .is_some_and(|&expected| self.get(pos.0, i32::from(pos.1), pos.2) != expected)
             {
                 self.pending_blast_edits.remove(&pos);
             }
         }
         self.pending_blast_edits.extend(delayed_blast);
-        let pending_blast_changed = pending_blast_before.as_ref()
+        let pending_blast_changed = pending_blast_before
+            .as_ref()
             .is_some_and(|before| *before != self.pending_blast_edits);
 
         // The pending chain is in TNT2, so save failures must also roll this
@@ -2290,7 +2292,11 @@ impl World {
         }
         let trailer = &bytes[blocks_end..];
         if !trailer.is_empty() {
-            if trailer.len() < 6 || (&trailer[..4] != b"TNT1" && &trailer[..4] != b"TNT2" && &trailer[..4] != b"TNT3") {
+            if trailer.len() < 6
+                || (&trailer[..4] != b"TNT1"
+                    && &trailer[..4] != b"TNT2"
+                    && &trailer[..4] != b"TNT3")
+            {
                 return Err(invalid("unrecognized world entity trailer"));
             }
             let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
@@ -2336,7 +2342,10 @@ impl World {
                         if !in_bounds(x, i32::from(y), z)
                             || expected == 0
                             || expected >> 4 == 46
-                            || world.pending_blast_edits.insert((x, y, z), expected).is_some()
+                            || world
+                                .pending_blast_edits
+                                .insert((x, y, z), expected)
+                                .is_some()
                         {
                             return Err(invalid("invalid deferred explosion"));
                         }
