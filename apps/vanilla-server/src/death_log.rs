@@ -22,6 +22,7 @@ pub enum DeathCause {
     Fire,
     Burning,
     CombatOrExplosion,
+    MixedHazards,
     DispenserArrow,
     EnderPearl,
     Unknown,
@@ -38,6 +39,7 @@ impl DeathCause {
             Self::Fire => "fire",
             Self::Burning => "burning",
             Self::CombatOrExplosion => "combat_or_explosion",
+            Self::MixedHazards => "mixed_environmental",
             Self::DispenserArrow => "dispenser_arrow",
             Self::EnderPearl => "ender_pearl",
             Self::Unknown => "unknown",
@@ -56,6 +58,7 @@ impl DeathCause {
             Self::Fire => "went up in flames",
             Self::Burning => "burned to death",
             Self::CombatOrExplosion => "was killed in combat or an explosion",
+            Self::MixedHazards => "died from multiple environmental hazards",
             Self::DispenserArrow => "was shot by a dispenser",
             Self::EnderPearl => "died after using an ender pearl",
             Self::Unknown => "died",
@@ -247,6 +250,15 @@ mod tests {
         assert_eq!(entries[0]["cause"], "fall");
         assert_eq!(entries[0]["player"], "Alex");
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn multiple_hazards_are_not_mislabeled_as_combat() {
+        assert_eq!(DeathCause::MixedHazards.code(), "mixed_environmental");
+        assert_eq!(
+            DeathCause::MixedHazards.message("Alex"),
+            "Alex died from multiple environmental hazards"
+        );
     }
 
     #[test]
