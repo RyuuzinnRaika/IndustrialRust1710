@@ -1035,6 +1035,35 @@ mod tests {
         assert!(cara_rx.try_recv().is_err());
     }
     #[test]
+    fn spawnpoint_mailbox_is_owned_by_overworld_target() {
+        let hub = Hub::default();
+        let (_, rx, _) = hub
+            .add(
+                "Alice".into(),
+                "uuid-a".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        hub.add_in_dimension(
+            "NetherUser".into(),
+            "uuid-n".into(),
+            PlayerPosition::default(),
+            Dimension::Nether,
+        )
+        .unwrap();
+        let point = crate::spawnpoint::Spawnpoint::new(-15, 65, 20).unwrap();
+        assert!(!hub.request_admin_spawnpoint("NotOnline", point).unwrap());
+        assert!(hub.request_admin_spawnpoint("NetherUser", point).is_err());
+        assert!(hub.request_admin_spawnpoint("aLiCe", point).unwrap());
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.id, ADMIN_SPAWNPOINT_EVENT);
+        assert_eq!(event.body.len(), 12);
+        assert_eq!(&event.body[0..4], &(-15i32).to_be_bytes());
+        assert_eq!(&event.body[4..8], &(65i32).to_be_bytes());
+        assert_eq!(&event.body[8..12], &(20i32).to_be_bytes());
+    }
+
+    #[test]
     fn queue_overflow_marks_session_unhealthy_instead_of_silent_desync() {
         let hub = Hub::default();
         let (id, _rx, _) = hub
