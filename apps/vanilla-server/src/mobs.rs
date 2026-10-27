@@ -3013,11 +3013,11 @@ impl Mobs {
                 {
                     mob.position = candidate;
                     events.push(multiplayer::teleport(
-                            mob.id,
-                            &candidate,
-                            facing_yaw,
-                            facing_pitch,
-                        ));
+                        mob.id,
+                        &candidate,
+                        facing_yaw,
+                        facing_pitch,
+                    ));
                 } else if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     // Both spider variants climb alongside a wall, never through it.
                     let front = PlayerPosition {
@@ -3038,11 +3038,11 @@ impl Mobs {
                         if climbed.is_valid() && !physics::collides(world, &climbed) {
                             mob.position = climbed;
                             events.push(multiplayer::teleport(
-                            mob.id,
-                            &climbed,
-                            facing_yaw,
-                            facing_pitch,
-                        ));
+                                mob.id,
+                                &climbed,
+                                facing_yaw,
+                                facing_pitch,
+                            ));
                         }
                     }
                 }
