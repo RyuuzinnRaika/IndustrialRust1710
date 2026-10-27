@@ -1,6 +1,6 @@
 //! Minecraft 1.7.10 special blocks, driven by World::block_tick (20TPS).
 //! All multi-cell player actions are staged and saved as a single IRW snapshot.
-use super::{in_bounds, Position, World};
+use super::{in_bounds, Position, World, MAX_PRIMED_TNT};
 use crate::inventory::Stack;
 use std::collections::BTreeMap;
 use std::io;
@@ -30,7 +30,10 @@ type StagedBlockBatch = (World, Vec<(i32, i32, i32)>);
 pub type StagedSpecialItem = (World, Vec<(i32, i32, i32)>, Option<Stack>, bool);
 
 impl World {
-    fn spawn_primed_tnt(&mut self, x: i32, y: i32, z: i32, fuse: u64) {
+    fn spawn_primed_tnt(&mut self, x: i32, y: i32, z: i32, fuse: u64) -> bool {
+        if self.primed_tnt.len() >= MAX_PRIMED_TNT {
+            return false;
+        }
         self.next_tnt_id = if self.next_tnt_id < 10_000_000 {
             10_000_001
         } else {
@@ -49,6 +52,7 @@ impl World {
             entity_id,
             pos: (x, y, z),
         });
+        true
     }
 
     /// Test-only direct ignition uses the same atomic block/entity staging
@@ -164,7 +168,10 @@ impl World {
             });
         }
         for ((x, y, z), fuse) in primed_fuses {
-            self.spawn_primed_tnt(x, y, z, fuse);
+            // The block worker reserves free slots before removing TNT blocks.
+            // Never create an unpersistable 4097th entity.
+            let spawned = self.spawn_primed_tnt(x, y, z, fuse);
+            debug_assert!(spawned, "unreserved TNT ignition");
         }
     }
 
@@ -457,6 +464,10 @@ impl World {
                 changes = self.bonemeal_changes(x, y, z);
                 (None, false)
             } else if target == 46 && held.id == 259 {
+                if self.primed_tnt.len() >= MAX_PRIMED_TNT {
+                    // Do not remove the TNT block if no entity can be saved.
+                    return Ok(None);
+                }
                 changes.insert((x, y as u8, z), 0);
                 (None, true)
             } else {
