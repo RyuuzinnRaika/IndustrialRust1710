@@ -1563,10 +1563,7 @@ mod tests {
             y: 71.6,
             ..high_from
         };
-        let above_to = PlayerPosition {
-            y: 71.6,
-            ..high_to
-        };
+        let above_to = PlayerPosition { y: 71.6, ..high_to };
         assert_eq!(first_solid_block_hit(&world, above_from, above_to), None);
     }
 
