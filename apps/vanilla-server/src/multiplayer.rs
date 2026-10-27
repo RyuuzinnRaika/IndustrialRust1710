@@ -1054,6 +1054,57 @@ mod tests {
         assert_eq!(hub.count().unwrap(), 1);
     }
     #[test]
+    fn add012_stale_session_id_cannot_mutate_or_evict_a_rejoined_player() {
+        let hub = Hub::default();
+        let old_position = PlayerPosition {
+            x: 1.5,
+            y: 65.0,
+            z: 2.5,
+        };
+        let (old_id, _old_rx, _) = hub
+            .add("RustTester".into(), "uuid-old".into(), old_position)
+            .unwrap();
+        hub.remove(old_id);
+
+        let current_position = PlayerPosition {
+            x: 12.5,
+            y: 67.0,
+            z: -2.5,
+        };
+        let (current_id, _current_rx, _) = hub
+            .add("rusttester".into(), "uuid-current".into(), current_position)
+            .unwrap();
+        assert!(current_id > old_id, "session IDs must never be reused");
+
+        // Delayed old-session movement, removal and dimension updates may
+        // arrive after a new connection takes over the username.
+        hub.move_player(
+            old_id,
+            PlayerPosition {
+                x: 999.5,
+                y: 65.0,
+                z: 999.5,
+            },
+            0.0,
+            0.0,
+        );
+        assert!(!hub
+            .change_dimension(old_id, Dimension::Nether, PlayerPosition::default(),)
+            .unwrap());
+        hub.remove(old_id);
+
+        assert_eq!(hub.count().unwrap(), 1);
+        assert_eq!(
+            hub.player_position("RUSTTESTER").unwrap(),
+            Some(current_position)
+        );
+        assert_eq!(
+            hub.uuid_for_online_name("RUSTTESTER").unwrap(),
+            Some("uuid-current".to_string())
+        );
+        assert!(hub.is_healthy(current_id));
+    }
+    #[test]
     fn movement_events_and_departure() {
         let hub = Hub::default();
         let (a, _a_rx, _) = hub
