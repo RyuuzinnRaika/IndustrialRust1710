@@ -96,7 +96,7 @@ use maps::Maps;
 use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
-    Event, Hub, JoinError, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT,
+    Event, Hub, JoinError, ADMIN_CLEAR_EVENT, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT,
     ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT,
     PISTON_PUSH_EVENT,
 };
@@ -1415,6 +1415,33 @@ fn play(
                 if survival {
                     send(s, 0x1f, &experience.packet())?;
                 }
+                continue;
+            }
+            if event.id == ADMIN_CLEAR_EVENT {
+                if event.body.len() != 8 {
+                    return Err(bad("invalid internal clear event"));
+                }
+                let id = i16::from_be_bytes(event.body[0..2].try_into().unwrap());
+                let data = i16::from_be_bytes(event.body[2..4].try_into().unwrap());
+                let max = i32::from_be_bytes(event.body[4..8].try_into().unwrap());
+                if (id != -1 && !items_1710::exists(id))
+                    || data < -1 || !(-1..=4096).contains(&max)
+                {
+                    return Err(bad("invalid internal clear arguments"));
+                }
+                let mut next = inventory.clone();
+                let (found, removed) = next.clear_matching(
+                    (id >= 0).then_some(id),
+                    (data >= 0).then_some(data),
+                    max,
+                );
+                if removed > 0 {
+                    next.save(inventory_path.as_path())?;
+                    *inventory = next;
+                    send(s, 0x30, &inventory.window_items())?;
+                    send(s, 0x2f, &inventory.cursor_packet())?;
+                }
+                as_chat(s, &format!("Clear: found {found} item(s); removed {removed}."))?;
                 continue;
             }
             if event.id == ADMIN_GIVE_EVENT {
@@ -2875,7 +2902,7 @@ fn play(
                         Err(usage) => as_chat(s, usage)?,
                         Ok(PublicCommand::Help) => as_chat(
                             s,
-                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /time, /weather, /kick, /ban, /save.",
+                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /time, /weather, /kick, /ban, /save.",
                         )?,
                         Ok(PublicCommand::List) => as_chat(
                             s,
@@ -2919,6 +2946,7 @@ fn play(
                         clock,
                         administration,
                         hardcore,
+                        dimension: *session_dimension,
                     };
                     let result = run_player_admin_command(
                         &message,
@@ -6444,6 +6472,7 @@ struct PlayerAdminServices<'a> {
     clock: &'a Clock,
     administration: &'a Administration,
     hardcore: bool,
+    dimension: dimensions::Dimension,
 }
 /// Authorization is based exclusively on the Mojang-verified session UUID.
 fn run_player_admin_command(
@@ -6459,11 +6488,12 @@ fn run_player_admin_command(
         clock,
         administration,
         hardcore,
+        dimension,
     } = services;
     let parts: Vec<&str> = message.split_whitespace().collect();
     let minimum_level = match parts.first().copied() {
         Some("/time") | Some("/weather") | Some("/tp") | Some("/teleport") | Some("/gamemode")
-        | Some("/give") => 2,
+        | Some("/give") | Some("/clear") | Some("/setblock") => 2,
         Some("/kick") | Some("/ban") | Some("/pardon") | Some("/pardon-uuid") | Some("/ban-ip")
         | Some("/pardon-ip") => 3,
         Some("/save") | Some("/op") | Some("/deop") | Some("/permission") => 4,
@@ -6476,6 +6506,38 @@ fn run_player_admin_command(
         ));
     }
     match parts.as_slice() {
+        ["/clear", args @ ..] if args.len() <= 4 => {
+            let target = args.first().copied().unwrap_or(actor);
+            let (item, data, max) = commands::clear_args(
+                args.get(1).copied(), args.get(2).copied(), args.get(3).copied(),
+            )?;
+            if !hub.request_admin_clear(target, item, data, max)? {
+                return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+            }
+            Ok(format!("Clear queued for {target}"))
+        }
+        ["/setblock", x, y, z, block, rest @ ..] => {
+            let origin = hub.player_position(actor)?
+                .ok_or_else(|| bad("actor not online"))?;
+            let (bx, by, bz, next, keep) =
+                commands::setblock_args([x, y, z], block, rest, origin)?;
+            let mut state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+            let current = state.get(bx, by, bz);
+            if keep && current != 0 {
+                return Err(bad("setblock keep requires air"));
+            }
+            if commands::is_tile_entity_block(current >> 4) {
+                return Err(bad("setblock replacement of TileEntity needs migration support"));
+            }
+            if !state.update_and_save(world_path, bx, by, bz, next)? {
+                return Err(bad("setblock made no change or coordinates outside world"));
+            }
+            let event = block_change_event(&state, bx, by, bz);
+            drop(state);
+            hub.broadcast_in_dimension_view(*dimension,
+                PlayerPosition { x: bx as f64, y: by as f64, z: bz as f64 }, event);
+            Ok(format!("Block set at {bx} {by} {bz}"))
+        }
         ["/time", "query", "daytime"] => Ok(format!("Daytime: {}", clock.day_time())),
         ["/time", "add", ticks] => {
             let ticks = ticks
@@ -6702,7 +6764,7 @@ fn start_clock_console(
             }
             let result: io::Result<()> = match args.as_slice() {
                 ["/help"] | ["/?"] => {
-                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
                     Ok(())
                 }
                 ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
@@ -6729,6 +6791,46 @@ fn start_clock_console(
                         Ok(())
                     })()
                 }
+                ["/clear", target, rest @ ..] if rest.len() <= 3 => (|| -> io::Result<()> {
+                    let (item, data, max) = commands::clear_args(
+                        rest.first().copied(), rest.get(1).copied(), rest.get(2).copied(),
+                    )?;
+                    if !hub.request_admin_clear(target, item, data, max)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Clear queued for {target}");
+                    Ok(())
+                })(),
+                ["/setblock", x, y, z, block, rest @ ..] => (|| -> io::Result<()> {
+                    // A host console has no player-relative origin. Reject ~ coordinates
+                    // rather than silently resolving them to 0,0,0.
+                    if [*x, *y, *z].iter().any(|v| v.contains('~')) {
+                        return Err(bad("relative setblock requires a player sender"));
+                    }
+                    let (bx, by, bz, next, keep) = commands::setblock_args(
+                        [x, y, z], block, rest, PlayerPosition::default(),
+                    )?;
+                    let mut state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let current = state.get(bx, by, bz);
+                    if keep && current != 0 {
+                        return Err(bad("setblock keep requires air"));
+                    }
+                    if commands::is_tile_entity_block(current >> 4) {
+                        return Err(bad("setblock replacement of TileEntity needs migration support"));
+                    }
+                    if !state.update_and_save(&world_path, bx, by, bz, next)? {
+                        return Err(bad("setblock made no change or coordinates outside world"));
+                    }
+                    let event = block_change_event(&state, bx, by, bz);
+                    drop(state);
+                    hub.broadcast_in_dimension_view(
+                        dimensions::Dimension::Overworld,
+                        PlayerPosition { x: bx as f64, y: by as f64, z: bz as f64 },
+                        event,
+                    );
+                    println!("Block set at {bx} {by} {bz}");
+                    Ok(())
+                })(),
                 ["/give", target, item, rest @ ..] => (|| -> io::Result<()> {
                     let (id, count, damage) = commands::give_args(item, rest)?;
                     if !hub.request_admin_give(target, id, count, damage)? {
