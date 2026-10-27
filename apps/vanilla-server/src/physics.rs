@@ -32,6 +32,70 @@ fn shapes(id: u16, meta: u16) -> Vec<Shape> {
         0 | 6 | 8 | 9 | 10 | 11 | 31 | 32 | 37 | 38 | 39 | 40 | 50 | 51 | 55 | 59 | 65 | 66
         | 69 | 70 | 72 | 75 | 76 | 77 | 78 | 83 | 90 | 104 | 105 | 106 | 111 | 115 | 131 | 132
         | 141 | 142 | 143 | 147 | 148 | 149 | 150 | 151 | 157 | 171 => Vec::new(),
+        29 | 33 if meta & 8 != 0 => {
+            // The extended base's final quarter is occupied by the rod.
+            // 1.7.10 BlockPistonBase#setBlockBoundsBasedOnState.
+            let mut body = FULL;
+            match meta & 7 {
+                0 => body.y0 = 0.25,
+                1 => body.y1 = 0.75,
+                2 => body.z0 = 0.25,
+                3 => body.z1 = 0.75,
+                4 => body.x0 = 0.25,
+                5 => body.x1 = 0.75,
+                _ => return vec![FULL],
+            }
+            vec![body]
+        }
+        34 => {
+            // 1.7.10 piston extension has two collision components: a
+            // four-pixel plate and a central rod. It is not empty/full.
+            let mut plate = FULL;
+            let mut rod = FULL;
+            match meta & 7 {
+                0 | 1 => {
+                    rod.x0 = 0.375;
+                    rod.x1 = 0.625;
+                    rod.z0 = 0.375;
+                    rod.z1 = 0.625;
+                    if meta & 7 == 0 {
+                        plate.y1 = 0.25;
+                        rod.y0 = 0.25;
+                    } else {
+                        plate.y0 = 0.75;
+                        rod.y1 = 0.75;
+                    }
+                }
+                2 | 3 => {
+                    rod.x0 = 0.25;
+                    rod.x1 = 0.75;
+                    rod.y0 = 0.375;
+                    rod.y1 = 0.625;
+                    if meta & 7 == 2 {
+                        plate.z1 = 0.25;
+                        rod.z0 = 0.25;
+                    } else {
+                        plate.z0 = 0.75;
+                        rod.z1 = 0.75;
+                    }
+                }
+                4 | 5 => {
+                    rod.z0 = 0.25;
+                    rod.z1 = 0.75;
+                    rod.y0 = 0.375;
+                    rod.y1 = 0.625;
+                    if meta & 7 == 4 {
+                        plate.x1 = 0.25;
+                        rod.x0 = 0.25;
+                    } else {
+                        plate.x0 = 0.75;
+                        rod.x1 = 0.75;
+                    }
+                }
+                _ => return Vec::new(),
+            }
+            vec![plate, rod]
+        }
         44 | 126 | 182 => {
             let mut box_ = FULL;
             if meta & 8 != 0 {
@@ -739,6 +803,44 @@ mod tests {
 #[cfg(test)]
 mod group_b_collision_tests {
     use super::*;
+
+    #[test]
+    fn piston_heads_have_legacy_plate_and_rod_collision_in_all_six_directions() {
+        for facing in 0..=5 {
+            let volumes = shapes(34, facing);
+            assert_eq!(volumes.len(), 2, "missing head shapes for facing {facing}");
+            let plate = volumes[0];
+            let rod = volumes[1];
+            let spans = [
+                (plate.x1 - plate.x0, rod.x1 - rod.x0),
+                (plate.y1 - plate.y0, rod.y1 - rod.y0),
+                (plate.z1 - plate.z0, rod.z1 - rod.z0),
+            ];
+            let axis = match facing {
+                0 | 1 => 1,
+                2 | 3 => 2,
+                _ => 0,
+            };
+            assert_eq!(spans[axis], (0.25, 0.75));
+            assert_eq!(shapes(34, facing | 8).len(), 2);
+        }
+    }
+
+    #[test]
+    fn extended_piston_base_leaves_space_for_the_rod() {
+        for facing in 0..=5 {
+            for id in [29, 33] {
+                assert_eq!(shapes(id, facing).len(), 1);
+                let base = shapes(id, facing | 8)[0];
+                let axis_length = match facing {
+                    0 | 1 => base.y1 - base.y0,
+                    2 | 3 => base.z1 - base.z0,
+                    _ => base.x1 - base.x0,
+                };
+                assert_eq!(axis_length, 0.75);
+            }
+        }
+    }
 
     #[test]
     fn open_fence_gate_allows_passage_and_closed_gate_blocks_passage() {

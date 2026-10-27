@@ -108,7 +108,7 @@ fn movable(block: u16) -> bool {
 /// in vanilla 1.7.10. They terminate a push rather than being translated
 /// as solid blocks, and sticky pistons cannot pull them back.
 /// Item-drop handling is tracked separately.
-fn piston_breakable(block: u16) -> bool {
+pub(super) fn piston_breakable(block: u16) -> bool {
     matches!(
         block >> 4,
         27 | 28 | 50 | 55 | 66 | 75 | 76 | 157
@@ -485,7 +485,13 @@ impl World {
             return;
         }
         let head = (x + dx, y + dy, z + dz);
-        if !in_bounds(head.0, head.1, head.2) {
+        // device_changes stages a complete tick in one map. A second piston
+        // must never read the original value of an already staged base/head
+        // or overwrite a move performed earlier in this same tick.
+        if !in_bounds(head.0, head.1, head.2)
+            || changes.contains_key(&(x, y as u8, z))
+            || changes.contains_key(&(head.0, head.1 as u8, head.2))
+        {
             return;
         }
         if on {
@@ -495,6 +501,11 @@ impl World {
             let mut target = head;
             loop {
                 if !in_bounds(target.0, target.1, target.2) {
+                    return;
+                }
+                // The terminal cell is part of the write set too: another
+                // scheduled action may already have claimed that destination.
+                if changes.contains_key(&(target.0, target.1 as u8, target.2)) {
                     return;
                 }
                 let found = self.get(target.0, target.1, target.2);
@@ -521,11 +532,21 @@ impl World {
             // A neighboring piston's head may occupy this cell. Only retract
             // the head that points in the same direction as this piston.
             let head_block = self.get(head.0, head.1, head.2);
+            if block >> 4 == 29 {
+                let far = (head.0 + dx, head.1 + dy, head.2 + dz);
+                if in_bounds(far.0, far.1, far.2)
+                    && changes.contains_key(&(far.0, far.1 as u8, far.2))
+                {
+                    return;
+                }
+            }
             if head_block >> 4 == 34 && (head_block & 7) == (block & 7) {
                 changes.insert((head.0, head.1 as u8, head.2), 0);
                 if block >> 4 == 29 {
                     let far = (head.0 + dx, head.1 + dy, head.2 + dz);
-                    if in_bounds(far.0, far.1, far.2) {
+                    if in_bounds(far.0, far.1, far.2)
+                        && !changes.contains_key(&(far.0, far.1 as u8, far.2))
+                    {
                         let pulled = self.get(far.0, far.1, far.2);
                         if pulled != 0 && movable(pulled) && !piston_breakable(pulled) {
                             changes.insert((head.0, head.1 as u8, head.2), pulled);
@@ -1400,6 +1421,35 @@ mod redstone_regression_tests {
         let mut changes = BTreeMap::new();
         world.push_piston(0, 64, 0, piston, &mut changes);
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn piston_defers_when_another_device_claimed_its_write_set() {
+        let mut world = World::new();
+        let piston = (33 << 4) | 5;
+        world.import_block(-1, 64, 0, (69 << 4) | 8).unwrap();
+        world.import_block(0, 64, 0, piston).unwrap();
+        world.import_block(1, 64, 0, 1 << 4).unwrap();
+        world.import_block(2, 64, 0, 2 << 4).unwrap();
+
+        for claimed in [(0, 64, 0), (1, 64, 0), (2, 64, 0), (3, 64, 0)] {
+            let mut changes = BTreeMap::from([((claimed.0, claimed.1 as u8, claimed.2), 5 << 4)]);
+            world.push_piston(0, 64, 0, piston, &mut changes);
+            assert_eq!(changes.len(), 1, "piston overwrote staged cell {claimed:?}");
+        }
+    }
+
+    #[test]
+    fn sticky_piston_retraction_defers_when_far_block_is_already_staged() {
+        let mut world = World::new();
+        let piston = (29 << 4) | 13;
+        world.import_block(0, 64, 0, piston).unwrap();
+        world.import_block(1, 64, 0, (34 << 4) | 13).unwrap();
+        world.import_block(2, 64, 0, 1 << 4).unwrap();
+        let mut changes = BTreeMap::from([((2, 64u8, 0), 0)]);
+        world.push_piston(0, 64, 0, piston, &mut changes);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes.get(&(2, 64, 0)), Some(&0));
     }
 
     #[test]
