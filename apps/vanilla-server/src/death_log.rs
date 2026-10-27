@@ -717,6 +717,65 @@ mod tests {
     }
 
     #[test]
+    fn fatal_player_score_and_outbox_are_a_single_redo_transaction() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-death-txn-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(root.join("players")).unwrap();
+        let world = root.join("overworld.irw");
+        let alice = root.join("players/alice.dat");
+        let score_path = Scoreboard::location(&world);
+        let mut initial = Scoreboard::default();
+        initial.add_objective("deaths", "Deaths", "deathCount").unwrap();
+        initial.save(&score_path).unwrap();
+        let scoreboard = Mutex::new(initial);
+        let position = PlayerPosition::default();
+        let vitals = Vitals {
+            health: 0.0,
+            ..Vitals::default()
+        };
+        let record = DeathRecord {
+            player: "Alice",
+            hit: Some(FatalHit {
+                cause: DeathCause::Fall,
+                previous_health: 2.0,
+                applied_damage: 2.0,
+            }),
+            position,
+            dimension: 0,
+            tick: 234,
+        };
+        let changes = commit_fatal_state(
+            &record,
+            &world,
+            &world,
+            &alice,
+            vitals,
+            &scoreboard,
+            &score_path,
+        )
+        .unwrap();
+        assert!(!changes.is_empty());
+        assert_eq!(PlayerPosition::load_state(&alice).unwrap().1.health, 0.0);
+        let score: Value = serde_json::from_slice(&fs::read(&score_path).unwrap()).unwrap();
+        assert_eq!(score["scores"]["deaths"]["Alice"], 1);
+        assert!(outbox_path(&alice).is_file());
+
+        // Idempotent replay of the prepared event must not count another death.
+        append_prepared(&world, &alice).unwrap();
+        assert_eq!(recover_pending(&world).unwrap(), 0);
+        let saved_score: Value = serde_json::from_slice(&fs::read(&score_path).unwrap()).unwrap();
+        assert_eq!(saved_score["scores"]["deaths"]["Alice"], 1);
+        let lines = fs::read_to_string(DeathRecord::log_path(&world)).unwrap();
+        assert_eq!(lines.lines().count(), 1);
+        // All durable participants were published, so restart needs no redo.
+        journal::recover(&world.with_extension("pending-txn.json")).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn existing_dead_player_has_safe_fallback_without_fabricated_cause() {
         let record = DeathRecord {
             player: "Alex",
