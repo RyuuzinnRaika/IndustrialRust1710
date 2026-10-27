@@ -69,6 +69,8 @@ struct Thrown {
     velocity: [f64; 3],
     age: u16,
     embedded: bool,
+    // The exact block state hit by an arrow; a later replacement releases it.
+    embedded_block: Option<(i32, i32, i32, u16)>,
 }
 impl Thrown {
     fn spawn(&self) -> Event {
@@ -160,6 +162,7 @@ impl Throwables {
             ],
             age: 0,
             embedded: false,
+            embedded_block: None,
         };
         let packet = object.spawn();
         self.active.insert(id, object);
@@ -224,6 +227,7 @@ impl Throwables {
             ],
             age: 0,
             embedded: false,
+            embedded_block: None,
         };
         let packet = object.spawn();
         self.active.insert(id, object);
@@ -246,8 +250,19 @@ impl Throwables {
             if object.embedded {
                 if object.age >= 1200 {
                     removed.push(object.id);
+                    continue;
                 }
-                continue;
+                if let Some((x, y, z, original)) = object.embedded_block {
+                    if world.get(x, y, z) == original {
+                        continue;
+                    }
+                }
+                // Vanilla releases an arrow when the block it hit is removed
+                // or replaced. Restart flight aging so it does not expire
+                // immediately after a long period embedded in the block.
+                object.embedded = false;
+                object.embedded_block = None;
+                object.age = 0;
             }
             let previous = object.at;
             let destination = PlayerPosition {
@@ -293,6 +308,8 @@ impl Throwables {
                 object.at = at;
                 if object.kind == Kind::Arrow {
                     object.embedded = true;
+                    let (x, y, z) = (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+                    object.embedded_block = Some((x, y, z, world.get(x, y, z)));
                     // Vanilla counts the 1200-tick lifetime from entering the block,
                     // not from launch. Flight time must not shorten embedded lifetime.
                     object.age = 0;
@@ -566,6 +583,37 @@ mod tests {
         assert_eq!(expired.events[0].1.id, 0x13);
         assert!(!objects.active.contains_key(&projectile_id));
         assert!(objects.tick(&world, 1203).events.is_empty());
+    }
+
+    #[test]
+    fn dispenser_embedded_arrow_releases_after_impact_block_is_removed() {
+        let mut world = World::new();
+        world.import_block(2, 70, 0, 1 << 4).unwrap();
+        let mut objects = Throwables::default();
+        objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
+        let projectile_id = *objects.active.keys().next().unwrap();
+
+        objects.tick(&world, 1);
+        let arrow = objects.active.get(&projectile_id).unwrap();
+        assert!(arrow.embedded);
+        assert_eq!(arrow.embedded_block, Some((2, 70, 0, 1 << 4)));
+        assert!(objects.tick(&world, 2).events.is_empty());
+
+        world.import_block(2, 70, 0, 0).unwrap();
+        let released = objects.tick(&world, 3);
+        let arrow = objects.active.get(&projectile_id).unwrap();
+        assert!(!arrow.embedded);
+        assert_eq!(arrow.embedded_block, None);
+        assert_eq!(arrow.age, 0);
+        assert_eq!(released.events.len(), 1);
+        assert_eq!(released.events[0].1.id, 0x18);
+        assert_eq!(arrow.velocity[1], -0.05);
+
+        let y = arrow.at.y;
+        objects.tick(&world, 4);
+        assert!(objects.active.get(&projectile_id).unwrap().at.y < y);
     }
 
     #[test]
