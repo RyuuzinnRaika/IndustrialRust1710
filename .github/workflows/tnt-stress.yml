@@ -43,6 +43,34 @@ jobs:
       - name: Validate TNT fixture and trailer parser
         run: PYTHONPATH=tools python -m unittest discover -s tools -p 'test_tnt_stress_benchmark.py' -v
 
+  live-smoke:
+    if: github.event_name == 'pull_request'
+    needs: parser-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build actual server binary
+        run: cargo build --release -p vanilla-server
+      - name: Exercise 100 TNT explosion, kill/restart, and /stop
+        run: |
+          python tools/tnt_stress_benchmark.py \
+            --server target/release/vanilla-server \
+            --output tnt-smoke-results \
+            --counts 100 --seconds 20 --inject-crash
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tnt-smoke-evidence
+          path: tnt-smoke-results/
+          if-no-files-found: warn
+
   live-stress:
     if: github.event_name == 'workflow_dispatch'
     needs: parser-tests
