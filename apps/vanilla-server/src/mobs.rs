@@ -3773,11 +3773,17 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
         assert!(!mobs.enabled);
-        let at = PlayerPosition { x: 0.5, y: 90.0, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 90.0,
+            z: 0.5,
+        };
         let packet = mobs.summon_command(&world, "Cow", at).unwrap();
         assert_eq!(packet.id, 0x0f);
         assert_eq!(mobs.entities.len(), 1);
-        assert!(mobs.summon_command(&world, "minecraft:netherite", at).is_err());
+        assert!(mobs
+            .summon_command(&world, "minecraft:netherite", at)
+            .is_err());
         let loaded = Mobs::load_or_new(&world, true, 2, &path).unwrap();
         assert_eq!(loaded.entities.len(), 1);
         assert!(!loaded.enabled);
