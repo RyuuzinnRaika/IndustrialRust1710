@@ -6,6 +6,8 @@
 //! can opt into these primitives without modifying saved IRW1–IRW4 worlds.
 // Isolated A01 layers: not wired into IRW4 world creation.
 #[allow(dead_code)]
+mod add_island;
+#[allow(dead_code)]
 mod island_zoom;
 
 const MULTIPLIER: i64 = 6_364_136_223_846_793_005;

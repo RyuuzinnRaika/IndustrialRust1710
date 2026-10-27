@@ -23,6 +23,8 @@ pub const ADMIN_GAMEMODE_EVENT: u32 = u32::MAX - 4;
 /// Internal worker-to-player correction after a server-owned piston move.
 /// Session thread rechecks the live collision and persists the new position.
 pub const PISTON_PUSH_EVENT: u32 = u32::MAX - 5;
+/// Server-owned dispenser arrow hit; the session persists HP before notifying.
+pub const DISPENSER_ARROW_DAMAGE_EVENT: u32 = u32::MAX - 6;
 const QUEUE_CAPACITY: usize = 512;
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -200,6 +202,27 @@ impl Hub {
     }
     pub fn request_pearl_teleport(&self, name: &str, position: PlayerPosition) -> io::Result<bool> {
         self.queue_teleport(name, position, PEARL_TELEPORT_EVENT)
+    }
+    /// Only the target's owning session may mutate its persisted health.
+    /// Never send a network packet with this private event ID.
+    pub fn request_dispenser_arrow_damage(&self, entity_id: i32) -> io::Result<bool> {
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(peer) = inner.players.get(&entity_id) else {
+            return Ok(false);
+        };
+        if peer.dimension != Dimension::Overworld {
+            return Ok(false);
+        }
+        peer.tx
+            .try_send(Event {
+                id: DISPENSER_ARROW_DAMAGE_EVENT,
+                body: Vec::new(),
+            })
+            .map_err(|_| {
+                peer.overloaded.store(true, Ordering::Release);
+                io::Error::other("target session damage mailbox unavailable")
+            })?;
+        Ok(true)
     }
     fn queue_teleport(
         &self,
@@ -926,5 +949,36 @@ mod tests {
         });
         assert_eq!(a_rx.try_recv().unwrap().id, 0x02);
         assert_eq!(b_rx.try_recv().unwrap().id, 0x02);
+    }
+    #[test]
+    fn dispenser_arrow_damage_is_addressed_only_to_overworld_target() {
+        let hub = Hub::default();
+        let (alice, alice_rx, _) = hub
+            .add_in_dimension(
+                "Alice".into(),
+                "uuid-a".into(),
+                PlayerPosition::default(),
+                Dimension::Overworld,
+            )
+            .unwrap();
+        let (bob, bob_rx, _) = hub
+            .add_in_dimension(
+                "Bob".into(),
+                "uuid-b".into(),
+                PlayerPosition::default(),
+                Dimension::Nether,
+            )
+            .unwrap();
+        // Joining Bob generates a player-list entry for Alice.
+        assert_eq!(alice_rx.try_recv().unwrap().id, 0x38);
+        assert!(hub.request_dispenser_arrow_damage(alice).unwrap());
+        assert_eq!(
+            alice_rx.try_recv().unwrap().id,
+            DISPENSER_ARROW_DAMAGE_EVENT
+        );
+        assert!(alice_rx.try_recv().is_err());
+        assert!(!hub.request_dispenser_arrow_damage(bob).unwrap());
+        assert!(!hub.request_dispenser_arrow_damage(999).unwrap());
+        assert!(bob_rx.try_recv().is_err());
     }
 }

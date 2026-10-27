@@ -94,7 +94,7 @@ use minecarts::Minecarts;
 use mobs::Mobs;
 use multiplayer::{
     Event, Hub, JoinError, ADMIN_GAMEMODE_EVENT, ADMIN_KICK_EVENT, ADMIN_TELEPORT_EVENT,
-    MAX_PLAYERS, PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
+    DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS, PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
 };
 use online_auth::{Connection, ServerIdentity};
 use physics::{FallTracker, IdleGravity};
@@ -649,6 +649,37 @@ fn health_packet(vitals: Vitals) -> Vec<u8> {
     packet.extend_from_slice(&vitals.saturation.to_be_bytes());
     packet
 }
+/// Base dispenser arrow impact is two health points; armor absorbs the
+/// same fraction as other server-owned physical damage.
+fn dispenser_arrow_health_after_hit(health: f32, armor_points: u8) -> f32 {
+    let armor = f32::from(armor_points.min(20));
+    (health - 2.0 * (25.0 - armor) / 25.0).max(0.0)
+}
+
+fn arrow_damage_due(previous: Option<u64>, now: u64) -> bool {
+    previous.is_none_or(|last| now.saturating_sub(last) >= 10)
+}
+
+#[cfg(test)]
+mod dispenser_arrow_damage_tests {
+    use super::{arrow_damage_due, dispenser_arrow_health_after_hit};
+
+    #[test]
+    fn armor_reduces_arrow_damage_and_health_never_goes_negative() {
+        assert_eq!(dispenser_arrow_health_after_hit(20.0, 0), 18.0);
+        assert_eq!(dispenser_arrow_health_after_hit(20.0, 20), 19.6);
+        assert_eq!(dispenser_arrow_health_after_hit(1.0, 0), 0.0);
+    }
+
+    #[test]
+    fn repeat_arrow_hits_respect_ten_tick_invulnerability() {
+        assert!(arrow_damage_due(None, 20));
+        assert!(!arrow_damage_due(Some(20), 20));
+        assert!(!arrow_damage_due(Some(20), 29));
+        assert!(arrow_damage_due(Some(20), 30));
+    }
+}
+
 fn send_player_position(s: &mut Connection, location: &PlayerPosition) -> io::Result<()> {
     // Protocol 5 clientbound position/look: x, feet y, z, yaw, pitch, on_ground.
     let mut bytes = Vec::with_capacity(33);
@@ -1271,6 +1302,7 @@ fn play(
     let mut last_beacon_tick = clock.ticks();
     let mut last_plate_refresh_tick = clock.ticks();
     let mut last_map_tick = clock.ticks();
+    let mut last_arrow_damage_tick: Option<u64> = None;
     loop {
         if !hub.is_healthy(entity_id) {
             return Err(io::Error::other(
@@ -1340,6 +1372,40 @@ fn play(
                 write_string(&json!({"text":reason}).to_string(), &mut payload)?;
                 send(s, 0x40, &payload)?;
                 return Ok(());
+            }
+            if event.id == DISPENSER_ARROW_DAMAGE_EVENT {
+                if !event.body.is_empty() {
+                    return Err(bad("invalid internal arrow damage payload"));
+                }
+                let tick = clock.ticks();
+                if survival
+                    && *session_dimension == dimensions::Dimension::Overworld
+                    && vitals.health > 0.0
+                    && arrow_damage_due(last_arrow_damage_tick, tick)
+                {
+                    let mut next = *vitals;
+                    next.health =
+                        dispenser_arrow_health_after_hit(next.health, inventory.armor_points());
+                    // The owning session persists health before any client notification.
+                    player.save_state_in_dimension(
+                        player_path,
+                        next,
+                        session_dimension.protocol_id() as i32,
+                    )?;
+                    *vitals = next;
+                    last_arrow_damage_tick = Some(tick);
+                    send(s, 0x06, &health_packet(*vitals))?;
+                    let mut hurt = entity_id.to_be_bytes().to_vec();
+                    hurt.push(2); // Protocol 5 Entity Status: hurt animation.
+                    hub.broadcast_in_view(
+                        *player,
+                        Event {
+                            id: 0x1a,
+                            body: hurt,
+                        },
+                    );
+                }
+                continue;
             }
             if matches!(event.id, ADMIN_TELEPORT_EVENT | PEARL_TELEPORT_EVENT) {
                 if event.body.len() != 24 {
@@ -8341,6 +8407,12 @@ fn main() -> io::Result<()> {
                     Ok(mobs) => mobs.projectile_targets(),
                     Err(_) => return,
                 };
+                let player_targets = match projectile_hub
+                    .participants_in_dimension(dimensions::Dimension::Overworld)
+                {
+                    Ok(players) => players,
+                    Err(_) => return,
+                };
                 let world = match projectile_world.lock() {
                     Ok(world) => world,
                     Err(_) => return,
@@ -8351,11 +8423,13 @@ fn main() -> io::Result<()> {
                 };
                 let mut actions = throwables::TickResult::default();
                 for tick in begin.max(now.saturating_sub(19))..=now {
-                    let step = objects.tick_with_mob_targets(&world, tick, &mob_targets);
+                    let step =
+                        objects.tick_with_targets(&world, tick, &mob_targets, &player_targets);
                     actions.events.extend(step.events);
                     actions.pearl_teleports.extend(step.pearl_teleports);
                     actions.egg_hatches.extend(step.egg_hatches);
                     actions.mob_hits.extend(step.mob_hits);
+                    actions.player_hits.extend(step.player_hits);
                 }
                 drop(objects);
                 let boat_events = match projectile_boats.lock() {
@@ -8435,6 +8509,11 @@ fn main() -> io::Result<()> {
                         for event in events {
                             projectile_hub.broadcast_in_view(at, event);
                         }
+                    }
+                }
+                for player_id in actions.player_hits {
+                    if let Err(error) = projectile_hub.request_dispenser_arrow_damage(player_id) {
+                        eprintln!("ARROW PLAYER DAMAGE MAILBOX ERROR: {error}");
                     }
                 }
                 for (at, packet) in actions
