@@ -6056,9 +6056,18 @@ mod tests {
         let magma_id = mobs.next_id;
         mobs.insert_sized(Kind::MagmaCube, PlayerPosition { x: 3.5, ..at }, false, 4);
 
-        let slime = mobs.entities.remove(&slime_id).unwrap();
+        // Kill through the real player-attack path rather than manually
+        // removing the parent: destruction must precede every child spawn.
+        mobs.entities.get_mut(&slime_id).unwrap().health = 1;
         let slime_start = mobs.next_id;
-        let slime_children = mobs.split(slime);
+        let slime_death = mobs.player_attack(slime_id, at, None, 20).unwrap();
+        assert_eq!(slime_death.events[0].id, 0x1a);
+        assert_eq!(slime_death.events[1].id, 0x13);
+        assert_eq!(
+            slime_death.events[1].body,
+            multiplayer::destroy(slime_id).body
+        );
+        let slime_children: Vec<_> = slime_death.events.into_iter().skip(2).collect();
         assert!((2..=4).contains(&slime_children.len()));
 
         let cow_id = mobs.next_id;
@@ -6068,9 +6077,18 @@ mod tests {
         let arrow_id = mobs.next_id;
         let arrow = mobs.fire_arrow(None, at, 0.0, 0.0, 1.0, 2).unwrap();
 
-        let magma = mobs.entities.remove(&magma_id).unwrap();
+        mobs.entities.get_mut(&magma_id).unwrap().health = 1;
         let magma_start = mobs.next_id;
-        let magma_children = mobs.split(magma);
+        let magma_death = mobs
+            .player_attack(magma_id, PlayerPosition { x: 3.5, ..at }, None, 21)
+            .unwrap();
+        assert_eq!(magma_death.events[0].id, 0x1a);
+        assert_eq!(magma_death.events[1].id, 0x13);
+        assert_eq!(
+            magma_death.events[1].body,
+            multiplayer::destroy(magma_id).body
+        );
+        let magma_children: Vec<_> = magma_death.events.into_iter().skip(2).collect();
         assert!((2..=4).contains(&magma_children.len()));
 
         // Protocol 5 entity spawns must encode exactly the ID allocated by
@@ -6159,6 +6177,7 @@ mod tests {
         assert!(mobs.entities.contains_key(&999_999));
         assert!(mobs.split(parent).is_empty());
         assert!(mobs.spawn_xp(at, 1).is_none());
+        assert!(mobs.fire_arrow(None, at, 0.0, 0.0, 1.0, 2).is_none());
     }
 
     #[test]
