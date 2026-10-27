@@ -2719,8 +2719,7 @@ fn creative_mob_feed_and_attack_keep_items_and_award_kill_rewards() {
     let first_tick = i64::from_be_bytes(first_time[..8].try_into().unwrap());
     until_packet(&mut client, 0x03, |body| {
         body.len() == 16
-            && i64::from_be_bytes(body[..8].try_into().unwrap())
-                >= first_tick.saturating_add(20)
+            && i64::from_be_bytes(body[..8].try_into().unwrap()) >= first_tick.saturating_add(20)
     });
     client.write_all(&frame(0x02, &attack)).unwrap();
 
