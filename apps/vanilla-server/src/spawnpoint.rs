@@ -171,7 +171,11 @@ mod tests {
         let p = Spawnpoint::new(-2, 65, 3).unwrap();
         save(&player, p).unwrap();
         assert_eq!(load(&player).unwrap(), Some(p));
-        fs::write(storage_path(&player), b"{\"version\":1,\"dimension\":-1,\"x\":0,\"y\":65,\"z\":0}").unwrap();
+        fs::write(
+            storage_path(&player),
+            b"{\"version\":1,\"dimension\":-1,\"x\":0,\"y\":65,\"z\":0}",
+        )
+        .unwrap();
         assert!(load(&player).is_err());
         save(&player, p).unwrap();
         clear(&player).unwrap();
