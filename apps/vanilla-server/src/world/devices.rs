@@ -1573,7 +1573,7 @@ mod redstone_regression_tests {
     #[test]
     fn downwards_piston_cannot_push_into_world_bottom() {
         let mut world = World::new();
-        let piston = (33 << 4) | 0;
+        let piston = 33 << 4;
         world.import_block(0, 1, 0, piston).unwrap();
         world.import_block(-1, 1, 0, (69 << 4) | 8).unwrap();
         let mut changes = BTreeMap::new();
