@@ -24,6 +24,7 @@ LEGACY_NON_RUST = frozenset({
 JAVA_ORACLES = frozenset({
     "tools/GenLayerAddIslandOracle.java",
     "tools/GenLayerAddSnowOracle.java",
+    "tools/GenLayerEdgeOracle.java",
     "tools/GenLayerRiverMixOracle.java",
     "tools/GenLayerRiverOracle.java",
 })
