@@ -946,7 +946,9 @@ fn play(
     let started = Instant::now();
     let mut ping_time = started;
     let mut pong_time = started;
-    let mut ping_id: i32 = 0;
+    // Per-session unpredictable IDs prevent another TCP session's pong from
+    // authenticating the current session's heartbeat by accident.
+    let mut ping_id: i32 = rand::random();
     // Only one outstanding server-issued KeepAlive may refresh liveness.
     // An unsolicited, replayed or cross-session ID must never count as a pong.
     let mut pending_ping: Option<i32> = None;
