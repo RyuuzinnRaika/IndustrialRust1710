@@ -154,3 +154,41 @@ does not establish full D02 completion.
 - [ ] The old, uncategorized fatal-path fallback is replaced by the same redo
       transaction before D02 is marked fully complete.
 - [ ] Check TPS cost as JSONL approaches 64 MiB.
+
+
+## D04 integration / D05 cactus-death implementation
+
+The D01 typed Mob / projectile / TNT attribution and D03 mixed-hazard
+classification are now integrated with D02's durable three-part death
+transaction in a **separate unmerged branch**. Native protocol tests have not
+been run here. Do not merge solely based on source inspection.
+
+For D05, cactus damage was added to \`Hazards::tick_detailed\`, using a
+bounded player bounding-box overlap against cactus block ID **81**, so touching
+the side matters even when the player feet are not inside a cactus block.
+It deals 1 raw HP with the existing armor-adjusted damage path, at most once
+every 10 server ticks, and is reported as \`cactus\`. A fatal encounter reports:
+\`Alex was pricked to death\`.
+
+The cactus source merges into \`mixed_environmental\` when a separate
+environmental hit is also applied in the same hazard batch; it never
+arbitrarily replaces the first source.
+
+### Remaining D05 sources
+- [ ] Void/out-of-world: requires safe server-owned movement below Y=0 and a
+      carefully specified Y=-64 kill threshold; current player position
+      validation forbids negative Y.
+- [ ] Falling anvil: requires actual falling-block entity and impact tracking,
+      not just an anvil block check.
+- [ ] Lightning: requires authoritative strike damage source and event linkage.
+- [ ] Potions and other magic: split current generic projectile/effect source
+      only when server-owned effects have stable provenance.
+- [ ] \`/kill\` should emit a distinct cause after command authorization and
+      vanilla 1.7.10 syntax are implemented.
+- [ ] Check collision, armor, death drops, position sync and 1.7.10 client
+      behavior through native tests.
+
+This work does not create a PR because the repository's
+\`.github/workflows/ops-python.yml\` is configured to launch GitHub Actions
+on every pull-request creation/synchronization. Branch-only pushes to this
+non-default, non-release branch avoid those workflow triggers.
