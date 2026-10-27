@@ -681,14 +681,19 @@ fn supplementary_tree(seed: u64, x: i32, z: i32) -> Option<(u16, u16)> {
     if x.abs() < 12 && z.abs() < 12 {
         return None; // keep the established safe spawn square
     }
-    let chance = match biome(seed, x, z) {
+    // Most nearby coordinates are not candidates. Hash before calling
+    // expensive biome/noise functions in the 5x5 canopy lookup.
+    let roll = hash(seed ^ 0x5ce3_77ea, x, 0, z);
+    if !roll.is_multiple_of(144) && !roll.is_multiple_of(80) {
+        return None;
+    }
+    let kind = biome(seed, x, z);
+    let chance = match kind {
         1 => 144, // plains: scattered oak, never dense forest
         35 => 80, // savanna: scattered acacia
         _ => return None,
     };
-    if !hash(seed ^ 0x5ce3_77ea, x, 0, z).is_multiple_of(chance)
-        || height(seed, x, z) < SEA + 2
-    {
+    if !roll.is_multiple_of(chance) || height(seed, x, z) < SEA + 2 {
         return None;
     }
     // Never replace a root with the original tall-grass/flower selection.
@@ -697,7 +702,7 @@ fn supplementary_tree(seed: u64, x: i32, z: i32) -> Option<(u16, u16)> {
     if grass_roll.is_multiple_of(29) || grass_roll.is_multiple_of(5) {
         return None;
     }
-    if biome(seed, x, z) == 35 {
+    if kind == 35 {
         Some((162, 161)) // 1.7.10 acacia log and leaves
     } else {
         Some((17, 18)) // oak
