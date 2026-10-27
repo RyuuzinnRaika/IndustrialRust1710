@@ -29,6 +29,7 @@ impl Hazards {
     }
     /// Compute damage for ONE 20Hz tick. Raw damage is reduced for contact/heat,
     /// but drowning and suffocation bypass armour in vanilla.
+    #[cfg(test)]
     pub fn tick(
         &mut self,
         world: &World,
