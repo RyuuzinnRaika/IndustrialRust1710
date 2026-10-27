@@ -99,6 +99,8 @@ class SyntheticClient:
         self.failure: str | None = None
         self.keepalives = 0
         self.packets = 0
+        self.explosion_packets = 0
+        self.entity_teleports = 0
         self.position: tuple[float, float, float] | None = None
         self.thread = threading.Thread(target=self._read, daemon=True, name=f"p5-{name}")
         handshake = (
@@ -122,6 +124,10 @@ class SyntheticClient:
                 except socket.timeout:
                     continue
                 self.packets += 1
+                if logged_in and packet_id == 0x27:
+                    self.explosion_packets += 1
+                if logged_in and packet_id == 0x18:
+                    self.entity_teleports += 1
                 if not logged_in:
                     if packet_id == 0:
                         raise ValueError("server rejected login")
