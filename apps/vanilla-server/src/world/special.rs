@@ -853,13 +853,24 @@ impl World {
             148 => count.div_ceil(10).min(15) as u16,
             _ => return Ok(false),
         };
-        // Keep the plate awake in the existing device timer, even when the
-        // strength did not change on this packet.
-        if count > 0 {
+        // An unchanged powered plate only needs its release deadline
+        // refreshed; avoid an unnecessary world save for each contact.
+        if state & 15 == level {
+            if count > 0 {
+                self.pending_buttons
+                    .insert((x, y as u8, z), self.fluid_phase + 10);
+            }
+            return Ok(false);
+        }
+        // The analog output must be durable before scheduling its release.
+        // On a failed save update_and_save restores the old block; preserve
+        // the previous timer as well instead of arming a ghost release.
+        let changed = self.update_and_save(path, x, y, z, (state & !15) | level)?;
+        if changed && count > 0 {
             self.pending_buttons
                 .insert((x, y as u8, z), self.fluid_phase + 10);
         }
-        self.update_and_save(path, x, y, z, (state & !15) | level)
+        Ok(changed)
     }
 
     /// Probe at player feet or shoulder height. A valid tripwire must join
@@ -1645,6 +1656,66 @@ mod tests {
             changed.is_empty(),
             "unsupported dark oak cannot debit bone meal"
         );
+    }
+
+    #[test]
+    fn weighted_plate_failed_save_preserves_analog_state_and_release_timer() {
+        for id in [147u16, 148] {
+            let path = std::env::temp_dir().join(format!(
+                "ir1710-b11-weighted-save-{}-{id}.irw",
+                std::process::id()
+            ));
+            let staging = path.with_extension("tmp");
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_dir(&staging);
+            fs::create_dir(&staging).unwrap();
+
+            let mut world = World::new();
+            world.import_block(0, 64, 0, id << 4).unwrap();
+            let key = (0, 64, 0);
+            assert!(world.press_weighted_plate(&path, 0, 64, 0, 1).is_err());
+            assert_eq!(world.get(0, 64, 0), id << 4);
+            assert!(!world.pending_buttons.contains_key(&key));
+
+            fs::remove_dir(&staging).unwrap();
+            assert!(world.press_weighted_plate(&path, 0, 64, 0, 1).unwrap());
+            assert_eq!(world.get(0, 64, 0), (id << 4) | 1);
+            assert_eq!(World::load(&path).unwrap().get(0, 64, 0), (id << 4) | 1);
+            let first_deadline = world.pending_buttons.get(&key).copied().unwrap();
+
+            // A failed analog-level change must keep the prior committed
+            // output and its original release deadline.
+            world.fluid_phase += 1;
+            fs::create_dir(&staging).unwrap();
+            let new_count = if id == 147 { 7 } else { 11 };
+            assert!(world
+                .press_weighted_plate(&path, 0, 64, 0, new_count)
+                .is_err());
+            assert_eq!(world.get(0, 64, 0), (id << 4) | 1);
+            assert_eq!(world.pending_buttons.get(&key), Some(&first_deadline));
+
+            fs::remove_dir(&staging).unwrap();
+            assert!(world
+                .press_weighted_plate(&path, 0, 64, 0, new_count)
+                .unwrap());
+            let expected_level = if id == 147 { 7 } else { 2 };
+            assert_eq!(world.get(0, 64, 0), (id << 4) | expected_level);
+            assert_eq!(
+                world.pending_buttons.get(&key),
+                Some(&(world.fluid_phase + 10))
+            );
+            // Contact with the same strength refreshes the deadline
+            // without changing the saved analog output.
+            world.fluid_phase += 1;
+            assert!(!world
+                .press_weighted_plate(&path, 0, 64, 0, new_count)
+                .unwrap());
+            assert_eq!(
+                world.pending_buttons.get(&key),
+                Some(&(world.fluid_phase + 10))
+            );
+            fs::remove_file(&path).unwrap();
+        }
     }
 
     #[test]
