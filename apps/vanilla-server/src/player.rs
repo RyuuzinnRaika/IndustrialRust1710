@@ -238,13 +238,14 @@ impl PlayerPosition {
         self.save_state_in_dimension(path, vitals, 0)
     }
 
-    /// Persists the position, vitals and active dimension in the same NBT write.
-    pub fn save_state_in_dimension(
+    /// Produce the exact gzip-encoded player NBT used by normal saves.
+    /// This allows one redo transaction to contain food/HP and an inventory
+    /// debit without making either file visible before both are prepared.
+    pub fn encoded_state_in_dimension(
         &self,
-        path: &Path,
         vitals: Vitals,
         dimension: i32,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<u8>> {
         if !matches!(dimension, -1..=1) {
             return Err(invalid("unsupported player dimension"));
         }
@@ -272,19 +273,32 @@ impl PlayerPosition {
         if binary.len() as u64 > MAX_DECOMPRESSED_BYTES {
             return Err(invalid("encoded player NBT too large"));
         }
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&binary)?;
+        let compressed = encoder.finish()?;
+        if compressed.len() as u64 > MAX_COMPRESSED_BYTES {
+            return Err(invalid("compressed player NBT too large"));
+        }
+        Ok(compressed)
+    }
+
+    /// Persists the position, vitals and active dimension in the same NBT write.
+    pub fn save_state_in_dimension(
+        &self,
+        path: &Path,
+        vitals: Vitals,
+        dimension: i32,
+    ) -> io::Result<()> {
+        let encoded = self.encoded_state_in_dimension(vitals, dimension)?;
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
         let temp = path.with_extension("tmp");
-        let file = File::create(&temp)?;
-        let mut encoder = GzEncoder::new(file, Compression::default());
-        encoder.write_all(&binary)?;
-        let mut completed = encoder.finish()?;
-        completed.flush()?;
-        completed.sync_all()?;
-        if fs::metadata(&temp)?.len() > MAX_COMPRESSED_BYTES {
-            return Err(invalid("compressed player NBT too large"));
-        }
+        let mut output = File::create(&temp)?;
+        output.write_all(&encoded)?;
+        output.flush()?;
+        output.sync_all()?;
+        drop(output);
         fs::rename(temp, path)
     }
 }
