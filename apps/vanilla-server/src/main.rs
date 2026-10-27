@@ -16,6 +16,7 @@ mod clock;
 mod commands;
 mod crafting;
 mod decorations;
+mod death_log;
 mod dimensions;
 mod disconnect_log;
 mod dispensers;
@@ -81,6 +82,7 @@ use chests::{Chests, Position as ChestPosition};
 use clock::Clock;
 use commands::PublicCommand;
 use decorations::Decorations;
+use death_log::{DeathCause, DeathRecord, FatalHit};
 use dispensers::{Devices, Position as DevicePosition};
 use experience::Experience;
 use fishing::Fishing;
@@ -119,7 +121,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use survival::MiningProgress;
-use survival_damage::Hazards;
+use survival_damage::{HazardCause, Hazards};
 use teleport_gate::TeleportGate;
 use throwables::Throwables;
 use vehicles::Boats;
@@ -1393,6 +1395,7 @@ fn play(
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
     let mut death_recorded = vitals.health <= 0.0;
+    let mut fatal_hit: Option<FatalHit> = None;
     let mut last_carrot_wear = 0u64;
     let mut last_beacon_tick = clock.ticks();
     let mut last_plate_refresh_tick = clock.ticks();
@@ -1660,6 +1663,12 @@ fn play(
                     let mut next = *vitals;
                     next.health =
                         dispenser_arrow_health_after_hit(next.health, inventory.armor_points());
+                    death_log::record_fatal(
+                        &mut fatal_hit,
+                        vitals.health,
+                        next.health,
+                        DeathCause::DispenserArrow,
+                    );
                     // The owning session persists health before any client notification.
                     player.save_state_in_dimension(
                         player_path,
@@ -1703,6 +1712,12 @@ fn play(
                 let mut next_vitals = *vitals;
                 if pearl_impact {
                     next_vitals.apply_ender_pearl_damage();
+                    death_log::record_fatal(
+                        &mut fatal_hit,
+                        vitals.health,
+                        next_vitals.health,
+                        DeathCause::EnderPearl,
+                    );
                 }
                 target.save_state_in_dimension(
                     player_path,
@@ -2119,7 +2134,14 @@ fn play(
                     worn.save(inventory_path)?;
                     *inventory = worn;
                 }
+                let previous_health = vitals.health;
                 vitals.health = (vitals.health - damage.ceil()).max(0.0);
+                death_log::record_fatal(
+                    &mut fatal_hit,
+                    previous_health,
+                    vitals.health,
+                    DeathCause::CombatOrExplosion,
+                );
                 player.save_state_in_dimension(
                     player_path,
                     *vitals,
@@ -2156,7 +2178,14 @@ fn play(
                 };
                 let landed_distance = fall.take_landing_distance();
                 let mut next_vitals = *vitals;
+                let previous_health = next_vitals.health;
                 next_vitals.health = (next_vitals.health - f32::from(damage)).max(0.0);
+                death_log::record_fatal(
+                    &mut fatal_hit,
+                    previous_health,
+                    next_vitals.health,
+                    DeathCause::Fall,
+                );
                 // Save accepted position and HP before sending an update.
                 candidate.save_state_in_dimension(
                     player_path,
@@ -2201,7 +2230,14 @@ fn play(
             let steps = (now_tick - last_vitals_tick).min(20);
             last_vitals_tick = now_tick;
             let mut next = *vitals;
-            if tick_survival_vitals(&mut next, steps, difficulty) {
+            let changed = tick_survival_vitals(&mut next, steps, difficulty);
+            death_log::record_fatal(
+                &mut fatal_hit,
+                vitals.health,
+                next.health,
+                DeathCause::Starvation,
+            );
+            if changed {
                 player.save_state_in_dimension(
                     player_path,
                     next,
@@ -2215,15 +2251,35 @@ fn play(
         }
         if survival && vitals.health > 0.0 && now_tick > last_hazards_tick {
             let mut total = 0.0f32;
+            let mut last_source = None;
             let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let steps = (now_tick - last_hazards_tick).min(4);
             for t in last_hazards_tick + 1..=last_hazards_tick + steps {
-                total += hazards.tick(&w, *player, t, inventory);
+                let (damage, source) = hazards.tick_detailed(&w, *player, t, inventory);
+                total += damage;
+                if damage > 0.0 {
+                    last_source = source;
+                }
             }
             last_hazards_tick = now_tick;
             drop(w);
             if total > 0.0 {
+                let previous_health = vitals.health;
                 vitals.health = (vitals.health - total).max(0.0);
+                let cause = match last_source {
+                    Some(HazardCause::Drowning) => DeathCause::Drowning,
+                    Some(HazardCause::Suffocation) => DeathCause::Suffocation,
+                    Some(HazardCause::Lava) => DeathCause::Lava,
+                    Some(HazardCause::Fire) => DeathCause::Fire,
+                    Some(HazardCause::Burning) => DeathCause::Burning,
+                    None => DeathCause::Unknown,
+                };
+                death_log::record_fatal(
+                    &mut fatal_hit,
+                    previous_health,
+                    vitals.health,
+                    cause,
+                );
                 player.save_state_in_dimension(
                     player_path,
                     *vitals,
@@ -2520,7 +2576,8 @@ fn play(
         }
         if survival && vitals.health <= 0.0 {
             eating = None;
-            if !death_recorded {
+            let newly_dead = !death_recorded;
+            if newly_dead {
                 // A death is counted exactly once in this session and the
                 // updated shared scoreboard is durable before client notify.
                 let changes = {
@@ -2538,10 +2595,12 @@ fn play(
                 }
                 death_recorded = true;
             }
-            let keep_inventory = game_rules
-                .lock()
-                .map_err(|_| bad("game rules mutex poisoned"))?
-                .keep_inventory();
+            let (keep_inventory, show_death_messages) = {
+                let rules = game_rules
+                    .lock()
+                    .map_err(|_| bad("game rules mutex poisoned"))?;
+                (rules.keep_inventory(), rules.show_death_messages())
+            };
             if !keep_inventory {
                 commit_death_drops(
                     inventory,
@@ -2552,6 +2611,23 @@ fn play(
                     hub,
                     location,
                 )?;
+            }
+            if newly_dead {
+                let record = DeathRecord {
+                    player: name,
+                    hit: fatal_hit.take(),
+                    position: *player,
+                    dimension: session_dimension.protocol_id() as i32,
+                    tick: now_tick,
+                };
+                println!("{}", record.console_summary());
+                if let Err(error) = record.append(world_path) {
+                    // Optional diagnostic output must not block drops or respawn.
+                    eprintln!("DEATH LOG WRITE ERROR: {error}");
+                }
+                if show_death_messages {
+                    hub.broadcast(chat_event(&record.chat_message())?);
+                }
             }
             if hardcore {
                 // Persist the dead state before ending the connection. Future
@@ -3270,7 +3346,14 @@ fn play(
                     };
                     landing_distance = fall.take_landing_distance();
                     if damage != 0 {
+                        let previous_health = vitals.health;
                         vitals.health = (vitals.health - f32::from(damage)).max(0.0);
+                        death_log::record_fatal(
+                            &mut fatal_hit,
+                            previous_health,
+                            vitals.health,
+                            DeathCause::Fall,
+                        );
                         player.save_state_in_dimension(
                             player_path,
                             *vitals,
@@ -6028,6 +6111,7 @@ fn play(
                     *vitals = fresh_vitals;
                     *player = origin;
                     death_recorded = false;
+                    fatal_hit = None;
                     fall = FallTracker::new(origin.y);
                     idle_gravity = IdleGravity::new(now_tick);
                     eating = None;
