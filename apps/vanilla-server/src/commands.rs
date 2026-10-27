@@ -464,6 +464,92 @@ pub fn summon_coordinates(
     });
     teleport_coordinates(coords[0], coords[1], coords[2], origin)
 }
+
+/// Java 1.7.10 numeric enchantment IDs; aliases are intentionally excluded
+/// until a versioned name registry is added.
+pub fn enchant_args(id: &str, level: Option<&str>) -> io::Result<(i16, i16)> {
+    let id = id
+        .parse::<i16>()
+        .map_err(|_| invalid("enchant ID must be numeric for 1.7.10"))?;
+    let level = level
+        .unwrap_or("1")
+        .parse::<i16>()
+        .map_err(|_| invalid("enchant level must be a positive number"))?;
+    if !(1..=5).contains(&level) || !matches!(id, 0..=7 | 16..=21 | 32..=35 | 48..=51 | 61..=62) {
+        return Err(invalid("unknown 1.7.10 enchantment ID or level"));
+    }
+    Ok((id, level))
+}
+
+/// Read-only legacy block query, where data=-1 tests only the numeric block ID.
+/// The limited named registry can expand without ever accepting 1.13 states.
+pub fn testforblock_args(
+    coords: [&str; 3],
+    name: &str,
+    data: Option<&str>,
+    origin: Option<PlayerPosition>,
+) -> io::Result<(i32, i32, i32, u8, Option<u8>)> {
+    if origin.is_none() && coords.iter().any(|part| part.starts_with('~')) {
+        return Err(invalid("console coordinates must be absolute"));
+    }
+    let origin = origin.unwrap_or(PlayerPosition {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    });
+    let parse = |text: &str, base: f64| -> io::Result<i32> {
+        let value = relative_coordinate(text, base)?.floor();
+        if value < i32::MIN as f64 || value >= (i32::MAX as f64 + 1.0) {
+            return Err(invalid("testforblock coordinate out of bounds"));
+        }
+        Ok(value as i32)
+    };
+    let x = parse(coords[0], origin.x)?;
+    let y = parse(coords[1], origin.y)?;
+    let z = parse(coords[2], origin.z)?;
+    if !crate::world::in_bounds(x, y, z) {
+        return Err(invalid("testforblock position outside world"));
+    }
+    let bare = name.strip_prefix("minecraft:").unwrap_or(name);
+    let id: u8 = match bare {
+        "bedrock" => 7,
+        "flowing_water" => 8,
+        "water" => 9,
+        "flowing_lava" => 10,
+        "lava" => 11,
+        "diamond_ore" => 56,
+        "crafting_table" => 58,
+        "furnace" => 61,
+        "lit_furnace" => 62,
+        "chest" => 54,
+        "mob_spawner" => 52,
+        "redstone_wire" => 55,
+        "command_block" => 137,
+        _ => safe_setblock_id(bare).or_else(|_| {
+            let numeric = bare
+                .parse::<u8>()
+                .map_err(|_| invalid("unknown legacy block name"))?;
+            if numeric > 175 || (numeric != 0 && !crate::items_1710::exists(i16::from(numeric))) {
+                return Err(invalid("unknown legacy block ID"));
+            }
+            Ok(numeric)
+        })?,
+    };
+    let data = match data
+        .unwrap_or("-1")
+        .parse::<i16>()
+        .map_err(|_| invalid("block data must be -1 or 0..15"))?
+    {
+        -1 => None,
+        0..=15 => Some(
+            data.unwrap_or("0")
+                .parse::<u8>()
+                .map_err(|_| invalid("invalid block data"))?,
+        ),
+        _ => return Err(invalid("block data must be -1 or 0..15")),
+    };
+    Ok((x, y, z, id, data))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,6 +678,32 @@ mod tests {
         assert!(summon_coordinates(&[], None).is_err());
         assert!(summon_coordinates(&["~", "64", "1"], None).is_err());
         assert!(summon_coordinates(&["1", "64", "2", "{CustomName:A}"], Some(player)).is_err());
+    }
+
+    #[test]
+    fn enchant_and_testforblock_enforce_pre_18_syntax() {
+        assert_eq!(enchant_args("16", None).unwrap(), (16, 1));
+        assert_eq!(enchant_args("48", Some("5")).unwrap(), (48, 5));
+        assert!(enchant_args("sharpness", None).is_err());
+        assert!(enchant_args("70", None).is_err());
+        assert!(enchant_args("16", Some("0")).is_err());
+        let pos = PlayerPosition {
+            x: 10.2,
+            y: 66.0,
+            z: -8.9,
+        };
+        assert_eq!(
+            testforblock_args(["~", "~-1", "~3"], "minecraft:chest", None, Some(pos)).unwrap(),
+            (10, 65, -6, 54, None)
+        );
+        assert_eq!(
+            testforblock_args(["0", "64", "3"], "wool", Some("3"), None).unwrap(),
+            (0, 64, 3, 35, Some(3))
+        );
+        assert!(testforblock_args(["~", "64", "3"], "stone", None, None).is_err());
+        assert!(testforblock_args(["0", "256", "3"], "stone", None, None).is_err());
+        assert!(testforblock_args(["0", "64", "3"], "stone", Some("16"), None).is_err());
+        assert!(testforblock_args(["0", "64", "3"], "netherite_block", None, None).is_err());
     }
 
     #[test]

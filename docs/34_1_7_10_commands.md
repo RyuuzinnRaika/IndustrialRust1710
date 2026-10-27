@@ -95,3 +95,22 @@ These limits prevent accidental inventory loss and incorrect 1.7.10 block NBT.
   and entities without existing AI are not yet supported.
 
 These commands share the existing verified-OP level-2 gate and console audit log.
+
+## Sequential command roadmap (#649): items 01 and 02
+
+- **01 /enchant** `/enchant <player> <numericId> [level=1]` works from the
+  host console and verified in-game OPs. IDs must be in the 1.7.10 registry;
+  enchantability, compatibility, level ceilings and pre-existing enchants
+  are validated using the same rules as anvil operations. Held-item NBT
+  keeps unknown tags and prior damage; the target's own session stages
+  the edit and saves the inventory **before** sending the Protocol 5 set-slot
+  packet. No XP is charged for a command enchant.
+- **02 /testforblock** `/testforblock <x> <y> <z> <block> [data=-1]`
+  uses read-only authoritative world data. Data `-1` matches any
+  metadata; values 0..15 match exactly. Players can specify `~`
+  relative coordinates; console only accepts absolute coordinates.
+  Query failure does not mutate world or inventory. Numeric ID and
+  legacy name validation deliberately reject newer 1.8+ blocks.
+- Neither command yet implements arbitrary target selectors, new
+  blockstate syntax or command-block success-count integration.
+- Planned ordered follow-up: https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/649
