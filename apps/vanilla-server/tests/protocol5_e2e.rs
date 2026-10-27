@@ -1118,6 +1118,75 @@ fn native_open_window_packets_cover_other_interactive_gui_blocks() {
 }
 
 #[test]
+fn native_ender_chest_is_personal_and_survives_reopening_over_tcp() {
+    let server = NativeServer::start();
+    let (mut alice, _, _) = server.join("RustTester");
+    let creative = |slot: i16, id: i16, count: u8| {
+        let mut p = slot.to_be_bytes().to_vec();
+        p.extend_from_slice(&id.to_be_bytes());
+        p.push(count);
+        p.extend_from_slice(&0i16.to_be_bytes());
+        p.extend_from_slice(&(-1i16).to_be_bytes());
+        frame(0x10, &p)
+    };
+    alice.write_all(&creative(36, 130, 1)).unwrap();
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[0, 0, 36]));
+    let mut placement = 0i32.to_be_bytes().to_vec();
+    placement.push(63);
+    placement.extend_from_slice(&0i32.to_be_bytes());
+    placement.push(1);
+    placement.extend_from_slice(&130i16.to_be_bytes());
+    placement.push(1);
+    placement.extend_from_slice(&0i16.to_be_bytes());
+    placement.extend_from_slice(&(-1i16).to_be_bytes());
+    placement.extend_from_slice(&[8, 8, 8]);
+    alice.write_all(&frame(8, &placement)).unwrap();
+    until_packet(&mut alice, 0x23, |p| p.len() >= 11 && p[4] == 64);
+
+    let mut open = 0i32.to_be_bytes().to_vec();
+    open.push(64);
+    open.extend_from_slice(&0i32.to_be_bytes());
+    open.push(1);
+    open.extend_from_slice(&(-1i16).to_be_bytes());
+    open.extend_from_slice(&[8, 8, 8]);
+    alice.write_all(&frame(8, &open)).unwrap();
+    let gui = until_packet(&mut alice, 0x2d, |p| p.first() == Some(&1));
+    assert_open_window_protocol5(&gui, 1, 0, "Ender Chest", 27);
+    until_packet(&mut alice, 0x30, |p| p.starts_with(&[1, 0, 63]));
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+
+    alice.write_all(&creative(37, 4, 5)).unwrap();
+    until_packet(&mut alice, 0x2f, |p| p.starts_with(&[0, 0, 37]));
+    for (slot, action) in [(55i16, 1i16), (0, 2)] {
+        let mut data = vec![1];
+        data.extend_from_slice(&slot.to_be_bytes());
+        data.push(0);
+        data.extend_from_slice(&action.to_be_bytes());
+        data.push(0);
+        data.extend_from_slice(&(-1i16).to_be_bytes());
+        alice.write_all(&frame(0x0e, &data)).unwrap();
+        until_packet(&mut alice, 0x32, |p| p == [1, 0, action as u8, 1]);
+        until_packet(&mut alice, 0x30, |p| p.starts_with(&[1, 0, 63]));
+        until_packet(&mut alice, 0x2f, |p| p.starts_with(&[255, 255, 255]));
+    }
+    let save = server.directory.join("players/rusttester.inventory.json");
+    await_file(&save);
+    let snapshot: Value = serde_json::from_slice(&fs::read(&save).unwrap()).unwrap();
+    assert_eq!(snapshot["ender_chest"][0]["id"], 4);
+    assert_eq!(snapshot["ender_chest"][0]["count"], 5);
+
+    alice.write_all(&frame(13, &[1])).unwrap();
+    until_packet(&mut alice, 0x30, |p| p.starts_with(&[0, 0, 45]));
+    alice.write_all(&frame(8, &open)).unwrap();
+    let next = until_packet(&mut alice, 0x2d, |p| p.first() == Some(&2));
+    assert_open_window_protocol5(&next, 2, 0, "Ender Chest", 27);
+    let items = until_packet(&mut alice, 0x30, |p| p.starts_with(&[2, 0, 63]));
+    assert_eq!(&items[3..10], &[0, 4, 5, 0, 0, 255, 255]);
+    drop(alice);
+    server.wait_idle();
+}
+
+#[test]
 fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
     let server = NativeServer::start();
     let (mut alice, _, _) = server.join("RustTester");
