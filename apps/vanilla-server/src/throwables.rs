@@ -621,6 +621,43 @@ mod tests {
     }
 
     #[test]
+    fn dispenser_embedded_arrow_rechecks_replaced_block_state() {
+        let mut world = World::new();
+        world.import_block(2, 70, 0, 1 << 4).unwrap();
+        let mut objects = Throwables::default();
+        objects
+            .launch_dispenser(262, (0, 70, 0), (1, 0, 0))
+            .unwrap();
+        let projectile_id = *objects.active.keys().next().unwrap();
+
+        objects.tick(&world, 1);
+        assert!(objects.active.get(&projectile_id).unwrap().embedded);
+        assert!(objects.tick(&world, 2).events.is_empty());
+
+        // Replacing stone with another solid block must invalidate the old
+        // impact state without deleting the arrow or duplicating its entity.
+        world.import_block(2, 70, 0, 4 << 4).unwrap();
+        let replacement = objects.tick(&world, 3);
+        let arrow = objects.active.get(&projectile_id).unwrap();
+        assert!(arrow.embedded);
+        assert_eq!(arrow.embedded_block, Some((2, 70, 0, 4 << 4)));
+        assert_eq!(arrow.age, 0);
+        assert_eq!(replacement.events.len(), 1);
+        assert_eq!(replacement.events[0].1.id, 0x18);
+
+        // Removing the replacement releases the same entity exactly once.
+        world.import_block(2, 70, 0, 0).unwrap();
+        let released = objects.tick(&world, 4);
+        let arrow = objects.active.get(&projectile_id).unwrap();
+        assert!(!arrow.embedded);
+        assert_eq!(arrow.embedded_block, None);
+        assert_eq!(arrow.age, 0);
+        assert_eq!(released.events.len(), 1);
+        assert_eq!(released.events[0].1.id, 0x18);
+        assert_eq!(objects.active.len(), 1);
+    }
+
+    #[test]
     fn dispenser_rejects_full_registry_without_mutation() {
         let mut objects = Throwables::default();
         for _ in 0..CAP {
