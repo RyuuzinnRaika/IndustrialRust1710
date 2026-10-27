@@ -5,6 +5,7 @@ use crate::world::World;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HazardCause {
+    Cactus,
     Drowning,
     Suffocation,
     Lava,
@@ -31,6 +32,41 @@ impl HazardAttribution {
     }
 }
 
+/// Check the horizontal player bounding box, not just the block containing
+/// the player's feet: a cactus damages players touching its side.
+fn touches_cactus(world: &World, pos: PlayerPosition) -> bool {
+    if !pos.x.is_finite() || !pos.y.is_finite() || !pos.z.is_finite() {
+        return false;
+    }
+    const PLAYER_HALF: f64 = 0.3;
+    const CACTUS_INSET: f64 = 1.0 / 16.0;
+    let player_x_min = pos.x - PLAYER_HALF;
+    let player_x_max = pos.x + PLAYER_HALF;
+    let player_z_min = pos.z - PLAYER_HALF;
+    let player_z_max = pos.z + PLAYER_HALF;
+    for bx in (player_x_min.floor() as i32)..=(player_x_max.floor() as i32) {
+        for bz in (player_z_min.floor() as i32)..=(player_z_max.floor() as i32) {
+            let cactus_x_min = f64::from(bx) + CACTUS_INSET;
+            let cactus_x_max = f64::from(bx) + 1.0 - CACTUS_INSET;
+            let cactus_z_min = f64::from(bz) + CACTUS_INSET;
+            let cactus_z_max = f64::from(bz) + 1.0 - CACTUS_INSET;
+            if player_x_max <= cactus_x_min
+                || player_x_min >= cactus_x_max
+                || player_z_max <= cactus_z_min
+                || player_z_min >= cactus_z_max
+            {
+                continue;
+            }
+            for by in (pos.y.floor() as i32)..=((pos.y + 1.8).floor() as i32) {
+                if world.get(bx, by, bz) >> 4 == 81 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 #[derive(Debug, Default)]
 pub struct Hazards {
     air: u16,
@@ -38,6 +74,7 @@ pub struct Hazards {
     fire_ticks: u16,
     last_fire_hit: u64,
     last_suffocation_hit: u64,
+    last_cactus_hit: Option<u64>,
 }
 impl Hazards {
     pub fn new() -> Self {
@@ -78,6 +115,15 @@ impl Hazards {
         let mut raw = 0.0_f32;
         let mut bypass = 0.0_f32;
         let mut cause = HazardAttribution::None;
+        if touches_cactus(world, pos)
+            && self
+                .last_cactus_hit
+                .is_none_or(|last| tick.saturating_sub(last) >= 10)
+        {
+            self.last_cactus_hit = Some(tick);
+            raw += 1.0;
+            cause = cause.combine(HazardAttribution::Single(HazardCause::Cactus));
+        }
         if submerged {
             self.air = self.air.saturating_sub(1);
             self.wet_ticks = self.wet_ticks.saturating_add(1);
@@ -201,6 +247,31 @@ mod tests {
                 .combine(HazardAttribution::Single(HazardCause::Drowning)),
             HazardAttribution::Mixed
         );
+    }
+
+    #[test]
+    fn cactus_side_contact_deals_server_owned_bounded_damage() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 81 << 4).unwrap();
+        let contact = PlayerPosition {
+            x: 1.2,
+            y: 64.0,
+            z: 0.5,
+        };
+        let no_contact = PlayerPosition {
+            x: 1.4,
+            y: 64.0,
+            z: 0.5,
+        };
+        let mut hazard = Hazards::new();
+        let inventory = Inventory::default();
+        let (first, source) = hazard.tick_detailed(&world, contact, 1, &inventory);
+        assert_eq!(first, 1.0);
+        assert_eq!(source, HazardAttribution::Single(HazardCause::Cactus));
+        assert_eq!(hazard.tick_detailed(&world, contact, 2, &inventory).0, 0.0);
+        assert_eq!(hazard.tick_detailed(&world, contact, 11, &inventory).0, 1.0);
+        let mut other = Hazards::new();
+        assert_eq!(other.tick_detailed(&world, no_contact, 1, &inventory).0, 0.0);
     }
 
     #[test]
