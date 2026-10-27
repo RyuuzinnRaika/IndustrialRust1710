@@ -84,6 +84,23 @@ impl World {
     /// travels through air/transparent blocks for at most 15 blocks and may
     /// cross chunk boundaries (sources are searched in a 15-block halo).
     pub(super) fn light_arrays(&self, chunk_x: i32, chunk_z: i32) -> (Vec<u8>, Vec<u8>) {
+        if let Some(cache) = self.chunk_block_cache(chunk_x, chunk_z) {
+            self.light_arrays_with(chunk_x, chunk_z, |x, y, z| {
+                cache.get(x, y, z).unwrap_or_else(|| self.get(x, y, z))
+            })
+        } else {
+            self.light_arrays_with(chunk_x, chunk_z, |x, y, z| self.get(x, y, z))
+        }
+    }
+
+    /// Calculate lighting from a shared transient block snapshot when a
+    /// streamed chunk already has one, avoiding a second terrain-generation pass.
+    pub(super) fn light_arrays_with(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        mut block_at: impl FnMut(i32, i32, i32) -> u16,
+    ) -> (Vec<u8>, Vec<u8>) {
         let min_x = chunk_x * 16;
         let min_z = chunk_z * 16;
         let mut sky = vec![0u8; 16 * 256 * 16];
@@ -100,7 +117,7 @@ impl World {
             for x in min_x - 1..min_x + 17 {
                 let mut sun = 15u8;
                 for y in (0..256).rev() {
-                    let air = transparent(self.get(x, y, z) >> 4);
+                    let air = transparent(block_at(x, y, z) >> 4);
                     if !air {
                         sun = 0;
                     }
@@ -202,7 +219,7 @@ impl World {
                 (x, y, z + 1),
                 (x, y, z - 1),
             ] {
-                if (0..256).contains(&ny) && transparent(self.get(nx, ny, nz) >> 4) {
+                if (0..256).contains(&ny) && transparent(block_at(nx, ny, nz) >> 4) {
                     queue.push_back((nx, ny, nz, level - 1));
                 }
             }

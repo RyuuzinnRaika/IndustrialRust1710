@@ -95,6 +95,83 @@ pub struct World {
     save_session: Option<(PathBuf, Arc<Mutex<crate::session_lock::WorldSessionLock>>)>,
 }
 
+const CHUNK_BLOCK_CACHE_WIDTH: i32 = 18;
+const CHUNK_BLOCK_CACHE_CELLS: usize = 18 * 18 * 256;
+
+/// Transient block snapshot for one chunk plus the one-block lighting halo.
+/// It is discarded after packet serialization and never enters world saves.
+struct ChunkBlockCache {
+    min_x: i32,
+    min_z: i32,
+    blocks: Vec<u16>,
+}
+
+impl ChunkBlockCache {
+    fn new(world: &World, chunk_x: i32, chunk_z: i32) -> Self {
+        let min_x = chunk_x * 16 - 1;
+        let min_z = chunk_z * 16 - 1;
+        let mut cache = Self {
+            min_x,
+            min_z,
+            blocks: vec![0; CHUNK_BLOCK_CACHE_CELLS],
+        };
+        if let Generation::Expanded(seed, crate::dimensions::Dimension::Overworld) =
+            world.generation
+        {
+            for z in min_z..min_z + CHUNK_BLOCK_CACHE_WIDTH {
+                for x in min_x..min_x + CHUNK_BLOCK_CACHE_WIDTH {
+                    let column = crate::worldgen::OverworldColumn::new(seed, x, z);
+                    for y in 0..256 {
+                        let block = if !in_bounds(x, y, z) {
+                            0
+                        } else {
+                            world
+                                .edits
+                                .get(&(x, y as u8, z))
+                                .copied()
+                                .unwrap_or_else(|| column.block_at(y))
+                        };
+                        cache.set(x, y, z, block);
+                    }
+                }
+            }
+        } else {
+            for y in 0..256 {
+                for z in min_z..min_z + CHUNK_BLOCK_CACHE_WIDTH {
+                    for x in min_x..min_x + CHUNK_BLOCK_CACHE_WIDTH {
+                        cache.set(x, y, z, world.get(x, y, z));
+                    }
+                }
+            }
+        }
+        cache
+    }
+
+    fn index(&self, x: i32, y: i32, z: i32) -> Option<usize> {
+        if !(self.min_x..self.min_x + CHUNK_BLOCK_CACHE_WIDTH).contains(&x)
+            || !(self.min_z..self.min_z + CHUNK_BLOCK_CACHE_WIDTH).contains(&z)
+            || !(0..256).contains(&y)
+        {
+            return None;
+        }
+        Some(
+            ((y * CHUNK_BLOCK_CACHE_WIDTH * CHUNK_BLOCK_CACHE_WIDTH)
+                + ((z - self.min_z) * CHUNK_BLOCK_CACHE_WIDTH)
+                + (x - self.min_x)) as usize,
+        )
+    }
+
+    fn get(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+        self.index(x, y, z).map(|index| self.blocks[index])
+    }
+
+    fn set(&mut self, x: i32, y: i32, z: i32, block: u16) {
+        if let Some(index) = self.index(x, y, z) {
+            self.blocks[index] = block;
+        }
+    }
+}
+
 /// A persisted world mutation can create a temporary ground-item event.
 /// World state is written first, then the 20TPS worker saves item entities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -907,6 +984,10 @@ impl World {
             63 => 2 << 4,
             _ => 0,
         }
+    }
+    fn chunk_block_cache(&self, chunk_x: i32, chunk_z: i32) -> Option<ChunkBlockCache> {
+        (!matches!(self.generation, Generation::Flat))
+            .then(|| ChunkBlockCache::new(self, chunk_x, chunk_z))
     }
     pub fn get(&self, x: i32, y: i32, z: i32) -> u16 {
         if !in_bounds(x, y, z) {
@@ -2627,6 +2708,7 @@ impl World {
     /// sections are transmitted when edited. This avoids dropping high-altitude
     /// or underground edits on re-login or crossing a chunk boundary.
     pub fn chunk_data(&self, chunk_x: i32, chunk_z: i32) -> (u16, Vec<u8>) {
+        let block_cache = self.chunk_block_cache(chunk_x, chunk_z);
         let mut mask: u16 = if self.extended_identity().is_some() {
             0x01ff
         } else if self.is_natural() {
@@ -2656,8 +2738,18 @@ impl World {
             for y in 0..16 {
                 for z in 0..16 {
                     for x in (0..16).step_by(2) {
-                        let a = self.get(chunk_x * 16 + x, section * 16 + y, chunk_z * 16 + z);
-                        let b = self.get(chunk_x * 16 + x + 1, section * 16 + y, chunk_z * 16 + z);
+                        let ax = chunk_x * 16 + x;
+                        let bx = ax + 1;
+                        let by = section * 16 + y;
+                        let bz = chunk_z * 16 + z;
+                        let a = block_cache
+                            .as_ref()
+                            .and_then(|cache| cache.get(ax, by, bz))
+                            .unwrap_or_else(|| self.get(ax, by, bz));
+                        let b = block_cache
+                            .as_ref()
+                            .and_then(|cache| cache.get(bx, by, bz))
+                            .unwrap_or_else(|| self.get(bx, by, bz));
                         bytes.push((a >> 4) as u8);
                         bytes.push((b >> 4) as u8);
                         metadata.push((a as u8 & 15) | ((b as u8 & 15) << 4));
@@ -2666,7 +2758,13 @@ impl World {
             }
         }
         bytes.extend_from_slice(&metadata);
-        let (block_light, sky_light) = self.light_arrays(chunk_x, chunk_z);
+        let (block_light, sky_light) = if let Some(cache) = block_cache.as_ref() {
+            self.light_arrays_with(chunk_x, chunk_z, |x, y, z| {
+                cache.get(x, y, z).unwrap_or_else(|| self.get(x, y, z))
+            })
+        } else {
+            self.light_arrays(chunk_x, chunk_z)
+        };
         for channel in [&block_light, &sky_light] {
             for &section in &sections {
                 for y in 0..16 {

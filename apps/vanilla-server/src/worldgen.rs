@@ -744,6 +744,161 @@ fn aboveground(seed: u64, x: i32, y: i32, z: i32, top: i32, id: u8) -> u16 {
         AIR
     }
 }
+/// Reuse column-invariant IRW4 terrain data while building one streamed chunk.
+/// The ordinary point query stays stateless; this short-lived view avoids
+/// recalculating biome, height and neighboring tree candidates for every Y.
+pub(crate) struct OverworldColumn {
+    seed: u64,
+    x: i32,
+    z: i32,
+    kind: u8,
+    top: i32,
+    canopy: [Option<u16>; 256],
+}
+
+impl OverworldColumn {
+    pub(crate) fn new(seed: u64, x: i32, z: i32) -> Self {
+        let kind = biome(seed, x, z);
+        let top = height(seed, x, z);
+        let mut canopy = [None; 256];
+        for tx in x - 2..=x + 2 {
+            for tz in z - 2..=z + 2 {
+                if tx.abs() < 12 && tz.abs() < 12 {
+                    continue;
+                }
+                let tree_kind = biome(seed, tx, tz);
+                let frequency = match tree_kind {
+                    4 | 27 => 37,
+                    5 | 30 => 47,
+                    21 => 28,
+                    6 => 59,
+                    18 => 44,
+                    _ => continue,
+                };
+                if !hash(seed ^ 0x7eed, tx, 0, tz).is_multiple_of(frequency) {
+                    continue;
+                }
+                let root = height(seed, tx, tz);
+                if root < SEA {
+                    continue;
+                }
+                let metadata = match tree_kind {
+                    5 | 30 => 1,
+                    27 => 2,
+                    21 => 3,
+                    _ => 0,
+                };
+                for y in root + 1..=root + 7 {
+                    if !(0..=255).contains(&y) {
+                        continue;
+                    }
+                    let block = if tx == x && tz == z && y <= root + 5 {
+                        Some(state(17, metadata))
+                    } else {
+                        let radius = if y >= root + 7 { 1 } else { 2 };
+                        ((tx - x).abs() <= radius && (tz - z).abs() <= radius && y >= root + 4)
+                            .then_some(state(18, metadata | 4))
+                    };
+                    // Preserve the point generator's first matching tree.
+                    if canopy[y as usize].is_none() {
+                        canopy[y as usize] = block;
+                    }
+                }
+            }
+        }
+        Self {
+            seed,
+            x,
+            z,
+            kind,
+            top,
+            canopy,
+        }
+    }
+
+    pub(crate) fn block_at(&self, y: i32) -> u16 {
+        if !(0..=255).contains(&y) {
+            return AIR;
+        }
+        if y == 0 {
+            return b(7);
+        }
+        if let Some(block) = village(self.seed, self.x, y, self.z) {
+            return block;
+        }
+        if let Some(block) = dungeon(self.seed, self.x, y, self.z) {
+            return block;
+        }
+        if y > self.top {
+            return self.aboveground(y);
+        }
+        if y < 5 && hash(self.seed, self.x, y, self.z).is_multiple_of(4) {
+            return b(7);
+        }
+        if y < self.top - 4 {
+            if cave(self.seed, self.x, y, self.z) {
+                return if y < 11 { b(10) } else { AIR };
+            }
+            return ore(self.seed, self.x, y, self.z, matches!(self.kind, 3 | 13));
+        }
+        if y == self.top {
+            return if stone_biome(self.kind) {
+                b(1)
+            } else if sand_biome(self.kind) {
+                b(12)
+            } else if matches!(self.kind, 12 | 13) {
+                b(80)
+            } else if self.top <= SEA + 1 {
+                b(13)
+            } else {
+                b(2)
+            };
+        }
+        if sand_biome(self.kind) {
+            b(12)
+        } else {
+            b(3)
+        }
+    }
+
+    fn aboveground(&self, y: i32) -> u16 {
+        let choice = hash(self.seed ^ 0x771e, self.x, 0, self.z);
+        if desert_biome(self.kind) && choice.is_multiple_of(121) && y <= self.top + 3 {
+            return b(81);
+        }
+        if y == self.top + 1 {
+            if matches!(self.kind, 6 | 21) && choice.is_multiple_of(48) {
+                return b(if choice & 1 == 0 { 39 } else { 40 });
+            }
+            if matches!(self.kind, 1 | 4 | 27 | 35) {
+                if choice.is_multiple_of(29) {
+                    return state(38, (choice % 9) as u16);
+                }
+                if choice.is_multiple_of(5) {
+                    return state(31, 1);
+                }
+            }
+        }
+        if let Some(block) = self.canopy[y as usize] {
+            return block;
+        }
+        if self.top < SEA && y <= SEA {
+            return if matches!(self.kind, 10 | 11) && y == SEA {
+                b(79)
+            } else {
+                b(9)
+            };
+        }
+        if y == self.top + 1
+            && self.top >= SEA
+            && matches!(self.kind, 5 | 10 | 11 | 12 | 13 | 26 | 30)
+        {
+            return b(78);
+        }
+        AIR
+    }
+}
+
 fn overworld(seed: u64, x: i32, y: i32, z: i32) -> u16 {
     if y == 0 {
         return b(7);
@@ -884,6 +1039,23 @@ pub fn biome_for_dimension(seed: u64, dim: Dimension, x: i32, z: i32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_overworld_columns_match_point_generation_at_every_height() {
+        for seed in [42, 983] {
+            for (x, z) in [(0, 0), (14, 23), (-17, 16), (48, 48), (835, 142)] {
+                let column = OverworldColumn::new(seed, x, z);
+                for y in 0..256 {
+                    assert_eq!(
+                        column.block_at(y),
+                        block(seed, Dimension::Overworld, x, y, z),
+                        "seed={seed}, x={x}, y={y}, z={z}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn lapis_ores_use_a_triangular_height_distribution() {
         assert_eq!(lapis_layer_weight(-1), 0);
