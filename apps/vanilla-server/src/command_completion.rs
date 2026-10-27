@@ -57,6 +57,23 @@ fn add(out: &mut Vec<String>, prefix: &str, options: &[&str]) {
     }
 }
 
+/// Legacy 1.7.10 command arguments also accept the minecraft: namespace.
+fn legacy_names(out: &mut Vec<String>, prefix: &str, options: &[&str]) {
+    if prefix
+        .get(..10)
+        .is_some_and(|head| head.eq_ignore_ascii_case("minecraft:"))
+    {
+        let bare = &prefix[10..];
+        for name in options {
+            if name.starts_with(bare) {
+                out.push(format!("minecraft:{name}"));
+            }
+        }
+    } else {
+        add(out, prefix, options);
+    }
+}
+
 fn players(out: &mut Vec<String>, prefix: &str, online: &[String]) {
     for name in online {
         if name.len() <= 16
@@ -153,8 +170,10 @@ pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
             ("/weather", 2) if previous == "set" => {
                 add(&mut found, prefix, &["clear", "rain", "thunder"]);
             }
-            ("/give" | "/clear", 2) => add(&mut found, prefix, ITEMS),
-            ("/setblock" | "/testforblock", 4) => add(&mut found, prefix, TERRAIN),
+            ("/give" | "/clear", 2) => legacy_names(&mut found, prefix, ITEMS),
+            ("/setblock" | "/testforblock", 4) => {
+                legacy_names(&mut found, prefix, TERRAIN);
+            }
             ("/setblock", 6) => add(&mut found, prefix, &["replace", "keep"]),
             ("/effect", 2) => {
                 add(
@@ -224,6 +243,10 @@ mod tests {
         assert_eq!(complete("/weather r", 2, &people), vec!["rain"]);
         assert_eq!(complete("/time set n", 2, &people), vec!["night"]);
         assert_eq!(complete("/summon Z", 2, &people), vec!["Zombie"]);
+        assert_eq!(
+            complete("/give Steve minecraft:di", 2, &people),
+            vec!["minecraft:diamond", "minecraft:diamond_pickaxe", "minecraft:diamond_sword"]
+        );
         assert!(complete("/tp Steve ~", 2, &people).contains(&"~".to_owned()));
         assert!(complete("/ban St", 2, &people).is_empty());
         assert_eq!(complete("Hello St", 0, &people), vec!["Stefan", "Steve"]);
