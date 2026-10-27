@@ -5396,6 +5396,74 @@ mod tests {
     }
 
     #[test]
+    fn natural_spawn_live_pack_respects_multiplayer_chunk_union_cap() {
+        // The live spawn loop must use the 17x17 chunk UNION, not a
+        // per-player count or the cap of just the first player. Keep all
+        // pre-existing mobs far from both spawn origins so their collision
+        // boxes do not suppress an otherwise eligible pack.
+        let world = World::natural(0);
+        let near = PlayerPosition {
+            x: 512.5,
+            y: world.spawn_y(),
+            z: 512.5,
+        };
+        let distant = PlayerPosition { x: 1024.5, ..near };
+        assert_eq!(natural_spawn_capacity(&[near], VANILLA_HOSTILE_CAP), 79);
+        assert_eq!(
+            natural_spawn_capacity(&[near, distant], VANILLA_HOSTILE_CAP),
+            158
+        );
+
+        let filler = PlayerPosition {
+            x: 4096.5,
+            y: 65.0,
+            z: 4096.5,
+        };
+        let seeded_mobs = |count| {
+            let mut mobs = Mobs::new_with_difficulty(&world, true, 2);
+            for _ in 0..count {
+                mobs.insert(Kind::Zombie, filler, false);
+            }
+            mobs
+        };
+        let spawn_once = |mobs: &mut Mobs, players: &[PlayerPosition]| {
+            let mut events = Vec::new();
+            let mut lighting = world.lighting_sampler();
+            mobs.spawn_natural(18_040, &world, &mut lighting, players, &mut events);
+            events
+        };
+
+        // At the single-player limit, the same deterministic tick cannot
+        // create a mob or send a Protocol 5 spawn packet.
+        let mut single = seeded_mobs(79);
+        assert!(spawn_once(&mut single, &[near]).is_empty());
+        assert_eq!(single.entities.len(), 79);
+
+        // The distant second player contributes a disjoint 17x17 area.
+        // With 79 existing hostiles, the natural pack must still be eligible.
+        let mut expanded = seeded_mobs(79);
+        let expanded_events = spawn_once(&mut expanded, &[near, distant]);
+        assert!(
+            expanded.entities.len() > 79,
+            "a disjoint second player must increase the live spawn budget"
+        );
+        assert!(expanded_events.iter().any(|event| event.id == 0x0f));
+
+        // Near the expanded limit, a multi-member pack may create exactly
+        // one more mob, even when the selected species permits a larger pack.
+        let mut nearly_full = seeded_mobs(157);
+        let limited_events = spawn_once(&mut nearly_full, &[near, distant]);
+        assert_eq!(nearly_full.entities.len(), 158);
+        assert_eq!(
+            limited_events
+                .iter()
+                .filter(|event| event.id == 0x0f)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn natural_mob_cap_diagonal_overlap_and_border_membership() {
         let a = PlayerPosition {
             x: 0.5,
