@@ -57,6 +57,11 @@ fn full_conductor(id: u16) -> bool {
 }
 
 fn movable(block: u16) -> bool {
+    // 1.7.10 allows pushing/retracting an unextended piston, but its
+    // extended base is immovable (BlockPistonBase#canPushBlock).
+    if matches!(block >> 4, 29 | 33) {
+        return block & 8 == 0;
+    }
     !matches!(
         block >> 4,
         0 | 7 | 8
@@ -64,8 +69,6 @@ fn movable(block: u16) -> bool {
                 | 18
                 | 23 // dispenser (tile entity)
                 | 25 // note block (tile entity)
-                | 29
-                | 33
                 | 34
                 | 36 // moving piston (transient block, never pushable)
                 | 49 // obsidian
@@ -471,7 +474,12 @@ impl World {
         let extended = block & 8 != 0;
         // Pistons in 1.7.10 are also quasi-connected by power at the
         // block directly above them (BUD behavior).
-        let on = self.powered_near(x, y, z)
+        // Front-face power does not directly energize the piston itself.
+        // Above-block indirect power remains valid for Java QC/BUD.
+        let on = NEIGHBORS
+            .iter()
+            .filter(|&&(ox, oy, oz)| (ox, oy, oz) != (dx, dy, dz))
+            .any(|&(ox, oy, oz)| self.power_into((x + ox, y + oy, z + oz), (x, y, z)))
             || (in_bounds(x, y + 1, z) && self.powered_near(x, y + 1, z));
         if extended == on {
             return;
@@ -505,7 +513,9 @@ impl World {
                 let dest = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
                 changes.insert((dest.0, dest.1 as u8, dest.2), value);
             }
-            changes.insert((head.0, head.1 as u8, head.2), (34 << 4) | (block & 7));
+            // Legacy head metadata bit 3 distinguishes a sticky piston head.
+            let head_metadata = (block & 7) | if block >> 4 == 29 { 8 } else { 0 };
+            changes.insert((head.0, head.1 as u8, head.2), (34 << 4) | head_metadata);
             changes.insert((x, y as u8, z), block | 8);
         } else {
             // A neighboring piston's head may occupy this cell. Only retract
@@ -1350,6 +1360,46 @@ mod redstone_regression_tests {
         }
         assert!(movable(1 << 4));
         assert!(movable(5 << 4));
+    }
+
+    #[test]
+    fn retracted_pistons_are_pushable_but_extended_ones_are_not() {
+        for id in [29u16, 33] {
+            let retracted = (id << 4) | 2;
+            assert!(movable(retracted));
+            assert!(!movable(retracted | 8));
+            let mut world = World::new();
+            let drive = (33 << 4) | 5;
+            world.import_block(-2, 64, 0, (69 << 4) | 8).unwrap();
+            world.import_block(-1, 64, 0, drive).unwrap();
+            world.import_block(0, 64, 0, retracted).unwrap();
+            let mut changes = BTreeMap::new();
+            world.push_piston(-1, 64, 0, drive, &mut changes);
+            assert_eq!(changes.get(&(1, 64, 0)), Some(&retracted));
+            assert_eq!(changes.get(&(0, 64, 0)), Some(&((34 << 4) | 5)));
+        }
+    }
+
+    #[test]
+    fn sticky_piston_head_has_correct_legacy_metadata() {
+        let mut world = World::new();
+        let sticky = (29 << 4) | 5;
+        world.import_block(-1, 64, 0, (69 << 4) | 8).unwrap();
+        world.import_block(0, 64, 0, sticky).unwrap();
+        let mut changes = BTreeMap::new();
+        world.push_piston(0, 64, 0, sticky, &mut changes);
+        assert_eq!(changes.get(&(1, 64, 0)), Some(&((34 << 4) | 13)));
+    }
+
+    #[test]
+    fn power_only_in_front_of_piston_does_not_activate_it() {
+        let mut world = World::new();
+        let piston = (33 << 4) | 5;
+        world.import_block(0, 64, 0, piston).unwrap();
+        world.import_block(1, 64, 0, 152 << 4).unwrap();
+        let mut changes = BTreeMap::new();
+        world.push_piston(0, 64, 0, piston, &mut changes);
+        assert!(changes.is_empty());
     }
 
     #[test]
