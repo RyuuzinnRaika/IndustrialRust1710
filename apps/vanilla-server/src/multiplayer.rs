@@ -1051,11 +1051,7 @@ mod tests {
             0.0,
         );
         assert!(!hub
-            .change_dimension(
-                old_id,
-                Dimension::Nether,
-                PlayerPosition::default(),
-            )
+            .change_dimension(old_id, Dimension::Nether, PlayerPosition::default(),)
             .unwrap());
         hub.remove(old_id);
 
