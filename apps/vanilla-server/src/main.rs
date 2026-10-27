@@ -654,6 +654,13 @@ fn block_change_event(world: &World, x: i32, y: i32, z: i32) -> Event {
 }
 /// Legacy 1.7.10 chest/furnace/piston front faces (BlockFurnace,
 /// BlockChest and BlockPistonBase#onBlockPlacedBy).
+/// Preserve the horizontal metadata through unlit (61) <-> lit (62)
+/// transitions. Only genuine furnace blocks may change.
+fn furnace_lit_state(current: u16, lit: bool) -> Option<u16> {
+    matches!(current >> 4, 61 | 62)
+        .then_some(((if lit { 62u16 } else { 61u16 }) << 4) | (current & 15))
+}
+
 fn horizontal_placement_facing(yaw: f32) -> u16 {
     let quadrant = ((f64::from(yaw) * 4.0 / 360.0 + 0.5).floor() as i32).rem_euclid(4);
     match quadrant {
@@ -713,11 +720,16 @@ fn chest_neighbor(world: &World, pos: ChestPosition) -> Option<ChestPosition> {
         .into_iter()
         .find(|&(x, y, z)| world.get(x, y, z) >> 4 == chest_id)
 }
-fn can_place_chest(world: &World, pos: ChestPosition) -> bool {
+fn can_place_chest(world: &World, pos: ChestPosition, chest_id: u16) -> bool {
+    if !matches!(chest_id, 54 | 146) {
+        return false;
+    }
     let (x, y, z) = pos;
+    // Trapped chests obey the same no-triple-chest rule as normal chests,
+    // but the two kinds must never be paired with each other.
     let neighbors: Vec<_> = [(x - 1, y, z), (x + 1, y, z), (x, y, z - 1), (x, y, z + 1)]
         .into_iter()
-        .filter(|&(x, y, z)| world.get(x, y, z) >> 4 == 54)
+        .filter(|&(x, y, z)| world.get(x, y, z) >> 4 == chest_id)
         .collect();
     if neighbors.len() > 1 {
         return false;
@@ -4175,11 +4187,11 @@ fn play(
                                 330 => 71,                       // iron door
                                 _ => stack.id as u16,
                             };
-                            let invalid_chest_merge =
-                                block_id == 54 && !can_place_chest(&w, (nx, ny, nz));
+                            let invalid_chest_merge = matches!(block_id, 54 | 146)
+                                && !can_place_chest(&w, (nx, ny, nz), block_id);
                             // A double chest must share one front direction.
                             // The front is perpendicular to the adjoining axis.
-                            let chest_partner = if block_id == 54 {
+                            let chest_partner = if matches!(block_id, 54 | 146) {
                                 [
                                     (nx - 1, ny, nz),
                                     (nx + 1, ny, nz),
@@ -4187,11 +4199,11 @@ fn play(
                                     (nx, ny, nz + 1),
                                 ]
                                 .into_iter()
-                                .find(|&(cx, cy, cz)| w.get(cx, cy, cz) >> 4 == 54)
+                                .find(|&(cx, cy, cz)| w.get(cx, cy, cz) >> 4 == block_id)
                             } else {
                                 None
                             };
-                            let metadata = if block_id == 54 {
+                            let metadata = if matches!(block_id, 54 | 146) {
                                 let preferred = horizontal_placement_facing(yaw);
                                 match chest_partner {
                                     Some((cx, _, _)) if cx != nx => {
@@ -4214,7 +4226,7 @@ fn play(
                                     }
                                     None => preferred,
                                 }
-                            } else if matches!(block_id, 61 | 62 | 146) {
+                            } else if matches!(block_id, 61 | 62) {
                                 horizontal_placement_facing(yaw)
                             } else if block_id == 63 {
                                 ((yaw.rem_euclid(360.0) * 16.0 / 360.0).round() as u16) & 15
@@ -4379,7 +4391,7 @@ fn play(
                         let event = block_change_event(&w, nx, ny, nz);
                         if changed {
                             hub.broadcast(event);
-                            if let Some(partner) = if w.get(nx, ny, nz) >> 4 == 54 {
+                            if let Some(partner) = if matches!(w.get(nx, ny, nz) >> 4, 54 | 146) {
                                 chest_neighbor(&w, (nx, ny, nz))
                             } else {
                                 None
@@ -7091,16 +7103,15 @@ fn main() -> io::Result<()> {
                         Err(_) => break,
                     };
                     for (pos, lit) in lighting {
-                        let actual = world.get(pos.0, pos.1, pos.2) >> 4;
-                        if actual == 61 || actual == 62 {
-                            let target: u16 = if lit { 62 } else { 61 };
-                            if actual != target {
+                        let current = world.get(pos.0, pos.1, pos.2);
+                        if let Some(target) = furnace_lit_state(current, lit) {
+                            if current != target {
                                 match world.update_and_save(
                                     &furnace_world_path,
                                     pos.0,
                                     pos.1,
                                     pos.2,
-                                    target << 4,
+                                    target,
                                 ) {
                                     Ok(true) => furnace_hub
                                         .broadcast(block_change_event(&world, pos.0, pos.1, pos.2)),
@@ -8816,6 +8827,38 @@ mod legacy_placement_orientation_tests {
                 piston_placement_facing(yaw, (0.5, 64.0, 0.5), (1, 65, 1)),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn furnace_lighting_preserves_all_four_front_faces() {
+        for facing in 2..=5 {
+            let off = (61 << 4) | facing;
+            let on = (62 << 4) | facing;
+            assert_eq!(furnace_lit_state(off, true), Some(on));
+            assert_eq!(furnace_lit_state(on, false), Some(off));
+            assert_eq!(furnace_lit_state(on, true), Some(on));
+            assert_eq!(furnace_lit_state(off, false), Some(off));
+        }
+        assert_eq!(furnace_lit_state(54 << 4, true), None);
+    }
+
+    #[test]
+    fn normal_and_trapped_chests_cannot_form_triples_or_mixed_pairs() {
+        for chest_id in [54u16, 146] {
+            let mut world = World::new();
+            world.import_block(0, 64, 0, (chest_id << 4) | 2).unwrap();
+            assert!(can_place_chest(&world, (1, 64, 0), chest_id));
+            world.import_block(1, 64, 0, (chest_id << 4) | 2).unwrap();
+            assert!(!can_place_chest(&world, (2, 64, 0), chest_id));
+            assert!(!can_place_chest(&world, (0, 64, 1), chest_id));
+            assert_eq!(chest_neighbor(&world, (0, 64, 0)), Some((1, 64, 0)));
+            // Different chest types may stand next to one another but do
+            // not merge inventories or prevent legal same-type placement.
+            let other = if chest_id == 54 { 146 } else { 54 };
+            world.import_block(3, 64, 0, other << 4).unwrap();
+            assert_eq!(chest_neighbor(&world, (3, 64, 0)), None);
+            assert!(can_place_chest(&world, (4, 64, 0), other));
         }
     }
 
