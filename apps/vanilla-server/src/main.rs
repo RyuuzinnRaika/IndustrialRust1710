@@ -66,6 +66,7 @@ mod verify_world;
 mod vitals;
 mod whitelist;
 mod workstations;
+mod window_open;
 mod world;
 mod worldgen;
 
@@ -116,6 +117,7 @@ use throwables::Throwables;
 use vehicles::Boats;
 use vitals::Vitals;
 use whitelist::Whitelist;
+use window_open::WindowKind;
 use world::{World, MAX_CHUNK, MIN_CHUNK, VIEW_DISTANCE};
 
 const MAX_CONNECTIONS: usize = 32;
@@ -3650,12 +3652,8 @@ fn play(
                     let guard = furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?;
                     last_furnace_view = guard.get(pos);
                     drop(guard);
-                    // Protocol 5 (Minecraft 1.7.10) uses a numeric window type,
-                    // a plain-string title, a slot count and a title-override boolean.
-                    // The namespaced string/JSON form belongs to later protocols.
-                    let mut opened = vec![active_window, 2]; // 2 = furnace
-                    write_string("Furnace", &mut opened)?;
-                    opened.extend_from_slice(&[3, 1]); // 3 slots, use supplied title
+                    let opened =
+                        window_open::encode(active_window, WindowKind::Furnace, "Furnace", 3)?;
                     send(s, 0x2d, &opened)?;
                     send(
                         s,
@@ -3675,8 +3673,9 @@ fn play(
                         .lock()
                         .map_err(|_| bad("world mutex poisoned"))?
                         .get(x, y, z)
-                        >> 4
-                        == 54
+                        >> 4,
+                        54 | 146
+                    )
                 {
                     active_window = next_window;
                     next_window = if next_window >= 100 {
@@ -3710,14 +3709,9 @@ fn play(
                     );
                     observed_chest_revision = guard.revision();
                     drop(guard);
-                    let mut opened = vec![active_window];
-                    write_string("minecraft:chest", &mut opened)?;
-                    write_string(&json!({"text":"Chest"}).to_string(), &mut opened)?;
-                    opened.push(if active_chest_partner.is_some() {
-                        54
-                    } else {
-                        27
-                    });
+                    let slots = if active_chest_partner.is_some() { 54 } else { 27 };
+                    let opened =
+                        window_open::encode(active_window, WindowKind::Chest, "Chest", slots)?;
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &items)?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
@@ -3746,13 +3740,17 @@ fn play(
                     active_furnace = None;
                     active_hopper = None;
                     active_device = None;
+                    active_anvil = None;
+                    active_enchant = None;
                     let guard = brewers.lock().map_err(|_| bad("brewer lock poisoned"))?;
                     last_brewer_view = guard.get(pos);
                     drop(guard);
-                    let mut opened = vec![active_window];
-                    write_string("minecraft:brewing_stand", &mut opened)?;
-                    write_string(&json!({"text":"Brewing Stand"}).to_string(), &mut opened)?;
-                    opened.push(4);
+                    let opened = window_open::encode(
+                        active_window,
+                        WindowKind::BrewingStand,
+                        "Brewing Stand",
+                        4,
+                    )?;
                     send(s, 0x2d, &opened)?;
                     send(
                         s,
@@ -3805,11 +3803,17 @@ fn play(
                     active_enchant = None;
                     let items = inventory.chest_window_items(active_window, &last_device_view);
                     drop(guard);
-                    let mut opened = vec![active_window];
-                    // Both machines use the 1.7.10 dispenser 3x3 window.
-                    write_string("minecraft:dispenser", &mut opened)?;
-                    write_string(&json!({"text":title}).to_string(), &mut opened)?;
-                    opened.push(dispensers::DEVICE_SLOTS as u8);
+                    let kind = if block_id == 158 {
+                        WindowKind::Dropper
+                    } else {
+                        WindowKind::Dispenser
+                    };
+                    let opened = window_open::encode(
+                        active_window,
+                        kind,
+                        title,
+                        dispensers::DEVICE_SLOTS as u8,
+                    )?;
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &items)?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
@@ -3845,10 +3849,8 @@ fn play(
                     observed_hopper_revision = guard.revision();
                     let items = inventory.chest_window_items(active_window, &guard.slots(pos));
                     drop(guard);
-                    let mut opened = vec![active_window];
-                    write_string("minecraft:hopper", &mut opened)?;
-                    write_string(&json!({"text":"Hopper"}).to_string(), &mut opened)?;
-                    opened.push(5);
+                    let opened =
+                        window_open::encode(active_window, WindowKind::Hopper, "Hopper", 5)?;
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &items)?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
@@ -3899,10 +3901,8 @@ fn play(
                     } else {
                         [0; 3]
                     };
-                    let mut opened = vec![active_window];
-                    write_string("minecraft:enchanting_table", &mut opened)?;
-                    write_string(&json!({"text":"Enchant"}).to_string(), &mut opened)?;
-                    opened.push(0);
+                    let opened =
+                        window_open::encode(active_window, WindowKind::EnchantingTable, "Enchant", 0)?;
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &inventory.enchanting_window_items(active_window))?;
                     for (property, cost) in enchant_offers.iter().copied().enumerate() {
@@ -3939,10 +3939,8 @@ fn play(
                     active_anvil = Some((x, y, z));
                     inventory.clear_anvil_name();
                     active_enchant = None;
-                    let mut opened = vec![active_window];
-                    write_string("minecraft:anvil", &mut opened)?;
-                    write_string(&json!({"text":"Repair & Name"}).to_string(), &mut opened)?;
-                    opened.push(0); // fixed 3-slot anvil, not a chest inventory
+                    let opened =
+                        window_open::encode(active_window, WindowKind::Anvil, "Repair & Name", 0)?;
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &inventory.anvil_window_items(active_window))?;
                     send(s, 0x31, &inventory.anvil_cost_property(active_window))?;
@@ -3975,10 +3973,8 @@ fn play(
                     } else {
                         next_window + 1
                     };
-                    let mut opened = vec![active_window];
-                    write_string("minecraft:crafting_table", &mut opened)?;
-                    write_string(&json!({"text":"Crafting"}).to_string(), &mut opened)?;
-                    opened.push(0); // non-storage window: slot count comes from type
+                    let opened =
+                        window_open::encode(active_window, WindowKind::CraftingTable, "Crafting", 0)?;
                     send(s, 0x2d, &opened)?;
                     send(s, 0x30, &inventory.window_items_for(active_window))?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
