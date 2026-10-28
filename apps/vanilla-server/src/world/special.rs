@@ -1677,7 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn bonemeal_preserves_sapling_species_and_rejects_lone_dark_oak() {
+    fn bonemeal_grows_saplings_in_two_stages_with_species_specific_blocks() {
         let mut w = World::new();
         let meal = Stack {
             id: 351,
@@ -1686,34 +1686,29 @@ mod tests {
             nbt: None,
         };
         w.import_block(0, 64, 0, (6 << 4) | 2).unwrap();
-        let (_, changed, _, _) = w.stage_special_item(0, 64, 0, meal).unwrap().unwrap();
-        assert!(!changed.is_empty());
-        let mut batch = w.bonemeal_changes(0, 64, 0);
-        assert_eq!(batch.get(&(0, 64, 0)), Some(&((17 << 4) | 2)));
-        assert!(
-            batch.values().any(|&block| block == ((18 << 4) | 2)),
-            "birch saplings must grow birch leaves"
-        );
-        w.import_block(5, 64, 0, (6 << 4) | 4).unwrap();
-        batch = w.bonemeal_changes(5, 64, 0);
-        assert_eq!(batch.get(&(5, 64, 0)), Some(&(162 << 4)));
-        assert!(
-            batch.values().any(|&block| block == (161 << 4)),
-            "acacia saplings must grow acacia leaves"
-        );
-        assert!(
-            batch.iter().any(|(&(x, _, z), &block)| {
-                block >> 4 == 162 && (x, z) != (5, 0)
-            }),
-            "acacia should have a sideways-bending trunk"
-        );
-        w.import_block(10, 64, 0, (6 << 4) | 5).unwrap();
-        assert!(w.bonemeal_changes(10, 64, 0).is_empty());
-        let (_, changed, _, _) = w.stage_special_item(10, 64, 0, meal).unwrap().unwrap();
-        assert!(
-            changed.is_empty(),
-            "unsupported dark oak cannot debit bone meal"
-        );
+        let first = w.bonemeal_changes(0, 64, 0);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first.get(&(0, 64, 0)), Some(&((6 << 4) | 2 | 8)));
+        w.import_block(0, 64, 0, (6 << 4) | 2 | 8).unwrap();
+        let birch = w.bonemeal_changes(0, 64, 0);
+        assert_eq!(birch.get(&(0, 64, 0)), Some(&((17 << 4) | 2)));
+        assert!(birch.values().any(|&block| block == ((18 << 4) | 2)));
+
+        w.import_block(15, 64, 0, (6 << 4) | 4 | 8).unwrap();
+        let acacia = w.bonemeal_changes(15, 64, 0);
+        assert_eq!(acacia.get(&(15, 64, 0)), Some(&(162 << 4)));
+        assert!(acacia.values().any(|&block| block == (161 << 4)));
+        assert!(acacia.iter().any(|(&(x, _, z), &block)| {
+            block >> 4 == 162 && (x, z) != (15, 0)
+        }));
+
+        // An isolated dark oak can advance to stage 1, but can never
+        // replace a lone sapling with a dark-oak tree.
+        w.import_block(40, 64, 0, (6 << 4) | 5 | 8).unwrap();
+        assert!(w.bonemeal_changes(40, 64, 0).is_empty());
+        let (_, changed, _, _, spend) = w.stage_special_item(40, 64, 0, meal).unwrap().unwrap();
+        assert!(changed.is_empty());
+        assert!(spend, "a valid attempted bone meal use consumes the item");
     }
 
     #[test]
@@ -1728,18 +1723,11 @@ mod tests {
             let mut world = World::new();
             for x in 0..2 {
                 for z in 0..2 {
-                    world.import_block(x, 64, z, (6 << 4) | species).unwrap();
+                    world.import_block(x, 64, z, (6 << 4) | species | 8).unwrap();
                 }
             }
-            let (_, changed, _, _) = world
-                .stage_special_item(1, 64, 1, meal)
-                .unwrap()
-                .expect("bone meal is a valid interaction");
-            assert!(
-                changed.len() > 128,
-                "the 2x2 giant must exceed the ordinary special-item cap"
-            );
             let staged = world.bonemeal_changes(1, 64, 1);
+            assert!(staged.len() > 128);
             assert!(staged.len() <= 2048);
             for x in 0..2 {
                 for z in 0..2 {
@@ -1750,7 +1738,29 @@ mod tests {
                     );
                 }
             }
+            let successful = (0..100).find_map(|_| {
+                let (_, changed, _, _, spend) = world.stage_special_item(1, 64, 1, meal)
+                    .unwrap()
+                    .expect("bone meal is a valid interaction");
+                assert!(spend);
+                (!changed.is_empty()).then_some(changed)
+            });
+            assert_eq!(
+                successful.expect("bone meal should succeed in 100 attempts").len(),
+                staged.len(),
+            );
         }
+    }
+
+    #[test]
+    fn bone_meal_growth_roll_is_approximately_forty_five_percent() {
+        let successes = (0..20_000)
+            .filter(|_| bone_meal_succeeds(2048, 0, 64, 0))
+            .count();
+        assert!(
+            (8_600..=9_400).contains(&successes),
+            "expected 45% sapling growth, observed {successes}/20000"
+        );
     }
 
     #[test]
