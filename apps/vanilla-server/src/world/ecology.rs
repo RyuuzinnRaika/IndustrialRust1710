@@ -907,10 +907,15 @@ mod regression_tests {
         let changed = world.block_tick(&path, 64).unwrap();
         assert!(changed.contains(&pos));
         assert_eq!(world.get(pos.0, pos.1, pos.2), 0);
-        assert!(world.drain_drops().iter().any(|drop| {
+        // The block destruction and its item-drop intent are written
+        // together. A power loss before the ground-item journal retains
+        // the sapling in the world trailer for delivery on restart.
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(pos.0, pos.1, pos.2), 0);
+        assert!(restored.queued_drops().iter().any(|drop| {
             drop.pos == pos && drop.stack.id == 6 && drop.stack.damage == 0
         }));
-        assert_eq!(World::load(&path).unwrap().get(pos.0, pos.1, pos.2), 0);
+        assert_eq!(restored.queued_drops(), world.queued_drops());
         std::fs::remove_file(path).unwrap();
     }
 
