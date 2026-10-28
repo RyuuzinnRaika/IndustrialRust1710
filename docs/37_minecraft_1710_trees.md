@@ -28,6 +28,43 @@ deterministic geometry/biome approximation. It does not change IRW1–3.
 - Generated leaf metadata **does not set 0x4**. In Java 1.7.10 that bit means permanent/player-placed leaves. Leaves use 18 for old species and 161 for acacia/dark oak; logs use 17 and 162 respectively.
 - Natural trees are seeded by world seed and absolute coordinates. A 13×13 candidate search allows tree crowns to cross chunk boundaries without seams; point and cached-column generation use identical precedence.
 
+## Sapling growth and bone meal (new)
+
+The `ecology.rs` sapling growth path now reuses the natural-tree
+`worldgen_trees.rs` silhouettes. This avoids growing every species as an
+identical four-block oak with a square crown.
+
+| Sapling data value (ID 6) | Single sapling | Complete 2×2 of matching saplings |
+|---|---|---|
+| 0 Oak | Oak or rare fancy/branching oak | Each grows as an individual oak |
+| 1 Spruce | Conical spruce or pine | Mega spruce or mega pine, 2×2 trunk |
+| 2 Birch | Upright birch | Each grows as an individual birch |
+| 3 Jungle | Small jungle tree | Mega jungle, 2×2 trunk and branches |
+| 4 Acacia | Bent acacia, sideways log metadata | Each grows as an individual acacia |
+| 5 Dark oak | Does not grow | Dark oak, 2×2 trunk |
+
+- A four-sapling variant is found from any selected sapling within the
+  2×2 square. All four must have the matching species metadata; stage bits
+  (`0x8`) do not change the species.
+- Trunk, canopy, lateral branches and vines use the same procedural voxel
+  geometry as the natural tree species, including log axis metadata and
+  naturally decaying leaves.
+- A growth attempt first validates **every proposed cell**. An existing
+  structure or other sapling outside the roots blocks the entire attempt,
+  leaving all saplings and adjacent player blocks untouched.
+- Normal growth requires light level 9 or greater above the sapling; bone
+  meal can grow it in the dark if it has enough free space.
+- The previous 128-cell special-item transaction limit remains intact for
+  all non-tree interactions. **Only bone meal applied to a sapling**
+  allows a bounded 2,048-cell atomic growth batch, for giant spruce/jungle
+  trees; any excess or collision aborts the full transaction.
+- World seed and current server tick deterministically choose each grown
+  tree's shape. This approximates the vanilla species and placement behavior,
+  but is not Mojang's original 1.7.10 PRNG.
+- Tests cover species IDs and metadata, giant 2×2 trunks, obstruction
+  safety and bone-meal transaction sizing. These tests still require
+  local execution on a Rust machine; no Actions/Rust CI were used.
+
 ## Leaf decay speed (Java 1.7.10 defaults)
 
 Natural leaves do not disappear as soon as the trunk is cut. The Overworld
@@ -87,6 +124,6 @@ before enabling in a long-lived survival world.
 Current limitations requiring follow-up verification:
 
 1. Natural tree shape and biome composition are approximated, not seed-identical to Mojang's 1.7.10 generator.
-2. Saplings and bone meal still use the older ecology growth system; especially 2×2 giant spruce/jungle growth is not yet shared with these natural-tree shapes.
+2. Sapling trees now share natural-tree silhouettes, but tree generation is not byte-for-byte Mojang's 1.7.10 random algorithm. A complete growth/bonemeal/growth-time compatibility audit is still outstanding.
 3. Natural tree/structure clashes, drop rates, canopy decay, vine attachments and multiplayer client visuals need live Java 1.7.10 validation.
 4. Existing IRW4 generation needs a format-version gate or migration strategy before safe general rollout.
