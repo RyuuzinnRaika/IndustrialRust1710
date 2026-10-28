@@ -2766,14 +2766,18 @@ impl World {
         if !self.primed_tnt.is_empty()
             || !self.pending_chain_tnt.is_empty()
             || !self.pending_blast_edits.is_empty()
+            || !self.falling_anvils.is_empty()
         {
             if self.primed_tnt.len() > MAX_PRIMED_TNT
                 || self.pending_chain_tnt.len() > MAX_PENDING_TNT
                 || self.pending_blast_edits.len() > MAX_PENDING_BLAST
+                || self.falling_anvils.len() > MAX_EDITS
             {
                 return Err(invalid("TNT entity or pending queue capacity exceeded"));
             }
-            f.write_all(if !self.primed_tnt.is_empty() {
+            f.write_all(if !self.falling_anvils.is_empty() {
+                b"TNT5"
+            } else if !self.primed_tnt.is_empty() {
                 b"TNT4"
             } else if !self.pending_blast_edits.is_empty() {
                 b"TNT3"
@@ -2805,6 +2809,7 @@ impl World {
             if !self.pending_chain_tnt.is_empty()
                 || !self.pending_blast_edits.is_empty()
                 || !self.primed_tnt.is_empty()
+                || !self.falling_anvils.is_empty()
             {
                 f.write_all(&(self.pending_chain_tnt.len() as u32).to_be_bytes())?;
                 for &(x, y, z) in &self.pending_chain_tnt {
@@ -2813,13 +2818,34 @@ impl World {
                     f.write_all(&z.to_be_bytes())?;
                 }
             }
-            if !self.pending_blast_edits.is_empty() || !self.primed_tnt.is_empty() {
+            if !self.pending_blast_edits.is_empty()
+                || !self.primed_tnt.is_empty()
+                || !self.falling_anvils.is_empty()
+            {
                 f.write_all(&(self.pending_blast_edits.len() as u32).to_be_bytes())?;
                 for (&(x, y, z), &expected) in &self.pending_blast_edits {
                     f.write_all(&x.to_be_bytes())?;
                     f.write_all(&[y])?;
                     f.write_all(&z.to_be_bytes())?;
                     f.write_all(&expected.to_be_bytes())?;
+                }
+            }
+            // TNT5 appends its anvil flight table after the existing TNT4
+            // queues, so legacy TNT1..4 layouts remain byte-for-byte stable.
+            if !self.falling_anvils.is_empty() {
+                f.write_all(&(self.falling_anvils.len() as u32).to_be_bytes())?;
+                for (&(x, y, z), &origin) in &self.falling_anvils {
+                    if !in_bounds(x, i32::from(y), z)
+                        || origin < i32::from(y)
+                        || origin > 255
+                        || self.get(x, i32::from(y), z) >> 4 != 145
+                    {
+                        return Err(invalid("invalid saved falling anvil origin"));
+                    }
+                    f.write_all(&x.to_be_bytes())?;
+                    f.write_all(&[y])?;
+                    f.write_all(&z.to_be_bytes())?;
+                    f.write_all(&(origin as u16).to_be_bytes())?;
                 }
             }
         }
