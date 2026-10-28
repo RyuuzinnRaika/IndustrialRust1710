@@ -3066,7 +3066,7 @@ fn play(
                     hub.broadcast(chat_event(&record.chat_message())?);
                 }
             }
-            if !keep_inventory {
+            if survival && !keep_inventory {
                 commit_death_drops(
                     inventory,
                     inventory_path,
@@ -6839,7 +6839,7 @@ fn play(
                         .lock()
                         .map_err(|_| bad("game rules mutex poisoned"))?
                         .keep_inventory();
-                    if !keep_inventory {
+                    if survival && !keep_inventory {
                         commit_death_drops(
                             inventory,
                             inventory_path,
@@ -6934,7 +6934,7 @@ fn play(
                     last_void_hit_tick = None;
                     last_anvil_hit_tick = None;
                     // In vanilla, death loses XP and may leave up to 100 XP in orbs.
-                    if !keep_inventory {
+                    if survival && !keep_inventory {
                         let drop_amount =
                             (u32::from(experience.level_and_fraction().0) * 7).min(100) as u16;
                         *experience = Experience::default();
