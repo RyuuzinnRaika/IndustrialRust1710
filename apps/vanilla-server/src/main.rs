@@ -122,7 +122,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use survival::MiningProgress;
-use survival_damage::{HazardCause, Hazards};
+use survival_damage::{HazardAttribution, HazardCause, Hazards};
 use teleport_gate::TeleportGate;
 use throwables::Throwables;
 use vehicles::Boats;
@@ -2262,14 +2262,14 @@ fn play(
         }
         if survival && vitals.health > 0.0 && now_tick > last_hazards_tick {
             let mut total = 0.0f32;
-            let mut last_source = None;
+            let mut sources = HazardAttribution::None;
             let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let steps = (now_tick - last_hazards_tick).min(4);
             for t in last_hazards_tick + 1..=last_hazards_tick + steps {
                 let (damage, source) = hazards.tick_detailed(&w, *player, t, inventory);
                 total += damage;
                 if damage > 0.0 {
-                    last_source = source;
+                    sources = sources.combine(source);
                 }
             }
             last_hazards_tick = now_tick;
@@ -2277,13 +2277,14 @@ fn play(
             if total > 0.0 {
                 let previous_health = vitals.health;
                 vitals.health = (vitals.health - total).max(0.0);
-                let cause = match last_source {
-                    Some(HazardCause::Drowning) => DeathCause::Drowning,
-                    Some(HazardCause::Suffocation) => DeathCause::Suffocation,
-                    Some(HazardCause::Lava) => DeathCause::Lava,
-                    Some(HazardCause::Fire) => DeathCause::Fire,
-                    Some(HazardCause::Burning) => DeathCause::Burning,
-                    None => DeathCause::Unknown,
+                let cause = match sources {
+                    HazardAttribution::Single(HazardCause::Drowning) => DeathCause::Drowning,
+                    HazardAttribution::Single(HazardCause::Suffocation) => DeathCause::Suffocation,
+                    HazardAttribution::Single(HazardCause::Lava) => DeathCause::Lava,
+                    HazardAttribution::Single(HazardCause::Fire) => DeathCause::Fire,
+                    HazardAttribution::Single(HazardCause::Burning) => DeathCause::Burning,
+                    HazardAttribution::Mixed => DeathCause::MixedHazards,
+                    HazardAttribution::None => DeathCause::Unknown,
                 };
                 death_log::record_fatal(&mut fatal_hit, previous_health, vitals.health, cause);
                 player.save_state_in_dimension(

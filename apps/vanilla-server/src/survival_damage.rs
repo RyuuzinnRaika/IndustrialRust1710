@@ -12,6 +12,25 @@ pub enum HazardCause {
     Burning,
 }
 
+/// A single tick may contain multiple independent environmental sources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HazardAttribution {
+    None,
+    Single(HazardCause),
+    Mixed,
+}
+
+impl HazardAttribution {
+    pub fn combine(self, next: Self) -> Self {
+        match (self, next) {
+            (Self::Mixed, _) | (_, Self::Mixed) => Self::Mixed,
+            (Self::None, value) | (value, Self::None) => value,
+            (Self::Single(a), Self::Single(b)) if a == b => Self::Single(a),
+            _ => Self::Mixed,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Hazards {
     air: u16,
@@ -47,7 +66,7 @@ impl Hazards {
         pos: PlayerPosition,
         tick: u64,
         inventory: &Inventory,
-    ) -> (f32, Option<HazardCause>) {
+    ) -> (f32, HazardAttribution) {
         let (x, y, z) = (
             pos.x.floor() as i32,
             pos.y.floor() as i32,
@@ -58,13 +77,13 @@ impl Hazards {
         let submerged = matches!(head, 8 | 9);
         let mut raw = 0.0_f32;
         let mut bypass = 0.0_f32;
-        let mut cause = None;
+        let mut cause = HazardAttribution::None;
         if submerged {
             self.air = self.air.saturating_sub(1);
             self.wet_ticks = self.wet_ticks.saturating_add(1);
             if self.air == 0 && self.wet_ticks.is_multiple_of(20) {
                 bypass += 2.0;
-                cause = Some(HazardCause::Drowning);
+                cause = cause.combine(HazardAttribution::Single(HazardCause::Drowning));
             }
         } else {
             self.air = 300;
@@ -112,16 +131,14 @@ impl Hazards {
         {
             self.last_suffocation_hit = tick;
             bypass += 1.0;
-            if cause.is_none() {
-                cause = Some(HazardCause::Suffocation);
-            }
+            cause = cause.combine(HazardAttribution::Single(HazardCause::Suffocation));
         }
         if matches!(feet, 10 | 11) {
             self.fire_ticks = self.fire_ticks.max(100);
             if tick.saturating_sub(self.last_fire_hit) >= 10 {
                 self.last_fire_hit = tick;
                 raw += 4.0;
-                cause = Some(HazardCause::Lava);
+                cause = cause.combine(HazardAttribution::Single(HazardCause::Lava));
             }
         } else if feet == 51 {
             self.fire_ticks = self.fire_ticks.max(80);
@@ -131,23 +148,61 @@ impl Hazards {
             if !matches!(feet, 10 | 11) && tick.saturating_sub(self.last_fire_hit) >= 20 {
                 self.last_fire_hit = tick;
                 raw += 1.0;
-                cause = Some(if feet == 51 {
+                cause = cause.combine(HazardAttribution::Single(if feet == 51 {
                     HazardCause::Fire
                 } else {
                     HazardCause::Burning
-                });
+                }));
             }
         } else if submerged {
             self.fire_ticks = 0;
         }
         let points = inventory.armor_points().min(20) as f32;
         let damage = (raw * (25.0 - points) / 25.0).ceil() + bypass;
-        (damage, if damage > 0.0 { cause } else { None })
+        (
+            damage,
+            if damage > 0.0 {
+                cause
+            } else {
+                HazardAttribution::None
+            },
+        )
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn simultaneous_heat_and_drowning_never_claim_single_source() {
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 10 << 4).unwrap(); // lava at feet
+        world.import_block(0, 66, 0, 9 << 4).unwrap(); // water at eye
+        let mut hazard = Hazards::new();
+        let mut simultaneous = false;
+        for tick in 1..=320 {
+            let (amount, origin) = hazard.tick_detailed(
+                &world,
+                PlayerPosition::default(),
+                tick,
+                &Inventory::default(),
+            );
+            if amount > 0.0 && origin == HazardAttribution::Mixed {
+                simultaneous = true;
+            }
+        }
+        assert!(simultaneous);
+        assert_eq!(
+            HazardAttribution::Single(HazardCause::Fire)
+                .combine(HazardAttribution::Single(HazardCause::Fire)),
+            HazardAttribution::Single(HazardCause::Fire)
+        );
+        assert_eq!(
+            HazardAttribution::Single(HazardCause::Fire)
+                .combine(HazardAttribution::Single(HazardCause::Drowning)),
+            HazardAttribution::Mixed
+        );
+    }
+
     #[test]
     fn drowned_player_loses_air_before_health() {
         let mut world = World::new();
@@ -159,7 +214,7 @@ mod tests {
         }
         assert!(damage >= 2.0);
         let mut under_water = Hazards::new();
-        let mut cause = None;
+        let mut cause = HazardAttribution::None;
         for t in 1..=320 {
             let (points, source) = under_water.tick_detailed(
                 &world,
@@ -171,6 +226,6 @@ mod tests {
                 cause = source;
             }
         }
-        assert_eq!(cause, Some(HazardCause::Drowning));
+        assert_eq!(cause, HazardAttribution::Single(HazardCause::Drowning));
     }
 }
