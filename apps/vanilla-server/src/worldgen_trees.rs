@@ -164,7 +164,11 @@ fn log_at(t: Tree, dx: i32, dy: i32, dz: i32, log: u16, meta: u16) -> Option<u16
     if thick(t.shape) && (0..=1).contains(&dx) && (0..=1).contains(&dz) {
         return Some(state(log, meta));
     }
-    if !thick(t.shape) && dx == 0 && dz == 0 {
+    if !thick(t.shape)
+        && dx == 0
+        && dz == 0
+        && (t.shape != Shape::Acacia || dy <= h - 3)
+    {
         return Some(state(log, meta));
     }
     let dir = ((t.variation >> 9) % 4) as i32;
@@ -484,6 +488,8 @@ mod tests {
         let acacia = sample(Shape::Acacia);
         assert!(matches!(voxel(acacia, 0, acacia.root + 1, 0), Some(_)));
         assert!(matches!(voxel(acacia, 3, acacia.root + acacia.height, 0), Some(_)));
+        // A bent acacia must not keep an impossible straight central log above the bend.
+        assert_eq!(voxel(acacia, 0, acacia.root + acacia.height, 0), None);
         let spruce = sample(Shape::Spruce);
         assert!(foliage_at(spruce, 2, spruce.height / 2, 0));
         assert!(!foliage_at(spruce, 2, spruce.height + 1, 0));
