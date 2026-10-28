@@ -2015,6 +2015,38 @@ impl World {
         }
         Ok(changed)
     }
+    /// Prepare a single player-mined cell without publishing an IRW file.
+    /// Pair this candidate with inventory, tile-entity and ground-item
+    /// snapshots in journal::commit, and swap the live World only on success.
+    pub fn stage_mining_removal(&self, x: i32, y: i32, z: i32) -> io::Result<Option<Self>> {
+        if !in_bounds(x, y, z) {
+            return Ok(None);
+        }
+        let previous = self.get(x, y, z);
+        if previous == 0 {
+            return Ok(None);
+        }
+        let mut next = self.clone();
+        let key = (x, y as u8, z);
+        if next.base_block(x, y as u8, z) == 0 {
+            next.edits.remove(&key);
+        } else {
+            next.edits.insert(key, 0);
+        }
+        if next.edits.len() > MAX_EDITS {
+            return Err(invalid("mining would exceed world edit capacity"));
+        }
+        next.pending_blast_edits.remove(&key);
+        next.mark_lighting_changed(x, z, previous, 0);
+        next.wake_gravity(x, y, z);
+        next.wake_block_updates(x, y, z);
+        if matches!(previous >> 4, 17 | 162) {
+            next.wake_leaves(x, y, z);
+        }
+        next.encoded()?;
+        Ok(Some(next))
+    }
+
     pub fn update_and_save(
         &mut self,
         path: &Path,
@@ -3556,6 +3588,18 @@ mod tests {
         world.import_block(4, 255, 4, 64 << 4).unwrap();
         assert_eq!(world.mining_partner(4, 255, 4), None);
         assert_eq!(world.mining_partner(i32::MIN, 64, 0), None);
+    }
+
+    #[test]
+    fn staged_mining_removal_keeps_original_unchanged_until_publish() {
+        let world = World::new();
+        let original = world.get(0, 63, 0);
+        assert_ne!(original, 0);
+        let next = world.stage_mining_removal(0, 63, 0).unwrap().unwrap();
+        assert_eq!(world.get(0, 63, 0), original);
+        assert_eq!(next.get(0, 63, 0), 0);
+        assert!(next.stage_mining_removal(0, 63, 0).unwrap().is_none());
+        assert!(world.stage_mining_removal(0, -1, 0).unwrap().is_none());
     }
 
     #[test]
