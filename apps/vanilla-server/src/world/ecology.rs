@@ -768,6 +768,72 @@ mod regression_tests {
         assert!(!world.ecology_changes(64).contains_key(&(3, 65, 0)));
     }
 
+
+    #[test]
+    fn batched_trunk_cut_schedules_natural_leaves_until_the_random_tick() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-leaf-batch-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(0, 65, 0, 17 << 4).unwrap();
+        world.import_block(1, 65, 0, 18 << 4).unwrap();
+        assert!(world
+            .update_many_and_save(&path, &[(0, 65, 0, 0)])
+            .unwrap());
+        assert!(world.pending_ecology.contains(&(1, 65, 0)));
+        assert_eq!(world.get(1, 65, 0), 18 << 4);
+        // Move to the game tick immediately before this leaf's first
+        // deterministic random sample; no forced deletion on cutting.
+        let first_sec = (1..=1024)
+            .find(|&sec| leaf_decay_due(sec * 20, 1, 65, 0))
+            .unwrap();
+        world.fluid_phase = first_sec * 20 - 1;
+        let changed = world.block_tick(&path, 64).unwrap();
+        assert!(changed.contains(&(1, 65, 0)));
+        assert_eq!(world.get(1, 65, 0), 0);
+        assert_eq!(World::load(&path).unwrap().get(1, 65, 0), 0);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn removing_a_leaf_wakes_neighbors_after_the_save() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-leaf-neighbor-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        for x in 0..3 {
+            world.import_block(x, 65, 0, 18 << 4).unwrap();
+        }
+        world.pending_ecology.clear();
+        assert!(world.update_and_save(&path, 1, 65, 0, 0).unwrap());
+        assert!(world.pending_ecology.contains(&(0, 65, 0)));
+        assert!(world.pending_ecology.contains(&(2, 65, 0)));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_atomic_batch_does_not_publish_new_leaf_checks() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-leaf-rollback-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(0, 65, 0, 17 << 4).unwrap();
+        world.import_block(1, 65, 0, 18 << 4).unwrap();
+        world.pending_ecology.clear();
+        assert!(world
+            .update_many_and_save(&path, &[(0, 65, 0, 0), (0, 65, 0, 0)])
+            .is_err());
+        assert_eq!(world.get(0, 65, 0), 17 << 4);
+        assert!(world.pending_ecology.is_empty());
+        assert!(!path.exists());
+    }
+
     #[test]
     fn many_unrelated_ecology_entries_do_not_prevent_leaf_decay() {
         let mut world = World::new();
