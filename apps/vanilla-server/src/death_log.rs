@@ -99,6 +99,14 @@ impl DeathCause {
         }
     }
 
+    /// The projectile kind is distinct from the Mob that fired it.
+    pub fn projectile_type(self) -> Option<&'static str> {
+        match self {
+            Self::Projectile { kind, .. } => Some(kind),
+            _ => None,
+        }
+    }
+
     /// Chat text follows the familiar Java 1.7.10 death-message vocabulary.
     /// Do not claim a specific killer when the combat event does not carry one.
     pub fn message(self, name: &str) -> String {
@@ -179,6 +187,7 @@ impl DeathRecord<'_> {
             "cause": self.cause().code(),
             "source_type": self.cause().source_type(),
             "source_entity_id": self.cause().source_entity_id(),
+            "projectile_type": self.cause().projectile_type(),
             "death_message": self.chat_message(),
             "dimension": self.dimension,
             "position": {
@@ -238,9 +247,12 @@ impl DeathRecord<'_> {
             |hit| format!("{:.1}", hit.applied_damage),
         );
         format!(
-            "[death] player={} cause={} dimension={} x={:.2} y={:.2} z={:.2} health_before={} applied_damage={} tick={} message={:?}",
+            "[death] player={} cause={} source_type={:?} source_entity_id={:?} projectile_type={:?} dimension={} x={:.2} y={:.2} z={:.2} health_before={} applied_damage={} tick={} message={:?}",
             self.player.escape_debug(),
             self.cause().code(),
+            self.cause().source_type(),
+            self.cause().source_entity_id(),
+            self.cause().projectile_type(),
             self.dimension,
             self.position.x,
             self.position.y,
@@ -393,7 +405,16 @@ mod tests {
         assert_eq!(death.json(0)["source_type"], "Zombie");
         assert_eq!(death.json(0)["source_entity_id"], 500_002);
         assert_eq!(death.json(0)["death_message"], death.chat_message());
-        assert!(death.console_summary().contains("cause=mob"));
+        assert!(death.console_summary().contains("source_entity_id=Some(500002)"));
+        assert_eq!(death.json(0)["projectile_type"], Value::Null);
+        let arrow = DeathCause::Projectile {
+            kind: "Arrow",
+            shooter_kind: Some("Skeleton"),
+            shooter_id: Some(901),
+        };
+        assert_eq!(arrow.projectile_type(), Some("Arrow"));
+        assert_eq!(arrow.source_type(), Some("Skeleton"));
+        assert_eq!(arrow.source_entity_id(), Some(901));
         assert_eq!(DeathCause::Mixed.source_entity_id(), None);
         assert_eq!(DeathCause::Mixed.code(), "mixed_damage");
         assert_eq!(DeathCause::MixedHazards.code(), "mixed_environmental");
