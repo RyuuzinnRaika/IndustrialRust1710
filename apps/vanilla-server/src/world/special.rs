@@ -346,11 +346,12 @@ impl World {
     fn stage_special_batch(
         &self,
         changes: &BTreeMap<Position, u16>,
+        limit: usize,
     ) -> io::Result<StagedBlockBatch> {
         if changes.is_empty() {
             return Ok((self.clone(), Vec::new()));
         }
-        if changes.len() > 128 {
+        if changes.len() > limit {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "special block batch too large",
@@ -387,7 +388,7 @@ impl World {
         path: &Path,
         changes: &BTreeMap<Position, u16>,
     ) -> io::Result<Vec<(i32, i32, i32)>> {
-        let (candidate, changed) = self.stage_special_batch(changes)?;
+        let (candidate, changed) = self.stage_special_batch(changes, 128)?;
         if !changed.is_empty() {
             candidate.save(path)?;
             *self = candidate;
@@ -639,7 +640,16 @@ impl World {
             } else {
                 return Ok(None);
             };
-        let (mut next, changed) = self.stage_special_batch(&changes)?;
+        // Only bone meal applied to a sapling may grow a giant tree.
+        // Other special-item interactions retain the existing 128-cell cap.
+        // This bound still prevents untrusted requests from staging an
+        // unbounded structure or an unpersistable IRW edit transaction.
+        let limit = if target == 6 && held.id == 351 && held.damage == 15 {
+            2048
+        } else {
+            128
+        };
+        let (mut next, changed) = self.stage_special_batch(&changes, limit)?;
         if wears_tool && !changed.is_empty() {
             next.spawn_primed_tnt(x, y, z, 80);
         }
