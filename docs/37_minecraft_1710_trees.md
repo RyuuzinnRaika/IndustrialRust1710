@@ -52,8 +52,25 @@ identical four-block oak with a square crown.
 - A growth attempt first validates **every proposed cell**. An existing
   structure or other sapling outside the roots blocks the entire attempt,
   leaving all saplings and adjacent player blocks untouched.
-- Normal growth requires light level 9 or greater above the sapling; bone
-  meal can grow it in the dark if it has enough free space.
+- Natural growth requires light level 9 or greater above the sapling.
+  Each sapling is randomly selected at the default rate of three positions
+  per 16³ section per tick, then has a **1/7** chance to advance its stage.
+  This produces approximately **8 minutes per stage / 16 minutes to the
+  first tree-generation attempt** when simulation runs at 20 TPS. The
+  implementation uses a sampled one-second approximation rather than
+  vanilla's exact per-section RNG. An overloaded ecology budget can slow it.
+- Each sapling has two invisible stages (metadata bit `0x8`). The **first**
+  successful growth attempt advances stage 0 to 1; the **next** attempts
+  tree generation. Bone meal bypasses the light requirement but succeeds
+  on just **45%** of uses, not on every use.
+- A valid bone-meal use on a sapling consumes **one bone meal even when**
+  the 45% roll fails or a stage-1 tree is obstructed. An inventory-only
+  failure is journaled atomically with the unchanged world snapshot.
+  Unsupported ground rejects the use without spending an item.
+- Successful tree growth can replace natural grass, ferns, flowers,
+  vines, snow layers and natural leaves, but not hard blocks, other
+  saplings, logs or player-placed persistent leaves. Grass and farmland
+  immediately beneath the new trunk roots become dirt in the same edit.
 - The previous 128-cell special-item transaction limit remains intact for
   all non-tree interactions. **Only bone meal applied to a sapling**
   allows a bounded 2,048-cell atomic growth batch, for giant spruce/jungle
@@ -65,10 +82,11 @@ identical four-block oak with a square crown.
   oak, spruce, birch, acacia and dark oak have a 1/20 chance, while
   **jungle leaves have only a 1/40 chance**. Oak and dark-oak apples
   continue to use the existing 1/200 approximation.
-- Tests cover species IDs and metadata, giant 2×2 trunks, obstruction
-  safety, drop probabilities and bone-meal transaction sizing. These
-  tests still require local execution on a Rust machine; no Actions/Rust
-  CI were used.
+- Regression tests now cover species IDs and metadata, giant 2×2
+  trunks, obstruction safety, replaceable foliage/soil changes, natural
+  random-tick rate, 45% bone-meal attempts, two growth stages, drop
+  probabilities and transaction sizing. These tests still require local
+  execution with Rust; no Actions/Rust CI were used.
 
 ## Leaf decay speed (Java 1.7.10 defaults)
 
