@@ -4402,6 +4402,7 @@ fn play(
                     let mut companion_changed = None;
                     let mut decoration_disc_cleared = false;
                     let mut decoration_pot_cleared = false;
+                    let mut decoration_handled = false;
                     let changed = if (action == 0 || action == 2)
                         && world::in_bounds(x, y, z)
                         && near(location, x, y, z)
@@ -4463,6 +4464,7 @@ fn play(
                                 )?;
                                 *w = staged_world;
                                 *stored = staged_decorations;
+                                decoration_handled = true;
                                 decoration_disc_cleared = disc;
                                 decoration_pot_cleared = pot;
                                 true
@@ -4491,10 +4493,7 @@ fn play(
                     };
                     let event = block_change_event(&w, x, y, z);
                     if changed {
-                        if !matches!(w.get(x, y, z) >> 4, 25 | 63 | 68 | 84 | 140)
-                            && !decoration_disc_cleared
-                            && !decoration_pot_cleared
-                        {
+                        if !decoration_handled {
                             // Other blocks retain their existing cleanup path.
                             decorations
                                 .lock()
