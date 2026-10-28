@@ -94,7 +94,10 @@ impl PlayerPosition {
         self.x.is_finite()
             && self.y.is_finite()
             && self.z.is_finite()
-            && (0.0..256.0).contains(&self.y)
+            // The legacy 1.7.10 void begins 64 blocks below the
+            // Y=0 build floor. Preserve a bounded negative-Y interval so
+            // players can fall through empty world space and receive damage.
+            && (-256.0..256.0).contains(&self.y)
             && (-limit..limit).contains(&self.x)
             && (-limit..limit).contains(&self.z)
     }
@@ -334,9 +337,21 @@ mod tests {
             z: 0.5
         })
         .is_valid());
-        assert!(!(PlayerPosition {
+        assert!(PlayerPosition {
             x: 0.5,
             y: -1.0,
+            z: 0.5
+        }
+        .is_valid());
+        assert!(PlayerPosition {
+            x: 0.5,
+            y: -64.5,
+            z: 0.5
+        }
+        .is_valid());
+        assert!(!(PlayerPosition {
+            x: 0.5,
+            y: -256.0,
             z: 0.5
         })
         .is_valid());
