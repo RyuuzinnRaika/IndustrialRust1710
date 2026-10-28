@@ -34,7 +34,20 @@ fn valid_event_id(id: &str) -> bool {
 
 /// Detect an immediate retry, including one after reopening the file. Scan
 /// at most 256 KiB rather than causing unbounded O(log_size) work on death.
-fn recent_event_present(file: &mut fs::File, id: &str, record: &DeathRecord<'_>) -> io::Result<bool> {
+/// Compare the complete audit identity; timestamp_ms can change on a retry.
+/// The caller has already chosen the event_id, which must never be reused to
+/// hide a different attack, damage amount, or location.
+fn recent_event_present(file: &mut fs::File, expected: &Value) -> io::Result<bool> {
+    let id = expected
+        .get("event_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "missing death event ID"))?;
+    let mut normalized_expected = expected.clone();
+    let fields = normalized_expected
+        .as_object_mut()
+        .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "invalid death event"))?;
+    fields.remove("timestamp_ms");
+
     let len = file.metadata()?.len();
     let scan_len = len.min(EVENT_ID_SCAN_BYTES as u64) as usize;
     if scan_len == 0 {
@@ -43,7 +56,8 @@ fn recent_event_present(file: &mut fs::File, id: &str, record: &DeathRecord<'_>)
     file.seek(SeekFrom::Start(len - scan_len as u64))?;
     let mut bytes = vec![0; scan_len];
     file.read_exact(&mut bytes)?;
-    // The window may start in the middle of an older JSONL entry.
+    // A bounded window can begin inside an older record; discard precisely
+    // that fragment, but fail closed for malformed complete JSONL entries.
     let offset = if len > scan_len as u64 {
         bytes
             .iter()
@@ -52,29 +66,40 @@ fn recent_event_present(file: &mut fs::File, id: &str, record: &DeathRecord<'_>)
     } else {
         0
     };
-    for line in bytes[offset..].split(|&byte| byte == b'\n').filter(|line| !line.is_empty()) {
-        let Ok(value) = serde_json::from_slice::<Value>(line) else {
-            continue;
-        };
+    let mut found = false;
+    for line in bytes[offset..]
+        .split(|&byte| byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let mut value: Value = serde_json::from_slice(line).map_err(|error| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                format!("malformed death-log entry in retry window: {error}"),
+            )
+        })?;
         if value.get("event_id").and_then(Value::as_str) != Some(id) {
             continue;
         }
-        if value.get("event").and_then(Value::as_str) != Some("player_death")
-            || value.get("player").and_then(Value::as_str) != Some(record.player)
-            || value.get("cause").and_then(Value::as_str) != Some(record.cause().code())
-            || value.get("dimension").and_then(Value::as_i64) != Some(i64::from(record.dimension))
-            || value.get("server_tick").and_then(Value::as_u64) != Some(record.tick)
-        {
+        let stored = value
+            .as_object_mut()
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "invalid death event object"))?;
+        stored.remove("timestamp_ms");
+        if value != normalized_expected {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
                 "death event ID reused for a different event",
             ));
         }
-        return Ok(true);
+        if found {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "duplicate death event ID already present in log",
+            ));
+        }
+        found = true;
     }
-    Ok(false)
+    Ok(found)
 }
-
 
 /// A human at negative fractional coordinates is inside the lower block,
 /// not in the block obtained by truncation toward zero. Do not invent a
@@ -371,7 +396,7 @@ impl DeathRecord<'_> {
             .append(true)
             .open(path)?;
         reconcile_jsonl_tail(&mut file)?;
-        if recent_event_present(&mut file, id, self)? {
+        if recent_event_present(&mut file, &payload)? {
             return Ok(false);
         }
         let previous_len = file.metadata()?.len();
@@ -668,6 +693,97 @@ mod tests {
         assert!(other.append_with_event_id(&world, "shared-id-001").is_err());
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
         assert!(other.append_with_event_id(&world, "invalid id").is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reuse_of_event_id_with_different_killer_or_position_is_rejected() {
+        let (world, path) = test_log_path("same-id-different-source");
+        let original = DeathRecord {
+            player: "Alex",
+            hit: Some(FatalHit {
+                cause: DeathCause::Projectile {
+                    kind: "Arrow",
+                    shooter_kind: Some("Skeleton"),
+                    shooter_id: Some(901),
+                },
+                previous_health: 2.0,
+                applied_damage: 2.0,
+            }),
+            position: PlayerPosition::default(),
+            dimension: 0,
+            tick: 123,
+        };
+        assert!(original.append_with_event_id(&world, "same-projectile-id").unwrap());
+        let conflicting_source = DeathRecord {
+            hit: Some(FatalHit {
+                cause: DeathCause::Projectile {
+                    kind: "Arrow",
+                    shooter_kind: Some("Skeleton"),
+                    shooter_id: Some(902),
+                },
+                previous_health: 2.0,
+                applied_damage: 2.0,
+            }),
+            ..original
+        };
+        assert!(conflicting_source
+            .append_with_event_id(&world, "same-projectile-id")
+            .is_err());
+
+        let conflicting_location = DeathRecord {
+            position: PlayerPosition {
+                x: 5.5,
+                ..PlayerPosition::default()
+            },
+            ..original
+        };
+        assert!(conflicting_location
+            .append_with_event_id(&world, "same-projectile-id")
+            .is_err());
+        let conflicting_damage = DeathRecord {
+            hit: Some(FatalHit {
+                cause: DeathCause::Projectile {
+                    kind: "Arrow",
+                    shooter_kind: Some("Skeleton"),
+                    shooter_id: Some(901),
+                },
+                previous_health: 3.0,
+                applied_damage: 3.0,
+            }),
+            ..original
+        };
+        assert!(conflicting_damage
+            .append_with_event_id(&world, "same-projectile-id")
+            .is_err());
+        assert!(!original.append_with_event_id(&world, "same-projectile-id").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn malformed_historical_jsonl_line_is_not_silently_skipped() {
+        let (world, path) = test_log_path("invalid-older-entry");
+        let contents = b"{\"event_id\":garbled}\n";
+        fs::write(&path, contents).unwrap();
+        assert!(sample_record()
+            .append_with_event_id(&world, "new-event")
+            .is_err());
+        assert_eq!(fs::read(&path).unwrap(), contents.to_vec());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn duplicate_event_ids_in_existing_log_are_reported() {
+        let (world, path) = test_log_path("already-duplicated");
+        let record = sample_record();
+        assert!(record.append_with_event_id(&world, "double-id").unwrap());
+        let contents = fs::read(&path).unwrap();
+        let mut duplicates = contents.clone();
+        duplicates.extend_from_slice(&contents);
+        fs::write(&path, &duplicates).unwrap();
+        assert!(record.append_with_event_id(&world, "double-id").is_err());
+        assert_eq!(fs::read(&path).unwrap(), duplicates);
         fs::remove_file(path).unwrap();
     }
 
