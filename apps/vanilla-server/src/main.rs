@@ -3900,6 +3900,8 @@ fn play(
                                 }
                                 let mut changed = false;
                                 let mut companion_changed = None;
+                                let mut decoration_disc_cleared = false;
+                                let mut decoration_pot_cleared = false;
                                 if world::in_bounds(x, y, z) && near(location, x, y, z) {
                                     if let Some(result) = result {
                                         let current_block = w.get(x, y, z);
@@ -4159,6 +4161,75 @@ fn play(
                                                     drops.len()
                                                 );
                                             }
+                                        } else if matches!(block, 25 | 63 | 68 | 84 | 140) {
+                                            // A decorative block and its sidecar belong to
+                                            // the same durable change. Dropping a record or
+                                            // potted plant must not precede their removal.
+                                            let mut stored = decorations
+                                                .lock()
+                                                .map_err(|_| bad("decorations lock poisoned"))?;
+                                            let disc = if block == 84 { stored.record(target) } else { None };
+                                            let plant = if block == 140 { stored.pot(target) } else { None };
+                                            let mut drops = Vec::with_capacity(3);
+                                            if let Some(item) = result.drop {
+                                                drops.push(Stack {
+                                                    id: item.id,
+                                                    count: 1,
+                                                    damage: item.damage,
+                                                    nbt: None,
+                                                });
+                                            }
+                                            if let Some(id) = disc {
+                                                drops.push(Stack { id, count: 1, damage: 0, nbt: None });
+                                            }
+                                            if let Some(stack) = plant {
+                                                drops.push(stack);
+                                            }
+                                            let mut ground = ground_items
+                                                .lock()
+                                                .map_err(|_| bad("ground items lock poisoned"))?;
+                                            if ground.has_capacity_for(drops.len()) {
+                                                let (staged_ground, spawned) =
+                                                    ground.stage_put_many(&drops, target)?;
+                                                if let Some(staged_world) = w.stage_mining_removal(x, y, z)? {
+                                                    let staged_decorations = stored.staged_remove(target)?;
+                                                    let mut staged_inventory = inventory.clone();
+                                                    let wore = result.wear_tool
+                                                        && staged_inventory.wear_held_tool();
+                                                    let mut writes = vec![
+                                                        (world_path, staged_world.encoded()?),
+                                                        (decoration_path, staged_decorations.encoded()?),
+                                                        (ground_path, staged_ground.encoded()?),
+                                                    ];
+                                                    if wore {
+                                                        writes.push((inventory_path, staged_inventory.encoded()?));
+                                                    }
+                                                    journal::commit(
+                                                        &world_path.with_extension("pending-txn.json"),
+                                                        &writes,
+                                                    )?;
+                                                    *w = staged_world;
+                                                    *stored = staged_decorations;
+                                                    *ground = staged_ground;
+                                                    if wore {
+                                                        *inventory = staged_inventory;
+                                                        send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                                    }
+                                                    for item in spawned {
+                                                        for packet in item.spawn() {
+                                                            hub.broadcast(packet);
+                                                        }
+                                                    }
+                                                    decoration_disc_cleared = disc.is_some();
+                                                    decoration_pot_cleared = plant.is_some();
+                                                    changed = true;
+                                                }
+                                            } else if trace_mining {
+                                                eprintln!(
+                                                    "mining trace: decorative break rejected: ground capacity {} at {target:?}",
+                                                    drops.len()
+                                                );
+                                            }
                                         } else if !occupied {
                                             let bonus = survival::additional_drop(
                                                 w.get(x, y, z),
@@ -4303,6 +4374,18 @@ fn play(
                                 let event = block_change_event(&w, x, y, z);
                                 if changed {
                                     hub.broadcast(event);
+                                    if decoration_disc_cleared {
+                                        hub.broadcast(Event {
+                                            id: 0x28,
+                                            body: decorations::disc_event(target, None),
+                                        });
+                                    }
+                                    if decoration_pot_cleared {
+                                        hub.broadcast(Event {
+                                            id: 0x35,
+                                            body: decorations::pot_packet(target, None)?,
+                                        });
+                                    }
                                     if let Some((px, py, pz)) = companion_changed {
                                         hub.broadcast(block_change_event(&w, px, py, pz));
                                     }
@@ -4317,6 +4400,8 @@ fn play(
                 } else {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let mut companion_changed = None;
+                    let mut decoration_disc_cleared = false;
+                    let mut decoration_pot_cleared = false;
                     let changed = if (action == 0 || action == 2)
                         && world::in_bounds(x, y, z)
                         && near(location, x, y, z)
@@ -4357,7 +4442,34 @@ fn play(
                                     .lock()
                                     .map_err(|_| bad("decorations lock poisoned"))?
                                     .occupied((x, y, z)));
-                        if occupied {
+                        if matches!(block, 25 | 63 | 68 | 84 | 140) {
+                            // Creative deletes decorative contents without drops,
+                            // but the world and its sidecar must still change
+                            // together to prevent orphaned tile data on restart.
+                            let pos = (x, y, z);
+                            let mut stored = decorations
+                                .lock()
+                                .map_err(|_| bad("decorations lock poisoned"))?;
+                            if let Some(staged_world) = w.stage_mining_removal(x, y, z)? {
+                                let staged_decorations = stored.staged_remove(pos)?;
+                                let disc = stored.record(pos).is_some();
+                                let pot = stored.pot(pos).is_some();
+                                journal::commit(
+                                    &world_path.with_extension("pending-txn.json"),
+                                    &[
+                                        (world_path, staged_world.encoded()?),
+                                        (decoration_path, staged_decorations.encoded()?),
+                                    ],
+                                )?;
+                                *w = staged_world;
+                                *stored = staged_decorations;
+                                decoration_disc_cleared = disc;
+                                decoration_pot_cleared = pot;
+                                true
+                            } else {
+                                false
+                            }
+                        } else if occupied {
                             false
                         } else {
                             let partner = w.mining_partner(x, y, z);
@@ -4379,11 +4491,29 @@ fn play(
                     };
                     let event = block_change_event(&w, x, y, z);
                     if changed {
-                        decorations
-                            .lock()
-                            .map_err(|_| bad("decorations lock poisoned"))?
-                            .remove(decoration_path, (x, y, z))?;
+                        if !matches!(w.get(x, y, z) >> 4, 25 | 63 | 68 | 84 | 140)
+                            && !decoration_disc_cleared
+                            && !decoration_pot_cleared
+                        {
+                            // Other blocks retain their existing cleanup path.
+                            decorations
+                                .lock()
+                                .map_err(|_| bad("decorations lock poisoned"))?
+                                .remove(decoration_path, (x, y, z))?;
+                        }
                         hub.broadcast(event);
+                        if decoration_disc_cleared {
+                            hub.broadcast(Event {
+                                id: 0x28,
+                                body: decorations::disc_event((x, y, z), None),
+                            });
+                        }
+                        if decoration_pot_cleared {
+                            hub.broadcast(Event {
+                                id: 0x35,
+                                body: decorations::pot_packet((x, y, z), None)?,
+                            });
+                        }
                         if let Some((px, py, pz)) = companion_changed {
                             hub.broadcast(block_change_event(&w, px, py, pz));
                         }
