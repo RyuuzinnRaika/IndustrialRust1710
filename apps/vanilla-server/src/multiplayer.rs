@@ -111,6 +111,7 @@ fn stamp_event(peer: &Peer, packet: Event) -> QueuedEvent {
         0x02 | 0x38
             | ADMIN_TELEPORT_EVENT
             | ADMIN_KICK_EVENT
+            | ADMIN_KILL_EVENT
             | ADMIN_GAMEMODE_EVENT
             | ADMIN_GIVE_EVENT
             | ADMIN_CLEAR_EVENT
