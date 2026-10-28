@@ -8,6 +8,9 @@ use crate::dimensions::Dimension;
 #[allow(dead_code)]
 mod genlayer;
 
+#[path = "worldgen_trees.rs"]
+mod trees;
+
 const SEA: i32 = 62;
 const AIR: u16 = 0;
 fn b(id: u16) -> u16 {
@@ -109,7 +112,8 @@ pub fn biome(seed: u64, x: i32, z: i32) -> u8 {
         return 12;
     }
     if cold < -0.20 {
-        return if wet > 0.0 { 30 } else { 5 };
+        // 1.7.10 giant-tree taiga, alongside ordinary/cold taiga.
+        return if wet > 0.32 { 32 } else if wet > 0.0 { 30 } else { 5 };
     }
     if cold > 0.42 && wet < -0.14 {
         return if ridge > 0.12 { 17 } else { 2 };
@@ -124,7 +128,9 @@ pub fn biome(seed: u64, x: i32, z: i32) -> u8 {
         return 6;
     }
     if wet > 0.21 {
-        return if ridge > 0.10 { 27 } else { 4 };
+        // Roofed Forest (29) is required for naturally generated dark oak.
+        return if wet > 0.37 && ridge < 0.0 { 29 }
+        else if ridge > 0.10 { 27 } else { 4 };
     }
     if wet < -0.37 {
         return 1;
@@ -157,7 +163,9 @@ pub fn climate(id: u8) -> (f32, f32) {
         21 => (1.2, 0.9),
         26 => (0.05, 0.3),
         27 => (0.6, 0.6),
+        29 => (0.7, 0.8),
         30 => (-0.5, 0.4),
+        32 => (0.3, 0.8),
         35 => (1.2, 0.0),
         _ => (0.8, 0.4),
     }
@@ -717,6 +725,10 @@ fn aboveground(seed: u64, x: i32, y: i32, z: i32, top: i32, id: u8) -> u16 {
     if desert_biome(id) && choice.is_multiple_of(121) && y <= top + 3 {
         return b(81);
     }
+    // The same tree candidate order is used for point and cached reads.
+    if let Some(tree) = trees::at(seed, x, y, z) {
+        return tree;
+    }
     if y == top + 1 {
         if matches!(id, 6 | 21) && choice.is_multiple_of(48) {
             return b(if choice & 1 == 0 { 39 } else { 40 });
@@ -727,64 +739,6 @@ fn aboveground(seed: u64, x: i32, y: i32, z: i32, top: i32, id: u8) -> u16 {
             }
             if choice.is_multiple_of(5) {
                 return state(31, 1);
-            }
-        }
-    }
-    // Cross-chunk canopy lookup around this block, independent of which
-    // chunk is requested. Trees are suppressed in the spawn-safe square.
-    for tx in x - 2..=x + 2 {
-        for tz in z - 2..=z + 2 {
-            if tx.abs() < 12 && tz.abs() < 12 {
-                continue;
-            }
-            let kind = biome(seed, tx, tz);
-            let frequency = match kind {
-                4 | 27 => 37,
-                5 | 30 => 47,
-                21 => 28,
-                6 => 59,
-                18 => 44,
-                _ => continue,
-            };
-            if !hash(seed ^ 0x7eed, tx, 0, tz).is_multiple_of(frequency) {
-                continue;
-            }
-            let root = height(seed, tx, tz);
-            if root < SEA || y < root + 1 || y > root + 7 {
-                continue;
-            }
-            let metadata = match kind {
-                5 | 30 => 1,
-                27 => 2,
-                21 => 3,
-                _ => 0,
-            };
-            if tx == x && tz == z && y <= root + 5 {
-                return state(17, metadata);
-            }
-            let radius = if y >= root + 7 { 1 } else { 2 };
-            if (tx - x).abs() <= radius && (tz - z).abs() <= radius && y >= root + 4 {
-                return state(18, metadata | 4); // player-placed decay disabled for generated canopy
-            }
-        }
-    }
-    // Preserve every old-generated tree first, then add sparse non-forest
-    // starter trees. Compare with OverworldColumn's second canopy pass.
-    for tx in x - 2..=x + 2 {
-        for tz in z - 2..=z + 2 {
-            let Some((trunk, leaves)) = supplementary_tree(seed, tx, tz) else {
-                continue;
-            };
-            let root = height(seed, tx, tz);
-            if y < root + 1 || y > root + 7 {
-                continue;
-            }
-            if tx == x && tz == z && y <= root + 5 {
-                return b(trunk);
-            }
-            let radius = if y >= root + 7 { 1 } else { 2 };
-            if (tx - x).abs() <= radius && (tz - z).abs() <= radius && y >= root + 4 {
-                return state(leaves, 4);
             }
         }
     }
@@ -820,77 +774,7 @@ impl OverworldColumn {
     pub(crate) fn new(seed: u64, x: i32, z: i32) -> Self {
         let kind = biome(seed, x, z);
         let top = height(seed, x, z);
-        let mut canopy = [None; 256];
-        for tx in x - 2..=x + 2 {
-            for tz in z - 2..=z + 2 {
-                if tx.abs() < 12 && tz.abs() < 12 {
-                    continue;
-                }
-                let tree_kind = biome(seed, tx, tz);
-                let frequency = match tree_kind {
-                    4 | 27 => 37,
-                    5 | 30 => 47,
-                    21 => 28,
-                    6 => 59,
-                    18 => 44,
-                    _ => continue,
-                };
-                if !hash(seed ^ 0x7eed, tx, 0, tz).is_multiple_of(frequency) {
-                    continue;
-                }
-                let root = height(seed, tx, tz);
-                if root < SEA {
-                    continue;
-                }
-                let metadata = match tree_kind {
-                    5 | 30 => 1,
-                    27 => 2,
-                    21 => 3,
-                    _ => 0,
-                };
-                for y in root + 1..=root + 7 {
-                    if !(0..=255).contains(&y) {
-                        continue;
-                    }
-                    let block = if tx == x && tz == z && y <= root + 5 {
-                        Some(state(17, metadata))
-                    } else {
-                        let radius = if y >= root + 7 { 1 } else { 2 };
-                        ((tx - x).abs() <= radius && (tz - z).abs() <= radius && y >= root + 4)
-                            .then_some(state(18, metadata | 4))
-                    };
-                    // Preserve the point generator's first matching tree.
-                    if canopy[y as usize].is_none() {
-                        canopy[y as usize] = block;
-                    }
-                }
-            }
-        }
-        // A second pass ensures the original IRW4 forest/taiga/jungle
-        // canopy is never replaced by supplementary plains/savanna trees.
-        for tx in x - 2..=x + 2 {
-            for tz in z - 2..=z + 2 {
-                let Some((trunk, leaves)) = supplementary_tree(seed, tx, tz) else {
-                    continue;
-                };
-                let root = height(seed, tx, tz);
-                for y in root + 1..=root + 7 {
-                    if !(0..=255).contains(&y) {
-                        continue;
-                    }
-                    let block = if tx == x && tz == z && y <= root + 5 {
-                        Some(b(trunk))
-                    } else {
-                        let radius = if y >= root + 7 { 1 } else { 2 };
-                        ((tx - x).abs() <= radius && (tz - z).abs() <= radius && y >= root + 4)
-                            .then_some(state(leaves, 4))
-                    };
-                    if canopy[y as usize].is_none() {
-                        canopy[y as usize] = block;
-                    }
-                }
-            }
-        }
+        let canopy = trees::column(seed, x, z);
         Self {
             seed,
             x,
@@ -951,6 +835,9 @@ impl OverworldColumn {
         if desert_biome(self.kind) && choice.is_multiple_of(121) && y <= self.top + 3 {
             return b(81);
         }
+        if let Some(block) = self.canopy[y as usize] {
+            return block;
+        }
         if y == self.top + 1 {
             if matches!(self.kind, 6 | 21) && choice.is_multiple_of(48) {
                 return b(if choice & 1 == 0 { 39 } else { 40 });
@@ -963,9 +850,6 @@ impl OverworldColumn {
                     return state(31, 1);
                 }
             }
-        }
-        if let Some(block) = self.canopy[y as usize] {
-            return block;
         }
         if self.top < SEA && y <= SEA {
             return if matches!(self.kind, 10 | 11) && y == SEA {
