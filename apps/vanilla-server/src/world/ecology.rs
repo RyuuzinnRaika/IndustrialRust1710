@@ -583,6 +583,13 @@ impl World {
             let block = self.get(x, i32::from(y), z);
             let id = block >> 4;
             let height = i32::from(y);
+            // Never grow or spread a plant which was already scheduled
+            // to detach or lose its attachment metadata in this tick.
+            // Otherwise an unsupported vine could produce a new dangling
+            // vine below it in the same atomic snapshot.
+            if changes.contains_key(&(x, y, z)) {
+                continue;
+            }
             if !self.can_support(x, height, z, block) {
                 changes.insert((x, y, z), 0);
                 continue;
@@ -811,6 +818,61 @@ mod regression_tests {
         assert!(loaded.pending_support.contains(&(0, 65, 0)));
         assert!(loaded.pending_ecology.contains(&(0, 65, 0)));
         assert_eq!(loaded.ecology_changes(64).get(&(0, 65, 0)), Some(&0));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn unsupported_vines_do_not_spread_during_the_detachment_tick() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, (106 << 4) | 8).unwrap();
+        // Without a backing wall or attached vine above, its support
+        // check stages removal. Even on a lucky growth tick, it must
+        // not create a fresh vine underneath.
+        let lucky = (1..=20_000u64)
+            .find(|&second| {
+                let phase = second * GAME_TICKS_PER_SECOND;
+                vine_random_tick_due(phase, 0, 65, 0)
+                    && ecology_roll(second ^ 0x7669_6e65, 0, 65, 0) % 6 == 0
+                    && ecology_roll(second ^ (0x6000 + 8), 0, 65, 0) & 1 == 0
+            })
+            .unwrap();
+        world.fluid_phase = lucky * GAME_TICKS_PER_SECOND;
+        let staged = world.ecology_changes(64);
+        assert_eq!(staged.get(&(0, 65, 0)), Some(&0));
+        assert!(!staged.contains_key(&(0, 64, 0)));
+    }
+
+    #[test]
+    fn naturally_decaying_leaves_persist_drops_after_the_commit() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-leaf-drop-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let leaf = 18 << 4;
+        let pos = (0, 65, 0);
+        let second = (1..=50_000u64)
+            .find(|&sec| {
+                leaf_decay_due(sec * GAME_TICKS_PER_SECOND, pos.0, pos.1, pos.2)
+                    && crate::survival::leaf_decay_drops(
+                        leaf,
+                        pos,
+                        sec * GAME_TICKS_PER_SECOND,
+                    )
+                    .iter()
+                    .any(|drop| drop.id == 6)
+            })
+            .expect("a decaying oak leaf should eventually drop a sapling");
+        let mut world = World::new();
+        world.import_block(pos.0, pos.1, pos.2, leaf).unwrap();
+        world.fluid_phase = second * GAME_TICKS_PER_SECOND - 1;
+        let changed = world.block_tick(&path, 64).unwrap();
+        assert!(changed.contains(&pos));
+        assert_eq!(world.get(pos.0, pos.1, pos.2), 0);
+        assert!(world.drain_drops().iter().any(|drop| {
+            drop.pos == pos && drop.stack.id == 6 && drop.stack.damage == 0
+        }));
+        assert_eq!(World::load(&path).unwrap().get(pos.0, pos.1, pos.2), 0);
         std::fs::remove_file(path).unwrap();
     }
 
