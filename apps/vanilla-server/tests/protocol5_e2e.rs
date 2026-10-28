@@ -28,6 +28,7 @@ struct NativeServer {
     _exclusive_test_run: std::sync::MutexGuard<'static, ()>,
     process: Child,
     directory: PathBuf,
+    stderr_path: PathBuf,
     port: u16,
     survival: bool,
 }
@@ -163,16 +164,22 @@ impl NativeServer {
         if survival {
             command.arg("--survival");
         }
+        // Keep child diagnostics when a real TCP test fails. The test
+        // harness otherwise hides the reason a connection was closed.
+        // Keep this file outside the world being verified and backed up.
+        let stderr_path = directory.with_extension("server-stderr.log");
+        let stderr_file = fs::File::create(&stderr_path).unwrap();
         let process = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr_file))
             .spawn()
             .unwrap();
         let mut server = Self {
             _exclusive_test_run: exclusive,
             process,
             directory,
+            stderr_path,
             port,
             survival,
         };
@@ -315,8 +322,25 @@ impl NativeServer {
 }
 impl Drop for NativeServer {
     fn drop(&mut self) {
+        let failed = thread::panicking();
+        let exit_status = if failed {
+            self.process.try_wait().ok().flatten()
+        } else {
+            None
+        };
         self.stop();
+        if failed {
+            // libtest prints captured diagnostics only for failing cases.
+            // Include a bounded stderr tail before deleting the temp world.
+            let stderr = fs::read(&self.stderr_path).unwrap_or_default();
+            let tail = stderr.len().saturating_sub(16 * 1024);
+            eprintln!(
+                "native server exit before cleanup: {exit_status:?}; stderr tail:\n{}",
+                String::from_utf8_lossy(&stderr[tail..])
+            );
+        }
         let _ = fs::remove_dir_all(&self.directory);
+        let _ = fs::remove_file(&self.stderr_path);
     }
 }
 fn vi(value: u32) -> Vec<u8> {
@@ -671,7 +695,8 @@ fn native_1710_minecart_checkpoint_keeps_survival_session_and_movement_alive() {
 fn native_1710_c04_c06_decode_feet_y_before_stance() {
     let server = NativeServer::start();
     let (mut client, _, initial) = server.join("Positioner");
-    assert_eq!(initial, [0.5, 65.0, 0.5]);
+    // The default IRW flat surface is y=63, so the player's feet start at 64.
+    assert_eq!(initial, [0.5, 64.0, 0.5]);
 
     // The unmodified 1.7.10 client writes [X, feet Y, stance, Z].
     // Assert C04 independently, so a broken C04 cannot be hidden by C06.
@@ -748,7 +773,7 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
 
     // A split VarInt / chat payload must survive multiple 50ms polls.
     let (mut client, _, pos) = server.join("RustTester");
-    assert_eq!(pos, [0.5, 65.0, 0.5]);
+    assert_eq!(pos, [0.5, 64.0, 0.5]);
     let list = frame(1, &mc_string("/list"));
     send_fragments(&mut client, &list, &[1, 1, 1, 2]);
     let response = until_packet(&mut client, 2, |body| {
@@ -930,9 +955,22 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
         .arg(&restored)
         .arg("--import-anvil")
         .arg(&source_dir)
-        .status()
+        .output()
         .unwrap();
-    assert!(!retry.success(), "import overwrote an existing world");
+    assert!(
+        !retry.status.success(),
+        "import overwrote an existing world"
+    );
+    assert!(
+        String::from_utf8_lossy(&retry.stderr).contains("destination IRW1 already exists"),
+        "Anvil retry failed for an unexpected reason: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(
+        fs::read(&restored).unwrap(),
+        before,
+        "rejected import changed the world"
+    );
 }
 
 #[test]
@@ -1325,8 +1363,12 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
 
 #[test]
 fn native_open_window_packets_cover_other_interactive_gui_blocks() {
-    // Use real placed blocks and the running server, not just the packet builder.
-    // Each case starts with an empty world to avoid layout-dependent interactions.
+    // Exercise each real GUI packet on a single native server connection.
+    // Restarting the server and streaming 25 chunks per case made this test
+    // unnecessarily slow. Clear the empty block after each case to preserve
+    // the original fresh-placement precondition without restarting.
+    let server = NativeServer::start();
+    let (mut player, _, _) = server.join("RustTester");
     let cases = [
         (23i16, 3u8, "Dispenser", 9u8),
         (158, 10, "Dropper", 9),
@@ -1336,16 +1378,18 @@ fn native_open_window_packets_cover_other_interactive_gui_blocks() {
         (145, 8, "Repair & Name", 0),
         (146, 0, "Chest", 27),
     ];
-    for (block, kind, title, slots) in cases {
-        let server = NativeServer::start();
-        let (mut player, _, _) = server.join("RustTester");
+    for (index, (block, kind, title, slots)) in cases.into_iter().enumerate() {
+        let window_id = u8::try_from(index + 1).unwrap();
         let mut held = 36i16.to_be_bytes().to_vec();
         held.extend_from_slice(&block.to_be_bytes());
         held.push(1);
         held.extend_from_slice(&0i16.to_be_bytes());
         held.extend_from_slice(&(-1i16).to_be_bytes());
         player.write_all(&frame(0x10, &held)).unwrap();
-        until_packet(&mut player, 0x2f, |p| p.starts_with(&[0, 0, 36]));
+        let item_id = block.to_be_bytes();
+        until_packet(&mut player, 0x2f, |p| {
+            p.starts_with(&[0, 0, 36, item_id[0], item_id[1]])
+        });
 
         let mut place = 0i32.to_be_bytes().to_vec();
         place.push(63);
@@ -1366,10 +1410,21 @@ fn native_open_window_packets_cover_other_interactive_gui_blocks() {
         open.extend_from_slice(&(-1i16).to_be_bytes());
         open.extend_from_slice(&[8, 8, 8]);
         player.write_all(&frame(8, &open)).unwrap();
-        let opened = until_packet(&mut player, 0x2d, |p| p.first() == Some(&1));
-        assert_open_window_protocol5(&opened, 1, kind, title, slots);
-        player.write_all(&frame(13, &[1])).unwrap();
-        drop(player);
+        let opened = until_packet(&mut player, 0x2d, |p| p.first() == Some(&window_id));
+        assert_open_window_protocol5(&opened, window_id, kind, title, slots);
+        player.write_all(&frame(13, &[window_id])).unwrap();
+
+        // A Creative Start Dig removes the now-empty GUI block instantly.
+        // Verify the real server reports air before exercising the next case.
+        let mut dig = vec![0u8];
+        dig.extend_from_slice(&0i32.to_be_bytes());
+        dig.push(64);
+        dig.extend_from_slice(&0i32.to_be_bytes());
+        dig.push(1);
+        player.write_all(&frame(7, &dig)).unwrap();
+        until_packet(&mut player, 0x23, |p| {
+            p.len() == 11 && p[4] == 64 && p[9] == 0 && p[10] == 0
+        });
     }
 }
 
@@ -1573,6 +1628,290 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
 }
 
 #[test]
+fn survival_instant_torch_mining_needs_only_start_packet() {
+    let server = NativeServer::start_with_mode_and_items(true, &[(36, 50)]);
+    let (mut client, _, _) = server.join("RustTester");
+
+    // Place a torch with a genuine server-owned hotbar stack, then mine
+    // it using only C07 Start. Vanilla 1.7.10 sends no Finish for instabreak.
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&50i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() >= 11 && p[4] == 64 && p[9] == 50
+    });
+
+    let mut dig = vec![0u8];
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(64);
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(1);
+    client.write_all(&frame(7, &dig)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() >= 11 && p[4] == 64 && p[9] == 0
+    });
+}
+
+#[test]
+fn creative_can_break_flat_bedrock_at_y60_with_one_start_packet() {
+    let server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+    // The flat world's y=60 layer is bedrock. Creative may break it;
+    // rejecting all y<=60 created apparently random mining failures.
+    let mut dig = vec![0u8];
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(60);
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(1);
+    client.write_all(&frame(7, &dig)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() >= 11 && p[4] == 60 && p[9] == 0
+    });
+}
+
+#[test]
+fn survival_decorative_mining_drops_blocks_and_clears_tile_state() {
+    // Mine via C07 after real C08 placement; test both ordinary decorative
+    // blocks and the item->block IDs of signs and flowerpots.
+    for (held_block, placed_block, drop_id) in [
+        (25_i16, 25_i16, 25_i16), // note block
+        (323, 63, 323),         // standing sign
+        (84, 84, 84),           // jukebox
+        (390, 140, 390),        // flower pot
+    ] {
+        let server = NativeServer::start_with_mode_and_items(
+            true,
+            &[(36, held_block), (37, 286)], // golden axe
+        );
+        let (mut client, _, _) = server.join("RustTester");
+        let mut place = 0i32.to_be_bytes().to_vec();
+        place.push(63);
+        place.extend_from_slice(&0i32.to_be_bytes());
+        place.push(1);
+        place.extend_from_slice(&held_block.to_be_bytes());
+        place.push(1);
+        place.extend_from_slice(&0i16.to_be_bytes());
+        place.extend_from_slice(&(-1i16).to_be_bytes());
+        place.extend_from_slice(&[8, 8, 8]);
+        client.write_all(&frame(8, &place)).unwrap();
+        until_packet(&mut client, 0x23, |p| {
+            p.len() == 11 && p[4] == 64 && i16::from(p[9]) == placed_block
+        });
+        client.write_all(&frame(9, &1i16.to_be_bytes())).unwrap();
+        send_position(&mut client, 4.5, 64.0, 0.5);
+        let mut start = vec![0u8];
+        start.extend_from_slice(&0i32.to_be_bytes());
+        start.push(64);
+        start.extend_from_slice(&0i32.to_be_bytes());
+        start.push(1);
+        let mut finish = start.clone();
+        finish[0] = 2;
+        client.write_all(&frame(7, &start)).unwrap();
+        thread::sleep(Duration::from_millis(950));
+        client.write_all(&frame(7, &finish)).unwrap();
+        until_packet(&mut client, 0x23, |p| {
+            p.len() == 11 && p[4] == 64 && p[9] == 0
+        });
+        let sidecar = server.directory.join("flat.decorations.json");
+        let drops_path = server.directory.join("flat.drops.json");
+        await_file(&sidecar);
+        await_file(&drops_path);
+        let state: Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+        for field in ["signs", "notes", "records", "pots"] {
+            assert!(
+                state[field].as_object().unwrap().is_empty(),
+                "orphaned {field} after mining block {placed_block}",
+            );
+        }
+        let ground: Value = serde_json::from_slice(&fs::read(drops_path).unwrap()).unwrap();
+        let entities = ground["entries"].as_object().unwrap();
+        assert_eq!(entities.len(), 1, "block {placed_block} must drop once");
+        assert_eq!(entities.values().next().unwrap()["stack"]["id"], drop_id);
+        drop(client);
+        server.wait_idle();
+    }
+}
+
+#[test]
+fn survival_container_break_uses_durable_world_and_ground_drop() {
+    // The empty-container path must journal its block drop as well.
+    // Brewing stand item 379 is placed as block 117 (1.7.10).
+    for (block, tool, expected_drop) in [
+        (54_i16, 286_i16, 54_i16), // chest, gold axe
+        (61, 285, 61),             // furnace, gold pickaxe
+        (154, 285, 154),           // hopper, gold pickaxe
+        (23, 285, 23),             // dispenser
+        (158, 285, 158),           // dropper
+        (379, 285, 379),           // brewing stand item -> block 117
+    ] {
+        eprintln!("survival container mining scenario: block={block}, tool={tool}");
+        let server = NativeServer::start_with_mode_and_items(true, &[(36, block), (37, tool)]);
+        let (mut client, _, _) = server.join("RustTester");
+        let placed_block = if block == 379 { 117 } else { block };
+        let mut place = 0i32.to_be_bytes().to_vec();
+        place.push(63);
+        place.extend_from_slice(&0i32.to_be_bytes());
+        place.push(1);
+        place.extend_from_slice(&block.to_be_bytes());
+        place.push(1);
+        place.extend_from_slice(&0i16.to_be_bytes());
+        place.extend_from_slice(&(-1i16).to_be_bytes());
+        place.extend_from_slice(&[8, 8, 8]);
+        client.write_all(&frame(8, &place)).unwrap();
+        until_packet(&mut client, 0x23, |p| {
+            p.len() == 11 && p[4] == 64 && i16::from(p[9]) == placed_block
+        });
+        client.write_all(&frame(9, &1i16.to_be_bytes())).unwrap();
+        // Mine within reach but away from the automatic item pickup radius.
+        send_position(&mut client, 4.5, 64.0, 0.5);
+        let mut start = vec![0u8];
+        start.extend_from_slice(&0i32.to_be_bytes());
+        start.push(64);
+        start.extend_from_slice(&0i32.to_be_bytes());
+        start.push(1);
+        let mut finish = start.clone();
+        finish[0] = 2;
+        client.write_all(&frame(7, &start)).unwrap();
+        thread::sleep(Duration::from_millis(950));
+        client.write_all(&frame(7, &finish)).unwrap();
+        until_packet(&mut client, 0x23, |p| {
+            p.len() == 11 && p[4] == 64 && p[9] == 0
+        });
+        let drops_file = server.directory.join("flat.drops.json");
+        await_file(&drops_file);
+        let saved: Value = serde_json::from_slice(&fs::read(drops_file).unwrap()).unwrap();
+        let entities = saved["entries"].as_object().unwrap();
+        assert_eq!(entities.len(), 1, "block {block} must drop once");
+        assert_eq!(
+            entities.values().next().unwrap()["stack"]["id"],
+            expected_drop
+        );
+        drop(client);
+        server.wait_idle();
+    }
+}
+
+#[test]
+fn survival_bed_head_mining_removes_both_halves_and_drops_one_bed() {
+    let server = NativeServer::start_with_mode_and_items(true, &[(36, 355)]);
+    let (mut client, _, _) = server.join("RustTester");
+    // Place a two-block bed on y63 grass; initial yaw=0 faces north (-Z).
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&355i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 64 && p[9] == 26
+    });
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11
+            && p[4] == 64
+            && i32::from_be_bytes(p[5..9].try_into().unwrap()) == -1
+            && p[9] == 26
+    });
+
+    // Destroy the HEAD, not the foot. Its own drop is None, but the intact
+    // foot contributes exactly one bed item to the shared ground pool.
+    let mut start = vec![0u8];
+    start.extend_from_slice(&0i32.to_be_bytes());
+    start.push(64);
+    start.extend_from_slice(&(-1i32).to_be_bytes());
+    start.push(1);
+    let mut finish = start.clone();
+    finish[0] = 2;
+    client.write_all(&frame(7, &start)).unwrap();
+    thread::sleep(Duration::from_millis(450));
+    client.write_all(&frame(7, &finish)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11
+            && p[4] == 64
+            && i32::from_be_bytes(p[5..9].try_into().unwrap()) == -1
+            && p[9] == 0
+    });
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11
+            && p[4] == 64
+            && i32::from_be_bytes(p[5..9].try_into().unwrap()) == 0
+            && p[9] == 0
+    });
+    let drop_path = server.directory.join("flat.drops.json");
+    await_file(&drop_path);
+    let ground: Value = serde_json::from_slice(&fs::read(drop_path).unwrap()).unwrap();
+    let entries = ground["entries"].as_object().unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "one intact bed must create only one item entity"
+    );
+    assert_eq!(entries.values().next().unwrap()["stack"]["id"], 355);
+}
+
+#[test]
+fn survival_upper_door_mining_removes_lower_half_and_drops_one_door() {
+    let server = NativeServer::start_with_mode_and_items(true, &[(36, 324), (37, 286)]);
+    let (mut client, _, _) = server.join("RustTester");
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&324i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 64 && p[9] == 64
+    });
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 65 && p[9] == 64
+    });
+
+    // Switch from consumed door item to a gold axe: 1.7.10 wooden-door
+    // hardness requires ~400 ms, not a bare-hand 4.5 second wait.
+    client.write_all(&frame(9, &1i16.to_be_bytes())).unwrap();
+    let mut start = vec![0u8];
+    start.extend_from_slice(&0i32.to_be_bytes());
+    start.push(65);
+    start.extend_from_slice(&0i32.to_be_bytes());
+    start.push(1);
+    let mut finish = start.clone();
+    finish[0] = 2;
+    client.write_all(&frame(7, &start)).unwrap();
+    thread::sleep(Duration::from_millis(650));
+    client.write_all(&frame(7, &finish)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 65 && p[9] == 0
+    });
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 64 && p[9] == 0
+    });
+    let drop_path = server.directory.join("flat.drops.json");
+    await_file(&drop_path);
+    let ground: Value = serde_json::from_slice(&fs::read(drop_path).unwrap()).unwrap();
+    let entries = ground["entries"].as_object().unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "one wooden door must create one item entity"
+    );
+    assert_eq!(entries.values().next().unwrap()["stack"]["id"], 324);
+}
+
+#[test]
 fn survival_shovel_mining_wears_out_last_use_and_persists_dirt_drop() {
     let server = NativeServer::start_with_mode(true);
     let player_inventory = server
@@ -1688,12 +2027,12 @@ fn vanilla_client_position_correction_accounts_for_eye_offset() {
     let initial = until_packet(&mut client, 0x08, |packet| packet.len() == 33);
     let wire_y = f64::from_be_bytes(initial[8..16].try_into().unwrap());
     let offset = f64::from(1.62_f32);
-    assert_eq!(wire_y, 65.0 + offset, "clientbound Y is the client posY");
+    assert_eq!(wire_y, 64.0 + offset, "clientbound Y is the client posY");
 
     // The vanilla client subtracts its float yOffset to obtain bounding-box
     // feet Y, then sends that feet Y back in C04/C06.
     let client_feet_y = wire_y - offset;
-    assert_eq!(client_feet_y, 65.0);
+    assert_eq!(client_feet_y, 64.0);
     send_position(&mut client, 0.7, 64.0, 0.5);
     send_position(&mut client, 0.7, 60.0, 0.5);
     let correction = until_packet(&mut client, 0x08, |packet| {
@@ -1766,6 +2105,28 @@ fn movement_and_collision_corrections_preserve_the_players_view() {
 }
 
 #[test]
+fn pending_position_correction_restores_mined_block_on_client() {
+    let server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+    send_position(&mut client, 0.7, 64.0, 0.5);
+    send_position(&mut client, 0.7, 60.0, 0.5);
+    until_packet(&mut client, 0x08, |packet| {
+        read_position(packet) == [0.7, 64.0, 0.5]
+    });
+    // While S08 is pending, even an instant dig attempt must be denied.
+    // Explicit S23 state prevents the client keeping a ghost hole.
+    let mut dig = vec![0u8];
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(63);
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(1);
+    client.write_all(&frame(7, &dig)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() >= 11 && p[4] == 63 && p[9] == 2
+    });
+}
+
+#[test]
 fn collision_correction_rejects_queued_nearby_client_movement_until_ack() {
     let server = NativeServer::start_with_mode(true);
     let (mut client, _, _) = server.join("RustTester");
@@ -1790,14 +2151,13 @@ fn collision_correction_rejects_queued_nearby_client_movement_until_ack() {
 #[test]
 fn native_survival_collision_damage_death_respawn_and_health_persistence() {
     let server = NativeServer::start_with_mode(true);
-    let (mut client, _, _) = server.join("RustTester");
+    let (mut client, _, spawn) = server.join("RustTester");
+    assert_eq!(spawn, [0.5, 64.0, 0.5]);
 
     // Position inside bedrock at y=60 must be rejected by the server.
     send_position(&mut client, 0.5, 60.0, 0.5);
-    until_packet(&mut client, 0x08, |packet| {
-        read_position(packet) == [0.5, 65.0, 0.5]
-    });
-    send_position(&mut client, 0.5, 65.0, 0.5); // S08 confirmation
+    until_packet(&mut client, 0x08, |packet| read_position(packet) == spawn);
+    send_position(&mut client, spawn[0], spawn[1], spawn[2]); // S08 ACK
 
     // Falling eight blocks to the y=64 grass surface costs five health.
     send_position(&mut client, 0.5, 72.0, 0.5);
@@ -1828,14 +2188,12 @@ fn native_survival_collision_damage_death_respawn_and_health_persistence() {
     until_packet(&mut rejoined, 0x06, |packet| {
         packet.len() == 10 && packet[0..4] == 20f32.to_be_bytes()
     });
-    until_packet(&mut rejoined, 0x08, |packet| {
-        read_position(packet) == [0.5, 65.0, 0.5]
-    });
+    until_packet(&mut rejoined, 0x08, |packet| read_position(packet) == spawn);
     drop(rejoined);
     server.wait_idle();
     let (final_session, _, position) = server.join("RustTester");
-    // During a slow reconnect the 20TPS idle-gravity fallback may already
-    // have started falling from the respawn Y=65 toward the safe floor Y=64.
+    // The default world spawn is now already supported at feet Y=64.
+    // Reconnection must not place the player below the floor or high in the air.
     assert_eq!([position[0], position[2]], [0.5, 0.5]);
     assert!(
         (64.0..=65.0).contains(&position[1]),
@@ -2178,7 +2536,7 @@ fn native_protocol5_eight_player_admission_full_and_reconnect() {
     for index in 0..8 {
         let name = format!("Load{index}");
         let (socket, entity_id, position) = server.join(&name);
-        assert_eq!(position, [0.5, 65.0, 0.5]);
+        assert_eq!(position, [0.5, 64.0, 0.5]);
         assert!(entity_id > 0);
         players.push((socket, entity_id));
     }
@@ -2210,7 +2568,7 @@ fn native_protocol5_eight_player_admission_full_and_reconnect() {
         thread::sleep(Duration::from_millis(40));
     }
     let (rejoined, new_id, position) = server.join("Load7");
-    assert_eq!(position, [0.5, 65.0, 0.5]);
+    assert_eq!(position, [0.5, 64.0, 0.5]);
     assert!(new_id > old_id, "entity ID reused after reconnection");
     players.push((rejoined, new_id));
     assert_eq!(server.status()["players"]["online"], 8);
@@ -2721,8 +3079,7 @@ fn creative_mob_feed_and_attack_keep_items_and_award_kill_rewards() {
     let first_tick = i64::from_be_bytes(first_time[..8].try_into().unwrap());
     until_packet(&mut client, 0x03, |body| {
         body.len() == 16
-            && i64::from_be_bytes(body[..8].try_into().unwrap())
-                >= first_tick.saturating_add(20)
+            && i64::from_be_bytes(body[..8].try_into().unwrap()) >= first_tick.saturating_add(20)
     });
     client.write_all(&frame(0x02, &attack)).unwrap();
 
@@ -2880,8 +3237,14 @@ fn tab_complete_protocol5_returns_public_commands_and_online_player_names() {
     assert!(read_completions(&mut player, "/gi").is_empty());
     assert!(read_completions(&mut player, "/op").is_empty());
     assert!(read_completions(&mut player, "/help ").is_empty());
-    assert_eq!(read_completions(&mut player, "/tell Rus"), vec!["RustTester"]);
-    assert_eq!(read_completions(&mut player, "/msg Pos"), Vec::<String>::new());
+    assert_eq!(
+        read_completions(&mut player, "/tell Rus"),
+        vec!["RustTester"]
+    );
+    assert_eq!(
+        read_completions(&mut player, "/msg Pos"),
+        Vec::<String>::new()
+    );
     // A second player appears in the real Hub names list.
     let (other, _, _) = server.join("Positioner");
     assert_eq!(
@@ -2891,4 +3254,3 @@ fn tab_complete_protocol5_returns_public_commands_and_online_player_names() {
     drop(other);
     drop(player);
 }
-

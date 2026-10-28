@@ -39,7 +39,12 @@ where
             let southwest = source[(dz + 2) * parent_width + dx];
             let southeast = source[(dz + 2) * parent_width + dx + 2];
             let center = source[(dz + 1) * parent_width + dx + 1];
-            rng.start_chunk(i64::from(x) + dx as i64, i64::from(z) + dz as i64);
+            // Java adds offsets as signed 32-bit ints before widening them
+            // to longs for initChunkSeed. This matters at i32::MAX.
+            rng.start_chunk(
+                i64::from(x.wrapping_add(dx as i32)),
+                i64::from(z.wrapping_add(dz as i32)),
+            );
             let output = if center == 0
                 && (northwest != 0 || northeast != 0 || southwest != 0 || southeast != 0)
             {
@@ -157,6 +162,59 @@ mod tests {
         }
         assert!(map(seed, 1, 0, 0, 0, 8).is_empty());
         assert!(map(seed, 1, 0, 0, 8, 0).is_empty());
+    }
+
+    #[test]
+    fn add_island_matches_java_oracle_at_signed_coordinate_wrap() {
+        // Independent Java 21 reference: parent uses Java int arithmetic,
+        // and initChunkSeed receives the wrapped signed-int cell coordinates.
+        // The previous widened-first implementation differs in these cases.
+        fn patterned_parent(x: i32, z: i32, width: usize, height: usize) -> Vec<i32> {
+            let mut values = Vec::with_capacity(width * height);
+            for dz in 0..height {
+                for dx in 0..width {
+                    let px = x.wrapping_add(dx as i32);
+                    let pz = z.wrapping_add(dz as i32);
+                    let marker = px.wrapping_mul(3).wrapping_add(pz.wrapping_mul(5)) & 7;
+                    values.push(if marker <= 2 {
+                        0
+                    } else if marker == 3 {
+                        4
+                    } else {
+                        1
+                    });
+                }
+            }
+            values
+        }
+
+        for (seed, x, z, expected) in [
+            (42_i64, i32::MAX - 1, i32::MIN, "0104101011014111"),
+            (42, i32::MAX - 1, i32::MAX - 1, "0414114001041010"),
+            (42, i32::MIN, i32::MAX - 1, "1411404004111040"),
+            (0, i32::MAX - 1, i32::MIN, "0104101011011110"),
+        ] {
+            let whole = add_island_map(seed, 1, x, z, 4, 4, patterned_parent);
+            assert_eq!(bits(&whole), expected, "seed={seed} x={x} z={z}");
+            for dz in 0_i32..4 {
+                for dx in 0_i32..4 {
+                    let cell = add_island_map(
+                        seed,
+                        1,
+                        x.wrapping_add(dx),
+                        z.wrapping_add(dz),
+                        1,
+                        1,
+                        patterned_parent,
+                    );
+                    assert_eq!(
+                        cell[0],
+                        whole[(dz * 4 + dx) as usize],
+                        "split request mismatch at ({dx},{dz})"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

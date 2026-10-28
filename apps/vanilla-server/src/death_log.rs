@@ -3,14 +3,69 @@
 use crate::player::PlayerPosition;
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_RECORD_BYTES: usize = 2048;
-// A single write_all remains serialized across all concurrent player sessions.
+
+/// A human at negative fractional coordinates is inside the lower block,
+/// not in the block obtained by truncation toward zero. Do not invent a
+/// block coordinate from corrupted/non-finite player positions.
+fn block_coordinate(value: f64) -> Option<i32> {
+    let block = value.floor();
+    if block.is_finite() && (i32::MIN as f64..=i32::MAX as f64).contains(&block) {
+        Some(block as i32)
+    } else {
+        None
+    }
+}
+// Protect against interleaved writes from this server process. This is not
+// a cross-process lock and does not make player state + scoreboard atomic.
 static DEATH_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Repair a bounded, interrupted final JSONL entry before a new append.
+/// Never truncate earlier complete lines or guess beyond our record size cap.
+fn reconcile_jsonl_tail(file: &mut fs::File) -> io::Result<()> {
+    let file_len = file.metadata()?.len();
+    if file_len == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+
+    // A normal death record occupies fewer than MAX_RECORD_BYTES bytes.
+    // If its start lies outside this window, do not destroy unknown data.
+    let window = file_len.min(MAX_RECORD_BYTES as u64) as usize;
+    file.seek(SeekFrom::Start(file_len - window as u64))?;
+    let mut tail = vec![0; window];
+    file.read_exact(&mut tail)?;
+    let last_newline = tail.iter().rposition(|&byte| byte == b'\n');
+    if last_newline.is_none() && file_len > window as u64 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "unterminated death-log tail exceeds maximum record size",
+        ));
+    }
+    let start = last_newline.map_or(0, |index| index + 1);
+    if serde_json::from_slice::<Value>(&tail[start..]).is_ok() {
+        // A fully written object may only have lost the final delimiter.
+        file.write_all(b"\n")?;
+    } else {
+        let valid_len = file_len - (window - start) as u64;
+        file.set_len(valid_len)?;
+        eprintln!(
+            "DEATH LOG RECOVERY: discarded {} bytes of incomplete final JSONL entry",
+            file_len - valid_len
+        );
+    }
+    file.sync_data()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeathCause {
@@ -22,6 +77,7 @@ pub enum DeathCause {
     Fire,
     Burning,
     CombatOrExplosion,
+    MixedHazards,
     DispenserArrow,
     EnderPearl,
     Unknown,
@@ -38,6 +94,7 @@ impl DeathCause {
             Self::Fire => "fire",
             Self::Burning => "burning",
             Self::CombatOrExplosion => "combat_or_explosion",
+            Self::MixedHazards => "mixed_environmental",
             Self::DispenserArrow => "dispenser_arrow",
             Self::EnderPearl => "ender_pearl",
             Self::Unknown => "unknown",
@@ -56,6 +113,7 @@ impl DeathCause {
             Self::Fire => "went up in flames",
             Self::Burning => "burned to death",
             Self::CombatOrExplosion => "was killed in combat or an explosion",
+            Self::MixedHazards => "died from multiple environmental hazards",
             Self::DispenserArrow => "was shot by a dispenser",
             Self::EnderPearl => "died after using an ender pearl",
             Self::Unknown => "died",
@@ -73,12 +131,7 @@ pub struct FatalHit {
 
 /// Capture only the transition from living to dead, not previous nonfatal hits.
 /// This avoids attributing a fatal fall to a mob that attacked minutes earlier.
-pub fn record_fatal(
-    pending: &mut Option<FatalHit>,
-    before: f32,
-    after: f32,
-    cause: DeathCause,
-) {
+pub fn record_fatal(pending: &mut Option<FatalHit>, before: f32, after: f32, cause: DeathCause) {
     if pending.is_none() && before.is_finite() && after.is_finite() && before > 0.0 && after <= 0.0
     {
         *pending = Some(FatalHit {
@@ -109,14 +162,21 @@ impl DeathRecord<'_> {
     pub fn json(&self, timestamp_ms: u128) -> Value {
         json!({
             "event": "player_death",
+            "schema_version": 1,
             "timestamp_ms": timestamp_ms,
             "player": self.player,
             "cause": self.cause().code(),
+            "death_message": self.chat_message(),
             "dimension": self.dimension,
             "position": {
                 "x": self.position.x,
                 "y": self.position.y,
                 "z": self.position.z
+            },
+            "block_position": {
+                "x": block_coordinate(self.position.x),
+                "y": block_coordinate(self.position.y),
+                "z": block_coordinate(self.position.z)
             },
             "health_before": self.hit.map(|hit| hit.previous_health),
             "applied_damage": self.hit.map(|hit| hit.applied_damage),
@@ -137,7 +197,10 @@ impl DeathRecord<'_> {
             .as_millis();
         let mut line = serde_json::to_vec(&self.json(timestamp_ms))?;
         if line.len() >= MAX_RECORD_BYTES {
-            return Err(io::Error::new(ErrorKind::InvalidData, "oversized death event"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "oversized death event",
+            ));
         }
         line.push(b'\n');
         let _guard = DEATH_FILE_LOCK
@@ -148,16 +211,25 @@ impl DeathRecord<'_> {
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)?;
+        reconcile_jsonl_tail(&mut file)?;
         let previous_len = file.metadata()?.len();
         if let Err(error) = file.write_all(&line) {
-            // A short write must not leave an invalid JSON fragment in the
-            // middle of the next player's event. Keep the original error.
-            let _ = file.set_len(previous_len);
+            // Preserve the pre-append length if a short write is reported.
+            // The process-local mutex also protects this rollback.
+            if let Err(rollback_error) = file.set_len(previous_len) {
+                return Err(io::Error::other(format!(
+                    "death log write failed: {error}; rollback failed: {rollback_error}"
+                )));
+            }
             return Err(error);
         }
-        // Flush the append before returning to the owning player session.
-        // Not an atomic transaction with player NBT or the death scoreboard.
+        // Sync the new line before reporting success to the player session.
+        // This is not an atomic transaction with player HP, items, or scores.
         file.sync_data()
     }
 
@@ -171,8 +243,8 @@ impl DeathRecord<'_> {
             |hit| format!("{:.1}", hit.applied_damage),
         );
         format!(
-            "[death] player={} cause={} dimension={} x={:.2} y={:.2} z={:.2} health_before={} applied_damage={} tick={}",
-            self.player,
+            "[death] player={} cause={} dimension={} x={:.2} y={:.2} z={:.2} health_before={} applied_damage={} tick={} message={:?}",
+            self.player.escape_debug(),
             self.cause().code(),
             self.dimension,
             self.position.x,
@@ -180,7 +252,8 @@ impl DeathRecord<'_> {
             self.position.z,
             health,
             damage,
-            self.tick
+            self.tick,
+            self.chat_message()
         )
     }
 }
@@ -217,12 +290,18 @@ mod tests {
         let data = record.json(123);
         assert_eq!(data["cause"], "drowning");
         assert_eq!(data["dimension"], -1);
+        assert_eq!(data["schema_version"], 1);
+        assert_eq!(data["death_message"], record.chat_message());
         assert_eq!(data["server_tick"], 234);
+        // Console is a single line even when a supplied name contains controls.
+        let console = record.console_summary();
+        assert!(!console.contains('\n'));
+        assert!(!console.contains('\r'));
+        assert!(console.contains("message="));
         let wire = serde_json::to_string(&data).unwrap();
         assert!(!wire.contains('\n'));
         let decoded: Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(decoded["player"], record.player);
-
     }
 
     #[test]
@@ -259,24 +338,146 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_diagnostic_destination_returns_error_not_panic() {
+    fn multiple_hazards_are_not_mislabeled_as_combat() {
+        assert_eq!(DeathCause::MixedHazards.code(), "mixed_environmental");
+        assert_eq!(
+            DeathCause::MixedHazards.message("Alex"),
+            "Alex died from multiple environmental hazards"
+        );
+    }
+
+    #[test]
+    fn block_positions_floor_negative_coordinates_without_fabricating_invalid_values() {
+        let mut record = DeathRecord {
+            player: "Alex",
+            hit: Some(FatalHit {
+                cause: DeathCause::Fall,
+                previous_health: 4.0,
+                applied_damage: 4.0,
+            }),
+            position: PlayerPosition {
+                x: -0.01,
+                y: 64.99,
+                z: -12.0,
+            },
+            dimension: 0,
+            tick: 9,
+        };
+        let data = record.json(321);
+        assert_eq!(data["block_position"]["x"], -1);
+        assert_eq!(data["block_position"]["y"], 64);
+        assert_eq!(data["block_position"]["z"], -12);
+        assert_eq!(data["death_message"], "Alex fell from a high place");
+        assert_eq!(data["timestamp_ms"], 321);
+
+        record.position.x = f64::NAN;
+        record.position.z = f64::INFINITY;
+        let invalid = record.json(322);
+        assert!(invalid["block_position"]["x"].is_null());
+        assert!(invalid["block_position"]["z"].is_null());
+        assert_eq!(invalid["block_position"]["y"], 64);
+    }
+
+    fn sample_record() -> DeathRecord<'static> {
+        DeathRecord {
+            player: "Alex",
+            hit: Some(FatalHit {
+                cause: DeathCause::Fall,
+                previous_health: 3.0,
+                applied_damage: 3.0,
+            }),
+            position: PlayerPosition::default(),
+            dimension: 0,
+            tick: 42,
+        }
+    }
+
+    fn test_log_path(tag: &str) -> (PathBuf, PathBuf) {
         let world = std::env::temp_dir().join(format!(
-            "ir1710-death-failed-{}-{:?}.irw",
+            "ir1710-deaths-{tag}-{}-{:?}.irw",
             std::process::id(),
             std::thread::current().id()
         ));
-        let log_dir = DeathRecord::log_path(&world);
-        let _ = fs::remove_file(&log_dir);
-        fs::create_dir_all(&log_dir).unwrap();
-        let record = DeathRecord {
-            player: "Alex",
-            hit: None,
-            position: PlayerPosition::default(),
-            dimension: 0,
-            tick: 3,
-        };
-        assert!(record.append(&world).is_err());
-        fs::remove_dir(&log_dir).unwrap();
+        let path = DeathRecord::log_path(&world);
+        let _ = fs::remove_file(&path);
+        (world, path)
+    }
+
+    #[test]
+    fn death_log_repairs_complete_unterminated_entry_without_losing_it() {
+        let (world, path) = test_log_path("missing-lf");
+        let old = sample_record().json(100).to_string();
+        fs::write(&path, old.as_bytes()).unwrap();
+        sample_record().append(&world).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        let entries: Vec<Value> = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["timestamp_ms"], 100);
+        assert_eq!(entries[1]["event"], "player_death");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn death_log_discards_only_an_incomplete_final_entry() {
+        let (world, path) = test_log_path("short-tail");
+        let old = sample_record().json(101).to_string();
+        fs::write(&path, format!("{old}\n{{\"event\":\"player_death\"")).unwrap();
+        sample_record().append(&world).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(serde_json::from_str::<Value>(lines[0]).unwrap()["timestamp_ms"], 101);
+        assert_eq!(serde_json::from_str::<Value>(lines[1]).unwrap()["event"], "player_death");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn death_log_refuses_an_unbounded_tail_without_truncation() {
+        let (world, path) = test_log_path("large-tail");
+        let original = vec![b'x'; MAX_RECORD_BYTES + 1];
+        fs::write(&path, &original).unwrap();
+        assert!(sample_record().append(&world).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_deaths_append_separate_json_lines() {
+        let (world, path) = test_log_path("concurrent");
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let world = world.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..3 {
+                        sample_record().append(&world).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let raw = fs::read_to_string(&path).unwrap();
+        let entries: Vec<Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 12);
+        assert!(entries.iter().all(|event| event["player"] == "Alex"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn death_log_destination_directory_reports_error_without_panic() {
+        let (world, path) = test_log_path("directory");
+        fs::create_dir_all(&path).unwrap();
+        assert!(sample_record().append(&world).is_err());
+        fs::remove_dir(&path).unwrap();
     }
 
     #[test]

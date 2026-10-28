@@ -172,6 +172,19 @@ impl Hoppers {
         candidate.encoded()?;
         Ok(candidate)
     }
+    /// Removing a mined hopper also clears its persisted tile inventory.
+    /// Unlike staged_update(empty), this removes its registration entry.
+    pub fn staged_remove(&self, pos: Position) -> io::Result<Self> {
+        if !world::in_bounds(pos.0, pos.1, pos.2) {
+            return Err(invalid("invalid hopper removal coordinate"));
+        }
+        let mut candidate = self.clone();
+        candidate.entries.remove(&key(pos));
+        candidate.revision = self.revision.wrapping_add(1);
+        candidate.encoded()?;
+        Ok(candidate)
+    }
+
     pub fn commit_staged(&mut self, path: &Path, candidate: Self) -> io::Result<()> {
         candidate.save(path)?;
         *self = candidate;

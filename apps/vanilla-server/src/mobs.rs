@@ -6035,6 +6035,397 @@ mod tests {
     }
 
     #[test]
+    fn simultaneous_slime_splits_share_ids_with_mobs_arrows_xp_and_rejoins() {
+        // ADD-045 / C27: both deaths happen in one shared Mob state, with
+        // other entity categories allocated between the two split batches.
+        let world = World::natural(20_261_027);
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust-add045-{}-{:?}.mobs.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let slime_id = mobs.next_id;
+        mobs.insert_sized(Kind::Slime, at, false, 4);
+        let magma_id = mobs.next_id;
+        mobs.insert_sized(Kind::MagmaCube, PlayerPosition { x: 3.5, ..at }, false, 4);
+
+        // Kill through the real player-attack path rather than manually
+        // removing the parent: destruction must precede every child spawn.
+        mobs.entities.get_mut(&slime_id).unwrap().health = 1;
+        let slime_start = mobs.next_id;
+        let slime_death = mobs.player_attack(slime_id, at, None, 20).unwrap();
+        assert_eq!(slime_death.events[0].id, 0x1a);
+        assert_eq!(slime_death.events[1].id, 0x13);
+        assert_eq!(
+            slime_death.events[1].body,
+            multiplayer::destroy(slime_id).body
+        );
+        let slime_children: Vec<_> = slime_death.events.into_iter().skip(2).collect();
+        assert!((2..=4).contains(&slime_children.len()));
+        let after_slime_split = mobs.next_id;
+        // A delayed/replayed lethal hit cannot split an already removed parent.
+        assert!(mobs.player_attack(slime_id, at, None, 21).is_none());
+        assert_eq!(mobs.next_id, after_slime_split);
+
+        let cow_id = mobs.next_id;
+        let cow = mobs.insert(Kind::Cow, at, false);
+        let xp_id = mobs.next_id;
+        let xp = mobs.spawn_xp(at, 5).unwrap();
+        let arrow_id = mobs.next_id;
+        let arrow = mobs.fire_arrow(None, at, 0.0, 0.0, 1.0, 2).unwrap();
+
+        mobs.entities.get_mut(&magma_id).unwrap().health = 1;
+        let magma_start = mobs.next_id;
+        let magma_death = mobs
+            .player_attack(magma_id, PlayerPosition { x: 3.5, ..at }, None, 21)
+            .unwrap();
+        assert_eq!(magma_death.events[0].id, 0x1a);
+        assert_eq!(magma_death.events[1].id, 0x13);
+        assert_eq!(
+            magma_death.events[1].body,
+            multiplayer::destroy(magma_id).body
+        );
+        let magma_children: Vec<_> = magma_death.events.into_iter().skip(2).collect();
+        assert!((2..=4).contains(&magma_children.len()));
+        let after_magma_split = mobs.next_id;
+        assert!(mobs
+            .player_attack(magma_id, PlayerPosition { x: 3.5, ..at }, None, 22)
+            .is_none());
+        assert_eq!(mobs.next_id, after_magma_split);
+
+        // Protocol 5 entity spawns must encode exactly the ID allocated by
+        // the server, including each child and the interleaved categories.
+        let assert_packet = |event: &Event, packet_id: u32, entity_id: i32| {
+            let mut encoded = Vec::new();
+            write_varint(entity_id as u32, &mut encoded);
+            assert_eq!(event.id, packet_id);
+            assert!(event.body.starts_with(&encoded), "entity {entity_id}");
+        };
+        for (offset, event) in slime_children.iter().enumerate() {
+            assert_packet(event, 0x0f, slime_start + offset as i32);
+        }
+        assert_packet(&cow, 0x0f, cow_id);
+        assert_packet(&xp, 0x11, xp_id);
+        assert_packet(&arrow, 0x0e, arrow_id);
+        for (offset, event) in magma_children.iter().enumerate() {
+            assert_packet(event, 0x0f, magma_start + offset as i32);
+        }
+
+        let ids: std::collections::BTreeSet<_> = mobs
+            .entities
+            .keys()
+            .chain(mobs.arrows.keys())
+            .chain(mobs.orbs.keys())
+            .copied()
+            .collect();
+        let total = mobs.entities.len() + mobs.arrows.len() + mobs.orbs.len();
+        assert_eq!(ids.len(), total, "entity IDs overlap between categories");
+        assert!(!ids.contains(&slime_id));
+        assert!(!ids.contains(&magma_id));
+        assert!(ids.iter().all(|id| *id >= BASE_ID && *id < mobs.next_id));
+
+        // Repeated join snapshots must reuse the same authoritative entity
+        // IDs; this unit test does not replace multi-client socket E2E.
+        let snapshot: Vec<_> = mobs
+            .spawn_events()
+            .map(|event| (event.id, event.body))
+            .collect();
+        assert_eq!(snapshot.len(), total);
+        for id in &ids {
+            let mut encoded = Vec::new();
+            write_varint(*id as u32, &mut encoded);
+            assert_eq!(
+                snapshot
+                    .iter()
+                    .filter(|(packet, body)| {
+                        matches!(*packet, 0x0e | 0x0f | 0x11)
+                            && body.starts_with(&encoded)
+                    })
+                    .count(),
+                1,
+                "entity {id} is missing or duplicated in the join snapshot"
+            );
+        }
+        let second_client: Vec<_> = mobs
+            .spawn_events()
+            .map(|event| (event.id, event.body))
+            .collect();
+        assert_eq!(second_client, snapshot);
+
+        mobs.save(&world).unwrap();
+        let mut reloaded = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        let after_restart: Vec<_> = reloaded
+            .spawn_events()
+            .map(|event| (event.id, event.body))
+            .collect();
+        assert_eq!(after_restart, snapshot);
+        assert_eq!(reloaded.next_id, mobs.next_id);
+        // Freed parent IDs must stay retired after a restart. A new entity
+        // continues the same global sequence rather than filling old holes.
+        let next_after_restart = reloaded.next_id;
+        assert!(next_after_restart > *ids.iter().max().unwrap());
+        let new_cow = reloaded.insert(Kind::Cow, at, false);
+        assert_packet(&new_cow, 0x0f, next_after_restart);
+        assert_eq!(reloaded.next_id, next_after_restart + 1);
+        assert!(!ids.contains(&next_after_restart));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn slime_split_at_entity_id_limit_never_reuses_or_wraps_ids() {
+        let at = PlayerPosition::default();
+        let mut mobs = Mobs {
+            next_id: 999_998,
+            ..Mobs::default()
+        };
+        let parent_id = mobs.next_id;
+        mobs.insert_sized(Kind::Slime, at, false, 4);
+        let parent = mobs.entities[&parent_id];
+        mobs.entities.get_mut(&parent_id).unwrap().health = 1;
+        let death = mobs.player_attack(parent_id, at, None, 20).unwrap();
+        // Death status, parent destroy, and exactly one remaining child ID.
+        assert_eq!(death.events.len(), 3);
+        assert_eq!(death.events[0].id, 0x1a);
+        assert_eq!(death.events[1].body, multiplayer::destroy(parent_id).body);
+        assert_eq!(death.events[2].id, 0x0f);
+        assert_eq!(mobs.next_id, 1_000_000);
+        assert!(!mobs.entities.contains_key(&parent_id));
+        assert!(mobs.entities.contains_key(&999_999));
+        assert!(mobs.player_attack(parent_id, at, None, 21).is_none());
+        assert!(mobs.split(parent).is_empty());
+        assert!(mobs.spawn_xp(at, 1).is_none());
+        assert!(mobs.fire_arrow(None, at, 0.0, 0.0, 1.0, 2).is_none());
+    }
+
+    #[test]
+    fn concurrent_slime_and_magma_deaths_keep_ids_unique_under_shared_mob_lock() {
+        // Two session workers may submit lethal hits at the same instant.
+        // The server serializes access to its shared Mobs state with a mutex;
+        // both split batches must still allocate distinct Protocol 5 IDs.
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let magma_at = PlayerPosition { x: 3.5, ..at };
+        let mut state = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let slime_id = state.next_id;
+        state.insert_sized(Kind::Slime, at, false, 4);
+        let magma_id = state.next_id;
+        state.insert_sized(Kind::MagmaCube, magma_at, false, 4);
+        state.entities.get_mut(&slime_id).unwrap().health = 1;
+        state.entities.get_mut(&magma_id).unwrap().health = 1;
+
+        let shared = std::sync::Mutex::new(state);
+        let start = std::sync::Barrier::new(3);
+        let (slime_events, magma_events) = std::thread::scope(|scope| {
+            let slime = scope.spawn(|| {
+                start.wait();
+                shared
+                    .lock()
+                    .unwrap()
+                    .player_attack(slime_id, at, None, 20)
+                    .unwrap()
+                    .events
+            });
+            let magma = scope.spawn(|| {
+                start.wait();
+                shared
+                    .lock()
+                    .unwrap()
+                    .player_attack(magma_id, magma_at, None, 20)
+                    .unwrap()
+                    .events
+            });
+            start.wait();
+            (slime.join().unwrap(), magma.join().unwrap())
+        });
+
+        for (parent_id, events) in [(slime_id, &slime_events), (magma_id, &magma_events)] {
+            assert_eq!(events[0].id, 0x1a);
+            assert_eq!(events[1].body, multiplayer::destroy(parent_id).body);
+        }
+        let children: Vec<_> = slime_events
+            .iter()
+            .skip(2)
+            .chain(magma_events.iter().skip(2))
+            .collect();
+        assert!((4..=8).contains(&children.len()));
+        let mobs = shared.into_inner().unwrap();
+        assert_eq!(mobs.entities.len(), children.len());
+        assert!(!mobs.entities.contains_key(&slime_id));
+        assert!(!mobs.entities.contains_key(&magma_id));
+        assert_eq!(mobs.next_id, BASE_ID + 2 + children.len() as i32);
+
+        // Every child must appear in the actual spawn event stream exactly
+        // once, regardless of which thread obtained the lock first.
+        for (&id, mob) in &mobs.entities {
+            assert_eq!(mob.id, id);
+            let mut encoded = Vec::new();
+            write_varint(id as u32, &mut encoded);
+            assert_eq!(
+                children
+                    .iter()
+                    .filter(|event| event.id == 0x0f && event.body.starts_with(&encoded))
+                    .count(),
+                1,
+                "concurrent split entity {id} is missing or duplicated"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_duplicate_lethal_hits_split_the_same_parent_only_once() {
+        // Two clients can attack the same low-health slime in one server tick.
+        // The shared Mobs mutex must serialize the death transition so the
+        // removed parent cannot allocate a second batch of child IDs.
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut state = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let parent_id = state.next_id;
+        state.insert_sized(Kind::Slime, at, false, 4);
+        state.entities.get_mut(&parent_id).unwrap().health = 1;
+
+        let shared = std::sync::Mutex::new(state);
+        let start = std::sync::Barrier::new(3);
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                start.wait();
+                shared
+                    .lock()
+                    .unwrap()
+                    .player_attack(parent_id, at, None, 20)
+            });
+            let second = scope.spawn(|| {
+                start.wait();
+                shared
+                    .lock()
+                    .unwrap()
+                    .player_attack(parent_id, at, None, 20)
+            });
+            start.wait();
+            (first.join().unwrap(), second.join().unwrap())
+        });
+
+        let attacks = [first, second];
+        assert_eq!(
+            attacks.iter().filter(|attack| attack.is_some()).count(),
+            1,
+            "a second simultaneous attack must not kill the same parent twice"
+        );
+        let death = attacks.into_iter().flatten().next().unwrap();
+        assert_eq!(death.events[0].id, 0x1a);
+        assert_eq!(death.events[1].id, 0x13);
+        assert_eq!(
+            death.events[1].body,
+            multiplayer::destroy(parent_id).body
+        );
+
+        let mobs = shared.into_inner().unwrap();
+        let children = death.events.len() - 2;
+        assert!((2..=4).contains(&children));
+        assert_eq!(mobs.entities.len(), children);
+        assert!(!mobs.entities.contains_key(&parent_id));
+        assert_eq!(mobs.next_id, BASE_ID + 1 + children as i32);
+        for (&id, mob) in &mobs.entities {
+            assert_eq!(mob.id, id);
+            let mut encoded = Vec::new();
+            write_varint(id as u32, &mut encoded);
+            assert_eq!(
+                death.events[2..]
+                    .iter()
+                    .filter(|event| event.id == 0x0f && event.body.starts_with(&encoded))
+                    .count(),
+                1,
+                "child {id} must have exactly one Protocol 5 spawn event"
+            );
+        }
+    }
+
+    #[test]
+    fn split_snapshots_reject_cross_category_id_aliases_after_restart() {
+        // ADD-045: a persisted split child must never share a Protocol 5 ID
+        // with an arrow or XP orb, even if the snapshot was corrupted.
+        let world = World::natural(20_261_028);
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust-add045-alias-{}-{:?}.mobs.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        let parent_id = mobs.next_id;
+        mobs.insert_sized(Kind::Slime, at, false, 4);
+        mobs.entities.get_mut(&parent_id).unwrap().health = 1;
+        mobs.player_attack(parent_id, at, None, 20).unwrap();
+        let child_id = *mobs.entities.keys().next().unwrap();
+        assert_ne!(child_id, parent_id);
+
+        let arrow_id = mobs.next_id;
+        assert!(mobs.fire_arrow(None, at, 0.0, 0.0, 1.0, 2).is_some());
+        let orb_id = mobs.next_id;
+        assert!(mobs.spawn_xp(at, 5).is_some());
+        mobs.save(&world).unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_ok());
+
+        // Mob/arrow alias: keep the arrow's internal ID consistent with its
+        // map key, so rejection specifically exercises cross-category checks.
+        let original_arrow = mobs.arrows.remove(&arrow_id).unwrap();
+        mobs.arrows.insert(
+            child_id,
+            Arrow {
+                id: child_id,
+                ..original_arrow
+            },
+        );
+        mobs.save(&world).unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
+        mobs.arrows.remove(&child_id);
+        mobs.arrows.insert(arrow_id, original_arrow);
+
+        // Arrow/orb alias: no Mob key overlaps this ID, so the third pair of
+        // category checks cannot be accidentally covered by the first one.
+        let original_orb = mobs.orbs.remove(&orb_id).unwrap();
+        mobs.orbs.insert(arrow_id, original_orb);
+        mobs.save(&world).unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
+        mobs.orbs.remove(&arrow_id);
+        mobs.orbs.insert(orb_id, original_orb);
+
+        // A backward allocator cursor must also be rejected, even with
+        // otherwise unique keys across all three categories.
+        let next_id = mobs.next_id;
+        mobs.next_id = orb_id;
+        mobs.save(&world).unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_err());
+        mobs.next_id = next_id;
+        mobs.save(&world).unwrap();
+        assert!(Mobs::load_or_new(&world, true, 2, &path).is_ok());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn eggs_and_slime_splits_share_the_current_loaded_mob_limit() {
         let world = World::new();
         let at = PlayerPosition {
