@@ -2702,8 +2702,27 @@ fn play(
         // Before C04/C06 confirms the authoritative destination, ignore
         // every location-sensitive action from the old client view.
         if pending_teleport.is_some() && TeleportGate::blocks_world_action(id) {
-            if trace_mining && id == 7 {
-                eprintln!("mining trace: packet ignored while position correction is pending; server={player:?}");
+            if id == 7 {
+                // A client may have already predicted an instant block break
+                // from the stale position. Never mutate while S08 is pending,
+                // but send the authoritative block back to clear ghost blocks.
+                let action = input.i8()?;
+                let x = input.i32()?;
+                let y = input.u8()? as i32;
+                let z = input.i32()?;
+                input.i8()?;
+                input.finish()?;
+                if matches!(action, 0..=2)
+                    && world::in_bounds(x, y, z)
+                    && near(location, x, y, z)
+                {
+                    let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let event = block_change_event(&state, x, y, z);
+                    send(s, event.id, &event.body)?;
+                }
+                if trace_mining {
+                    eprintln!("mining trace: packet ignored while position correction is pending; server={player:?}");
+                }
             }
             mining = None;
             continue;
