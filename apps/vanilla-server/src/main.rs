@@ -1299,7 +1299,7 @@ fn lightning_spawn_packet(strike: PlayerPosition, id: i32) -> io::Result<Event> 
         return Err(bad("invalid lightning origin or entity id"));
     }
     let mut body = Vec::with_capacity(18);
-    write_varint(id, &mut body)?;
+    write_varint(id as u32, &mut body);
     body.push(1); // Global entity type 1 = lightning bolt
     for value in [strike.x, strike.y, strike.z] {
         let fixed = (value * 32.0).floor() as i32;
