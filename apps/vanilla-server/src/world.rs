@@ -44,9 +44,9 @@ pub struct World {
     generation: Generation,
     // In-memory wake-up queue only. Reconstructed from placed blocks on load.
     pending_gravity: BTreeSet<Position>,
-    // In-flight origin height for 1.7.10 anvils. Snapshot reconstruction
-    // cannot recover this height across restart; never fabricate damage
-    // from a partial fall that was interrupted by process shutdown.
+    // The original height for an in-flight anvil is persisted in the IRW
+    // TNT5 trailer with its block position, in the SAME atomic snapshot.
+    // This permits exact recovery of anvil impact distance after restart.
     falling_anvils: BTreeMap<Position, i32>,
     pending_fluid: BTreeSet<Position>,
     pending_circuit: BTreeSet<Position>,
@@ -1062,6 +1062,18 @@ impl World {
                 anvil_landing_damage: landing_damage,
             });
         }
+        // The world image and in-flight anvil starts must be serialized
+        // together. Only publish the new map in memory after a durable
+        // world save; restore the old map and blocks on every failed save.
+        let previous_anvils = self.falling_anvils.clone();
+        for &(upper, lower, origin, landed) in &anvil_updates {
+            self.falling_anvils.remove(&upper);
+            if landed {
+                self.falling_anvils.remove(&lower);
+            } else {
+                self.falling_anvils.insert(lower, origin);
+            }
+        }
         if !moved.is_empty() {
             let written = if self.edits.len() > MAX_EDITS {
                 Err(invalid("gravity tick would exceed IRW1 edit capacity"))
@@ -1069,6 +1081,7 @@ impl World {
                 self.save(path)
             };
             if let Err(error) = written {
+                self.falling_anvils = previous_anvils;
                 for (cell, old) in undo {
                     match old {
                         Some(value) => {
@@ -1080,16 +1093,6 @@ impl World {
                     }
                 }
                 return Err(error);
-            }
-        }
-        // Update the in-memory flight origins ONLY after the world mutation
-        // succeeds. A failed save must leave the heights and queue intact.
-        for (upper, lower, origin, landed) in anvil_updates {
-            self.falling_anvils.remove(&upper);
-            if landed {
-                self.falling_anvils.remove(&lower);
-            } else {
-                self.falling_anvils.insert(lower, origin);
             }
         }
         for position in scheduled {
