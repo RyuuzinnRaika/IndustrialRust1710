@@ -31,6 +31,8 @@ try {
         'high_volume_support_breaks_do_not_silently_truncate_world_drops',
         'over_capacity_support_breaks_roll_back_every_block_and_drop',
         'interrupted_world_drop_handoff_replays_exactly_one_entity',
+        'ground_first_world_drop_replay_prevents_duplicate_after_restart',
+        'staged_world_drop_batches_preserve_backpressure_and_reject_invalid_items',
         'queued_leaf_drops_at_distinct_positions_save_in_one_batch',
         'large_drop_backlog_commits_only_thirty_two_items_per_retry',
         'full_ground_pool_keeps_world_drops_until_space_is_available',
