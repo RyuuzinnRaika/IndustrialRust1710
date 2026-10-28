@@ -1285,6 +1285,12 @@ fn anvil_landing_touches_player(player: PlayerPosition, landing: (i32, i32, i32)
         && player.y < by + 1.0
 }
 
+/// Instant Damage potion effect I..IV in 1.7.10: six health points
+/// at level I, doubling for each permitted amplifier.
+fn instant_damage_health(amplifier: u8) -> f32 {
+    f32::from(6u16 << amplifier.min(3))
+}
+
 fn void_damage_due(y: f64, tick: u64, last_hit: Option<u64>) -> bool {
     y.is_finite()
         && y < LEGACY_VOID_DAMAGE_Y
@@ -1310,6 +1316,15 @@ mod void_damage_tests {
             PlayerPosition { x: 4.5, y: 67.0, z: 4.5 },
             at
         ));
+    }
+
+    #[test]
+    fn legacy_instant_damage_doubles_by_amplifier() {
+        assert_eq!(instant_damage_health(0), 6.0);
+        assert_eq!(instant_damage_health(1), 12.0);
+        assert_eq!(instant_damage_health(2), 24.0);
+        assert_eq!(instant_damage_health(3), 48.0);
+        assert_eq!(instant_damage_health(u8::MAX), 48.0);
     }
 
     #[test]
@@ -1646,6 +1661,42 @@ fn play(
                         let mut packet = entity_id.to_be_bytes().to_vec();
                         packet.push(removed_kind);
                         send(s, 0x1e, &packet)?;
+                    }
+                } else if kind == 7 {
+                    // An instant potion is a single server-owned hit, NOT a
+                    // long-running status effect. Creative is immune.
+                    if survival && vitals.health > 0.0 {
+                        let before = vitals.health;
+                        vitals.health =
+                            (vitals.health - instant_damage_health(amplifier)).max(0.0);
+                        death_log::record_fatal(
+                            &mut fatal_hit,
+                            before,
+                            vitals.health,
+                            DeathCause::Magic,
+                        );
+                        save_damage_state(
+                            player,
+                            *vitals,
+                            session_dimension.protocol_id() as i32,
+                            fatal_hit,
+                            &mut death_count_committed,
+                            name,
+                            clock,
+                            player_path,
+                            root_world_path,
+                            world_path,
+                            scoreboard,
+                            scoreboard_path,
+                            hub,
+                        )?;
+                        send(s, 0x06, &health_packet(*vitals))?;
+                        let mut animation = entity_id.to_be_bytes().to_vec();
+                        animation.push(2);
+                        hub.broadcast_in_view(
+                            *player,
+                            Event { id: 0x1a, body: animation },
+                        );
                     }
                 } else {
                     let now = clock.ticks();
