@@ -1816,6 +1816,28 @@ fn movement_and_collision_corrections_preserve_the_players_view() {
 }
 
 #[test]
+fn pending_position_correction_restores_mined_block_on_client() {
+    let server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+    send_position(&mut client, 0.7, 64.0, 0.5);
+    send_position(&mut client, 0.7, 60.0, 0.5);
+    until_packet(&mut client, 0x08, |packet| {
+        read_position(packet) == [0.7, 64.0, 0.5]
+    });
+    // While S08 is pending, even an instant dig attempt must be denied.
+    // Explicit S23 state prevents the client keeping a ghost hole.
+    let mut dig = vec![0u8];
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(63);
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(1);
+    client.write_all(&frame(7, &dig)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() >= 11 && p[4] == 63 && p[9] == 2
+    });
+}
+
+#[test]
 fn collision_correction_rejects_queued_nearby_client_movement_until_ack() {
     let server = NativeServer::start_with_mode(true);
     let (mut client, _, _) = server.join("RustTester");
