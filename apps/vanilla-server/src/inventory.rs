@@ -573,9 +573,9 @@ impl Inventory {
         *self = next;
         true
     }
-    /// Damage one server-held, unenchanted tool on a committed block break.
-    /// Returns true only if a real tool was damaged or broke. Hand mining
-    /// and ordinary blocks/items do not acquire arbitrary damage metadata.
+    /// Wear a server-held unenchanted tool after a committed block break:
+    /// ordinary tools lose one use, but swords lose two in Java 1.7.10.
+    /// Instant-break-by-hand blocks are filtered by survival::mine_rule.
     pub fn wear_held_tool(&mut self) -> bool {
         let slot = &mut self.slots[36 + self.selected as usize];
         let Some(mut value) = *slot else {
@@ -584,10 +584,39 @@ impl Inventory {
         let Some(max_uses) = crate::survival::tool_max_uses(value) else {
             return false;
         };
-        value.damage += 1;
+        let wear = if matches!(value.id, 268 | 272 | 267 | 276 | 283) {
+            2
+        } else {
+            1
+        };
+        value.damage = value.damage.saturating_add(wear);
         *slot = (value.damage < max_uses).then_some(value);
         true
     }
+    /// Java 1.7.10 Mob melee hits charge TWO durability to mining tools
+    /// (axe, pickaxe and shovel), but only ONE to a sword. Hoes do not
+    /// override Item.hitEntity and do not wear when used as weapons.
+    /// Never reuse block-mining wear here: it always charges one use.
+    pub fn wear_held_tool_on_mob_attack(&mut self) -> bool {
+        let slot = &mut self.slots[36 + self.selected as usize];
+        let Some(mut value) = *slot else {
+            return false;
+        };
+        let wear: i16 = match value.id {
+            268 | 272 | 267 | 276 | 283 => 1, // swords
+            269 | 273 | 256 | 277 | 284 // shovels
+            | 270 | 274 | 257 | 278 | 285 // pickaxes
+            | 271 | 275 | 258 | 279 | 286 => 2, // axes
+            _ => return false,
+        };
+        let Some(max_uses) = crate::survival::tool_max_uses(value) else {
+            return false;
+        };
+        value.damage = value.damage.saturating_add(wear);
+        *slot = (value.damage < max_uses).then_some(value);
+        true
+    }
+
     /// One durability point when a fishing float is reeled in.
     /// Fishing rods are distinct from mining tools in 1.7.10.
     pub fn wear_fishing_rod(&mut self) -> bool {
@@ -2508,6 +2537,129 @@ mod tests {
         assert_eq!(inventory.held(), Some(bowl));
         assert!(inventory.encoded().is_ok());
         assert!(!inventory.consume_item(282));
+    }
+
+    #[test]
+    fn s07_all_five_materials_have_correct_mining_combat_and_hoe_wear() {
+        // Java 1.7.10: 59/131/250/32/1561 uses. Swords cost 1 on
+        // entity hit and 2 on block break, while mining tools do the
+        // opposite. The hoe only wears when tilling/mining a block.
+        for (material, uses, sword, pickaxe, axe, shovel, hoe) in [
+            ("wood", 59, 268, 270, 271, 269, 290),
+            ("stone", 131, 272, 274, 275, 273, 291),
+            ("iron", 250, 267, 257, 258, 256, 292),
+            ("gold", 32, 283, 285, 286, 284, 294),
+            ("diamond", 1561, 276, 278, 279, 277, 293),
+        ] {
+            let make = |id, damage| Stack {
+                id,
+                damage,
+                count: 1,
+                nbt: None,
+            };
+            let mut inventory = Inventory::default();
+            // Swords: one last-HP Mob strike breaks at the tier limit.
+            inventory
+                .creative_set(36, Some(make(sword, uses - 1)))
+                .unwrap();
+            assert!(inventory.wear_held_tool_on_mob_attack(), "{material} sword");
+            assert_eq!(inventory.held(), None, "{material} sword should break");
+
+            // Breaking a non-instant block with a sword charges two.
+            inventory
+                .creative_set(36, Some(make(sword, uses - 2)))
+                .unwrap();
+            assert!(inventory.wear_held_tool(), "{material} sword mining");
+            assert_eq!(inventory.held(), None, "{material} sword mining break");
+
+            // Axes, pickaxes and shovels wear two on a landed Mob hit,
+            // regardless of material (including very brittle gold).
+            for id in [pickaxe, axe, shovel] {
+                inventory
+                    .creative_set(36, Some(make(id, uses - 2)))
+                    .unwrap();
+                assert!(inventory.wear_held_tool_on_mob_attack(), "{material} id={id}");
+                assert_eq!(inventory.held(), None, "{material} id={id} combat break");
+
+                inventory
+                    .creative_set(36, Some(make(id, uses - 2)))
+                    .unwrap();
+                assert!(inventory.wear_held_tool(), "{material} id={id} mining");
+                assert_eq!(
+                    inventory.held(),
+                    Some(make(id, uses - 1)),
+                    "{material} id={id} mines with one use"
+                );
+            }
+
+            inventory
+                .creative_set(36, Some(make(hoe, uses - 1)))
+                .unwrap();
+            assert!(!inventory.wear_held_tool_on_mob_attack(), "{material} hoe melee");
+            assert_eq!(inventory.held(), Some(make(hoe, uses - 1)));
+            assert!(inventory.wear_held_tool(), "{material} hoe tilling");
+            assert_eq!(inventory.held(), None, "{material} hoe breaks when used");
+            assert!(inventory.encoded().is_ok(), "{material} inventory persists");
+        }
+    }
+
+    #[test]
+    fn s07_mob_combat_charges_double_durability_to_iron_mining_tools() {
+        let mut inventory = Inventory::default();
+        let iron_pickaxe = Stack {
+            id: 257,
+            count: 1,
+            damage: 247,
+            nbt: None,
+        };
+        inventory.creative_set(36, Some(iron_pickaxe)).unwrap();
+        assert!(inventory.wear_held_tool_on_mob_attack());
+        assert_eq!(inventory.held(), Some(Stack { damage: 249, ..iron_pickaxe }));
+        assert!(inventory.wear_held_tool_on_mob_attack());
+        assert!(inventory.held().is_none(), "iron pickaxe must break at 250 uses");
+
+        // Unlike combat, mining one block consumes only one durability.
+        inventory.creative_set(36, Some(iron_pickaxe)).unwrap();
+        assert!(inventory.wear_held_tool());
+        assert_eq!(inventory.held(), Some(Stack { damage: 248, ..iron_pickaxe }));
+
+        for id in [258, 256] {
+            inventory.creative_set(36, Some(Stack { id, ..iron_pickaxe })).unwrap();
+            assert!(inventory.wear_held_tool_on_mob_attack());
+            assert_eq!(inventory.held().unwrap().damage, 249, "item ID {id}");
+        }
+    }
+
+    #[test]
+    fn s07_iron_sword_wears_one_use_but_hoe_and_barehand_do_not() {
+        let mut inventory = Inventory::default();
+        let iron_sword = Stack {
+            id: 267,
+            count: 1,
+            damage: 249,
+            nbt: None,
+        };
+        inventory.creative_set(36, Some(iron_sword)).unwrap();
+        assert!(inventory.wear_held_tool_on_mob_attack());
+        assert!(inventory.held().is_none());
+
+        // Breaking a non-instant block with a sword spends two uses,
+        // unlike the single use spent on a confirmed Mob hit.
+        inventory.creative_set(36, Some(Stack { damage: 248, ..iron_sword })).unwrap();
+        assert!(inventory.wear_held_tool());
+        assert!(inventory.held().is_none());
+
+        let hoe = Stack {
+            id: 292,
+            count: 1,
+            damage: 50,
+            nbt: None,
+        };
+        inventory.creative_set(36, Some(hoe)).unwrap();
+        assert!(!inventory.wear_held_tool_on_mob_attack());
+        assert_eq!(inventory.held(), Some(hoe));
+        inventory.creative_set(36, None).unwrap();
+        assert!(!inventory.wear_held_tool_on_mob_attack());
     }
 
     #[test]
