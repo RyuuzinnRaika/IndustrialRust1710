@@ -80,6 +80,8 @@ pub struct World {
     pending_comparators: BTreeMap<Position, (u64, u8)>,
     comparator_ready: BTreeMap<Position, u8>,
     pending_buttons: BTreeMap<Position, u64>,
+    // Durable FIFO of item drops awaiting atomic handoff to ground storage.
+    // Persisted in the backward-compatible TNT5 IRW trailer.
     pending_drops: Vec<WorldDrop>,
     // Fired devices are published only after the block snapshot is durable.
     pending_device_activations: Vec<(i32, i32, i32)>,
@@ -186,8 +188,9 @@ impl ChunkBlockCache {
     }
 }
 
-/// A persisted world mutation can create a temporary ground-item event.
-/// World state is written first, then the 20TPS worker saves item entities.
+/// A persisted world mutation can create a durable ground-item event.
+/// Its unsent intent is serialized with the same IRW block update. The
+/// worker journal-transfers it into the ground sidecar exactly once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorldDrop {
     pub pos: (i32, i32, i32),
@@ -357,7 +360,7 @@ impl World {
     pub fn set_day_time(&mut self, value: i64) {
         self.day_time = value.rem_euclid(24_000);
     }
-    /// Snapshot pending post-world-save item spawns without consuming them.
+    /// Read durable pending world-drop intents without consuming them.
     /// World ticks may append new entries, but only a successful ground-item
     /// save can acknowledge and remove the oldest ones.
     pub fn queued_drops(&self) -> &[WorldDrop] {
