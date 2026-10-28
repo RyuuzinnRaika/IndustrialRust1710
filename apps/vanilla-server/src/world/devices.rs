@@ -660,18 +660,18 @@ impl World {
             .filter(|&(_, &when)| self.fluid_phase >= when)
             .take(budget)
         {
-                let (x, y, z) = pos;
-                let current = self.get(x, i32::from(y), z);
-                let flag = match current >> 4 {
-                    70 | 72 => 1,
-                    147 | 148 => 15,
-                    _ => 8,
-                };
-                if matches!(current >> 4, 70 | 72 | 77 | 131 | 143 | 147 | 148)
-                    && current & flag != 0
-                {
-                    changes.insert(pos, current & !flag);
-                }
+            let (x, y, z) = pos;
+            let current = self.get(x, i32::from(y), z);
+            let flag = match current >> 4 {
+                70 | 72 => 1,
+                147 | 148 => 15,
+                _ => 8,
+            };
+            if matches!(current >> 4, 70 | 72 | 77 | 131 | 143 | 147 | 148)
+                && current & flag != 0
+            {
+                changes.insert(pos, current & !flag);
+            }
         }
         if self.pending_devices.is_empty() {
             return changes;
