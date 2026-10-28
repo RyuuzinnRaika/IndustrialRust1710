@@ -1052,12 +1052,31 @@ fn projectile_hits_mob(mob: &Mob, point: PlayerPosition) -> bool {
         && point.y >= mob.position.y - 0.25
         && point.y <= mob.position.y + height + 0.25
 }
+/// Vanilla Java 1.7.10's pre-attack-cooldown base melee damage (HP).
+/// ItemTool applies a material bonus of 0/1/2/3 for wood+gold/stone/iron/
+/// diamond, on top of 1 for shovels, 2 for pickaxes or 3 for axes.
+/// Swords have a base of 4 and hoes/other items use the bare-hand 1 HP.
 fn damage_held(held: Option<Stack>) -> i16 {
     match held.map(|s| s.id) {
-        Some(268) | Some(283) => 4,
+        // Swords: wood, gold, stone, iron, diamond.
+        Some(268 | 283) => 4,
         Some(272) => 5,
         Some(267) => 6,
         Some(276) => 7,
+        // Axes.
+        Some(271 | 286) => 3,
+        Some(275) => 4,
+        Some(258) => 5,
+        Some(279) => 6,
+        // Pickaxes.
+        Some(270 | 285) => 2,
+        Some(274) => 3,
+        Some(257) => 4,
+        Some(278) => 5,
+        // Shovels.
+        Some(273) => 2,
+        Some(256) => 3,
+        Some(277) => 4,
         _ => 1,
     }
 }
@@ -3891,6 +3910,63 @@ fn natural_spawn_location_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn s07_legacy_tool_damage_matches_survival_tiers() {
+        let equipped = |id| {
+            Some(Stack {
+                id,
+                count: 1,
+                damage: 0,
+                nbt: None,
+            })
+        };
+        for (id, damage) in [
+            // All five sword materials.
+            (268, 4), (272, 5), (267, 6), (276, 7), (283, 4),
+            // Wood, stone, iron, diamond, gold axes.
+            (271, 3), (275, 4), (258, 5), (279, 6), (286, 3),
+            // Wood, stone, iron, diamond, gold pickaxes.
+            (270, 2), (274, 3), (257, 4), (278, 5), (285, 2),
+            // Shovels.
+            (269, 1), (273, 2), (256, 3), (277, 4), (284, 1),
+            // Hoes were not bonus-attack tools in Java 1.7.10.
+            (290, 1), (291, 1), (292, 1), (293, 1), (294, 1),
+            (265, 1), // An iron ingot is not an iron weapon.
+        ] {
+            assert_eq!(damage_held(equipped(id)), damage, "item ID {id}");
+        }
+        assert_eq!(damage_held(None), 1);
+    }
+
+    #[test]
+    fn s07_iron_tool_melee_changes_mob_hp_and_sword_kill_spawns_loot_once() {
+        let pos = PlayerPosition::default();
+        let stack = |id| {
+            Some(Stack {
+                id,
+                count: 1,
+                damage: 0,
+                nbt: None,
+            })
+        };
+        let mut mobs = Mobs::default();
+        let id = mobs.next_id;
+        mobs.insert(Kind::Cow, pos, false);
+        let original = mobs.entities[&id].health;
+        assert!(original > 0);
+
+        assert!(mobs.player_attack(id, pos, stack(257), 20).is_some());
+        assert_eq!(mobs.entities[&id].health, original - 4);
+        // One mob's 10-tick hit immunity blocks a duplicate packet.
+        assert!(mobs.player_attack(id, pos, stack(267), 21).is_none());
+        assert_eq!(mobs.entities[&id].health, original - 4);
+        let fatal = mobs.player_attack(id, pos, stack(267), 30).unwrap();
+        assert!(fatal.drop.is_some());
+        assert!(!mobs.entities.contains_key(&id));
+        assert!(mobs.player_attack(id, pos, stack(267), 40).is_none());
+        assert_eq!(fatal.events.iter().filter(|event| event.id == 0x13).count(), 1);
+    }
     #[test]
     fn command_summon_in_flat_world_survives_restart_without_enabling_natural_spawns() {
         let world = World::new();
