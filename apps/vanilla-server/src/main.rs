@@ -3899,9 +3899,13 @@ fn play(
                                     );
                                 }
                                 let mut changed = false;
+                                let mut companion_changed = None;
                                 if world::in_bounds(x, y, z) && near(location, x, y, z) {
                                     if let Some(result) = result {
-                                        let block = w.get(x, y, z) >> 4;
+                                        let current_block = w.get(x, y, z);
+                                        let block = current_block >> 4;
+                                        // Read the other half before editing the world.
+                                        let mining_partner = w.mining_partner(x, y, z);
                                         // Safely refuse tile-entity mining until
                                         // their contents can become proper drops.
                                         let occupied = (matches!(block, 54 | 146)
@@ -3947,7 +3951,20 @@ fn play(
                                             // irreversible world edit. Two drops now require
                                             // one durable ground-item snapshot, not two.
                                             let mut drop_stacks = Vec::with_capacity(2);
-                                            if let Some(drop) = result.drop {
+                                            // Mined upper/head halves yield the item from
+                                            // their intact lower/foot half exactly once.
+                                            let harvested_drop = if current_block & 8 != 0 {
+                                                mining_partner.and_then(|(px, py, pz)| {
+                                                    survival::mine_rule(
+                                                        w.get(px, py, pz),
+                                                        inventory.held(),
+                                                    )
+                                                    .and_then(|(_, harvest)| harvest.drop)
+                                                }).or(result.drop)
+                                            } else {
+                                                result.drop
+                                            };
+                                            if let Some(drop) = harvested_drop {
                                                 drop_stacks.push(Stack {
                                                     id: drop.id,
                                                     count: 1,
@@ -3983,7 +4000,15 @@ fn play(
                                                 if wore {
                                                     candidate.save(inventory_path)?;
                                                 }
-                                                match w.update_and_save(world_path, x, y, z, 0) {
+                                                let saved = if let Some((px, py, pz)) = mining_partner {
+                                                    w.update_many_and_save(
+                                                        world_path,
+                                                        &[(x, y, z, 0), (px, py, pz, 0)],
+                                                    )
+                                                } else {
+                                                    w.update_and_save(world_path, x, y, z, 0)
+                                                };
+                                                match saved {
                                                     Ok(true) => {
                                                         decorations
                                                             .lock()
@@ -4016,6 +4041,7 @@ fn play(
                                                             }
                                                         }
                                                         changed = true;
+                                                        companion_changed = mining_partner;
                                                         let reward = match block {
                                                             16 => 2,
                                                             21 => 4,
@@ -4056,6 +4082,9 @@ fn play(
                                 let event = block_change_event(&w, x, y, z);
                                 if changed {
                                     hub.broadcast(event);
+                                    if let Some((px, py, pz)) = companion_changed {
+                                        hub.broadcast(block_change_event(&w, px, py, pz));
+                                    }
                                 } else {
                                     send(s, event.id, &event.body)?;
                                 }
@@ -4066,6 +4095,7 @@ fn play(
                     }
                 } else {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                    let mut companion_changed = None;
                     let changed = if (action == 0 || action == 2)
                         && world::in_bounds(x, y, z)
                         && near(location, x, y, z)
@@ -4109,7 +4139,19 @@ fn play(
                         if occupied {
                             false
                         } else {
-                            w.update_and_save(world_path, x, y, z, 0)?
+                            let partner = w.mining_partner(x, y, z);
+                            let saved = if let Some((px, py, pz)) = partner {
+                                w.update_many_and_save(
+                                    world_path,
+                                    &[(x, y, z, 0), (px, py, pz, 0)],
+                                )?
+                            } else {
+                                w.update_and_save(world_path, x, y, z, 0)?
+                            };
+                            if saved {
+                                companion_changed = partner;
+                            }
+                            saved
                         }
                     } else {
                         false
@@ -4121,6 +4163,9 @@ fn play(
                             .map_err(|_| bad("decorations lock poisoned"))?
                             .remove(decoration_path, (x, y, z))?;
                         hub.broadcast(event);
+                        if let Some((px, py, pz)) = companion_changed {
+                            hub.broadcast(block_change_event(&w, px, py, pz));
+                        }
                     } else {
                         send(s, event.id, &event.body)?;
                     }
