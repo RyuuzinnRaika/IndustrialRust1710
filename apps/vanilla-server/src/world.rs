@@ -1657,7 +1657,7 @@ impl World {
         if !changes.is_empty() {
             // Decaying oak leaves may yield a sapling or apple. Stage these
             // before mutation, but expose them only after a successful save.
-            let detached_drops: Vec<WorldDrop> = changes
+            let mut detached_drops: Vec<WorldDrop> = changes
                 .iter()
                 .filter_map(|(&(x, y, z), &next)| {
                     let old = self.get(x, i32::from(y), z);
@@ -1701,10 +1701,7 @@ impl World {
                         64 if old & 8 == 0 => 324,
                         71 if old & 8 == 0 => 330,
                         96 => 96,
-                        18 | 161 => {
-                            return crate::survival::additional_drop(old, pos, self.fluid_phase)
-                                .map(|stack| WorldDrop { pos, stack });
-                        }
+                        18 | 161 => return None, // handled by independent decay-drop rolls below
                         _ => return None,
                     };
                     let stack = crate::inventory::Stack {
@@ -1727,6 +1724,26 @@ impl World {
                 })
                 .take(256)
                 .collect();
+            // 1.7.10 leaf decay independently rolls for a sapling and
+            // (oak/dark-oak only) an apple. A single dying leaf may yield
+            // two drops. Stage them alongside other block drops, then
+            // publish only after the atomic world snapshot is saved.
+            for (&(x, y, z), &next) in &changes {
+                if detached_drops.len() >= 256 {
+                    break;
+                }
+                let pos = (x, i32::from(y), z);
+                let previous = self.get(pos.0, pos.1, pos.2);
+                if next != 0 || !matches!(previous >> 4, 18 | 161) {
+                    continue;
+                }
+                for stack in crate::survival::leaf_decay_drops(previous, pos, self.fluid_phase) {
+                    if detached_drops.len() >= 256 {
+                        break;
+                    }
+                    detached_drops.push(WorldDrop { pos, stack });
+                }
+            }
             let dirty_light: Vec<_> = changes
                 .iter()
                 .filter_map(|(&(x, y, z), &new)| {
