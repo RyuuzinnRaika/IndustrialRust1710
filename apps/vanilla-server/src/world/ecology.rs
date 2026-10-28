@@ -737,14 +737,16 @@ mod regression_tests {
     fn many_unrelated_ecology_entries_do_not_prevent_leaf_decay() {
         let mut world = World::new();
         for x in 0..40 {
-            world.import_block(x, 65, 2, 18 << 4).unwrap();
+            // These permanent leaves fill the ecology set but can never
+            // consume the live-leaf decay budget.
+            world.import_block(x, 65, 2, (18 << 4) | 4).unwrap();
         }
         world.import_block(0, 65, 0, 161 << 4).unwrap();
         let sec = (1..=1024)
             .find(|&sec| leaf_decay_due(sec * 20, 0, 65, 0))
             .unwrap();
         world.fluid_phase = sec * 20;
-        assert_eq!(world.ecology_changes(2).get(&(0, 65, 0)), Some(&0));
+        assert_eq!(world.ecology_changes(1).get(&(0, 65, 0)), Some(&0));
     }
 
 }
