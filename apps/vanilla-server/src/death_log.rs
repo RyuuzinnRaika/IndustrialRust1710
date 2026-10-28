@@ -280,10 +280,10 @@ impl DeathRecord<'_> {
             .map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid system clock"))?
             .as_millis();
         let mut payload = self.json(timestamp_ms);
-        payload
-            .as_object_mut()
-            .expect("death event is always a JSON object")
-            .insert("event_id".to_string(), Value::String(id.to_string()));
+        let fields = payload.as_object_mut().ok_or_else(|| {
+            io::Error::new(ErrorKind::InvalidData, "death event must be an object")
+        })?;
+        fields.insert("event_id".to_string(), Value::String(id.to_string()));
         let mut line = serde_json::to_vec(&payload)?;
         if line.len() >= MAX_RECORD_BYTES {
             return Err(io::Error::new(
@@ -600,6 +600,21 @@ mod tests {
         assert!(other.append_with_event_id(&world, "shared-id-001").is_err());
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
         assert!(other.append_with_event_id(&world, "invalid id").is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn retry_repairs_lost_newline_then_recognizes_existing_event() {
+        let (world, path) = test_log_path("retry-missing-lf");
+        let record = sample_record();
+        assert!(record.append_with_event_id(&world, "previous-event-001").unwrap());
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        fs::write(&path, &bytes).unwrap();
+        // The existing JSON is complete. Repair its newline, then deduplicate.
+        assert!(!record.append_with_event_id(&world, "previous-event-001").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
+        assert_eq!(fs::read(&path).unwrap().last(), Some(&b'\n'));
         fs::remove_file(path).unwrap();
     }
 
