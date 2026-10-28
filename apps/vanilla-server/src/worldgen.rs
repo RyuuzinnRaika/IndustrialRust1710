@@ -1114,6 +1114,7 @@ pub fn block(seed: u64, dim: Dimension, x: i32, y: i32, z: i32) -> u16 {
         Dimension::End => end(seed, x, y, z),
     }
 }
+#[cfg(test)]
 pub fn biome_for_dimension(seed: u64, dim: Dimension, x: i32, z: i32) -> u8 {
     match dim {
         Dimension::Overworld => biome(seed, x, z),
