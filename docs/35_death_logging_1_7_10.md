@@ -96,7 +96,7 @@ Local acceptance tests:
 - Wither状態異常：近接攻撃や飛び道具の致死ダメージと区別
 - 異なる攻撃元が同一HP更新に混在する場合：単独の攻撃者を推測せず `mixed_damage`
 
-JSONLに `source_type` と `source_entity_id` が追加されます。確認できない値はnullです。既存のD03の `mixed_environmental` とD04の `schema_version`、`death_message`、`block_position` は維持します。Entity IDはサーバー内部の識別子で、アカウントUUIDではありません。
+JSONLに `source_type`、`source_entity_id`、`projectile_type` が追加されます。`source_type` は発生元Mobや爆発元の種別、`source_entity_id` はサーバーで確認したID、`projectile_type` は矢・火球などの飛び道具の種類です。確認できない値はnullです。コンソールの死亡ログにも発生元情報を表示します。既存のD03の `mixed_environmental` とD04の `schema_version`、`death_message`、`block_position` は維持します。Entity IDはサーバー内部の識別子で、アカウントUUIDではありません。
 
 ### D01受入条件
 
