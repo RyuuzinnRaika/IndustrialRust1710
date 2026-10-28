@@ -408,6 +408,76 @@ mod tests {
         })
     }
     #[test]
+    fn s03_all_five_tool_materials_have_legacy_speed_tier_and_durability() {
+        // Material, pickaxe, shovel, axe, sword, hoe, tier, speed, durability.
+        // Gold's speed is highest, but its harvest tier is only wooden.
+        for (material, pick, shovel, axe, sword, hoe, tier, speed, uses) in [
+            ("wood", 270, 269, 271, 268, 290, 0, 2.0, 59),
+            ("stone", 274, 273, 275, 272, 291, 1, 4.0, 131),
+            ("iron", 257, 256, 258, 267, 292, 2, 6.0, 250),
+            ("gold", 285, 284, 286, 283, 294, 0, 12.0, 32),
+            ("diamond", 278, 277, 279, 276, 293, 3, 8.0, 1561),
+        ] {
+            for id in [pick, shovel, axe, sword, hoe] {
+                let item = Stack {
+                    id,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                };
+                let stats = tool(Some(item)).expect("all 25 tool IDs");
+                assert_eq!(stats.tier, tier, "{material} id={id}");
+                assert_eq!(stats.max_uses, uses, "{material} id={id}");
+                assert_eq!(stats.speed, speed, "{material} id={id}");
+                assert_eq!(tool_max_uses(item), Some(uses));
+                assert_eq!(
+                    tool_max_uses(Stack {
+                        damage: uses - 1,
+                        ..item
+                    }),
+                    Some(uses),
+                    "last valid use: {material} id={id}"
+                );
+                assert_eq!(tool_max_uses(Stack { damage: uses, ..item }), None);
+            }
+            // The real server harvest rule must check material tier before
+            // giving an ore drop, not just the pickaxe's faster mining time.
+            for (ore, required, drop) in [
+                (1u16, 0, 4), // stone -> cobblestone
+                (16, 0, 263), // coal ore -> coal
+                (15, 1, 15), // iron ore -> itself
+                (14, 2, 14), // gold ore -> itself
+                (56, 2, 264), // diamond ore -> diamond
+                (49, 3, 49), // obsidian -> itself
+            ] {
+                let (_, mined) = mine_rule(ore << 4, stack(pick, 0)).unwrap();
+                assert_eq!(
+                    mined.drop.map(|item| item.id),
+                    (tier >= required).then_some(drop),
+                    "{material} pickaxe vs block {ore}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn s03_golden_pickaxe_mines_stone_fast_but_cannot_harvest_iron_ore() {
+        let wood = mine_rule(1 << 4, stack(270, 0)).unwrap().0;
+        let stone = mine_rule(1 << 4, stack(274, 0)).unwrap().0;
+        let iron = mine_rule(1 << 4, stack(257, 0)).unwrap().0;
+        let diamond = mine_rule(1 << 4, stack(278, 0)).unwrap().0;
+        let gold = mine_rule(1 << 4, stack(285, 0)).unwrap().0;
+        assert!(gold < diamond && diamond < iron && iron < stone && stone < wood);
+
+        let (gold_iron_time, gold_iron) = mine_rule(15 << 4, stack(285, 0)).unwrap();
+        let (wood_iron_time, wood_iron) = mine_rule(15 << 4, stack(270, 0)).unwrap();
+        assert_eq!(gold_iron.drop, None);
+        assert_eq!(wood_iron.drop, None);
+        assert_eq!(gold_iron_time, wood_iron_time,
+            "gold's high mining speed cannot bypass the iron harvest tier");
+    }
+
+    #[test]
     fn s03_instant_hand_breaks_do_not_damage_held_iron_tools() {
         let iron_pickaxe = stack(257, 0);
         let iron_sword = stack(267, 0);
