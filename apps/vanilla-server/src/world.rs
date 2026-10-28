@@ -1220,6 +1220,26 @@ impl World {
             }
         }
     }
+    /// Enqueue only leaves touching a removed/replaced leaf. Decay can
+    /// disconnect another leaf further than four blocks from the original
+    /// log; these six neighbors propagate rechecks without a 9x9x9 scan
+    /// for every fallen leaf.
+    fn wake_adjacent_leaves(&mut self, x: i32, y: i32, z: i32) {
+        for (dx, dy, dz) in [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
+            let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+            if in_bounds(nx, ny, nz) && matches!(self.get(nx, ny, nz) >> 4, 18 | 161) {
+                self.pending_ecology.insert((nx, ny as u8, nz));
+            }
+        }
+    }
+
     fn wake_leaves(&mut self, x: i32, y: i32, z: i32) {
         for dx in -4..=4 {
             for dz in -4..=4 {
@@ -1758,6 +1778,23 @@ impl World {
                         .then_some((x, i32::from(y), z))
                 })
                 .collect();
+            // Keep leaf wakeups transactional. No new leaf checks are
+            // published if persisting this tick fails and the edits roll
+            // back. Precompute the old block types before writing changes.
+            let leaf_wake_sources: Vec<_> = changes
+                .iter()
+                .filter_map(|(&(x, y, z), &new)| {
+                    let previous = self.get(x, i32::from(y), z);
+                    let old_id = previous >> 4;
+                    let new_id = new >> 4;
+                    (previous != new && matches!(old_id, 17 | 18 | 161 | 162))
+                        .then_some((x, i32::from(y), z, matches!(old_id, 17 | 162)))
+                        .or_else(|| {
+                            (previous != new && matches!(new_id, 17 | 162))
+                                .then_some((x, i32::from(y), z, true))
+                        })
+                })
+                .collect();
             let undo: Vec<(Position, Option<u16>)> = changes
                 .keys()
                 .map(|&p| (p, self.edits.get(&p).copied()))
@@ -1814,6 +1851,13 @@ impl World {
             }
             for (x, z, old, new) in dirty_light {
                 self.mark_lighting_changed(x, z, old, new);
+            }
+            for (x, y, z, was_log) in leaf_wake_sources {
+                if was_log {
+                    self.wake_leaves(x, y, z);
+                } else {
+                    self.wake_adjacent_leaves(x, y, z);
+                }
             }
         } else if !self.comparator_ready.is_empty()
             || tnt_changed
@@ -1955,7 +1999,8 @@ impl World {
             if !in_bounds(x, y, z) || block >> 4 > 255 || !seen.insert((x, y, z)) {
                 return Err(invalid("invalid batched block update"));
             }
-            if next.get(x, y, z) == block {
+            let previous = next.get(x, y, z);
+            if previous == block {
                 continue;
             }
             let key = (x, y as u8, z);
@@ -1969,6 +2014,11 @@ impl World {
             }
             next.wake_gravity(x, y, z);
             next.wake_block_updates(x, y, z);
+            if matches!(previous >> 4, 17 | 162) || matches!(block >> 4, 17 | 162) {
+                next.wake_leaves(x, y, z);
+            } else if matches!(previous >> 4, 18 | 161) && previous != block {
+                next.wake_adjacent_leaves(x, y, z);
+            }
             changed = true;
         }
         if changed {
