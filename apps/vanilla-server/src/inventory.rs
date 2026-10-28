@@ -2325,7 +2325,8 @@ mod tests {
         assert!(inv.click_window(1, 0, 0, 0));
         assert!(inv.workbench.iter().all(Option::is_none));
         assert_eq!(inv.cursor.map(|stack| stack.id), Some(267));
-        assert!(!inv.click_window(1, 0, 0, 0) || inv.cursor.map(|stack| stack.id) == Some(267));
+        assert!(inv.click_window(1, 0, 0, 0)); // no recipe left: no second sword
+        assert_eq!(inv.cursor, Some(Stack { id: 267, ..ingot }));
         assert!(inv.encoded().is_ok());
     }
 
