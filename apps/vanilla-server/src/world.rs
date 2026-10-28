@@ -3122,6 +3122,47 @@ mod tests {
     }
 
     #[test]
+    fn streamed_overworld_vines_register_for_ecology_without_regenerating_terrain() {
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        // An edited vine is an easy, stable probe of the actual chunk wire
+        // scan, including the high Y=144..159 canopy section.
+        let vine = (3, 151, 4);
+        world.import_block(vine.0, vine.1, vine.2, (106 << 4) | 8).unwrap();
+        let snapshot = world.chunk_read_snapshot(0, 0);
+        let (mask, wire, vines) = snapshot.chunk_data_with_vines(0, 0);
+        assert_eq!(mask & (1 << 9), 1 << 9);
+        assert!(wire.len() > 256);
+        assert!(vines.contains(&vine));
+        let mut fresh = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        fresh.observe_vines_chunk(&vines);
+        // The observed positions are reconstructed at chunk load, without
+        // adding sparse edits to the world-file.
+        assert!(fresh.pending_ecology.contains(&(3, 151, 4)));
+        assert!(fresh.pending_support.contains(&(3, 151, 4)));
+        assert!(fresh.edits.is_empty());
+        fresh.observe_vines_chunk(&vines);
+        assert_eq!(fresh.observed_vines.len(), fresh.observed_vine_order.len());
+        // A newer player edit cancels a stale snapshot observation.
+        fresh.edits.insert((3, 151, 4), 0);
+        fresh.pending_ecology.clear();
+        fresh.observe_vines_chunk(&vines);
+        assert!(!fresh.pending_ecology.contains(&(3, 151, 4)));
+    }
+
+    #[test]
+    fn unedited_vine_observations_are_lru_bounded() {
+        let mut world = World::new();
+        let positions: Vec<_> = (0..=MAX_OBSERVED_VINES)
+            .map(|x| (x as i32, 65, 0))
+            .collect();
+        world.observe_vines_chunk(&positions);
+        assert_eq!(world.observed_vines.len(), MAX_OBSERVED_VINES);
+        assert_eq!(world.observed_vine_order.len(), MAX_OBSERVED_VINES);
+        assert!(!world.pending_ecology.contains(&(0, 65, 0)));
+        assert!(world.pending_ecology.contains(&(MAX_OBSERVED_VINES as i32, 65, 0)));
+    }
+
+    #[test]
     fn expanded_overworld_streams_seeded_biomes_instead_of_flat_sections() {
         let world = World::expanded(42, crate::dimensions::Dimension::Overworld);
         let mut heights = BTreeSet::new();
