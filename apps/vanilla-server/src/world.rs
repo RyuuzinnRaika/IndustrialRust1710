@@ -3577,10 +3577,20 @@ mod tests {
         }
         for (facing, dx, dz) in [(0, 0, 1), (1, -1, 0), (2, 0, -1), (3, 1, 0)] {
             world.import_block(10, 64, 10, 26 << 4 | facing).unwrap();
-            world.import_block(10 + dx, 64, 10 + dz, 26 << 4 | facing | 8).unwrap();
-            assert_eq!(world.mining_partner(10, 64, 10), Some((10 + dx, 64, 10 + dz)));
-            assert_eq!(world.mining_partner(10 + dx, 64, 10 + dz), Some((10, 64, 10)));
-            world.import_block(10 + dx, 64, 10 + dz, 26 << 4 | ((facing + 1) & 3) | 8).unwrap();
+            world
+                .import_block(10 + dx, 64, 10 + dz, 26 << 4 | facing | 8)
+                .unwrap();
+            assert_eq!(
+                world.mining_partner(10, 64, 10),
+                Some((10 + dx, 64, 10 + dz))
+            );
+            assert_eq!(
+                world.mining_partner(10 + dx, 64, 10 + dz),
+                Some((10, 64, 10))
+            );
+            world
+                .import_block(10 + dx, 64, 10 + dz, 26 << 4 | ((facing + 1) & 3) | 8)
+                .unwrap();
             assert_eq!(world.mining_partner(10, 64, 10), None);
             world.import_block(10, 64, 10, 0).unwrap();
             world.import_block(10 + dx, 64, 10 + dz, 0).unwrap();
@@ -3640,9 +3650,7 @@ mod tests {
                 54 => {
                     let mut slots = [None; CHEST_SLOTS];
                     slots[4] = Some(source);
-                    let storage = Chests::default()
-                        .staged_update((0, 64, 0), slots)
-                        .unwrap();
+                    let storage = Chests::default().staged_update((0, 64, 0), slots).unwrap();
                     fs::write(Chests::location(&world_file), storage.encoded().unwrap()).unwrap();
                     let staged = storage
                         .staged_update((0, 64, 0), [None; CHEST_SLOTS])
@@ -3665,15 +3673,16 @@ mod tests {
                 _ => {
                     let mut slots = [None; HOPPER_SLOTS];
                     slots[4] = Some(source);
-                    let storage = Hoppers::default()
-                        .staged_update((0, 64, 0), slots)
-                        .unwrap();
+                    let storage = Hoppers::default().staged_update((0, 64, 0), slots).unwrap();
                     fs::write(Hoppers::location(&world_file), storage.encoded().unwrap()).unwrap();
                     let staged = storage.staged_remove((0, 64, 0)).unwrap();
                     (Hoppers::location(&world_file), staged.encoded().unwrap())
                 }
             };
-            assert_eq!(fs::read(&world_file).unwrap(), original_world.encoded().unwrap());
+            assert_eq!(
+                fs::read(&world_file).unwrap(),
+                original_world.encoded().unwrap()
+            );
             crate::journal::commit(
                 &journal_file,
                 &[
@@ -3686,8 +3695,13 @@ mod tests {
             assert_eq!(World::load(&world_file).unwrap().get(0, 64, 0), 0);
             match id {
                 54 => assert!(!Chests::load(&storage_file).unwrap().is_nonempty((0, 64, 0))),
-                61 => assert!(!Furnaces::load(&storage_file).unwrap().get((0, 64, 0)).occupied()),
-                _ => assert!(!Hoppers::load(&storage_file).unwrap().has_contents((0, 64, 0))),
+                61 => assert!(!Furnaces::load(&storage_file)
+                    .unwrap()
+                    .get((0, 64, 0))
+                    .occupied()),
+                _ => assert!(!Hoppers::load(&storage_file)
+                    .unwrap()
+                    .has_contents((0, 64, 0))),
             };
             let actual: Vec<_> = GroundItems::load(&drop_file)
                 .unwrap()
@@ -3713,10 +3727,8 @@ mod tests {
 
     #[test]
     fn mining_both_structure_halves_persists_one_atomic_world_snapshot() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-paired-mining-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-paired-mining-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
         world.import_block(7, 64, 7, 26 << 4 | 3).unwrap();
