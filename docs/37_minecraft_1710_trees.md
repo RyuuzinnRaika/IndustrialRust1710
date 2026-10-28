@@ -206,15 +206,37 @@ others may take several minutes.
   destruction is deferred. This prevents further leaf-decay drops from
   accumulating without bound during a prolonged full-pool condition.
   Leaf decay resumes after enough queued drops have been persisted.
-- This **does not provide full crash durability**. The queue is currently
-  in process memory and is not included in the IRW world-file format.
-  A process crash or OS shutdown before ground-item storage succeeds
-  can still lose queued drops. Fully transactional durable recovery
-  across the IRW and ground-items sidecars remains a separate task.
+- **Implemented cross-restart crash recovery:** before a block update
+  is saved, its resulting item drops are appended to the bounded IRW
+  world-drop backlog and persisted in that *same* atomic world write.
+  The backwards-compatible **TNT5** trailer carries up to 2,048 drops
+  (each stores coordinates, item ID, count and metadata). The existing
+  TNT1–TNT4 trailers and IRW1–IRW4 generation identities remain readable.
+  Malformed counts, truncated entries, invalid stacks and trailing
+  data are rejected rather than silently losing items.
+- Delivery to `world.drops.json` is a **two-file redo transaction**:
+  stage 1–32 ground entities and the corresponding IRW backlog removal,
+  write both snapshots through the existing `pending-txn.json` journal,
+  then publish both in-memory states and network entity spawns only
+  after commit succeeds. On crash during an applied journal, startup
+  runs `journal::recover` before loading the world or accepting players.
+  Replaying a transaction is idempotent, preventing both duplicate
+  item entities and disappearing items in the two files.
+- World-tick failures undo both proposed block edits and appended
+  pending drops. A full queue rejects further unsafe commits instead
+  of truncating persisted items. A prepared-journal error stops the
+  live world worker until restart/recovery instead of continuing with
+  an inconsistent in-memory snapshot.
+- The durable queue uses a compact format for existing generated
+  non-NBT drops. Items carrying arbitrary NBT are rejected for now;
+  any future NBT-bearing world-drop producer must extend the format.
+  The existing redo journal's per-file size limit still applies to
+  oversized worlds. Back up existing saves before first rollout.
 - Added regression tests for 2 drops at distinct locations, 40-item
-  partial batches (32 + 8), full 512-slot storage with retry, ground
-  file write failure with retry, and the leaf-decay pause. These
-  tests have **not been executed with cargo**.
+  partial batches (32 + 8), full 512-slot storage, invalid target
+  refusal, random leaf backpressure, IRW1–IRW4 drop roundtrips,
+  TNT5 corruption detection and crash replay with one item exactly.
+  **These tests have not been executed with cargo or on a live client.**
 
 ## Compatibility and testing
 
