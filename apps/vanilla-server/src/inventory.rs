@@ -573,9 +573,9 @@ impl Inventory {
         *self = next;
         true
     }
-    /// Damage one server-held, unenchanted tool on a committed block break.
-    /// Returns true only if a real tool was damaged or broke. Hand mining
-    /// and ordinary blocks/items do not acquire arbitrary damage metadata.
+    /// Wear a server-held unenchanted tool after a committed block break:
+    /// ordinary tools lose one use, but swords lose two in Java 1.7.10.
+    /// Instant-break-by-hand blocks are filtered by survival::mine_rule.
     pub fn wear_held_tool(&mut self) -> bool {
         let slot = &mut self.slots[36 + self.selected as usize];
         let Some(mut value) = *slot else {
@@ -584,7 +584,12 @@ impl Inventory {
         let Some(max_uses) = crate::survival::tool_max_uses(value) else {
             return false;
         };
-        value.damage += 1;
+        let wear = if matches!(value.id, 268 | 272 | 267 | 276 | 283) {
+            2
+        } else {
+            1
+        };
+        value.damage = value.damage.saturating_add(wear);
         *slot = (value.damage < max_uses).then_some(value);
         true
     }
@@ -2417,6 +2422,12 @@ mod tests {
         };
         inventory.creative_set(36, Some(iron_sword)).unwrap();
         assert!(inventory.wear_held_tool_on_mob_attack());
+        assert!(inventory.held().is_none());
+
+        // Breaking a non-instant block with a sword spends two uses,
+        // unlike the single use spent on a confirmed Mob hit.
+        inventory.creative_set(36, Some(Stack { damage: 248, ..iron_sword })).unwrap();
+        assert!(inventory.wear_held_tool());
         assert!(inventory.held().is_none());
 
         let hoe = Stack {
