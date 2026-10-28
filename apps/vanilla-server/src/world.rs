@@ -4712,7 +4712,7 @@ mod tests {
     }
 
     #[test]
-    fn crops_hydrate_and_grow_saplings_become_trees_and_attachments_fall() {
+    fn crops_hydrate_and_saplings_wait_for_random_ticks_and_attachments_fall() {
         let path = std::env::temp_dir().join(format!("ir1710-ecology-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
@@ -4725,7 +4725,10 @@ mod tests {
         }
         assert_eq!(w.get(0, 63, 0), (60 << 4) | 7);
         assert_eq!(w.get(0, 64, 0), (59 << 4) | 7);
-        assert_eq!(w.get(8, 64, 0) >> 4, 17);
+        // A 20-second ecology run is far too short for vanilla's typical
+        // ~16-minute two-stage sapling growth. It must not instantly become
+        // a full tree as under the previous 1/4-per-second shortcut.
+        assert_eq!(w.get(8, 64, 0) >> 4, 6);
         // A broken support causes a torch to detach via the next tick.
         w.update_and_save(&path, 12, 64, 0, 50 << 4).unwrap();
         w.update_and_save(&path, 12, 63, 0, 0).unwrap();
