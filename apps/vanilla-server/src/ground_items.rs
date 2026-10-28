@@ -296,6 +296,34 @@ impl GroundItems {
         Ok((candidate, spawned))
     }
 
+    /// The 512-entity limit is not the only limit: the persisted JSON also
+    /// has a 128 KiB ceiling (e.g. when other ground entities carry NBT).
+    /// Find a batch that fits both bounds without discarding a world drop.
+    /// None means the caller must leave the durable IRW queue unchanged
+    /// until existing ground items have been collected.
+    pub fn stage_world_drops_that_fit(
+        &self,
+        drops: &[crate::world::WorldDrop],
+    ) -> io::Result<Option<(usize, Self, Vec<GroundItem>)>> {
+        let mut count = drops.len().min(self.remaining_capacity());
+        while count > 0 {
+            match self.stage_put_world_drops(&drops[..count]) {
+                Ok((staged, items)) => return Ok(Some((count, staged, items))),
+                // A valid ground registry can be near the JSON byte limit
+                // before the entity limit. Try half the items; never
+                // silently interpret an invalid stack/position as "full".
+                Err(error)
+                    if error.kind() == ErrorKind::InvalidData
+                        && error.to_string() == "ground-item save exceeds cap" =>
+                {
+                    count /= 2;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
+    }
+
     /// Create an unsaved, validated snapshot for atomic inventory + ground
     /// transactions. This method must not publish any state before journal::commit.
     pub fn stage_put_many(
