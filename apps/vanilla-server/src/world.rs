@@ -3250,6 +3250,118 @@ mod tests {
     }
 
     #[test]
+    fn pending_world_drops_roundtrip_across_irw_versions() {
+        for mut world in [
+            World::new(),
+            World::natural(123),
+            World::with_biomes(456),
+            World::expanded(789, crate::dimensions::Dimension::Overworld),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "ir1710-world-drop-trailer-{}-{:?}.irw",
+                std::process::id(),
+                world.generation
+            ));
+            let _ = std::fs::remove_file(&path);
+            world.queue_test_drop(
+                (1, 72, -4),
+                crate::inventory::Stack {
+                    id: 6,
+                    count: 1,
+                    damage: 3,
+                    nbt: None,
+                },
+            );
+            world.queue_test_drop(
+                (-12, 155, 31),
+                crate::inventory::Stack {
+                    id: 260,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                },
+            );
+            world.save(&path).unwrap();
+            let raw = std::fs::read(&path).unwrap();
+            assert!(raw.windows(4).any(|bytes| bytes == b"TNT5"));
+            let restored = World::load(&path).unwrap();
+            assert_eq!(restored.queued_drops(), world.queued_drops());
+            assert_eq!(restored.generation, world.generation);
+
+            // A completed two-file journal acknowledges a world queue
+            // prefix without altering the original terrain or seed.
+            let staged = restored.staged_drop_acknowledgement(1).unwrap();
+            staged.save(&path).unwrap();
+            let after = World::load(&path).unwrap();
+            assert_eq!(after.queued_drops(), &world.queued_drops()[1..]);
+            assert_eq!(after.generation, world.generation);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn corrupt_tnt5_drop_backlogs_fail_closed() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-tnt5-corrupt-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.queue_test_drop(
+            (1, 70, 2),
+            crate::inventory::Stack {
+                id: 6,
+                count: 1,
+                damage: 0,
+                nbt: None,
+            },
+        );
+        world.save(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let marker = original.windows(4).position(|b| b == b"TNT5").unwrap();
+        let mut truncated = original.clone();
+        truncated.pop();
+        std::fs::write(&path, truncated).unwrap();
+        assert!(World::load(&path).is_err(), "truncated drops cannot load");
+
+        let mut invalid_count = original.clone();
+        invalid_count[marker + 14..marker + 18]
+            .copy_from_slice(&u32::MAX.to_be_bytes());
+        std::fs::write(&path, invalid_count).unwrap();
+        assert!(World::load(&path).is_err(), "unbounded drop counts must fail");
+
+        let mut invalid_stack = original.clone();
+        invalid_stack[marker + 18 + 11] = 0;
+        std::fs::write(&path, invalid_stack).unwrap();
+        assert!(World::load(&path).is_err(), "zero-count items must fail");
+
+        let mut extra = original;
+        extra.push(0);
+        std::fs::write(&path, extra).unwrap();
+        assert!(World::load(&path).is_err(), "trailing data must fail");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn worlds_without_pending_drops_retain_the_old_trailer_format() {
+        let mut world = World::new();
+        assert_eq!(&world.encoded().unwrap()[..4], b"IRW1");
+        assert!(!world.encoded().unwrap().windows(4).any(|p| p == b"TNT5"));
+        world.queue_test_drop(
+            (1, 65, 1),
+            crate::inventory::Stack {
+                id: 6,
+                count: 1,
+                damage: 0,
+                nbt: None,
+            },
+        );
+        assert!(world.encoded().unwrap().windows(4).any(|p| p == b"TNT5"));
+        world.acknowledge_drops(1);
+        assert!(!world.encoded().unwrap().windows(4).any(|p| p == b"TNT5"));
+    }
+
+    #[test]
     fn streamed_overworld_vines_register_for_ecology_without_regenerating_terrain() {
         let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
         // An edited vine is an easy, stable probe of the actual chunk wire
