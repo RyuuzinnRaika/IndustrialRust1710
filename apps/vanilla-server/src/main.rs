@@ -6183,6 +6183,25 @@ fn play(
                         portal_since = None;
                         portal_cooldown_until = now_tick.saturating_add(100);
                     }
+                    // The client discards its old window during respawn.
+                    // Never allow a delayed C0E click from the pre-death
+                    // furnace/chest/workbench to mutate storage in this life.
+                    if active_window != 0 {
+                        send(s, 0x2e, &[active_window])?;
+                    }
+                    active_window = 0;
+                    active_chest = None;
+                    active_chest_partner = None;
+                    active_ender_chest = None;
+                    active_furnace = None;
+                    active_hopper = None;
+                    active_device = None;
+                    active_brewer = None;
+                    active_anvil = None;
+                    active_enchant = None;
+                    pending_sign = None;
+                    mining = None;
+
                     *vitals = fresh_vitals;
                     *player = origin;
                     death_recorded = false;
