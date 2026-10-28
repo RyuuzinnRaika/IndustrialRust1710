@@ -189,6 +189,7 @@ fn rule(block: u16) -> Option<BlockRule> {
         25 => (0.8, Some(ToolKind::Axe), 0, false, item(25, 0)), // note block
         61 | 62 => (3.5, Some(ToolKind::Pickaxe), 0, true, item(61, 0)),
         20 => (0.3, None, 0, false, None), // glass: breaks but no drop
+        92 => (0.5, None, 0, false, None), // placed cake cannot be recovered
         35 => (0.8, None, 0, false, item(35, damage)),
         87 => (0.4, Some(ToolKind::Pickaxe), 0, false, item(87, 0)),
         88 => (0.5, Some(ToolKind::Shovel), 0, false, item(88, 0)),
@@ -231,6 +232,9 @@ fn rule(block: u16) -> Option<BlockRule> {
         84 => (2.0, Some(ToolKind::Axe), 0, false, item(84, 0)),       // jukebox
         116 => (5.0, Some(ToolKind::Pickaxe), 0, false, item(116, 0)),
         117 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(379, 0)), // brewing stand
+        // Placed cauldrons have a distinct item ID in pre-flattening 1.7.10.
+        // Only a pickaxe harvests the item; the water level is not inventory metadata.
+        118 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(380, 0)),
         140 => (0.0, None, 0, false, item(390, 0)),                    // flower pot
         145 => (
             5.0,
@@ -1125,6 +1129,29 @@ mod tests {
         // Protected blocks stay unmineable; no generic fallback is added.
         for id in [0_u16, 7, 8, 9, 10, 11, 90, 119, 120, 137, 166] {
             assert!(mine_rule(id << 4, None).is_none(), "protected block {id}");
+        }
+    }
+
+    #[test]
+    fn b20_placed_cake_and_cauldron_can_be_broken_with_legacy_drops() {
+        // These blocks can be placed by the live server but previously had
+        // no mining rule, creating client-visible ghost blocks in Survival.
+        for bites in 0_u16..=5 {
+            let (duration, result) = mine_rule((92 << 4) | bites, None).unwrap();
+            assert!(duration > Duration::ZERO);
+            assert!(result.drop.is_none(), "cake must not be returned as an item");
+        }
+        for level in 0_u16..=3 {
+            let block = (118 << 4) | level;
+            let bare = mine_rule(block, None).unwrap();
+            let pickaxe = mine_rule(block, stack(270, 0)).unwrap();
+            assert!(pickaxe.0 < bare.0);
+            assert!(bare.1.drop.is_none());
+            assert_eq!(
+                pickaxe.1.drop,
+                Some(BlockDrop { id: 380, damage: 0 }),
+                "water level must not become a cauldron item subtype"
+            );
         }
     }
 
