@@ -250,7 +250,11 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
         47 => (340, 3), // Bookshelf always drops three books.
         18 if block & 3 == 0 && roll.is_multiple_of(200) => (260, 1), // Oak apple
         161 if block & 3 == 1 && roll.is_multiple_of(200) => (260, 1), // Dark oak apple
-        18 | 161 if roll.is_multiple_of(20) => (6, 1), // Matching sapling
+        // Jungle leaves are half as likely to drop a sapling (1/40),
+        // compared with the other five 1.7.10 wood species (1/20).
+        18 if block & 3 == 3 && roll.is_multiple_of(40) => (6, 1),
+        18 if block & 3 != 3 && roll.is_multiple_of(20) => (6, 1),
+        161 if roll.is_multiple_of(20) => (6, 1),
         59 if block & 7 == 7 => (295, 1 + (roll % 3) as u8),
         141 if block & 7 == 7 => (391, 1 + (roll % 3) as u8),
         142 if block & 7 == 7 => (392, 1 + (roll % 3) as u8),
@@ -678,6 +682,28 @@ mod tests {
                 .expect("each leaf species should drop its matching sapling");
             assert_eq!(sapling.damage, expected);
         }
+    }
+
+    #[test]
+    fn jungle_saplings_drop_half_as_often_as_other_1710_leaves() {
+        let mut jungle_saplings = 0usize;
+        let mut birch_saplings = 0usize;
+        for tick in 1..=80_000u64 {
+            for (block, counter) in [
+                ((18 << 4) | 3, &mut jungle_saplings),
+                ((18 << 4) | 2, &mut birch_saplings),
+            ] {
+                if additional_drop(block, (1, 75, 2), tick)
+                    .is_some_and(|item| item.id == 6)
+                {
+                    *counter += 1;
+                }
+            }
+        }
+        assert!(
+            birch_saplings > jungle_saplings + 500,
+            "jungle saplings should be rarer: birch={birch_saplings}, jungle={jungle_saplings}"
+        );
     }
 
     #[test]
