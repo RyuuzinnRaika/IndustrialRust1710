@@ -261,9 +261,11 @@ impl GroundItems {
         stacks: &[Stack],
         block: (i32, i32, i32),
     ) -> io::Result<(Self, Vec<GroundItem>)> {
-        self.stage_put_at_positions(
-            &stacks.iter().copied().map(|stack| (stack, block)).collect::<Vec<_>>(),
-        )
+        // Preserve the single-position API's validation even for an empty
+        // batch; invalid positions must never be silently accepted.
+        drop_position(block)?;
+        let positions = stacks.iter().copied().map(|stack| (stack, block)).collect::<Vec<_>>();
+        self.stage_put_at_positions(&positions)
     }
 
     /// Stage a world-tick batch with distinct item positions. A tick may
@@ -461,6 +463,26 @@ mod tests {
             assert_eq!(candidate.entries.len(), 1);
             assert_eq!(new_items[0].position, drop_position(location).unwrap());
         }
+    }
+
+    #[test]
+    fn staged_world_drop_batch_keeps_positions_and_does_not_publish_on_error() {
+        let ground = GroundItems::default();
+        let one = Stack { id: 50, count: 1, damage: 0, nbt: None };
+        let two = Stack { id: 171, count: 1, damage: 3, nbt: None };
+        let entries = [(one, (-3, 64, 5)), (two, (9, 65, -8))];
+        let (staged, spawned) = ground.stage_put_at_positions(&entries).unwrap();
+        assert_eq!(spawned.len(), 2);
+        assert_eq!(spawned[0].position, drop_position(entries[0].1).unwrap());
+        assert_eq!(spawned[1].position, drop_position(entries[1].1).unwrap());
+        assert_eq!(spawned[1].stack.damage, 3);
+        assert_eq!(ground.items().count(), 0);
+        assert_eq!(staged.items().count(), 2);
+        assert!(ground.stage_put_at_positions(
+            &[(one, (0, 64, 0)), (two, (WORLD_LIMIT, 64, 0))],
+        ).is_err());
+        assert_eq!(ground.items().count(), 0);
+        assert!(ground.stage_put_many(&[], (WORLD_LIMIT, 64, 0)).is_err());
     }
 
     #[test]
