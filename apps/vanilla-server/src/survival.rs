@@ -276,6 +276,55 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
     })
 }
 
+/// Independent, bounded 1.7.10 sapling and apple rolls for natural leaf
+/// decay. Unlike the manual extra-drop compatibility API, a single decaying
+/// leaf may drop *both* items. Sticks were introduced as leaf drops in much
+/// newer Minecraft versions, so 1.7.10 has none here.
+pub fn leaf_decay_drops(block: u16, pos: (i32, i32, i32), tick: u64) -> Vec<Stack> {
+    let id = block >> 4;
+    if !matches!(id, 18 | 161) {
+        return Vec::new();
+    }
+    let (x, y, z) = pos;
+    let seed = tick
+        ^ (x as i64 as u64).wrapping_mul(0x9e3779b185ebca87)
+        ^ (y as i64 as u64).wrapping_mul(0xc2b2ae3d27d4eb4f)
+        ^ (z as i64 as u64).wrapping_mul(0x165667b19e3779f9);
+    let mix = |mut value: u64| {
+        value ^= value >> 30;
+        value = value.wrapping_mul(0xbf58476d1ce4e5b9);
+        value ^= value >> 27;
+        value = value.wrapping_mul(0x94d049bb133111eb);
+        value ^ (value >> 31)
+    };
+    let mut drops = Vec::with_capacity(2);
+    let species = if id == 18 {
+        (block & 3) as i16
+    } else {
+        4 + (block & 1) as i16
+    };
+    let sapling_chance = if species == 3 { 40 } else { 20 };
+    if mix(seed ^ 0x5a91_1eaf).is_multiple_of(sapling_chance) {
+        drops.push(Stack {
+            id: 6,
+            count: 1,
+            damage: species,
+            nbt: None,
+        });
+    }
+    if matches!((id, species), (18, 0) | (161, 5))
+        && mix(seed ^ 0xa991_e100).is_multiple_of(200)
+    {
+        drops.push(Stack {
+            id: 260,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        });
+    }
+    drops
+}
+
 /// Server-authoritative minimum for breaking a known block; tick quantized,
 /// 30 game ticks × hardness / speed if harvestable, otherwise 100 × hardness.
 /// Not all environmental penalties of vanilla 1.7.10 are modeled.
@@ -682,6 +731,26 @@ mod tests {
                 .expect("each leaf species should drop its matching sapling");
             assert_eq!(sapling.damage, expected);
         }
+    }
+
+    #[test]
+    fn naturally_decaying_oak_leaves_can_drop_saplings_and_apples_together() {
+        let mut saplings = 0;
+        let mut apples = 0;
+        let mut both = 0;
+        for tick in 1..=100_000u64 {
+            let items = leaf_decay_drops(18 << 4, (2, 70, -3), tick);
+            let sapling = items.iter().any(|drop| drop.id == 6 && drop.damage == 0);
+            let apple = items.iter().any(|drop| drop.id == 260);
+            saplings += usize::from(sapling);
+            apples += usize::from(apple);
+            both += usize::from(sapling && apple);
+            assert!(items.len() <= 2);
+        }
+        assert!((4_600..=5_400).contains(&saplings), "saplings={saplings}");
+        assert!((350..=650).contains(&apples), "apples={apples}");
+        assert!(both > 1, "apple and sapling rolls must be independent");
+        assert!(leaf_decay_drops(17 << 4, (2, 70, -3), 100).is_empty());
     }
 
     #[test]
