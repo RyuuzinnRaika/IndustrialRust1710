@@ -11,33 +11,111 @@ const PUBLIC: &[&str] = &["/help", "/?", "/list", "/me", "/tell", "/msg", "/w"];
 // Keep this list in sync with run_player_admin_command's OP level gate.
 // In particular, never advertise new 1.8+ commands or unmerged features.
 const LEVEL_2: &[&str] = &[
-    "/time", "/weather", "/tp", "/teleport", "/gamemode", "/give",
-    "/clear", "/setblock", "/effect", "/summon", "/enchant",
-    "/testforblock", "/seed", "/spawnpoint", "/setworldspawn", "/gamerule", "/difficulty",
+    "/time",
+    "/weather",
+    "/tp",
+    "/teleport",
+    "/gamemode",
+    "/give",
+    "/clear",
+    "/setblock",
+    "/effect",
+    "/summon",
+    "/enchant",
+    "/testforblock",
+    "/seed",
+    "/spawnpoint",
+    "/setworldspawn",
+    "/gamerule",
+    "/difficulty",
 ];
 const LEVEL_3: &[&str] = &[
-    "/kick", "/ban", "/pardon", "/pardon-uuid", "/ban-ip", "/pardon-ip",
+    "/kick",
+    "/ban",
+    "/pardon",
+    "/pardon-uuid",
+    "/ban-ip",
+    "/pardon-ip",
 ];
 const LEVEL_4: &[&str] = &["/save", "/op", "/deop", "/permission"];
 
 const ITEMS: &[&str] = &[
-    "stone", "grass", "dirt", "cobblestone", "planks", "sand", "gravel",
-    "iron_ore", "gold_ore", "coal_ore", "log", "glass", "wool", "tnt",
-    "torch", "chest", "furnace", "obsidian", "diamond", "iron_ingot",
-    "gold_ingot", "diamond_sword", "iron_sword", "diamond_pickaxe",
-    "bow", "arrow", "apple", "bread", "stick", "redstone", "emerald",
-    "book", "enchanted_book", "potion", "ender_pearl",
+    "stone",
+    "grass",
+    "dirt",
+    "cobblestone",
+    "planks",
+    "sand",
+    "gravel",
+    "iron_ore",
+    "gold_ore",
+    "coal_ore",
+    "log",
+    "glass",
+    "wool",
+    "tnt",
+    "torch",
+    "chest",
+    "furnace",
+    "obsidian",
+    "diamond",
+    "iron_ingot",
+    "gold_ingot",
+    "diamond_sword",
+    "iron_sword",
+    "diamond_pickaxe",
+    "bow",
+    "arrow",
+    "apple",
+    "bread",
+    "stick",
+    "redstone",
+    "emerald",
+    "book",
+    "enchanted_book",
+    "potion",
+    "ender_pearl",
 ];
 const TERRAIN: &[&str] = &[
-    "air", "stone", "grass", "dirt", "cobblestone", "planks",
-    "sand", "gravel", "log", "leaves", "glass", "wool", "obsidian",
-    "gold_block", "iron_block", "diamond_block", "quartz_block",
-    "sandstone", "glowstone", "emerald_block", "netherrack",
+    "air",
+    "stone",
+    "grass",
+    "dirt",
+    "cobblestone",
+    "planks",
+    "sand",
+    "gravel",
+    "log",
+    "leaves",
+    "glass",
+    "wool",
+    "obsidian",
+    "gold_block",
+    "iron_block",
+    "diamond_block",
+    "quartz_block",
+    "sandstone",
+    "glowstone",
+    "emerald_block",
+    "netherrack",
 ];
 const MOBS: &[&str] = &[
-    "Zombie", "Skeleton", "Creeper", "Spider", "CaveSpider",
-    "Enderman", "Slime", "Witch", "Cow", "Pig", "Sheep", "Chicken",
-    "Horse", "Villager", "Blaze", "Ghast",
+    "Zombie",
+    "Skeleton",
+    "Creeper",
+    "Spider",
+    "CaveSpider",
+    "Enderman",
+    "Slime",
+    "Witch",
+    "Cow",
+    "Pig",
+    "Sheep",
+    "Chicken",
+    "Horse",
+    "Villager",
+    "Blaze",
+    "Ghast",
 ];
 
 fn eligible(command: &str, op_level: u8) -> bool {
@@ -50,7 +128,9 @@ fn eligible(command: &str, op_level: u8) -> bool {
 fn add(out: &mut Vec<String>, prefix: &str, options: &[&str]) {
     for &option in options {
         if option.len() <= 64
-            && option.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase())
+            && option
+                .to_ascii_lowercase()
+                .starts_with(&prefix.to_ascii_lowercase())
         {
             out.push(option.to_owned());
         }
@@ -78,7 +158,9 @@ fn players(out: &mut Vec<String>, prefix: &str, online: &[String]) {
     for name in online {
         if name.len() <= 16
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            && name.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase())
+            && name
+                .to_ascii_lowercase()
+                .starts_with(&prefix.to_ascii_lowercase())
         {
             out.push(name.clone());
         }
@@ -135,15 +217,12 @@ pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
             words.len() - 1
         };
         let prefix = if trailing_space { "" } else { words[index] };
-        let previous = words
-            .get(index.saturating_sub(1))
-            .copied()
-            .unwrap_or("");
+        let previous = words.get(index.saturating_sub(1)).copied().unwrap_or("");
         match (command.as_str(), index) {
             ("/tell" | "/msg" | "/w", 1)
             | (
-                "/give" | "/enchant" | "/effect" | "/kick" | "/ban" | "/pardon" | "/op"
-                | "/deop" | "/clear" | "/permission" | "/spawnpoint",
+                "/give" | "/enchant" | "/effect" | "/kick" | "/ban" | "/pardon" | "/op" | "/deop"
+                | "/clear" | "/permission" | "/spawnpoint",
                 1,
             )
             | ("/gamemode", 2) => players(&mut found, prefix, online),
@@ -156,9 +235,22 @@ pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
             | ("/setworldspawn", 1..=3)
             | ("/summon", 2..=4)
             | ("/setblock" | "/testforblock", 1..=3) => add(&mut found, prefix, &["~"]),
-            ("/gamerule", 1) => add(&mut found, prefix, &["keepInventory", "doDaylightCycle", "doMobSpawning", "showDeathMessages"]),
+            ("/gamerule", 1) => add(
+                &mut found,
+                prefix,
+                &[
+                    "keepInventory",
+                    "doDaylightCycle",
+                    "doMobSpawning",
+                    "showDeathMessages",
+                ],
+            ),
             ("/gamerule", 2) => add(&mut found, prefix, &["true", "false"]),
-            ("/difficulty", 1) => add(&mut found, prefix, &["0", "1", "2", "3", "peaceful", "easy", "normal", "hard"]),
+            ("/difficulty", 1) => add(
+                &mut found,
+                prefix,
+                &["0", "1", "2", "3", "peaceful", "easy", "normal", "hard"],
+            ),
             ("/gamemode", 1) => {
                 add(&mut found, prefix, &["survival", "creative", "0", "1"]);
             }
@@ -184,7 +276,17 @@ pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
                 add(
                     &mut found,
                     prefix,
-                    &["clear", "1", "10", "17", "19", "speed", "regeneration", "hunger", "poison"],
+                    &[
+                        "clear",
+                        "1",
+                        "10",
+                        "17",
+                        "19",
+                        "speed",
+                        "regeneration",
+                        "hunger",
+                        "poison",
+                    ],
                 );
             }
             ("/summon", 1) => add(&mut found, prefix, MOBS),
@@ -244,10 +346,19 @@ mod tests {
         let people = names();
         assert_eq!(complete("/tell st", 0, &people), vec!["Stefan", "Steve"]);
         assert_eq!(complete("/give St", 2, &people), vec!["Stefan", "Steve"]);
-        assert_eq!(complete("/spawnpoint St", 2, &people), vec!["Stefan", "Steve"]);
+        assert_eq!(
+            complete("/spawnpoint St", 2, &people),
+            vec!["Stefan", "Steve"]
+        );
         assert_eq!(complete("/difficulty h", 2, &people), vec!["hard"]);
-        assert_eq!(complete("/gamerule showD", 2, &people), vec!["showDeathMessages"]);
-        assert_eq!(complete("/gamerule showDeathMessages f", 2, &people), vec!["false"]);
+        assert_eq!(
+            complete("/gamerule showD", 2, &people),
+            vec!["showDeathMessages"]
+        );
+        assert_eq!(
+            complete("/gamerule showDeathMessages f", 2, &people),
+            vec!["false"]
+        );
         assert_eq!(complete("/setworldspawn ~", 2, &people), vec!["~"]);
         assert_eq!(complete("/gamemode c", 2, &people), vec!["creative"]);
         assert_eq!(complete("/weather r", 2, &people), vec!["rain"]);
@@ -255,7 +366,11 @@ mod tests {
         assert_eq!(complete("/summon Z", 2, &people), vec!["Zombie"]);
         assert_eq!(
             complete("/give Steve minecraft:di", 2, &people),
-            vec!["minecraft:diamond", "minecraft:diamond_pickaxe", "minecraft:diamond_sword"]
+            vec![
+                "minecraft:diamond",
+                "minecraft:diamond_pickaxe",
+                "minecraft:diamond_sword"
+            ]
         );
         assert!(complete("/tp Steve ~", 2, &people).contains(&"~".to_owned()));
         assert!(complete("/ban St", 2, &people).is_empty());
