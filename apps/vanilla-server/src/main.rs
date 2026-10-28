@@ -100,7 +100,7 @@ use legacy_protocol::{
 };
 use maps::Maps;
 use minecarts::Minecarts;
-use mobs::Mobs;
+use mobs::{DamageOrigin, Mobs};
 use multiplayer::{
     Event, Hub, JoinError, SessionEvents, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT,
     ADMIN_ENCHANT_EVENT, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT,
@@ -2118,11 +2118,10 @@ fn play(
                 updates.extend(effects);
             }
             let incoming =
-                creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
-            // Broadcast one animation per actual melee hit, with the health
-            // result; simply subtracting HP does not animate the attacker.
+                creatures.hurt_player_detailed(entity_id, *player, now_tick, vitals.health);
+            // Preserve the existing authoritative melee animation synchronization.
             updates.extend(creatures.take_melee_animations());
-            let hurt = if survival { incoming } else { 0 };
+            let hurt = if survival { incoming.amount } else { 0 };
             let drops = creatures.take_drops();
             drop(creatures);
             for (x, y, z) in grazed_blocks.into_iter().chain(broken_doors) {
@@ -2174,11 +2173,23 @@ fn play(
                 }
                 let previous_health = vitals.health;
                 vitals.health = (vitals.health - damage.ceil()).max(0.0);
+                let cause = match incoming.origin {
+                    DamageOrigin::Mob { kind, entity_id } => DeathCause::Mob { kind, entity_id },
+                    DamageOrigin::Projectile { kind, shooter_kind, shooter_id } => {
+                        DeathCause::Projectile { kind, shooter_kind, shooter_id }
+                    }
+                    DamageOrigin::Explosion { kind, source_id } => {
+                        DeathCause::Explosion { kind, source_id }
+                    }
+                    DamageOrigin::WitherEffect => DeathCause::WitherEffect,
+                    DamageOrigin::Mixed => DeathCause::Mixed,
+                    DamageOrigin::Unknown => DeathCause::CombatOrExplosion,
+                };
                 death_log::record_fatal(
                     &mut fatal_hit,
                     previous_health,
                     vitals.health,
-                    DeathCause::CombatOrExplosion,
+                    cause,
                 );
                 player.save_state_in_dimension(
                     player_path,
@@ -9715,6 +9726,10 @@ fn main() -> io::Result<()> {
                                                 z: f64::from(z) + 0.5,
                                             },
                                             radius: 4.0,
+                                            origin: DamageOrigin::Explosion {
+                                                kind: "TNT",
+                                                source_id: Some(entity_id),
+                                            },
                                         });
                                         furnace_hub.broadcast(multiplayer::destroy(entity_id));
                                         let mut body = Vec::new();

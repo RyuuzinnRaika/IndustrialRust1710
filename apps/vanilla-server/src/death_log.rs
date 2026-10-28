@@ -150,6 +150,21 @@ pub enum DeathCause {
     Fire,
     Burning,
     CombatOrExplosion,
+    Mob {
+        kind: &'static str,
+        entity_id: i32,
+    },
+    Projectile {
+        kind: &'static str,
+        shooter_kind: Option<&'static str>,
+        shooter_id: Option<i32>,
+    },
+    Explosion {
+        kind: &'static str,
+        source_id: Option<i32>,
+    },
+    WitherEffect,
+    Mixed,
     MixedHazards,
     DispenserArrow,
     EnderPearl,
@@ -167,6 +182,11 @@ impl DeathCause {
             Self::Fire => "fire",
             Self::Burning => "burning",
             Self::CombatOrExplosion => "combat_or_explosion",
+            Self::Mob { .. } => "mob",
+            Self::Projectile { .. } => "projectile",
+            Self::Explosion { .. } => "explosion",
+            Self::WitherEffect => "wither_effect",
+            Self::Mixed => "mixed_damage",
             Self::MixedHazards => "mixed_environmental",
             Self::DispenserArrow => "dispenser_arrow",
             Self::EnderPearl => "ender_pearl",
@@ -174,9 +194,48 @@ impl DeathCause {
         }
     }
 
+    /// Return only server-verified provenance; never guess the nearest Mob.
+    pub fn source_type(self) -> Option<&'static str> {
+        match self {
+            Self::Mob { kind, .. } | Self::Explosion { kind, .. } => Some(kind),
+            Self::Projectile {
+                shooter_kind: Some(kind),
+                ..
+            } => Some(kind),
+            _ => None,
+        }
+    }
+
+    pub fn source_entity_id(self) -> Option<i32> {
+        match self {
+            Self::Mob { entity_id, .. } => Some(entity_id),
+            Self::Projectile { shooter_id, .. } => shooter_id,
+            Self::Explosion { source_id, .. } => source_id,
+            _ => None,
+        }
+    }
+
+    /// The projectile kind is distinct from the Mob that fired it.
+    pub fn projectile_type(self) -> Option<&'static str> {
+        match self {
+            Self::Projectile { kind, .. } => Some(kind),
+            _ => None,
+        }
+    }
+
     /// Chat text follows the familiar Java 1.7.10 death-message vocabulary.
     /// Do not claim a specific killer when the combat event does not carry one.
     pub fn message(self, name: &str) -> String {
+        match self {
+            Self::Mob { kind, .. } => return format!("{name} was slain by {kind}"),
+            Self::Projectile {
+                shooter_kind: Some(kind),
+                ..
+            } => return format!("{name} was shot by {kind}"),
+            Self::Projectile { kind, .. } => return format!("{name} was killed by {kind}"),
+            Self::Explosion { kind, .. } => return format!("{name} was blown up by {kind}"),
+            _ => {}
+        }
         let description = match self {
             Self::Fall => "fell from a high place",
             Self::Starvation => "starved to death",
@@ -186,6 +245,9 @@ impl DeathCause {
             Self::Fire => "went up in flames",
             Self::Burning => "burned to death",
             Self::CombatOrExplosion => "was killed in combat or an explosion",
+            Self::Mob { .. } | Self::Projectile { .. } | Self::Explosion { .. } => "died",
+            Self::WitherEffect => "withered away",
+            Self::Mixed => "was killed by several sources",
             Self::MixedHazards => "died from multiple environmental hazards",
             Self::DispenserArrow => "was shot by a dispenser",
             Self::EnderPearl => "died after using an ender pearl",
@@ -239,6 +301,9 @@ impl DeathRecord<'_> {
             "timestamp_ms": timestamp_ms,
             "player": self.player,
             "cause": self.cause().code(),
+            "source_type": self.cause().source_type(),
+            "source_entity_id": self.cause().source_entity_id(),
+            "projectile_type": self.cause().projectile_type(),
             "death_message": self.chat_message(),
             "dimension": self.dimension,
             "position": {
@@ -336,9 +401,12 @@ impl DeathRecord<'_> {
             |hit| format!("{:.1}", hit.applied_damage),
         );
         format!(
-            "[death] player={} cause={} dimension={} x={:.2} y={:.2} z={:.2} health_before={} applied_damage={} tick={} message={:?}",
+            "[death] player={} cause={} source_type={:?} source_entity_id={:?} projectile_type={:?} dimension={} x={:.2} y={:.2} z={:.2} health_before={} applied_damage={} tick={} message={:?}",
             self.player.escape_debug(),
             self.cause().code(),
+            self.cause().source_type(),
+            self.cause().source_entity_id(),
+            self.cause().projectile_type(),
             self.dimension,
             self.position.x,
             self.position.y,
@@ -633,6 +701,41 @@ mod tests {
         fs::create_dir_all(&path).unwrap();
         assert!(sample_record().append(&world).is_err());
         fs::remove_dir(&path).unwrap();
+    }
+
+    #[test]
+    fn verified_attacker_stays_consistent_across_chat_and_json() {
+        let death = DeathRecord {
+            player: "Alex",
+            hit: Some(FatalHit {
+                cause: DeathCause::Mob {
+                    kind: "Zombie",
+                    entity_id: 500_002,
+                },
+                previous_health: 2.0,
+                applied_damage: 2.0,
+            }),
+            position: PlayerPosition::default(),
+            dimension: 0,
+            tick: 123,
+        };
+        assert_eq!(death.chat_message(), "Alex was slain by Zombie");
+        assert_eq!(death.json(0)["source_type"], "Zombie");
+        assert_eq!(death.json(0)["source_entity_id"], 500_002);
+        assert_eq!(death.json(0)["death_message"], death.chat_message());
+        assert!(death.console_summary().contains("source_entity_id=Some(500002)"));
+        assert_eq!(death.json(0)["projectile_type"], Value::Null);
+        let arrow = DeathCause::Projectile {
+            kind: "Arrow",
+            shooter_kind: Some("Skeleton"),
+            shooter_id: Some(901),
+        };
+        assert_eq!(arrow.projectile_type(), Some("Arrow"));
+        assert_eq!(arrow.source_type(), Some("Skeleton"));
+        assert_eq!(arrow.source_entity_id(), Some(901));
+        assert_eq!(DeathCause::Mixed.source_entity_id(), None);
+        assert_eq!(DeathCause::Mixed.code(), "mixed_damage");
+        assert_eq!(DeathCause::MixedHazards.code(), "mixed_environmental");
     }
 
     #[test]
