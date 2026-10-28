@@ -305,6 +305,15 @@ impl GroundItems {
         &self,
         drops: &[crate::world::WorldDrop],
     ) -> io::Result<Option<(usize, Self, Vec<GroundItem>)>> {
+        // Reject corrupt queued entries even if ground storage is full.
+        // Otherwise an invalid world item could masquerade as ordinary
+        // backpressure and remain hidden until a later unrelated pickup.
+        for drop in drops {
+            if !drop.stack.is_valid() {
+                return Err(invalid("invalid queued world drop stack"));
+            }
+            drop_position(drop.pos)?;
+        }
         let mut count = drops.len().min(self.remaining_capacity());
         while count > 0 {
             match self.stage_put_world_drops(&drops[..count]) {
@@ -802,6 +811,10 @@ mod tests {
             stack,
         };
         assert!(empty.stage_world_drops_that_fit(&[bad_position]).is_err());
+        // The same invalid inputs must not be masked as "full" even when
+        // the already persisted ground-item pool has no free entity IDs.
+        assert!(full.stage_world_drops_that_fit(&[bad_stack]).is_err());
+        assert!(full.stage_world_drops_that_fit(&[bad_position]).is_err());
     }
 
     #[test]
