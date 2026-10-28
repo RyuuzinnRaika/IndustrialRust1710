@@ -1237,13 +1237,15 @@ fn use_special_item(
     *w = staged_world;
     Ok(Some(changed))
 }
-/// Persist up to 32 post-world-save drops with one ground-item snapshot,
-/// then remove only those exact entries from the in-memory world backlog.
-/// A full 512-item pool and all I/O errors leave pending drops untouched.
+/// Atomically publish up to 32 durable world-drop acknowledgements and
+/// ground-item entities. A crash at any journal phase replays *both* files
+/// before loading the world or allowing players to join, so a drop can
+/// neither vanish nor duplicate between these two persistent registries.
 fn flush_pending_world_drops(
     world: &mut World,
     ground: &mut GroundItems,
-    path: &Path,
+    world_path: &Path,
+    ground_path: &Path,
 ) -> io::Result<Vec<ground_items::GroundItem>> {
     let count = world
         .queued_drops()
@@ -1253,9 +1255,18 @@ fn flush_pending_world_drops(
     if count == 0 {
         return Ok(Vec::new());
     }
-    let staged = ground.stage_put_world_drops(&world.queued_drops()[..count])?;
-    let spawned = ground.commit_staged_put(path, staged)?;
-    world.acknowledge_drops(count);
+    let (staged_ground, spawned) =
+        ground.stage_put_world_drops(&world.queued_drops()[..count])?;
+    let staged_world = world.staged_drop_acknowledgement(count)?;
+    journal::commit(
+        &world_path.with_extension("pending-txn.json"),
+        &[
+            (world_path, staged_world.encoded()?),
+            (ground_path, staged_ground.encoded()?),
+        ],
+    )?;
+    *ground = staged_ground;
+    *world = staged_world;
     Ok(spawned)
 }
 
@@ -9344,6 +9355,7 @@ fn main() -> io::Result<()> {
                                 match flush_pending_world_drops(
                                     &mut gravity_world,
                                     &mut ground,
+                                    &furnace_world_path,
                                     &leaf_drops_file,
                                 ) {
                                     Ok(spawned) => {
@@ -9354,9 +9366,12 @@ fn main() -> io::Result<()> {
                                         }
                                     }
                                     Err(error) => {
-                                        // Retained in the world queue: a later
-                                        // tick can retry after an I/O failure.
-                                        eprintln!("LEAF DROP STORAGE RETRY: {error}");
+                                        // An incomplete redo journal must
+                                        // complete during startup recovery.
+                                        // Stop world writes instead of
+                                        // advancing with mismatched files.
+                                        eprintln!("LEAF DROP JOURNAL ERROR: {error}");
+                                        return;
                                     }
                                 }
                             }
