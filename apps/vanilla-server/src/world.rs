@@ -3251,6 +3251,31 @@ mod tests {
     }
 
     #[test]
+    fn over_capacity_support_breaks_roll_back_every_block_and_drop() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-overflow-support-drop-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        for x in 0..=MAX_PENDING_DROPS as i32 {
+            world.import_block(x, 80, 0, (50 << 4) | 1).unwrap();
+        }
+        world.save(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+        let result = world.block_tick(&path, MAX_PENDING_DROPS + 16);
+        assert!(result.is_err(), "oversized drop events must fail before commit");
+        assert_eq!(world.queued_drops().len(), 0);
+        assert_eq!(world.get(0, 80, 0), (50 << 4) | 1);
+        assert_eq!(
+            world.get(MAX_PENDING_DROPS as i32, 80, 0),
+            (50 << 4) | 1
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn high_volume_support_breaks_do_not_silently_truncate_world_drops() {
         let path = std::env::temp_dir().join(format!(
             "ir1710-oversized-support-drop-{}.irw",
