@@ -1011,7 +1011,14 @@ impl World {
             if !in_bounds(x, candidate_y, z) {
                 continue;
             }
-            if matches!(self.get(x, candidate_y, z) >> 4, 12 | 13 | 145) {
+            let block_id = self.get(x, candidate_y, z) >> 4;
+            if block_id != 145 {
+                // Mining, explosions and pistons can remove/replace an
+                // in-flight anvil. Its origin may never migrate to another
+                // block or prevent a later save from succeeding.
+                self.falling_anvils.remove(&(x, candidate_y as u8, z));
+            }
+            if matches!(block_id, 12 | 13 | 145) {
                 self.pending_gravity.insert((x, candidate_y as u8, z));
             }
         }
