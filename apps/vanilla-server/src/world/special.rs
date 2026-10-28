@@ -1643,11 +1643,23 @@ mod tests {
         assert!(!changed.is_empty());
         let mut batch = w.bonemeal_changes(0, 64, 0);
         assert_eq!(batch.get(&(0, 64, 0)), Some(&((17 << 4) | 2)));
-        assert_eq!(batch.get(&(1, 68, 0)), Some(&((18 << 4) | 2)));
+        assert!(
+            batch.values().any(|&block| block == ((18 << 4) | 2)),
+            "birch saplings must grow birch leaves"
+        );
         w.import_block(5, 64, 0, (6 << 4) | 4).unwrap();
         batch = w.bonemeal_changes(5, 64, 0);
         assert_eq!(batch.get(&(5, 64, 0)), Some(&(162 << 4)));
-        assert_eq!(batch.get(&(6, 68, 0)), Some(&(161 << 4)));
+        assert!(
+            batch.values().any(|&block| block == (161 << 4)),
+            "acacia saplings must grow acacia leaves"
+        );
+        assert!(
+            batch.iter().any(|(&(x, _, z), &block)| {
+                block >> 4 == 162 && (x, z) != (5, 0)
+            }),
+            "acacia should have a sideways-bending trunk"
+        );
         w.import_block(10, 64, 0, (6 << 4) | 5).unwrap();
         assert!(w.bonemeal_changes(10, 64, 0).is_empty());
         let (_, changed, _, _) = w.stage_special_item(10, 64, 0, meal).unwrap().unwrap();
@@ -1655,6 +1667,43 @@ mod tests {
             changed.is_empty(),
             "unsupported dark oak cannot debit bone meal"
         );
+    }
+
+    #[test]
+    fn bone_meal_grows_two_by_two_jungle_and_spruce_without_partial_saplings() {
+        let meal = Stack {
+            id: 351,
+            count: 1,
+            damage: 15,
+            nbt: None,
+        };
+        for species in [1u16, 3] {
+            let mut world = World::new();
+            for x in 0..2 {
+                for z in 0..2 {
+                    world.import_block(x, 64, z, (6 << 4) | species).unwrap();
+                }
+            }
+            let (_, changed, _, _) = world
+                .stage_special_item(1, 64, 1, meal)
+                .unwrap()
+                .expect("bone meal is a valid interaction");
+            assert!(
+                changed.len() > 128,
+                "the 2x2 giant must exceed the ordinary special-item cap"
+            );
+            let staged = world.bonemeal_changes(1, 64, 1);
+            assert!(staged.len() <= 2048);
+            for x in 0..2 {
+                for z in 0..2 {
+                    assert_eq!(
+                        staged.get(&(x, 70, z)).map(|b| b >> 4),
+                        Some(17),
+                        "four tall spruce/jungle trunk columns"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
