@@ -28,6 +28,10 @@ const MAX_WEATHER_COLUMNS: usize = 16_384;
 // If persistent ground-item storage fills, postpone natural leaf decay
 // before its ephemeral drop queue can grow without bound.
 pub(super) const LEAF_DROP_BACKPRESSURE: usize = 1_536;
+// Serialized world-drop backlog is bounded independently of the sparse
+// edits, including in the event of failed ground-item persistence.
+const MAX_PENDING_DROPS: usize = 2_048;
+const WORLD_DROP_STRIDE: usize = 14;
 // Observe naturally generated vines only in client-visible chunks.
 // Evict stale observations without unregistering player-edited plants.
 const MAX_OBSERVED_VINES: usize = 8_192;
@@ -367,6 +371,18 @@ impl World {
         // Drop the Drain explicitly so clippy/rustc never see an unused
         // must-use iterator, and the queued prefix is removed at once.
         drop(self.pending_drops.drain(..committed));
+    }
+
+    /// Detached snapshot for the existing world + ground-item redo journal.
+    /// Never remove pending drops from the live queue before the journal
+    /// has durably written BOTH the IRW snapshot and ground item entities.
+    pub fn staged_drop_acknowledgement(&self, count: usize) -> io::Result<Self> {
+        if count > self.pending_drops.len() {
+            return Err(invalid("acknowledgement exceeds pending world drops"));
+        }
+        let mut staged = self.clone();
+        staged.acknowledge_drops(count);
+        Ok(staged)
     }
 
     /// Construct a post-world-save drop to verify batch/acknowledgement
@@ -2596,18 +2612,19 @@ impl World {
                 || (&trailer[..4] != b"TNT1"
                     && &trailer[..4] != b"TNT2"
                     && &trailer[..4] != b"TNT3"
-                    && &trailer[..4] != b"TNT4")
+                    && &trailer[..4] != b"TNT4"
+                    && &trailer[..4] != b"TNT5")
             {
                 return Err(invalid("unrecognized world entity trailer"));
             }
             let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
-            let moving = &trailer[..4] == b"TNT4";
+            let moving = matches!(&trailer[..4], b"TNT4" | b"TNT5");
             let entity_stride = if moving { 44 } else { 20 };
             let primed_end = 6 + primed_count * entity_stride;
             if primed_count > MAX_PRIMED_TNT || trailer.len() < primed_end {
                 return Err(invalid("invalid primed TNT trailer length"));
             }
-            if &trailer[..4] == b"TNT2" || &trailer[..4] == b"TNT3" || &trailer[..4] == b"TNT4" {
+            if matches!(&trailer[..4], b"TNT2" | b"TNT3" | b"TNT4" | b"TNT5") {
                 let queued = &trailer[primed_end..];
                 if queued.len() < 4 {
                     return Err(invalid("truncated queued TNT trailer"));
@@ -2628,16 +2645,22 @@ impl World {
                         return Err(invalid("invalid or duplicate queued TNT position"));
                     }
                 }
-                if &trailer[..4] == b"TNT3" || &trailer[..4] == b"TNT4" {
+                if matches!(&trailer[..4], b"TNT3" | b"TNT4" | b"TNT5") {
                     let pending = &queued[chain_end..];
                     if pending.len() < 4 {
                         return Err(invalid("truncated blast backlog"));
                     }
                     let count = u32::from_be_bytes(pending[..4].try_into().unwrap()) as usize;
-                    if count > MAX_PENDING_BLAST || pending.len() != 4 + count * 11 {
+                    if count > MAX_PENDING_BLAST {
+                        return Err(invalid("invalid blast backlog count"));
+                    }
+                    let blast_end = 4 + count * 11;
+                    if pending.len() < blast_end
+                        || (&trailer[..4] != b"TNT5" && pending.len() != blast_end)
+                    {
                         return Err(invalid("invalid blast backlog length"));
                     }
-                    for item in pending[4..].as_chunks::<11>().0 {
+                    for item in pending[4..blast_end].as_chunks::<11>().0 {
                         let x = i32::from_be_bytes(item[..4].try_into().unwrap());
                         let y = item[4];
                         let z = i32::from_be_bytes(item[5..9].try_into().unwrap());
@@ -2651,6 +2674,40 @@ impl World {
                                 .is_some()
                         {
                             return Err(invalid("invalid deferred explosion"));
+                        }
+                    }
+                    if &trailer[..4] == b"TNT5" {
+                        // TNT5 extends TNT4 with a bounded, durable FIFO of
+                        // already committed world-drop events. IRW1..IRW4
+                        // world identity and all earlier trailers still load.
+                        let backlog = &pending[blast_end..];
+                        if backlog.len() < 4 {
+                            return Err(invalid("truncated world-drop backlog"));
+                        }
+                        let count =
+                            u32::from_be_bytes(backlog[..4].try_into().unwrap()) as usize;
+                        if count > MAX_PENDING_DROPS
+                            || backlog.len() != 4 + count * WORLD_DROP_STRIDE
+                        {
+                            return Err(invalid("invalid world-drop backlog length"));
+                        }
+                        for entry in backlog[4..].chunks_exact(WORLD_DROP_STRIDE) {
+                            let x = i32::from_be_bytes(entry[..4].try_into().unwrap());
+                            let y = i32::from(entry[4]);
+                            let z = i32::from_be_bytes(entry[5..9].try_into().unwrap());
+                            let stack = crate::inventory::Stack {
+                                id: i16::from_be_bytes(entry[9..11].try_into().unwrap()),
+                                count: entry[11],
+                                damage: i16::from_be_bytes(entry[12..14].try_into().unwrap()),
+                                nbt: None,
+                            };
+                            if !in_bounds(x, y, z) || !stack.is_valid() {
+                                return Err(invalid("invalid persisted world drop"));
+                            }
+                            world.pending_drops.push(WorldDrop {
+                                pos: (x, y, z),
+                                stack,
+                            });
                         }
                     }
                 }
@@ -2811,14 +2868,18 @@ impl World {
         if !self.primed_tnt.is_empty()
             || !self.pending_chain_tnt.is_empty()
             || !self.pending_blast_edits.is_empty()
+            || !self.pending_drops.is_empty()
         {
             if self.primed_tnt.len() > MAX_PRIMED_TNT
                 || self.pending_chain_tnt.len() > MAX_PENDING_TNT
                 || self.pending_blast_edits.len() > MAX_PENDING_BLAST
+                || self.pending_drops.len() > MAX_PENDING_DROPS
             {
                 return Err(invalid("TNT entity or pending queue capacity exceeded"));
             }
-            f.write_all(if !self.primed_tnt.is_empty() {
+            f.write_all(if !self.pending_drops.is_empty() {
+                b"TNT5"
+            } else if !self.primed_tnt.is_empty() {
                 b"TNT4"
             } else if !self.pending_blast_edits.is_empty() {
                 b"TNT3"
@@ -2850,6 +2911,7 @@ impl World {
             if !self.pending_chain_tnt.is_empty()
                 || !self.pending_blast_edits.is_empty()
                 || !self.primed_tnt.is_empty()
+                || !self.pending_drops.is_empty()
             {
                 f.write_all(&(self.pending_chain_tnt.len() as u32).to_be_bytes())?;
                 for &(x, y, z) in &self.pending_chain_tnt {
@@ -2858,13 +2920,34 @@ impl World {
                     f.write_all(&z.to_be_bytes())?;
                 }
             }
-            if !self.pending_blast_edits.is_empty() || !self.primed_tnt.is_empty() {
+            if !self.pending_blast_edits.is_empty()
+                || !self.primed_tnt.is_empty()
+                || !self.pending_drops.is_empty()
+            {
                 f.write_all(&(self.pending_blast_edits.len() as u32).to_be_bytes())?;
                 for (&(x, y, z), &expected) in &self.pending_blast_edits {
                     f.write_all(&x.to_be_bytes())?;
                     f.write_all(&[y])?;
                     f.write_all(&z.to_be_bytes())?;
                     f.write_all(&expected.to_be_bytes())?;
+                }
+            }
+            if !self.pending_drops.is_empty() {
+                f.write_all(&(self.pending_drops.len() as u32).to_be_bytes())?;
+                for drop in &self.pending_drops {
+                    let stack = drop.stack;
+                    if !in_bounds(drop.pos.0, drop.pos.1, drop.pos.2)
+                        || !stack.is_valid()
+                        || stack.nbt.is_some()
+                    {
+                        return Err(invalid("invalid world-drop backlog item"));
+                    }
+                    f.write_all(&drop.pos.0.to_be_bytes())?;
+                    f.write_all(&[drop.pos.1 as u8])?;
+                    f.write_all(&drop.pos.2.to_be_bytes())?;
+                    f.write_all(&stack.id.to_be_bytes())?;
+                    f.write_all(&[stack.count])?;
+                    f.write_all(&stack.damage.to_be_bytes())?;
                 }
             }
         }
