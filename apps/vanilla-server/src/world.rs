@@ -3591,6 +3591,110 @@ mod tests {
     }
 
     #[test]
+    fn journaled_container_mining_preserves_all_slots_and_clears_saved_tile_state() {
+        use crate::chests::{Chests, CHEST_SLOTS};
+        use crate::furnaces::{Furnace, Furnaces, FURNACE_SLOTS};
+        use crate::ground_items::GroundItems;
+        use crate::hoppers::{Hoppers, HOPPER_SLOTS};
+        use crate::inventory::Stack;
+
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-container-mining-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for id in [54_u16, 61, 154] {
+            let world_file = root.join(format!("container-{id}.irw"));
+            let drop_file = GroundItems::location(&world_file);
+            let journal_file = world_file.with_extension("pending-txn.json");
+            let source = Stack {
+                id: 264,
+                count: 17,
+                damage: 0,
+                nbt: None,
+            };
+            let mut original_world = World::new();
+            original_world.import_block(0, 64, 0, id << 4).unwrap();
+            let staged_world = original_world
+                .stage_mining_removal(0, 64, 0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(original_world.get(0, 64, 0) >> 4, id);
+            let ground = GroundItems::default();
+            let block_drop = Stack {
+                id: if id == 61 { 61 } else { id as i16 },
+                count: 1,
+                damage: 0,
+                nbt: None,
+            };
+            let (next_ground, entities) = ground
+                .stage_put_many(&[block_drop, source], (0, 64, 0))
+                .unwrap();
+            assert_eq!(entities.len(), 2);
+            let (storage_file, storage_bytes) = match id {
+                54 => {
+                    let mut slots = [None; CHEST_SLOTS];
+                    slots[4] = Some(source);
+                    let storage = Chests::default()
+                        .staged_update((0, 64, 0), slots)
+                        .unwrap();
+                    let staged = storage
+                        .staged_update((0, 64, 0), [None; CHEST_SLOTS])
+                        .unwrap();
+                    (Chests::location(&world_file), staged.encoded().unwrap())
+                }
+                61 => {
+                    let mut furnace = Furnace::default();
+                    furnace.slots[1] = Some(source);
+                    let storage = Furnaces::default()
+                        .staged_update((0, 64, 0), furnace)
+                        .unwrap();
+                    let staged = storage
+                        .staged_update((0, 64, 0), Furnace::default())
+                        .unwrap();
+                    assert_eq!(furnace.slots.len(), FURNACE_SLOTS);
+                    (Furnaces::location(&world_file), staged.encoded().unwrap())
+                }
+                _ => {
+                    let mut slots = [None; HOPPER_SLOTS];
+                    slots[4] = Some(source);
+                    let storage = Hoppers::default()
+                        .staged_update((0, 64, 0), slots)
+                        .unwrap();
+                    let staged = storage.staged_remove((0, 64, 0)).unwrap();
+                    (Hoppers::location(&world_file), staged.encoded().unwrap())
+                }
+            };
+            crate::journal::commit(
+                &journal_file,
+                &[
+                    (world_file.as_path(), staged_world.encoded().unwrap()),
+                    (storage_file.as_path(), storage_bytes),
+                    (drop_file.as_path(), next_ground.encoded().unwrap()),
+                ],
+            )
+            .unwrap();
+            assert_eq!(World::load(&world_file).unwrap().get(0, 64, 0), 0);
+            match id {
+                54 => assert!(!Chests::load(&storage_file).unwrap().is_nonempty((0, 64, 0))),
+                61 => assert!(!Furnaces::load(&storage_file).unwrap().get((0, 64, 0)).occupied()),
+                _ => assert!(!Hoppers::load(&storage_file).unwrap().has_contents((0, 64, 0))),
+            };
+            let actual: Vec<_> = GroundItems::load(&drop_file)
+                .unwrap()
+                .items()
+                .map(|item| item.stack)
+                .collect();
+            assert_eq!(actual, vec![block_drop, source]);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn staged_mining_removal_keeps_original_unchanged_until_publish() {
         let world = World::new();
         let original = world.get(0, 63, 0);
