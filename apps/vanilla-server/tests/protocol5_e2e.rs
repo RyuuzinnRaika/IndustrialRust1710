@@ -1678,17 +1678,20 @@ fn creative_can_break_flat_bedrock_at_y60_with_one_start_packet() {
 
 #[test]
 fn survival_container_break_uses_durable_world_and_ground_drop() {
-    // Exercise the actual C08/C07 packet path, not only the storage staging
-    // helpers. An initially empty container still needs the same atomic path
-    // as a nonempty one and its block item must not vanish.
+    // The empty-container path must journal its block drop as well.
+    // Brewing stand item 379 is placed as block 117 (1.7.10).
     for (block, tool, expected_drop) in [
         (54_i16, 286_i16, 54_i16), // chest, gold axe
         (61, 285, 61),             // furnace, gold pickaxe
         (154, 285, 154),           // hopper, gold pickaxe
+        (23, 285, 23),             // dispenser
+        (158, 285, 158),           // dropper
+        (379, 285, 379),           // brewing stand item -> block 117
     ] {
         eprintln!("survival container mining scenario: block={block}, tool={tool}");
         let server = NativeServer::start_with_mode_and_items(true, &[(36, block), (37, tool)]);
         let (mut client, _, _) = server.join("RustTester");
+        let placed_block = if block == 379 { 117 } else { block };
         let mut place = 0i32.to_be_bytes().to_vec();
         place.push(63);
         place.extend_from_slice(&0i32.to_be_bytes());
@@ -1700,7 +1703,7 @@ fn survival_container_break_uses_durable_world_and_ground_drop() {
         place.extend_from_slice(&[8, 8, 8]);
         client.write_all(&frame(8, &place)).unwrap();
         until_packet(&mut client, 0x23, |p| {
-            p.len() == 11 && p[4] == 64 && i16::from(p[9]) == block
+            p.len() == 11 && p[4] == 64 && i16::from(p[9]) == placed_block
         });
         client.write_all(&frame(9, &1i16.to_be_bytes())).unwrap();
         // Mine within reach but away from the automatic item pickup radius.
