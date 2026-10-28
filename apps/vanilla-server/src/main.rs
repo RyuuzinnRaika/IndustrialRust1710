@@ -2622,9 +2622,31 @@ fn play(
         if survival && vitals.health <= 0.0 {
             eating = None;
             let newly_dead = !death_recorded;
+            let death_record = if newly_dead {
+                Some(DeathRecord {
+                    player: name,
+                    hit: fatal_hit.take(),
+                    position: *player,
+                    dimension: session_dimension.protocol_id() as i32,
+                    tick: now_tick,
+                })
+            } else {
+                None
+            };
+            // Audit the fatal event before either scoreboard saving or the
+            // item-drop redo transaction can fail and close the session.
+            if let Some(record) = death_record.as_ref() {
+                let event_id = format!("d2-{:032x}", rand::random::<u128>());
+                println!("{} event_id={event_id}", record.console_summary());
+                if let Err(error) = record.append_with_event_id(world_path, &event_id) {
+                    // Diagnostic I/O is deliberately nonfatal for gameplay.
+                    eprintln!("DEATH LOG WRITE ERROR event_id={event_id}: {error}");
+                }
+            }
             if newly_dead {
-                // A death is counted exactly once in this session and the
-                // updated shared scoreboard is durable before client notify.
+                // A death is counted exactly once in this session. Save the
+                // scoreboard before broadcasting its new values or death chat.
+                // A crash-safe multi-file transaction remains future work.
                 let changes = {
                     let mut board = scoreboard
                         .lock()
@@ -2646,26 +2668,8 @@ fn play(
                     .map_err(|_| bad("game rules mutex poisoned"))?;
                 (rules.keep_inventory(), rules.show_death_messages())
             };
-            // Log before drop I/O. A failed inventory/journal commit must
-            // not erase the only available account of the fatal hit.
-            if newly_dead {
-                let record = DeathRecord {
-                    player: name,
-                    hit: fatal_hit.take(),
-                    position: *player,
-                    dimension: session_dimension.protocol_id() as i32,
-                    tick: now_tick,
-                };
-                // A server-generated ID correlates the console line with
-                // the durable JSONL event. Reuse it for any in-session retry.
-                // It is not yet a persisted transaction ID for other files.
-                let event_id = format!("d2-{:032x}", rand::random::<u128>());
-                println!("{} event_id={event_id}", record.console_summary());
-                if let Err(error) = record.append_with_event_id(world_path, &event_id) {
-                    // Optional diagnostic output must not block drops or respawn.
-                    eprintln!("DEATH LOG WRITE ERROR event_id={event_id}: {error}");
-                }
-                if show_death_messages {
+            if show_death_messages {
+                if let Some(record) = death_record.as_ref() {
                     hub.broadcast(chat_event(&record.chat_message())?);
                 }
             }
