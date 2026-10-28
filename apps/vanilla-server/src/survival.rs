@@ -99,14 +99,14 @@ fn rule(block: u16) -> Option<BlockRule> {
         // Tall grass / ferns are removed with no guaranteed block item:
         // optional wheat seeds are decided in additional_drop().
         31 | 32 | 175 => (0.0, None, 0, false, None), // grass, dead bush, tall plants
-        37 => (0.0, None, 0, false, item(37, 0)), // dandelion
+        37 => (0.0, None, 0, false, item(37, 0)),     // dandelion
         38 => (0.0, None, 0, false, item(38, damage)), // flower variants
         39 | 40 => (0.0, None, 0, false, item(id as i16, 0)),
         81 => (0.4, None, 0, false, item(81, 0)),  // cactus
         83 => (0.0, None, 0, false, item(338, 0)), // sugar cane item
         86 | 91 => (1.0, Some(ToolKind::Axe), 0, false, item(id as i16, 0)),
         111 => (0.0, None, 0, false, item(111, 0)), // lily pad
-        106 => (0.2, None, 0, false, None), // vines: shears-only drop
+        106 => (0.2, None, 0, false, None),         // vines: shears-only drop
         78 => (0.1, Some(ToolKind::Shovel), 0, false, None), // snow layer
         79 => (0.5, Some(ToolKind::Pickaxe), 0, false, None), // ice melts
         110 => (0.6, Some(ToolKind::Shovel), 0, false, item(3, 0)), // mycelium
@@ -198,11 +198,17 @@ fn rule(block: u16) -> Option<BlockRule> {
         84 => (2.0, Some(ToolKind::Axe), 0, false, item(84, 0)), // jukebox
         116 => (5.0, Some(ToolKind::Pickaxe), 0, false, item(116, 0)),
         117 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(379, 0)), // brewing stand
-        140 => (0.0, None, 0, false, item(390, 0)), // flower pot
-        145 => (5.0, Some(ToolKind::Pickaxe), 1, true, item(145, damage >> 2)),
+        140 => (0.0, None, 0, false, item(390, 0)),                    // flower pot
+        145 => (
+            5.0,
+            Some(ToolKind::Pickaxe),
+            1,
+            true,
+            item(145, damage >> 2),
+        ),
         95 | 160 => (0.3, None, 0, false, None), // stained glass/panes
         101 => (5.0, Some(ToolKind::Pickaxe), 0, true, item(101, 0)), // iron bars
-        102 => (0.3, None, 0, false, None), // glass pane
+        102 => (0.3, None, 0, false, None),      // glass pane
         112 | 113 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(id as i16, 0)),
         121 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(121, 0)), // end stone
         123 | 124 => (0.3, Some(ToolKind::Pickaxe), 0, false, item(123, 0)),
@@ -244,7 +250,7 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
         47 => (340, 3), // Bookshelf always drops three books.
         18 if block & 3 == 0 && roll.is_multiple_of(200) => (260, 1), // Oak apple
         161 if block & 3 == 1 && roll.is_multiple_of(200) => (260, 1), // Dark oak apple
-        18 | 161 if roll.is_multiple_of(20) => (6, 1),                // Matching sapling
+        18 | 161 if roll.is_multiple_of(20) => (6, 1), // Matching sapling
         59 if block & 7 == 7 => (295, 1 + (roll % 3) as u8),
         141 if block & 7 == 7 => (391, 1 + (roll % 3) as u8),
         142 if block & 7 == 7 => (392, 1 + (roll % 3) as u8),
@@ -374,7 +380,10 @@ impl MiningProgress {
         // Dig progress is reported in client ticks but start/finish packets
         // are processed on separate server polls. Allow one 20TPS tick of
         // quantization slack, not an arbitrary fast-mine bypass.
-        (self.started.elapsed().saturating_add(Duration::from_millis(50))
+        (self
+            .started
+            .elapsed()
+            .saturating_add(Duration::from_millis(50))
             >= minimum.saturating_mul(penalty))
         .then_some(result)
     }
@@ -738,7 +747,10 @@ mod tests {
             let (minimum, _) = mine_rule(block, None).unwrap();
             assert!(minimum.is_zero(), "instant block {id} requires a delay");
             let progress = MiningProgress::start(at, block, None).unwrap();
-            assert!(progress.finish(at, block, None).is_some(), "instant block {id}");
+            assert!(
+                progress.finish(at, block, None).is_some(),
+                "instant block {id}"
+            );
         }
     }
 
@@ -755,7 +767,10 @@ mod tests {
             let (_, result) = mine_rule(id << 4, None).unwrap();
             assert_eq!(result.drop.map(|drop| drop.id), expected, "block {id}");
         }
-        assert!(mine_rule(7 << 4, None).is_none(), "bedrock must remain unbreakable");
+        assert!(
+            mine_rule(7 << 4, None).is_none(),
+            "bedrock must remain unbreakable"
+        );
     }
 
     #[test]
@@ -767,12 +782,23 @@ mod tests {
             assert!(started.finish(at, id << 4, None).is_some());
         }
         let dirt = MiningProgress::start(at, 3 << 4, None).unwrap();
-        assert!(!dirt.is_instant(), "normal dirt must still require a Finish");
-        for id in [19_u16, 22, 23, 29, 33, 47, 95, 101, 112, 121, 123, 133,
-                   139, 146, 147, 152, 154, 156, 157, 160, 171, 174] {
-            assert!(mine_rule(id << 4, None).is_some(), "missing breakable 1.7.10 block {id}");
+        assert!(
+            !dirt.is_instant(),
+            "normal dirt must still require a Finish"
+        );
+        for id in [
+            19_u16, 22, 23, 29, 33, 47, 95, 101, 112, 121, 123, 133, 139, 146, 147, 152, 154, 156,
+            157, 160, 171, 174,
+        ] {
+            assert!(
+                mine_rule(id << 4, None).is_some(),
+                "missing breakable 1.7.10 block {id}"
+            );
         }
-        assert_eq!(additional_drop(47 << 4, at, 42).map(|s| (s.id, s.count)), Some((340, 3)));
+        assert_eq!(
+            additional_drop(47 << 4, at, 42).map(|s| (s.id, s.count)),
+            Some((340, 3))
+        );
         for id in [0_u16, 7, 8, 9, 10, 11, 90, 119, 120, 137, 166] {
             assert!(mine_rule(id << 4, None).is_none(), "protected block {id}");
         }
