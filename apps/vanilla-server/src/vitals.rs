@@ -150,7 +150,8 @@ impl Vitals {
         }
     }
 
-    /// Walking movement, retained for callers that do not track sprint state.
+    /// Ordinary walking does not cause exhaustion in Java Edition 1.7.10.
+    /// Retained for callers that do not track sprint state.
     pub fn travel(&mut self, horizontal_blocks: f64) -> bool {
         self.travel_with_sprint(horizontal_blocks, false)
     }
@@ -161,8 +162,10 @@ impl Vitals {
         if self.health <= 0.0 || !horizontal_blocks.is_finite() || horizontal_blocks <= 0.0 {
             return false;
         }
-        let per_block = if sprinting { 0.1 } else { 0.01 };
-        self.add_exhaustion(horizontal_blocks.min(64.0) as f32 * per_block)
+        if !sprinting {
+            return false;
+        }
+        self.add_exhaustion(horizontal_blocks.min(64.0) as f32 * 0.1)
     }
 
     /// Test-only shortcut for Normal difficulty; gameplay loads live difficulty.
@@ -282,7 +285,8 @@ mod tests {
     fn sprinting_drains_saturation_faster_without_creating_negative_food() {
         let mut walking = Vitals::default();
         let mut sprinting = Vitals::default();
-        assert!(walking.travel(40.0));
+        assert!(!walking.travel(40.0));
+        assert_eq!(walking.exhaustion, 0.0);
         assert!(sprinting.travel_with_sprint(40.0, true));
         assert_eq!(walking.saturation, 5.0);
         assert_eq!(sprinting.saturation, 4.0);
@@ -423,19 +427,21 @@ mod tests {
         assert!(!v.eat(food(1))); // not food
     }
     #[test]
-    fn travel_drains_saturation_then_food_and_ticking_heals() {
+    fn walking_preserves_hunger_while_sprinting_drains_it_and_ticking_heals() {
         let mut v = Vitals {
             health: 15.0,
             food: 20,
             saturation: 1.0,
             ..Vitals::default()
         };
-        for _ in 0..8 {
-            v.travel(64.0);
+        for _ in 0..80 {
+            assert!(!v.travel(64.0));
         }
         assert_eq!(v.food, 20);
+        assert_eq!(v.saturation, 1.0);
+        assert_eq!(v.exhaustion, 0.0);
         for _ in 0..7 {
-            v.travel(64.0);
+            assert!(v.travel_with_sprint(64.0, true));
         }
         assert!(v.food < 20);
         let mut healthy = Vitals {
@@ -448,6 +454,21 @@ mod tests {
         }
         assert_eq!(healthy.health, 16.0);
     }
+    #[test]
+    fn walking_with_low_food_does_not_cause_starvation() {
+        let mut v = Vitals {
+            food: 1,
+            saturation: 0.0,
+            ..Vitals::default()
+        };
+        for _ in 0..256 {
+            assert!(!v.travel_with_sprint(64.0, false));
+        }
+        assert_eq!(v.food, 1);
+        assert_eq!(v.exhaustion, 0.0);
+        assert!(v.valid());
+    }
+
     #[test]
     fn ender_pearl_damage_is_five_hp_and_cannot_underflow() {
         let mut v = Vitals::default();

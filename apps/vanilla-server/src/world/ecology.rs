@@ -4,9 +4,12 @@ use super::{in_bounds, Position, World};
 use std::collections::BTreeMap;
 
 fn solid(id: u16) -> bool {
-    !matches!(id, 0 | 6 | 8..=11 | 18 | 20 | 161 | 31 | 37..=40 | 50 | 55 | 59
-        | 63 | 66 | 69 | 70 | 72 | 75..=78 | 83 | 93 | 94 | 96
-        | 104 | 105 | 107 | 115 | 127 | 141 | 142 | 143 | 149 | 150)
+    !matches!(
+        id,
+        0 | 6 | 8..=11 | 18 | 20 | 27 | 28 | 31 | 37..=40 | 50 | 55 | 59 | 63 | 65 | 66
+            | 68 | 69 | 70 | 72 | 75..=78 | 83 | 93 | 94 | 96 | 104 | 105 | 107 | 115
+            | 127 | 140 | 141 | 142 | 143 | 149 | 150 | 157 | 161 | 171
+    )
 }
 fn chance(phase: u64, x: i32, y: i32, z: i32, divisor: u64) -> bool {
     let mut v = phase
@@ -59,7 +62,9 @@ impl World {
             6 | 31 | 37 | 38 => plantable(below),
             32 => matches!(below, 12 | 159 | 172), // dead bush on sand/terracotta
             25 | 63 | 84 | 92 | 140 => solid(below),
-            68 => {
+            65 | 68 => {
+                // Ladders and wall signs attach to the four horizontal
+                // faces using their legacy 1.7.10 direction metadata.
                 let neighbor = match block & 7 {
                     2 => self.get(x, y, z + 1) >> 4,
                     3 => self.get(x, y, z - 1) >> 4,
@@ -106,6 +111,9 @@ impl World {
                 };
                 solid(support)
             }
+            // Carpet was allowed on non-solid blocks in Java 1.7.10;
+            // it only falls when its supporting cell becomes air.
+            171 => below != 0,
             55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 | 132 | 147 | 148 | 149 | 150 | 151 => {
                 solid(below)
             }
@@ -320,6 +328,11 @@ impl World {
                     | 50
                     | 55
                     | 59
+                    | 27
+                    | 28
+                    | 157
+                    | 65
+                    | 171
                     | 81
                     | 83
                     | 104

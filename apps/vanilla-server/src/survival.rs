@@ -64,7 +64,7 @@ fn tool(stack: Option<Stack>) -> Option<Tool> {
         _ => return None,
     };
     // Damaged tool metadata must represent an existing, unbroken item.
-    if held.count != 1 || held.damage >= max_uses {
+    if held.count != 1 || held.damage < 0 || held.damage >= max_uses {
         return None;
     }
     Some(Tool {
@@ -98,21 +98,26 @@ fn rule(block: u16) -> Option<BlockRule> {
         // Common 1.7.10 wild plants must be breakable even without tools.
         // Tall grass / ferns are removed with no guaranteed block item:
         // optional wheat seeds are decided in additional_drop().
-        31 => (0.0, None, 0, false, None),
-        37 => (0.0, None, 0, false, item(37, 0)), // dandelion
+        31 | 32 | 175 => (0.0, None, 0, false, None), // grass, dead bush, tall plants
+        37 => (0.0, None, 0, false, item(37, 0)),     // dandelion
         38 => (0.0, None, 0, false, item(38, damage)), // flower variants
         39 | 40 => (0.0, None, 0, false, item(id as i16, 0)),
         81 => (0.4, None, 0, false, item(81, 0)),  // cactus
         83 => (0.0, None, 0, false, item(338, 0)), // sugar cane item
         86 | 91 => (1.0, Some(ToolKind::Axe), 0, false, item(id as i16, 0)),
         111 => (0.0, None, 0, false, item(111, 0)), // lily pad
+        106 => (0.2, None, 0, false, None),         // vines: shears-only drop
+        78 => (0.1, Some(ToolKind::Shovel), 0, false, None), // snow layer
+        79 => (0.5, Some(ToolKind::Pickaxe), 0, false, None), // ice melts
+        110 => (0.6, Some(ToolKind::Shovel), 0, false, item(3, 0)), // mycelium
         2 | 3 => (0.5, Some(ToolKind::Shovel), 0, false, item(3, 0)),
         12 => (0.5, Some(ToolKind::Shovel), 0, false, item(12, damage)),
         13 => (0.6, Some(ToolKind::Shovel), 0, false, item(13, 0)),
         80 => (0.2, Some(ToolKind::Shovel), 0, false, item(332, 0)),
         82 => (0.6, Some(ToolKind::Shovel), 0, false, item(337, 0)),
         1 => (1.5, Some(ToolKind::Pickaxe), 0, true, item(4, 0)),
-        4 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(4, 0)),
+        4 | 48 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(id as i16, 0)),
+        24 => (0.8, Some(ToolKind::Pickaxe), 0, true, item(24, damage)),
         14 => (3.0, Some(ToolKind::Pickaxe), 2, true, item(14, 0)),
         15 => (3.0, Some(ToolKind::Pickaxe), 1, true, item(15, 0)),
         16 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(263, 0)),
@@ -161,33 +166,86 @@ fn rule(block: u16) -> Option<BlockRule> {
         162 => (2.0, Some(ToolKind::Axe), 0, false, item(162, damage & 1)),
         // Standalone early-game building materials. Their orientation/top-half
         // bits belong to the placed block and must not leak into the drop.
-        53 | 134 | 135 | 136 | 163 | 164 => (
-            2.0,
-            Some(ToolKind::Axe),
-            0,
-            false,
-            item(id as i16, 0),
-        ), // oak/spruce/birch/jungle/acacia/dark oak stairs
+        53 | 134 | 135 | 136 | 163 | 164 => {
+            (2.0, Some(ToolKind::Axe), 0, false, item(id as i16, 0))
+        } // oak/spruce/birch/jungle/acacia/dark oak stairs
         67 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(67, 0)), // cobblestone stairs
-        65 => (0.4, Some(ToolKind::Axe), 0, false, item(65, 0)), // ladder
+        65 => (0.4, Some(ToolKind::Axe), 0, false, item(65, 0)),    // ladder
         85 | 107 => (2.0, Some(ToolKind::Axe), 0, false, item(id as i16, 0)), // fence/gate
-        96 => (3.0, Some(ToolKind::Axe), 0, false, item(96, 0)), // trapdoor
-        126 if damage & 7 <= 5 => (
-            2.0,
-            Some(ToolKind::Axe),
-            0,
-            false,
-            item(126, damage & 7),
-        ), // half wooden slab (species retained, upper-half flag stripped)
+        96 => (3.0, Some(ToolKind::Axe), 0, false, item(96, 0)),    // trapdoor
+        126 if damage & 7 <= 5 => (2.0, Some(ToolKind::Axe), 0, false, item(126, damage & 7)), // half wooden slab (species retained, upper-half flag stripped)
         44 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(44, damage & 7)),
         54 => (2.5, Some(ToolKind::Axe), 0, false, item(54, 0)),
         58 => (2.5, Some(ToolKind::Axe), 0, false, item(58, 0)),
+        25 => (0.8, Some(ToolKind::Axe), 0, false, item(25, 0)), // note block
         61 | 62 => (3.5, Some(ToolKind::Pickaxe), 0, true, item(61, 0)),
         20 => (0.3, None, 0, false, None), // glass: breaks but no drop
         35 => (0.8, None, 0, false, item(35, damage)),
-        87 => (0.4, Some(ToolKind::Pickaxe), 0, true, item(87, 0)),
+        87 => (0.4, Some(ToolKind::Pickaxe), 0, false, item(87, 0)),
+        88 => (0.5, Some(ToolKind::Shovel), 0, false, item(88, 0)),
+        153 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(153, 0)),
         89 => (0.3, None, 0, false, item(348, 0)),
         170 => (0.5, Some(ToolKind::Axe), 0, false, item(170, 0)),
+        // Previously absent 1.7.10 blocks were treated as unbreakable.
+        // Keep fluid/portal/bedrock exclusions below, and don't invent
+        // multi-item or Silk Touch drops when those mechanics are unavailable.
+        19 => (0.6, None, 0, false, item(19, 0)), // sponge
+        22 => (3.0, Some(ToolKind::Pickaxe), 1, true, item(22, 0)), // lapis block
+        23 | 158 => (3.5, Some(ToolKind::Pickaxe), 0, true, item(id as i16, 0)), // dispenser/dropper
+        29 | 33 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(id as i16, 0)), // pistons
+        46 => (0.0, None, 0, false, item(46, 0)), // TNT is instant-break
+        47 => (1.5, Some(ToolKind::Axe), 0, false, None), // bookshelf: 3 books from additional_drop
+        // A bed/door can be mined from either half; the upper/head half must
+        // not drop a second item when its companion is already absent.
+        26 => (
+            0.2,
+            None,
+            0,
+            false,
+            if damage & 8 == 0 { item(355, 0) } else { None },
+        ),
+        64 => (
+            3.0,
+            Some(ToolKind::Axe),
+            0,
+            false,
+            if damage & 8 == 0 { item(324, 0) } else { None },
+        ),
+        71 => (
+            5.0,
+            Some(ToolKind::Pickaxe),
+            0,
+            true,
+            if damage & 8 == 0 { item(330, 0) } else { None },
+        ),
+        63 | 68 => (1.0, Some(ToolKind::Axe), 0, false, item(323, 0)), // signs
+        84 => (2.0, Some(ToolKind::Axe), 0, false, item(84, 0)),       // jukebox
+        116 => (5.0, Some(ToolKind::Pickaxe), 0, false, item(116, 0)),
+        117 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(379, 0)), // brewing stand
+        140 => (0.0, None, 0, false, item(390, 0)),                    // flower pot
+        145 => (
+            5.0,
+            Some(ToolKind::Pickaxe),
+            1,
+            true,
+            item(145, damage >> 2),
+        ),
+        95 | 160 => (0.3, None, 0, false, None), // stained glass/panes
+        101 => (5.0, Some(ToolKind::Pickaxe), 0, true, item(101, 0)), // iron bars
+        102 => (0.3, None, 0, false, None),      // glass pane
+        112 | 113 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(id as i16, 0)),
+        121 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(121, 0)), // end stone
+        123 | 124 => (0.3, Some(ToolKind::Pickaxe), 0, false, item(123, 0)),
+        128 | 156 => (0.8, Some(ToolKind::Pickaxe), 0, true, item(id as i16, 0)),
+        133 => (5.0, Some(ToolKind::Pickaxe), 2, true, item(133, 0)),
+        139 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(139, damage)),
+        146 => (2.5, Some(ToolKind::Axe), 0, false, item(146, 0)), // trapped chest
+        147 | 148 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(id as i16, 0)),
+        152 => (5.0, Some(ToolKind::Pickaxe), 0, true, item(152, 0)),
+        154 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(154, 0)), // hopper
+        157 => (0.7, Some(ToolKind::Pickaxe), 0, false, item(157, 0)),
+        171 => (0.1, None, 0, false, item(171, damage)),
+        174 => (0.5, Some(ToolKind::Pickaxe), 0, false, None), // packed ice
         _ => return None,
     };
     Some(BlockRule {
@@ -213,9 +271,10 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
     roll ^= roll >> 31;
     let (id, count) = match block >> 4 {
         31 if (block & 3) != 0 && roll.is_multiple_of(8) => (295, 1), // Grass/fern seeds
+        47 => (340, 3), // Bookshelf always drops three books.
         18 if block & 3 == 0 && roll.is_multiple_of(200) => (260, 1), // Oak apple
         161 if block & 3 == 1 && roll.is_multiple_of(200) => (260, 1), // Dark oak apple
-        18 | 161 if roll.is_multiple_of(20) => (6, 1),                // Matching sapling
+        18 | 161 if roll.is_multiple_of(20) => (6, 1), // Matching sapling
         59 if block & 7 == 7 => (295, 1 + (roll % 3) as u8),
         141 if block & 7 == 7 => (391, 1 + (roll % 3) as u8),
         142 if block & 7 == 7 => (392, 1 + (roll % 3) as u8),
@@ -251,9 +310,16 @@ pub fn mine_rule(block: u16, held: Option<Stack>) -> Option<(Duration, MineResul
     } else {
         1.0
     };
-    let ticks = ((spec.hardness * if can_harvest { 30.0 } else { 100.0 }) / speed)
-        .ceil()
-        .max(1.0) as u64;
+    // Instant-break foliage must accept a C07 Start/Finish pair sent in
+    // the same client tick; enforcing one 50ms tick made grass and flowers
+    // intermittently reappear when the finish arrived immediately.
+    let ticks = if spec.hardness == 0.0 {
+        0
+    } else {
+        ((spec.hardness * if can_harvest { 30.0 } else { 100.0 }) / speed)
+            .ceil()
+            .max(1.0) as u64
+    };
     let drop = if can_harvest { spec.drop } else { None };
     Some((
         Duration::from_millis(ticks.saturating_mul(50)),
@@ -295,6 +361,14 @@ impl MiningProgress {
             penalty: environment_penalty(head_submerged, on_ground),
         })
     }
+    /// A Protocol 5 client sends only Start for blocks destroyed in its
+    /// first mining tick. The shared finish path must commit these immediately.
+    pub fn is_instant(&self) -> bool {
+        mine_rule(self.block, self.tool).is_some_and(|(duration, _)| {
+            duration.saturating_mul(self.penalty) <= Duration::from_millis(50)
+        })
+    }
+
     /// Consume the attempt exactly once. The held tool must remain unchanged
     /// between starting and finishing a dig, preventing fast-tool switching.
     #[cfg(test)]
@@ -327,7 +401,15 @@ impl MiningProgress {
         let penalty = self
             .penalty
             .max(environment_penalty(head_submerged, on_ground));
-        (self.started.elapsed() >= minimum.saturating_mul(penalty)).then_some(result)
+        // Dig progress is reported in client ticks but start/finish packets
+        // are processed on separate server polls. Allow one 20TPS tick of
+        // quantization slack, not an arbitrary fast-mine bypass.
+        (self
+            .started
+            .elapsed()
+            .saturating_add(Duration::from_millis(50))
+            >= minimum.saturating_mul(penalty))
+        .then_some(result)
     }
 }
 
@@ -419,19 +501,33 @@ mod tests {
         );
         // Multiblock doors/beds are deliberately not changed by this patch:
         // they require the other half and drop to be transacted together.
-        assert!(mine_rule(64 << 4, None).is_none());
-        assert!(mine_rule(26 << 4, None).is_none());
+        assert_eq!(mine_rule(64 << 4, None).unwrap().1.drop.unwrap().id, 324);
+        assert_eq!(mine_rule(64 << 4 | 8, None).unwrap().1.drop, None);
+        assert_eq!(mine_rule(71 << 4, None).unwrap().1.drop, None);
+        assert_eq!(
+            mine_rule(71 << 4, stack(270, 0))
+                .unwrap()
+                .1
+                .drop
+                .unwrap()
+                .id,
+            330
+        );
+        assert_eq!(mine_rule(26 << 4, None).unwrap().1.drop.unwrap().id, 355);
+        assert_eq!(mine_rule(26 << 4 | 8, None).unwrap().1.drop, None);
         assert!(mine_rule(7 << 4, None).is_none());
     }
 
     #[test]
     fn s01_to_s04_minimum_resource_chain_matches_1710_recipe_primitives() {
-        let st = |id| Some(Stack {
-            id,
-            count: 1,
-            damage: 0,
-            nbt: None,
-        });
+        let st = |id| {
+            Some(Stack {
+                id,
+                count: 1,
+                damage: 0,
+                nbt: None,
+            })
+        };
         let wood = mine_rule(17 << 4, None).unwrap().1.drop.unwrap();
         let planks = crate::crafting::result(&[st(wood.id), None, None, None], 2).unwrap();
         assert_eq!((planks.id, planks.count), (5, 4));
@@ -440,7 +536,17 @@ mod tests {
         let workbench = crate::crafting::result(&[st(5); 4], 2).unwrap();
         assert_eq!(workbench.id, 58);
         let wooden_pick = crate::crafting::result(
-            &[st(5), st(5), st(5), None, st(280), None, None, st(280), None],
+            &[
+                st(5),
+                st(5),
+                st(5),
+                None,
+                st(280),
+                None,
+                None,
+                st(280),
+                None,
+            ],
             3,
         )
         .unwrap();
@@ -452,7 +558,17 @@ mod tests {
             .unwrap();
         assert_eq!(cobble.id, 4);
         let stone_pick = crate::crafting::result(
-            &[st(4), st(4), st(4), None, st(280), None, None, st(280), None],
+            &[
+                st(4),
+                st(4),
+                st(4),
+                None,
+                st(280),
+                None,
+                None,
+                st(280),
+                None,
+            ],
             3,
         )
         .unwrap();
@@ -470,7 +586,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(furnace.id, 61);
-        assert_eq!(crate::furnaces::recipe(st(iron_ore.id).unwrap()).unwrap().id, 265);
+        assert_eq!(
+            crate::furnaces::recipe(st(iron_ore.id).unwrap())
+                .unwrap()
+                .id,
+            265
+        );
         // This is a rules-only smoke test, not proof of live item transfers,
         // inventory debits, client packets, furnace ticks, or persistence.
     }
@@ -596,6 +717,114 @@ mod tests {
     }
 
     #[test]
+    fn s03_negative_or_exhausted_pickaxe_damage_cannot_harvest_stone() {
+        // Tool damage is signed in the legacy item stack. A negative value
+        // must not become a usable pickaxe or bypass the harvest/timing rules.
+        let valid = stack(270, 58);
+        let (valid_time, valid_mine) = mine_rule(1 << 4, valid).unwrap();
+        assert_eq!(tool_max_uses(valid.unwrap()), Some(59));
+        assert_eq!(valid_mine.drop, Some(BlockDrop { id: 4, damage: 0 }));
+        assert!(valid_mine.wear_tool);
+
+        for damage in [i16::MIN, -1, 59, i16::MAX] {
+            let invalid = stack(270, damage);
+            assert_eq!(tool_max_uses(invalid.unwrap()), None);
+            let (minimum, mined) = mine_rule(1 << 4, invalid).unwrap();
+            assert_eq!(mined.drop, None, "invalid damage {damage}");
+            assert!(!mined.wear_tool, "invalid damage {damage}");
+            assert!(minimum > valid_time, "invalid damage {damage}");
+        }
+    }
+
+    #[test]
+    fn s03_invalid_tool_damage_never_accelerates_mining_or_consumes_durability() {
+        // Cover every recognized tool family, not only pickaxes. A malformed
+        // signed damage value must behave like an empty hand for mining.
+        for (tool_id, block_id) in [
+            (270_i16, 1_u16),  // pickaxe / stone
+            (269, 3),          // shovel / dirt
+            (271, 17),         // axe / log
+            (268, 3),          // sword / dirt
+            (290, 3),          // hoe / dirt
+        ] {
+            let bare = mine_rule(block_id << 4, None).unwrap();
+            for damage in [i16::MIN, -1] {
+                let malformed = stack(tool_id, damage);
+                assert_eq!(
+                    tool_max_uses(malformed.unwrap()),
+                    None,
+                    "tool {tool_id}, damage {damage}"
+                );
+                assert_eq!(
+                    mine_rule(block_id << 4, malformed).unwrap(),
+                    bare,
+                    "tool {tool_id}, damage {damage}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn s03_negative_tool_damage_cannot_fast_finish_or_swap_into_active_dig() {
+        // A malformed tool is treated as bare hands throughout the complete
+        // server-authoritative dig, not only by the initial harvest rule.
+        let target = (3, 64, -2);
+        let block = 1_u16 << 4;
+        let bare_minimum = mine_rule(block, None).unwrap().0;
+        assert!(bare_minimum > Duration::from_secs(1));
+
+        for damage in [i16::MIN, -1] {
+            let malformed = stack(270, damage);
+            let mut too_early = MiningProgress::start(target, block, malformed).unwrap();
+            too_early.started = Instant::now() - Duration::from_millis(100);
+            assert!(too_early.finish(target, block, malformed).is_none());
+
+            let mut completed = MiningProgress::start(target, block, malformed).unwrap();
+            completed.started = Instant::now() - bare_minimum;
+            assert_eq!(
+                completed.finish(target, block, malformed),
+                mine_rule(block, None).map(|(_, result)| result)
+            );
+
+            let mut switched = MiningProgress::start(target, block, stack(270, 0)).unwrap();
+            switched.started = Instant::now() - bare_minimum;
+            assert!(switched.finish(target, block, malformed).is_none());
+        }
+    }
+
+    #[test]
+    fn s03_negative_tool_damage_cannot_bypass_environment_mining_penalties() {
+        // Invalid durability is bare-hand mining even if the player starts
+        // submerged and becomes airborne before the finish packet arrives.
+        let target = (-3, 63, 5);
+        let block = 1_u16 << 4;
+        let bare_minimum = mine_rule(block, None).unwrap().0;
+        for damage in [i16::MIN, -1] {
+            let malformed = stack(270, damage);
+            let mut early =
+                MiningProgress::start_with_environment(target, block, malformed, true, true)
+                    .unwrap();
+            early.started = Instant::now() - bare_minimum.saturating_mul(5);
+            assert!(
+                early
+                    .finish_with_environment(target, block, malformed, true, false)
+                    .is_none(),
+                "invalid damage {damage} bypassed the airborne penalty"
+            );
+
+            let mut complete =
+                MiningProgress::start_with_environment(target, block, malformed, true, true)
+                    .unwrap();
+            complete.started = Instant::now() - bare_minimum.saturating_mul(25);
+            assert_eq!(
+                complete.finish_with_environment(target, block, malformed, true, false),
+                mine_rule(block, None).map(|(_, result)| result),
+                "invalid damage {damage} changed the bare-hand harvest result"
+            );
+        }
+    }
+
+    #[test]
     fn matching_tools_mine_faster_and_have_correct_durability() {
         let bare = mine_rule(1 << 4, None).unwrap().0;
         let wood = mine_rule(1 << 4, stack(270, 0)).unwrap().0;
@@ -639,6 +868,107 @@ mod tests {
         assert!(enter_water
             .finish_with_environment(target, block, held, true, true)
             .is_none());
+    }
+
+    #[test]
+    fn mining_allows_one_tick_of_network_quantization_but_not_instant_dirt() {
+        let at = (5, 66, 4);
+        let block = 3 << 4;
+        let base = mine_rule(block, None).unwrap().0;
+        assert!(base >= Duration::from_millis(250));
+        let mut close = MiningProgress::start(at, block, None).unwrap();
+        close.started = Instant::now() - (base - Duration::from_millis(40));
+        assert!(close.finish(at, block, None).is_some());
+        let early = MiningProgress::start(at, block, None).unwrap();
+        assert!(early.finish(at, block, None).is_none());
+    }
+
+    #[test]
+    fn instant_break_foliage_accepts_same_tick_finish() {
+        let at = (8, 66, -2);
+        for id in [31_u16, 32, 37, 38, 39, 40, 83, 111, 175] {
+            let block = id << 4;
+            let (minimum, _) = mine_rule(block, None).unwrap();
+            assert!(minimum.is_zero(), "instant block {id} requires a delay");
+            let progress = MiningProgress::start(at, block, None).unwrap();
+            assert!(
+                progress.finish(at, block, None).is_some(),
+                "instant block {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn common_1710_surface_blocks_remain_breakable_without_dropping_wrong_items() {
+        for (id, expected) in [
+            (78_u16, None),
+            (79, None),
+            (106, None),
+            (110, Some(3_i16)),
+            (175, None),
+            (88, Some(88)),
+        ] {
+            let (_, result) = mine_rule(id << 4, None).unwrap();
+            assert_eq!(result.drop.map(|drop| drop.id), expected, "block {id}");
+        }
+        assert!(
+            mine_rule(7 << 4, None).is_none(),
+            "bedrock must remain unbreakable"
+        );
+    }
+
+    #[test]
+    fn doors_and_beds_can_be_mined_but_only_lower_halves_drop_items() {
+        for (block, item) in [(26_u16, 355_i16), (64, 324)] {
+            let lower = mine_rule(block << 4, None).unwrap().1;
+            let upper = mine_rule(block << 4 | 8, None).unwrap().1;
+            assert_eq!(lower.drop.unwrap().id, item);
+            assert!(upper.drop.is_none());
+        }
+        let bare_iron = mine_rule(71 << 4, None).unwrap();
+        assert!(bare_iron.1.drop.is_none());
+        let picked_iron = mine_rule(71 << 4 | 8, stack(257, 0)).unwrap().1;
+        assert!(picked_iron.drop.is_none()); // Upper alone does not duplicate doors.
+        assert_eq!(
+            mine_rule(71 << 4, stack(257, 0))
+                .unwrap()
+                .1
+                .drop
+                .unwrap()
+                .id,
+            330
+        );
+    }
+
+    #[test]
+    fn one_packet_instant_mining_and_missing_legacy_blocks() {
+        let at = (0, 64, 0);
+        for id in [31_u16, 37, 46, 50, 83] {
+            let started = MiningProgress::start(at, id << 4, None).unwrap();
+            assert!(started.is_instant(), "block {id} must accept Start alone");
+            assert!(started.finish(at, id << 4, None).is_some());
+        }
+        let dirt = MiningProgress::start(at, 3 << 4, None).unwrap();
+        assert!(
+            !dirt.is_instant(),
+            "normal dirt must still require a Finish"
+        );
+        for id in [
+            19_u16, 22, 23, 29, 33, 47, 95, 101, 112, 121, 123, 133, 139, 146, 147, 152, 154, 156,
+            157, 160, 171, 174,
+        ] {
+            assert!(
+                mine_rule(id << 4, None).is_some(),
+                "missing breakable 1.7.10 block {id}"
+            );
+        }
+        assert_eq!(
+            additional_drop(47 << 4, at, 42).map(|s| (s.id, s.count)),
+            Some((340, 3))
+        );
+        for id in [0_u16, 7, 8, 9, 10, 11, 90, 119, 120, 137, 166] {
+            assert!(mine_rule(id << 4, None).is_none(), "protected block {id}");
+        }
     }
 
     #[test]

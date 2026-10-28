@@ -9,6 +9,18 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_RECORD_BYTES: usize = 2048;
+
+/// A human at negative fractional coordinates is inside the lower block,
+/// not in the block obtained by truncation toward zero. Do not invent a
+/// block coordinate from corrupted/non-finite player positions.
+fn block_coordinate(value: f64) -> Option<i32> {
+    let block = value.floor();
+    if block.is_finite() && (i32::MIN as f64..=i32::MAX as f64).contains(&block) {
+        Some(block as i32)
+    } else {
+        None
+    }
+}
 // A single write_all remains serialized across all concurrent player sessions.
 static DEATH_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -22,15 +34,22 @@ pub enum DeathCause {
     Fire,
     Burning,
     CombatOrExplosion,
-    Mob { kind: &'static str, entity_id: i32 },
+    Mob {
+        kind: &'static str,
+        entity_id: i32,
+    },
     Projectile {
         kind: &'static str,
         shooter_kind: Option<&'static str>,
         shooter_id: Option<i32>,
     },
-    Explosion { kind: &'static str, source_id: Option<i32> },
+    Explosion {
+        kind: &'static str,
+        source_id: Option<i32>,
+    },
     WitherEffect,
     Mixed,
+    MixedHazards,
     DispenserArrow,
     EnderPearl,
     Unknown,
@@ -52,18 +71,21 @@ impl DeathCause {
             Self::Explosion { .. } => "explosion",
             Self::WitherEffect => "wither_effect",
             Self::Mixed => "mixed_damage",
+            Self::MixedHazards => "mixed_environmental",
             Self::DispenserArrow => "dispenser_arrow",
             Self::EnderPearl => "ender_pearl",
             Self::Unknown => "unknown",
         }
     }
 
-    /// Return only sources confirmed by the server; never infer a name from
-    /// the death position or a nearby entity.
+    /// Return only server-verified provenance; never guess the nearest Mob.
     pub fn source_type(self) -> Option<&'static str> {
         match self {
             Self::Mob { kind, .. } | Self::Explosion { kind, .. } => Some(kind),
-            Self::Projectile { shooter_kind: Some(kind), .. } => Some(kind),
+            Self::Projectile {
+                shooter_kind: Some(kind),
+                ..
+            } => Some(kind),
             _ => None,
         }
     }
@@ -77,17 +99,24 @@ impl DeathCause {
         }
     }
 
+    /// The projectile kind is distinct from the Mob that fired it.
+    pub fn projectile_type(self) -> Option<&'static str> {
+        match self {
+            Self::Projectile { kind, .. } => Some(kind),
+            _ => None,
+        }
+    }
+
     /// Chat text follows the familiar Java 1.7.10 death-message vocabulary.
     /// Do not claim a specific killer when the combat event does not carry one.
     pub fn message(self, name: &str) -> String {
         match self {
             Self::Mob { kind, .. } => return format!("{name} was slain by {kind}"),
-            Self::Projectile { shooter_kind: Some(kind), .. } => {
-                return format!("{name} was shot by {kind}");
-            }
-            Self::Projectile { kind, .. } => {
-                return format!("{name} was killed by {kind}");
-            }
+            Self::Projectile {
+                shooter_kind: Some(kind),
+                ..
+            } => return format!("{name} was shot by {kind}"),
+            Self::Projectile { kind, .. } => return format!("{name} was killed by {kind}"),
             Self::Explosion { kind, .. } => return format!("{name} was blown up by {kind}"),
             _ => {}
         }
@@ -103,6 +132,7 @@ impl DeathCause {
             Self::Mob { .. } | Self::Projectile { .. } | Self::Explosion { .. } => "died",
             Self::WitherEffect => "withered away",
             Self::Mixed => "was killed by several sources",
+            Self::MixedHazards => "died from multiple environmental hazards",
             Self::DispenserArrow => "was shot by a dispenser",
             Self::EnderPearl => "died after using an ender pearl",
             Self::Unknown => "died",
@@ -120,12 +150,7 @@ pub struct FatalHit {
 
 /// Capture only the transition from living to dead, not previous nonfatal hits.
 /// This avoids attributing a fatal fall to a mob that attacked minutes earlier.
-pub fn record_fatal(
-    pending: &mut Option<FatalHit>,
-    before: f32,
-    after: f32,
-    cause: DeathCause,
-) {
+pub fn record_fatal(pending: &mut Option<FatalHit>, before: f32, after: f32, cause: DeathCause) {
     if pending.is_none() && before.is_finite() && after.is_finite() && before > 0.0 && after <= 0.0
     {
         *pending = Some(FatalHit {
@@ -156,16 +181,24 @@ impl DeathRecord<'_> {
     pub fn json(&self, timestamp_ms: u128) -> Value {
         json!({
             "event": "player_death",
+            "schema_version": 1,
             "timestamp_ms": timestamp_ms,
             "player": self.player,
             "cause": self.cause().code(),
             "source_type": self.cause().source_type(),
             "source_entity_id": self.cause().source_entity_id(),
+            "projectile_type": self.cause().projectile_type(),
+            "death_message": self.chat_message(),
             "dimension": self.dimension,
             "position": {
                 "x": self.position.x,
                 "y": self.position.y,
                 "z": self.position.z
+            },
+            "block_position": {
+                "x": block_coordinate(self.position.x),
+                "y": block_coordinate(self.position.y),
+                "z": block_coordinate(self.position.z)
             },
             "health_before": self.hit.map(|hit| hit.previous_health),
             "applied_damage": self.hit.map(|hit| hit.applied_damage),
@@ -186,7 +219,10 @@ impl DeathRecord<'_> {
             .as_millis();
         let mut line = serde_json::to_vec(&self.json(timestamp_ms))?;
         if line.len() >= MAX_RECORD_BYTES {
-            return Err(io::Error::new(ErrorKind::InvalidData, "oversized death event"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "oversized death event",
+            ));
         }
         line.push(b'\n');
         let _guard = DEATH_FILE_LOCK
@@ -211,16 +247,20 @@ impl DeathRecord<'_> {
             |hit| format!("{:.1}", hit.applied_damage),
         );
         format!(
-            "[death] player={} cause={} dimension={} x={:.2} y={:.2} z={:.2} health_before={} applied_damage={} tick={}",
-            self.player,
+            "[death] player={} cause={} source_type={:?} source_entity_id={:?} projectile_type={:?} dimension={} x={:.2} y={:.2} z={:.2} health_before={} applied_damage={} tick={} message={:?}",
+            self.player.escape_debug(),
             self.cause().code(),
+            self.cause().source_type(),
+            self.cause().source_entity_id(),
+            self.cause().projectile_type(),
             self.dimension,
             self.position.x,
             self.position.y,
             self.position.z,
             health,
             damage,
-            self.tick
+            self.tick,
+            self.chat_message()
         )
     }
 }
@@ -257,12 +297,18 @@ mod tests {
         let data = record.json(123);
         assert_eq!(data["cause"], "drowning");
         assert_eq!(data["dimension"], -1);
+        assert_eq!(data["schema_version"], 1);
+        assert_eq!(data["death_message"], record.chat_message());
         assert_eq!(data["server_tick"], 234);
+        // Console is a single line even when a supplied name contains controls.
+        let console = record.console_summary();
+        assert!(!console.contains('\n'));
+        assert!(!console.contains('\r'));
+        assert!(console.contains("message="));
         let wire = serde_json::to_string(&data).unwrap();
         assert!(!wire.contains('\n'));
         let decoded: Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(decoded["player"], record.player);
-
     }
 
     #[test]
@@ -299,11 +345,55 @@ mod tests {
     }
 
     #[test]
-    fn server_confirmed_attacker_is_present_in_chat_and_structured_log() {
+    fn multiple_hazards_are_not_mislabeled_as_combat() {
+        assert_eq!(DeathCause::MixedHazards.code(), "mixed_environmental");
+        assert_eq!(
+            DeathCause::MixedHazards.message("Alex"),
+            "Alex died from multiple environmental hazards"
+        );
+    }
+
+    #[test]
+    fn block_positions_floor_negative_coordinates_without_fabricating_invalid_values() {
+        let mut record = DeathRecord {
+            player: "Alex",
+            hit: Some(FatalHit {
+                cause: DeathCause::Fall,
+                previous_health: 4.0,
+                applied_damage: 4.0,
+            }),
+            position: PlayerPosition {
+                x: -0.01,
+                y: 64.99,
+                z: -12.0,
+            },
+            dimension: 0,
+            tick: 9,
+        };
+        let data = record.json(321);
+        assert_eq!(data["block_position"]["x"], -1);
+        assert_eq!(data["block_position"]["y"], 64);
+        assert_eq!(data["block_position"]["z"], -12);
+        assert_eq!(data["death_message"], "Alex fell from a high place");
+        assert_eq!(data["timestamp_ms"], 321);
+
+        record.position.x = f64::NAN;
+        record.position.z = f64::INFINITY;
+        let invalid = record.json(322);
+        assert!(invalid["block_position"]["x"].is_null());
+        assert!(invalid["block_position"]["z"].is_null());
+        assert_eq!(invalid["block_position"]["y"], 64);
+    }
+
+    #[test]
+    fn verified_attacker_stays_consistent_across_chat_and_json() {
         let death = DeathRecord {
             player: "Alex",
             hit: Some(FatalHit {
-                cause: DeathCause::Mob { kind: "Zombie", entity_id: 500_002 },
+                cause: DeathCause::Mob {
+                    kind: "Zombie",
+                    entity_id: 500_002,
+                },
                 previous_health: 2.0,
                 applied_damage: 2.0,
             }),
@@ -314,9 +404,20 @@ mod tests {
         assert_eq!(death.chat_message(), "Alex was slain by Zombie");
         assert_eq!(death.json(0)["source_type"], "Zombie");
         assert_eq!(death.json(0)["source_entity_id"], 500_002);
-        let mixed = DeathCause::Mixed;
-        assert_eq!(mixed.source_entity_id(), None);
-        assert_eq!(mixed.code(), "mixed_damage");
+        assert_eq!(death.json(0)["death_message"], death.chat_message());
+        assert!(death.console_summary().contains("source_entity_id=Some(500002)"));
+        assert_eq!(death.json(0)["projectile_type"], Value::Null);
+        let arrow = DeathCause::Projectile {
+            kind: "Arrow",
+            shooter_kind: Some("Skeleton"),
+            shooter_id: Some(901),
+        };
+        assert_eq!(arrow.projectile_type(), Some("Arrow"));
+        assert_eq!(arrow.source_type(), Some("Skeleton"));
+        assert_eq!(arrow.source_entity_id(), Some(901));
+        assert_eq!(DeathCause::Mixed.source_entity_id(), None);
+        assert_eq!(DeathCause::Mixed.code(), "mixed_damage");
+        assert_eq!(DeathCause::MixedHazards.code(), "mixed_environmental");
     }
 
     #[test]

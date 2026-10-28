@@ -14,7 +14,7 @@
 - エンダーパール: `Alex died after using an ender pearl`
 - Mob・飛び道具・爆発が混在する被ダメージ経路: `Alex was killed in combat or an explosion`
 
-**制限**: 既存のMob被ダメージ集約処理は攻撃者ID・Mob種別・TNT/クリーパーの区別を返さないため、個別の攻撃者名を推測しません。この種類の正確な attribution は将来の別対応が必要です。原因が観測できない場合は `Alex died` を使います。
+**制限**: 攻撃者はサーバーが取得した確実な情報だけを使用します。原因が観測できない場合は `Alex died` を使います。
 
 ## GameRule
 
@@ -29,17 +29,25 @@
 
 コンソール:
 ```text
-[death] player=Alex cause=fall dimension=0 x=0.50 y=64.00 z=0.50 health_before=3.0 applied_damage=3.0 tick=900
+[death] player=Alex cause=fall dimension=0 x=0.50 y=64.00 z=0.50 health_before=3.0 applied_damage=3.0 tick=900 message="Alex fell from a high place"
 ```
 
 JSONL (1行1JSON):
 ```json
-{"event":"player_death","timestamp_ms":1790000000000,"player":"Alex","cause":"fall","dimension":0,"position":{"x":0.5,"y":64.0,"z":0.5},"health_before":3.0,"applied_damage":3.0,"server_tick":900}
+{"event":"player_death","schema_version":1,"timestamp_ms":1790000000000,"player":"Alex","cause":"fall","death_message":"Alex fell from a high place","dimension":0,"position":{"x":0.5,"y":64.0,"z":0.5},"block_position":{"x":0,"y":64,"z":0},"health_before":3.0,"applied_damage":3.0,"server_tick":900}
 ```
 
 `dimension` はバニラの値（ネザー -1 / オーバーワールド 0 / エンド 1）。`health_before` は致死ダメージ直前のHP、`applied_damage` はHPへ**実際に適用された**ダメージです（超過ダメージは含まれません）。`timestamp_ms` はUnix時刻のミリ秒、`server_tick` はサーバーのTickです。復旧・再接続で原因が追跡不能の場合は `unknown`、HP情報は `null` になります。
 
-ログ保存が失敗しても、死亡処理とリスポーンを止めません。コンソールには `DEATH LOG WRITE ERROR` が表示されます。ユーザー入力をJSONに格納するので、名前などの改行はエスケープされ、ファイルへの任意行注入を避けます。IPアドレス・認証トークンは記録しません。
+ログ保存が失敗しても、死亡処理とリスポーンを止めません。コンソールには `DEATH LOG WRITE ERROR` が表示されます。ユーザー入力をJSONに格納するので、名前などの改行はエスケープされ、ファイルへの任意行注入を避けます。コンソール出力中のプレイヤー名と死亡メッセージも改行・制御文字をエスケープし、偽のログ行が混入しないようにします。IPアドレス・認証トークンは記録しません。
+
+### 詳細フィールド（D04）
+
+- `schema_version` は新形式で **1**。以前のJSONLにこのフィールドがない場合は、旧形式として解釈してください。過去ログの書き換えは行いません。
+- `death_message` はゲーム内へ送るのと同じ死亡メッセージ文字列（`showDeathMessages=false` でも監査用に保存）。
+- `position` は小数点を含むプレイヤー位置、`block_position` は各座標を床関数で整数化したブロック位置です。例えば `x=-0.01` のブロック座標は `-1` で、0にはなりません。
+- 壊れた/非有限の座標からブロック値を推測しないため、該当する `block_position` 成分は `null` とします。
+- D04は死亡事実の情報追加、D03は混合環境ダメージの分類、D01はサーバーが確認したMob・飛び道具・爆発の出所を追加します。D02の耐障害性とexactly-onceは別の残課題です。
 
 ## ローカルでの検証 (GitHub Actions不要)
 
@@ -51,37 +59,52 @@ cargo build --release -p vanilla-server
 Get-Content .\world.deaths.jsonl -Tail 20
 ```
 
-ワールドファイル名は実際の `--world` パスへ読み替えてください。サバイバルで落下・溺水・空腹・炎上・矢・Mob・エンダーパールの各死亡を再現し、(1)チャット通知が1回のみ、(2)JSONLに各死因と座標が残る、(3)ゲームルールがfalseでもログは残る、(4)死亡回数とドロップが従来どおり、(5)リスポーン後に新しい死亡が記録できることを確認してください。
+ワールドファイル名は実際の `--world` パスへ読み替えてください。サバイバルで落下・溺水・空腹・炎上・矢・Mob・エンダーパールの各死亡を再現し、(1)チャット通知が1回のみ、(2)JSONLに各死因・死亡メッセージ・整数ブロック座標が残る、(3)ゲームルールがfalseでもログは残る、(4)死亡回数とドロップが従来どおり、(5)リスポーン後に新しい死亡が記録できることを確認してください。
 
 **注意**: これは**死亡ログの詳細化**であり、未実装の被ダメージ源を実装する変更ではありません。大きな高負荷検証を始める前にワールドのバックアップを取ってください。
 
 
-## D01: attacker and explosion provenance (follow-up)
+## D03: environmental source aggregation
 
-The server now keeps the identity of the actual origin alongside each pending damage event:
-- Direct melee: Mob species and server-owned entity ID.
-- Projectiles: projectile kind plus firing Mob species/entity ID captured **at launch**, not inferred from who is nearby at death. This survives shooter despawn while the projectile is in flight.
-- Explosions: Creeper, Ghast Fireball, Wither Skull and TNT, retaining their source entity IDs when available.
-- Wither effect: distinct from melee and projectile impacts.
-- **Concurrent, different damage origins**: `mixed_damage` rather than claiming an arbitrary Mob killed the player.
+Hazard ticks are bounded to four steps per owning session. The existing code
+returned only the **last** observed source, which could falsely claim a burn
+caused a death when drowning and lava dealt damage in the same batch.
 
-The death JSONL schema includes nullable `source_type` and `source_entity_id` fields. Source IDs identify the **in-world entity** and are not Mojang account IDs, and `source_type` names a server-observed species or explosion origin; neither is supplied by the untrusted client.
+`HazardAttribution` now tracks either no source, exactly one consistent
+source, or a genuinely mixed set of sources. Combining repeated damage from
+the same source retains that source; combining different sources uses
+`mixed_environmental` and the death chat text:
+`Alex died from multiple environmental hazards`.
 
-Example:
-```json
-{"event":"player_death","player":"Alex","cause":"mob","source_type":"Zombie","source_entity_id":500002,"dimension":0}
-```
-(The example omits required timestamp/position/damage fields for readability.)
+This classification is conservative. When the engine aggregates multiple
+environmental hits in one health update it cannot prove which component
+crossed zero first without changing the combat timing model. A mixed event
+therefore avoids making an unsupported claim rather than inventing a source.
 
-**Limitations**: Multiple different hits coalesced into one HP update remain `mixed_damage`, not a single credited killer. Explicit player-vs-player damage attribution is not available until the PvP damage path exists. This change does not invent modded entity names. Projectiles continue to use the existing position-based target selection; disambiguation for two players overlapping at the same coordinates remains a separate gameplay fix.
+Local acceptance tests:
+- [ ] Run the combined lava-feet/water-eye Rust unit test.
+- [ ] Drowning alone remains `drowning` across the 300-air-tick window.
+- [ ] Mixed exposure is `mixed_environmental`, not `combat_or_explosion`.
+- [ ] Repeated same-source hits do not become mixed.
+- [ ] No extra HP loss or delayed/duplicated health packets.
 
-### Additional acceptance criteria
+## D01: Mob・飛び道具・爆発の発生元
 
-- [ ] Mob melee death emits `was slain by Zombie` and a matching entity ID.
-- [ ] Skeleton arrow death retains the original shooter ID even if the skeleton despawns before impact.
-- [ ] TNT/creeper explosions report separate types; concurrent blast and projectile become `mixed_damage`.
-- [ ] Invulnerability grace suppresses both damage and corresponding false death attribution.
-- [ ] Saved 1.7.10 Mob snapshots without `shooter_kind` load via Serde defaults.
-- [ ] `cargo fmt --all -- --check`, `cargo test -p vanilla-server`, `cargo clippy --workspace --all-targets -- -D warnings`, release build and native 1.7.10 tests **locally**.
+- Mob近接攻撃：Mob種別とサーバーが採番したEntity ID
+- 飛び道具：発射時点の射手のMob種別とEntity IDを保存（射手が消滅しても引き継ぐ）
+- 爆発：TNT、Creeper、Ghast Fireball、Wither Skullの発生元
+- Wither状態異常：近接攻撃や飛び道具の致死ダメージと区別
+- 異なる攻撃元が同一HP更新に混在する場合：単独の攻撃者を推測せず `mixed_damage`
 
-GitHub Actions Rust CI must remain disabled. Do not launch or rerun it.
+JSONLに `source_type`、`source_entity_id`、`projectile_type` が追加されます。`source_type` は発生元Mobや爆発元の種別、`source_entity_id` はサーバーで確認したID、`projectile_type` は矢・火球などの飛び道具の種類です。確認できない値はnullです。コンソールの死亡ログにも発生元情報を表示します。既存のD03の `mixed_environmental` とD04の `schema_version`、`death_message`、`block_position` は維持します。Entity IDはサーバー内部の識別子で、アカウントUUIDではありません。
+
+### D01受入条件
+
+- [ ] Zombieに倒されると `was slain by Zombie` とMob Entity IDを正確に記録
+- [ ] Skeletonが消滅したあとでも矢の射手を記録
+- [ ] TNTとCreeperの爆発発生元を区別し、同時に異なる攻撃元があれば `mixed_damage` として扱う
+- [ ] 10tick被ダメージ猶予と既存の攻撃アニメーションを維持し、被ダメージ0の場合は死亡原因を捏造しない
+- [ ] 過去のMobセーブに `shooter_kind` がなくても `#[serde(default)]` で読み込み可能
+- [ ] `cargo fmt --all -- --check`、単体テスト、Clippy、リリースビルド、Minecraft 1.7.10実機で確認
+
+PvPの攻撃者を近くのプレイヤー名から推測しません。完全に重なったプレイヤー同士での飛び道具のターゲット判定は別タスクです。GitHub Actionsは起動しません。
