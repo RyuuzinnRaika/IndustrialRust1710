@@ -7586,6 +7586,7 @@ fn run_player_admin_command(
     let minimum_level = match parts.first().copied() {
         Some("/time")
         | Some("/weather")
+        | Some("/kill")
         | Some("/tp")
         | Some("/teleport")
         | Some("/gamemode")
@@ -7613,6 +7614,16 @@ fn run_player_admin_command(
         ));
     }
     match parts.as_slice() {
+        ["/kill"] | ["/kill", _] => {
+            let target = parts.get(1).copied().unwrap_or(actor);
+            if !crate::whitelist::valid_name(target) {
+                return Err(bad("Usage: /kill [player]"));
+            }
+            if !hub.request_admin_kill(target)? {
+                return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+            }
+            Ok(format!("Kill queued for {target}"))
+        }
         ["/seed"] => {
             let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             commands::seed_text(&state)
@@ -8127,6 +8138,16 @@ fn start_clock_console(
                         event,
                     );
                     println!("Block set at {bx} {by} {bz}");
+                    Ok(())
+                })(),
+                ["/kill", target] => (|| -> io::Result<()> {
+                    if !whitelist::valid_name(target) {
+                        return Err(bad("Usage: /kill <online-player>"));
+                    }
+                    if !hub.request_admin_kill(target)? {
+                        return Err(io::Error::new(ErrorKind::NotFound, "target not online"));
+                    }
+                    println!("Kill queued for {target}");
                     Ok(())
                 })(),
                 ["/effect", target, effect @ ..] => (|| -> io::Result<()> {
