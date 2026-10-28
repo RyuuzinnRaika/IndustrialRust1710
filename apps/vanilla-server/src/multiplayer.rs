@@ -26,6 +26,8 @@ pub const ADMIN_GAMEMODE_EVENT: u32 = u32::MAX - 4;
 pub const PISTON_PUSH_EVENT: u32 = u32::MAX - 5;
 /// Server-owned dispenser arrow hit; the session persists HP before notifying.
 pub const DISPENSER_ARROW_DAMAGE_EVENT: u32 = u32::MAX - 6;
+/// Internal-only authoritative falling-anvil damage; never a Protocol 5 packet.
+pub const FALLING_ANVIL_DAMAGE_EVENT: u32 = u32::MAX - 12;
 /// Validated console/verified-OP item grant; applied by the inventory owner.
 pub const ADMIN_GIVE_EVENT: u32 = u32::MAX - 7;
 pub const ADMIN_CLEAR_EVENT: u32 = u32::MAX - 8;
@@ -502,6 +504,43 @@ impl Hub {
             })?;
         Ok(true)
     }
+    /// Deliver a tracked anvil landing to the victim's owning session.
+    /// The world worker may identify impacted entities, but must not mutate
+    /// player health, which belongs to the authenticated session.
+    pub fn request_falling_anvil_damage(
+        &self,
+        entity_id: i32,
+        dimension: Dimension,
+        damage: u8,
+    ) -> io::Result<bool> {
+        if damage == 0 || damage > 40 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "falling anvil damage outside permitted range",
+            ));
+        }
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(peer) = inner.players.get(&entity_id) else {
+            return Ok(false);
+        };
+        if peer.dimension != dimension {
+            return Ok(false);
+        }
+        peer.tx
+            .try_send(stamp_event(
+                peer,
+                Event {
+                    id: FALLING_ANVIL_DAMAGE_EVENT,
+                    body: vec![damage],
+                },
+            ))
+            .map_err(|_| {
+                peer.overloaded.store(true, Ordering::Release);
+                io::Error::other("target session anvil damage mailbox unavailable")
+            })?;
+        Ok(true)
+    }
+
     fn queue_teleport(
         &self,
         name: &str,
