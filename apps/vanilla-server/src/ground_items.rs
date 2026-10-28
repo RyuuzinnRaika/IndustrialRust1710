@@ -430,7 +430,11 @@ mod tests {
             assert_eq!(initial.next_id, 1_000_000_000);
             let mut independent = initial.clone();
             assert!(independent
-                .put(std::path::Path::new("invalid-drop-must-not-write.json"), item, location)
+                .put(
+                    std::path::Path::new("invalid-drop-must-not-write.json"),
+                    item,
+                    location
+                )
                 .is_err());
             assert!(independent.entries.is_empty());
             assert_eq!(independent.next_id, 1_000_000_000);
