@@ -13,6 +13,7 @@ const PUBLIC: &[&str] = &["/help", "/?", "/list", "/me", "/tell", "/msg", "/w"];
 const LEVEL_2: &[&str] = &[
     "/time",
     "/weather",
+    "/kill",
     "/tp",
     "/teleport",
     "/gamemode",
@@ -221,7 +222,7 @@ pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
         match (command.as_str(), index) {
             ("/tell" | "/msg" | "/w", 1)
             | (
-                "/give" | "/enchant" | "/effect" | "/kick" | "/ban" | "/pardon" | "/op" | "/deop"
+                "/give" | "/enchant" | "/effect" | "/kill" | "/kick" | "/ban" | "/pardon" | "/op" | "/deop"
                 | "/clear" | "/permission" | "/spawnpoint",
                 1,
             )
@@ -279,10 +280,12 @@ pub fn complete(text: &str, op_level: u8, online: &[String]) -> Vec<String> {
                     &[
                         "clear",
                         "1",
+                        "7",
                         "10",
                         "17",
                         "19",
                         "speed",
+                        "instant_damage",
                         "regeneration",
                         "hunger",
                         "poison",
