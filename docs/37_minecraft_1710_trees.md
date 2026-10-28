@@ -54,6 +54,13 @@ others may take several minutes.
   can increase actual delay relative to the average.
 - Leaf decay also requires the server's 20 TPS block worker to run and
   does not continue while the server is stopped.
+- All ordinary edits, two-block atomic edits and committed world-tick
+  mutations now propagate leaf wakeups after a removed trunk or leaf.
+  Chained disconnections wake adjacent leaves rather than performing a
+  9×9×9 neighborhood scan for every decayed leaf.
+- Added source-level regression cases for batched trunk removals,
+  neighboring leaf propagation and failed-transaction rollback. These
+  tests have not been executed yet.
 - No GitHub Actions / Rust CI were run for this change. Unit tests were
   authored but not executed.
 
