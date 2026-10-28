@@ -1155,7 +1155,10 @@ mod tests {
                 }
             }
         }
-        assert!(oak + acacia > 0, "seed 42 should offer reachable starter trees");
+        assert!(
+            oak + acacia > 0,
+            "seed 42 should offer reachable starter trees"
+        );
         assert!(supplementary_tree(seed, 0, 0).is_none());
     }
 
