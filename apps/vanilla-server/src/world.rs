@@ -3559,6 +3559,30 @@ mod tests {
     }
 
     #[test]
+    fn mining_both_structure_halves_persists_one_atomic_world_snapshot() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-paired-mining-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(7, 64, 7, 26 << 4 | 3).unwrap();
+        world.import_block(8, 64, 7, 26 << 4 | 3 | 8).unwrap();
+        let partner = world.mining_partner(8, 64, 7).unwrap();
+        assert_eq!(partner, (7, 64, 7));
+        assert!(world
+            .update_many_and_save(
+                &path,
+                &[(8, 64, 7, 0), (partner.0, partner.1, partner.2, 0)]
+            )
+            .unwrap());
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(8, 64, 7), 0);
+        assert_eq!(restored.get(7, 64, 7), 0);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn player_built_village_doors_follow_edits_and_survive_restart() {
         let seed = 42;
         let mut world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
