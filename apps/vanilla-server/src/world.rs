@@ -5020,6 +5020,137 @@ mod tests {
     }
 
     #[test]
+    fn support_loss_journals_sign_text_and_potted_flower_with_all_drops() {
+        use crate::decorations::Decorations;
+        use crate::ground_items::GroundItems;
+        use crate::inventory::Stack;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-sign-pot-tick-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let decoration_path = Decorations::location(&path);
+        let ground_path = GroundItems::location(&path);
+        let sign = (0, 64, 0);
+        let pot = (2, 64, 0);
+        let flower = Stack { id: 38, count: 1, damage: 2, nbt: None };
+        let mut w = World::new();
+        w.update_and_save(&path, sign.0, sign.1, sign.2, 63 << 4).unwrap();
+        w.update_and_save(&path, pot.0, pot.1, pot.2, 140 << 4).unwrap();
+        let mut stored = Decorations::default();
+        stored
+            .set_sign(
+                &decoration_path,
+                sign,
+                ["Saved text".into(), String::new(), String::new(), String::new()],
+            )
+            .unwrap();
+        stored = stored.stage_pot(pot, Some(flower)).unwrap();
+        fs::write(&decoration_path, stored.encoded().unwrap()).unwrap();
+        stored.verify_world_references(&w).unwrap();
+
+        // Break both supports, then atomically save the detached blocks,
+        // their contained items, and the now-empty tile-entity sidecar.
+        w.update_and_save(&path, sign.0, sign.1 - 1, sign.2, 0).unwrap();
+        w.update_and_save(&path, pot.0, pot.1 - 1, pot.2, 0).unwrap();
+        let mut ground = GroundItems::default();
+        let (changed, spawned) = w
+            .block_tick_with_ground_and_decorations(
+                &path, 64, &mut ground, &ground_path, &mut stored, &decoration_path,
+            )
+            .unwrap();
+        assert!(changed.contains(&sign));
+        assert!(changed.contains(&pot));
+        assert_eq!(spawned.len(), 3);
+        assert_eq!(spawned.iter().filter(|item| item.stack.id == 323).count(), 1);
+        assert_eq!(spawned.iter().filter(|item| item.stack.id == 390).count(), 1);
+        assert!(spawned.iter().any(|item| item.stack == flower));
+        assert!(w.drain_drops().is_empty());
+        let restarted_world = World::load(&path).unwrap();
+        assert_eq!(restarted_world.get(sign.0, sign.1, sign.2), 0);
+        assert_eq!(restarted_world.get(pot.0, pot.1, pot.2), 0);
+        let restarted_decorations = Decorations::load(&decoration_path).unwrap();
+        restarted_decorations
+            .verify_world_references(&restarted_world)
+            .unwrap();
+        assert_eq!(restarted_decorations.pot(pot), None);
+        assert!(restarted_decorations
+            .sign_packets_in(&[(0, 0)].into_iter().collect())
+            .unwrap()
+            .is_empty());
+        assert_eq!(GroundItems::load(&ground_path).unwrap().items().count(), 3);
+        assert!(!path.with_extension("pending-txn.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn full_ground_pool_defers_potted_flower_and_preserves_sidecar() {
+        use crate::decorations::Decorations;
+        use crate::ground_items::GroundItems;
+        use crate::inventory::Stack;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-pot-capacity-tick-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let decoration_path = Decorations::location(&path);
+        let ground_path = GroundItems::location(&path);
+        let pos = (4, 64, 4);
+        let flower = Stack { id: 37, count: 1, damage: 0, nbt: None };
+        let mut w = World::new();
+        w.update_and_save(&path, pos.0, pos.1, pos.2, 140 << 4).unwrap();
+        w.update_and_save(&path, pos.0, pos.1 - 1, pos.2, 0).unwrap();
+        let mut stored = Decorations::default().stage_pot(pos, Some(flower)).unwrap();
+        fs::write(&decoration_path, stored.encoded().unwrap()).unwrap();
+
+        let filler = Stack { id: 4, count: 1, damage: 0, nbt: None };
+        let (mut ground, _) = GroundItems::default()
+            .stage_put_at_positions(&vec![(filler, (0, 64, 0)); 511])
+            .unwrap();
+        let (changed, spawned) = w
+            .block_tick_with_ground_and_decorations(
+                &path, 64, &mut ground, &ground_path, &mut stored, &decoration_path,
+            )
+            .unwrap();
+        assert!(!changed.contains(&pos));
+        assert!(spawned.is_empty());
+        assert_eq!(w.get(pos.0, pos.1, pos.2) >> 4, 140);
+        assert_eq!(stored.pot(pos), Some(flower));
+        assert_eq!(World::load(&path).unwrap().get(pos.0, pos.1, pos.2) >> 4, 140);
+        assert_eq!(Decorations::load(&decoration_path).unwrap().pot(pos), Some(flower));
+
+        let removed_id = ground.items().next().unwrap().id;
+        let (with_room, _) = ground.stage_take(removed_id).unwrap().unwrap();
+        ground = with_room;
+        let (changed, spawned) = w
+            .block_tick_with_ground_and_decorations(
+                &path, 64, &mut ground, &ground_path, &mut stored, &decoration_path,
+            )
+            .unwrap();
+        assert!(changed.contains(&pos));
+        assert_eq!(spawned.len(), 2);
+        assert!(spawned.iter().any(|item| item.stack.id == 390));
+        assert!(spawned.iter().any(|item| item.stack == flower));
+        let restarted_world = World::load(&path).unwrap();
+        Decorations::load(&decoration_path)
+            .unwrap()
+            .verify_world_references(&restarted_world)
+            .unwrap();
+        assert_eq!(GroundItems::load(&ground_path).unwrap().items().count(), 512);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn unsupported_torch_detaches_into_an_item_after_commit() {
         let path =
             std::env::temp_dir().join(format!("ir1710-attachment-{}.irw", std::process::id()));
