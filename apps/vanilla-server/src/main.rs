@@ -8844,7 +8844,7 @@ fn main() -> io::Result<()> {
                     // remains the only writer. A large persisted backlog
                     // gets one extra 32-item handoff per 20TPS tick while
                     // storage has capacity; full storage performs no writes.
-                    if gravity_world.queued_drops().len() >= 1_536 {
+                    if gravity_world.queued_drops().len() >= world::LEAF_DROP_BACKPRESSURE {
                         let mut ground = match leaf_drops.lock() {
                             Ok(value) => value,
                             Err(_) => return,
