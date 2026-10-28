@@ -166,7 +166,8 @@ impl NativeServer {
         }
         // Keep child diagnostics when a real TCP test fails. The test
         // harness otherwise hides the reason a connection was closed.
-        let stderr_path = directory.join("native-server-stderr.log");
+        // Keep this file outside the world being verified and backed up.
+        let stderr_path = directory.with_extension("server-stderr.log");
         let stderr_file = fs::File::create(&stderr_path).unwrap();
         let process = command
             .stdin(Stdio::piped())
@@ -339,6 +340,7 @@ impl Drop for NativeServer {
             );
         }
         let _ = fs::remove_dir_all(&self.directory);
+        let _ = fs::remove_file(&self.stderr_path);
     }
 }
 fn vi(value: u32) -> Vec<u8> {
