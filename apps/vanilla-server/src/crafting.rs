@@ -657,6 +657,52 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn s02_all_five_java_1710_materials_craft_all_five_tool_types() {
+        // Java 1.7.10 has no copper/netherite tier. Every output must be
+        // generated from an actual workbench pattern, not supplied by C0E.
+        for (material, sword, pickaxe, axe, shovel, hoe) in [
+            (5, 268, 270, 271, 269, 290), // planks
+            (4, 272, 274, 275, 273, 291), // cobblestone
+            (265, 267, 257, 258, 256, 292), // iron
+            (266, 283, 285, 286, 284, 294), // gold
+            (264, 276, 278, 279, 277, 293), // diamond
+        ] {
+            let m = product(material, 1, 0);
+            let stick = product(280, 1, 0);
+            let patterns = [
+                (sword, [None, m, None, None, m, None, None, stick, None]),
+                (pickaxe, [m, m, m, None, stick, None, None, stick, None]),
+                (axe, [m, m, None, m, stick, None, None, stick, None]),
+                (shovel, [None, m, None, None, stick, None, None, stick, None]),
+                (hoe, [m, m, None, None, stick, None, None, stick, None]),
+            ];
+            for (expected_id, grid) in patterns {
+                assert_eq!(
+                    result(&grid, 3),
+                    product(expected_id, 1, 0),
+                    "material={material} output={expected_id}"
+                );
+                // Every recipe must stop working without its stick.
+                let mut missing_stick = grid;
+                if let Some(index) = missing_stick.iter().position(|slot| *slot == stick) {
+                    missing_stick[index] = None;
+                    assert_eq!(result(&missing_stick, 3), None,
+                        "must require all sticks: material={material} output={expected_id}");
+                }
+            }
+        }
+        // All six 1.7.10 plank variants craft ordinary wooden tools.
+        for species in 0..=5 {
+            let plank = product(5, 1, species);
+            let stick = product(280, 1, 0);
+            assert_eq!(
+                result(&[plank, plank, plank, None, stick, None, None, stick, None], 3),
+                product(270, 1, 0)
+            );
+        }
+    }
+
+    #[test]
     fn java_1710_wool_dyeing_uses_white_wool_and_inverse_dye_metadata() {
         for dye_color in 0..=15 {
             let dye = product(351, 1, dye_color);
