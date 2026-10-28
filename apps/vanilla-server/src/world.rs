@@ -1683,11 +1683,24 @@ impl World {
         if let Some((ground, _)) = ground.as_ref() {
             let mut reserved = 0usize;
             for (&pos, &next) in &changes {
-                if self.tick_drop_for_change(pos, next).is_some() {
-                    if reserved >= 256 || !ground.has_capacity_for(reserved + 1) {
+                let mut needed = usize::from(self.tick_drop_for_change(pos, next).is_some());
+                if let Some((stored, _)) = decorations.as_ref() {
+                    let old_id = self.get(pos.0, i32::from(pos.1), pos.2) >> 4;
+                    if old_id != next >> 4 {
+                        let at = (pos.0, i32::from(pos.1), pos.2);
+                        if old_id == 84 && stored.record(at).is_some() {
+                            needed += 1;
+                        }
+                        if old_id == 140 && stored.pot(at).is_some() {
+                            needed += 1;
+                        }
+                    }
+                }
+                if needed != 0 {
+                    if reserved + needed > 256 || !ground.has_capacity_for(reserved + needed) {
                         deferred_drops.push(pos);
                     } else {
-                        reserved += 1;
+                        reserved += needed;
                     }
                 }
             }
