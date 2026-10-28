@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 fn solid(id: u16) -> bool {
     !matches!(id, 0 | 6 | 8..=11 | 18 | 20 | 161 | 31 | 37..=40 | 50 | 55 | 59
         | 63 | 66 | 69 | 70 | 72 | 75..=78 | 83 | 93 | 94 | 96
-        | 104 | 105 | 107 | 115 | 127 | 141 | 142 | 143 | 149 | 150)
+        | 104 | 105 | 106 | 107 | 115 | 127 | 141 | 142 | 143 | 149 | 150)
 }
 fn chance(phase: u64, x: i32, y: i32, z: i32, divisor: u64) -> bool {
     let mut v = phase
@@ -508,8 +508,10 @@ impl World {
                         self.grow_tree(x, height, z, &mut changes);
                     }
                 }
-                // Bit 3 marks player-placed / persistent leaves in 1.7.10.
-                18 | 161 if block & 8 == 0 && !self.leaf_connected(x, height, z) => {
+                // In 1.7.10 bit 0x4 is persistent/player-placed; bit 0x8
+                // requests a decay check. Keep disconnected natural leaves
+                // eligible for scheduled random-tick decay in this simulator.
+                18 | 161 if block & 4 == 0 && !self.leaf_connected(x, height, z) => {
                     changes.insert((x, y, z), 0);
                 }
                 _ => {}
@@ -562,8 +564,8 @@ mod regression_tests {
     #[test]
     fn persistent_legacy_and_new_leaves_never_decay_without_logs() {
         let mut world = World::new();
-        world.import_block(0, 65, 0, (18 << 4) | 8).unwrap();
-        world.import_block(1, 65, 0, (161 << 4) | 9).unwrap();
+        world.import_block(0, 65, 0, (18 << 4) | 4).unwrap();
+        world.import_block(1, 65, 0, (161 << 4) | 5).unwrap();
         let changes = world.ecology_changes(64);
         assert!(!changes.contains_key(&(0, 65, 0)));
         assert!(!changes.contains_key(&(1, 65, 0)));
