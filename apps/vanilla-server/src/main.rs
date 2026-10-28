@@ -1237,6 +1237,28 @@ fn use_special_item(
     *w = staged_world;
     Ok(Some(changed))
 }
+/// Persist up to 32 post-world-save drops with one ground-item snapshot,
+/// then remove only those exact entries from the in-memory world backlog.
+/// A full 512-item pool and all I/O errors leave pending drops untouched.
+fn flush_pending_world_drops(
+    world: &mut World,
+    ground: &mut GroundItems,
+    path: &Path,
+) -> io::Result<Vec<ground_items::GroundItem>> {
+    let count = world
+        .queued_drops()
+        .len()
+        .min(32)
+        .min(ground.remaining_capacity());
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let staged = ground.stage_put_world_drops(&world.queued_drops()[..count])?;
+    let spawned = ground.commit_staged_put(path, staged)?;
+    world.acknowledge_drops(count);
+    Ok(spawned)
+}
+
 /// Drive 1.7.10 tripwire collision from server-authoritative Mob/drop
 /// locations on the existing world worker. Bounded entity registries are
 /// sampled periodically, deduplicating touching entities into block cells.
@@ -9307,26 +9329,34 @@ fn main() -> io::Result<()> {
                                     furnace_hub.broadcast(packet);
                                 }
                             }
-                            let decayed = gravity_world.drain_drops();
-                            if !decayed.is_empty() {
+                            // Drop storage is capped and separate from the
+                            // world file. Never drain this queue before the
+                            // corresponding item entities have been saved.
+                            // Retry once per second so a full ground registry
+                            // cannot cause 20 futile writes/logs per second.
+                            if !gravity_world.queued_drops().is_empty()
+                                && now % 20 < u64::from(steps)
+                            {
                                 let mut ground = match leaf_drops.lock() {
                                     Ok(value) => value,
                                     Err(_) => return,
                                 };
-                                for fallen in decayed {
-                                    if ground.is_full() {
-                                        break;
-                                    }
-                                    match ground.put(&leaf_drops_file, fallen.stack, fallen.pos) {
-                                        Ok(item) => {
+                                match flush_pending_world_drops(
+                                    &mut gravity_world,
+                                    &mut ground,
+                                    &leaf_drops_file,
+                                ) {
+                                    Ok(spawned) => {
+                                        for item in spawned {
                                             for packet in item.spawn() {
                                                 furnace_hub.broadcast(packet);
                                             }
                                         }
-                                        Err(error) => {
-                                            eprintln!("LEAF DROP STORAGE ERROR: {error}");
-                                            return;
-                                        }
+                                    }
+                                    Err(error) => {
+                                        // Retained in the world queue: a later
+                                        // tick can retry after an I/O failure.
+                                        eprintln!("LEAF DROP STORAGE RETRY: {error}");
                                     }
                                 }
                             }
