@@ -3810,237 +3810,246 @@ fn play(
                                 }
                             }
                         }
-                        0 => {
-                            let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                            if w.get(x, y, z) >> 4 == 25
-                                && w.get(x, y + 1, z) == 0
-                                && world::in_bounds(x, y, z)
-                                && near(location, x, y, z)
-                            {
-                                let pos = (x, y, z);
-                                let pitch = decorations
-                                    .lock()
-                                    .map_err(|_| bad("decorations lock poisoned"))?
-                                    .note(pos);
-                                hub.broadcast(Event {
-                                    id: 0x24,
-                                    body: decorations::note_action(
-                                        pos,
-                                        decorations::instrument(w.get(x, y - 1, z) >> 4),
-                                        pitch,
-                                    ),
-                                });
+                        0 | 2 => {
+                            if action == 0 {
+                                let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                                if w.get(x, y, z) >> 4 == 25
+                                    && w.get(x, y + 1, z) == 0
+                                    && world::in_bounds(x, y, z)
+                                    && near(location, x, y, z)
+                                {
+                                    let pos = (x, y, z);
+                                    let pitch = decorations
+                                        .lock()
+                                        .map_err(|_| bad("decorations lock poisoned"))?
+                                        .note(pos);
+                                    hub.broadcast(Event {
+                                        id: 0x24,
+                                        body: decorations::note_action(
+                                            pos,
+                                            decorations::instrument(w.get(x, y - 1, z) >> 4),
+                                            pitch,
+                                        ),
+                                    });
+                                }
+                                let in_reach =
+                                    world::in_bounds(x, y, z) && near(location, x, y, z);
+                                mining = if in_reach {
+                                    let (submerged, grounded) = mining_environment(&w, player);
+                                    MiningProgress::start_with_environment(
+                                        target,
+                                        w.get(x, y, z),
+                                        inventory.held(),
+                                        submerged,
+                                        grounded,
+                                    )
+                                } else {
+                                    None
+                                };
+                                if trace_mining && mining.is_none() {
+                                    eprintln!(
+                                        "mining trace: start refused target={target:?} server={player:?} in_reach={in_reach} block={} held={:?}",
+                                        w.get(x, y, z) >> 4,
+                                        inventory.held().map(|item| item.id)
+                                    );
+                                }
                             }
-                            let in_reach =
-                                world::in_bounds(x, y, z) && near(location, x, y, z);
-                            mining = if in_reach {
+                            // Protocol 5 instant-mined blocks send only Start.
+                            // Complete them using the SAME drop/durability/save
+                            // path as ordinary client Finish packets.
+                            let instant = action == 0
+                                && mining.as_ref().is_some_and(MiningProgress::is_instant);
+                            if action == 2 || instant {
+                                let attempt = mining.take();
+                                let had_start = attempt.is_some();
+                                let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                                 let (submerged, grounded) = mining_environment(&w, player);
-                                MiningProgress::start_with_environment(
-                                    target,
-                                    w.get(x, y, z),
-                                    inventory.held(),
-                                    submerged,
-                                    grounded,
-                                )
-                            } else {
-                                None
-                            };
-                            if trace_mining && mining.is_none() {
-                                eprintln!(
-                                    "mining trace: start refused target={target:?} server={player:?} in_reach={in_reach} block={} held={:?}",
-                                    w.get(x, y, z) >> 4,
-                                    inventory.held().map(|item| item.id)
-                                );
-                            }
-                        }
-                        1 => mining = None,
-                        2 => {
-                            let attempt = mining.take();
-                            let had_start = attempt.is_some();
-                            let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                            let (submerged, grounded) = mining_environment(&w, player);
-                            let result = attempt.and_then(|m| {
-                                m.finish_with_environment(
-                                    target,
-                                    w.get(x, y, z),
-                                    inventory.held(),
-                                    submerged,
-                                    grounded,
-                                )
-                            });
-                            if trace_mining && result.is_none() {
-                                eprintln!(
-                                    "mining trace: finish refused target={target:?} server={player:?} had_start={had_start} block={} held={:?} head_submerged={submerged} grounded={grounded}",
-                                    w.get(x, y, z) >> 4,
-                                    inventory.held().map(|item| item.id)
-                                );
-                            }
-                            let mut changed = false;
-                            if world::in_bounds(x, y, z) && near(location, x, y, z) {
-                                if let Some(result) = result {
-                                    let block = w.get(x, y, z) >> 4;
-                                    // Safely refuse tile-entity mining until
-                                    // their contents can become proper drops.
-                                    let occupied = (block == 54
-                                        && chests
-                                            .lock()
-                                            .map_err(|_| bad("chest lock poisoned"))?
-                                            .is_nonempty(target))
-                                        || ((block == 61 || block == 62)
-                                            && furnaces
+                                let result = attempt.and_then(|m| {
+                                    m.finish_with_environment(
+                                        target,
+                                        w.get(x, y, z),
+                                        inventory.held(),
+                                        submerged,
+                                        grounded,
+                                    )
+                                });
+                                if trace_mining && result.is_none() {
+                                    eprintln!(
+                                        "mining trace: finish refused target={target:?} server={player:?} had_start={had_start} block={} held={:?} head_submerged={submerged} grounded={grounded}",
+                                        w.get(x, y, z) >> 4,
+                                        inventory.held().map(|item| item.id)
+                                    );
+                                }
+                                let mut changed = false;
+                                if world::in_bounds(x, y, z) && near(location, x, y, z) {
+                                    if let Some(result) = result {
+                                        let block = w.get(x, y, z) >> 4;
+                                        // Safely refuse tile-entity mining until
+                                        // their contents can become proper drops.
+                                        let occupied = (matches!(block, 54 | 146)
+                                            && chests
                                                 .lock()
-                                                .map_err(|_| bad("furnace lock poisoned"))?
-                                                .get(target)
-                                                .occupied())
-                                        || (matches!(block, 23 | 158)
-                                            && devices
-                                                .lock()
-                                                .map_err(|_| bad("device lock poisoned"))?
-                                                .slots(target)
-                                                .iter()
-                                                .any(Option::is_some))
-                                        || (block == 154
-                                            && hoppers
-                                                .lock()
-                                                .map_err(|_| bad("hopper lock poisoned"))?
-                                                .has_contents(target))
-                                        || (block == 117
-                                            && brewers
-                                                .lock()
-                                                .map_err(|_| bad("brewer lock poisoned"))?
+                                                .map_err(|_| bad("chest lock poisoned"))?
                                                 .is_nonempty(target))
-                                        || (matches!(block, 84 | 140)
-                                            && decorations
-                                                .lock()
-                                                .map_err(|_| bad("decorations lock poisoned"))?
-                                                .occupied(target));
-                                    if !occupied {
-                                        let bonus = survival::additional_drop(
-                                            w.get(x, y, z),
-                                            target,
-                                            now_tick,
-                                        );
-                                        // Collect ordinary and bonus drops before any
-                                        // irreversible world edit. Two drops now require
-                                        // one durable ground-item snapshot, not two.
-                                        let mut drop_stacks = Vec::with_capacity(2);
-                                        if let Some(drop) = result.drop {
-                                            drop_stacks.push(Stack {
-                                                id: drop.id,
-                                                count: 1,
-                                                damage: drop.damage,
-                                                nbt: None,
-                                            });
-                                        }
-                                        if let Some(stack) = bonus {
-                                            drop_stacks.push(stack);
-                                        }
-                                        let mut ground = ground_items.lock().map_err(|_| {
-                                            io::Error::other("ground items lock poisoned")
-                                        })?;
-                                        // Never break a block unless ALL item entities can
-                                        // be saved; an almost-full pool must not lose bonus
-                                        // drops on the next world update.
-                                        if drop_stacks.is_empty()
-                                            || ground.has_capacity_for(drop_stacks.len())
-                                        {
-                                            let staged_drops = if drop_stacks.is_empty() {
-                                                None
-                                            } else {
-                                                Some(ground.stage_put_many(&drop_stacks, target)?)
-                                            };
-                                            let mut candidate = inventory.clone();
-                                            let wore =
-                                                result.wear_tool && candidate.wear_held_tool();
-                                            // Commit durability consumption before
-                                            // changing the world, not vice-versa.
-                                            if wore {
-                                                candidate.save(inventory_path)?;
+                                            || ((block == 61 || block == 62)
+                                                && furnaces
+                                                    .lock()
+                                                    .map_err(|_| bad("furnace lock poisoned"))?
+                                                    .get(target)
+                                                    .occupied())
+                                            || (matches!(block, 23 | 158)
+                                                && devices
+                                                    .lock()
+                                                    .map_err(|_| bad("device lock poisoned"))?
+                                                    .slots(target)
+                                                    .iter()
+                                                    .any(Option::is_some))
+                                            || (block == 154
+                                                && hoppers
+                                                    .lock()
+                                                    .map_err(|_| bad("hopper lock poisoned"))?
+                                                    .has_contents(target))
+                                            || (block == 117
+                                                && brewers
+                                                    .lock()
+                                                    .map_err(|_| bad("brewer lock poisoned"))?
+                                                    .is_nonempty(target))
+                                            || (matches!(block, 84 | 140)
+                                                && decorations
+                                                    .lock()
+                                                    .map_err(|_| bad("decorations lock poisoned"))?
+                                                    .occupied(target));
+                                        if !occupied {
+                                            let bonus = survival::additional_drop(
+                                                w.get(x, y, z),
+                                                target,
+                                                now_tick,
+                                            );
+                                            // Collect ordinary and bonus drops before any
+                                            // irreversible world edit. Two drops now require
+                                            // one durable ground-item snapshot, not two.
+                                            let mut drop_stacks = Vec::with_capacity(2);
+                                            if let Some(drop) = result.drop {
+                                                drop_stacks.push(Stack {
+                                                    id: drop.id,
+                                                    count: 1,
+                                                    damage: drop.damage,
+                                                    nbt: None,
+                                                });
                                             }
-                                            match w.update_and_save(world_path, x, y, z, 0) {
-                                                Ok(true) => {
-                                                    decorations
-                                                        .lock()
-                                                        .map_err(|_| {
-                                                            bad("decorations lock poisoned")
-                                                        })?
-                                                        .remove(decoration_path, target)?;
-                                                    if wore {
-                                                        *inventory = candidate;
-                                                        send(
-                                                            s,
-                                                            0x2f,
-                                                            &inventory
-                                                                .set_slot(inventory.held_slot())?,
-                                                        )?;
-                                                    }
-                                                    if let Some(staged) = staged_drops {
-                                                        // One fsync/rename for every drop
-                                                        // created by this mining action.
-                                                        // Publish only after successful save.
-                                                        let items = ground.commit_staged_put(
-                                                            ground_path,
-                                                            staged,
-                                                        )?;
-                                                        for item in items {
-                                                            for packet in item.spawn() {
-                                                                hub.broadcast(packet);
+                                            if let Some(stack) = bonus {
+                                                drop_stacks.push(stack);
+                                            }
+                                            let mut ground = ground_items.lock().map_err(|_| {
+                                                io::Error::other("ground items lock poisoned")
+                                            })?;
+                                            // Never break a block unless ALL item entities can
+                                            // be saved; an almost-full pool must not lose bonus
+                                            // drops on the next world update.
+                                            if drop_stacks.is_empty()
+                                                || ground.has_capacity_for(drop_stacks.len())
+                                            {
+                                                let staged_drops = if drop_stacks.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(ground.stage_put_many(&drop_stacks, target)?)
+                                                };
+                                                let mut candidate = inventory.clone();
+                                                let wore =
+                                                    result.wear_tool && candidate.wear_held_tool();
+                                                // Commit durability consumption before
+                                                // changing the world, not vice-versa.
+                                                if wore {
+                                                    candidate.save(inventory_path)?;
+                                                }
+                                                match w.update_and_save(world_path, x, y, z, 0) {
+                                                    Ok(true) => {
+                                                        decorations
+                                                            .lock()
+                                                            .map_err(|_| {
+                                                                bad("decorations lock poisoned")
+                                                            })?
+                                                            .remove(decoration_path, target)?;
+                                                        if wore {
+                                                            *inventory = candidate;
+                                                            send(
+                                                                s,
+                                                                0x2f,
+                                                                &inventory
+                                                                    .set_slot(inventory.held_slot())?,
+                                                            )?;
+                                                        }
+                                                        if let Some(staged) = staged_drops {
+                                                            // One fsync/rename for every drop
+                                                            // created by this mining action.
+                                                            // Publish only after successful save.
+                                                            let items = ground.commit_staged_put(
+                                                                ground_path,
+                                                                staged,
+                                                            )?;
+                                                            for item in items {
+                                                                for packet in item.spawn() {
+                                                                    hub.broadcast(packet);
+                                                                }
+                                                            }
+                                                        }
+                                                        changed = true;
+                                                        let reward = match block {
+                                                            16 => 2,
+                                                            21 => 4,
+                                                            56 => 5,
+                                                            73 | 74 => 3,
+                                                            129 => 5,
+                                                            153 => 3,
+                                                            _ => 0,
+                                                        };
+                                                        if reward > 0 {
+                                                            if let Some(orb) = mobs
+                                                                .lock()
+                                                                .map_err(|_| bad("mob mutex poisoned"))?
+                                                                .spawn_xp(*player, reward)
+                                                            {
+                                                                hub.broadcast(orb);
                                                             }
                                                         }
                                                     }
-                                                    changed = true;
-                                                    let reward = match block {
-                                                        16 => 2,
-                                                        21 => 4,
-                                                        56 => 5,
-                                                        73 | 74 => 3,
-                                                        129 => 5,
-                                                        153 => 3,
-                                                        _ => 0,
-                                                    };
-                                                    if reward > 0 {
-                                                        if let Some(orb) = mobs
-                                                            .lock()
-                                                            .map_err(|_| bad("mob mutex poisoned"))?
-                                                            .spawn_xp(*player, reward)
-                                                        {
-                                                            hub.broadcast(orb);
+                                                    Ok(false) => {
+                                                        if wore {
+                                                            inventory.save(inventory_path)?;
                                                         }
                                                     }
-                                                }
-                                                Ok(false) => {
-                                                    if wore {
-                                                        inventory.save(inventory_path)?;
+                                                    Err(error) => {
+                                                        if wore {
+                                                            inventory.save(inventory_path)?;
+                                                        }
+                                                        return Err(error);
                                                     }
-                                                }
-                                                Err(error) => {
-                                                    if wore {
-                                                        inventory.save(inventory_path)?;
-                                                    }
-                                                    return Err(error);
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            let event = block_change_event(&w, x, y, z);
-                            if changed {
-                                hub.broadcast(event);
-                            } else {
-                                send(s, event.id, &event.body)?;
+                                let event = block_change_event(&w, x, y, z);
+                                if changed {
+                                    hub.broadcast(event);
+                                } else {
+                                    send(s, event.id, &event.body)?;
+                                }
                             }
                         }
+                        1 => mining = None,
                         _ => mining = None,
                     }
                 } else {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let changed =
-                        if (action == 0 || action == 2) && y > 60 && near(location, x, y, z) {
+                        if (action == 0 || action == 2)
+                            && world::in_bounds(x, y, z)
+                            && near(location, x, y, z) {
                             // Refuse breaking a nonempty chest until contents
                             // can be safely dropped as item entities.
                             let block = w.get(x, y, z) >> 4;
-                            let occupied = (block == 54
+                            let occupied = (matches!(block, 54 | 146)
                                 && chests
                                     .lock()
                                     .map_err(|_| bad("chest lock poisoned"))?
@@ -4051,6 +4060,13 @@ fn play(
                                         .map_err(|_| bad("furnace lock poisoned"))?
                                         .get((x, y, z))
                                         .occupied())
+                                || (matches!(block, 23 | 158)
+                                    && devices
+                                        .lock()
+                                        .map_err(|_| bad("device lock poisoned"))?
+                                        .slots((x, y, z))
+                                        .iter()
+                                        .any(Option::is_some))
                                 || (block == 154
                                     && hoppers
                                         .lock()
