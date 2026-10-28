@@ -54,6 +54,17 @@ fn sapling_growth_due(phase: u64, x: i32, y: i32, z: i32) -> bool {
             .is_multiple_of(7)
 }
 
+/// Vines use legacy pre-flattening wall attachment bits:
+/// south=1, west=2, north=4, east=8.
+const VINE_FACES: [(u16, i32, i32); 4] =
+    [(1, 0, 1), (2, -1, 0), (4, 0, -1), (8, 1, 0)];
+
+fn vine_random_tick_due(phase: u64, x: i32, y: i32, z: i32) -> bool {
+    leaf_decay_due(phase, x, y, z)
+        && ecology_roll(phase / GAME_TICKS_PER_SECOND ^ 0x1060_1710, x, y, z)
+            .is_multiple_of(4)
+}
+
 fn plantable(id: u16) -> bool {
     matches!(id, 2 | 3 | 60)
 }
@@ -200,6 +211,96 @@ impl World {
         }
         false
     }
+    /// The vine mask that still has a valid wall or a matching vine above.
+    /// The ceiling itself is handled separately because Java 1.7.10 uses
+    /// metadata zero for vines hanging only from their top face.
+    fn supported_vine_mask(&self, x: i32, y: i32, z: i32, mask: u16) -> u16 {
+        let above = self.get(x, y + 1, z);
+        let inherited = if above >> 4 == 106 { above & 15 } else { 0 };
+        let mut valid = 0;
+        for (face, dx, dz) in VINE_FACES {
+            if mask & face != 0
+                && (solid(self.get(x + dx, y, z + dz) >> 4)
+                    || inherited & face != 0)
+            {
+                valid |= face;
+            }
+        }
+        valid
+    }
+
+    fn vine_has_ceiling(&self, x: i32, y: i32, z: i32) -> bool {
+        solid(self.get(x, y + 1, z) >> 4)
+    }
+
+    /// One vanilla-style random vine tick. Respect the global 1/4 growth
+    /// chance, four attachment bits, ceiling support and a local cap on
+    /// upward/horizontal spreading. Downward hanging vines remain possible
+    /// regardless of local density.
+    fn grow_vine(&self, x: i32, y: i32, z: i32, block: u16, changes: &mut BTreeMap<Position, u16>) {
+        let tick = self.fluid_phase / GAME_TICKS_PER_SECOND;
+        let roll = ecology_roll(tick ^ 0x7669_6e65, x, y, z);
+        let facing = block & 15;
+        let dir = roll % 6;
+        if dir == 0 && y > 0 {
+            let below = self.get(x, y - 1, z);
+            let mut candidate = 0u16;
+            for (bit, _, _) in VINE_FACES {
+                if facing & bit != 0
+                    && ecology_roll(tick ^ (0x6000 + u64::from(bit)), x, y, z) & 1 == 0
+                {
+                    candidate |= bit;
+                }
+            }
+            if below == 0 && candidate != 0 {
+                let supported = self.supported_vine_mask(x, y - 1, z, candidate);
+                if supported != 0 || self.vine_has_ceiling(x, y - 1, z) {
+                    changes.insert((x, (y - 1) as u8, z), (106 << 4) | supported);
+                }
+            } else if below >> 4 == 106 && candidate != 0 {
+                let extended = self.supported_vine_mask(x, y - 1, z, (below & 15) | candidate);
+                if extended != below & 15 {
+                    changes.insert((x, (y - 1) as u8, z), (106 << 4) | extended);
+                }
+            }
+            return;
+        }
+        if y >= 255 || dir == 0 {
+            return;
+        }
+        // Java's vine spread is limited in dense patches. A bounded local
+        // count prevents infinite vines from flooding one loaded chunk.
+        let mut nearby = 0;
+        for dx in -4..=4 {
+            for dz in -4..=4 {
+                for dy in -1..=1 {
+                    if self.get(x + dx, y + dy, z + dz) >> 4 == 106 {
+                        nearby += 1;
+                        if nearby >= 5 {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        let (tx, ty, tz) = match dir {
+            1 => (x, y + 1, z),
+            2 => (x - 1, y, z),
+            3 => (x + 1, y, z),
+            4 => (x, y, z - 1),
+            _ => (x, y, z + 1),
+        };
+        if !in_bounds(tx, ty, tz) || self.get(tx, ty, tz) != 0 {
+            return;
+        }
+        // A newly spread vine must immediately have a real attachment;
+        // copying bits without a wall would create unsupported blocks.
+        let supported = self.supported_vine_mask(tx, ty, tz, facing);
+        if supported != 0 {
+            changes.insert((tx, ty as u8, tz), (106 << 4) | supported);
+        }
+    }
+
     /// A leaf survives only if a log can be reached through at most four
     /// face-adjacent leaves. Nearby but disconnected logs do not prevent decay.
     fn leaf_connected(&self, x: i32, y: i32, z: i32) -> bool {
@@ -380,6 +481,16 @@ impl World {
         for &(x, y, z) in self.pending_support.iter().take(budget) {
             let block = self.get(x, i32::from(y), z);
             let id = block >> 4;
+            if id == 106 {
+                let height = i32::from(y);
+                let supported = self.supported_vine_mask(x, height, z, block & 15);
+                if supported == 0 && !self.vine_has_ceiling(x, height, z) {
+                    changes.insert((x, y, z), 0);
+                } else if supported != block & 15 {
+                    changes.insert((x, y, z), (106 << 4) | supported);
+                }
+                continue;
+            }
             if matches!(
                 id,
                 6 | 31
@@ -618,6 +729,9 @@ impl World {
                             self.grow_tree(x, height, z, &mut changes);
                         }
                     }
+                }
+                106 if vine_random_tick_due(self.fluid_phase, x, height, z) => {
+                    self.grow_vine(x, height, z, block, &mut changes);
                 }
                 // Leaves use the independent random-tick sampling above,
                 // never the crop/flower 1-second cycle.
