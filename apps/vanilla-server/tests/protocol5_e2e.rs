@@ -931,9 +931,15 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
         .arg(&restored)
         .arg("--import-anvil")
         .arg(&source_dir)
-        .status()
+        .output()
         .unwrap();
-    assert!(!retry.success(), "import overwrote an existing world");
+    assert!(!retry.status.success(), "import overwrote an existing world");
+    assert!(
+        String::from_utf8_lossy(&retry.stderr).contains("destination IRW1 already exists"),
+        "Anvil retry failed for an unexpected reason: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(fs::read(&restored).unwrap(), before, "rejected import changed the world");
 }
 
 #[test]
@@ -1326,8 +1332,12 @@ fn native_single_chest_shared_storage_and_protocol5_gui() {
 
 #[test]
 fn native_open_window_packets_cover_other_interactive_gui_blocks() {
-    // Use real placed blocks and the running server, not just the packet builder.
-    // Each case starts with an empty world to avoid layout-dependent interactions.
+    // Exercise each real GUI packet on a single native server connection.
+    // Restarting the server and streaming 25 chunks per case made this test
+    // unnecessarily slow. Clear the empty block after each case to preserve
+    // the original fresh-placement precondition without restarting.
+    let server = NativeServer::start();
+    let (mut player, _, _) = server.join("RustTester");
     let cases = [
         (23i16, 3u8, "Dispenser", 9u8),
         (158, 10, "Dropper", 9),
@@ -1337,16 +1347,18 @@ fn native_open_window_packets_cover_other_interactive_gui_blocks() {
         (145, 8, "Repair & Name", 0),
         (146, 0, "Chest", 27),
     ];
-    for (block, kind, title, slots) in cases {
-        let server = NativeServer::start();
-        let (mut player, _, _) = server.join("RustTester");
+    for (index, (block, kind, title, slots)) in cases.into_iter().enumerate() {
+        let window_id = u8::try_from(index + 1).unwrap();
         let mut held = 36i16.to_be_bytes().to_vec();
         held.extend_from_slice(&block.to_be_bytes());
         held.push(1);
         held.extend_from_slice(&0i16.to_be_bytes());
         held.extend_from_slice(&(-1i16).to_be_bytes());
         player.write_all(&frame(0x10, &held)).unwrap();
-        until_packet(&mut player, 0x2f, |p| p.starts_with(&[0, 0, 36]));
+        let item_id = block.to_be_bytes();
+        until_packet(&mut player, 0x2f, |p| {
+            p.starts_with(&[0, 0, 36, item_id[0], item_id[1]])
+        });
 
         let mut place = 0i32.to_be_bytes().to_vec();
         place.push(63);
@@ -1367,10 +1379,21 @@ fn native_open_window_packets_cover_other_interactive_gui_blocks() {
         open.extend_from_slice(&(-1i16).to_be_bytes());
         open.extend_from_slice(&[8, 8, 8]);
         player.write_all(&frame(8, &open)).unwrap();
-        let opened = until_packet(&mut player, 0x2d, |p| p.first() == Some(&1));
-        assert_open_window_protocol5(&opened, 1, kind, title, slots);
-        player.write_all(&frame(13, &[1])).unwrap();
-        drop(player);
+        let opened = until_packet(&mut player, 0x2d, |p| p.first() == Some(&window_id));
+        assert_open_window_protocol5(&opened, window_id, kind, title, slots);
+        player.write_all(&frame(13, &[window_id])).unwrap();
+
+        // A Creative Start Dig removes the now-empty GUI block instantly.
+        // Verify the real server reports air before exercising the next case.
+        let mut dig = vec![0u8];
+        dig.extend_from_slice(&0i32.to_be_bytes());
+        dig.push(64);
+        dig.extend_from_slice(&0i32.to_be_bytes());
+        dig.push(1);
+        player.write_all(&frame(7, &dig)).unwrap();
+        until_packet(&mut player, 0x23, |p| {
+            p.len() == 10 && p[4] == 64 && p[9] == 0
+        });
     }
 }
 
