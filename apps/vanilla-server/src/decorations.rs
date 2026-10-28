@@ -263,15 +263,24 @@ impl Decorations {
     /// The caller must commit this snapshot together with the world edit and
     /// any dropped disc/plant before publishing either live state.
     pub fn staged_remove(&self, position: Position) -> io::Result<Self> {
-        if !world::in_bounds(position.0, position.1, position.2) {
-            return Err(invalid("invalid decoration removal position"));
-        }
+        self.staged_remove_many(&[position])
+    }
+
+    /// Stage a whole world-tick's decorative removals in one snapshot.
+    /// Never publish the sidecar unless the associated block and all
+    /// dropped items have also been journaled successfully.
+    pub fn staged_remove_many(&self, positions: &[Position]) -> io::Result<Self> {
         let mut next = self.clone();
-        let position = key(position);
-        next.signs.remove(&position);
-        next.notes.remove(&position);
-        next.records.remove(&position);
-        next.pots.remove(&position);
+        for &position in positions {
+            if !world::in_bounds(position.0, position.1, position.2) {
+                return Err(invalid("invalid decoration removal position"));
+            }
+            let position = key(position);
+            next.signs.remove(&position);
+            next.notes.remove(&position);
+            next.records.remove(&position);
+            next.pots.remove(&position);
+        }
         next.encoded()?;
         Ok(next)
     }
