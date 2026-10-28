@@ -1091,6 +1091,11 @@ impl World {
     /// Wake fluids and powered dust around an edited block, without scanning
     /// every generated chunk. Source types are 1.7.10 8=water and 10=lava.
     fn wake_block_updates(&mut self, x: i32, y: i32, z: i32) {
+        // All neighboring coordinate arithmetic below assumes a valid world
+        // cell. Reject untrusted or stale coordinates before x/y/z +/- 1.
+        if !in_bounds(x, y, z) {
+            return;
+        }
         for (nx, ny, nz) in [
             (x, y, z),
             (x + 1, y, z),
@@ -2070,6 +2075,12 @@ impl World {
             return Err(invalid("invalid creeper explosion radius"));
         }
         let (cx, cy, cz) = center;
+        // A client or an entity crossing the finite world boundary must
+        // never overflow signed coordinates in the explosion's +/- 3 scan.
+        // Out-of-bounds centers cannot damage the authoritative world.
+        if !in_bounds(cx, cy, cz) {
+            return Ok(Vec::new());
+        }
         let mut changed = Vec::new();
         'blast: for y in (cy - 3).max(1)..=(cy + 3).min(254) {
             for x in cx - 3..=cx + 3 {
@@ -3161,6 +3172,64 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_block_coordinates_do_not_wake_neighbors_or_blast() {
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust1710-block-coordinate-guard-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 1 << 4).unwrap();
+        world.save(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let fluid_before = world.pending_fluid.clone();
+        let circuit_before = world.pending_circuit.clone();
+        let support_before = world.pending_support.clone();
+        let devices_before = world.pending_devices.clone();
+
+        for position in [
+            (i32::MIN, 64, 0),
+            (i32::MAX, 64, 0),
+            (0, 64, i32::MIN),
+            (0, 64, i32::MAX),
+            (0, i32::MIN, 0),
+            (0, i32::MAX, 0),
+            (WORLD_LIMIT, 64, 0),
+            (-WORLD_LIMIT - 1, 64, 0),
+        ] {
+            world.wake_block_updates(position.0, position.1, position.2);
+            assert!(world.creeper_blast_and_save(&path, position, 3.0).unwrap().is_empty());
+        }
+        assert_eq!(world.pending_fluid, fluid_before);
+        assert_eq!(world.pending_circuit, circuit_before);
+        assert_eq!(world.pending_support, support_before);
+        assert_eq!(world.pending_devices, devices_before);
+        assert_eq!(world.get(0, 64, 0), 1 << 4);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn creeper_blast_at_world_edge_never_edits_outside_bounds() {
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust1710-edge-creeper-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(WORLD_LIMIT - 1, 64, 0, 1 << 4).unwrap();
+        world.save(&path).unwrap();
+        let changed = world
+            .creeper_blast_and_save(&path, (WORLD_LIMIT - 1, 64, 0), 1.0)
+            .unwrap();
+        assert!(changed.contains(&(WORLD_LIMIT - 1, 64, 0)));
+        assert!(changed.iter().all(|&(x, y, z)| in_bounds(x, y, z)));
+        assert_eq!(world.get(WORLD_LIMIT - 1, 64, 0), 0);
+        assert_eq!(World::load(&path).unwrap().get(WORLD_LIMIT - 1, 64, 0), 0);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn creeper_blast_is_single_durable_transition_and_preserves_tile_blocks() {
