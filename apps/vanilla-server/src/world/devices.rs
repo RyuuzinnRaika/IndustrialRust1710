@@ -951,12 +951,21 @@ impl World {
         if !matches!(block >> 4, 70 | 72) {
             return Ok(false);
         }
-        self.pending_buttons
-            .insert((x, y as u8, z), self.fluid_phase + 10);
         if block & 1 != 0 {
+            // An already-pressed plate only refreshes its release timer.
+            self.pending_buttons
+                .insert((x, y as u8, z), self.fluid_phase + 10);
             return Ok(false);
         }
-        self.update_and_save(path, x, y, z, block | 1)
+        // Do not arm a release timer until the pressed state is durable.
+        // update_and_save rolls the block back on I/O failure; the timer
+        // must follow the same commit boundary.
+        let changed = self.update_and_save(path, x, y, z, block | 1)?;
+        if changed {
+            self.pending_buttons
+                .insert((x, y as u8, z), self.fluid_phase + 10);
+        }
+        Ok(changed)
     }
 }
 
@@ -964,6 +973,60 @@ impl World {
 mod redstone_regression_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn pressure_plate_failed_save_does_not_leave_a_release_timer() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-b11-plate-commit-{}.irw",
+            std::process::id()
+        ));
+        let staging = path.with_extension("tmp");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&staging);
+        // Block the atomic staging file deterministically with a directory.
+        fs::create_dir(&staging).unwrap();
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 70 << 4).unwrap();
+
+        assert!(world.press_plate(&path, 0, 64, 0).is_err());
+        assert_eq!(world.get(0, 64, 0), 70 << 4);
+        assert!(!world.pending_buttons.contains_key(&(0, 64, 0)));
+
+        fs::remove_dir(&staging).unwrap();
+        assert!(world.press_plate(&path, 0, 64, 0).unwrap());
+        assert_eq!(world.get(0, 64, 0), (70 << 4) | 1);
+        assert_eq!(
+            world.pending_buttons.get(&(0, 64, 0)),
+            Some(&(world.fluid_phase + 10))
+        );
+        // A second contact refreshes the timer without rewriting the block.
+        world.fluid_phase += 1;
+        assert!(!world.press_plate(&path, 0, 64, 0).unwrap());
+        assert_eq!(
+            world.pending_buttons.get(&(0, 64, 0)),
+            Some(&(world.fluid_phase + 10))
+        );
+        // The plate stays powered until the refreshed deadline. A failed
+        // release save must not clear its state or discard the timer.
+        assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 15);
+        for _ in 0..9 {
+            world.block_tick(&path, 64).unwrap();
+            assert_eq!(world.get(0, 64, 0), (70 << 4) | 1);
+        }
+        fs::create_dir(&staging).unwrap();
+        assert!(world.block_tick(&path, 64).is_err());
+        assert_eq!(world.get(0, 64, 0), (70 << 4) | 1);
+        assert!(world.pending_buttons.contains_key(&(0, 64, 0)));
+        fs::remove_dir(&staging).unwrap();
+
+        let changed = world.block_tick(&path, 64).unwrap();
+        assert!(changed.contains(&(0, 64, 0)));
+        assert_eq!(world.get(0, 64, 0), 70 << 4);
+        assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 0);
+        assert!(!world.pending_buttons.contains_key(&(0, 64, 0)));
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 70 << 4);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn isolated_dust_powers_all_four_sides_but_straight_wire_does_not() {
