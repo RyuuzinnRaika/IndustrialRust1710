@@ -193,7 +193,13 @@ fn rule(block: u16) -> Option<BlockRule> {
         23 | 158 => (3.5, Some(ToolKind::Pickaxe), 0, true, item(id as i16, 0)), // dispenser/dropper
         29 | 33 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(id as i16, 0)), // pistons
         46 => (0.0, None, 0, false, item(46, 0)), // TNT is instant-break
-        47 => (1.5, Some(ToolKind::Axe), 0, false, None), // bookshelf: three-book drop pending
+        47 => (1.5, Some(ToolKind::Axe), 0, false, None), // bookshelf: 3 books from additional_drop
+        63 | 68 => (1.0, Some(ToolKind::Axe), 0, false, item(323, 0)), // signs
+        84 => (2.0, Some(ToolKind::Axe), 0, false, item(84, 0)), // jukebox
+        116 => (5.0, Some(ToolKind::Pickaxe), 0, false, item(116, 0)),
+        117 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(379, 0)), // brewing stand
+        140 => (0.0, None, 0, false, item(390, 0)), // flower pot
+        145 => (5.0, Some(ToolKind::Pickaxe), 1, true, item(145, damage >> 2)),
         95 | 160 => (0.3, None, 0, false, None), // stained glass/panes
         101 => (5.0, Some(ToolKind::Pickaxe), 0, true, item(101, 0)), // iron bars
         102 => (0.3, None, 0, false, None), // glass pane
@@ -208,9 +214,6 @@ fn rule(block: u16) -> Option<BlockRule> {
         152 => (5.0, Some(ToolKind::Pickaxe), 0, true, item(152, 0)),
         154 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(154, 0)), // hopper
         157 => (0.7, Some(ToolKind::Pickaxe), 0, false, item(157, 0)),
-        165 => (0.0, None, 0, false, item(165, 0)), // slime
-        167 => (5.0, Some(ToolKind::Pickaxe), 0, true, item(167, 0)),
-        169 => (0.3, None, 0, false, None), // sea lantern: shards/crystals pending
         171 => (0.1, None, 0, false, item(171, damage)),
         174 => (0.5, Some(ToolKind::Pickaxe), 0, false, None), // packed ice
         _ => return None,
@@ -238,6 +241,7 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
     roll ^= roll >> 31;
     let (id, count) = match block >> 4 {
         31 if (block & 3) != 0 && roll.is_multiple_of(8) => (295, 1), // Grass/fern seeds
+        47 => (340, 3), // Bookshelf always drops three books.
         18 if block & 3 == 0 && roll.is_multiple_of(200) => (260, 1), // Oak apple
         161 if block & 3 == 1 && roll.is_multiple_of(200) => (260, 1), // Dark oak apple
         18 | 161 if roll.is_multiple_of(20) => (6, 1),                // Matching sapling
@@ -757,7 +761,7 @@ mod tests {
     #[test]
     fn one_packet_instant_mining_and_missing_legacy_blocks() {
         let at = (0, 64, 0);
-        for id in [31_u16, 37, 46, 50, 83, 165] {
+        for id in [31_u16, 37, 46, 50, 83] {
             let started = MiningProgress::start(at, id << 4, None).unwrap();
             assert!(started.is_instant(), "block {id} must accept Start alone");
             assert!(started.finish(at, id << 4, None).is_some());
@@ -765,9 +769,10 @@ mod tests {
         let dirt = MiningProgress::start(at, 3 << 4, None).unwrap();
         assert!(!dirt.is_instant(), "normal dirt must still require a Finish");
         for id in [19_u16, 22, 23, 29, 33, 47, 95, 101, 112, 121, 123, 133,
-                   139, 146, 147, 152, 154, 156, 157, 160, 167, 169, 171, 174] {
+                   139, 146, 147, 152, 154, 156, 157, 160, 171, 174] {
             assert!(mine_rule(id << 4, None).is_some(), "missing breakable 1.7.10 block {id}");
         }
+        assert_eq!(additional_drop(47 << 4, at, 42).map(|s| (s.id, s.count)), Some((340, 3)));
         for id in [0_u16, 7, 8, 9, 10, 11, 90, 119, 120, 137, 166] {
             assert!(mine_rule(id << 4, None).is_none(), "protected block {id}");
         }
