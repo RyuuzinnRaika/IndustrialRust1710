@@ -29,7 +29,12 @@ where
         for dx in 0..width {
             let index = dz * width + dx;
             if source[index] > 0 {
-                rng.start_chunk(i64::from(x) + dx as i64, i64::from(z) + dz as i64);
+                // Java adds cell offsets as signed 32-bit ints before
+                // widening them to long for initChunkSeed.
+                rng.start_chunk(
+                    i64::from(x.wrapping_add(dx as i32)),
+                    i64::from(z.wrapping_add(dz as i32)),
+                );
                 result[index] = rng.next_int(299_999) + 2;
             }
         }
@@ -183,5 +188,44 @@ mod tests {
             }
         }
         assert!(river_map(0, 0, 8, 0, parent).is_empty());
+    }
+
+    #[test]
+    fn river_init_wraps_java_int_coordinates_at_both_boundaries() {
+        // Independent Python verification of Java-long GenLayerRiverInit
+        // with the same patterned parent as the other golden fixtures.
+        // Java int addition wraps before initChunkSeed(long, long).
+        let cases: [(i64, i32, i32, [i32; 12]); 2] = [
+            (
+                42,
+                i32::MAX - 1,
+                i32::MAX - 1,
+                [
+                    0, 251901, 137239, 178700, 298966, 0, 79446, 70386,
+                    207052, 242802, 0, 240650,
+                ],
+            ),
+            (
+                -12_345,
+                i32::MAX,
+                i32::MIN,
+                [
+                    61330, 0, 241381, 236981, 19420, 267753, 0, 77482,
+                    56220, 151332, 81672, 0,
+                ],
+            ),
+        ];
+        for (seed, x, z, expected) in cases {
+            let whole = river_init_map(seed, 100, x, z, 4, 3, patterned_parent);
+            assert_eq!(whole, expected, "seed={seed} at ({x},{z})");
+            for dz in 0..3 {
+                for dx in 0..4 {
+                    let px = x.wrapping_add(dx as i32);
+                    let pz = z.wrapping_add(dz as i32);
+                    let cell = river_init_map(seed, 100, px, pz, 1, 1, patterned_parent);
+                    assert_eq!(cell[0], whole[dz * 4 + dx]);
+                }
+            }
+        }
     }
 }

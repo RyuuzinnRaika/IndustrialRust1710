@@ -12,7 +12,13 @@ pub(super) fn island_map(world_seed: i64, x: i32, z: i32, width: usize, height: 
     let mut result = vec![0; width * height];
     for dz in 0..height {
         for dx in 0..width {
-            rng.start_chunk(i64::from(x) + dx as i64, i64::from(z) + dz as i64);
+            // Java evaluates `x + dx` and `z + dz` as signed 32-bit ints before
+            // widening them to longs for initChunkSeed. Widening first changes
+            // islands at the i32 coordinate wrap boundary.
+            rng.start_chunk(
+                i64::from(x.wrapping_add(dx as i32)),
+                i64::from(z.wrapping_add(dz as i32)),
+            );
             result[dz * width + dx] = i32::from(rng.next_int(10) == 0);
         }
     }
@@ -199,6 +205,37 @@ mod tests {
         );
         assert_eq!(island_map(0, -1, -1, 3, 3)[4], 1);
         assert_eq!(island_map(42, i32::MIN, i32::MIN, 1, 1).len(), 1);
+    }
+
+    #[test]
+    fn island_matches_java_oracle_across_signed_coordinate_wrap() {
+        // Independent Java 21 oracle: Java int addition wraps before the
+        // resulting coordinate is passed as a long to GenLayer.initChunkSeed.
+        // These cases cross the positive-X and positive-Z i32 boundaries.
+        let cases = [
+            (42_i64, i32::MAX - 1, i32::MIN, "0000000000100000"),
+            (-12_345, i32::MAX - 1, i32::MIN, "1000001000000001"),
+            (0, i32::MAX - 1, i32::MIN, "0101000100000000"),
+            (42, i32::MIN, i32::MAX - 1, "0000010100000001"),
+            (-12_345, i32::MIN, i32::MAX - 1, "0000000000001000"),
+            (0, i32::MIN, i32::MAX - 1, "0000001001100110"),
+        ];
+        for (seed, x, z, expected) in cases {
+            let whole = island_map(seed, x, z, 4, 4);
+            assert_eq!(bits(&whole), expected, "seed={seed} x={x} z={z}");
+            for dz in 0_i32..4 {
+                for dx in 0_i32..4 {
+                    let cell = island_map(
+                        seed,
+                        x.wrapping_add(dx),
+                        z.wrapping_add(dz),
+                        1,
+                        1,
+                    );
+                    assert_eq!(cell[0], whole[(dz * 4 + dx) as usize]);
+                }
+            }
+        }
     }
 
     #[test]
