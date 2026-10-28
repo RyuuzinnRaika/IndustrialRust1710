@@ -3602,7 +3602,9 @@ mod tests {
 
     #[test]
     fn journaled_container_mining_preserves_all_slots_and_clears_saved_tile_state() {
+        use crate::brewing::{Brewer, Brewers};
         use crate::chests::{Chests, CHEST_SLOTS};
+        use crate::dispensers::{Devices, DEVICE_SLOTS};
         use crate::furnaces::{Furnace, Furnaces, FURNACE_SLOTS};
         use crate::ground_items::GroundItems;
         use crate::hoppers::{Hoppers, HOPPER_SLOTS};
@@ -3617,13 +3619,13 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        for id in [54_u16, 61, 154] {
+        for id in [54_u16, 61, 154, 23, 158, 117] {
             let world_file = root.join(format!("container-{id}.irw"));
             let drop_file = GroundItems::location(&world_file);
             let journal_file = world_file.with_extension("pending-txn.json");
             let source = Stack {
-                id: 264,
-                count: 17,
+                id: if id == 117 { 373 } else { 264 },
+                count: if id == 117 { 1 } else { 17 },
                 damage: 0,
                 nbt: None,
             };
@@ -3637,7 +3639,7 @@ mod tests {
             assert_eq!(original_world.get(0, 64, 0) >> 4, id);
             let ground = GroundItems::default();
             let block_drop = Stack {
-                id: if id == 61 { 61 } else { id as i16 },
+                id: match id { 61 => 61, 117 => 379, _ => id as i16 },
                 count: 1,
                 damage: 0,
                 nbt: None,
@@ -3670,7 +3672,7 @@ mod tests {
                     assert_eq!(furnace.slots.len(), FURNACE_SLOTS);
                     (Furnaces::location(&world_file), staged.encoded().unwrap())
                 }
-                _ => {
+                154 => {
                     let mut slots = [None; HOPPER_SLOTS];
                     slots[4] = Some(source);
                     let storage = Hoppers::default().staged_update((0, 64, 0), slots).unwrap();
@@ -3678,6 +3680,29 @@ mod tests {
                     let staged = storage.staged_remove((0, 64, 0)).unwrap();
                     (Hoppers::location(&world_file), staged.encoded().unwrap())
                 }
+                23 | 158 => {
+                    let mut slots = [None; DEVICE_SLOTS];
+                    slots[8] = Some(source);
+                    let storage = Devices::default().staged_update((0, 64, 0), slots).unwrap();
+                    let file = Devices::location(&world_file);
+                    fs::write(&file, storage.encoded().unwrap()).unwrap();
+                    let staged = storage
+                        .staged_update((0, 64, 0), [None; DEVICE_SLOTS])
+                        .unwrap();
+                    (file, staged.encoded().unwrap())
+                }
+                117 => {
+                    let mut stand = Brewer::default();
+                    stand.slots[0] = Some(source);
+                    let storage = Brewers::default().staged_update((0, 64, 0), stand).unwrap();
+                    let file = Brewers::location(&world_file);
+                    fs::write(&file, storage.encoded().unwrap()).unwrap();
+                    let staged = storage
+                        .staged_update((0, 64, 0), Brewer::default())
+                        .unwrap();
+                    (file, staged.encoded().unwrap())
+                }
+                _ => unreachable!(),
             };
             assert_eq!(
                 fs::read(&world_file).unwrap(),
@@ -3699,9 +3724,14 @@ mod tests {
                     .unwrap()
                     .get((0, 64, 0))
                     .occupied()),
-                _ => assert!(!Hoppers::load(&storage_file)
+                154 => assert!(!Hoppers::load(&storage_file)
                     .unwrap()
                     .has_contents((0, 64, 0))),
+                23 | 158 => assert!(Devices::load(&storage_file).unwrap()
+                    .slots((0, 64, 0)).iter().all(Option::is_none)),
+                117 => assert!(!Brewers::load(&storage_file).unwrap()
+                    .is_nonempty((0, 64, 0))),
+                _ => unreachable!(),
             };
             let actual: Vec<_> = GroundItems::load(&drop_file)
                 .unwrap()
