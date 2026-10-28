@@ -1247,16 +1247,15 @@ fn flush_pending_world_drops(
     world_path: &Path,
     ground_path: &Path,
 ) -> io::Result<Vec<ground_items::GroundItem>> {
-    let count = world
-        .queued_drops()
-        .len()
-        .min(32)
-        .min(ground.remaining_capacity());
-    if count == 0 {
+    let max_batch = world.queued_drops().len().min(32);
+    let Some((count, staged_ground, spawned)) =
+        ground.stage_world_drops_that_fit(&world.queued_drops()[..max_batch])?
+    else {
+        // Both the item-count limit and the JSON byte limit are normal
+        // backpressure, not a world corruption. Do not acknowledge drops
+        // until collected ground entities free enough storage.
         return Ok(Vec::new());
-    }
-    let (staged_ground, spawned) =
-        ground.stage_put_world_drops(&world.queued_drops()[..count])?;
+    };
     let staged_world = world.staged_drop_acknowledgement(count)?;
     journal::commit(
         &world_path.with_extension("pending-txn.json"),
