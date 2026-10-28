@@ -254,6 +254,48 @@ impl GroundItems {
             && i64::from(self.next_id) + count as i64 <= i64::from(i32::MAX)
     }
 
+    /// Maximum number of additional ground-item entities that may be
+    /// persisted without exceeding the entity or integer-ID cap.
+    pub fn remaining_capacity(&self) -> usize {
+        MAX_DROPS
+            .saturating_sub(self.entries.len())
+            .min((i64::from(i32::MAX) - i64::from(self.next_id)).max(0) as usize)
+    }
+
+    /// Stage natural world drops with their distinct absolute positions in
+    /// one validated JSON snapshot. This does not write or publish anything;
+    /// callers keep the world queue until commit_staged_put succeeds.
+    pub fn stage_put_world_drops(
+        &self,
+        drops: &[crate::world::WorldDrop],
+    ) -> io::Result<(Self, Vec<GroundItem>)> {
+        if !self.has_capacity_for(drops.len())
+            || drops.iter().any(|drop| !drop.stack.is_valid())
+        {
+            return Err(invalid("world-drop capacity or stack invalid"));
+        }
+        let mut candidate = self.clone();
+        let mut spawned = Vec::with_capacity(drops.len());
+        let ready = Instant::now() + PICKUP_DELAY;
+        for drop in drops {
+            let position = drop_position(drop.pos)?;
+            candidate.next_id += 1;
+            let item = GroundItem {
+                id: candidate.next_id,
+                position,
+                stack: drop.stack,
+            };
+            if !item.valid() {
+                return Err(invalid("invalid world drop position"));
+            }
+            candidate.entries.insert(item.id, item.clone());
+            candidate.eligible_after.insert(item.id, ready);
+            spawned.push(item);
+        }
+        candidate.encoded()?;
+        Ok((candidate, spawned))
+    }
+
     /// Create an unsaved, validated snapshot for atomic inventory + ground
     /// transactions. This method must not publish any state before journal::commit.
     pub fn stage_put_many(
