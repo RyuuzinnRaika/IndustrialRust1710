@@ -125,12 +125,18 @@ impl Scoreboard {
         state.validate()?;
         Ok(state)
     }
-    pub fn save(&self, path: &Path) -> io::Result<()> {
+    /// Encode one validated image for multi-file crash-recoverable commits.
+    pub fn encoded(&self) -> io::Result<Vec<u8>> {
         self.validate()?;
         let bytes = serde_json::to_vec_pretty(self)?;
         if bytes.len() as u64 > MAX_SIZE {
             return Err(invalid("scoreboard too large"));
         }
+        Ok(bytes)
+    }
+
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        let bytes = self.encoded()?;
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
