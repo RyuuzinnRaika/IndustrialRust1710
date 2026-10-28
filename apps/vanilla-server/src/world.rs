@@ -25,6 +25,9 @@ const MAX_PENDING_BLAST: usize = MAX_EDITS;
 // A loaded 5x5 view contains at most 6_400 surface columns per player.
 // Keep weather observations bounded even after prolonged exploration.
 const MAX_WEATHER_COLUMNS: usize = 16_384;
+// If persistent ground-item storage fills, postpone natural leaf decay
+// before its ephemeral drop queue can grow without bound.
+pub(super) const LEAF_DROP_BACKPRESSURE: usize = 1_536;
 // Observe naturally generated vines only in client-visible chunks.
 // Evict stale observations without unregistering player-edited plants.
 const MAX_OBSERVED_VINES: usize = 8_192;
@@ -350,7 +353,23 @@ impl World {
     pub fn set_day_time(&mut self, value: i64) {
         self.day_time = value.rem_euclid(24_000);
     }
-    /// Tracks which chunk columns contain changes, without allocating a full world.
+    /// Snapshot pending post-world-save item spawns without consuming them.
+    /// World ticks may append new entries, but only a successful ground-item
+    /// save can acknowledge and remove the oldest ones.
+    pub fn queued_drops(&self) -> &[WorldDrop] {
+        &self.pending_drops
+    }
+
+    /// Acknowledge only the prefix successfully written to ground storage.
+    /// A full item pool or temporary I/O error must leave the queue intact.
+    pub fn acknowledge_drops(&mut self, count: usize) {
+        let committed = count.min(self.pending_drops.len());
+        self.pending_drops.drain(..committed);
+    }
+
+    /// Test-only legacy drain helper. Live consumers use the acknowledged
+    /// queue path instead of losing items before the file is persisted.
+    #[cfg(test)]
     pub fn drain_drops(&mut self) -> Vec<WorldDrop> {
         std::mem::take(&mut self.pending_drops)
     }
