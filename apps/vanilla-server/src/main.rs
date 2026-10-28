@@ -3949,17 +3949,28 @@ fn play(
                                             // Match the hopper worker's world -> storage lock
                                             // order, then hold the ground pool through commit.
                                             let mut chest_guard = if matches!(block, 54 | 146) {
-                                                Some(chests.lock().map_err(|_| bad("chest lock poisoned"))?)
+                                                Some(
+                                                    chests
+                                                        .lock()
+                                                        .map_err(|_| bad("chest lock poisoned"))?,
+                                                )
                                             } else {
                                                 None
                                             };
-                                            let mut furnace_guard = if matches!(block, 61 | 62) {
-                                                Some(furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?)
-                                            } else {
-                                                None
-                                            };
+                                            let mut furnace_guard =
+                                                if matches!(block, 61 | 62) {
+                                                    Some(furnaces.lock().map_err(|_| {
+                                                        bad("furnace lock poisoned")
+                                                    })?)
+                                                } else {
+                                                    None
+                                                };
                                             let mut hopper_guard = if block == 154 {
-                                                Some(hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?)
+                                                Some(
+                                                    hoppers
+                                                        .lock()
+                                                        .map_err(|_| bad("hopper lock poisoned"))?,
+                                                )
                                             } else {
                                                 None
                                             };
@@ -3973,28 +3984,37 @@ fn play(
                                                 });
                                             }
                                             if let Some(storage) = chest_guard.as_ref() {
-                                                drops.extend(storage.slots(target).into_iter().flatten());
+                                                drops.extend(
+                                                    storage.slots(target).into_iter().flatten(),
+                                                );
                                             }
                                             if let Some(storage) = furnace_guard.as_ref() {
-                                                drops.extend(storage.get(target).slots.into_iter().flatten());
+                                                drops.extend(
+                                                    storage.get(target).slots.into_iter().flatten(),
+                                                );
                                             }
                                             if let Some(storage) = hopper_guard.as_ref() {
-                                                drops.extend(storage.slots(target).into_iter().flatten());
+                                                drops.extend(
+                                                    storage.slots(target).into_iter().flatten(),
+                                                );
                                             }
-                                            let mut ground = ground_items.lock().map_err(|_| {
-                                                bad("ground items lock poisoned")
-                                            })?;
+                                            let mut ground = ground_items
+                                                .lock()
+                                                .map_err(|_| bad("ground items lock poisoned"))?;
                                             // Insufficient entity capacity refuses the whole
                                             // break and sends an authoritative S23 below.
                                             if ground.has_capacity_for(drops.len()) {
                                                 let (next_ground, spawned) =
                                                     ground.stage_put_many(&drops, target)?;
-                                                if let Some(next_world) = w.stage_mining_removal(x, y, z)? {
+                                                if let Some(next_world) =
+                                                    w.stage_mining_removal(x, y, z)?
+                                                {
                                                     let mut next_chests = None;
                                                     let mut next_furnaces = None;
                                                     let mut next_hoppers = None;
                                                     let (storage_path, storage_bytes) =
-                                                        if let Some(storage) = chest_guard.as_ref() {
+                                                        if let Some(storage) = chest_guard.as_ref()
+                                                        {
                                                             let staged = storage.staged_update(
                                                                 target,
                                                                 [None; chests::CHEST_SLOTS],
@@ -4002,13 +4022,21 @@ fn play(
                                                             let bytes = staged.encoded()?;
                                                             next_chests = Some(staged);
                                                             (chest_path, bytes)
-                                                        } else if let Some(storage) = furnace_guard.as_ref() {
-                                                            let staged = storage.staged_update(target, Furnace::default())?;
+                                                        } else if let Some(storage) =
+                                                            furnace_guard.as_ref()
+                                                        {
+                                                            let staged = storage.staged_update(
+                                                                target,
+                                                                Furnace::default(),
+                                                            )?;
                                                             let bytes = staged.encoded()?;
                                                             next_furnaces = Some(staged);
                                                             (furnace_path, bytes)
-                                                        } else if let Some(storage) = hopper_guard.as_ref() {
-                                                            let staged = storage.staged_remove(target)?;
+                                                        } else if let Some(storage) =
+                                                            hopper_guard.as_ref()
+                                                        {
+                                                            let staged =
+                                                                storage.staged_remove(target)?;
                                                             let bytes = staged.encoded()?;
                                                             next_hoppers = Some(staged);
                                                             (hopper_path, bytes)
@@ -4024,10 +4052,14 @@ fn play(
                                                         (ground_path, next_ground.encoded()?),
                                                     ];
                                                     if wore {
-                                                        writes.push((inventory_path, next_inventory.encoded()?));
+                                                        writes.push((
+                                                            inventory_path,
+                                                            next_inventory.encoded()?,
+                                                        ));
                                                     }
                                                     journal::commit(
-                                                        &world_path.with_extension("pending-txn.json"),
+                                                        &world_path
+                                                            .with_extension("pending-txn.json"),
                                                         &writes,
                                                     )?;
                                                     // Publish every in-memory state only once
@@ -4054,7 +4086,8 @@ fn play(
                                                         send(
                                                             s,
                                                             0x2f,
-                                                            &inventory.set_slot(inventory.held_slot())?,
+                                                            &inventory
+                                                                .set_slot(inventory.held_slot())?,
                                                         )?;
                                                     }
                                                     for item in spawned {
@@ -4083,13 +4116,15 @@ fn play(
                                             // Mined upper/head halves yield the item from
                                             // their intact lower/foot half exactly once.
                                             let harvested_drop = if current_block & 8 != 0 {
-                                                mining_partner.and_then(|(px, py, pz)| {
-                                                    survival::mine_rule(
-                                                        w.get(px, py, pz),
-                                                        inventory.held(),
-                                                    )
-                                                    .and_then(|(_, harvest)| harvest.drop)
-                                                }).or(result.drop)
+                                                mining_partner
+                                                    .and_then(|(px, py, pz)| {
+                                                        survival::mine_rule(
+                                                            w.get(px, py, pz),
+                                                            inventory.held(),
+                                                        )
+                                                        .and_then(|(_, harvest)| harvest.drop)
+                                                    })
+                                                    .or(result.drop)
                                             } else {
                                                 result.drop
                                             };
@@ -4129,14 +4164,15 @@ fn play(
                                                 if wore {
                                                     candidate.save(inventory_path)?;
                                                 }
-                                                let saved = if let Some((px, py, pz)) = mining_partner {
-                                                    w.update_many_and_save(
-                                                        world_path,
-                                                        &[(x, y, z, 0), (px, py, pz, 0)],
-                                                    )
-                                                } else {
-                                                    w.update_and_save(world_path, x, y, z, 0)
-                                                };
+                                                let saved =
+                                                    if let Some((px, py, pz)) = mining_partner {
+                                                        w.update_many_and_save(
+                                                            world_path,
+                                                            &[(x, y, z, 0), (px, py, pz, 0)],
+                                                        )
+                                                    } else {
+                                                        w.update_and_save(world_path, x, y, z, 0)
+                                                    };
                                                 match saved {
                                                     Ok(true) => {
                                                         decorations
