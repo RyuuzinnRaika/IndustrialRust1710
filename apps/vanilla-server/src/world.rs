@@ -3619,6 +3619,7 @@ mod tests {
             };
             let mut original_world = World::new();
             original_world.import_block(0, 64, 0, id << 4).unwrap();
+            original_world.save(&world_file).unwrap();
             let staged_world = original_world
                 .stage_mining_removal(0, 64, 0)
                 .unwrap()
@@ -3642,6 +3643,7 @@ mod tests {
                     let storage = Chests::default()
                         .staged_update((0, 64, 0), slots)
                         .unwrap();
+                    fs::write(Chests::location(&world_file), storage.encoded().unwrap()).unwrap();
                     let staged = storage
                         .staged_update((0, 64, 0), [None; CHEST_SLOTS])
                         .unwrap();
@@ -3653,6 +3655,7 @@ mod tests {
                     let storage = Furnaces::default()
                         .staged_update((0, 64, 0), furnace)
                         .unwrap();
+                    fs::write(Furnaces::location(&world_file), storage.encoded().unwrap()).unwrap();
                     let staged = storage
                         .staged_update((0, 64, 0), Furnace::default())
                         .unwrap();
@@ -3665,10 +3668,12 @@ mod tests {
                     let storage = Hoppers::default()
                         .staged_update((0, 64, 0), slots)
                         .unwrap();
+                    fs::write(Hoppers::location(&world_file), storage.encoded().unwrap()).unwrap();
                     let staged = storage.staged_remove((0, 64, 0)).unwrap();
                     (Hoppers::location(&world_file), staged.encoded().unwrap())
                 }
             };
+            assert_eq!(fs::read(&world_file).unwrap(), original_world.encoded().unwrap());
             crate::journal::commit(
                 &journal_file,
                 &[
