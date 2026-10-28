@@ -150,9 +150,9 @@ others may take several minutes.
   both items. No modern stick drops are added for the 1.7.10 target.
   As before, pending drops publish only after the world save succeeds
   and share the worker's 256-drop per-tick bound.
-- The existing manually mined leaf extra-drop API is still limited to
-  one bonus item per leaf. Independent double-roll behavior is newly
-  provided for **natural decay** only.
+- The legacy `additional_drop` helper remains for ordinary non-leaf
+  block bonuses, while the live manual foliage mining path now uses the
+  independent two-drop logic (or collects leaves/vines with shears).
 - Regression tests cover vine face stripping, full detachment, hanging
   support, downward growth, restart restoration, leaves dropping saplings
   after a durable tick, and joint apple/sapling probabilities. Tests
@@ -188,6 +188,33 @@ others may take several minutes.
   and wear, chunk-encoder vine collection, observation eviction and
   upper tree section delivery. **Rust compilation, cargo tests and
   real client validation remain pending.**
+
+## Saturated ground items: bounded retry and backpressure
+
+- Natural leaf decay already saves the world before generating a ground
+  item. Previously the world worker used `drain_drops` and silently lost
+  the remaining items if the 512-entity ground-item registry filled.
+- The live server now **peeks** at the in-memory world-drop queue, stages
+  up to **32 distinct-position item entities** in one validated ground
+  snapshot, saves that snapshot once, and only then acknowledges the
+  exact saved queue prefix. Spawn packets follow a successful save.
+- If the ground-item pool is full or its file cannot be written, the
+  queue remains intact and the worker retries at most once per second
+  rather than repeatedly dropping the backlog or aborting the tick.
+  A temporary file error does not remove any queued items.
+- When 1,536 or more pending drops remain, new random natural-leaf
+  destruction is deferred. This prevents further leaf-decay drops from
+  accumulating without bound during a prolonged full-pool condition.
+  Leaf decay resumes after enough queued drops have been persisted.
+- This **does not provide full crash durability**. The queue is currently
+  in process memory and is not included in the IRW world-file format.
+  A process crash or OS shutdown before ground-item storage succeeds
+  can still lose queued drops. Fully transactional durable recovery
+  across the IRW and ground-items sidecars remains a separate task.
+- Added regression tests for 2 drops at distinct locations, 40-item
+  partial batches (32 + 8), full 512-slot storage with retry, ground
+  file write failure with retry, and the leaf-decay pause. These
+  tests have **not been executed with cargo**.
 
 ## Compatibility and testing
 
