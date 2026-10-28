@@ -1574,6 +1574,55 @@ fn native_furnace_protocol5_gui_fuel_and_20tps_smelting() {
 }
 
 #[test]
+fn survival_instant_torch_mining_needs_only_start_packet() {
+    let server = NativeServer::start_with_mode_and_items(true, &[(36, 50)]);
+    let (mut client, _, _) = server.join("RustTester");
+
+    // Place a torch with a genuine server-owned hotbar stack, then mine
+    // it using only C07 Start. Vanilla 1.7.10 sends no Finish for instabreak.
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&50i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() >= 11 && p[4] == 64 && p[9] == 50
+    });
+
+    let mut dig = vec![0u8];
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(64);
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(1);
+    client.write_all(&frame(7, &dig)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() >= 11 && p[4] == 64 && p[9] == 0
+    });
+}
+
+#[test]
+fn creative_can_break_flat_bedrock_at_y60_with_one_start_packet() {
+    let server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+    // The flat world's y=60 layer is bedrock. Creative may break it;
+    // rejecting all y<=60 created apparently random mining failures.
+    let mut dig = vec![0u8];
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(60);
+    dig.extend_from_slice(&0i32.to_be_bytes());
+    dig.push(1);
+    client.write_all(&frame(7, &dig)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() >= 11 && p[4] == 60 && p[9] == 0
+    });
+}
+
+#[test]
 fn survival_shovel_mining_wears_out_last_use_and_persists_dirt_drop() {
     let server = NativeServer::start_with_mode(true);
     let player_inventory = server
