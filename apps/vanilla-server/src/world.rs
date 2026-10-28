@@ -1895,29 +1895,39 @@ impl World {
                 self.set_gravity_cell(position, block);
             }
             let mut committed_pool = None;
+            let mut committed_decorations = None;
             let saved = if self.edits.len() > MAX_EDITS {
                 Err(invalid("fluid or redstone exceeds world edit budget"))
-            } else if !detached_drops.is_empty() {
-                if let Some((pool, ground_path)) = ground.as_ref() {
-                    // All drop positions have already been accepted by the
-                    // capacity gate. Stage all of them before committing
-                    // either the world or the ground-item sidecar.
-                    (|| -> io::Result<()> {
-                        let positions = detached_drops
-                            .iter()
-                            .map(|drop| (drop.stack, drop.pos))
-                            .collect::<Vec<_>>();
-                        let (staged, spawned) = pool.stage_put_at_positions(&positions)?;
-                        crate::journal::commit(
-                            &path.with_extension("pending-txn.json"),
-                            &[(path, self.encoded()?), (*ground_path, staged.encoded()?)],
-                        )?;
-                        committed_pool = Some((staged, spawned));
-                        Ok(())
-                    })()
-                } else {
-                    self.save(path)
-                }
+            } else if (ground.is_some() && !detached_drops.is_empty())
+                || (decorations.is_some() && !decoration_positions.is_empty())
+            {
+                (|| -> io::Result<()> {
+                    let mut changes = vec![(path, self.encoded()?)];
+                    let mut next_pool = None;
+                    if !detached_drops.is_empty() {
+                        if let Some((pool, ground_path)) = ground.as_ref() {
+                            let positions = detached_drops
+                                .iter()
+                                .map(|drop| (drop.stack, drop.pos))
+                                .collect::<Vec<_>>();
+                            let (staged, spawned) = pool.stage_put_at_positions(&positions)?;
+                            changes.push((*ground_path, staged.encoded()?));
+                            next_pool = Some((staged, spawned));
+                        }
+                    }
+                    let mut next_decorations = None;
+                    if !decoration_positions.is_empty() {
+                        if let Some((stored, decoration_path)) = decorations.as_ref() {
+                            let staged = stored.staged_remove_many(&decoration_positions)?;
+                            changes.push((*decoration_path, staged.encoded()?));
+                            next_decorations = Some(staged);
+                        }
+                    }
+                    crate::journal::commit(&path.with_extension("pending-txn.json"), &changes)?;
+                    committed_pool = next_pool;
+                    committed_decorations = next_decorations;
+                    Ok(())
+                })()
             } else {
                 self.save(path)
             };
@@ -1954,6 +1964,11 @@ impl World {
                 // Preserve the stand-alone block_tick API used by existing
                 // offline tests and tools, which still drain these events.
                 self.pending_drops.extend(detached_drops);
+            }
+            if let Some(staged) = committed_decorations {
+                if let Some((live, _)) = decorations.as_mut() {
+                    **live = staged;
+                }
             }
             self.pending_device_activations.extend(fired_devices);
             self.pending_piston_actions.extend(piston_actions);
