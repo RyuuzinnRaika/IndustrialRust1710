@@ -64,7 +64,7 @@ fn tool(stack: Option<Stack>) -> Option<Tool> {
         _ => return None,
     };
     // Damaged tool metadata must represent an existing, unbroken item.
-    if held.count != 1 || held.damage >= max_uses {
+    if held.count != 1 || held.damage < 0 || held.damage >= max_uses {
         return None;
     }
     Some(Tool {
@@ -713,6 +713,114 @@ mod tests {
                 })
                 .expect("each leaf species should drop its matching sapling");
             assert_eq!(sapling.damage, expected);
+        }
+    }
+
+    #[test]
+    fn s03_negative_or_exhausted_pickaxe_damage_cannot_harvest_stone() {
+        // Tool damage is signed in the legacy item stack. A negative value
+        // must not become a usable pickaxe or bypass the harvest/timing rules.
+        let valid = stack(270, 58);
+        let (valid_time, valid_mine) = mine_rule(1 << 4, valid).unwrap();
+        assert_eq!(tool_max_uses(valid.unwrap()), Some(59));
+        assert_eq!(valid_mine.drop, Some(BlockDrop { id: 4, damage: 0 }));
+        assert!(valid_mine.wear_tool);
+
+        for damage in [i16::MIN, -1, 59, i16::MAX] {
+            let invalid = stack(270, damage);
+            assert_eq!(tool_max_uses(invalid.unwrap()), None);
+            let (minimum, mined) = mine_rule(1 << 4, invalid).unwrap();
+            assert_eq!(mined.drop, None, "invalid damage {damage}");
+            assert!(!mined.wear_tool, "invalid damage {damage}");
+            assert!(minimum > valid_time, "invalid damage {damage}");
+        }
+    }
+
+    #[test]
+    fn s03_invalid_tool_damage_never_accelerates_mining_or_consumes_durability() {
+        // Cover every recognized tool family, not only pickaxes. A malformed
+        // signed damage value must behave like an empty hand for mining.
+        for (tool_id, block_id) in [
+            (270_i16, 1_u16),  // pickaxe / stone
+            (269, 3),          // shovel / dirt
+            (271, 17),         // axe / log
+            (268, 3),          // sword / dirt
+            (290, 3),          // hoe / dirt
+        ] {
+            let bare = mine_rule(block_id << 4, None).unwrap();
+            for damage in [i16::MIN, -1] {
+                let malformed = stack(tool_id, damage);
+                assert_eq!(
+                    tool_max_uses(malformed.unwrap()),
+                    None,
+                    "tool {tool_id}, damage {damage}"
+                );
+                assert_eq!(
+                    mine_rule(block_id << 4, malformed).unwrap(),
+                    bare,
+                    "tool {tool_id}, damage {damage}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn s03_negative_tool_damage_cannot_fast_finish_or_swap_into_active_dig() {
+        // A malformed tool is treated as bare hands throughout the complete
+        // server-authoritative dig, not only by the initial harvest rule.
+        let target = (3, 64, -2);
+        let block = 1_u16 << 4;
+        let bare_minimum = mine_rule(block, None).unwrap().0;
+        assert!(bare_minimum > Duration::from_secs(1));
+
+        for damage in [i16::MIN, -1] {
+            let malformed = stack(270, damage);
+            let mut too_early = MiningProgress::start(target, block, malformed).unwrap();
+            too_early.started = Instant::now() - Duration::from_millis(100);
+            assert!(too_early.finish(target, block, malformed).is_none());
+
+            let mut completed = MiningProgress::start(target, block, malformed).unwrap();
+            completed.started = Instant::now() - bare_minimum;
+            assert_eq!(
+                completed.finish(target, block, malformed),
+                mine_rule(block, None).map(|(_, result)| result)
+            );
+
+            let mut switched = MiningProgress::start(target, block, stack(270, 0)).unwrap();
+            switched.started = Instant::now() - bare_minimum;
+            assert!(switched.finish(target, block, malformed).is_none());
+        }
+    }
+
+    #[test]
+    fn s03_negative_tool_damage_cannot_bypass_environment_mining_penalties() {
+        // Invalid durability is bare-hand mining even if the player starts
+        // submerged and becomes airborne before the finish packet arrives.
+        let target = (-3, 63, 5);
+        let block = 1_u16 << 4;
+        let bare_minimum = mine_rule(block, None).unwrap().0;
+        for damage in [i16::MIN, -1] {
+            let malformed = stack(270, damage);
+            let mut early =
+                MiningProgress::start_with_environment(target, block, malformed, true, true)
+                    .unwrap();
+            early.started = Instant::now() - bare_minimum.saturating_mul(5);
+            assert!(
+                early
+                    .finish_with_environment(target, block, malformed, true, false)
+                    .is_none(),
+                "invalid damage {damage} bypassed the airborne penalty"
+            );
+
+            let mut complete =
+                MiningProgress::start_with_environment(target, block, malformed, true, true)
+                    .unwrap();
+            complete.started = Instant::now() - bare_minimum.saturating_mul(25);
+            assert_eq!(
+                complete.finish_with_environment(target, block, malformed, true, false),
+                mine_rule(block, None).map(|(_, result)| result),
+                "invalid damage {damage} changed the bare-hand harvest result"
+            );
         }
     }
 
