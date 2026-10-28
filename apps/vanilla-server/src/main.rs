@@ -3092,7 +3092,10 @@ fn play(
                     if let Some(hit) = result {
                         if survival {
                             let mut next_inventory = inventory.clone();
-                            if next_inventory.wear_held_tool() {
+                            // Java 1.7.10 combat wears a pickaxe/axe/shovel
+                            // by 2 uses, a sword by 1, and not a hoe. This
+                            // differs from the one-use block mining path.
+                            if next_inventory.wear_held_tool_on_mob_attack() {
                                 next_inventory.save(inventory_path)?;
                                 *inventory = next_inventory;
                                 send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
