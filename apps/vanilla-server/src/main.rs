@@ -1118,6 +1118,32 @@ fn sprint_action(current: bool, action: i32, food: i32) -> bool {
     }
 }
 
+/// World-changing packets must not reach gameplay logic while a Survival
+/// player is on the death screen. Client Status (22) is intentionally allowed
+/// so the authoritative respawn path remains reachable.
+fn blocked_while_dead(id: i32) -> bool {
+    matches!(id, 2 | 3 | 4 | 5 | 6 | 7 | 8 | 10 | 11 | 12 | 14 | 16 | 17 | 18 | 19 | 23)
+}
+
+#[cfg(test)]
+mod dead_session_packet_tests {
+    use super::blocked_while_dead;
+
+    #[test]
+    fn dead_players_cannot_attack_move_place_or_mutate_containers() {
+        for id in [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 14, 16, 17, 18, 19, 23] {
+            assert!(blocked_while_dead(id), "packet {id} must be ignored");
+        }
+    }
+
+    #[test]
+    fn keepalive_chat_close_window_and_respawn_remain_available() {
+        for id in [0, 1, 9, 13, 15, 20, 21, 22] {
+            assert!(!blocked_while_dead(id), "packet {id} must remain available");
+        }
+    }
+}
+
 fn potion_effect_packet(entity: i32, kind: u8, amplifier: u8, duration: u16) -> Vec<u8> {
     let mut packet = entity.to_be_bytes().to_vec();
     packet.push(kind);
@@ -2694,9 +2720,10 @@ fn play(
             last_client_packet_at = Instant::now();
             last_client_packet_id = Some(id);
         }
-        // Dead players cannot interact with or move through the world until
-        // their Protocol 5 Client Status respawn request is accepted.
-        if survival && vitals.health <= 0.0 && matches!(id, 4 | 6 | 7 | 8) {
+        // Dead players cannot attack Mobs, mutate inventory, or act in the
+        // world before a Protocol 5 Client Status respawn request succeeds.
+        // KeepAlive, chat, Close Window and the respawn request still work.
+        if survival && vitals.health <= 0.0 && blocked_while_dead(id) {
             continue;
         }
         // Before C04/C06 confirms the authoritative destination, ignore
@@ -6164,6 +6191,7 @@ fn play(
                     idle_gravity = IdleGravity::new(now_tick);
                     eating = None;
                     bow_start = None;
+                    sprinting = false; // fresh client session has no sprint flag
                     // Death clears every temporary potion effect; stale
                     // regeneration must never resurrect a dead player before
                     // the server has committed death drops and respawn.
