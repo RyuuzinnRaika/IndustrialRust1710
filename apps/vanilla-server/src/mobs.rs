@@ -3912,6 +3912,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn s07_every_materials_25_tool_types_inflict_correct_mob_melee_damage() {
+        // The player-to-Mob path, not just damage_held(), must honor all
+        // five crafting materials in Minecraft Java 1.7.10.
+        for (material, sword, axe, pickaxe, shovel, hoe, bonus) in [
+            ("wood", 268, 271, 270, 269, 290, 0),
+            ("stone", 272, 275, 274, 273, 291, 1),
+            ("iron", 267, 258, 257, 256, 292, 2),
+            ("gold", 283, 286, 285, 284, 294, 0),
+            ("diamond", 276, 279, 278, 277, 293, 3),
+        ] {
+            for (tool_type, id, expected) in [
+                ("sword", sword, 4 + bonus),
+                ("axe", axe, 3 + bonus),
+                ("pickaxe", pickaxe, 2 + bonus),
+                ("shovel", shovel, 1 + bonus),
+                ("hoe", hoe, 1),
+            ] {
+                let player = PlayerPosition::default();
+                let mut mobs = Mobs::default();
+                mobs.insert(Kind::Enderman, player, false);
+                let mob_id = mobs.next_id - 1;
+                let original = mobs.entities[&mob_id].health;
+                let weapon = Some(Stack {
+                    id,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                });
+                assert!(mobs.player_attack(mob_id, player, weapon, 20).is_some());
+                assert_eq!(
+                    mobs.entities[&mob_id].health,
+                    original - expected,
+                    "material={material} tool={tool_type} id={id}"
+                );
+                // Duplicate packets in the same invulnerability window do
+                // not deal additional damage, regardless of material.
+                assert!(mobs.player_attack(mob_id, player, weapon, 21).is_none());
+                assert_eq!(mobs.entities[&mob_id].health, original - expected);
+            }
+        }
+    }
+
+    #[test]
     fn s07_legacy_tool_damage_matches_survival_tiers() {
         let equipped = |id| {
             Some(Stack {
