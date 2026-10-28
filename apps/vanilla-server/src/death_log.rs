@@ -741,6 +741,21 @@ mod tests {
         assert!(conflicting_location
             .append_with_event_id(&world, "same-projectile-id")
             .is_err());
+        let conflicting_damage = DeathRecord {
+            hit: Some(FatalHit {
+                cause: DeathCause::Projectile {
+                    kind: "Arrow",
+                    shooter_kind: Some("Skeleton"),
+                    shooter_id: Some(901),
+                },
+                previous_health: 3.0,
+                applied_damage: 3.0,
+            }),
+            ..original
+        };
+        assert!(conflicting_damage
+            .append_with_event_id(&world, "same-projectile-id")
+            .is_err());
         assert!(!original.append_with_event_id(&world, "same-projectile-id").unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
         fs::remove_file(path).unwrap();
@@ -754,7 +769,7 @@ mod tests {
         assert!(sample_record()
             .append_with_event_id(&world, "new-event")
             .is_err());
-        assert_eq!(fs::read(&path).unwrap(), contents);
+        assert_eq!(fs::read(&path).unwrap(), contents.to_vec());
         fs::remove_file(path).unwrap();
     }
 
