@@ -2618,10 +2618,14 @@ fn play(
                     dimension: session_dimension.protocol_id() as i32,
                     tick: now_tick,
                 };
-                println!("{}", record.console_summary());
-                if let Err(error) = record.append(world_path) {
+                // A server-generated ID correlates the console line with
+                // the durable JSONL event. Reuse it for any in-session retry.
+                // It is not yet a persisted transaction ID for other files.
+                let event_id = format!("d2-{:032x}", rand::random::<u128>());
+                println!("{} event_id={event_id}", record.console_summary());
+                if let Err(error) = record.append_with_event_id(world_path, &event_id) {
                     // Optional diagnostic output must not block drops or respawn.
-                    eprintln!("DEATH LOG WRITE ERROR: {error}");
+                    eprintln!("DEATH LOG WRITE ERROR event_id={event_id}: {error}");
                 }
                 if show_death_messages {
                     hub.broadcast(chat_event(&record.chat_message())?);
