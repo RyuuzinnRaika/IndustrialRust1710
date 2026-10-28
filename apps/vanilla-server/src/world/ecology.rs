@@ -324,6 +324,33 @@ impl World {
             }
         }
     }
+    /// An IRW snapshot records removed *generated* logs as sparse overrides,
+    /// but does not serialize the in-memory random-tick wake set. Rebuild it
+    /// for nearby generated leaves on restart so chopped trees can finish
+    /// decaying, even if the server was stopped right after the last log broke.
+    pub(super) fn restore_generated_leaf_checks(&mut self) {
+        if !matches!(
+            self.generation,
+            super::Generation::Expanded(_, crate::dimensions::Dimension::Overworld)
+        ) {
+            return;
+        }
+        let removed_logs: Vec<(i32, i32, i32)> = self
+            .edits
+            .iter()
+            .filter_map(|(&(x, y, z), &replacement)| {
+                if !(63..=160).contains(&y) || matches!(replacement >> 4, 17 | 162) {
+                    return None;
+                }
+                matches!(self.base_block(x, y, z) >> 4, 17 | 162)
+                    .then_some((x, i32::from(y), z))
+            })
+            .collect();
+        for (x, y, z) in removed_logs {
+            self.wake_leaves(x, y, z);
+        }
+    }
+
     /// Changes from environmental random ticks and immediate support checks.
     /// This function only stages data, so the caller can commit or roll back
     /// the entire tick as one world-file transaction.
