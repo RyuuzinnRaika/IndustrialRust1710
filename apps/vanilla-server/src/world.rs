@@ -367,6 +367,13 @@ impl World {
         self.pending_drops.drain(..committed);
     }
 
+    /// Construct a post-world-save drop to verify batch/acknowledgement
+    /// transactions without relying on a random natural leaf tick.
+    #[cfg(test)]
+    pub fn queue_test_drop(&mut self, pos: (i32, i32, i32), stack: crate::inventory::Stack) {
+        self.pending_drops.push(WorldDrop { pos, stack });
+    }
+
     /// Test-only legacy drain helper. Live consumers use the acknowledged
     /// queue path instead of losing items before the file is persisted.
     #[cfg(test)]
