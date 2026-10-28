@@ -1316,7 +1316,7 @@ impl World {
     /// Bounded 20TPS flow/conduction step. IRW save occurs once per tick.
     /// Empty fluid destinations and wire strengths are staged before mutation.
     pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
-        self.block_tick_inner(path, budget, None).map(|(changed, _)| changed)
+        self.block_tick_inner(path, budget, None, None).map(|(changed, _)| changed)
     }
 
     /// Tick world blocks together with their materialized ground-item drops.
@@ -1329,7 +1329,26 @@ impl World {
         ground: &mut crate::ground_items::GroundItems,
         ground_path: &Path,
     ) -> io::Result<(Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>)> {
-        self.block_tick_inner(path, budget, Some((ground, ground_path)))
+        self.block_tick_inner(path, budget, Some((ground, ground_path)), None)
+    }
+
+    /// Live server tick: world edits, item entities, and decorative tile data
+    /// are committed together when support failure or piston moves remove them.
+    pub fn block_tick_with_ground_and_decorations(
+        &mut self,
+        path: &Path,
+        budget: usize,
+        ground: &mut crate::ground_items::GroundItems,
+        ground_path: &Path,
+        decorations: &mut crate::decorations::Decorations,
+        decoration_path: &Path,
+    ) -> io::Result<(Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>)> {
+        self.block_tick_inner(
+            path,
+            budget,
+            Some((ground, ground_path)),
+            Some((decorations, decoration_path)),
+        )
     }
 
     fn block_tick_inner(
@@ -1337,6 +1356,7 @@ impl World {
         path: &Path,
         budget: usize,
         mut ground: Option<(&mut crate::ground_items::GroundItems, &Path)>,
+        mut decorations: Option<(&mut crate::decorations::Decorations, &Path)>,
     ) -> io::Result<(Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>)> {
         let mut committed_drops = Vec::new();
         self.fluid_phase = self.fluid_phase.wrapping_add(1);
