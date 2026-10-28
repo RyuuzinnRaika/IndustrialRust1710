@@ -18,6 +18,8 @@ mod edge;
 #[allow(dead_code)]
 mod island_zoom;
 #[allow(dead_code)]
+mod rare_biome;
+#[allow(dead_code)]
 mod remove_too_much_ocean;
 #[allow(dead_code)]
 mod river;
