@@ -104,7 +104,8 @@ use mobs::{DamageOrigin, Mobs};
 use multiplayer::{
     Event, Hub, JoinError, SessionEvents, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT,
     ADMIN_ENCHANT_EVENT, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT,
-    ADMIN_SPAWNPOINT_EVENT, ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT, MAX_PLAYERS,
+    ADMIN_SPAWNPOINT_EVENT, ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT,
+    FALLING_ANVIL_DAMAGE_EVENT, MAX_PLAYERS,
     PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
 };
 use online_auth::{Connection, ServerIdentity};
@@ -1271,6 +1272,19 @@ fn mining_environment(world: &World, player: &PlayerPosition) -> (bool, bool) {
 const LEGACY_VOID_DAMAGE_Y: f64 = -64.0;
 const LEGACY_VOID_DAMAGE_INTERVAL: u64 = 10;
 
+/// Check an authoritative player AABB against the final anvil block cell.
+fn anvil_landing_touches_player(player: PlayerPosition, landing: (i32, i32, i32)) -> bool {
+    let (x, y, z) = landing;
+    let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
+    let inset = 1.0 / 16.0;
+    player.x + 0.3 > bx + inset
+        && player.x - 0.3 < bx + 1.0 - inset
+        && player.z + 0.3 > bz + inset
+        && player.z - 0.3 < bz + 1.0 - inset
+        && player.y + 1.8 > by
+        && player.y < by + 1.0
+}
+
 fn void_damage_due(y: f64, tick: u64, last_hit: Option<u64>) -> bool {
     y.is_finite()
         && y < LEGACY_VOID_DAMAGE_Y
@@ -1280,6 +1294,23 @@ fn void_damage_due(y: f64, tick: u64, last_hit: Option<u64>) -> bool {
 #[cfg(test)]
 mod void_damage_tests {
     use super::*;
+
+    #[test]
+    fn anvil_landing_contacts_player_not_distant_bystander() {
+        let at = (4, 65, 4);
+        assert!(anvil_landing_touches_player(
+            PlayerPosition { x: 4.5, y: 64.0, z: 4.5 },
+            at
+        ));
+        assert!(!anvil_landing_touches_player(
+            PlayerPosition { x: 6.5, y: 64.0, z: 4.5 },
+            at
+        ));
+        assert!(!anvil_landing_touches_player(
+            PlayerPosition { x: 4.5, y: 67.0, z: 4.5 },
+            at
+        ));
+    }
 
     #[test]
     fn void_damage_is_below_legacy_build_floor_by_sixty_four_blocks() {
@@ -1465,6 +1496,7 @@ fn play(
     let mut hazards = Hazards::new();
     let mut last_hazards_tick = clock.ticks();
     let mut last_void_hit_tick: Option<u64> = None;
+    let mut last_anvil_hit_tick: Option<u64> = None;
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
     let mut death_recorded = vitals.health <= 0.0;
@@ -6624,6 +6656,7 @@ fn play(
                     hazards = Hazards::new();
                     last_hazards_tick = now_tick;
                     last_void_hit_tick = None;
+                    last_anvil_hit_tick = None;
                     // In vanilla, death loses XP and may leave up to 100 XP in orbs.
                     if !keep_inventory {
                         let drop_amount =
