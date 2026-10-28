@@ -325,11 +325,64 @@ pub fn leaf_decay_drops(block: u16, pos: (i32, i32, i32), tick: u64) -> Vec<Stac
     drops
 }
 
+/// The hand-mining path needs to stage all items before changing the
+/// world. Java 1.7.10 leaves make independent apple/sapling rolls and
+/// shears collect the leaf block instead. Vines drop only when sheared.
+/// `None` means the caller should use ordinary primary/bonus block drops.
+pub fn manual_foliage_drops(
+    block: u16,
+    pos: (i32, i32, i32),
+    tick: u64,
+    held: Option<Stack>,
+) -> Option<Vec<Stack>> {
+    let id = block >> 4;
+    if !matches!(id, 18 | 106 | 161) {
+        return None;
+    }
+    let shears = held.is_some_and(|item| {
+        item.id == 359 && item.count == 1 && (0..238).contains(&item.damage)
+    });
+    if shears {
+        let damage = match id {
+            18 => (block & 3) as i16,
+            161 => (block & 1) as i16,
+            _ => 0,
+        };
+        return Some(vec![Stack {
+            id: id as i16,
+            count: 1,
+            damage,
+            nbt: None,
+        }]);
+    }
+    Some(if matches!(id, 18 | 161) {
+        leaf_decay_drops(block, pos, tick)
+    } else {
+        Vec::new()
+    })
+}
+
 /// Server-authoritative minimum for breaking a known block; tick quantized,
 /// 30 game ticks × hardness / speed if harvestable, otherwise 100 × hardness.
 /// Not all environmental penalties of vanilla 1.7.10 are modeled.
 pub fn mine_rule(block: u16, held: Option<Stack>) -> Option<(Duration, MineResult)> {
     let spec = rule(block)?;
+    // Minecraft 1.7.10 shears instantly harvest foliage. The exact
+    // species-preserving drops are resolved after mining in
+    // manual_foliage_drops, never through the ordinary block drop.
+    if matches!(block >> 4, 18 | 106 | 161)
+        && held.is_some_and(|item| {
+            item.id == 359 && item.count == 1 && (0..238).contains(&item.damage)
+        })
+    {
+        return Some((
+            Duration::ZERO,
+            MineResult {
+                drop: None,
+                wear_tool: true,
+            },
+        ));
+    }
     let equipped = tool(held);
     let effective = equipped.is_some_and(|t| spec.kind == Some(t.kind));
     let can_harvest =
@@ -731,6 +784,36 @@ mod tests {
                 .expect("each leaf species should drop its matching sapling");
             assert_eq!(sapling.damage, expected);
         }
+    }
+
+    #[test]
+    fn hand_mined_leaves_can_drop_both_and_shears_preserve_species() {
+        let oak = 18 << 4;
+        let pos = (5, 83, -7);
+        let (tick, both) = (1..=150_000u64)
+            .find_map(|tick| {
+                let drops = manual_foliage_drops(oak, pos, tick, None).unwrap();
+                (drops.len() == 2).then_some((tick, drops))
+            })
+            .expect("independent 1/20 and 1/200 drops must coexist");
+        assert!(both.iter().any(|stack| stack.id == 6));
+        assert!(both.iter().any(|stack| stack.id == 260));
+        let shears = Some(Stack { id: 359, count: 1, damage: 12, nbt: None });
+        for (block, item_id, damage) in [
+            ((18 << 4) | 3 | 4, 18, 3),
+            ((161 << 4) | 1 | 4, 161, 1),
+            ((106 << 4) | 8, 106, 0),
+        ] {
+            let items = manual_foliage_drops(block, pos, tick, shears).unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].id, item_id);
+            assert_eq!(items[0].damage, damage);
+            let (duration, mining) = mine_rule(block, shears).unwrap();
+            assert_eq!(duration, Duration::ZERO);
+            assert!(mining.wear_tool);
+        }
+        assert!(manual_foliage_drops(106 << 4, pos, tick, None).unwrap().is_empty());
+        assert!(manual_foliage_drops(1 << 4, pos, tick, shears).is_none());
     }
 
     #[test]
