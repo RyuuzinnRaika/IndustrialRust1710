@@ -1137,7 +1137,12 @@ impl World {
                     | 127
                     | 55
                     | 59
+                    | 27
+                    | 28
+                    | 65
                     | 66
+                    | 157
+                    | 171
                     | 70
                     | 131
                     | 132
@@ -1262,7 +1267,14 @@ impl World {
         let wired: Vec<Position> = self.pending_circuit.iter().take(budget).copied().collect();
         let supported: Vec<Position> = self.pending_support.iter().take(budget).copied().collect();
         let mut changes: BTreeMap<Position, u16> = self.ecology_changes(budget);
-        changes.extend(self.device_changes(budget));
+        // A powered rail or redstone torch can change metadata on the same
+        // tick that its supporting block disappears. Never let a device
+        // state update resurrect an attachment detached by ecology.
+        for (pos, next) in self.device_changes(budget) {
+            if changes.get(&pos) != Some(&0) {
+                changes.insert(pos, next);
+            }
+        }
         let (special, blast_cells) = self.special_changes(budget);
         changes.extend(special);
         // Timed redstone components must release power on the authoritative
@@ -2660,7 +2672,12 @@ impl World {
                 6 | 50
                     | 55
                     | 59
+                    | 27
+                    | 28
+                    | 65
                     | 66
+                    | 157
+                    | 171
                     | 70
                     | 131
                     | 132
@@ -2679,9 +2696,6 @@ impl World {
                     | 64
                     | 71
                     | 96
-                    | 27
-                    | 28
-                    | 157
                     | 149
                     | 150
             ) {
@@ -4629,6 +4643,91 @@ mod tests {
         assert!(world.can_support(1, 64, 1, 32 << 4));
         fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn powered_detector_activator_and_plain_rails_drop_when_floor_removed() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-rail-support-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for id in [27_u16, 28, 66, 157] {
+            let path = root.join(format!("{id}.irw"));
+            let mut world = World::new();
+            let rail = id << 4 | if id == 66 { 1 } else { 8 };
+            world.update_and_save(&path, 0, 64, 0, rail).unwrap();
+            assert!(world.can_support(0, 64, 0, rail));
+            world.update_and_save(&path, 0, 63, 0, 0).unwrap();
+            assert!(!world.can_support(0, 64, 0, rail));
+            // Reconstruct support queues from saved edits after a server restart.
+            let mut recovered = World::load(&path).unwrap();
+            assert_eq!(recovered.get(0, 64, 0), rail);
+            assert!(recovered.block_tick(&path, 64).unwrap().contains(&(0, 64, 0)));
+            assert_eq!(recovered.get(0, 64, 0), 0);
+            let items = recovered.drain_drops();
+            assert_eq!(items.len(), 1, "rail {id} must drop once");
+            assert_eq!(items[0].stack.id, id as i16);
+            assert_eq!(items[0].stack.count, 1);
+            assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 0);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ladder_detaches_when_backing_wall_breaks_but_not_other_neighbor() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-ladder-support-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        // Legacy metadata 2 attaches to a block at Z+1.
+        world.update_and_save(&path, 0, 64, 1, 1 << 4).unwrap();
+        world.update_and_save(&path, 0, 64, 0, 65 << 4 | 2).unwrap();
+        assert!(world.can_support(0, 64, 0, 65 << 4 | 2));
+        world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, 1, 64, 0, 0).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(0, 64, 0) >> 4, 65);
+        world.update_and_save(&path, 0, 64, 1, 0).unwrap();
+        assert!(!world.can_support(0, 64, 0, 65 << 4 | 2));
+        assert!(world.block_tick(&path, 64).unwrap().contains(&(0, 64, 0)));
+        let fallen = world.drain_drops();
+        assert_eq!(fallen.len(), 1);
+        assert_eq!(fallen[0].stack.id, 65);
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn carpet_drops_when_floor_breaks_and_survives_an_unrelated_edit() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-carpet-support-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        // 1.7.10 carpet supports a non-solid block as long as it is non-air.
+        let mut supported_by_torch = World::new();
+        supported_by_torch.import_block(3, 64, 4, 50 << 4).unwrap();
+        assert!(supported_by_torch.can_support(3, 65, 4, 171 << 4));
+        assert!(!supported_by_torch.can_support(3, 66, 4, 171 << 4));
+        let carpet = (171 << 4) | 11;
+        world.update_and_save(&path, 3, 64, 3, carpet).unwrap();
+        assert!(world.can_support(3, 64, 3, carpet));
+        world.update_and_save(&path, 4, 64, 3, 1 << 4).unwrap();
+        world.block_tick(&path, 64).unwrap();
+        assert_eq!(world.get(3, 64, 3), carpet);
+        world.update_and_save(&path, 3, 63, 3, 0).unwrap();
+        assert!(world.block_tick(&path, 64).unwrap().contains(&(3, 64, 3)));
+        let fallen = world.drain_drops();
+        assert_eq!(fallen.len(), 1);
+        assert_eq!(fallen[0].stack.id, 171);
+        assert_eq!(fallen[0].stack.damage, 11);
+        assert_eq!(World::load(&path).unwrap().get(3, 64, 3), 0);
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn unsupported_torch_detaches_into_an_item_after_commit() {
         let path =
