@@ -405,6 +405,11 @@ fn candidates<F: FnMut(Tree) -> bool>(seed: u64, x: i32, z: i32, mut visit: F) {
 }
 
 pub(super) fn at(seed: u64, x: i32, y: i32, z: i32) -> Option<u16> {
+    // IRW4 height is clamped to 125; the tallest 1.7.10-style crown
+    // ends below Y=159. Avoid any biome/height probes outside that band.
+    if !(SEA + 1..=158).contains(&y) {
+        return None;
+    }
     let mut result = None;
     candidates(seed, x, z, |tree| {
         if let Some(block) = voxel(tree, x, y, z) {
