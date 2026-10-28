@@ -392,6 +392,64 @@ fn voxel(t: Tree, x: i32, y: i32, z: i32) -> Option<u16> {
     None
 }
 
+/// Build the same species-specific geometry for a sapling-grown tree.
+//// The caller owns the soil, obstructions and transaction checks; this pure
+/// helper never reads or edits the world and cannot replace a player's build.
+/// Root y is the *sapling's* y, while Tree::root represents the soil below it.
+pub(super) fn sapling_blocks(
+    seed: u64,
+    x: i32,
+    y: i32,
+    z: i32,
+    species: u16,
+    large: bool,
+) -> Vec<(i32, i32, i32, u16)> {
+    let variation = hash(seed ^ 0x5a91_1eaf, x, y, z);
+    let shape = match (species, large) {
+        (0, false) if variation.is_multiple_of(10) => Shape::FancyOak,
+        (0, false) => Shape::Oak,
+        (1, true) if variation.is_multiple_of(3) => Shape::MegaPine,
+        (1, true) => Shape::MegaSpruce,
+        (1, false) if variation.is_multiple_of(4) => Shape::Pine,
+        (1, false) => Shape::Spruce,
+        (2, false) => Shape::Birch,
+        (3, true) => Shape::MegaJungle,
+        (3, false) => Shape::Jungle,
+        (4, false) => Shape::Acacia,
+        (5, true) => Shape::DarkOak,
+        _ => return Vec::new(),
+    };
+    let trunk_height = match shape {
+        Shape::Oak => 4 + (variation % 3) as i32,
+        Shape::FancyOak => 8 + (variation % 5) as i32,
+        Shape::Birch => 5 + (variation % 4) as i32,
+        Shape::Spruce => 6 + (variation % 5) as i32,
+        Shape::Pine => 8 + (variation % 6) as i32,
+        Shape::MegaSpruce | Shape::MegaPine => 18 + (variation % 11) as i32,
+        Shape::Jungle => 5 + (variation % 6) as i32,
+        Shape::MegaJungle => 18 + (variation % 12) as i32,
+        Shape::Acacia => 5 + (variation % 4) as i32,
+        Shape::DarkOak => 6 + (variation % 4) as i32,
+        Shape::SwampOak => unreachable!("swamp shape is not selected by saplings"),
+    };
+    if !(1..=253).contains(&y) || y + trunk_height + 1 > 255 {
+        return Vec::new();
+    }
+    let t = Tree { x, z, root: y - 1, height: trunk_height, shape, variation };
+    let mut blocks = Vec::new();
+    // REACH is already enough for branch heads, acacia tips and 2x2 crowns.
+    for px in x - REACH..=x + REACH {
+        for pz in z - REACH..=z + REACH {
+            for py in y..=y + trunk_height + 1 {
+                if let Some(block) = voxel(t, px, py, pz) {
+                    blocks.push((px, py, pz, block));
+                }
+            }
+        }
+    }
+    blocks
+}
+
 fn candidates<F: FnMut(Tree) -> bool>(seed: u64, x: i32, z: i32, mut visit: F) {
     'outer: for tx in x.saturating_sub(REACH)..=x.saturating_add(REACH) {
         for tz in z.saturating_sub(REACH)..=z.saturating_add(REACH) {
