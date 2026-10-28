@@ -4577,7 +4577,7 @@ mod tests {
         ));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
-        world.update_and_save(&path, 4, 68, 4, 145 << 4).unwrap();
+        world.update_and_save(&path, 4, 67, 4, 145 << 4).unwrap();
         let mut events = Vec::new();
         for _ in 0..5 {
             events.extend(world.gravity_tick(&path, 64).unwrap());
@@ -4588,7 +4588,7 @@ mod tests {
             .collect();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].anvil_landing_damage, 4);
-        assert_eq!(hits[0].to, (4, 65, 4));
+        assert_eq!(hits[0].to, (4, 64, 4));
         fs::remove_file(path).unwrap();
     }
 
