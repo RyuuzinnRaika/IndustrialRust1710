@@ -455,6 +455,72 @@ mod tests {
         fs::remove_dir_all(home).unwrap();
     }
     #[test]
+    fn interrupted_world_drop_handoff_replays_exactly_one_entity() {
+        use crate::ground_items::GroundItems;
+        use crate::inventory::Stack;
+        use crate::world::World;
+        let home = std::env::temp_dir().join(format!(
+            "ir1710-drop-handoff-replay-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let world_file = home.join("world.irw");
+        let ground_file = home.join("world.drops.json");
+        let journal_file = home.join("world.pending-txn.json");
+        let mut world = World::new();
+        world.queue_test_drop(
+            (-3, 70, 19),
+            Stack { id: 6, count: 1, damage: 2, nbt: None },
+        );
+        world.save(&world_file).unwrap();
+        let before = fs::read(&world_file).unwrap();
+        assert_eq!(World::load(&world_file).unwrap().queued_drops().len(), 1);
+
+        let (staged_ground, spawned) = GroundItems::default()
+            .stage_put_world_drops(world.queued_drops())
+            .unwrap();
+        assert_eq!(spawned.len(), 1);
+        let staged_world = world.staged_drop_acknowledgement(1).unwrap();
+        let world_bytes = staged_world.encoded().unwrap();
+        let ground_bytes = staged_ground.encoded().unwrap();
+        let changes = [
+            (world_file.as_path(), world_bytes),
+            (ground_file.as_path(), ground_bytes),
+        ];
+        let record = Record {
+            version: VERSION,
+            files: changes
+                .iter()
+                .map(|(path, contents)| Target {
+                    relative: relative(&home, path).unwrap(),
+                    contents: contents.clone(),
+                    checksum: fingerprint(contents),
+                })
+                .collect(),
+        };
+        fs::write(&journal_file, serde_json::to_vec(&record).unwrap()).unwrap();
+        // Simulate power loss immediately after the world rename, but
+        // before publishing the ground item file. Replay must finish both.
+        fs::write(&world_file, &changes[0].1).unwrap();
+        assert_ne!(fs::read(&world_file).unwrap(), before);
+        assert!(!ground_file.exists());
+        recover(&journal_file).unwrap();
+        assert!(!journal_file.exists());
+        assert!(World::load(&world_file).unwrap().queued_drops().is_empty());
+        let items = GroundItems::load(&ground_file).unwrap();
+        assert_eq!(items.items().count(), 1);
+        let restored = items.items().next().unwrap();
+        assert_eq!(restored.stack.id, 6);
+        assert_eq!(restored.stack.damage, 2);
+        assert_eq!(restored.position, [-3 * 32 + 16, 70 * 32 + 16, 19 * 32 + 16]);
+        // Recovery is idempotent; no duplicate entity is created.
+        recover(&journal_file).unwrap();
+        assert_eq!(GroundItems::load(&ground_file).unwrap().items().count(), 1);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn interrupted_two_file_commit_replays_on_boot() {
         let home = std::env::temp_dir().join(format!("ir-journal-{}-{}", std::process::id(), 42));
         let _ = fs::remove_dir_all(&home);
