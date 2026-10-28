@@ -2079,6 +2079,8 @@ impl World {
         self.wake_block_updates(x, y, z);
         if matches!(previous >> 4, 17 | 162) || matches!(block >> 4, 17 | 162) {
             self.wake_leaves(x, y, z);
+        } else if matches!(previous >> 4, 18 | 161) {
+            self.wake_adjacent_leaves(x, y, z);
         }
         Ok(true)
     }
