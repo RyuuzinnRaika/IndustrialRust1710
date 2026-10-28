@@ -22,6 +22,7 @@ static DEATH_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeathCause {
     Void,
+    FallingAnvil,
     Cactus,
     Fall,
     Starvation,
@@ -50,6 +51,7 @@ impl DeathCause {
     pub fn code(self) -> &'static str {
         match self {
             Self::Void => "void",
+            Self::FallingAnvil => "falling_anvil",
             Self::Cactus => "cactus",
             Self::Fall => "fall",
             Self::Starvation => "starvation",
@@ -105,6 +107,7 @@ impl DeathCause {
         }
         let description = match self {
             Self::Void => "fell out of the world",
+            Self::FallingAnvil => "was squashed by a falling anvil",
             Self::Cactus => "was pricked to death",
             Self::Fall => "fell from a high place",
             Self::Starvation => "starved to death",
@@ -877,6 +880,15 @@ mod tests {
             serde_json::from_slice(&fs::read(&scoreboard_path).unwrap()).unwrap();
         assert!(encoded["scores"]["deaths"].get("Alice").is_none());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn anvil_landing_uses_legacy_death_message() {
+        assert_eq!(DeathCause::FallingAnvil.code(), "falling_anvil");
+        assert_eq!(
+            DeathCause::FallingAnvil.message("Alex"),
+            "Alex was squashed by a falling anvil"
+        );
     }
 
     #[test]
