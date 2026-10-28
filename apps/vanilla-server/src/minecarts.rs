@@ -10,7 +10,7 @@ use legacy_protocol::write_varint;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 const FIRST_ID: i32 = 1_500_000;
@@ -256,15 +256,26 @@ impl Minecarts {
     /// Load a bounded versioned snapshot or start empty for old worlds. The
     /// caller runs journal recovery first; malformed saves fail closed.
     pub fn load(path: &Path, tick: u64) -> io::Result<Self> {
-        let len = match fs::metadata(path) {
-            Ok(metadata) => metadata.len(),
+        // Do not follow symlinks or accept directories as vehicle snapshots.
+        // A missing save is a legacy world; a non-regular entry is not.
+        let len = match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
+            Ok(_) => return Err(invalid("minecart save must be a regular file")),
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
             Err(error) => return Err(error),
         };
         if len > MAX_SAVE_BYTES {
             return Err(invalid("minecart file is too large"));
         }
-        let bytes = fs::read(path)?;
+        // A file can grow after the metadata check. Bound the actual read
+        // to the maximum accepted size plus one sentinel byte so that a
+        // concurrent writer cannot cause an unbounded allocation.
+        let file = fs::File::open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(invalid("minecart save must be a regular file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_SAVE_BYTES + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_SAVE_BYTES {
             return Err(invalid("minecart file is too large"));
         }
@@ -613,10 +624,96 @@ impl Minecarts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Use a fresh directory per test, including when tests run in parallel or
+    // a previous process left files behind. Never delete a shared PID path.
+    static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            loop {
+                let sequence = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "ir1710-carts-test-{}-{sequence}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("cannot create minecart test directory: {error}"),
+                }
+            }
+        }
+
+        fn file(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn minecart_load_missing_snapshot_starts_empty_without_creating_file() {
+        let directory = TestDir::new();
+        let path = directory.file("missing.json");
+        let restored = Minecarts::load(&path, 10).unwrap();
+        assert!(restored.carts.is_empty());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn minecart_load_rejects_non_regular_save_paths() {
+        let directory = TestDir::new();
+        let path = directory.file("snapshot.json");
+        fs::create_dir(&path).unwrap();
+
+        let error = Minecarts::load(&path, 10).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn minecart_load_rejects_symlink_even_to_valid_snapshot() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDir::new();
+        let target = directory.file("target.json");
+        let link = directory.file("link.json");
+        fs::write(&target, Minecarts::default().encoded().unwrap()).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let error = Minecarts::load(&link, 10).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn minecart_snapshot_size_limit_accepts_boundary_and_rejects_one_extra_byte() {
+        let directory = TestDir::new();
+        let path = directory.file("snapshot.json");
+
+        let mut bytes = Minecarts::default().encoded().unwrap();
+        bytes.resize(MAX_SAVE_BYTES as usize, b' ');
+        fs::write(&path, &bytes).unwrap();
+        let restored = Minecarts::load(&path, 42).unwrap();
+        assert!(restored.carts.is_empty());
+
+        bytes.push(b' ');
+        fs::write(&path, &bytes).unwrap();
+        let error = Minecarts::load(&path, 42).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
     #[test]
     fn durable_snapshot_restores_carts_without_reusing_player_attachment() {
-        let path = std::env::temp_dir().join(format!("ir1710-carts-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let directory = TestDir::new();
+        let path = directory.file("snapshot.json");
         let mut world = World::new();
         world.import_block(0, 65, 0, (66 << 4) | 1).unwrap();
         let position = PlayerPosition {
@@ -636,14 +733,13 @@ mod tests {
         assert_eq!(saved.last_tick, 500);
         assert_eq!(saved.rider, None);
         assert!(restored.place(&world, position, 500).is_none());
-        std::fs::remove_file(path).unwrap();
+        // TestDir owns cleanup; never remove a shared process-wide path.
     }
 
     #[test]
     fn corrupted_and_duplicate_cart_entries_fail_closed() {
-        let path =
-            std::env::temp_dir().join(format!("ir1710-carts-corrupt-{}.json", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let directory = TestDir::new();
+        let path = directory.file("corrupt.json");
         for malformed in [
             r#"{"version":1,"next":1,"carts":[{"id":1500000,"position":{"x":0.5,"y":65.5,"z":0.5},"speed":0.1,"direction":1,"east_west":false},{"id":1500000,"position":{"x":0.5,"y":65.5,"z":0.5},"speed":0.1,"direction":1,"east_west":false}]}"#,
             r#"{"version":1,"next":1,"carts":[{"id":1500000,"position":{"x":0.5,"y":65.5,"z":0.5},"speed":99.0,"direction":1,"east_west":false}]}"#,
@@ -652,7 +748,7 @@ mod tests {
             std::fs::write(&path, malformed).unwrap();
             assert!(Minecarts::load(&path, 10).is_err());
         }
-        std::fs::remove_file(path).unwrap();
+        // TestDir owns cleanup; never remove a shared process-wide path.
     }
 
     #[test]
