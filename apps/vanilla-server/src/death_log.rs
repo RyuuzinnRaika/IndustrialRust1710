@@ -447,6 +447,32 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_deaths_append_separate_json_lines() {
+        let (world, path) = test_log_path("concurrent");
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let world = world.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..3 {
+                        sample_record().append(&world).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let raw = fs::read_to_string(&path).unwrap();
+        let entries: Vec<Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 12);
+        assert!(entries.iter().all(|event| event["player"] == "Alex"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn death_log_destination_directory_reports_error_without_panic() {
         let (world, path) = test_log_path("directory");
         fs::create_dir_all(&path).unwrap();
