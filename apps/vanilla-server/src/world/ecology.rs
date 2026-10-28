@@ -576,10 +576,16 @@ impl World {
                     }
                 }
                 6 if chance(self.fluid_phase, x, height, z, 4) => {
-                    if block & 8 == 0 {
-                        changes.insert((x, y, z), block | 8);
-                    } else {
-                        self.grow_tree(x, height, z, &mut changes);
+                    // Vanilla saplings advance naturally only when the
+                    // light above them is at least 9. Bone meal directly
+                    // calls grow_tree and remains usable under dim light.
+                    let (block_light, sky_light) = self.light_at(x, height + 1, z);
+                    if block_light.max(sky_light) >= 9 {
+                        if block & 8 == 0 {
+                            changes.insert((x, y, z), block | 8);
+                        } else {
+                            self.grow_tree(x, height, z, &mut changes);
+                        }
                     }
                 }
                 // Leaves use the independent random-tick sampling above,
