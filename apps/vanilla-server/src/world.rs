@@ -2698,8 +2698,15 @@ impl World {
             }
             if (matches!(block >> 4, 70 | 72) && block & 1 != 0)
                 || (matches!(block >> 4, 77 | 143) && block & 8 != 0)
+                // Weighted pressure plates store their signal in all four
+                // metadata bits. Re-arm their release after a restart just
+                // like binary plates, or a saved nonzero level stays powered.
+                || (matches!(block >> 4, 147 | 148) && block & 15 != 0)
             {
-                world.pending_buttons.insert((x, y, z), 20);
+                // Existing weighted-plate contacts expire after 10 ticks.
+                // Keep this consistent across save/reload; other devices retain 20.
+                let release_delay = if matches!(block >> 4, 147 | 148) { 10 } else { 20 };
+                world.pending_buttons.insert((x, y, z), release_delay);
             }
         }
         Ok(world)
@@ -5295,6 +5302,36 @@ mod group_b_regression_tests {
 
     fn temp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("ir1710-b-{name}-{}.irw", std::process::id()))
+    }
+
+    #[test]
+    fn powered_weighted_plates_release_after_world_reload() {
+        for (id, count, level) in [(147u16, 7usize, 7u16), (148, 11, 2)] {
+            let path = temp(&format!("weighted-restart-{id}"));
+            let _ = std::fs::remove_file(&path);
+            let mut world = World::new();
+            // Preserve a solid support under the plate across save/reload.
+            world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
+            world.update_and_save(&path, 0, 65, 0, id << 4).unwrap();
+            assert!(world.press_weighted_plate(&path, 0, 65, 0, count).unwrap());
+            assert_eq!(world.get(0, 65, 0), (id << 4) | level);
+
+            let mut restored = World::load(&path).unwrap();
+            assert_eq!(restored.get(0, 65, 0), (id << 4) | level);
+            assert_eq!(restored.pending_buttons.get(&(0, 65, 0)), Some(&10u64));
+            for _ in 0..9 {
+                restored.block_tick(&path, 64).unwrap();
+                assert_eq!(restored.get(0, 65, 0), (id << 4) | level);
+            }
+            let changed = restored.block_tick(&path, 64).unwrap();
+            assert!(changed.contains(&(0, 65, 0)));
+            assert_eq!(restored.get(0, 65, 0), id << 4);
+            assert!(!restored.pending_buttons.contains_key(&(0, 65, 0)));
+            let reloaded = World::load(&path).unwrap();
+            assert_eq!(reloaded.get(0, 65, 0), id << 4);
+            assert!(!reloaded.pending_buttons.contains_key(&(0, 65, 0)));
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
