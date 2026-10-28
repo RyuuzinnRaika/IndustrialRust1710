@@ -28,6 +28,35 @@ deterministic geometry/biome approximation. It does not change IRW1–3.
 - Generated leaf metadata **does not set 0x4**. In Java 1.7.10 that bit means permanent/player-placed leaves. Leaves use 18 for old species and 161 for acacia/dark oak; logs use 17 and 162 respectively.
 - Natural trees are seeded by world seed and absolute coordinates. A 13×13 candidate search allows tree crowns to cross chunk boundaries without seams; point and cached-column generation use identical precedence.
 
+## Leaf decay speed (Java 1.7.10 defaults)
+
+Natural leaves do not disappear as soon as the trunk is cut. The Overworld
+block worker now tests a **deterministically sampled subset once per second**
+with a probability of 60/4096 (= 20 TPS * 3 random block selections per
+16³ section) per registered leaf per second. This is a close approximation to
+vanilla's mean 68.27-second interval between random ticks per block; it is
+**not a fixed 68-second removal timer**. Some leaves disappear quickly while
+others may take several minutes.
+
+- The authoritative tuning constant is
+  `LEAF_RANDOM_TICK_SPEED: u64 = 3` in
+  `apps/vanilla-server/src/world/ecology.rs`.
+- Leaves (both legacy ID 18 and newer ID 161) **only disappear** when no
+  connected trunk exists within four face-adjacent leaf steps. Supported
+  leaves persist indefinitely.
+- Bit `0x4` marks permanent/user-placed leaves, which never decay even after
+  the trunk is removed. Log changes wake nearby leaves (4-block radius).
+- The vanilla `0x8` "check decay" metadata is represented by the
+  server's in-memory ecology wake queue, which is rebuilt for edited leaves
+  after loading. Vanilla chunk-level random position sampling is not
+  implemented globally.
+- Processing is bounded by the world tick budget, so sustained heavy load
+  can increase actual delay relative to the average.
+- Leaf decay also requires the server's 20 TPS block worker to run and
+  does not continue while the server is stopped.
+- No GitHub Actions / Rust CI were run for this change. Unit tests were
+  authored but not executed.
+
 ## Compatibility and testing
 
 Changes are currently on branch feat/vanilla-1710-tree-varieties-20261028.
