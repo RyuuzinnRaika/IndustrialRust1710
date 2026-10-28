@@ -364,7 +364,9 @@ impl World {
     /// A full item pool or temporary I/O error must leave the queue intact.
     pub fn acknowledge_drops(&mut self, count: usize) {
         let committed = count.min(self.pending_drops.len());
-        self.pending_drops.drain(..committed);
+        // Drop the Drain explicitly so clippy/rustc never see an unused
+        // must-use iterator, and the queued prefix is removed at once.
+        drop(self.pending_drops.drain(..committed));
     }
 
     /// Construct a post-world-save drop to verify batch/acknowledgement
