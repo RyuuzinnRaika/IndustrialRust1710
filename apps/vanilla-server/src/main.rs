@@ -11324,6 +11324,29 @@ mod queued_leaf_drop_persistence_tests {
     }
 
     #[test]
+    fn large_drop_backlog_commits_only_thirty_two_items_per_retry() {
+        let dir = root("leaf-drops-partial");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ground.json");
+        let mut world = World::new();
+        for index in 0..40 {
+            world.queue_test_drop((index, 70, 0), item(6));
+        }
+        let mut ground = GroundItems::default();
+        let first = flush_pending_world_drops(&mut world, &mut ground, &path).unwrap();
+        assert_eq!(first.len(), 32);
+        assert_eq!(world.queued_drops().len(), 8);
+        assert_eq!(world.queued_drops()[0].pos, (32, 70, 0));
+        assert_eq!(GroundItems::load(&path).unwrap().items().count(), 32);
+        let second = flush_pending_world_drops(&mut world, &mut ground, &path).unwrap();
+        assert_eq!(second.len(), 8);
+        assert!(world.queued_drops().is_empty());
+        assert_eq!(GroundItems::load(&path).unwrap().items().count(), 40);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn full_ground_pool_keeps_world_drops_until_space_is_available() {
         let dir = root("leaf-drops-capacity");
         let _ = std::fs::remove_dir_all(&dir);
