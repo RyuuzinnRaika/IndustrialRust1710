@@ -2645,8 +2645,13 @@ impl World {
                     return Err(invalid("truncated queued TNT trailer"));
                 }
                 let count = u32::from_be_bytes(queued[..4].try_into().unwrap()) as usize;
+                // Validate before multiplication: malformed old/new TNT
+                // trailers must not overflow usize on a 32-bit target.
+                if count > MAX_PENDING_TNT {
+                    return Err(invalid("invalid queued TNT trailer count"));
+                }
                 let chain_end = 4 + count * 9;
-                if count > MAX_PENDING_TNT || queued.len() < chain_end {
+                if queued.len() < chain_end {
                     return Err(invalid("invalid queued TNT trailer length"));
                 }
                 if &trailer[..4] == b"TNT2" && queued.len() != chain_end {
