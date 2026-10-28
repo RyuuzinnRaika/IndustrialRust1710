@@ -2555,18 +2555,19 @@ impl World {
                 || (&trailer[..4] != b"TNT1"
                     && &trailer[..4] != b"TNT2"
                     && &trailer[..4] != b"TNT3"
-                    && &trailer[..4] != b"TNT4")
+                    && &trailer[..4] != b"TNT4"
+                    && &trailer[..4] != b"TNT5")
             {
                 return Err(invalid("unrecognized world entity trailer"));
             }
             let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
-            let moving = &trailer[..4] == b"TNT4";
+            let moving = matches!(&trailer[..4], b"TNT4" | b"TNT5");
             let entity_stride = if moving { 44 } else { 20 };
             let primed_end = 6 + primed_count * entity_stride;
             if primed_count > MAX_PRIMED_TNT || trailer.len() < primed_end {
                 return Err(invalid("invalid primed TNT trailer length"));
             }
-            if &trailer[..4] == b"TNT2" || &trailer[..4] == b"TNT3" || &trailer[..4] == b"TNT4" {
+            if matches!(&trailer[..4], b"TNT2" | b"TNT3" | b"TNT4" | b"TNT5") {
                 let queued = &trailer[primed_end..];
                 if queued.len() < 4 {
                     return Err(invalid("truncated queued TNT trailer"));
@@ -2587,16 +2588,21 @@ impl World {
                         return Err(invalid("invalid or duplicate queued TNT position"));
                     }
                 }
-                if &trailer[..4] == b"TNT3" || &trailer[..4] == b"TNT4" {
+                if matches!(&trailer[..4], b"TNT3" | b"TNT4" | b"TNT5") {
                     let pending = &queued[chain_end..];
                     if pending.len() < 4 {
                         return Err(invalid("truncated blast backlog"));
                     }
                     let count = u32::from_be_bytes(pending[..4].try_into().unwrap()) as usize;
-                    if count > MAX_PENDING_BLAST || pending.len() != 4 + count * 11 {
+                    let blast_end = 4 + count * 11;
+                    let anvils = &trailer[..4] == b"TNT5";
+                    if count > MAX_PENDING_BLAST
+                        || pending.len() < blast_end
+                        || (!anvils && pending.len() != blast_end)
+                    {
                         return Err(invalid("invalid blast backlog length"));
                     }
-                    for item in pending[4..].as_chunks::<11>().0 {
+                    for item in pending[4..blast_end].as_chunks::<11>().0 {
                         let x = i32::from_be_bytes(item[..4].try_into().unwrap());
                         let y = item[4];
                         let z = i32::from_be_bytes(item[5..9].try_into().unwrap());
@@ -2610,6 +2616,37 @@ impl World {
                                 .is_some()
                         {
                             return Err(invalid("invalid deferred explosion"));
+                        }
+                    }
+                    if anvils {
+                        let tail = &pending[blast_end..];
+                        if tail.len() < 4 {
+                            return Err(invalid("truncated anvil flight table"));
+                        }
+                        let count =
+                            u32::from_be_bytes(tail[..4].try_into().unwrap()) as usize;
+                        if count == 0
+                            || count > MAX_EDITS
+                            || tail.len() != 4 + count * 11
+                        {
+                            return Err(invalid("invalid anvil flight table length"));
+                        }
+                        for item in tail[4..].as_chunks::<11>().0 {
+                            let x = i32::from_be_bytes(item[..4].try_into().unwrap());
+                            let y = item[4];
+                            let z = i32::from_be_bytes(item[5..9].try_into().unwrap());
+                            let origin =
+                                i32::from(u16::from_be_bytes(item[9..11].try_into().unwrap()));
+                            if !in_bounds(x, i32::from(y), z)
+                                || origin < i32::from(y)
+                                || origin > 255
+                                || world
+                                    .falling_anvils
+                                    .insert((x, y, z), origin)
+                                    .is_some()
+                            {
+                                return Err(invalid("invalid or duplicate falling anvil"));
+                            }
                         }
                     }
                 }
@@ -2735,6 +2772,14 @@ impl World {
                 || (matches!(block >> 4, 77 | 143) && block & 8 != 0)
             {
                 world.pending_buttons.insert((x, y, z), 20);
+            }
+        }
+        // Only validated anvil blocks may own an in-flight origin.
+        // IRW blocks are read after the optional TNT5 trailer, so defer
+        // this check until all sparse edits have been loaded.
+        for &(x, y, z) in world.falling_anvils.keys() {
+            if world.get(x, i32::from(y), z) >> 4 != 145 {
+                return Err(invalid("falling anvil origin references non-anvil block"));
             }
         }
         Ok(world)
