@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod devices;
 mod ecology;
 mod lighting;
+#[cfg(test)]
+mod terrain_packet_regressions;
 mod special;
 pub(crate) use lighting::LightSampler;
 pub use special::TntEvent;
@@ -3060,19 +3062,9 @@ impl World {
         }
         for z in 0..16 {
             for x in 0..16 {
-                let kind = match self.generation {
-                    Generation::Biomes(seed) => {
-                        crate::terrain::biome(seed, chunk_x * 16 + x, chunk_z * 16 + z)
-                    }
-                    Generation::Expanded(seed, dim) => crate::worldgen::biome_for_dimension(
-                        seed,
-                        dim,
-                        chunk_x * 16 + x,
-                        chunk_z * 16 + z,
-                    ),
-                    _ => 1,
-                };
-                bytes.push(kind);
+                // One authoritative biome lookup for gameplay and Protocol 5.
+                // Preserve existing IRW1-IRW4 generation and biome IDs.
+                bytes.push(self.biome_at(chunk_x * 16 + x, chunk_z * 16 + z));
             }
         }
         (mask, bytes)
