@@ -124,6 +124,40 @@ others may take several minutes.
 - No GitHub Actions / Rust CI were run for this change. Unit tests were
   authored but not executed.
 
+## Hanging vines and leaf-decay drops (additional implementation)
+
+- Jungle and swamp vines (block 106) use Java 1.7.10's four direction
+  flags: south `0x1`, west `0x2`, north `0x4`, east `0x8`.
+- A vine face remains while backed by an opaque wall or inherited from
+  an appropriately oriented vine above. A solid ceiling may also support
+  hanging vines with metadata `0`.
+- Breaking a backing wall clears the unsupported face bits. When no
+  wall/ceiling/upper-vine attachment remains, the vine detaches.
+  Unsupported vines cannot spread during their pending removal tick.
+- Existing edited vines and sapling-grown vines enter the ecology and
+  support queues. Nearby generated vines are awakened by tree log edits.
+  Saved edited vines are requeued at world load.
+- A random vine tick has an additional `1/4` chance of attempting to
+  spread, using the same batched random sampling as leaves. Downward vines
+  inherit supported faces; upward and horizontal attempts require a
+  real attachment and stop spreading into dense local vine patches.
+  This is a bounded **1.7.10-inspired approximation**, not the exact
+  Mojang spread RNG or all of its branch-selection logic.
+- Natural leaf decay performs **independent** sapling (oak/spruce/birch/
+  acacia/dark oak 1/20, jungle 1/40) and apple (oak/dark oak 1/200)
+  rolls. Consequently one naturally decaying oak/dark-oak leaf can yield
+  both items. No modern stick drops are added for the 1.7.10 target.
+  As before, pending drops publish only after the world save succeeds
+  and share the worker's 256-drop per-tick bound.
+- The existing manually mined leaf extra-drop API is still limited to
+  one bonus item per leaf. Independent double-roll behavior is newly
+  provided for **natural decay** only.
+- Regression tests cover vine face stripping, full detachment, hanging
+  support, downward growth, restart restoration, leaves dropping saplings
+  after a durable tick, and joint apple/sapling probabilities. Tests
+  were authored but not executed in Rust; offline Python calculations
+  confirmed the selected deterministic sampling cases.
+
 ## Compatibility and testing
 
 Changes are currently on branch feat/vanilla-1710-tree-varieties-20261028.
@@ -148,5 +182,5 @@ Current limitations requiring follow-up verification:
 
 1. Natural tree shape and biome composition are approximated, not seed-identical to Mojang's 1.7.10 generator.
 2. Sapling trees now share natural-tree silhouettes, but tree generation is not byte-for-byte Mojang's 1.7.10 random algorithm. A complete growth/bonemeal/growth-time compatibility audit is still outstanding.
-3. Natural tree/structure clashes, drop rates, canopy decay, vine attachments and multiplayer client visuals need live Java 1.7.10 validation.
+3. Natural tree/structure clashes, canopy decay, vine growth details, manually mined leaf multiple drops and multiplayer client visuals need live Java 1.7.10 validation.
 4. Existing IRW4 generation needs a format-version gate or migration strategy before safe general rollout.
