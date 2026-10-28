@@ -60,7 +60,8 @@ pub fn burn_duration(item: Stack) -> Option<u16> {
         369 => 2400,                     // blaze rod
         280 => 100,                      // stick
         6 => 100,                        // sapling
-        5 | 17 | 162 | 54 | 58 | 53 | 85 | 107 | 134 | 135 | 136 | 125 | 126 | 143 | 158 | 47
+        126 => 150,                      // wooden slab (half a wooden block)
+        5 | 17 | 162 | 54 | 58 | 53 | 85 | 107 | 134 | 135 | 136 | 125 | 143 | 158 | 47
         | 84 | 96 | 64 => 300,
         268..=271 | 290 => 200, // wooden tools
         _ => return None,
@@ -424,6 +425,8 @@ mod tests {
         assert_eq!(recipe(stack(999, 1).unwrap()), None);
         assert_eq!(burn_duration(stack(263, 1).unwrap()), Some(1600));
         assert_eq!(burn_duration(stack(280, 1).unwrap()), Some(100));
+        assert_eq!(burn_duration(stack(126, 1).unwrap()), Some(150));
+        assert_eq!(burn_duration(stack(125, 1).unwrap()), Some(300));
         assert_eq!(burn_duration(stack(327, 1).unwrap()), Some(20000));
         assert_eq!(burn_duration(stack(327, 2).unwrap()), None);
         assert_eq!(burn_duration(stack(265, 1).unwrap()), None);
@@ -451,6 +454,46 @@ mod tests {
         assert_eq!(f.burn_left, 0);
         assert_eq!(f.slots[2], stack(265, 8));
     }
+    #[test]
+    fn s04_two_wooden_slabs_are_needed_to_smelt_one_iron_ore() {
+        // In Java 1.7.10 a wooden slab burns for 150 ticks, unlike a
+        // full wooden block (300). A single slab must not smelt an ore.
+        let mut single = Furnace {
+            slots: [stack(15, 1), stack(126, 1), None],
+            ..Furnace::default()
+        };
+        for _ in 0..150 {
+            single.tick_once();
+        }
+        assert_eq!(single.slots[2], None);
+        assert_eq!(single.slots[1], None);
+
+        // Two slabs together sustain 200 ticks of iron smelting and
+        // produce precisely one ingot without duplicating the input.
+        let mut two = Furnace {
+            slots: [stack(15, 1), stack(126, 2), None],
+            ..Furnace::default()
+        };
+        for _ in 0..200 {
+            two.tick_once();
+        }
+        assert_eq!(two.slots[0], None);
+        assert_eq!(two.slots[1], None);
+        assert_eq!(two.slots[2], stack(265, 1));
+        assert_eq!(two.cook, 0);
+
+        // Use the smelted output in the actual 3x3 iron pickaxe recipe.
+        let ingot = two.slots[2];
+        let stick = stack(280, 1);
+        let grid = [
+            ingot, ingot, ingot, None, stick, None, None, stick, None,
+        ];
+        assert_eq!(
+            crate::crafting::result(&grid, 3).map(|item| (item.id, item.count)),
+            Some((257, 1))
+        );
+    }
+
     #[test]
     fn blocked_output_does_not_burn_new_fuel_or_consume_input() {
         let mut f = Furnace {

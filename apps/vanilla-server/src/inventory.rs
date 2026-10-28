@@ -853,7 +853,10 @@ impl Inventory {
                 for dest in slots {
                     let existing = self.lookup(window, dest);
                     if let Some(other) = existing {
-                        if other.id != held.id || other.damage != held.damage {
+                        if other.id != held.id
+                            || other.damage != held.damage
+                            || other.nbt != held.nbt
+                        {
                             continue;
                         }
                     }
@@ -896,7 +899,10 @@ impl Inventory {
             let Some(mut other) = self.lookup(window, slot) else {
                 continue;
             };
-            if other.id != carried.id || other.damage != carried.damage {
+            if other.id != carried.id
+                || other.damage != carried.damage
+                || other.nbt != carried.nbt
+            {
                 continue;
             }
             let count = (carried.max_count() - carried.count).min(other.count);
@@ -1149,9 +1155,11 @@ impl Inventory {
                     {
                         continue;
                     }
-                    if existing
-                        .is_some_and(|other| other.id != cursor.id || other.damage != cursor.damage)
-                    {
+                    if existing.is_some_and(|other| {
+                        other.id != cursor.id
+                            || other.damage != cursor.damage
+                            || other.nbt != cursor.nbt
+                    }) {
                         continue;
                     }
                     let count = existing.map_or(0, |other| other.count);
@@ -1226,7 +1234,10 @@ impl Inventory {
             let Some(mut existing) = self.chest_stack(chest, position) else {
                 continue;
             };
-            if existing.id != carried.id || existing.damage != carried.damage {
+            if existing.id != carried.id
+                || existing.damage != carried.damage
+                || existing.nbt != carried.nbt
+            {
                 continue;
             }
             let amount = (carried.max_count() - carried.count).min(existing.count);
@@ -1291,7 +1302,8 @@ impl Inventory {
                     && existing.is_some()
                     && carried.is_some()
                     && (existing.unwrap().id != carried.unwrap().id
-                        || existing.unwrap().damage != carried.unwrap().damage)
+                        || existing.unwrap().damage != carried.unwrap().damage
+                        || existing.unwrap().nbt != carried.unwrap().nbt)
                 {
                     return None;
                 }
@@ -1553,12 +1565,15 @@ impl Inventory {
                     return None;
                 }
             }
-            if old.is_some()
-                && hand.is_some()
-                && (old.unwrap().id != hand.unwrap().id
-                    || old.unwrap().damage != hand.unwrap().damage)
-            {
-                return None; // unsupported unlike-stack swap across two files
+            if let (Some(existing), Some(carried)) = (old, hand) {
+                if existing.id != carried.id
+                    || existing.damage != carried.damage
+                    || existing.nbt != carried.nbt
+                {
+                    // Never merge different named/NBT stacks across the
+                    // furnace and player inventory persistence boundary.
+                    return None;
+                }
             }
             let (next_slot, next_cursor) = match (old, hand, button) {
                 (item, None, 0) => (None, item),
@@ -2220,6 +2235,98 @@ mod tests {
     }
 
     #[test]
+    fn s04_full_furnace_input_and_fuel_right_click_conserve_items() {
+        let mut inventory = Inventory::default();
+        let mut furnace = crate::furnaces::Furnace::default();
+        for (slot, id) in [(0, 15), (1, 263)] {
+            let full = Stack {
+                id,
+                count: 64,
+                damage: 0,
+                nbt: None,
+            };
+            furnace.slots[slot] = Some(full);
+            inventory.cursor = Some(Stack { count: 3, ..full });
+            for _ in 0..5 {
+                assert!(inventory.furnace_click(&mut furnace, slot as i16, 1, 0).is_some());
+                assert_eq!(furnace.slots[slot], Some(full));
+                assert_eq!(inventory.cursor, Some(Stack { count: 3, ..full }));
+            }
+        }
+    }
+
+    #[test]
+    fn s04_furnace_cannot_merge_distinct_nbt_items() {
+        use fastnbt::Value;
+        use std::collections::HashMap;
+
+        let named = |label: &str| {
+            crate::item_nbt::from_value(&Value::Compound(HashMap::from([(
+                "display".to_string(),
+                Value::Compound(HashMap::from([(
+                    "Name".to_string(),
+                    Value::String(label.to_string()),
+                )])),
+            )])))
+            .unwrap()
+        };
+        let a = Stack {
+            id: 15,
+            count: 3,
+            damage: 0,
+            nbt: Some(named("Iron A")),
+        };
+        let b = Stack {
+            id: 15,
+            count: 2,
+            damage: 0,
+            nbt: Some(named("Iron B")),
+        };
+        assert!(a.is_valid() && b.is_valid());
+        assert_ne!(a.nbt, b.nbt);
+
+        let mut inventory = Inventory::default();
+        let mut furnace = crate::furnaces::Furnace::default();
+        furnace.slots[0] = Some(a);
+        inventory.cursor = Some(b);
+        assert!(inventory.furnace_click(&mut furnace, 0, 1, 0).is_none());
+        assert_eq!(furnace.slots[0], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
+
+        // Dragging across a same-ID but differently named player stack
+        // must not overwrite its original NBT with the cursor NBT.
+        inventory.slots[9] = Some(a);
+        assert!(inventory.click_window(0, -999, 0, 5));
+        assert!(inventory.click_window(0, 9, 1, 5));
+        assert!(inventory.click_window(0, -999, 2, 5));
+        assert_eq!(inventory.slots[9], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
+
+        // Double-click collect also must not mix tagged and untagged items.
+        assert!(inventory.click_window(0, 9, 0, 6));
+        assert_eq!(inventory.slots[9], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
+
+        // A chest is independently persisted; it must obey the same
+        // exact ItemStack identity rule for left/right clicks and drag.
+        let mut chest = [None; 27];
+        chest[0] = Some(a);
+        assert!(inventory.chest_click_window(1, &mut chest, 0, 1, 0).is_none());
+        assert_eq!(chest[0], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
+
+        assert!(inventory.chest_click_window(1, &mut chest, -999, 0, 5).is_some());
+        assert!(inventory.chest_click_window(1, &mut chest, 0, 1, 5).is_some());
+        assert!(inventory.chest_click_window(1, &mut chest, -999, 2, 5).is_some());
+        assert_eq!(chest[0], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
+
+        assert!(inventory.chest_click_window(1, &mut chest, 0, 0, 6).is_some());
+        assert_eq!(chest[0], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
+    }
+
+    #[test]
     fn shift_click_never_stacks_lava_buckets_in_furnace() {
         let mut inv = Inventory::default();
         let bucket = Stack {
@@ -2280,6 +2387,54 @@ mod tests {
         assert!(inv.chest_click(&mut chest, 0, 0, 0).is_some());
         assert_eq!(chest[0], Some(potion));
         assert_eq!(inv.cursor, Some(potion));
+    }
+
+    #[test]
+    fn s04_iron_tools_take_exact_recipe_inputs_without_duplication() {
+        // Workbench window 1: output 0, inputs 1..9. Iron tools must
+        // consume real server-owned iron ingots and sticks, not the
+        // client-advertised output ItemStack.
+        let ingot = Stack {
+            id: 265,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let stick = Stack {
+            id: 280,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inv = Inventory::default();
+        for slot in [0, 1, 2] {
+            inv.workbench[slot] = Some(ingot);
+        }
+        for slot in [4, 7] {
+            inv.workbench[slot] = Some(stick);
+        }
+        assert_eq!(inv.crafting_result(1).map(|stack| stack.id), Some(257));
+        assert!(inv.click_window(1, 0, 0, 1)); // Shift-click pickaxe output
+        assert!(inv.workbench.iter().all(Option::is_none));
+        let crafted: Vec<_> = inv.slots[9..45].iter().flatten().copied().collect();
+        assert_eq!(crafted.len(), 1);
+        assert_eq!(crafted[0].id, 257);
+        assert_eq!(crafted[0].count, 1);
+        assert!(inv.crafting_result(1).is_none());
+        assert!(inv.encoded().is_ok());
+
+        // The same ingot cannot be reused; a fresh input is needed to
+        // craft a sword, which is delivered into the cursor exactly once.
+        inv.workbench[1] = Some(ingot);
+        inv.workbench[4] = Some(ingot);
+        inv.workbench[7] = Some(stick);
+        assert_eq!(inv.crafting_result(1).map(|stack| stack.id), Some(267));
+        assert!(inv.click_window(1, 0, 0, 0));
+        assert!(inv.workbench.iter().all(Option::is_none));
+        assert_eq!(inv.cursor.map(|stack| stack.id), Some(267));
+        assert!(inv.click_window(1, 0, 0, 0)); // no recipe left: no second sword
+        assert_eq!(inv.cursor, Some(Stack { id: 267, ..ingot }));
+        assert!(inv.encoded().is_ok());
     }
 
     #[test]
