@@ -393,7 +393,7 @@ fn voxel(t: Tree, x: i32, y: i32, z: i32) -> Option<u16> {
 }
 
 /// Build the same species-specific geometry for a sapling-grown tree.
-//// The caller owns the soil, obstructions and transaction checks; this pure
+/// The caller owns the soil, obstructions and transaction checks; this pure
 /// helper never reads or edits the world and cannot replace a player's build.
 /// Root y is the *sapling's* y, while Tree::root represents the soil below it.
 pub(super) fn sapling_blocks(
@@ -435,7 +435,14 @@ pub(super) fn sapling_blocks(
     if !(1..=253).contains(&y) || y + trunk_height + 1 > 255 {
         return Vec::new();
     }
-    let t = Tree { x, z, root: y - 1, height: trunk_height, shape, variation };
+    let t = Tree {
+        x,
+        z,
+        root: y - 1,
+        height: trunk_height,
+        shape,
+        variation,
+    };
     let mut blocks = Vec::new();
     // REACH is already enough for branch heads, acacia tips and 2x2 crowns.
     for px in x - REACH..=x + REACH {
