@@ -8,7 +8,7 @@ fn solid(id: u16) -> bool {
         | 63 | 66 | 69 | 70 | 72 | 75..=78 | 83 | 93 | 94 | 96
         | 104 | 105 | 106 | 107 | 115 | 127 | 141 | 142 | 143 | 149 | 150)
 }
-fn chance(phase: u64, x: i32, y: i32, z: i32, divisor: u64) -> bool {
+fn ecology_roll(phase: u64, x: i32, y: i32, z: i32) -> u64 {
     let mut v = phase
         ^ (x as i64 as u64).wrapping_mul(0x9e3779b185ebca87)
         ^ (y as i64 as u64).wrapping_mul(0xc2b2ae3d27d4eb4f)
@@ -17,8 +17,29 @@ fn chance(phase: u64, x: i32, y: i32, z: i32, divisor: u64) -> bool {
     v = v.wrapping_mul(0xbf58476d1ce4e5b9);
     v ^= v >> 27;
     v = v.wrapping_mul(0x94d049bb133111eb);
-    (v ^ (v >> 31)).is_multiple_of(divisor)
+    v ^ (v >> 31)
 }
+
+fn chance(phase: u64, x: i32, y: i32, z: i32, divisor: u64) -> bool {
+    ecology_roll(phase, x, y, z).is_multiple_of(divisor)
+}
+
+/// Java 1.7.10's default randomTickSpeed is 3 selections per 16^3
+/// section per game tick. This server schedules wakeable leaves in
+/// one-second batches rather than simulating every loaded section.
+/// 20 ticks * 3 / 4096 approximates the same per-leaf hazard (68.27s
+/// average), without 4096 empty block checks per active section.
+const LEAF_RANDOM_TICK_SPEED: u64 = 3;
+const SECTION_VOLUME: u64 = 16 * 16 * 16;
+const GAME_TICKS_PER_SECOND: u64 = 20;
+
+fn leaf_decay_due(phase: u64, x: i32, y: i32, z: i32) -> bool {
+    phase != 0
+        && phase.is_multiple_of(GAME_TICKS_PER_SECOND)
+        && ecology_roll(phase / GAME_TICKS_PER_SECOND, x, y, z) % SECTION_VOLUME
+            < LEAF_RANDOM_TICK_SPEED * GAME_TICKS_PER_SECOND
+}
+
 fn plantable(id: u16) -> bool {
     matches!(id, 2 | 3 | 60)
 }
@@ -352,6 +373,34 @@ impl World {
                 changes.insert((x, y, z), 0);
             }
         }
+        // Leaves are sampled independently of the crop/ecology budget. They
+        // do NOT disappear immediately on log removal, nor should flowers,
+        // crops or a large leaf canopy starve the whole leaf decay queue.
+        //
+        // The stochastic test occurs once per simulated second and has the
+        // 1.7.10 randomTickSpeed=3 average (60 / 4096 per second). The
+        // world's deterministic tick counter keeps repeated reads stable.
+        if !self.pending_ecology.is_empty() && self.fluid_phase.is_multiple_of(GAME_TICKS_PER_SECOND) {
+            let len = self.pending_ecology.len();
+            let offset = ((self.fluid_phase / GAME_TICKS_PER_SECOND) as usize)
+                .wrapping_mul(budget.max(1))
+                % len;
+            for &(x, y, z) in self.pending_ecology.iter().cycle().skip(offset).take(len) {
+                if changes.len() >= budget {
+                    break;
+                }
+                if !leaf_decay_due(self.fluid_phase, x, i32::from(y), z) {
+                    continue;
+                }
+                let block = self.get(x, i32::from(y), z);
+                if matches!(block >> 4, 18 | 161)
+                    && block & 4 == 0
+                    && !self.leaf_connected(x, i32::from(y), z)
+                {
+                    changes.insert((x, y, z), 0);
+                }
+            }
+        }
         if !self.fluid_phase.is_multiple_of(20) || self.pending_ecology.is_empty() {
             return changes;
         }
@@ -508,12 +557,8 @@ impl World {
                         self.grow_tree(x, height, z, &mut changes);
                     }
                 }
-                // In 1.7.10 bit 0x4 is persistent/player-placed; bit 0x8
-                // requests a decay check. Keep disconnected natural leaves
-                // eligible for scheduled random-tick decay in this simulator.
-                18 | 161 if block & 4 == 0 && !self.leaf_connected(x, height, z) => {
-                    changes.insert((x, y, z), 0);
-                }
+                // Leaves use the independent random-tick sampling above,
+                // never the crop/flower 1-second cycle.
                 _ => {}
             }
         }
@@ -557,8 +602,15 @@ mod regression_tests {
         assert!(world.leaf_connected(1, 65, 0));
         world.import_block(2, 65, 0, 0).unwrap();
         assert!(!world.leaf_connected(0, 65, 0));
-        assert_eq!(world.ecology_changes(64).get(&(0, 65, 0)), Some(&0));
-        assert_eq!(world.ecology_changes(64).get(&(1, 65, 0)), Some(&0));
+        // No immediate disappearance, even though the log was removed.
+        assert_eq!(world.ecology_changes(64).get(&(0, 65, 0)), None);
+        for x in 0..=1 {
+            let second = (1..=1024)
+                .find(|&sec| leaf_decay_due(sec * 20, x, 65, 0))
+                .expect("a pending leaf must eventually receive a random tick");
+            world.fluid_phase = second * 20;
+            assert_eq!(world.ecology_changes(64).get(&(x, 65, 0)), Some(&0));
+        }
     }
 
     #[test]
@@ -646,4 +698,53 @@ mod regression_tests {
         assert!(w.wet_farmland(0, 64, 0));
         assert!(!w.wet_farmland(-1, 64, 0));
     }
+    #[test]
+    fn leaf_random_ticks_match_vanilla_default_average() {
+        // 3 attempts/4096 blocks/tick x 20 TPS gives 60/4096 per second.
+        assert_eq!(LEAF_RANDOM_TICK_SPEED, 3);
+        assert_eq!(SECTION_VOLUME, 4096);
+        assert!(!leaf_decay_due(0, 0, 65, 0));
+        assert!(!leaf_decay_due(19, 0, 65, 0));
+        assert!(!leaf_decay_due(21, 0, 65, 0));
+        let selected = (1..=4096)
+            .filter(|&sec| leaf_decay_due(sec * 20, 0, 65, 0))
+            .count();
+        assert!(
+            (30..=95).contains(&selected),
+            "expected ~60 random leaf checks over 4096 seconds, got {selected}"
+        );
+    }
+
+    #[test]
+    fn connected_and_persistent_leaves_survive_even_when_selected() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, 18 << 4).unwrap();
+        world.import_block(1, 65, 0, 17 << 4).unwrap();
+        world.import_block(3, 65, 0, (161 << 4) | 4).unwrap();
+        let sec = (1..=1024)
+            .find(|&sec| leaf_decay_due(sec * 20, 0, 65, 0))
+            .unwrap();
+        world.fluid_phase = sec * 20;
+        assert!(!world.ecology_changes(64).contains_key(&(0, 65, 0)));
+        let sec = (1..=1024)
+            .find(|&sec| leaf_decay_due(sec * 20, 3, 65, 0))
+            .unwrap();
+        world.fluid_phase = sec * 20;
+        assert!(!world.ecology_changes(64).contains_key(&(3, 65, 0)));
+    }
+
+    #[test]
+    fn many_unrelated_ecology_entries_do_not_prevent_leaf_decay() {
+        let mut world = World::new();
+        for x in 0..40 {
+            world.import_block(x, 65, 2, 18 << 4).unwrap();
+        }
+        world.import_block(0, 65, 0, 161 << 4).unwrap();
+        let sec = (1..=1024)
+            .find(|&sec| leaf_decay_due(sec * 20, 0, 65, 0))
+            .unwrap();
+        world.fluid_phase = sec * 20;
+        assert_eq!(world.ecology_changes(2).get(&(0, 65, 0)), Some(&0));
+    }
+
 }
