@@ -152,13 +152,22 @@ fn rule(block: u16) -> Option<BlockRule> {
         60 => (0.6, Some(ToolKind::Shovel), 0, false, item(3, 0)),
         141 => (0.0, None, 0, false, item(391, 0)),
         142 => (0.0, None, 0, false, item(392, 0)),
-        66 => (0.7, Some(ToolKind::Pickaxe), 0, false, item(66, 0)),
+        // Rails store slope/direction and power in the block metadata, but
+        // all states drop the same (unpowered) item of their own rail type.
+        27 | 28 | 66 | 157 => (0.7, Some(ToolKind::Pickaxe), 0, false, item(id as i16, 0)),
         70 | 72 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(id as i16, 0)),
-        93 | 94 => (0.0, None, 0, false, item(356, 0)),
+        77 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(77, 0)), // stone button
+        143 => (0.5, Some(ToolKind::Axe), 0, false, item(143, 0)), // wooden button
+        93 | 94 => (0.0, None, 0, false, item(356, 0)), // repeater on/off
+        // Java 1.7.10 comparator item ID 404 (not block IDs 149/150).
+        149 | 150 => (0.0, None, 0, false, item(404, 0)),
+        131 => (0.0, None, 0, false, item(131, 0)), // tripwire hook
+        151 => (0.2, Some(ToolKind::Axe), 0, false, item(151, 0)), // daylight sensor
         50 => (0.0, None, 0, false, item(50, 0)),  // torch
         55 => (0.0, None, 0, false, item(331, 0)), // redstone dust
         69 => (0.5, None, 0, false, item(69, 0)),  // lever
-        76 => (0.0, None, 0, false, item(76, 0)),  // redstone torch
+        // An unlit torch is still a normal redstone torch when mined.
+        75 | 76 => (0.0, None, 0, false, item(76, 0)),
         5 => (2.0, Some(ToolKind::Axe), 0, false, item(5, damage)),
         // The upper two log metadata bits encode the axis, not the item species.
         // Re-mining a sideways log must not mint an orientation-specific item.
@@ -243,7 +252,6 @@ fn rule(block: u16) -> Option<BlockRule> {
         147 | 148 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(id as i16, 0)),
         152 => (5.0, Some(ToolKind::Pickaxe), 0, true, item(152, 0)),
         154 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(154, 0)), // hopper
-        157 => (0.7, Some(ToolKind::Pickaxe), 0, false, item(157, 0)),
         171 => (0.1, None, 0, false, item(171, damage)),
         174 => (0.5, Some(ToolKind::Pickaxe), 0, false, None), // packed ice
         _ => return None,
@@ -1060,6 +1068,81 @@ mod tests {
         );
         for id in [0_u16, 7, 8, 9, 10, 11, 90, 119, 120, 137, 166] {
             assert!(mine_rule(id << 4, None).is_none(), "protected block {id}");
+        }
+    }
+
+    #[test]
+    fn b20_stateful_redstone_and_rail_blocks_are_mineable_in_both_states() {
+        // The old rule table only handled the lit torch, normal rail and
+        // repeater. A redstone update could therefore make the SAME torch
+        // intermittently impossible to mine. A drop must never contain
+        // a powered block ID or its facing/power metadata.
+        for &(id, expected_item, instant) in &[
+            (75_u16, 76_i16, true),   // unlit torch
+            (76, 76, true),           // lit torch
+            (149, 404, true),         // unpowered comparator
+            (150, 404, true),         // powered comparator
+            (93, 356, true),          // repeater off
+            (94, 356, true),          // repeater on
+            (131, 131, true),         // tripwire hook
+            (27, 27, false),          // powered rail
+            (28, 28, false),          // detector rail
+            (66, 66, false),          // normal rail
+            (157, 157, false),        // activator rail
+            (77, 77, false),          // stone button
+            (143, 143, false),        // wooden button
+            (151, 151, false),        // daylight sensor
+        ] {
+            for meta in [0_u16, 1, 8, 15] {
+                let block = (id << 4) | meta;
+                let (duration, mined) = mine_rule(block, None)
+                    .unwrap_or_else(|| panic!("block {id} meta {meta} is unmineable"));
+                assert_eq!(
+                    mined.drop,
+                    Some(BlockDrop { id: expected_item, damage: 0 }),
+                    "block {id} meta {meta} must drop its unpowered, unrotated item"
+                );
+                assert!(!mined.wear_tool);
+                let at = (3, 64, 4);
+                let progress = MiningProgress::start(at, block, None).unwrap();
+                assert_eq!(
+                    progress.is_instant(),
+                    instant,
+                    "block {id} meta {meta} instant-break status"
+                );
+                if instant {
+                    assert_eq!(duration, Duration::ZERO);
+                    assert_eq!(progress.finish(at, block, None), Some(mined));
+                } else {
+                    assert!(duration > Duration::ZERO);
+                    assert!(progress.finish(at, block, None).is_none());
+                }
+            }
+        }
+        // Never treat the inaccessible block IDs as genuine inventory items.
+        assert_eq!(mine_rule(75 << 4, None).unwrap().1.drop.unwrap().id, 76);
+        assert_eq!(mine_rule(150 << 4, None).unwrap().1.drop.unwrap().id, 404);
+        // Protected blocks stay unmineable; no generic fallback is added.
+        for id in [0_u16, 7, 8, 9, 10, 11, 90, 119, 120, 137, 166] {
+            assert!(mine_rule(id << 4, None).is_none(), "protected block {id}");
+        }
+    }
+
+    #[test]
+    fn b20_buttons_and_rails_use_the_right_tool_without_requiring_it() {
+        for &(block, matching, other) in &[
+            (27_u16, 270_i16, 271_i16),
+            (28, 270, 271),
+            (77, 270, 271),
+            (143, 271, 270),
+            (151, 271, 270),
+        ] {
+            let bare = mine_rule(block << 4, None).unwrap();
+            let fast = mine_rule(block << 4, stack(matching, 0)).unwrap();
+            let wrong = mine_rule(block << 4, stack(other, 0)).unwrap();
+            assert!(fast.0 < bare.0, "matching tool {matching} for block {block}");
+            assert_eq!(wrong.0, bare.0, "wrong tool for block {block}");
+            assert_eq!(bare.1.drop, fast.1.drop, "hand-mined block {block} drops");
         }
     }
 
