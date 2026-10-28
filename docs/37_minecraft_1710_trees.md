@@ -48,8 +48,8 @@ others may take several minutes.
   the trunk is removed. Log changes wake nearby leaves (4-block radius).
 - The vanilla `0x8` "check decay" metadata is represented by the
   server's in-memory ecology wake queue, which is rebuilt for edited leaves
-  after loading. Vanilla chunk-level random position sampling is not
-  implemented globally.
+  and for generated leaves near persisted removed logs after loading.
+  Vanilla chunk-level random position sampling is not implemented globally.
 - Processing is bounded by the world tick budget, so sustained heavy load
   can increase actual delay relative to the average.
 - Leaf decay also requires the server's 20 TPS block worker to run and
