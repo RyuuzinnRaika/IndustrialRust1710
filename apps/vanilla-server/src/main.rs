@@ -1810,6 +1810,56 @@ fn play(
                 }
                 continue;
             }
+            if event.id == FALLING_ANVIL_DAMAGE_EVENT {
+                if event.body.len() != 1 || event.body[0] == 0 || event.body[0] > 40 {
+                    return Err(bad("invalid internal anvil damage payload"));
+                }
+                let now = clock.ticks();
+                if survival
+                    && vitals.health > 0.0
+                    && last_anvil_hit_tick
+                        .is_none_or(|last| now.saturating_sub(last) >= 10)
+                {
+                    last_anvil_hit_tick = Some(now);
+                    let incoming = f32::from(event.body[0]);
+                    let armor = f32::from(inventory.armor_points().min(20));
+                    let damage = (incoming * (25.0 - armor) / 25.0).ceil();
+                    let previous_health = vitals.health;
+                    vitals.health = (vitals.health - damage).max(0.0);
+                    death_log::record_fatal(
+                        &mut fatal_hit,
+                        previous_health,
+                        vitals.health,
+                        DeathCause::FallingAnvil,
+                    );
+                    save_damage_state(
+                        player,
+                        *vitals,
+                        session_dimension.protocol_id() as i32,
+                        fatal_hit,
+                        &mut death_count_committed,
+                        name,
+                        clock,
+                        player_path,
+                        root_world_path,
+                        world_path,
+                        scoreboard,
+                        scoreboard_path,
+                        hub,
+                    )?;
+                    send(s, 0x06, &health_packet(*vitals))?;
+                    let mut animation = entity_id.to_be_bytes().to_vec();
+                    animation.push(2);
+                    hub.broadcast_in_view(
+                        *player,
+                        Event {
+                            id: 0x1a,
+                            body: animation,
+                        },
+                    );
+                }
+                continue;
+            }
             if matches!(event.id, ADMIN_TELEPORT_EVENT | PEARL_TELEPORT_EVENT) {
                 if event.body.len() != 24 {
                     return Err(bad("invalid internal teleport payload"));
@@ -9222,6 +9272,25 @@ fn main() -> io::Result<()> {
                     match gravity_world.gravity_tick(&furnace_world_path, 64) {
                         Ok(changes) => {
                             for movement in changes {
+                                if movement.anvil_landing_damage > 0 {
+                                    let dimension = gravity_world.dimension();
+                                    match furnace_hub.participants_in_dimension(dimension) {
+                                        Ok(participants) => {
+                                            for (id, position) in participants {
+                                                if anvil_landing_touches_player(position, movement.to) {
+                                                    if let Err(error) = furnace_hub.request_falling_anvil_damage(
+                                                        id,
+                                                        dimension,
+                                                        movement.anvil_landing_damage,
+                                                    ) {
+                                                        eprintln!("ANVIL LANDING DAMAGE DELIVERY ERROR: {error}");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Err(error) => eprintln!("ANVIL PLAYER SNAPSHOT ERROR: {error}"),
+                                    }
+                                }
                                 for (x, y, z) in [movement.from, movement.to] {
                                     furnace_hub.broadcast(block_change_event(
                                         &gravity_world,
