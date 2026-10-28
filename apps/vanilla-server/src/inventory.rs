@@ -853,7 +853,10 @@ impl Inventory {
                 for dest in slots {
                     let existing = self.lookup(window, dest);
                     if let Some(other) = existing {
-                        if other.id != held.id || other.damage != held.damage {
+                        if other.id != held.id
+                            || other.damage != held.damage
+                            || other.nbt != held.nbt
+                        {
                             continue;
                         }
                     }
@@ -896,7 +899,10 @@ impl Inventory {
             let Some(mut other) = self.lookup(window, slot) else {
                 continue;
             };
-            if other.id != carried.id || other.damage != carried.damage {
+            if other.id != carried.id
+                || other.damage != carried.damage
+                || other.nbt != carried.nbt
+            {
                 continue;
             }
             let count = (carried.max_count() - carried.count).min(other.count);
@@ -1553,12 +1559,15 @@ impl Inventory {
                     return None;
                 }
             }
-            if old.is_some()
-                && hand.is_some()
-                && (old.unwrap().id != hand.unwrap().id
-                    || old.unwrap().damage != hand.unwrap().damage)
-            {
-                return None; // unsupported unlike-stack swap across two files
+            if let (Some(existing), Some(carried)) = (old, hand) {
+                if existing.id != carried.id
+                    || existing.damage != carried.damage
+                    || existing.nbt != carried.nbt
+                {
+                    // Never merge different named/NBT stacks across the
+                    // furnace and player inventory persistence boundary.
+                    return None;
+                }
             }
             let (next_slot, next_cursor) = match (old, hand, button) {
                 (item, None, 0) => (None, item),
@@ -2217,6 +2226,80 @@ mod tests {
         // Remote player's storage must never be overwritten by this session.
         assert!(bob.ender_chest_click_window(1, 0, 0, 0).is_some());
         assert!(bob.cursor.is_none());
+    }
+
+    #[test]
+    fn s04_full_furnace_input_and_fuel_right_click_conserve_items() {
+        let mut inventory = Inventory::default();
+        let mut furnace = crate::furnaces::Furnace::default();
+        for (slot, id) in [(0, 15), (1, 263)] {
+            let full = Stack {
+                id,
+                count: 64,
+                damage: 0,
+                nbt: None,
+            };
+            furnace.slots[slot] = Some(full);
+            inventory.cursor = Some(Stack { count: 3, ..full });
+            for _ in 0..5 {
+                assert!(inventory.furnace_click(&mut furnace, slot as i16, 1, 0).is_some());
+                assert_eq!(furnace.slots[slot], Some(full));
+                assert_eq!(inventory.cursor, Some(Stack { count: 3, ..full }));
+            }
+        }
+    }
+
+    #[test]
+    fn s04_furnace_cannot_merge_distinct_nbt_items() {
+        use fastnbt::Value;
+        use std::collections::HashMap;
+
+        let named = |label: &str| {
+            crate::item_nbt::from_value(&Value::Compound(HashMap::from([(
+                "display".to_string(),
+                Value::Compound(HashMap::from([(
+                    "Name".to_string(),
+                    Value::String(label.to_string()),
+                )])),
+            )])))
+            .unwrap()
+        };
+        let a = Stack {
+            id: 15,
+            count: 3,
+            damage: 0,
+            nbt: Some(named("Iron A")),
+        };
+        let b = Stack {
+            id: 15,
+            count: 2,
+            damage: 0,
+            nbt: Some(named("Iron B")),
+        };
+        assert!(a.is_valid() && b.is_valid());
+        assert_ne!(a.nbt, b.nbt);
+
+        let mut inventory = Inventory::default();
+        let mut furnace = crate::furnaces::Furnace::default();
+        furnace.slots[0] = Some(a);
+        inventory.cursor = Some(b);
+        assert!(inventory.furnace_click(&mut furnace, 0, 1, 0).is_none());
+        assert_eq!(furnace.slots[0], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
+
+        // Dragging across a same-ID but differently named player stack
+        // must not overwrite its original NBT with the cursor NBT.
+        inventory.slots[9] = Some(a);
+        assert!(inventory.click_window(0, -999, 0, 5));
+        assert!(inventory.click_window(0, 9, 1, 5));
+        assert!(inventory.click_window(0, -999, 2, 5));
+        assert_eq!(inventory.slots[9], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
+
+        // Double-click collect also must not mix tagged and untagged items.
+        assert!(inventory.click_window(0, 9, 0, 6));
+        assert_eq!(inventory.slots[9], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
     }
 
     #[test]
