@@ -177,6 +177,7 @@ fn rule(block: u16) -> Option<BlockRule> {
         44 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(44, damage & 7)),
         54 => (2.5, Some(ToolKind::Axe), 0, false, item(54, 0)),
         58 => (2.5, Some(ToolKind::Axe), 0, false, item(58, 0)),
+        25 => (0.8, Some(ToolKind::Axe), 0, false, item(25, 0)), // note block
         61 | 62 => (3.5, Some(ToolKind::Pickaxe), 0, true, item(61, 0)),
         20 => (0.3, None, 0, false, None), // glass: breaks but no drop
         35 => (0.8, None, 0, false, item(35, damage)),
