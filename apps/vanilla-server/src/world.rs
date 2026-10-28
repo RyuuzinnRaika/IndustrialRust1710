@@ -3720,7 +3720,9 @@ mod tests {
 
     #[test]
     fn journaled_container_mining_preserves_all_slots_and_clears_saved_tile_state() {
+        use crate::brewing::{Brewer, Brewers};
         use crate::chests::{Chests, CHEST_SLOTS};
+        use crate::dispensers::{Devices, DEVICE_SLOTS};
         use crate::furnaces::{Furnace, Furnaces, FURNACE_SLOTS};
         use crate::ground_items::GroundItems;
         use crate::hoppers::{Hoppers, HOPPER_SLOTS};
@@ -3735,13 +3737,13 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        for id in [54_u16, 61, 154] {
+        for id in [54_u16, 61, 154, 23, 158, 117] {
             let world_file = root.join(format!("container-{id}.irw"));
             let drop_file = GroundItems::location(&world_file);
             let journal_file = world_file.with_extension("pending-txn.json");
             let source = Stack {
-                id: 264,
-                count: 17,
+                id: if id == 117 { 373 } else { 264 },
+                count: if id == 117 { 1 } else { 17 },
                 damage: 0,
                 nbt: None,
             };
@@ -3755,7 +3757,7 @@ mod tests {
             assert_eq!(original_world.get(0, 64, 0) >> 4, id);
             let ground = GroundItems::default();
             let block_drop = Stack {
-                id: if id == 61 { 61 } else { id as i16 },
+                id: match id { 61 => 61, 117 => 379, _ => id as i16 },
                 count: 1,
                 damage: 0,
                 nbt: None,
@@ -3788,7 +3790,7 @@ mod tests {
                     assert_eq!(furnace.slots.len(), FURNACE_SLOTS);
                     (Furnaces::location(&world_file), staged.encoded().unwrap())
                 }
-                _ => {
+                154 => {
                     let mut slots = [None; HOPPER_SLOTS];
                     slots[4] = Some(source);
                     let storage = Hoppers::default().staged_update((0, 64, 0), slots).unwrap();
@@ -3796,6 +3798,29 @@ mod tests {
                     let staged = storage.staged_remove((0, 64, 0)).unwrap();
                     (Hoppers::location(&world_file), staged.encoded().unwrap())
                 }
+                23 | 158 => {
+                    let mut slots = [None; DEVICE_SLOTS];
+                    slots[8] = Some(source);
+                    let storage = Devices::default().staged_update((0, 64, 0), slots).unwrap();
+                    let file = Devices::location(&world_file);
+                    fs::write(&file, storage.encoded().unwrap()).unwrap();
+                    let staged = storage
+                        .staged_update((0, 64, 0), [None; DEVICE_SLOTS])
+                        .unwrap();
+                    (file, staged.encoded().unwrap())
+                }
+                117 => {
+                    let mut stand = Brewer::default();
+                    stand.slots[0] = Some(source);
+                    let storage = Brewers::default().staged_update((0, 64, 0), stand).unwrap();
+                    let file = Brewers::location(&world_file);
+                    fs::write(&file, storage.encoded().unwrap()).unwrap();
+                    let staged = storage
+                        .staged_update((0, 64, 0), Brewer::default())
+                        .unwrap();
+                    (file, staged.encoded().unwrap())
+                }
+                _ => unreachable!(),
             };
             assert_eq!(
                 fs::read(&world_file).unwrap(),
@@ -3817,9 +3842,14 @@ mod tests {
                     .unwrap()
                     .get((0, 64, 0))
                     .occupied()),
-                _ => assert!(!Hoppers::load(&storage_file)
+                154 => assert!(!Hoppers::load(&storage_file)
                     .unwrap()
                     .has_contents((0, 64, 0))),
+                23 | 158 => assert!(Devices::load(&storage_file).unwrap()
+                    .slots((0, 64, 0)).iter().all(Option::is_none)),
+                117 => assert!(!Brewers::load(&storage_file).unwrap()
+                    .is_nonempty((0, 64, 0))),
+                _ => unreachable!(),
             };
             let actual: Vec<_> = GroundItems::load(&drop_file)
                 .unwrap()
@@ -3827,6 +3857,106 @@ mod tests {
                 .map(|item| item.stack)
                 .collect();
             assert_eq!(actual, vec![block_drop, source]);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn journaled_devices_and_brewer_keep_every_occupied_slot_after_mining() {
+        use crate::brewing::{Brewer, Brewers};
+        use crate::dispensers::{Devices, DEVICE_SLOTS};
+        use crate::ground_items::GroundItems;
+        use crate::inventory::Stack;
+
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-device-brewer-mining-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for id in [23_u16, 158, 117] {
+            let world_path = root.join(format!("{id}.irw"));
+            let ground_path = GroundItems::location(&world_path);
+            let journal_path = world_path.with_extension("pending-txn.json");
+            let mut world = World::new();
+            world.import_block(0, 64, 0, id << 4).unwrap();
+            world.save(&world_path).unwrap();
+            let staged_world = world.stage_mining_removal(0, 64, 0).unwrap().unwrap();
+            let make_stack = |id, count| Stack {
+                id,
+                count,
+                damage: 0,
+                nbt: None,
+            };
+            let (storage_path, old_bytes, new_bytes, contents) = if id == 117 {
+                let mut stand = Brewer::default();
+                stand.slots[0] = Some(make_stack(373, 1));
+                stand.slots[2] = Some(make_stack(374, 1));
+                stand.slots[3] = Some(make_stack(372, 5));
+                let original = Brewers::default().staged_update((0, 64, 0), stand).unwrap();
+                let staged = original
+                    .staged_update((0, 64, 0), Brewer::default())
+                    .unwrap();
+                (
+                    Brewers::location(&world_path),
+                    original.encoded().unwrap(),
+                    staged.encoded().unwrap(),
+                    stand.slots.into_iter().flatten().collect::<Vec<_>>(),
+                )
+            } else {
+                let mut slots = [None; DEVICE_SLOTS];
+                slots[0] = Some(make_stack(1, 64));
+                slots[4] = Some(make_stack(264, 17));
+                slots[8] = Some(make_stack(373, 1));
+                let original = Devices::default().staged_update((0, 64, 0), slots).unwrap();
+                let staged = original
+                    .staged_update((0, 64, 0), [None; DEVICE_SLOTS])
+                    .unwrap();
+                (
+                    Devices::location(&world_path),
+                    original.encoded().unwrap(),
+                    staged.encoded().unwrap(),
+                    slots.into_iter().flatten().collect::<Vec<_>>(),
+                )
+            };
+            fs::write(&storage_path, old_bytes).unwrap();
+            let block_item = make_stack(if id == 117 { 379 } else { id as i16 }, 1);
+            let mut all_drops = vec![block_item];
+            all_drops.extend(contents.iter().copied());
+            let (staged_ground, _) = GroundItems::default()
+                .stage_put_many(&all_drops, (0, 64, 0))
+                .unwrap();
+            crate::journal::commit(
+                &journal_path,
+                &[
+                    (world_path.as_path(), staged_world.encoded().unwrap()),
+                    (storage_path.as_path(), new_bytes),
+                    (ground_path.as_path(), staged_ground.encoded().unwrap()),
+                ],
+            )
+            .unwrap();
+            assert_eq!(World::load(&world_path).unwrap().get(0, 64, 0), 0);
+            if id == 117 {
+                assert_eq!(
+                    Brewers::load(&storage_path).unwrap().get((0, 64, 0)),
+                    Brewer::default()
+                );
+            } else {
+                assert!(Devices::load(&storage_path)
+                    .unwrap()
+                    .slots((0, 64, 0))
+                    .iter()
+                    .all(Option::is_none));
+            }
+            let saved_drops = GroundItems::load(&ground_path)
+                .unwrap()
+                .items()
+                .map(|entity| entity.stack)
+                .collect::<Vec<_>>();
+            assert_eq!(saved_drops, all_drops, "every stack survives for block {id}");
         }
         fs::remove_dir_all(root).unwrap();
     }
