@@ -8838,6 +8838,38 @@ fn main() -> io::Result<()> {
                             return;
                         }
                     }
+                    // Keep high-volume leaf/support drops draining before
+                    // the next block batch can reach the bounded IRW queue cap.
+                    // Under normal load, the post-tick once-per-second flush
+                    // remains the only writer. A large persisted backlog
+                    // gets one extra 32-item handoff per 20TPS tick while
+                    // storage has capacity; full storage performs no writes.
+                    if gravity_world.queued_drops().len() >= 1_536 {
+                        let mut ground = match leaf_drops.lock() {
+                            Ok(value) => value,
+                            Err(_) => return,
+                        };
+                        match flush_pending_world_drops(
+                            &mut gravity_world,
+                            &mut ground,
+                            &furnace_world_path,
+                            &leaf_drops_file,
+                        ) {
+                            Ok(spawned) => {
+                                for item in spawned {
+                                    for packet in item.spawn() {
+                                        furnace_hub.broadcast(packet);
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                // An interrupted journal must be recovered
+                                // at restart; never risk an in-process redo.
+                                eprintln!("LEAF BACKLOG JOURNAL ERROR: {error}");
+                                return;
+                            }
+                        }
+                    }
                     // Snapshot only when TNT's fuse expires. Exposure must be
                     // sampled before the explosion clears intervening walls.
                     let tnt_exposure = gravity_world
