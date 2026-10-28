@@ -40,6 +40,20 @@ fn leaf_decay_due(phase: u64, x: i32, y: i32, z: i32) -> bool {
             < LEAF_RANDOM_TICK_SPEED * GAME_TICKS_PER_SECOND
 }
 
+/// 1.7.10 saplings attempt a growth-stage update on only one in seven
+/// randomly selected block ticks. At 20 TPS/randomTickSpeed=3 this
+/// yields approximately 478 seconds per stage (two stages per tree).
+fn sapling_growth_due(phase: u64, x: i32, y: i32, z: i32) -> bool {
+    leaf_decay_due(phase, x, y, z)
+        && ecology_roll(
+            (phase / GAME_TICKS_PER_SECOND) ^ 0x5a91_1eaf,
+            x,
+            y,
+            z,
+        )
+            .is_multiple_of(7)
+}
+
 fn plantable(id: u16) -> bool {
     matches!(id, 2 | 3 | 60)
 }
@@ -575,7 +589,7 @@ impl World {
                         changes.insert((x, y, z), (id << 4) | ((block & 7) + 1));
                     }
                 }
-                6 if chance(self.fluid_phase, x, height, z, 4) => {
+                6 if sapling_growth_due(self.fluid_phase, x, height, z) => {
                     // Vanilla saplings advance naturally only when the
                     // light above them is at least 9. Bone meal directly
                     // calls grow_tree and remains usable under dim light.
@@ -720,6 +734,27 @@ mod regression_tests {
         w.import_block(1, 64, 1, 0).unwrap();
         w.grow_tree(0, 64, 0, &mut blocked);
         assert!(blocked.is_empty(), "a lone dark oak does not grow");
+    }
+
+    #[test]
+    fn sapling_growth_uses_one_in_seven_random_ticks_not_every_four_seconds() {
+        assert!(!sapling_growth_due(0, 0, 64, 0));
+        assert!(!sapling_growth_due(19, 0, 64, 0));
+        assert!(!sapling_growth_due(21, 0, 64, 0));
+        let mut checks = 0;
+        let mut growths = 0;
+        for second in 1..=50_000 {
+            let phase = second * 20;
+            if leaf_decay_due(phase, 0, 64, 0) {
+                checks += 1;
+                if sapling_growth_due(phase, 0, 64, 0) {
+                    growths += 1;
+                }
+            }
+        }
+        assert!((600..=850).contains(&checks), "random ticks={checks}");
+        assert!((60..=145).contains(&growths), "growth attempts={growths}");
+        assert!(growths < checks / 4, "saplings must not grow every fourth second");
     }
 
     #[test]
