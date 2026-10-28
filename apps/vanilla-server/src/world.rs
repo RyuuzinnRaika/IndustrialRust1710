@@ -1912,12 +1912,26 @@ impl World {
             for (&position, &block) in &changes {
                 self.set_gravity_cell(position, block);
             }
-            let saved = if self.edits.len() > MAX_EDITS {
+            // Stage block changes AND any resulting drops before saving the
+            // IRW snapshot. The TNT5 trailer makes the undelivered queue
+            // durable in the same atomic file replacement as the decay.
+            // On any save failure undo both edits and newly queued drops.
+            let queued_before = self.pending_drops.len();
+            let overflow = queued_before
+                .checked_add(detached_drops.len())
+                .is_none_or(|count| count > MAX_PENDING_DROPS);
+            if !overflow {
+                self.pending_drops.extend(detached_drops);
+            }
+            let saved = if overflow {
+                Err(invalid("pending world-drop backlog capacity exceeded"))
+            } else if self.edits.len() > MAX_EDITS {
                 Err(invalid("fluid or redstone exceeds world edit budget"))
             } else {
                 self.save(path)
             };
             if let Err(error) = saved {
+                self.pending_drops.truncate(queued_before);
                 if let Some(before) = primed_before.take() {
                     self.primed_tnt = before;
                 }
@@ -1941,7 +1955,6 @@ impl World {
                 }
                 return Err(error);
             }
-            self.pending_drops.extend(detached_drops);
             self.pending_device_activations.extend(fired_devices);
             self.pending_piston_actions.extend(piston_actions);
             for (position, (facing, extending)) in swept {
@@ -2618,13 +2631,15 @@ impl World {
                 return Err(invalid("unrecognized world entity trailer"));
             }
             let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
-            let moving = matches!(&trailer[..4], b"TNT4" | b"TNT5");
+            let moving = &trailer[..4] == b"TNT4" || &trailer[..4] == b"TNT5";
             let entity_stride = if moving { 44 } else { 20 };
             let primed_end = 6 + primed_count * entity_stride;
             if primed_count > MAX_PRIMED_TNT || trailer.len() < primed_end {
                 return Err(invalid("invalid primed TNT trailer length"));
             }
-            if matches!(&trailer[..4], b"TNT2" | b"TNT3" | b"TNT4" | b"TNT5") {
+            if [&b"TNT2"[..], &b"TNT3"[..], &b"TNT4"[..], &b"TNT5"[..]]
+                .contains(&&trailer[..4])
+            {
                 let queued = &trailer[primed_end..];
                 if queued.len() < 4 {
                     return Err(invalid("truncated queued TNT trailer"));
@@ -2645,7 +2660,9 @@ impl World {
                         return Err(invalid("invalid or duplicate queued TNT position"));
                     }
                 }
-                if matches!(&trailer[..4], b"TNT3" | b"TNT4" | b"TNT5") {
+                if [&b"TNT3"[..], &b"TNT4"[..], &b"TNT5"[..]]
+                    .contains(&&trailer[..4])
+                {
                     let pending = &queued[chain_end..];
                     if pending.len() < 4 {
                         return Err(invalid("truncated blast backlog"));
