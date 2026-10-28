@@ -455,6 +455,65 @@ mod tests {
         fs::remove_dir_all(home).unwrap();
     }
     #[test]
+    fn ground_first_world_drop_replay_prevents_duplicate_after_restart() {
+        use crate::ground_items::GroundItems;
+        use crate::inventory::Stack;
+        use crate::world::World;
+        let home = std::env::temp_dir().join(format!(
+            "ir1710-ground-first-replay-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let world_file = home.join("world.irw");
+        let ground_file = home.join("world.drops.json");
+        let journal_file = home.join("world.pending-txn.json");
+        let mut world = World::new();
+        world.queue_test_drop(
+            (4, 65, -9),
+            Stack { id: 260, count: 1, damage: 0, nbt: None },
+        );
+        world.save(&world_file).unwrap();
+        let before = fs::read(&world_file).unwrap();
+        let (staged_ground, _) = GroundItems::default()
+            .stage_put_world_drops(world.queued_drops())
+            .unwrap();
+        let staged_world = world.staged_drop_acknowledgement(1).unwrap();
+        let world_bytes = staged_world.encoded().unwrap();
+        let ground_bytes = staged_ground.encoded().unwrap();
+        let targets = [
+            (world_file.as_path(), world_bytes),
+            (ground_file.as_path(), ground_bytes),
+        ];
+        let record = Record {
+            version: VERSION,
+            files: targets
+                .iter()
+                .map(|(path, contents)| Target {
+                    relative: relative(&home, path).unwrap(),
+                    contents: contents.clone(),
+                    checksum: fingerprint(contents),
+                })
+                .collect(),
+        };
+        fs::write(&journal_file, serde_json::to_vec(&record).unwrap()).unwrap();
+        // The ground sidecar is visible but the IRW still has a queued
+        // apple. Replaying the prepared transaction MUST clear the queue
+        // rather than emit the same item a second time.
+        fs::write(&ground_file, &targets[1].1).unwrap();
+        assert_eq!(fs::read(&world_file).unwrap(), before);
+        assert_eq!(World::load(&world_file).unwrap().queued_drops().len(), 1);
+        recover(&journal_file).unwrap();
+        assert!(World::load(&world_file).unwrap().queued_drops().is_empty());
+        let persisted = GroundItems::load(&ground_file).unwrap();
+        assert_eq!(persisted.items().count(), 1);
+        assert_eq!(persisted.items().next().unwrap().stack.id, 260);
+        recover(&journal_file).unwrap();
+        assert_eq!(GroundItems::load(&ground_file).unwrap().items().count(), 1);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn interrupted_world_drop_handoff_replays_exactly_one_entity() {
         use crate::ground_items::GroundItems;
         use crate::inventory::Stack;
