@@ -1938,6 +1938,44 @@ impl World {
         Ok(changed.into_iter().map(|(x, y, z, _)| (x, y, z)).collect())
     }
 
+    /// Locate the other half of an intact 1.7.10 bed or door before mining.
+    /// Matching block IDs, orientation and opposing half bits prevent an
+    /// unrelated neighboring block from being destroyed.
+    pub fn mining_partner(&self, x: i32, y: i32, z: i32) -> Option<(i32, i32, i32)> {
+        if !in_bounds(x, y, z) {
+            return None;
+        }
+        let block = self.get(x, y, z);
+        let id = block >> 4;
+        let head_or_upper = block & 8 != 0;
+        let partner = match id {
+            64 | 71 => (x, if head_or_upper { y - 1 } else { y + 1 }, z),
+            26 => {
+                // 1.7.10 bed facing: 0=south, 1=west, 2=north, 3=east.
+                let (dx, dz) = match block & 3 {
+                    0 => (0, 1),
+                    1 => (-1, 0),
+                    2 => (0, -1),
+                    _ => (1, 0),
+                };
+                if head_or_upper {
+                    (x - dx, y, z - dz)
+                } else {
+                    (x + dx, y, z + dz)
+                }
+            }
+            _ => return None,
+        };
+        if !in_bounds(partner.0, partner.1, partner.2) {
+            return None;
+        }
+        let other = self.get(partner.0, partner.1, partner.2);
+        (other >> 4 == id
+            && (other & 8 != 0) != head_or_upper
+            && (id != 26 || other & 3 == block & 3))
+            .then_some(partner)
+    }
+
     /// Persist a small related block edit (such as the two bed halves) as
     /// one world snapshot, never exposing a half-built object to clients.
     pub fn update_many_and_save(
@@ -3492,6 +3530,32 @@ mod tests {
                 .live_village_house_doors(0, 0),
             None
         );
+    }
+
+    #[test]
+    fn mining_partner_finds_only_valid_bed_and_door_halves() {
+        let mut world = World::new();
+        for id in [64_u16, 71] {
+            world.import_block(2, 64, 3, id << 4 | 2).unwrap();
+            world.import_block(2, 65, 3, id << 4 | 8).unwrap();
+            assert_eq!(world.mining_partner(2, 64, 3), Some((2, 65, 3)));
+            assert_eq!(world.mining_partner(2, 65, 3), Some((2, 64, 3)));
+            world.import_block(2, 65, 3, 1 << 4).unwrap();
+            assert_eq!(world.mining_partner(2, 64, 3), None);
+        }
+        for (facing, dx, dz) in [(0, 0, 1), (1, -1, 0), (2, 0, -1), (3, 1, 0)] {
+            world.import_block(10, 64, 10, 26 << 4 | facing).unwrap();
+            world.import_block(10 + dx, 64, 10 + dz, 26 << 4 | facing | 8).unwrap();
+            assert_eq!(world.mining_partner(10, 64, 10), Some((10 + dx, 64, 10 + dz)));
+            assert_eq!(world.mining_partner(10 + dx, 64, 10 + dz), Some((10, 64, 10)));
+            world.import_block(10 + dx, 64, 10 + dz, 26 << 4 | ((facing + 1) & 3) | 8).unwrap();
+            assert_eq!(world.mining_partner(10, 64, 10), None);
+            world.import_block(10, 64, 10, 0).unwrap();
+            world.import_block(10 + dx, 64, 10 + dz, 0).unwrap();
+        }
+        world.import_block(4, 255, 4, 64 << 4).unwrap();
+        assert_eq!(world.mining_partner(4, 255, 4), None);
+        assert_eq!(world.mining_partner(i32::MIN, 64, 0), None);
     }
 
     #[test]
