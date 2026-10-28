@@ -28,6 +28,7 @@ struct NativeServer {
     _exclusive_test_run: std::sync::MutexGuard<'static, ()>,
     process: Child,
     directory: PathBuf,
+    stderr_path: PathBuf,
     port: u16,
     survival: bool,
 }
@@ -163,16 +164,21 @@ impl NativeServer {
         if survival {
             command.arg("--survival");
         }
+        // Keep child diagnostics when a real TCP test fails. The test
+        // harness otherwise hides the reason a connection was closed.
+        let stderr_path = directory.join("native-server-stderr.log");
+        let stderr_file = fs::File::create(&stderr_path).unwrap();
         let process = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr_file))
             .spawn()
             .unwrap();
         let mut server = Self {
             _exclusive_test_run: exclusive,
             process,
             directory,
+            stderr_path,
             port,
             survival,
         };
@@ -315,7 +321,23 @@ impl NativeServer {
 }
 impl Drop for NativeServer {
     fn drop(&mut self) {
+        let failed = thread::panicking();
+        let exit_status = if failed {
+            self.process.try_wait().ok().flatten()
+        } else {
+            None
+        };
         self.stop();
+        if failed {
+            // libtest prints captured diagnostics only for failing cases.
+            // Include a bounded stderr tail before deleting the temp world.
+            let stderr = fs::read(&self.stderr_path).unwrap_or_default();
+            let tail = stderr.len().saturating_sub(16 * 1024);
+            eprintln!(
+                "native server exit before cleanup: {exit_status:?}; stderr tail:\n{}",
+                String::from_utf8_lossy(&stderr[tail..])
+            );
+        }
         let _ = fs::remove_dir_all(&self.directory);
     }
 }
@@ -933,13 +955,20 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
         .arg(&source_dir)
         .output()
         .unwrap();
-    assert!(!retry.status.success(), "import overwrote an existing world");
+    assert!(
+        !retry.status.success(),
+        "import overwrote an existing world"
+    );
     assert!(
         String::from_utf8_lossy(&retry.stderr).contains("destination IRW1 already exists"),
         "Anvil retry failed for an unexpected reason: {}",
         String::from_utf8_lossy(&retry.stderr)
     );
-    assert_eq!(fs::read(&restored).unwrap(), before, "rejected import changed the world");
+    assert_eq!(
+        fs::read(&restored).unwrap(),
+        before,
+        "rejected import changed the world"
+    );
 }
 
 #[test]
@@ -1651,12 +1680,12 @@ fn survival_container_break_uses_durable_world_and_ground_drop() {
     // helpers. An initially empty container still needs the same atomic path
     // as a nonempty one and its block item must not vanish.
     for (block, tool, expected_drop) in [
-        (54_i16, 286_i16, 54_i16),  // chest, gold axe
+        (54_i16, 286_i16, 54_i16), // chest, gold axe
         (61, 285, 61),             // furnace, gold pickaxe
         (154, 285, 154),           // hopper, gold pickaxe
     ] {
-        let server =
-            NativeServer::start_with_mode_and_items(true, &[(36, block), (37, tool)]);
+        eprintln!("survival container mining scenario: block={block}, tool={tool}");
+        let server = NativeServer::start_with_mode_and_items(true, &[(36, block), (37, tool)]);
         let (mut client, _, _) = server.join("RustTester");
         let mut place = 0i32.to_be_bytes().to_vec();
         place.push(63);
@@ -1689,11 +1718,13 @@ fn survival_container_break_uses_durable_world_and_ground_drop() {
         });
         let drops_file = server.directory.join("flat.drops.json");
         await_file(&drops_file);
-        let saved: Value =
-            serde_json::from_slice(&fs::read(drops_file).unwrap()).unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(drops_file).unwrap()).unwrap();
         let entities = saved["entries"].as_object().unwrap();
         assert_eq!(entities.len(), 1, "block {block} must drop once");
-        assert_eq!(entities.values().next().unwrap()["stack"]["id"], expected_drop);
+        assert_eq!(
+            entities.values().next().unwrap()["stack"]["id"],
+            expected_drop
+        );
         drop(client);
         server.wait_idle();
     }
@@ -1714,9 +1745,13 @@ fn survival_bed_head_mining_removes_both_halves_and_drops_one_bed() {
     place.extend_from_slice(&(-1i16).to_be_bytes());
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
-    until_packet(&mut client, 0x23, |p| p.len() == 11 && p[4] == 64 && p[9] == 26);
     until_packet(&mut client, 0x23, |p| {
-        p.len() == 11 && p[4] == 64 && i32::from_be_bytes(p[5..9].try_into().unwrap()) == -1
+        p.len() == 11 && p[4] == 64 && p[9] == 26
+    });
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11
+            && p[4] == 64
+            && i32::from_be_bytes(p[5..9].try_into().unwrap()) == -1
             && p[9] == 26
     });
 
@@ -1733,18 +1768,26 @@ fn survival_bed_head_mining_removes_both_halves_and_drops_one_bed() {
     thread::sleep(Duration::from_millis(450));
     client.write_all(&frame(7, &finish)).unwrap();
     until_packet(&mut client, 0x23, |p| {
-        p.len() == 11 && p[4] == 64 && i32::from_be_bytes(p[5..9].try_into().unwrap()) == -1
+        p.len() == 11
+            && p[4] == 64
+            && i32::from_be_bytes(p[5..9].try_into().unwrap()) == -1
             && p[9] == 0
     });
     until_packet(&mut client, 0x23, |p| {
-        p.len() == 11 && p[4] == 64 && i32::from_be_bytes(p[5..9].try_into().unwrap()) == 0
+        p.len() == 11
+            && p[4] == 64
+            && i32::from_be_bytes(p[5..9].try_into().unwrap()) == 0
             && p[9] == 0
     });
     let drop_path = server.directory.join("flat.drops.json");
     await_file(&drop_path);
     let ground: Value = serde_json::from_slice(&fs::read(drop_path).unwrap()).unwrap();
     let entries = ground["entries"].as_object().unwrap();
-    assert_eq!(entries.len(), 1, "one intact bed must create only one item entity");
+    assert_eq!(
+        entries.len(),
+        1,
+        "one intact bed must create only one item entity"
+    );
     assert_eq!(entries.values().next().unwrap()["stack"]["id"], 355);
 }
 
@@ -1762,8 +1805,12 @@ fn survival_upper_door_mining_removes_lower_half_and_drops_one_door() {
     place.extend_from_slice(&(-1i16).to_be_bytes());
     place.extend_from_slice(&[8, 8, 8]);
     client.write_all(&frame(8, &place)).unwrap();
-    until_packet(&mut client, 0x23, |p| p.len() == 11 && p[4] == 64 && p[9] == 64);
-    until_packet(&mut client, 0x23, |p| p.len() == 11 && p[4] == 65 && p[9] == 64);
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 64 && p[9] == 64
+    });
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 65 && p[9] == 64
+    });
 
     // Switch from consumed door item to a gold axe: 1.7.10 wooden-door
     // hardness requires ~400 ms, not a bare-hand 4.5 second wait.
@@ -1778,13 +1825,21 @@ fn survival_upper_door_mining_removes_lower_half_and_drops_one_door() {
     client.write_all(&frame(7, &start)).unwrap();
     thread::sleep(Duration::from_millis(650));
     client.write_all(&frame(7, &finish)).unwrap();
-    until_packet(&mut client, 0x23, |p| p.len() == 11 && p[4] == 65 && p[9] == 0);
-    until_packet(&mut client, 0x23, |p| p.len() == 11 && p[4] == 64 && p[9] == 0);
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 65 && p[9] == 0
+    });
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 64 && p[9] == 0
+    });
     let drop_path = server.directory.join("flat.drops.json");
     await_file(&drop_path);
     let ground: Value = serde_json::from_slice(&fs::read(drop_path).unwrap()).unwrap();
     let entries = ground["entries"].as_object().unwrap();
-    assert_eq!(entries.len(), 1, "one wooden door must create one item entity");
+    assert_eq!(
+        entries.len(),
+        1,
+        "one wooden door must create one item entity"
+    );
     assert_eq!(entries.values().next().unwrap()["stack"]["id"], 324);
 }
 
