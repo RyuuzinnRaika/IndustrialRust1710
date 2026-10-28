@@ -102,12 +102,44 @@ impl DeathCause {
     pub fn message(self, name: &str) -> String {
         match self {
             Self::Mob { kind, .. } => return format!("{name} was slain by {kind}"),
-            Self::Projectile { shooter_kind: Some(kind), .. } => {
-                return format!("{name} was shot by {kind}");
+            Self::Projectile {
+                kind: "Witch Potion",
+                shooter_kind: Some(attacker),
+                ..
+            } => return format!("{name} was killed by {attacker} using magic"),
+            Self::Projectile {
+                kind: "Witch Potion", ..
+            } => return format!("{name} was killed by magic"),
+            Self::Projectile {
+                kind: "Ghast Fireball" | "Blaze Fireball",
+                shooter_kind: Some(attacker),
+                ..
+            } => return format!("{name} was fireballed by {attacker}"),
+            Self::Projectile {
+                kind: "Wither Skull",
+                shooter_kind: Some(attacker),
+                ..
+            } => return format!("{name} was blown up by {attacker}"),
+            Self::Projectile {
+                kind: "Arrow",
+                shooter_kind: Some(attacker),
+                ..
+            } => return format!("{name} was shot by {attacker}"),
+            Self::Projectile { kind: "Arrow", .. } => {
+                return format!("{name} was shot by an arrow");
             }
             Self::Projectile { kind, .. } => {
                 return format!("{name} was killed by {kind}");
             }
+            Self::Explosion { kind: "TNT", .. } => return format!("{name} blew up"),
+            Self::Explosion {
+                kind: "Ghast Fireball",
+                ..
+            } => return format!("{name} was fireballed by Ghast"),
+            Self::Explosion {
+                kind: "Wither Skull",
+                ..
+            } => return format!("{name} was blown up by Wither"),
             Self::Explosion { kind, .. } => return format!("{name} was blown up by {kind}"),
             _ => {}
         }
@@ -898,6 +930,60 @@ mod tests {
             DeathCause::FallingAnvil.message("Alex"),
             "Alex was squashed by a falling anvil"
         );
+    }
+
+    #[test]
+    fn legacy_projectile_magic_and_explosion_chat_is_source_specific() {
+        let cases = [
+            (
+                DeathCause::Projectile {
+                    kind: "Arrow",
+                    shooter_kind: Some("Skeleton"),
+                    shooter_id: Some(7),
+                },
+                "Alex was shot by Skeleton",
+            ),
+            (
+                DeathCause::Projectile {
+                    kind: "Witch Potion",
+                    shooter_kind: Some("Witch"),
+                    shooter_id: Some(8),
+                },
+                "Alex was killed by Witch using magic",
+            ),
+            (
+                DeathCause::Projectile {
+                    kind: "Ghast Fireball",
+                    shooter_kind: Some("Ghast"),
+                    shooter_id: Some(9),
+                },
+                "Alex was fireballed by Ghast",
+            ),
+            (
+                DeathCause::Explosion {
+                    kind: "TNT",
+                    source_id: Some(10),
+                },
+                "Alex blew up",
+            ),
+            (
+                DeathCause::Explosion {
+                    kind: "Creeper",
+                    source_id: Some(11),
+                },
+                "Alex was blown up by Creeper",
+            ),
+            (
+                DeathCause::Explosion {
+                    kind: "Wither Skull",
+                    source_id: Some(12),
+                },
+                "Alex was blown up by Wither",
+            ),
+        ];
+        for (cause, expected) in cases {
+            assert_eq!(cause.message("Alex"), expected);
+        }
     }
 
     #[test]
