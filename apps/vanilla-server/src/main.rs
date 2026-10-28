@@ -3941,7 +3941,136 @@ fn play(
                                                     .lock()
                                                     .map_err(|_| bad("decorations lock poisoned"))?
                                                     .occupied(target));
-                                        if !occupied {
+                                        if matches!(block, 54 | 146 | 61 | 62 | 154) {
+                                            // Mine a populated container without destroying
+                                            // any inventory first. Keep the live World, tile
+                                            // inventory, ground pool and held tool untouched
+                                            // until a single recoverable journal commits.
+                                            // Match the hopper worker's world -> storage lock
+                                            // order, then hold the ground pool through commit.
+                                            let mut chest_guard = if matches!(block, 54 | 146) {
+                                                Some(chests.lock().map_err(|_| bad("chest lock poisoned"))?)
+                                            } else {
+                                                None
+                                            };
+                                            let mut furnace_guard = if matches!(block, 61 | 62) {
+                                                Some(furnaces.lock().map_err(|_| bad("furnace lock poisoned"))?)
+                                            } else {
+                                                None
+                                            };
+                                            let mut hopper_guard = if block == 154 {
+                                                Some(hoppers.lock().map_err(|_| bad("hopper lock poisoned"))?)
+                                            } else {
+                                                None
+                                            };
+                                            let mut drops = Vec::new();
+                                            if let Some(drop) = result.drop {
+                                                drops.push(Stack {
+                                                    id: drop.id,
+                                                    count: 1,
+                                                    damage: drop.damage,
+                                                    nbt: None,
+                                                });
+                                            }
+                                            if let Some(storage) = chest_guard.as_ref() {
+                                                drops.extend(storage.slots(target).into_iter().flatten());
+                                            }
+                                            if let Some(storage) = furnace_guard.as_ref() {
+                                                drops.extend(storage.get(target).slots.into_iter().flatten());
+                                            }
+                                            if let Some(storage) = hopper_guard.as_ref() {
+                                                drops.extend(storage.slots(target).into_iter().flatten());
+                                            }
+                                            let mut ground = ground_items.lock().map_err(|_| {
+                                                bad("ground items lock poisoned")
+                                            })?;
+                                            // Insufficient entity capacity refuses the whole
+                                            // break and sends an authoritative S23 below.
+                                            if ground.has_capacity_for(drops.len()) {
+                                                let (next_ground, spawned) =
+                                                    ground.stage_put_many(&drops, target)?;
+                                                if let Some(next_world) = w.stage_mining_removal(x, y, z)? {
+                                                    let mut next_chests = None;
+                                                    let mut next_furnaces = None;
+                                                    let mut next_hoppers = None;
+                                                    let (storage_path, storage_bytes) =
+                                                        if let Some(storage) = chest_guard.as_ref() {
+                                                            let staged = storage.staged_update(
+                                                                target,
+                                                                [None; chests::CHEST_SLOTS],
+                                                            )?;
+                                                            let bytes = staged.encoded()?;
+                                                            next_chests = Some(staged);
+                                                            (chest_path, bytes)
+                                                        } else if let Some(storage) = furnace_guard.as_ref() {
+                                                            let staged = storage.staged_update(target, Furnace::default())?;
+                                                            let bytes = staged.encoded()?;
+                                                            next_furnaces = Some(staged);
+                                                            (furnace_path, bytes)
+                                                        } else if let Some(storage) = hopper_guard.as_ref() {
+                                                            let staged = storage.staged_remove(target)?;
+                                                            let bytes = staged.encoded()?;
+                                                            next_hoppers = Some(staged);
+                                                            (hopper_path, bytes)
+                                                        } else {
+                                                            unreachable!("container branch has one tile storage")
+                                                        };
+                                                    let mut next_inventory = inventory.clone();
+                                                    let wore = result.wear_tool
+                                                        && next_inventory.wear_held_tool();
+                                                    let mut writes = vec![
+                                                        (world_path, next_world.encoded()?),
+                                                        (storage_path, storage_bytes),
+                                                        (ground_path, next_ground.encoded()?),
+                                                    ];
+                                                    if wore {
+                                                        writes.push((inventory_path, next_inventory.encoded()?));
+                                                    }
+                                                    journal::commit(
+                                                        &world_path.with_extension("pending-txn.json"),
+                                                        &writes,
+                                                    )?;
+                                                    // Publish every in-memory state only once
+                                                    // the redo transaction is durable.
+                                                    *w = next_world;
+                                                    *ground = next_ground;
+                                                    if let (Some(storage), Some(staged)) =
+                                                        (chest_guard.as_mut(), next_chests)
+                                                    {
+                                                        **storage = staged;
+                                                    }
+                                                    if let (Some(storage), Some(staged)) =
+                                                        (furnace_guard.as_mut(), next_furnaces)
+                                                    {
+                                                        **storage = staged;
+                                                    }
+                                                    if let (Some(storage), Some(staged)) =
+                                                        (hopper_guard.as_mut(), next_hoppers)
+                                                    {
+                                                        **storage = staged;
+                                                    }
+                                                    if wore {
+                                                        *inventory = next_inventory;
+                                                        send(
+                                                            s,
+                                                            0x2f,
+                                                            &inventory.set_slot(inventory.held_slot())?,
+                                                        )?;
+                                                    }
+                                                    for item in spawned {
+                                                        for packet in item.spawn() {
+                                                            hub.broadcast(packet);
+                                                        }
+                                                    }
+                                                    changed = true;
+                                                }
+                                            } else if trace_mining {
+                                                eprintln!(
+                                                    "mining trace: container refused; ground item capacity {} needed at {target:?}",
+                                                    drops.len()
+                                                );
+                                            }
+                                        } else if !occupied {
                                             let bonus = survival::additional_drop(
                                                 w.get(x, y, z),
                                                 target,
