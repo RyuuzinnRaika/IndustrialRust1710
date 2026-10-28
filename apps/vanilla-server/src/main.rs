@@ -100,7 +100,7 @@ use legacy_protocol::{
 };
 use maps::Maps;
 use minecarts::Minecarts;
-use mobs::Mobs;
+use mobs::{DamageOrigin, Mobs};
 use multiplayer::{
     Event, Hub, JoinError, SessionEvents, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT,
     ADMIN_ENCHANT_EVENT, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT,
@@ -122,7 +122,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use survival::MiningProgress;
-use survival_damage::{HazardCause, Hazards};
+use survival_damage::{HazardAttribution, HazardCause, Hazards};
 use teleport_gate::TeleportGate;
 use throwables::Throwables;
 use vehicles::Boats;
@@ -1268,6 +1268,53 @@ fn mining_environment(world: &World, player: &PlayerPosition) -> (bool, bool) {
     (submerged, physics::supported(world, player))
 }
 
+/// Normal HP updates keep the existing player NBT format. The first fatal
+/// update instead publishes player NBT, event outbox and deathCount scoreboard
+/// in ONE durable redo transaction; no client observes a partially committed
+/// death and a crash can replay all three files together.
+#[allow(clippy::too_many_arguments)]
+fn save_damage_state(
+    position: &PlayerPosition,
+    next_vitals: Vitals,
+    dimension: i32,
+    fatal_hit: Option<FatalHit>,
+    death_count_committed: &mut bool,
+    player_name: &str,
+    clock: &Clock,
+    player_path: &Path,
+    root_world_path: &Path,
+    death_world_path: &Path,
+    scoreboard: &Mutex<Scoreboard>,
+    scoreboard_path: &Path,
+    hub: &Hub,
+) -> io::Result<()> {
+    if next_vitals.health <= 0.0 && !*death_count_committed {
+        let record = DeathRecord {
+            player: player_name,
+            hit: fatal_hit,
+            position: *position,
+            dimension,
+            tick: clock.ticks(),
+        };
+        let events = death_log::commit_fatal_state(
+            &record,
+            root_world_path,
+            death_world_path,
+            player_path,
+            next_vitals,
+            scoreboard,
+            scoreboard_path,
+        )?;
+        *death_count_committed = true;
+        for event in events {
+            hub.broadcast(event);
+        }
+        Ok(())
+    } else {
+        position.save_state_in_dimension(player_path, next_vitals, dimension)
+    }
+}
+
 fn play(
     s: &mut Connection,
     world: &Mutex<World>,
@@ -1397,6 +1444,8 @@ fn play(
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
     let mut death_recorded = vitals.health <= 0.0;
+    // Commit HP, deathCount and the durable event in one redo transaction.
+    let mut death_count_committed = death_recorded;
     let mut fatal_hit: Option<FatalHit> = None;
     let mut last_carrot_wear = 0u64;
     let mut last_beacon_tick = clock.ticks();
@@ -1675,10 +1724,20 @@ fn play(
                         DeathCause::DispenserArrow,
                     );
                     // The owning session persists health before any client notification.
-                    player.save_state_in_dimension(
-                        player_path,
+                    save_damage_state(
+                        &player,
                         next,
                         session_dimension.protocol_id() as i32,
+                        fatal_hit,
+                        &mut death_count_committed,
+                        name,
+                        clock,
+                        player_path,
+                        root_world_path,
+                        world_path,
+                        scoreboard,
+                        scoreboard_path,
+                        hub,
                     )?;
                     *vitals = next;
                     last_arrow_damage_tick = Some(tick);
@@ -1724,10 +1783,20 @@ fn play(
                         DeathCause::EnderPearl,
                     );
                 }
-                target.save_state_in_dimension(
-                    player_path,
+                save_damage_state(
+                    &target,
                     next_vitals,
                     session_dimension.protocol_id() as i32,
+                    fatal_hit,
+                    &mut death_count_committed,
+                    name,
+                    clock,
+                    player_path,
+                    root_world_path,
+                    world_path,
+                    scoreboard,
+                    scoreboard_path,
+                    hub,
                 )?;
                 *vitals = next_vitals;
                 *player = target;
@@ -2091,11 +2160,11 @@ fn play(
                 updates.extend(effects);
             }
             let incoming =
-                creatures.hurt_player_with_health(entity_id, *player, now_tick, vitals.health);
+                creatures.hurt_player_detailed(entity_id, *player, now_tick, vitals.health);
             // Broadcast one animation per actual melee hit, with the health
             // result; simply subtracting HP does not animate the attacker.
             updates.extend(creatures.take_melee_animations());
-            let hurt = if survival { incoming } else { 0 };
+            let hurt = if survival { incoming.amount } else { 0 };
             let drops = creatures.take_drops();
             drop(creatures);
             for (x, y, z) in grazed_blocks.into_iter().chain(broken_doors) {
@@ -2147,16 +2216,38 @@ fn play(
                 }
                 let previous_health = vitals.health;
                 vitals.health = (vitals.health - damage.ceil()).max(0.0);
+                let cause = match incoming.origin {
+                    DamageOrigin::Mob { kind, entity_id } => DeathCause::Mob { kind, entity_id },
+                    DamageOrigin::Projectile { kind, shooter_kind, shooter_id } => {
+                        DeathCause::Projectile { kind, shooter_kind, shooter_id }
+                    }
+                    DamageOrigin::Explosion { kind, source_id } => {
+                        DeathCause::Explosion { kind, source_id }
+                    }
+                    DamageOrigin::WitherEffect => DeathCause::WitherEffect,
+                    DamageOrigin::Mixed => DeathCause::Mixed,
+                    DamageOrigin::Unknown => DeathCause::CombatOrExplosion,
+                };
                 death_log::record_fatal(
                     &mut fatal_hit,
                     previous_health,
                     vitals.health,
-                    DeathCause::CombatOrExplosion,
+                    cause,
                 );
-                player.save_state_in_dimension(
-                    player_path,
+                save_damage_state(
+                    &player,
                     *vitals,
                     session_dimension.protocol_id() as i32,
+                    fatal_hit,
+                    &mut death_count_committed,
+                    name,
+                    clock,
+                    player_path,
+                    root_world_path,
+                    world_path,
+                    scoreboard,
+                    scoreboard_path,
+                    hub,
                 )?;
                 if armor_changed {
                     send(s, 0x30, &inventory.window_items())?;
@@ -2198,10 +2289,20 @@ fn play(
                     DeathCause::Fall,
                 );
                 // Save accepted position and HP before sending an update.
-                candidate.save_state_in_dimension(
-                    player_path,
+                save_damage_state(
+                    &candidate,
                     next_vitals,
                     session_dimension.protocol_id() as i32,
+                    fatal_hit,
+                    &mut death_count_committed,
+                    name,
+                    clock,
+                    player_path,
+                    root_world_path,
+                    world_path,
+                    scoreboard,
+                    scoreboard_path,
+                    hub,
                 )?;
                 *player = candidate;
                 *vitals = next_vitals;
@@ -2249,10 +2350,20 @@ fn play(
                 DeathCause::Starvation,
             );
             if changed {
-                player.save_state_in_dimension(
-                    player_path,
+                save_damage_state(
+                    &player,
                     next,
                     session_dimension.protocol_id() as i32,
+                    fatal_hit,
+                    &mut death_count_committed,
+                    name,
+                    clock,
+                    player_path,
+                    root_world_path,
+                    world_path,
+                    scoreboard,
+                    scoreboard_path,
+                    hub,
                 )?;
                 *vitals = next;
                 send(s, 0x06, &health_packet(*vitals))?;
@@ -2262,14 +2373,14 @@ fn play(
         }
         if survival && vitals.health > 0.0 && now_tick > last_hazards_tick {
             let mut total = 0.0f32;
-            let mut last_source = None;
+            let mut sources = HazardAttribution::None;
             let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let steps = (now_tick - last_hazards_tick).min(4);
             for t in last_hazards_tick + 1..=last_hazards_tick + steps {
                 let (damage, source) = hazards.tick_detailed(&w, *player, t, inventory);
                 total += damage;
                 if damage > 0.0 {
-                    last_source = source;
+                    sources = sources.combine(source);
                 }
             }
             last_hazards_tick = now_tick;
@@ -2277,19 +2388,31 @@ fn play(
             if total > 0.0 {
                 let previous_health = vitals.health;
                 vitals.health = (vitals.health - total).max(0.0);
-                let cause = match last_source {
-                    Some(HazardCause::Drowning) => DeathCause::Drowning,
-                    Some(HazardCause::Suffocation) => DeathCause::Suffocation,
-                    Some(HazardCause::Lava) => DeathCause::Lava,
-                    Some(HazardCause::Fire) => DeathCause::Fire,
-                    Some(HazardCause::Burning) => DeathCause::Burning,
-                    None => DeathCause::Unknown,
+                let cause = match sources {
+                    HazardAttribution::Single(HazardCause::Cactus) => DeathCause::Cactus,
+                    HazardAttribution::Single(HazardCause::Drowning) => DeathCause::Drowning,
+                    HazardAttribution::Single(HazardCause::Suffocation) => DeathCause::Suffocation,
+                    HazardAttribution::Single(HazardCause::Lava) => DeathCause::Lava,
+                    HazardAttribution::Single(HazardCause::Fire) => DeathCause::Fire,
+                    HazardAttribution::Single(HazardCause::Burning) => DeathCause::Burning,
+                    HazardAttribution::Mixed => DeathCause::MixedHazards,
+                    HazardAttribution::None => DeathCause::Unknown,
                 };
                 death_log::record_fatal(&mut fatal_hit, previous_health, vitals.health, cause);
-                player.save_state_in_dimension(
-                    player_path,
+                save_damage_state(
+                    &player,
                     *vitals,
                     session_dimension.protocol_id() as i32,
+                    fatal_hit,
+                    &mut death_count_committed,
+                    name,
+                    clock,
+                    player_path,
+                    root_world_path,
+                    world_path,
+                    scoreboard,
+                    scoreboard_path,
+                    hub,
                 )?;
                 send(s, 0x06, &health_packet(*vitals))?;
             }
@@ -2583,9 +2706,9 @@ fn play(
         if survival && vitals.health <= 0.0 {
             eating = None;
             let newly_dead = !death_recorded;
-            if newly_dead {
-                // A death is counted exactly once in this session and the
-                // updated shared scoreboard is durable before client notify.
+            if newly_dead && !death_count_committed {
+                // Fallback for an unrecognized fatal path only: validated
+                // damage paths already recorded deathCount in the redo journal.
                 let changes = {
                     let mut board = scoreboard
                         .lock()
@@ -2599,6 +2722,8 @@ fn play(
                 for change in changes {
                     hub.broadcast(change);
                 }
+            }
+            if newly_dead {
                 death_recorded = true;
             }
             let (keep_inventory, show_death_messages) = {
@@ -2607,6 +2732,32 @@ fn play(
                     .map_err(|_| bad("game rules mutex poisoned"))?;
                 (rules.keep_inventory(), rules.show_death_messages())
             };
+            if newly_dead {
+                let record = DeathRecord {
+                    player: name,
+                    hit: fatal_hit.take(),
+                    position: *player,
+                    dimension: session_dimension.protocol_id() as i32,
+                    tick: now_tick,
+                };
+                println!("{}", record.console_summary());
+                let appended = if death_count_committed {
+                    death_log::append_prepared(root_world_path, player_path)
+                } else {
+                    death_log::append_recoverable(
+                        &record,
+                        root_world_path,
+                        world_path,
+                        player_path,
+                    )
+                };
+                if let Err(error) = appended {
+                    eprintln!("DEATH LOG OUTBOX ERROR: {error}");
+                }
+                if show_death_messages {
+                    hub.broadcast(chat_event(&record.chat_message())?);
+                }
+            }
             if !keep_inventory {
                 commit_death_drops(
                     inventory,
@@ -2617,23 +2768,6 @@ fn play(
                     hub,
                     location,
                 )?;
-            }
-            if newly_dead {
-                let record = DeathRecord {
-                    player: name,
-                    hit: fatal_hit.take(),
-                    position: *player,
-                    dimension: session_dimension.protocol_id() as i32,
-                    tick: now_tick,
-                };
-                println!("{}", record.console_summary());
-                if let Err(error) = record.append(world_path) {
-                    // Optional diagnostic output must not block drops or respawn.
-                    eprintln!("DEATH LOG WRITE ERROR: {error}");
-                }
-                if show_death_messages {
-                    hub.broadcast(chat_event(&record.chat_message())?);
-                }
             }
             if hardcore {
                 // Persist the dead state before ending the connection. Future
@@ -3393,10 +3527,20 @@ fn play(
                             vitals.health,
                             DeathCause::Fall,
                         );
-                        player.save_state_in_dimension(
-                            player_path,
+                        save_damage_state(
+                            &player,
                             *vitals,
                             session_dimension.protocol_id() as i32,
+                            fatal_hit,
+                            &mut death_count_committed,
+                            name,
+                            clock,
+                            player_path,
+                            root_world_path,
+                            world_path,
+                            scoreboard,
+                            scoreboard_path,
+                            hub,
                         )?;
                         send(s, 0x06, &health_packet(*vitals))?;
                     }
@@ -6409,6 +6553,7 @@ fn play(
                     *vitals = fresh_vitals;
                     *player = origin;
                     death_recorded = false;
+                    death_count_committed = false;
                     fatal_hit = None;
                     fall = FallTracker::new(origin.y);
                     idle_gravity = IdleGravity::new(now_tick);
@@ -7056,11 +7201,16 @@ fn handle(
             .map_err(|_| bad("mob mutex poisoned"))?
             .save(&guard)
     };
-    let player_saved = player_state.save_state_in_dimension(
-        &player_file,
-        player_vitals,
-        session_dimension.protocol_id() as i32,
-    );
+    // Do not overwrite prepared fatal redo participants after failed play.
+    let player_saved = if result.is_err() && player_vitals.health <= 0.0 {
+        Ok(())
+    } else {
+        player_state.save_state_in_dimension(
+            &player_file,
+            player_vitals,
+            session_dimension.protocol_id() as i32,
+        )
+    };
     let inventory_saved = inventory_state.save(&inventory_file);
     let experience_saved = experience_state.save(&experience_file);
     let achievements_saved = achievements_state.save(&achievements_file);
@@ -8743,6 +8893,11 @@ fn main() -> io::Result<()> {
     let shared_difficulty = Arc::new(AtomicU8::new(difficulty));
     let rules_path = Arc::new(GameRules::location(&world_path));
     let world_rules = Arc::new(Mutex::new(GameRules::load(&rules_path)?));
+    // Replay committed death events after journal recovery, before admission.
+    let replayed_deaths = death_log::recover_pending(&world_path)?;
+    if replayed_deaths > 0 {
+        println!("Recovered {replayed_deaths} pending player death log event(s)");
+    }
     let scoreboard_path = Arc::new(Scoreboard::location(&world_path));
     let shared_scoreboard = Arc::new(Mutex::new(Scoreboard::load(&scoreboard_path)?));
     clock.set_daylight_cycle(
@@ -9443,6 +9598,10 @@ fn main() -> io::Result<()> {
                                                 z: f64::from(z) + 0.5,
                                             },
                                             radius: 4.0,
+                                            origin: DamageOrigin::Explosion {
+                                                kind: "TNT",
+                                                source_id: Some(entity_id),
+                                            },
                                         });
                                         furnace_hub.broadcast(multiplayer::destroy(entity_id));
                                         let mut body = Vec::new();
