@@ -29,17 +29,25 @@
 
 コンソール:
 ```text
-[death] player=Alex cause=fall dimension=0 x=0.50 y=64.00 z=0.50 health_before=3.0 applied_damage=3.0 tick=900
+[death] player=Alex cause=fall dimension=0 x=0.50 y=64.00 z=0.50 health_before=3.0 applied_damage=3.0 tick=900 message="Alex fell from a high place"
 ```
 
 JSONL (1行1JSON):
 ```json
-{"event":"player_death","timestamp_ms":1790000000000,"player":"Alex","cause":"fall","dimension":0,"position":{"x":0.5,"y":64.0,"z":0.5},"health_before":3.0,"applied_damage":3.0,"server_tick":900}
+{"event":"player_death","schema_version":1,"timestamp_ms":1790000000000,"player":"Alex","cause":"fall","death_message":"Alex fell from a high place","dimension":0,"position":{"x":0.5,"y":64.0,"z":0.5},"block_position":{"x":0,"y":64,"z":0},"health_before":3.0,"applied_damage":3.0,"server_tick":900}
 ```
 
 `dimension` はバニラの値（ネザー -1 / オーバーワールド 0 / エンド 1）。`health_before` は致死ダメージ直前のHP、`applied_damage` はHPへ**実際に適用された**ダメージです（超過ダメージは含まれません）。`timestamp_ms` はUnix時刻のミリ秒、`server_tick` はサーバーのTickです。復旧・再接続で原因が追跡不能の場合は `unknown`、HP情報は `null` になります。
 
-ログ保存が失敗しても、死亡処理とリスポーンを止めません。コンソールには `DEATH LOG WRITE ERROR` が表示されます。ユーザー入力をJSONに格納するので、名前などの改行はエスケープされ、ファイルへの任意行注入を避けます。IPアドレス・認証トークンは記録しません。
+ログ保存が失敗しても、死亡処理とリスポーンを止めません。コンソールには `DEATH LOG WRITE ERROR` が表示されます。ユーザー入力をJSONに格納するので、名前などの改行はエスケープされ、ファイルへの任意行注入を避けます。コンソール出力中のプレイヤー名と死亡メッセージも改行・制御文字をエスケープし、偽のログ行が混入しないようにします。IPアドレス・認証トークンは記録しません。
+
+### 詳細フィールド（D04）
+
+- `schema_version` は新形式で **1**。以前のJSONLにこのフィールドがない場合は、旧形式として解釈してください。過去ログの書き換えは行いません。
+- `death_message` はゲーム内へ送るのと同じ死亡メッセージ文字列（`showDeathMessages=false` でも監査用に保存）。
+- `position` は小数点を含むプレイヤー位置、`block_position` は各座標を床関数で整数化したブロック位置です。例えば `x=-0.01` のブロック座標は `-1` で、0にはなりません。
+- 壊れた/非有限の座標からブロック値を推測しないため、該当する `block_position` 成分は `null` とします。
+- D04は**観測可能な死亡事実の情報追加のみ**です。まだ識別できないMobの攻撃者や複数の環境要因を推測することはせず、個別に作業中のD01/D02/D03との統合が必要です。
 
 ## ローカルでの検証 (GitHub Actions不要)
 
@@ -51,7 +59,7 @@ cargo build --release -p vanilla-server
 Get-Content .\world.deaths.jsonl -Tail 20
 ```
 
-ワールドファイル名は実際の `--world` パスへ読み替えてください。サバイバルで落下・溺水・空腹・炎上・矢・Mob・エンダーパールの各死亡を再現し、(1)チャット通知が1回のみ、(2)JSONLに各死因と座標が残る、(3)ゲームルールがfalseでもログは残る、(4)死亡回数とドロップが従来どおり、(5)リスポーン後に新しい死亡が記録できることを確認してください。
+ワールドファイル名は実際の `--world` パスへ読み替えてください。サバイバルで落下・溺水・空腹・炎上・矢・Mob・エンダーパールの各死亡を再現し、(1)チャット通知が1回のみ、(2)JSONLに各死因・死亡メッセージ・整数ブロック座標が残る、(3)ゲームルールがfalseでもログは残る、(4)死亡回数とドロップが従来どおり、(5)リスポーン後に新しい死亡が記録できることを確認してください。
 
 **注意**: これは**死亡ログの詳細化**であり、未実装の被ダメージ源を実装する変更ではありません。大きな高負荷検証を始める前にワールドのバックアップを取ってください。
 
