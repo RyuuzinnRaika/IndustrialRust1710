@@ -2561,13 +2561,16 @@ impl World {
                 return Err(invalid("unrecognized world entity trailer"));
             }
             let primed_count = u16::from_be_bytes(trailer[4..6].try_into().unwrap()) as usize;
-            let moving = matches!(&trailer[..4], b"TNT4" | b"TNT5");
+            let moving = (&trailer[..4] == b"TNT4" || &trailer[..4] == b"TNT5");
             let entity_stride = if moving { 44 } else { 20 };
             let primed_end = 6 + primed_count * entity_stride;
             if primed_count > MAX_PRIMED_TNT || trailer.len() < primed_end {
                 return Err(invalid("invalid primed TNT trailer length"));
             }
-            if matches!(&trailer[..4], b"TNT2" | b"TNT3" | b"TNT4" | b"TNT5") {
+            if (&trailer[..4] == b"TNT2"
+                || &trailer[..4] == b"TNT3"
+                || &trailer[..4] == b"TNT4"
+                || &trailer[..4] == b"TNT5") {
                 let queued = &trailer[primed_end..];
                 if queued.len() < 4 {
                     return Err(invalid("truncated queued TNT trailer"));
@@ -2588,7 +2591,9 @@ impl World {
                         return Err(invalid("invalid or duplicate queued TNT position"));
                     }
                 }
-                if matches!(&trailer[..4], b"TNT3" | b"TNT4" | b"TNT5") {
+                if (&trailer[..4] == b"TNT3"
+                    || &trailer[..4] == b"TNT4"
+                    || &trailer[..4] == b"TNT5") {
                     let pending = &queued[chain_end..];
                     if pending.len() < 4 {
                         return Err(invalid("truncated blast backlog"));
@@ -4663,6 +4668,40 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].anvil_landing_damage, 4);
         assert_eq!(hits[0].to, (4, 64, 4));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn falling_anvil_origin_and_landing_damage_survive_irw_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-falling-anvil-tnt5-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 4, 67, 4, 145 << 4).unwrap();
+        assert_eq!(world.gravity_tick(&path, 64).unwrap()[0].anvil_landing_damage, 0);
+        let before_restart = fs::read(&path).unwrap();
+        assert!(before_restart.windows(4).any(|bytes| bytes == b"TNT5"));
+        let mut restored = World::load(&path).unwrap();
+        let mut landing = Vec::new();
+        for _ in 0..5 {
+            landing.extend(restored.gravity_tick(&path, 64).unwrap());
+        }
+        let hits: Vec<_> = landing
+            .iter()
+            .filter(|movement| movement.anvil_landing_damage > 0)
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].to, (4, 64, 4));
+        assert_eq!(hits[0].anvil_landing_damage, 4);
+        assert!(restored.falling_anvils.is_empty());
+        // A truncated trailer is rejected rather than forgetting the origin.
+        let mut corrupt = before_restart;
+        corrupt.pop();
+        fs::write(&path, corrupt).unwrap();
+        assert!(World::load(&path).is_err());
         fs::remove_file(path).unwrap();
     }
 
