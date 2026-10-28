@@ -100,6 +100,26 @@ fn is_player_state(relative: &Path) -> bool {
     }
 }
 
+/// Only an authenticated or offline player's bounded death outbox may
+/// participate in player-state redo. Arbitrary JSON paths are not accepted.
+fn is_player_death_outbox(relative: &Path) -> bool {
+    let Some(filename) = relative.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(basename) = filename.strip_suffix(".death-outbox.json") else {
+        return false;
+    };
+    is_player_state(&relative.with_file_name(format!("{basename}.dat")))
+}
+
+fn is_scoreboard_state(relative: &Path) -> bool {
+    relative.components().count() == 1
+        && relative
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".scoreboard.json"))
+}
+
 fn target_limit(relative: &Path) -> usize {
     if is_anvil_region(relative) {
         MAX_REGION_TARGET_BYTES
@@ -114,6 +134,9 @@ fn validate_target(relative: &Path, bytes: &[u8]) -> io::Result<()> {
     }
     if is_player_state(relative) && (bytes.len() > 8192 || !bytes.starts_with(&[0x1f, 0x8b])) {
         return Err(invalid("invalid journaled player gzip NBT"));
+    }
+    if is_player_death_outbox(relative) && bytes.len() > 8192 {
+        return Err(invalid("oversized journaled death outbox"));
     }
     if is_anvil_region(relative) {
         crate::legacy_region::inspect_region_bytes(relative, bytes)?;
@@ -152,6 +175,8 @@ fn relative(root: &Path, target: &Path) -> io::Result<PathBuf> {
         || name.ends_with(".drops.json")
         || name.ends_with(".irw")
         || is_player_state(rel)
+        || is_player_death_outbox(rel)
+        || is_scoreboard_state(rel)
         || is_anvil_region(rel))
     {
         return Err(invalid("journal target type not allowed"));
@@ -337,6 +362,26 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn death_outboxes_and_scoreboards_are_scope_checked_journal_targets() {
+        assert!(is_player_death_outbox(Path::new(
+            "players/alice.death-outbox.json"
+        )));
+        assert!(is_player_death_outbox(Path::new(
+            "players/verified/d3a0a8b1-4753-4a66-b9c8-f4ac1234c9ca.death-outbox.json"
+        )));
+        for bad in [
+            "alice.death-outbox.json",
+            "players/../admin.death-outbox.json",
+            "players/verified/not-a-uuid.death-outbox.json",
+            "players/verified/bob.death-outbox.json",
+        ] {
+            assert!(!is_player_death_outbox(Path::new(bad)));
+        }
+        assert!(is_scoreboard_state(Path::new("overworld.scoreboard.json")));
+        assert!(!is_scoreboard_state(Path::new("players/bob.scoreboard.json")));
+    }
 
     #[test]
     fn player_nbt_journal_targets_are_identity_scoped_and_gzip_bounded() {
