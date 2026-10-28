@@ -747,6 +747,74 @@ mod regression_tests {
     use super::*;
 
     #[test]
+    fn vines_drop_unsupported_faces_and_detach_when_last_wall_breaks() {
+        let mut world = World::new();
+        world.import_block(1, 65, 0, 17 << 4).unwrap();
+        world.import_block(0, 65, 0, (106 << 4) | 8 | 1).unwrap();
+        assert_eq!(
+            world.ecology_changes(64).get(&(0, 65, 0)),
+            Some(&((106 << 4) | 8)),
+            "south attachment should clear but east-facing wall survives"
+        );
+        world.import_block(1, 65, 0, 0).unwrap();
+        assert_eq!(world.ecology_changes(64).get(&(0, 65, 0)), Some(&0));
+    }
+
+    #[test]
+    fn lower_vines_survive_when_they_hang_from_an_attached_vine_above() {
+        let mut world = World::new();
+        world.import_block(1, 66, 0, 17 << 4).unwrap();
+        world.import_block(0, 66, 0, (106 << 4) | 8).unwrap();
+        world.import_block(0, 65, 0, (106 << 4) | 8).unwrap();
+        assert!(
+            !world.ecology_changes(64).contains_key(&(0, 65, 0)),
+            "the matching upper vine should keep the hanging vine attached"
+        );
+        world.import_block(0, 66, 0, 0).unwrap();
+        assert_eq!(world.ecology_changes(64).get(&(0, 65, 0)), Some(&0));
+    }
+
+    #[test]
+    fn vines_grow_downward_only_when_selected_by_random_ticks() {
+        let mut world = World::new();
+        world.import_block(1, 65, 0, 17 << 4).unwrap();
+        world.import_block(0, 65, 0, (106 << 4) | 8).unwrap();
+        assert!(world.pending_ecology.contains(&(0, 65, 0)));
+        assert!(world.ecology_changes(64).get(&(0, 64, 0)).is_none());
+        let second = (1..=20_000u64)
+            .find(|&second| {
+                let tick = second * GAME_TICKS_PER_SECOND;
+                vine_random_tick_due(tick, 0, 65, 0)
+                    && ecology_roll(second ^ 0x7669_6e65, 0, 65, 0) % 6 == 0
+                    && ecology_roll(second ^ (0x6000 + 8), 0, 65, 0) & 1 == 0
+            })
+            .expect("the vine must eventually receive a downward growth tick");
+        world.fluid_phase = second * GAME_TICKS_PER_SECOND;
+        assert_eq!(
+            world.ecology_changes(64).get(&(0, 64, 0)),
+            Some(&((106 << 4) | 8)),
+            "a hanging vine must inherit its supported wall orientation"
+        );
+    }
+
+    #[test]
+    fn saved_vines_rebuild_both_support_and_ecology_queues() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-vines-reload-{}.irw",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        world.import_block(0, 65, 0, (106 << 4) | 8).unwrap();
+        world.save(&path).unwrap();
+        let loaded = World::load(&path).unwrap();
+        assert!(loaded.pending_support.contains(&(0, 65, 0)));
+        assert!(loaded.pending_ecology.contains(&(0, 65, 0)));
+        assert_eq!(loaded.ecology_changes(64).get(&(0, 65, 0)), Some(&0));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn leaf_decay_requires_a_contiguous_four_block_path_to_a_log() {
         let mut connected = World::new();
         for x in 0..4 {
