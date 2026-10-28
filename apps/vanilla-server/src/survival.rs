@@ -194,6 +194,13 @@ fn rule(block: u16) -> Option<BlockRule> {
         29 | 33 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(id as i16, 0)), // pistons
         46 => (0.0, None, 0, false, item(46, 0)), // TNT is instant-break
         47 => (1.5, Some(ToolKind::Axe), 0, false, None), // bookshelf: 3 books from additional_drop
+        // A bed/door can be mined from either half; the upper/head half must
+        // not drop a second item when its companion is already absent.
+        26 => (0.2, None, 0, false, if damage & 8 == 0 { item(355, 0) } else { None }),
+        64 => (3.0, Some(ToolKind::Axe), 0, false,
+            if damage & 8 == 0 { item(324, 0) } else { None }),
+        71 => (5.0, Some(ToolKind::Pickaxe), 0, true,
+            if damage & 8 == 0 { item(330, 0) } else { None }),
         63 | 68 => (1.0, Some(ToolKind::Axe), 0, false, item(323, 0)), // signs
         84 => (2.0, Some(ToolKind::Axe), 0, false, item(84, 0)), // jukebox
         116 => (5.0, Some(ToolKind::Pickaxe), 0, false, item(116, 0)),
@@ -477,8 +484,12 @@ mod tests {
         );
         // Multiblock doors/beds are deliberately not changed by this patch:
         // they require the other half and drop to be transacted together.
-        assert!(mine_rule(64 << 4, None).is_none());
-        assert!(mine_rule(26 << 4, None).is_none());
+        assert_eq!(mine_rule(64 << 4, None).unwrap().1.drop.unwrap().id, 324);
+        assert_eq!(mine_rule(64 << 4 | 8, None).unwrap().1.drop, None);
+        assert_eq!(mine_rule(71 << 4, None).unwrap().1.drop, None);
+        assert_eq!(mine_rule(71 << 4, stack(270, 0)).unwrap().1.drop.unwrap().id, 330);
+        assert_eq!(mine_rule(26 << 4, None).unwrap().1.drop.unwrap().id, 355);
+        assert_eq!(mine_rule(26 << 4 | 8, None).unwrap().1.drop, None);
         assert!(mine_rule(7 << 4, None).is_none());
     }
 
@@ -770,6 +781,24 @@ mod tests {
         assert!(
             mine_rule(7 << 4, None).is_none(),
             "bedrock must remain unbreakable"
+        );
+    }
+
+    #[test]
+    fn doors_and_beds_can_be_mined_but_only_lower_halves_drop_items() {
+        for (block, item) in [(26_u16, 355_i16), (64, 324)] {
+            let lower = mine_rule(block << 4, None).unwrap().1;
+            let upper = mine_rule(block << 4 | 8, None).unwrap().1;
+            assert_eq!(lower.drop.unwrap().id, item);
+            assert!(upper.drop.is_none());
+        }
+        let bare_iron = mine_rule(71 << 4, None).unwrap();
+        assert!(bare_iron.1.drop.is_none());
+        let picked_iron = mine_rule(71 << 4 | 8, stack(257, 0)).unwrap().1;
+        assert!(picked_iron.drop.is_none()); // Upper alone does not duplicate doors.
+        assert_eq!(
+            mine_rule(71 << 4, stack(257, 0)).unwrap().1.drop.unwrap().id,
+            330
         );
     }
 
