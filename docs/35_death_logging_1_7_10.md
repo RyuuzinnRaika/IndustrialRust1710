@@ -14,7 +14,7 @@
 - エンダーパール: `Alex died after using an ender pearl`
 - Mob・飛び道具・爆発が混在する被ダメージ経路: `Alex was killed in combat or an explosion`
 
-**制限**: 既存のMob被ダメージ集約処理は攻撃者ID・Mob種別・TNT/クリーパーの区別を返さないため、個別の攻撃者名を推測しません。この種類の正確な attribution は将来の別対応が必要です。原因が観測できない場合は `Alex died` を使います。
+**制限**: 攻撃者はサーバーが取得した確実な情報だけを使用します。原因が観測できない場合は `Alex died` を使います。
 
 ## GameRule
 
@@ -47,7 +47,7 @@ JSONL (1行1JSON):
 - `death_message` はゲーム内へ送るのと同じ死亡メッセージ文字列（`showDeathMessages=false` でも監査用に保存）。
 - `position` は小数点を含むプレイヤー位置、`block_position` は各座標を床関数で整数化したブロック位置です。例えば `x=-0.01` のブロック座標は `-1` で、0にはなりません。
 - 壊れた/非有限の座標からブロック値を推測しないため、該当する `block_position` 成分は `null` とします。
-- D04は**観測可能な死亡事実の情報追加のみ**です。まだ識別できないMobの攻撃者や複数の環境要因を推測することはせず、個別に作業中のD01/D02/D03との統合が必要です。
+- D04は死亡事実の情報追加、D03は混合環境ダメージの分類、D01はサーバーが確認したMob・飛び道具・爆発の出所を追加します。D02の耐障害性とexactly-onceは別の残課題です。
 
 ## ローカルでの検証 (GitHub Actions不要)
 
@@ -87,3 +87,24 @@ Local acceptance tests:
 - [ ] Mixed exposure is `mixed_environmental`, not `combat_or_explosion`.
 - [ ] Repeated same-source hits do not become mixed.
 - [ ] No extra HP loss or delayed/duplicated health packets.
+
+## D01: Mob・飛び道具・爆発の発生元
+
+- Mob近接攻撃：Mob種別とサーバーが採番したEntity ID
+- 飛び道具：発射時点の射手のMob種別とEntity IDを保存（射手が消滅しても引き継ぐ）
+- 爆発：TNT、Creeper、Ghast Fireball、Wither Skullの発生元
+- Wither状態異常：近接攻撃や飛び道具の致死ダメージと区別
+- 異なる攻撃元が同一HP更新に混在する場合：単独の攻撃者を推測せず `mixed_damage`
+
+JSONLに `source_type` と `source_entity_id` が追加されます。確認できない値はnullです。既存のD03の `mixed_environmental` とD04の `schema_version`、`death_message`、`block_position` は維持します。Entity IDはサーバー内部の識別子で、アカウントUUIDではありません。
+
+### D01受入条件
+
+- [ ] Zombieに倒されると `was slain by Zombie` とMob Entity IDを正確に記録
+- [ ] Skeletonが消滅したあとでも矢の射手を記録
+- [ ] TNTとCreeperの爆発発生元を区別し、同時に異なる攻撃元があれば `mixed_damage` として扱う
+- [ ] 10tick被ダメージ猶予と既存の攻撃アニメーションを維持し、被ダメージ0の場合は死亡原因を捏造しない
+- [ ] 過去のMobセーブに `shooter_kind` がなくても `#[serde(default)]` で読み込み可能
+- [ ] `cargo fmt --all -- --check`、単体テスト、Clippy、リリースビルド、Minecraft 1.7.10実機で確認
+
+PvPの攻撃者を近くのプレイヤー名から推測しません。完全に重なったプレイヤー同士での飛び道具のターゲット判定は別タスクです。GitHub Actionsは起動しません。
