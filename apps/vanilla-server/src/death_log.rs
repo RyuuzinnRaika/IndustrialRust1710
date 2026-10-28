@@ -3,7 +3,7 @@
 use crate::player::PlayerPosition;
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,8 +21,51 @@ fn block_coordinate(value: f64) -> Option<i32> {
         None
     }
 }
-// A single write_all remains serialized across all concurrent player sessions.
+// Protect against interleaved writes from this server process. This is not
+// a cross-process lock and does not make player state + scoreboard atomic.
 static DEATH_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Repair a bounded, interrupted final JSONL entry before a new append.
+/// Never truncate earlier complete lines or guess beyond our record size cap.
+fn reconcile_jsonl_tail(file: &mut fs::File) -> io::Result<()> {
+    let file_len = file.metadata()?.len();
+    if file_len == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+
+    // A normal death record occupies fewer than MAX_RECORD_BYTES bytes.
+    // If its start lies outside this window, do not destroy unknown data.
+    let window = file_len.min(MAX_RECORD_BYTES as u64) as usize;
+    file.seek(SeekFrom::Start(file_len - window as u64))?;
+    let mut tail = vec![0; window];
+    file.read_exact(&mut tail)?;
+    let last_newline = tail.iter().rposition(|&byte| byte == b'\n');
+    if last_newline.is_none() && file_len > window as u64 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "unterminated death-log tail exceeds maximum record size",
+        ));
+    }
+    let start = last_newline.map_or(0, |index| index + 1);
+    if serde_json::from_slice::<Value>(&tail[start..]).is_ok() {
+        // A fully written object may only have lost the final delimiter.
+        file.write_all(b"\n")?;
+    } else {
+        let valid_len = file_len - (window - start) as u64;
+        file.set_len(valid_len)?;
+        eprintln!(
+            "DEATH LOG RECOVERY: discarded {} bytes of incomplete final JSONL entry",
+            file_len - valid_len
+        );
+    }
+    file.sync_data()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeathCause {
@@ -168,8 +211,26 @@ impl DeathRecord<'_> {
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        file.write_all(&line)
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)?;
+        reconcile_jsonl_tail(&mut file)?;
+        let previous_len = file.metadata()?.len();
+        if let Err(error) = file.write_all(&line) {
+            // Preserve the pre-append length if a short write is reported.
+            // The process-local mutex also protects this rollback.
+            if let Err(rollback_error) = file.set_len(previous_len) {
+                return Err(io::Error::other(format!(
+                    "death log write failed: {error}; rollback failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
+        // Sync the new line before reporting success to the player session.
+        // This is not an atomic transaction with player HP, items, or scores.
+        file.sync_data()
     }
 
     pub fn console_summary(&self) -> String {
@@ -315,6 +376,82 @@ mod tests {
         assert!(invalid["block_position"]["x"].is_null());
         assert!(invalid["block_position"]["z"].is_null());
         assert_eq!(invalid["block_position"]["y"], 64);
+    }
+
+    fn sample_record() -> DeathRecord<'static> {
+        DeathRecord {
+            player: "Alex",
+            hit: Some(FatalHit {
+                cause: DeathCause::Fall,
+                previous_health: 3.0,
+                applied_damage: 3.0,
+            }),
+            position: PlayerPosition::default(),
+            dimension: 0,
+            tick: 42,
+        }
+    }
+
+    fn test_log_path(tag: &str) -> (PathBuf, PathBuf) {
+        let world = std::env::temp_dir().join(format!(
+            "ir1710-deaths-{tag}-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path = DeathRecord::log_path(&world);
+        let _ = fs::remove_file(&path);
+        (world, path)
+    }
+
+    #[test]
+    fn death_log_repairs_complete_unterminated_entry_without_losing_it() {
+        let (world, path) = test_log_path("missing-lf");
+        let old = sample_record().json(100).to_string();
+        fs::write(&path, old.as_bytes()).unwrap();
+        sample_record().append(&world).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        let entries: Vec<Value> = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["timestamp_ms"], 100);
+        assert_eq!(entries[1]["event"], "player_death");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn death_log_discards_only_an_incomplete_final_entry() {
+        let (world, path) = test_log_path("short-tail");
+        let old = sample_record().json(101).to_string();
+        fs::write(&path, format!("{old}\n{{\"event\":\"player_death\"")).unwrap();
+        sample_record().append(&world).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(serde_json::from_str::<Value>(lines[0]).unwrap()["timestamp_ms"], 101);
+        assert_eq!(serde_json::from_str::<Value>(lines[1]).unwrap()["event"], "player_death");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn death_log_refuses_an_unbounded_tail_without_truncation() {
+        let (world, path) = test_log_path("large-tail");
+        let original = vec![b'x'; MAX_RECORD_BYTES + 1];
+        fs::write(&path, &original).unwrap();
+        assert!(sample_record().append(&world).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn death_log_destination_directory_reports_error_without_panic() {
+        let (world, path) = test_log_path("directory");
+        fs::create_dir_all(&path).unwrap();
+        assert!(sample_record().append(&world).is_err());
+        fs::remove_dir(&path).unwrap();
     }
 
     #[test]
