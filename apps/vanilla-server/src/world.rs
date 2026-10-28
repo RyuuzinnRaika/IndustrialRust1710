@@ -1241,71 +1241,70 @@ impl World {
     /// Item created when a world tick removes or piston-breaks a block.
     /// Evaluated against the pre-tick world so its legacy metadata survives.
     fn tick_drop_for_change(&self, (x, y, z): Position, next: u16) -> Option<WorldDrop> {
-
         let old = self.get(x, i32::from(y), z);
-                    // A piston can replace a fragile torch/rail directly
-                    // with its head or the last shifted solid. The destroyed
-                    // attachment still drops an item even if the new cell is
-                    // non-air. Other replacement paths retain prior behavior.
-                    if old == 0 || (next != 0 && (next == old || !devices::piston_breakable(old))) {
-                        return None;
-                    }
-                    let pos = (x, i32::from(y), z);
-                    let id = old >> 4;
-                    let item_id = match id {
-                        6 => 6,
-                        50 => 50,
-                        55 => 331,
-                        59 => {
-                            if old & 7 == 7 {
-                                296
-                            } else {
-                                295
-                            }
-                        }
-                        // Piston-destroy reaction still drops the block's
-                        // *item*, including powered/detector/activator rails.
-                        27 | 28 | 66 | 157 => id as i16,
-                        37..=40 => id as i16,
-                        63 | 68 => 323, // signs use the standing-sign item
-                        65 | 69 | 70 | 72 | 77 | 131 | 143 | 147 | 148 => id as i16,
-                        132 => 287,       // tripwire drops string
-                        149 | 150 => 404, // comparator item, not powered block
-                        30 => 287,        // cobweb without silk touch
-                        81 | 83 | 111 | 171 => id as i16,
-                        127 => 351, // cocoa beans (brown dye)
-                        115 => 372, // nether wart item
-                        175 => 175, // double-height flower
-                        75 | 76 => 76,
-                        93 | 94 => 356,
-                        141 => 391,
-                        142 => 392,
-                        64 if old & 8 == 0 => 324,
-                        71 if old & 8 == 0 => 330,
-                        96 => 96,
-                        18 | 161 => {
-                            return crate::survival::additional_drop(old, pos, self.fluid_phase)
-                                .map(|stack| WorldDrop { pos, stack });
-                        }
-                        _ => return None,
-                    };
-                    let stack = crate::inventory::Stack {
-                        id: item_id,
-                        count: if id == 127 {
-                            (1 + ((old & 12) >> 2)) as u8
-                        } else {
-                            1
-                        },
-                        damage: if id == 127 {
-                            3 // cocoa item/dye damage
-                        } else if matches!(id, 6 | 38 | 171 | 175) {
-                            (old & 15) as i16
-                        } else {
-                            0
-                        },
-                        nbt: None,
-                    };
-                    Some(WorldDrop { pos, stack })
+        // A piston can replace a fragile torch/rail directly
+        // with its head or the last shifted solid. The destroyed
+        // attachment still drops an item even if the new cell is
+        // non-air. Other replacement paths retain prior behavior.
+        if old == 0 || (next != 0 && (next == old || !devices::piston_breakable(old))) {
+            return None;
+        }
+        let pos = (x, i32::from(y), z);
+        let id = old >> 4;
+        let item_id = match id {
+            6 => 6,
+            50 => 50,
+            55 => 331,
+            59 => {
+                if old & 7 == 7 {
+                    296
+                } else {
+                    295
+                }
+            }
+            // Piston-destroy reaction still drops the block's
+            // *item*, including powered/detector/activator rails.
+            27 | 28 | 66 | 157 => id as i16,
+            37..=40 => id as i16,
+            63 | 68 => 323, // signs use the standing-sign item
+            65 | 69 | 70 | 72 | 77 | 131 | 143 | 147 | 148 => id as i16,
+            132 => 287,       // tripwire drops string
+            149 | 150 => 404, // comparator item, not powered block
+            30 => 287,        // cobweb without silk touch
+            81 | 83 | 111 | 171 => id as i16,
+            127 => 351, // cocoa beans (brown dye)
+            115 => 372, // nether wart item
+            175 => 175, // double-height flower
+            75 | 76 => 76,
+            93 | 94 => 356,
+            141 => 391,
+            142 => 392,
+            64 if old & 8 == 0 => 324,
+            71 if old & 8 == 0 => 330,
+            96 => 96,
+            18 | 161 => {
+                return crate::survival::additional_drop(old, pos, self.fluid_phase)
+                    .map(|stack| WorldDrop { pos, stack });
+            }
+            _ => return None,
+        };
+        let stack = crate::inventory::Stack {
+            id: item_id,
+            count: if id == 127 {
+                (1 + ((old & 12) >> 2)) as u8
+            } else {
+                1
+            },
+            damage: if id == 127 {
+                3 // cocoa item/dye damage
+            } else if matches!(id, 6 | 38 | 171 | 175) {
+                (old & 15) as i16
+            } else {
+                0
+            },
+            nbt: None,
+        };
+        Some(WorldDrop { pos, stack })
     }
 
     /// Bounded 20TPS flow/conduction step. IRW save occurs once per tick.
@@ -4850,6 +4849,10 @@ mod tests {
         assert!(items.iter().any(|stack| stack.id == 27));
         assert!(items.iter().any(|stack| stack.id == 38 && stack.damage == 5));
         assert!(items.iter().any(|stack| stack.id == 171 && stack.damage == 3));
+        for (x, id) in [(1, 50), (2, 27), (3, 38), (4, 171)] {
+            let dropped = spawned.iter().find(|item| item.stack.id == id).unwrap();
+            assert_eq!(dropped.position, [(x * 32) + 16, (64 * 32) + 16, (1 * 32) + 16]);
+        }
         assert!(!path.with_extension("pending-txn.json").exists());
         fs::remove_dir_all(&root).unwrap();
     }
