@@ -1392,7 +1392,7 @@ fn native_open_window_packets_cover_other_interactive_gui_blocks() {
         dig.push(1);
         player.write_all(&frame(7, &dig)).unwrap();
         until_packet(&mut player, 0x23, |p| {
-            p.len() == 10 && p[4] == 64 && p[9] == 0
+            p.len() == 11 && p[4] == 64 && p[9] == 0 && p[10] == 0
         });
     }
 }
