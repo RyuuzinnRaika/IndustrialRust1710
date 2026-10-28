@@ -1267,7 +1267,14 @@ impl World {
         let wired: Vec<Position> = self.pending_circuit.iter().take(budget).copied().collect();
         let supported: Vec<Position> = self.pending_support.iter().take(budget).copied().collect();
         let mut changes: BTreeMap<Position, u16> = self.ecology_changes(budget);
-        changes.extend(self.device_changes(budget));
+        // A powered rail or redstone torch can change metadata on the same
+        // tick that its supporting block disappears. Never let a device
+        // state update resurrect an attachment detached by ecology.
+        for (pos, next) in self.device_changes(budget) {
+            if changes.get(&pos) != Some(&0) {
+                changes.insert(pos, next);
+            }
+        }
         let (special, blast_cells) = self.special_changes(budget);
         changes.extend(special);
         // Timed redstone components must release power on the authoritative
