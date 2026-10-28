@@ -1188,13 +1188,17 @@ fn use_special_item(
     let Some(held) = inventory.held() else {
         return Ok(None);
     };
-    let Some((staged_world, changed, replacement, wears_tool)) =
+    let Some((staged_world, changed, replacement, wears_tool, spend_on_noop)) =
         w.stage_special_item(x, y, z, held)?
     else {
         return Ok(None);
     };
-    // Invalid uses and blocked tree generation never debit or damage an item.
-    if changed.is_empty() {
+    // Ordinary no-op uses do not debit items. 1.7.10 bone meal is an
+    // exception: after a valid sapling use, the item is consumed even if
+    // the independent 45% growth roll fails or the tree is obstructed.
+    // The existing two-participant journal commits inventory and world
+    // together even when the world bytes are unchanged.
+    if changed.is_empty() && !spend_on_noop {
         return Ok(Some(Vec::new()));
     }
     if survival {
