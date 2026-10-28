@@ -2712,10 +2712,7 @@ fn play(
                 let z = input.i32()?;
                 input.i8()?;
                 input.finish()?;
-                if matches!(action, 0..=2)
-                    && world::in_bounds(x, y, z)
-                    && near(location, x, y, z)
-                {
+                if matches!(action, 0..=2) && world::in_bounds(x, y, z) && near(location, x, y, z) {
                     let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                     let event = block_change_event(&state, x, y, z);
                     send(s, event.id, &event.body)?;
@@ -3760,7 +3757,9 @@ fn play(
             7 => {
                 if !permissions.build {
                     if trace_mining {
-                        eprintln!("mining trace: packet refused because build permission is disabled");
+                        eprintln!(
+                            "mining trace: packet refused because build permission is disabled"
+                        );
                     }
                     continue;
                 }
@@ -3851,8 +3850,7 @@ fn play(
                                         ),
                                     });
                                 }
-                                let in_reach =
-                                    world::in_bounds(x, y, z) && near(location, x, y, z);
+                                let in_reach = world::in_bounds(x, y, z) && near(location, x, y, z);
                                 mining = if in_reach {
                                     let (submerged, grounded) = mining_environment(&w, player);
                                     MiningProgress::start_with_environment(
@@ -3881,7 +3879,8 @@ fn play(
                             if action == 2 || instant {
                                 let attempt = mining.take();
                                 let had_start = attempt.is_some();
-                                let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                                let mut w =
+                                    world.lock().map_err(|_| bad("world mutex poisoned"))?;
                                 let (submerged, grounded) = mining_environment(&w, player);
                                 let result = attempt.and_then(|m| {
                                     m.finish_with_environment(
@@ -3971,7 +3970,10 @@ fn play(
                                                 let staged_drops = if drop_stacks.is_empty() {
                                                     None
                                                 } else {
-                                                    Some(ground.stage_put_many(&drop_stacks, target)?)
+                                                    Some(
+                                                        ground
+                                                            .stage_put_many(&drop_stacks, target)?,
+                                                    )
                                                 };
                                                 let mut candidate = inventory.clone();
                                                 let wore =
@@ -3994,8 +3996,9 @@ fn play(
                                                             send(
                                                                 s,
                                                                 0x2f,
-                                                                &inventory
-                                                                    .set_slot(inventory.held_slot())?,
+                                                                &inventory.set_slot(
+                                                                    inventory.held_slot(),
+                                                                )?,
                                                             )?;
                                                         }
                                                         if let Some(staged) = staged_drops {
@@ -4025,7 +4028,9 @@ fn play(
                                                         if reward > 0 {
                                                             if let Some(orb) = mobs
                                                                 .lock()
-                                                                .map_err(|_| bad("mob mutex poisoned"))?
+                                                                .map_err(|_| {
+                                                                    bad("mob mutex poisoned")
+                                                                })?
                                                                 .spawn_xp(*player, reward)
                                                             {
                                                                 hub.broadcast(orb);
@@ -4061,54 +4066,54 @@ fn play(
                     }
                 } else {
                     let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
-                    let changed =
-                        if (action == 0 || action == 2)
-                            && world::in_bounds(x, y, z)
-                            && near(location, x, y, z) {
-                            // Refuse breaking a nonempty chest until contents
-                            // can be safely dropped as item entities.
-                            let block = w.get(x, y, z) >> 4;
-                            let occupied = (matches!(block, 54 | 146)
-                                && chests
+                    let changed = if (action == 0 || action == 2)
+                        && world::in_bounds(x, y, z)
+                        && near(location, x, y, z)
+                    {
+                        // Refuse breaking a nonempty chest until contents
+                        // can be safely dropped as item entities.
+                        let block = w.get(x, y, z) >> 4;
+                        let occupied = (matches!(block, 54 | 146)
+                            && chests
+                                .lock()
+                                .map_err(|_| bad("chest lock poisoned"))?
+                                .is_nonempty((x, y, z)))
+                            || ((block == 61 || block == 62)
+                                && furnaces
                                     .lock()
-                                    .map_err(|_| bad("chest lock poisoned"))?
+                                    .map_err(|_| bad("furnace lock poisoned"))?
+                                    .get((x, y, z))
+                                    .occupied())
+                            || (matches!(block, 23 | 158)
+                                && devices
+                                    .lock()
+                                    .map_err(|_| bad("device lock poisoned"))?
+                                    .slots((x, y, z))
+                                    .iter()
+                                    .any(Option::is_some))
+                            || (block == 154
+                                && hoppers
+                                    .lock()
+                                    .map_err(|_| bad("hopper lock poisoned"))?
+                                    .has_contents((x, y, z)))
+                            || (block == 117
+                                && brewers
+                                    .lock()
+                                    .map_err(|_| bad("brewer lock poisoned"))?
                                     .is_nonempty((x, y, z)))
-                                || ((block == 61 || block == 62)
-                                    && furnaces
-                                        .lock()
-                                        .map_err(|_| bad("furnace lock poisoned"))?
-                                        .get((x, y, z))
-                                        .occupied())
-                                || (matches!(block, 23 | 158)
-                                    && devices
-                                        .lock()
-                                        .map_err(|_| bad("device lock poisoned"))?
-                                        .slots((x, y, z))
-                                        .iter()
-                                        .any(Option::is_some))
-                                || (block == 154
-                                    && hoppers
-                                        .lock()
-                                        .map_err(|_| bad("hopper lock poisoned"))?
-                                        .has_contents((x, y, z)))
-                                || (block == 117
-                                    && brewers
-                                        .lock()
-                                        .map_err(|_| bad("brewer lock poisoned"))?
-                                        .is_nonempty((x, y, z)))
-                                || (matches!(block, 84 | 140)
-                                    && decorations
-                                        .lock()
-                                        .map_err(|_| bad("decorations lock poisoned"))?
-                                        .occupied((x, y, z)));
-                            if occupied {
-                                false
-                            } else {
-                                w.update_and_save(world_path, x, y, z, 0)?
-                            }
-                        } else {
+                            || (matches!(block, 84 | 140)
+                                && decorations
+                                    .lock()
+                                    .map_err(|_| bad("decorations lock poisoned"))?
+                                    .occupied((x, y, z)));
+                        if occupied {
                             false
-                        };
+                        } else {
+                            w.update_and_save(world_path, x, y, z, 0)?
+                        }
+                    } else {
+                        false
+                    };
                     let event = block_change_event(&w, x, y, z);
                     if changed {
                         decorations
