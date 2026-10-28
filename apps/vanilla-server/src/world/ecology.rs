@@ -214,115 +214,105 @@ impl World {
         }
         false
     }
+    /// A grown tree uses the SAME shapes and 1.7.10 block metadata as natural
+    /// terrain trees. Stage all changes first, and reject a blocked crown or
+    /// incomplete 2x2 set without removing any saplings or nearby structures.
+    /// The caller commits the map atomically (random tick or bone meal).
     pub(super) fn grow_tree(&self, x: i32, y: i32, z: i32, changes: &mut BTreeMap<Position, u16>) {
-        if y > 249 || !plantable(self.get(x, y - 1, z) >> 4) {
+        if !(1..=253).contains(&y) || !in_bounds(x, y, z) {
             return;
         }
-        // Large dark oak is only legal for a complete 2x2 group.
-        // Reuse this path for both natural growth and bone meal.
-        if self.get(x, y, z) & 7 == 5 {
-            self.grow_dark_oak(x, y, z, changes);
+        let sapling = self.get(x, y, z);
+        if sapling >> 4 != 6 {
             return;
         }
-        // Retain legacy log and leaf species for smaller saplings.
-        let (log, log_meta, leaves, leaf_meta) = match self.get(x, y, z) & 7 {
-            0 => (17, 0, 18, 0),   // Oak
-            1 => (17, 1, 18, 1),   // Spruce
-            2 => (17, 2, 18, 2),   // Birch
-            3 => (17, 3, 18, 3),   // Jungle
-            4 => (162, 0, 161, 0), // Acacia
-            _ => return,
+        let species = sapling & 7;
+        if species > 5 || !plantable(self.get(x, y - 1, z) >> 4) {
+            return;
+        }
+
+        // In Java 1.7.10, only spruce/jungle/dark oak support 2x2 growth.
+        // Dark oak REQUIRES the square; the other two use the giant variant
+        // whenever the full 2x2 is present, even if its canopy is obstructed.
+        let mut origin = (x, z);
+        let mut large = false;
+        if matches!(species, 1 | 3 | 5) {
+            'squares: for dx in [-1, 0] {
+                for dz in [-1, 0] {
+                    let (ax, az) = (x + dx, z + dz);
+                    if (0..=1).all(|ox| {
+                        (0..=1).all(|oz| {
+                            let px = ax + ox;
+                            let pz = az + oz;
+                            in_bounds(px, y, pz)
+                                && self.get(px, y, pz) >> 4 == 6
+                                && self.get(px, y, pz) & 7 == species
+                                && plantable(self.get(px, y - 1, pz) >> 4)
+                        })
+                    }) {
+                        origin = (ax, az);
+                        large = true;
+                        break 'squares;
+                    }
+                }
+            }
+        }
+        if species == 5 && !large {
+            return;
+        }
+
+        let seed = match self.generation {
+            super::Generation::Flat => 0,
+            super::Generation::Natural(seed)
+            | super::Generation::Biomes(seed)
+            | super::Generation::Expanded(seed, _) => seed,
         };
-        // First pass checks every eventual occupied cell; tree generation
-        // must never overwrite players' buildings or another sapling.
-        for dy in 1..=5 {
-            let radius = if dy >= 3 { 2 } else { 0 };
-            for dx in -radius..=radius {
-                for dz in -radius..=radius {
-                    if self.get(x + dx, y + dy, z + dz) != 0 {
-                        return;
-                    }
-                }
-            }
-        }
-        for dy in 0..4 {
-            changes.insert((x, (y + dy) as u8, z), (log << 4) | log_meta);
-        }
-        for dy in 3..=5 {
-            let radius: i32 = if dy == 5 { 1 } else { 2 };
-            for dx in -radius..=radius {
-                for dz in -radius..=radius {
-                    if dx == 0 && dz == 0 && dy <= 3 {
-                        continue;
-                    }
-                    if dx.abs() == 2 && dz.abs() == 2 {
-                        continue;
-                    }
-                    let pos = (x + dx, (y + dy) as u8, z + dz);
-                    if in_bounds(pos.0, i32::from(pos.1), pos.2) {
-                        changes.insert(pos, (leaves << 4) | leaf_meta);
-                    }
-                }
-            }
-        }
-    }
-    /// Generate a bounded dark-oak crown only after every destination has
-    /// passed validation. The four saplings are replaced together, so an
-    /// obstructed canopy neither destroys blocks nor consumes bone meal.
-    fn grow_dark_oak(&self, x: i32, y: i32, z: i32, changes: &mut BTreeMap<Position, u16>) {
-        if y > 247 {
+        let blocks = crate::worldgen::sapling_tree_blocks(
+            seed ^ self.fluid_phase,
+            origin.0,
+            y,
+            origin.1,
+            species,
+            large,
+        );
+        if blocks.is_empty() || blocks.len() > 2048 {
             return;
         }
-        for ox in [-1, 0] {
-            for oz in [-1, 0] {
-                let (ax, az) = (x + ox, z + oz);
-                if !(0..2).all(|dx| {
-                    (0..2).all(|dz| {
-                        in_bounds(ax + dx, y, az + dz)
-                            && self.get(ax + dx, y, az + dz) >> 4 == 6
-                            && self.get(ax + dx, y, az + dz) & 7 == 5
-                            && plantable(self.get(ax + dx, y - 1, az + dz) >> 4)
-                    })
-                }) {
-                    continue;
-                }
-                let mut proposed = BTreeMap::new();
-                // Six-block high 2x2 trunk (log2, dark-oak metadata 1).
-                for dy in 0..=5 {
-                    for dx in 0..2 {
-                        for dz in 0..2 {
-                            proposed.insert((ax + dx, (y + dy) as u8, az + dz), (162 << 4) | 1);
-                        }
-                    }
-                }
-                // Crown is bounded to fit the special block transaction's
-                // 128-block limit; higher rings taper without overwriting logs.
-                for dy in 4..=7 {
-                    let radius = if matches!(dy, 4 | 7) { 1 } else { 2 };
-                    for dx in -radius..=1 + radius {
-                        for dz in -radius..=1 + radius {
-                            if dy <= 5 && (0..2).contains(&dx) && (0..2).contains(&dz) {
-                                continue;
-                            }
-                            proposed.insert((ax + dx, (y + dy) as u8, az + dz), (161 << 4) | 1);
-                        }
-                    }
-                }
-                if proposed.len() > 128
-                    || proposed.iter().any(|(&(px, py, pz), &block)| {
-                        !in_bounds(px, i32::from(py), pz)
-                            || (self.get(px, i32::from(py), pz) != 0
-                                && !(py == y as u8
-                                    && block >> 4 == 162
-                                    && self.get(px, i32::from(py), pz) >> 4 == 6))
-                    })
-                {
-                    continue;
-                }
-                changes.extend(proposed);
+
+        let is_sapling_root = |px: i32, pz: i32| {
+            if large {
+                (origin.0..=origin.0 + 1).contains(&px)
+                    && (origin.1..=origin.1 + 1).contains(&pz)
+            } else {
+                px == x && pz == z
+            }
+        };
+        let mut proposed = BTreeMap::new();
+        for (px, py, pz, block) in blocks {
+            if !in_bounds(px, py, pz) {
                 return;
             }
+            let existing = self.get(px, py, pz);
+            if existing != 0
+                && !(py == y
+                    && is_sapling_root(px, pz)
+                    && existing >> 4 == 6
+                    && existing & 7 == species)
+            {
+                return;
+            }
+            proposed.insert((px, py as u8, pz), block);
         }
+        // Every sapling in a complete square must become a trunk. Reject
+        // pathological shapes instead of destroying three of four saplings.
+        if large && (0..=1).any(|dx| {
+            (0..=1).any(|dz| {
+                !proposed.contains_key(&(origin.0 + dx, y as u8, origin.1 + dz))
+            })
+        }) {
+            return;
+        }
+        changes.extend(proposed);
     }
     /// An IRW snapshot records removed *generated* logs as sparse overrides,
     /// but does not serialize the in-memory random-tick wake set. Rebuild it
