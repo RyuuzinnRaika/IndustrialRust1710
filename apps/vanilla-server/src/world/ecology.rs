@@ -545,6 +545,10 @@ impl World {
         // world's deterministic tick counter keeps repeated reads stable.
         if !self.pending_ecology.is_empty()
             && self.fluid_phase.is_multiple_of(GAME_TICKS_PER_SECOND)
+            // Ground-item storage has a bounded 512-entity registry.
+            // When it fills, keep the surviving leaves in the world
+            // rather than spawning an unbounded unsaved item backlog.
+            && self.pending_drops.len() < super::LEAF_DROP_BACKPRESSURE
         {
             let len = self.pending_ecology.len();
             let offset = ((self.fluid_phase / GAME_TICKS_PER_SECOND) as usize)
@@ -846,6 +850,34 @@ mod regression_tests {
         let staged = world.ecology_changes(64);
         assert_eq!(staged.get(&(0, 65, 0)), Some(&0));
         assert!(!staged.contains_key(&(0, 64, 0)));
+    }
+
+    #[test]
+    fn saturated_drop_backlog_defers_leaf_decay_without_destroying_the_leaf() {
+        let mut world = World::new();
+        world.import_block(0, 65, 0, 18 << 4).unwrap();
+        world.pending_drops.resize(
+            super::super::LEAF_DROP_BACKPRESSURE,
+            super::super::WorldDrop {
+                pos: (10, 80, 10),
+                stack: crate::inventory::Stack {
+                    id: 6,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                },
+            },
+        );
+        let second = (1..=10_000u64)
+            .find(|&sec| leaf_decay_due(sec * GAME_TICKS_PER_SECOND, 0, 65, 0))
+            .unwrap();
+        world.fluid_phase = second * GAME_TICKS_PER_SECOND;
+        assert!(
+            !world.ecology_changes(64).contains_key(&(0, 65, 0)),
+            "natural leaf decay must pause while unpersisted drops accumulate"
+        );
+        world.pending_drops.clear();
+        assert_eq!(world.ecology_changes(64).get(&(0, 65, 0)), Some(&0));
     }
 
     #[test]
