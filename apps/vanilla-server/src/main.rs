@@ -9463,6 +9463,64 @@ fn main() -> io::Result<()> {
                     if tick_shutdown.load(Ordering::Acquire) {
                         break;
                     }
+                    // Lightning existed in Java 1.7.10 only as natural
+                    // thunderstorm weather. /summon LightningBolt was added
+                    // in 1.8, so it is deliberately not exposed as a command.
+                    // One bounded random trial per world tick, only near an
+                    // observed player in the Overworld; no whole-world scan.
+                    if weather.1
+                        && gravity_world.dimension() == dimensions::Dimension::Overworld
+                        && rand::random::<u16>() % 6000 == 0
+                    {
+                        let dimension = gravity_world.dimension();
+                        if let Ok(players) = furnace_hub.participants_in_dimension(dimension) {
+                            if !players.is_empty() {
+                                let focus = players
+                                    [usize::from(rand::random::<u16>()) % players.len()]
+                                    .1;
+                                let bx = focus.x.floor() as i32
+                                    + i32::from(rand::random::<u8>() % 33)
+                                    - 16;
+                                let bz = focus.z.floor() as i32
+                                    + i32::from(rand::random::<u8>() % 33)
+                                    - 16;
+                                if world::in_bounds(bx, 64, bz) {
+                                    let ground = (0..=254)
+                                        .rev()
+                                        .find(|&y| gravity_world.get(bx, y, bz) != 0);
+                                    if let Some(y) = ground {
+                                        let strike = PlayerPosition {
+                                            x: f64::from(bx) + 0.5,
+                                            y: f64::from(y) + 1.0,
+                                            z: f64::from(bz) + 0.5,
+                                        };
+                                        let bolt_id =
+                                            30_000_000 + i32::from(rand::random::<u16>());
+                                        if let Ok(packet) =
+                                            lightning_spawn_packet(strike, bolt_id)
+                                        {
+                                            furnace_hub.broadcast_in_dimension(
+                                                dimension, packet
+                                            );
+                                            for (entity_id, victim) in players {
+                                                if lightning_strike_touches_player(strike, victim) {
+                                                    if let Err(err) = furnace_hub
+                                                        .request_lightning_damage(
+                                                            entity_id, dimension
+                                                        )
+                                                    {
+                                                        eprintln!(
+                                                            "LIGHTNING DAMAGE DELIVERY ERROR: {err}"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     match gravity_world.gravity_tick(&furnace_world_path, 64) {
                         Ok(changes) => {
                             for movement in changes {
