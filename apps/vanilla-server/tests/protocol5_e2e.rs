@@ -1646,6 +1646,60 @@ fn creative_can_break_flat_bedrock_at_y60_with_one_start_packet() {
 }
 
 #[test]
+fn survival_container_break_uses_durable_world_and_ground_drop() {
+    // Exercise the actual C08/C07 packet path, not only the storage staging
+    // helpers. An initially empty container still needs the same atomic path
+    // as a nonempty one and its block item must not vanish.
+    for (block, tool, expected_drop) in [
+        (54_i16, 286_i16, 54_i16),  // chest, gold axe
+        (61, 285, 61),             // furnace, gold pickaxe
+        (154, 285, 154),           // hopper, gold pickaxe
+    ] {
+        let server =
+            NativeServer::start_with_mode_and_items(true, &[(36, block), (37, tool)]);
+        let (mut client, _, _) = server.join("RustTester");
+        let mut place = 0i32.to_be_bytes().to_vec();
+        place.push(63);
+        place.extend_from_slice(&0i32.to_be_bytes());
+        place.push(1);
+        place.extend_from_slice(&block.to_be_bytes());
+        place.push(1);
+        place.extend_from_slice(&0i16.to_be_bytes());
+        place.extend_from_slice(&(-1i16).to_be_bytes());
+        place.extend_from_slice(&[8, 8, 8]);
+        client.write_all(&frame(8, &place)).unwrap();
+        until_packet(&mut client, 0x23, |p| {
+            p.len() == 11 && p[4] == 64 && i16::from(p[9]) == block
+        });
+        client.write_all(&frame(9, &1i16.to_be_bytes())).unwrap();
+        // Mine within reach but away from the automatic item pickup radius.
+        send_position(&mut client, 4.5, 64.0, 0.5);
+        let mut start = vec![0u8];
+        start.extend_from_slice(&0i32.to_be_bytes());
+        start.push(64);
+        start.extend_from_slice(&0i32.to_be_bytes());
+        start.push(1);
+        let mut finish = start.clone();
+        finish[0] = 2;
+        client.write_all(&frame(7, &start)).unwrap();
+        thread::sleep(Duration::from_millis(950));
+        client.write_all(&frame(7, &finish)).unwrap();
+        until_packet(&mut client, 0x23, |p| {
+            p.len() == 11 && p[4] == 64 && p[9] == 0
+        });
+        let drops_file = server.directory.join("flat.drops.json");
+        await_file(&drops_file);
+        let saved: Value =
+            serde_json::from_slice(&fs::read(drops_file).unwrap()).unwrap();
+        let entities = saved["entries"].as_object().unwrap();
+        assert_eq!(entities.len(), 1, "block {block} must drop once");
+        assert_eq!(entities.values().next().unwrap()["stack"]["id"], expected_drop);
+        drop(client);
+        server.wait_idle();
+    }
+}
+
+#[test]
 fn survival_bed_head_mining_removes_both_halves_and_drops_one_bed() {
     let server = NativeServer::start_with_mode_and_items(true, &[(36, 355)]);
     let (mut client, _, _) = server.join("RustTester");
