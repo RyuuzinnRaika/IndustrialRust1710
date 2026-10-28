@@ -2283,6 +2283,53 @@ mod tests {
     }
 
     #[test]
+    fn s04_iron_tools_take_exact_recipe_inputs_without_duplication() {
+        // Workbench window 1: output 0, inputs 1..9. Iron tools must
+        // consume real server-owned iron ingots and sticks, not the
+        // client-advertised output ItemStack.
+        let ingot = Stack {
+            id: 265,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let stick = Stack {
+            id: 280,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inv = Inventory::default();
+        for slot in [0, 1, 2] {
+            inv.workbench[slot] = Some(ingot);
+        }
+        for slot in [4, 7] {
+            inv.workbench[slot] = Some(stick);
+        }
+        assert_eq!(inv.crafting_result(1).map(|stack| stack.id), Some(257));
+        assert!(inv.click_window(1, 0, 0, 1)); // Shift-click pickaxe output
+        assert!(inv.workbench.iter().all(Option::is_none));
+        let crafted: Vec<_> = inv.slots[9..45].iter().flatten().copied().collect();
+        assert_eq!(crafted.len(), 1);
+        assert_eq!(crafted[0].id, 257);
+        assert_eq!(crafted[0].count, 1);
+        assert!(inv.crafting_result(1).is_none());
+        assert!(inv.encoded().is_ok());
+
+        // The same ingot cannot be reused; a fresh input is needed to
+        // craft a sword, which is delivered into the cursor exactly once.
+        inv.workbench[1] = Some(ingot);
+        inv.workbench[4] = Some(ingot);
+        inv.workbench[7] = Some(stick);
+        assert_eq!(inv.crafting_result(1).map(|stack| stack.id), Some(267));
+        assert!(inv.click_window(1, 0, 0, 0));
+        assert!(inv.workbench.iter().all(Option::is_none));
+        assert_eq!(inv.cursor.map(|stack| stack.id), Some(267));
+        assert!(!inv.click_window(1, 0, 0, 0) || inv.cursor.map(|stack| stack.id) == Some(267));
+        assert!(inv.encoded().is_ok());
+    }
+
+    #[test]
     fn shift_crafting_consumes_each_iteration_and_stops_at_capacity() {
         let mut inv = Inventory::default();
         // 2x2 player grid ingredients are only set through server-owned clicks.
