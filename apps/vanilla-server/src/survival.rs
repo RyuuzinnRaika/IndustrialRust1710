@@ -185,6 +185,34 @@ fn rule(block: u16) -> Option<BlockRule> {
         153 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(153, 0)),
         89 => (0.3, None, 0, false, item(348, 0)),
         170 => (0.5, Some(ToolKind::Axe), 0, false, item(170, 0)),
+        // Previously absent 1.7.10 blocks were treated as unbreakable.
+        // Keep fluid/portal/bedrock exclusions below, and don't invent
+        // multi-item or Silk Touch drops when those mechanics are unavailable.
+        19 => (0.6, None, 0, false, item(19, 0)), // sponge
+        22 => (3.0, Some(ToolKind::Pickaxe), 1, true, item(22, 0)), // lapis block
+        23 | 158 => (3.5, Some(ToolKind::Pickaxe), 0, true, item(id as i16, 0)), // dispenser/dropper
+        29 | 33 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(id as i16, 0)), // pistons
+        46 => (0.0, None, 0, false, item(46, 0)), // TNT is instant-break
+        47 => (1.5, Some(ToolKind::Axe), 0, false, None), // bookshelf: three-book drop pending
+        95 | 160 => (0.3, None, 0, false, None), // stained glass/panes
+        101 => (5.0, Some(ToolKind::Pickaxe), 0, true, item(101, 0)), // iron bars
+        102 => (0.3, None, 0, false, None), // glass pane
+        112 | 113 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(id as i16, 0)),
+        121 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(121, 0)), // end stone
+        123 | 124 => (0.3, Some(ToolKind::Pickaxe), 0, false, item(123, 0)),
+        128 | 156 => (0.8, Some(ToolKind::Pickaxe), 0, true, item(id as i16, 0)),
+        133 => (5.0, Some(ToolKind::Pickaxe), 2, true, item(133, 0)),
+        139 => (2.0, Some(ToolKind::Pickaxe), 0, true, item(139, damage)),
+        146 => (2.5, Some(ToolKind::Axe), 0, false, item(146, 0)), // trapped chest
+        147 | 148 => (0.5, Some(ToolKind::Pickaxe), 0, false, item(id as i16, 0)),
+        152 => (5.0, Some(ToolKind::Pickaxe), 0, true, item(152, 0)),
+        154 => (3.0, Some(ToolKind::Pickaxe), 0, true, item(154, 0)), // hopper
+        157 => (0.7, Some(ToolKind::Pickaxe), 0, false, item(157, 0)),
+        165 => (0.0, None, 0, false, item(165, 0)), // slime
+        167 => (5.0, Some(ToolKind::Pickaxe), 0, true, item(167, 0)),
+        169 => (0.3, None, 0, false, None), // sea lantern: shards/crystals pending
+        171 => (0.1, None, 0, false, item(171, damage)),
+        174 => (0.5, Some(ToolKind::Pickaxe), 0, false, None), // packed ice
         _ => return None,
     };
     Some(BlockRule {
@@ -299,6 +327,14 @@ impl MiningProgress {
             penalty: environment_penalty(head_submerged, on_ground),
         })
     }
+    /// A Protocol 5 client sends only Start for blocks destroyed in its
+    /// first mining tick. The shared finish path must commit these immediately.
+    pub fn is_instant(&self) -> bool {
+        mine_rule(self.block, self.tool).is_some_and(|(duration, _)| {
+            duration.saturating_mul(self.penalty) <= Duration::from_millis(50)
+        })
+    }
+
     /// Consume the attempt exactly once. The held tool must remain unchanged
     /// between starting and finishing a dig, preventing fast-tool switching.
     #[cfg(test)]
@@ -716,6 +752,25 @@ mod tests {
             assert_eq!(result.drop.map(|drop| drop.id), expected, "block {id}");
         }
         assert!(mine_rule(7 << 4, None).is_none(), "bedrock must remain unbreakable");
+    }
+
+    #[test]
+    fn one_packet_instant_mining_and_missing_legacy_blocks() {
+        let at = (0, 64, 0);
+        for id in [31_u16, 37, 46, 50, 83, 165] {
+            let started = MiningProgress::start(at, id << 4, None).unwrap();
+            assert!(started.is_instant(), "block {id} must accept Start alone");
+            assert!(started.finish(at, id << 4, None).is_some());
+        }
+        let dirt = MiningProgress::start(at, 3 << 4, None).unwrap();
+        assert!(!dirt.is_instant(), "normal dirt must still require a Finish");
+        for id in [19_u16, 22, 23, 29, 33, 47, 95, 101, 112, 121, 123, 133,
+                   139, 146, 147, 152, 154, 156, 157, 160, 167, 169, 171, 174] {
+            assert!(mine_rule(id << 4, None).is_some(), "missing breakable 1.7.10 block {id}");
+        }
+        for id in [0_u16, 7, 8, 9, 10, 11, 90, 119, 120, 137, 166] {
+            assert!(mine_rule(id << 4, None).is_none(), "protected block {id}");
+        }
     }
 
     #[test]
