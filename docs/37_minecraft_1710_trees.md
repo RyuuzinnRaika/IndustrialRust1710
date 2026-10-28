@@ -159,6 +159,36 @@ others may take several minutes.
   were authored but not executed in Rust; offline Python calculations
   confirmed the selected deterministic sampling cases.
 
+## Live natural vines, hand-mining foliage and tall chunk coverage
+
+- While a Protocol 5 chunk is encoded on an immutable world snapshot,
+  the encoder collects block ID 106 positions in the same pass that builds
+  block ID/metadata bytes. The live world reuses those coordinates to
+  register naturally generated vines for support checks and random-tick
+  spreading, **without re-running the tree generator under the world lock**.
+- Each expanded Overworld chunk reports at most 1,024 vines. A bounded
+  oldest-first registry holds at most 8,192 recent naturally generated
+  vine positions. Eviction never unregisters player-edited plants.
+  Freshly streamed chunks restore eligibility after a restart.
+- The expanded Overworld now includes chunk section 9 (Y=144..159)
+  in the normal client block/metadata/light payload. Giant jungle and
+  spruce crowns can reach Y=158, so the previous nine-section mask
+  could hide the upper part of otherwise real trees. Other dimensions
+  retain their existing section masks.
+- Manually destroyed leaves now use the same **independent** sapling and
+  apple rolls as natural leaf decay. One ordinary oak/dark-oak leaf may
+  drop both; a full ground-item capacity check covers all staged drops.
+- Valid shears (item 359) instantly harvest old/new leaves (18/161)
+  preserving their wood subtype, or collect vines (106) as an item.
+  Shears lose one durability point on committed harvest, with the
+  normal 238-use limit. Without shears, vines do not drop themselves.
+  Leaf/vine harvest does not also roll ordinary saplings/apples when
+  shears are used.
+- Regression tests cover manually mined double-drops, shears metadata
+  and wear, chunk-encoder vine collection, observation eviction and
+  upper tree section delivery. **Rust compilation, cargo tests and
+  real client validation remain pending.**
+
 ## Compatibility and testing
 
 Changes are currently on branch feat/vanilla-1710-tree-varieties-20261028.
@@ -183,5 +213,5 @@ Current limitations requiring follow-up verification:
 
 1. Natural tree shape and biome composition are approximated, not seed-identical to Mojang's 1.7.10 generator.
 2. Sapling trees now share natural-tree silhouettes, but tree generation is not byte-for-byte Mojang's 1.7.10 random algorithm. A complete growth/bonemeal/growth-time compatibility audit is still outstanding.
-3. Natural tree/structure clashes, canopy decay, vine growth details, manually mined leaf multiple drops and multiplayer client visuals need live Java 1.7.10 validation.
+3. Natural tree/structure clashes, canopy decay, vine growth details, manual leaf drop behavior and multiplayer client visuals need live Java 1.7.10 validation.
 4. Existing IRW4 generation needs a format-version gate or migration strategy before safe general rollout.
