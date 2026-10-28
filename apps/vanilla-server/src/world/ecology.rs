@@ -108,7 +108,10 @@ impl World {
                 };
                 solid(support)
             }
-            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 | 132 | 147 | 148 | 149 | 150 | 151 | 171 => {
+            // Carpet was allowed on non-solid blocks in Java 1.7.10;
+            // it only falls when its supporting cell becomes air.
+            171 => below != 0,
+            55 | 66 | 27 | 28 | 157 | 70 | 72 | 93 | 94 | 132 | 147 | 148 | 149 | 150 | 151 => {
                 solid(below)
             }
             78 => solid(below) || below == 79,
