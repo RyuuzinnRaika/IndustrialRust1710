@@ -1809,25 +1809,18 @@ impl World {
                     };
                     Some(WorldDrop { pos, stack })
                 })
-                .take(256)
                 .collect();
             // 1.7.10 leaf decay independently rolls for a sapling and
             // (oak/dark-oak only) an apple. A single dying leaf may yield
             // two drops. Stage them alongside other block drops, then
             // publish only after the atomic world snapshot is saved.
             for (&(x, y, z), &next) in &changes {
-                if detached_drops.len() >= 256 {
-                    break;
-                }
                 let pos = (x, i32::from(y), z);
                 let previous = self.get(pos.0, pos.1, pos.2);
                 if next != 0 || !matches!(previous >> 4, 18 | 161) {
                     continue;
                 }
                 for stack in crate::survival::leaf_decay_drops(previous, pos, self.fluid_phase) {
-                    if detached_drops.len() >= 256 {
-                        break;
-                    }
                     detached_drops.push(WorldDrop { pos, stack });
                 }
             }
@@ -3255,6 +3248,28 @@ mod tests {
                 snapshot.base_block(200, 70, 200)
             );
         }
+    }
+
+    #[test]
+    fn high_volume_support_breaks_do_not_silently_truncate_world_drops() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-oversized-support-drop-{}.irw",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        // Unsupported wall torches are all broken in one bounded update.
+        // Previously a 256-entry .take() silently discarded later drops.
+        for x in 0..300 {
+            world.import_block(x, 80, 0, (50 << 4) | 1).unwrap();
+        }
+        let changed = world.block_tick(&path, 512).unwrap();
+        assert_eq!(changed.len(), 300);
+        assert_eq!(world.queued_drops().len(), 300);
+        assert!(world.queued_drops().iter().all(|drop| drop.stack.id == 50));
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.queued_drops(), world.queued_drops());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
