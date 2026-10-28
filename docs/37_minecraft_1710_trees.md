@@ -204,9 +204,13 @@ others may take several minutes.
   recovery can complete the transaction before any further world writes.
   A storage failure must never be followed by an unsafe in-process retry.
 - When 1,536 or more pending drops remain, new random natural-leaf
-  destruction is deferred. This prevents further leaf-decay drops from
-  accumulating without bound during a prolonged full-pool condition.
-  Leaf decay resumes after enough queued drops have been persisted.
+  destruction is deferred. The 20TPS world worker also attempts an
+  additional pre-tick journal handoff of up to 32 entries while the
+  backlog remains above that threshold; normally it only flushes once
+  per second. This reduces overflow risk when many supported blocks
+  detach in quick succession. A truly full ground-item registry
+  performs no disk write and keeps all drops pending. Leaf decay
+  resumes after enough queued drops have been persisted.
 - **Implemented cross-restart crash recovery:** before a block update
   is saved, its resulting item drops are appended to the bounded IRW
   world-drop backlog and persisted in that *same* atomic world write.
@@ -244,10 +248,12 @@ others may take several minutes.
   Invalid stacks and out-of-range positions are **not** treated as
   ordinary backpressure. A local regression test covers item-count
   capacity, unchanged source snapshots, and invalid inputs.
-- The crash replay test now covers **both write orders**: world
+- The crash replay tests now cover **both write orders**: world
   acknowledgment appearing before the ground item, and ground item
   appearing before world acknowledgment. In either case, redo recovery
   must converge to one saved ground entity and no pending world event.
+  These are source-level regression tests and still require a Rust
+  compiler and an actual test run.
 - All breakable drops are staged without the former silent 256-item
   truncation. A valid 300-block support-break tick persists all 300
   drops. If a tick would exceed the 2,048-drop durable queue limit,
