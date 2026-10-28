@@ -25,6 +25,9 @@ const MAX_PENDING_BLAST: usize = MAX_EDITS;
 // A loaded 5x5 view contains at most 6_400 surface columns per player.
 // Keep weather observations bounded even after prolonged exploration.
 const MAX_WEATHER_COLUMNS: usize = 16_384;
+// Observe naturally generated vines only in client-visible chunks.
+// Evict stale observations without unregistering player-edited plants.
+const MAX_OBSERVED_VINES: usize = 8_192;
 const MAGIC: &[u8; 4] = b"IRW1";
 const NATURAL_MAGIC: &[u8; 4] = b"IRW2";
 const BIOME_MAGIC: &[u8; 4] = b"IRW3";
@@ -48,6 +51,10 @@ pub struct World {
     pending_circuit: BTreeSet<Position>,
     pending_support: BTreeSet<Position>,
     pending_ecology: BTreeSet<Position>,
+    // Natural vines are procedural, not stored in IRW sparse edits.
+    // Track only recently streamed vine positions and evict oldest ones.
+    observed_vines: BTreeSet<Position>,
+    observed_vine_order: VecDeque<Position>,
     // Weather surfaces are scheduled separately to avoid disturbing crop ticks.
     pending_weather: BTreeSet<Position>,
     // FIFO eviction prevents long-running servers from retaining every
@@ -909,6 +916,39 @@ impl World {
     fn unregister_weather_column(&mut self, pos: Position) {
         if self.pending_weather.remove(&pos) {
             self.pending_weather_order.retain(|&stored| stored != pos);
+        }
+    }
+
+    /// Register naturally generated hanging vines from a completed chunk
+    /// snapshot, with no second terrain-generation pass under the world lock.
+    /// The caller samples vines while encoding an immutable chunk snapshot,
+    /// then publishes only entries still consistent with newer sparse edits.
+    pub fn observe_vines_chunk(&mut self, vines: &[(i32, i32, i32)]) {
+        for &(x, y, z) in vines {
+            if !in_bounds(x, y, z) {
+                continue;
+            }
+            let pos = (x, y as u8, z);
+            // Player-edited vines already join the normal ecology queue;
+            // snapshots that raced with a more recent edit must not
+            // reintroduce deleted/generated vines.
+            if self.edits.contains_key(&pos) {
+                continue;
+            }
+            if self.observed_vines.insert(pos) {
+                if self.observed_vine_order.len() == MAX_OBSERVED_VINES {
+                    if let Some(old) = self.observed_vine_order.pop_front() {
+                        self.observed_vines.remove(&old);
+                        if !self.edits.contains_key(&old) {
+                            self.pending_ecology.remove(&old);
+                            self.pending_support.remove(&old);
+                        }
+                    }
+                }
+                self.observed_vine_order.push_back(pos);
+            }
+            self.pending_ecology.insert(pos);
+            self.pending_support.insert(pos);
         }
     }
 
@@ -2897,7 +2937,20 @@ impl World {
     /// sections are transmitted when edited. This avoids dropping high-altitude
     /// or underground edits on re-login or crossing a chunk boundary.
     pub fn chunk_data(&self, chunk_x: i32, chunk_z: i32) -> (u16, Vec<u8>) {
+        let (mask, bytes, _) = self.chunk_data_with_vines(chunk_x, chunk_z);
+        (mask, bytes)
+    }
+
+    /// Chunk encoding already reads each final block ID once. Capture visible
+    /// naturally generated vines alongside the wire payload so the 20TPS
+    /// ecology worker can tick them, without a costly second chunk scan.
+    pub fn chunk_data_with_vines(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> (u16, Vec<u8>, Vec<(i32, i32, i32)>) {
         let block_cache = self.chunk_block_cache(chunk_x, chunk_z);
+        let mut vines = Vec::new();
         let mut mask: u16 = if self.extended_identity().is_some() {
             0x01ff
         } else if self.is_natural() {
@@ -2941,6 +2994,18 @@ impl World {
                             .unwrap_or_else(|| self.get(bx, by, bz));
                         bytes.push((a >> 4) as u8);
                         bytes.push((b >> 4) as u8);
+                        if matches!(
+                            self.generation,
+                            Generation::Expanded(_, crate::dimensions::Dimension::Overworld)
+                        ) && vines.len() < 1_024
+                        {
+                            if a >> 4 == 106 {
+                                vines.push((ax, by, bz));
+                            }
+                            if b >> 4 == 106 && vines.len() < 1_024 {
+                                vines.push((bx, by, bz));
+                            }
+                        }
                         metadata.push((a as u8 & 15) | ((b as u8 & 15) << 4));
                     }
                 }
@@ -2983,7 +3048,7 @@ impl World {
                 bytes.push(kind);
             }
         }
-        (mask, bytes)
+        (mask, bytes, vines)
     }
 }
 #[cfg(test)]
