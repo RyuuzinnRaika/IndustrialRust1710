@@ -407,12 +407,20 @@ impl World {
         // The stochastic test occurs once per simulated second and has the
         // 1.7.10 randomTickSpeed=3 average (60 / 4096 per second). The
         // world's deterministic tick counter keeps repeated reads stable.
-        if !self.pending_ecology.is_empty() && self.fluid_phase.is_multiple_of(GAME_TICKS_PER_SECOND) {
+        if !self.pending_ecology.is_empty()
+            && self.fluid_phase.is_multiple_of(GAME_TICKS_PER_SECOND)
+        {
             let len = self.pending_ecology.len();
             let offset = ((self.fluid_phase / GAME_TICKS_PER_SECOND) as usize)
                 .wrapping_mul(budget.max(1))
                 % len;
-            for &(x, y, z) in self.pending_ecology.iter().cycle().skip(offset).take(len) {
+            for &(x, y, z) in self
+                .pending_ecology
+                .iter()
+                .cycle()
+                .skip(offset)
+                .take(len)
+            {
                 if changes.len() >= budget {
                     break;
                 }
