@@ -9998,6 +9998,52 @@ mod h_special_item_transaction_tests {
     }
 
     #[test]
+    fn blocked_stage_one_sapling_consumes_bone_meal_without_world_change() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-h-bonemeal-blocked-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let world_path = root.join("world.irw");
+        let inventory_path = root.join("player.inventory.json");
+        let mut world = World::new();
+        let mut inventory = Inventory::default();
+        // A lone stage-1 dark oak can never generate a tree, regardless
+        // of the 45% chance. A valid use still consumes one bone meal.
+        world
+            .update_and_save(&world_path, 1, 64, 1, (6 << 4) | 5 | 8)
+            .unwrap();
+        inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 351,
+                    count: 2,
+                    damage: 15,
+                    nbt: None,
+                }),
+            )
+            .unwrap();
+        inventory.save(&inventory_path).unwrap();
+        let changed = use_special_item(
+            &mut world,
+            &world_path,
+            &mut inventory,
+            &inventory_path,
+            true,
+            (1, 64, 1),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(changed.is_empty());
+        assert_eq!(inventory.held().unwrap().count, 1);
+        assert_eq!(Inventory::load(&inventory_path).unwrap().held().unwrap().count, 1);
+        assert_eq!(World::load(&world_path).unwrap().get(1, 64, 1), (6 << 4) | 5 | 8);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn bonemeal_noop_does_not_debit_items_or_write_a_world() {
         let root =
             std::env::temp_dir().join(format!("ir1710-h-bonemeal-noop-{}", std::process::id()));
