@@ -236,6 +236,18 @@ others may take several minutes.
   any future NBT-bearing world-drop producer must extend the format.
   The existing redo journal's per-file size limit still applies to
   oversized worlds. Back up existing saves before first rollout.
+- In addition to the 512-entity limit, ground items must fit the
+  existing 128 KiB JSON file limit. The delivery worker now reduces
+  an oversized 32-item batch by half until its fully validated encoded
+  snapshot fits. If even one additional item cannot fit, it leaves
+  the durable IRW backlog untouched and continues serving pickups.
+  Invalid stacks and out-of-range positions are **not** treated as
+  ordinary backpressure. A local regression test covers item-count
+  capacity, unchanged source snapshots, and invalid inputs.
+- The crash replay test now covers **both write orders**: world
+  acknowledgment appearing before the ground item, and ground item
+  appearing before world acknowledgment. In either case, redo recovery
+  must converge to one saved ground entity and no pending world event.
 - All breakable drops are staged without the former silent 256-item
   truncation. A valid 300-block support-break tick persists all 300
   drops. If a tick would exceed the 2,048-drop durable queue limit,
