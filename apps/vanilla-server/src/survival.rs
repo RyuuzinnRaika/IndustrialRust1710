@@ -473,8 +473,9 @@ mod tests {
         let (wood_iron_time, wood_iron) = mine_rule(15 << 4, stack(270, 0)).unwrap();
         assert_eq!(gold_iron.drop, None);
         assert_eq!(wood_iron.drop, None);
-        assert_eq!(gold_iron_time, wood_iron_time,
-            "gold's high mining speed cannot bypass the iron harvest tier");
+        // Both drop nothing, but the golden tool still removes the block
+        // faster: high speed does not imply a higher harvest tier.
+        assert!(gold_iron_time < wood_iron_time);
     }
 
     #[test]
