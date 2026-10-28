@@ -649,8 +649,17 @@ impl World {
     }
     pub(super) fn device_changes(&mut self, budget: usize) -> BTreeMap<Position, u16> {
         let mut changes = BTreeMap::new();
-        for (&pos, &when) in &self.pending_buttons {
-            if self.fluid_phase >= when {
+        // Only process a bounded number of expired buttons/plates per
+        // tick. A dense feedback circuit must not turn a small scheduler
+        // budget into an unbounded release scan or persistence batch.
+        // Filter expired entries *before* take so non-expired entries at
+        // lower coordinates cannot starve ready timers indefinitely.
+        for (&pos, _) in self
+            .pending_buttons
+            .iter()
+            .filter(|&(_, &when)| self.fluid_phase >= when)
+            .take(budget)
+        {
                 let (x, y, z) = pos;
                 let current = self.get(x, i32::from(y), z);
                 let flag = match current >> 4 {
@@ -663,7 +672,6 @@ impl World {
                 {
                     changes.insert(pos, current & !flag);
                 }
-            }
         }
         if self.pending_devices.is_empty() {
             return changes;
@@ -973,6 +981,30 @@ impl World {
 mod redstone_regression_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn expired_plate_release_respects_tick_budget_and_skips_future_timers() {
+        let mut world = World::new();
+        for x in 0..4 {
+            world.import_block(x, 64, 0, (70 << 4) | 1).unwrap();
+            world
+                .pending_buttons
+                .insert((x, 64, 0), if x == 0 { 10 } else { 1 });
+        }
+        world.fluid_phase = 1;
+        let first = world.device_changes(2);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first.get(&(1, 64, 0)), Some(&(70 << 4)));
+        assert_eq!(first.get(&(2, 64, 0)), Some(&(70 << 4)));
+        assert!(!first.contains_key(&(0, 64, 0)));
+        assert!(!first.contains_key(&(3, 64, 0)));
+        world.pending_buttons.remove(&(1, 64, 0));
+        world.pending_buttons.remove(&(2, 64, 0));
+        let second = world.device_changes(2);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second.get(&(3, 64, 0)), Some(&(70 << 4)));
+        assert!(world.device_changes(0).is_empty());
+    }
 
     #[test]
     fn pressure_plate_failed_save_does_not_leave_a_release_timer() {
