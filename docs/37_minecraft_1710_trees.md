@@ -198,10 +198,11 @@ others may take several minutes.
   up to **32 distinct-position item entities** in one validated ground
   snapshot, saves that snapshot once, and only then acknowledges the
   exact saved queue prefix. Spawn packets follow a successful save.
-- If the ground-item pool is full or its file cannot be written, the
-  queue remains intact and the worker retries at most once per second
-  rather than repeatedly dropping the backlog or aborting the tick.
-  A temporary file error does not remove any queued items.
+- When the ground-item pool is full, the persisted world queue remains
+  unchanged and the worker checks for space at most once per second.
+  If a two-file journal write fails, the worker **halts** so startup
+  recovery can complete the transaction before any further world writes.
+  A storage failure must never be followed by an unsafe in-process retry.
 - When 1,536 or more pending drops remain, new random natural-leaf
   destruction is deferred. This prevents further leaf-decay drops from
   accumulating without bound during a prolonged full-pool condition.
@@ -232,10 +233,16 @@ others may take several minutes.
   any future NBT-bearing world-drop producer must extend the format.
   The existing redo journal's per-file size limit still applies to
   oversized worlds. Back up existing saves before first rollout.
+- All breakable drops are staged without the former silent 256-item
+  truncation. A valid 300-block support-break tick persists all 300
+  drops. If a tick would exceed the 2,048-drop durable queue limit,
+  **the whole update is rejected and rolled back** rather than saving
+  fewer items than the blocks destroyed.
 - Added regression tests for 2 drops at distinct locations, 40-item
   partial batches (32 + 8), full 512-slot storage, invalid target
   refusal, random leaf backpressure, IRW1–IRW4 drop roundtrips,
-  TNT5 corruption detection and crash replay with one item exactly.
+  TNT5 corruption detection, 300-item complete saves, 2,049-item
+  rollback, and crash replay with one item exactly.
   **These tests have not been executed with cargo or on a live client.**
 
 ## Compatibility and testing
@@ -248,9 +255,22 @@ chunk-edge equivalence, **but they were not executed in this session**.
 Suggested local commands in a Rust-enabled environment:
 
     cargo fmt --all -- --check
-    cargo test -p vanilla-server --lib worldgen_trees
-    cargo test -p vanilla-server --lib worldgen
-    cargo test -p vanilla-server --lib ecology
+    cargo test -p vanilla-server --bin vanilla-server pending_world_drops_roundtrip_across_irw_versions
+    cargo test -p vanilla-server --bin vanilla-server interrupted_world_drop_handoff_replays_exactly_one_entity
+    cargo test -p vanilla-server --bin vanilla-server high_volume_support_breaks_do_not_silently_truncate_world_drops
+    cargo test -p vanilla-server --bin vanilla-server over_capacity_support_breaks_roll_back_every_block_and_drop
+
+The server is a **binary crate** (no library target); do not use the
+`--lib` selector for these tests. Windows PowerShell can run the curated
+local test suite without triggering any GitHub CI workflow:
+
+    powershell.exe -ExecutionPolicy Bypass -File .\scripts\verify_tree_world_drops_local.ps1
+
+Optional `-CheckFormat` checks formatting locally; optional `-AllTests`
+runs the complete vanilla-server binary test suite. The default only
+runs targeted tests and checks that every named test actually exists
+before treating the run as successful. No tests were run when authoring
+these changes.
 
 Important: IRW4 base terrain is coordinate-generated. Changing its generator
 can change **unmodified blocks in existing IRW4 worlds** when chunks are re-read.
