@@ -943,7 +943,7 @@ impl World {
                 }
                 return Ok(Vec::new());
             }
-            let (mut candidate, changed) = self.stage_special_batch(&batch)?;
+            let (mut candidate, changed) = self.stage_special_batch(&batch, 128)?;
             for (&pos, &block) in &batch {
                 if matches!(block >> 4, 131 | 132) {
                     candidate.pending_buttons.insert(pos, expires);
