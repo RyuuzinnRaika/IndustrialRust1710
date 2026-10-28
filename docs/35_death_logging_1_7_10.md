@@ -54,3 +54,183 @@ Get-Content .\world.deaths.jsonl -Tail 20
 ワールドファイル名は実際の `--world` パスへ読み替えてください。サバイバルで落下・溺水・空腹・炎上・矢・Mob・エンダーパールの各死亡を再現し、(1)チャット通知が1回のみ、(2)JSONLに各死因と座標が残る、(3)ゲームルールがfalseでもログは残る、(4)死亡回数とドロップが従来どおり、(5)リスポーン後に新しい死亡が記録できることを確認してください。
 
 **注意**: これは**死亡ログの詳細化**であり、未実装の被ダメージ源を実装する変更ではありません。大きな高負荷検証を始める前にワールドのバックアップを取ってください。
+
+
+## D02: fail-safe logging improvements (partial)
+
+The death announcement and diagnostic append happen **before** the potentially
+failing death-drop journal transaction. A failed inventory/drop commit therefore
+does not skip the first death message and diagnostic log.
+
+A successful JSONL append now calls `sync_data()` before returning, and a
+short/failed `write_all` attempts to truncate the partial suffix. A separate
+test simulates an unwritable diagnostic destination. The diagnostic log is still
+best-effort: an I/O error is reported to the console and does not block
+ordinary death-drop/respawn processing.
+
+**Not yet complete:** This is not a multi-file transaction. A power failure
+after player health becomes zero but before scoreboard/death-log processing can
+still lose the death-log event, and a crash between multiple durable files can
+leave a temporarily inconsistent score. Strict cross-restart exactly-once
+semantics require an outbox/checkpoint protocol keyed by a durable unique death
+ID and redo/recovery logic shared with the player, scoreboard and inventory
+journal. Do not mark D02 fully accepted until this has been implemented and
+tested with fault injection.
+
+### D02 validation
+
+- [ ] Fail a death-drop commit and verify that the death log still exists.
+- [ ] Fail the death-log destination and verify that ordinary death/respawn
+      continues without a process crash (error visible to an administrator).
+- [ ] Crash/restart after each checkpoint and confirm no loss/duplication
+      once durable event IDs/redo recovery are implemented.
+- [ ] Confirm `sync_data` and retry I/O do not cause pathological 20TPS stalls
+      during bursts of deaths.
+
+
+## D02 continuation: durable last-event outbox and crash replay
+
+A per-player last-death outbox is now saved atomically before the JSONL
+append. Files live next to a player's saved NBT, for example
+\`players/alex.death-outbox.json\` or
+\`players/verified/<uuid>.death-outbox.json\`.
+
+Each generated death event has a random 128-bit \`event_id\` stored both in the
+outbox and its JSONL entry. On startup the server scans only those two player
+directories, validates the bounded JSON outboxes, and appends events missing
+from their corresponding world/dimension death logs. Repeated recovery does
+not duplicate an event ID; a torn trailing JSONL line is removed and replaced
+by a complete copy of the durable outbox event.
+
+The append path is **serialized**, scans at most 64 MiB of existing log data,
+and invokes \`sync_data()\` after each new row. The 64 MiB bound is intentional:
+if reached, manual log rotation is required rather than allocating
+unbounded memory or silently duplicating old IDs.
+
+Failure policy: invalid/symlinked/outsize outboxes and corrupt complete
+JSONL rows cause recovery to fail closed, with a visible startup error rather
+than discarding evidence. Normal death/respawn remains best-effort if the
+diagnostic outbox cannot be created during play.
+
+### D02 atomic death-accounting improvement
+
+For the seven identified fatal-damage paths, the first HP transition to zero
+now uses the existing bounded \`pending-txn.json\` redo journal to commit
+**three participants in one transaction**:
+
+1. The player's gzip-NBT position/vitals (including 0 HP)
+2. The player's new \`*.death-outbox.json\` event ID and full death event
+3. The world scoreboard image with the incremented \`deathCount\` objective
+
+The scoreboard is updated in memory and broadcast **only after** the redo
+commit succeeds. A repeated dead-session loop cannot increment deathCount
+again, and the JSONL log replays the committed outbox ID once. The journal
+target whitelist now admits **only identity-scoped** player death outboxes and
+root-level scoreboard files; symlinks remain prohibited.
+
+If a fatal journal application fails, disconnect-time player NBT save is
+suppressed so it cannot overwrite prepared redo targets before recovery.
+
+The fallback for any *unrecognized future* fatal damage path still uses the
+legacy separate scoreboard+outbox sequence; it must eventually be replaced by
+the shared fatal transaction wrapper. The entire change requires **Rust
+formatting, unit/integration tests, failpoint-based recovery and a 1.7.10
+native client run before being considered accepted**. Source-only inspection
+does not establish full D02 completion.
+
+### Manual and local tests
+
+- [ ] \`cargo fmt --all -- --check\`
+- [ ] \`cargo test -p vanilla-server death_log\`
+- [ ] \`cargo clippy --workspace --all-targets -- -D warnings\`
+- [ ] Kill the server after outbox preparation but before/after JSONL write,
+      restart and verify exactly one \`event_id\` row.
+- [ ] Verify two successive deaths of one player produce two different IDs.
+- [ ] Verify an invalid outbox fails closed, without modifying world files.
+- [ ] Verify existing legacy death rows lacking \`event_id\` remain readable.
+- [ ] Power-fail between prepare, journal rename, each target rename, and
+      journal cleanup; recover and verify NBT HP/outbox/deathCount agree.
+- [ ] Repeated fatal loop and reconnect cannot increase deathCount twice.
+- [ ] The old, uncategorized fatal-path fallback is replaced by the same redo
+      transaction before D02 is marked fully complete.
+- [ ] Check TPS cost as JSONL approaches 64 MiB.
+
+
+## D04 integration / D05 cactus-death implementation
+
+The D01 typed Mob / projectile / TNT attribution and D03 mixed-hazard
+classification are now integrated with D02's durable three-part death
+transaction in a **separate unmerged branch**. Native protocol tests have not
+been run here. Do not merge solely based on source inspection.
+
+For D05, cactus damage was added to \`Hazards::tick_detailed\`, using a
+bounded player bounding-box overlap against cactus block ID **81**, so touching
+the side matters even when the player feet are not inside a cactus block.
+It deals 1 raw HP with the existing armor-adjusted damage path, at most once
+every 10 server ticks, and is reported as \`cactus\`. A fatal encounter reports:
+\`Alex was pricked to death\`.
+
+The cactus source merges into \`mixed_environmental\` when a separate
+environmental hit is also applied in the same hazard batch; it never
+arbitrarily replaces the first source.
+
+### Remaining D05 sources
+- [ ] Void/out-of-world: requires safe server-owned movement below Y=0 and a
+      carefully specified Y=-64 kill threshold; current player position
+      validation forbids negative Y.
+- [ ] Falling anvil: requires actual falling-block entity and impact tracking,
+      not just an anvil block check.
+- [ ] Lightning: requires authoritative strike damage source and event linkage.
+- [ ] Potions and other magic: split current generic projectile/effect source
+      only when server-owned effects have stable provenance.
+- [ ] \`/kill\` should emit a distinct cause after command authorization and
+      vanilla 1.7.10 syntax are implemented.
+- [ ] Check collision, armor, death drops, position sync and 1.7.10 client
+      behavior through native tests.
+
+This work does not create a PR because the repository's
+\`.github/workflows/ops-python.yml\` is configured to launch GitHub Actions
+on every pull-request creation/synchronization. Branch-only pushes to this
+non-default, non-release branch avoid those workflow triggers.
+
+## 2026-10-28: D04 reintegration against main and D05 void/anvil work
+
+- The project death pipeline was transplanted onto a new branch based on
+  current `main`, retaining newer gameplay and command changes. No PR
+  is opened because unrelated workflows launch on pull_request.
+- Legacy 1.7.10 void damage begins below Y=-64, removing the incorrect
+  Y=0 physics floor. A bounded negative-Y position is now allowed; the
+  session inflicts **4 armor-bypassing health points per 10 ticks** and
+  records `void` / `<player> fell out of the world`. The current
+  implementation applies only to Survival; Creative and riding-player
+  interactions need additional tests/implementation.
+- Existing block-based gravity has a tracked in-memory anvil origin and emits
+  one landing event with `min(2*(blocks_fallen-1),40)` damage. The event
+  is delivered only to intersecting players in the active dimension; the
+  authenticated owning session performs the health mutation, death
+  transaction, health packet, and `falling_anvil` death message.
+- Important limitation: the world currently emulates falling blocks as
+  block-to-block moves instead of Protocol 5 falling-block entities. The
+  in-memory anvil origin height is lost across restart; after restart the
+  damage can be undercounted. Replaying a made-up origin would be worse.
+  **D05 anvil is therefore partial, not a claim of complete 1.7.10
+  falling-entity equivalence.** Armor/helmet-specific falling-anvil reduction
+  is also not yet implemented.
+
+### Acceptance tests before integration
+
+- [ ] `cargo fmt --all -- --check` — not run here
+- [ ] `cargo test -p vanilla-server` — not run here
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` — not run here
+- [ ] `cargo build --release -p vanilla-server` — not run here
+- [ ] Protocol 5 client: test Y=-0.5, -63.5, -64.1, and death after
+      the fifth 4-point void hit; test respawn in the original dimension.
+- [ ] Protocol 5 client: place an anvil three blocks above a player and
+      check correct single hit, no distant damage, proper death drops;
+      repeat while another player stands in a different dimension.
+- [ ] Test shutdown/reload while an anvil is falling; no phantom killer or
+      duplicated hit.
+- [ ] Retest movement rollback, teleport ACK, world save/reload and
+      the existing 37+ protocol5 end-to-end tests.
+- [ ] Verify no GitHub Actions were triggered; Actions are **not** a test
+      destination for this project.
