@@ -5,6 +5,7 @@ use crate::inventory::Stack;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Primed TNT is an entity and can no longer be mined as a TNT block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,7 +75,28 @@ pub(super) fn blast_breakable(id: u16) -> bool {
 }
 
 type StagedBlockBatch = (World, Vec<(i32, i32, i32)>);
-pub type StagedSpecialItem = (World, Vec<(i32, i32, i32)>, Option<Stack>, bool);
+/// (next world, block changes, exchanged item, flint-steel wear,
+///  consume bone meal even if no blocks changed).
+pub type StagedSpecialItem = (World, Vec<(i32, i32, i32)>, Option<Stack>, bool, bool);
+
+static BONE_MEAL_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+
+/// Each interaction draws a fresh pseudo-random outcome, even when a player
+/// uses bone meal multiple times in one game tick. Vanilla succeeds on 9/20.
+fn bone_meal_succeeds(phase: u64, x: i32, y: i32, z: i32) -> bool {
+    let n = BONE_MEAL_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    let mut v = n
+        ^ phase.wrapping_mul(0x9e37_79b1_85eb_ca87)
+        ^ (x as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f)
+        ^ (y as i64 as u64).wrapping_mul(0x1656_67b1_9e37_79f9)
+        ^ (z as i64 as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    v ^= v >> 30;
+    v = v.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    v ^= v >> 27;
+    v = v.wrapping_mul(0x94d0_49bb_1331_11eb);
+    v ^= v >> 31;
+    v % 20 < 9
+}
 
 impl World {
     fn spawn_primed_tnt(&mut self, x: i32, y: i32, z: i32, fuse: u64) -> bool {
@@ -117,7 +139,7 @@ impl World {
             damage: 0,
             nbt: None,
         };
-        let Some((staged, changed, _, _)) = self.stage_special_item(x, y, z, held)? else {
+        let Some((staged, changed, _, _, _)) = self.stage_special_item(x, y, z, held)? else {
             return Ok(false);
         };
         if changed.is_empty() {
@@ -584,6 +606,11 @@ impl World {
             59 | 141 | 142 | 104 | 105 if block & 7 < 7 => {
                 changes.insert((x, y as u8, z), (block & !7) | 7);
             }
+            6 if block & 8 == 0 => {
+                // The first fertilizer-assisted growth stage is invisible
+                // in 1.7.10: species bits stay unchanged; bit 0x8 is set.
+                changes.insert((x, y as u8, z), block | 8);
+            }
             6 => self.grow_tree(x, y, z, &mut changes),
             2 => {
                 for dx in -2..=2 {
@@ -620,6 +647,7 @@ impl World {
         }
         let target = self.get(x, y, z) >> 4;
         let mut changes = BTreeMap::new();
+        let mut consume_even_without_changes = false;
         let (exchange, wears_tool) =
             if let Some((block, replacement)) = self.cauldron_exchange(x, y, z, held) {
                 changes.insert((x, y as u8, z), block);
@@ -628,7 +656,20 @@ impl World {
                 changes = self.end_eye_changes(x, y, z);
                 (None, false)
             } else if held.id == 351 && held.damage == 15 {
-                changes = self.bonemeal_changes(x, y, z);
+                if target == 6 {
+                    // An attempted use consumes one bone meal regardless
+                    // of the 45% roll or an obstructed stage-1 tree.
+                    // Malformed/unsupported locations never debit items.
+                    if y <= 0 || !matches!(self.get(x, y - 1, z) >> 4, 2 | 3 | 60) {
+                        return Ok(None);
+                    }
+                    consume_even_without_changes = true;
+                    if bone_meal_succeeds(self.fluid_phase, x, y, z) {
+                        changes = self.bonemeal_changes(x, y, z);
+                    }
+                } else {
+                    changes = self.bonemeal_changes(x, y, z);
+                }
                 (None, false)
             } else if target == 46 && held.id == 259 {
                 if self.primed_tnt.len() >= MAX_PRIMED_TNT {
@@ -653,7 +694,13 @@ impl World {
         if wears_tool && !changed.is_empty() {
             next.spawn_primed_tnt(x, y, z, 80);
         }
-        Ok(Some((next, changed, exchange, wears_tool)))
+        Ok(Some((
+            next,
+            changed,
+            exchange,
+            wears_tool,
+            consume_even_without_changes,
+        )))
     }
 
     /// Approximate 1.7.10 daylight detector curve: noon=15, midnight=0,
