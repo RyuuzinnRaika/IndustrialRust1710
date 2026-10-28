@@ -761,6 +761,50 @@ mod tests {
     }
 
     #[test]
+    fn staged_world_drop_batches_preserve_backpressure_and_reject_invalid_items() {
+        let stack = Stack { id: 6, count: 1, damage: 0, nbt: None };
+        let sample = crate::world::WorldDrop { pos: (2, 70, 3), stack };
+        let empty = GroundItems::default();
+        let (count, candidate, items) = empty
+            .stage_world_drops_that_fit(&[sample, sample])
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(items.len(), 2);
+        assert_eq!(candidate.items().count(), 2);
+        assert_eq!(empty.items().count(), 0, "staging must never mutate the source");
+
+        let almost_full_stacks = vec![stack; MAX_DROPS - 1];
+        let (almost_full, _) = empty
+            .stage_put_many(&almost_full_stacks, (0, 70, 0))
+            .unwrap();
+        let (count, next, items) = almost_full
+            .stage_world_drops_that_fit(&[sample, sample])
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(items.len(), 1);
+        assert_eq!(next.items().count(), MAX_DROPS);
+        assert_eq!(almost_full.items().count(), MAX_DROPS - 1);
+
+        let (full, _) = empty
+            .stage_put_many(&vec![stack; MAX_DROPS], (0, 70, 0))
+            .unwrap();
+        assert!(full.stage_world_drops_that_fit(&[sample]).unwrap().is_none());
+
+        let bad_stack = crate::world::WorldDrop {
+            pos: (2, 70, 3),
+            stack: Stack { id: 6, count: 0, damage: 0, nbt: None },
+        };
+        assert!(empty.stage_world_drops_that_fit(&[bad_stack]).is_err());
+        let bad_position = crate::world::WorldDrop {
+            pos: (crate::world::WORLD_LIMIT, 70, 3),
+            stack,
+        };
+        assert!(empty.stage_world_drops_that_fit(&[bad_position]).is_err());
+    }
+
+    #[test]
     fn protocol5_item_packets_and_range() {
         let item = GroundItem {
             id: 1_000_000_001,
