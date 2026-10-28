@@ -27,6 +27,7 @@ deterministic geometry/biome approximation. It does not change IRW1–3.
 - Surface-root minimum is sea level (Y=62); plains/savanna supplementary trees require Y>=64. Roots in the spawn-safe 24×24 area are suppressed.
 - Generated leaf metadata **does not set 0x4**. In Java 1.7.10 that bit means permanent/player-placed leaves. Leaves use 18 for old species and 161 for acacia/dark oak; logs use 17 and 162 respectively.
 - Natural trees are seeded by world seed and absolute coordinates. A 13×13 candidate search allows tree crowns to cross chunk boundaries without seams; point and cached-column generation use identical precedence.
+- A species-specific conservative horizontal footprint (2–6 blocks) skips trees that cannot possibly contribute to a queried point or column. This preserves candidate ordering and all reachable tree voxels while avoiding unnecessary canopy geometry checks. A regression test inspects all twelve shapes across multiple variations; actual client-side performance still needs measurement.
 
 ## Sapling growth and bone meal (new)
 
