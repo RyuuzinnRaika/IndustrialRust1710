@@ -261,14 +261,30 @@ impl GroundItems {
         stacks: &[Stack],
         block: (i32, i32, i32),
     ) -> io::Result<(Self, Vec<GroundItem>)> {
-        if !self.has_capacity_for(stacks.len()) || stacks.iter().any(|stack| !stack.is_valid()) {
-            return Err(invalid("death-drop capacity or stack invalid"));
+        self.stage_put_at_positions(
+            &stacks.iter().copied().map(|stack| (stack, block)).collect::<Vec<_>>(),
+        )
+    }
+
+    /// Stage a world-tick batch with distinct item positions. A tick may
+    /// detach several attachments in different chunks, so using one block
+    /// coordinate for every item would place the drops at the wrong location.
+    /// The returned pool and entities stay private until a world+ground
+    /// journal transaction has committed successfully.
+    pub fn stage_put_at_positions(
+        &self,
+        entries: &[(Stack, (i32, i32, i32))],
+    ) -> io::Result<(Self, Vec<GroundItem>)> {
+        if !self.has_capacity_for(entries.len())
+            || entries.iter().any(|(stack, _)| !stack.is_valid())
+        {
+            return Err(invalid("world-drop capacity or stack invalid"));
         }
-        let position = drop_position(block)?;
         let mut candidate = self.clone();
-        let mut inserted = Vec::with_capacity(stacks.len());
-        let when_ready = Instant::now() + PICKUP_DELAY;
-        for &stack in stacks {
+        let mut inserted = Vec::with_capacity(entries.len());
+        let ready = Instant::now() + PICKUP_DELAY;
+        for &(stack, block) in entries {
+            let position = drop_position(block)?;
             candidate.next_id += 1;
             let item = GroundItem {
                 id: candidate.next_id,
@@ -276,10 +292,10 @@ impl GroundItems {
                 stack,
             };
             if !item.valid() {
-                return Err(invalid("invalid death-drop location"));
+                return Err(invalid("invalid world-drop location"));
             }
             candidate.entries.insert(item.id, item.clone());
-            candidate.eligible_after.insert(item.id, when_ready);
+            candidate.eligible_after.insert(item.id, ready);
             inserted.push(item);
         }
         candidate.encoded()?;
