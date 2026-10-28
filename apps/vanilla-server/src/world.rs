@@ -1311,6 +1311,29 @@ impl World {
     /// Bounded 20TPS flow/conduction step. IRW save occurs once per tick.
     /// Empty fluid destinations and wire strengths are staged before mutation.
     pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
+        self.block_tick_inner(path, budget, None).map(|(changed, _)| changed)
+    }
+
+    /// Tick world blocks together with their materialized ground-item drops.
+    /// A detached attachment and the item it creates have one crash-recoverable
+    /// world/ground journal transaction; no item is broadcast before commit.
+    pub fn block_tick_with_ground(
+        &mut self,
+        path: &Path,
+        budget: usize,
+        ground: &mut crate::ground_items::GroundItems,
+        ground_path: &Path,
+    ) -> io::Result<(Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>)> {
+        self.block_tick_inner(path, budget, Some((ground, ground_path)))
+    }
+
+    fn block_tick_inner(
+        &mut self,
+        path: &Path,
+        budget: usize,
+        mut ground: Option<(&mut crate::ground_items::GroundItems, &Path)>,
+    ) -> io::Result<(Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>)> {
+        let mut committed_drops = Vec::new();
         self.fluid_phase = self.fluid_phase.wrapping_add(1);
         // Snapshot before any TNT movement; disk failure restores exactly
         // the positions and velocities that were durably committed.
@@ -1627,6 +1650,26 @@ impl World {
             }
             changes.remove(&pos);
         }
+        // Block supports must not disappear unless every corresponding
+        // item can also be stored. On a full ground pool, keep the original
+        // block in the world and retry its support check on a later tick.
+        // This applies to regular support detachments and piston breakage.
+        let mut deferred_drops = Vec::new();
+        if let Some((ground, _)) = ground.as_ref() {
+            let mut reserved = 0usize;
+            for (&pos, &next) in &changes {
+                if self.tick_drop_for_change(pos, next).is_some() {
+                    if reserved >= 256 || !ground.has_capacity_for(reserved + 1) {
+                        deferred_drops.push(pos);
+                    } else {
+                        reserved += 1;
+                    }
+                }
+            }
+            for pos in &deferred_drops {
+                changes.remove(pos);
+            }
+        }
         // Never spawn an entity for a TNT block whose removal was dropped by
         // the edit budget. Otherwise /stop persists a TNT block AND entity.
         primed_on_commit.retain(|&(x, y, z)| changes.get(&(x, y as u8, z)) == Some(&0));
@@ -1781,8 +1824,30 @@ impl World {
             for (&position, &block) in &changes {
                 self.set_gravity_cell(position, block);
             }
+            let mut committed_pool = None;
             let saved = if self.edits.len() > MAX_EDITS {
                 Err(invalid("fluid or redstone exceeds world edit budget"))
+            } else if !detached_drops.is_empty() {
+                if let Some((pool, ground_path)) = ground.as_ref() {
+                    // All drop positions have already been accepted by the
+                    // capacity gate. Stage all of them before committing
+                    // either the world or the ground-item sidecar.
+                    (|| -> io::Result<()> {
+                        let positions = detached_drops
+                            .iter()
+                            .map(|drop| (drop.stack, drop.pos))
+                            .collect::<Vec<_>>();
+                        let (staged, spawned) = pool.stage_put_at_positions(&positions)?;
+                        crate::journal::commit(
+                            &path.with_extension("pending-txn.json"),
+                            &[(path, self.encoded()?), (*ground_path, staged.encoded()?)],
+                        )?;
+                        committed_pool = Some((staged, spawned));
+                        Ok(())
+                    })()
+                } else {
+                    self.save(path)
+                }
             } else {
                 self.save(path)
             };
@@ -1810,7 +1875,16 @@ impl World {
                 }
                 return Err(error);
             }
-            self.pending_drops.extend(detached_drops);
+            if let Some((pool, spawned)) = committed_pool {
+                if let Some((live, _)) = ground.as_mut() {
+                    **live = pool;
+                }
+                committed_drops = spawned;
+            } else {
+                // Preserve the stand-alone block_tick API used by existing
+                // offline tests and tools, which still drain these events.
+                self.pending_drops.extend(detached_drops);
+            }
             self.pending_device_activations.extend(fired_devices);
             self.pending_piston_actions.extend(piston_actions);
             for (position, (facing, extending)) in swept {
@@ -1875,6 +1949,11 @@ impl World {
         for pos in supported {
             self.pending_support.remove(&pos);
         }
+        // Capacity-deferred blocks retain a wake-up marker, even if they
+        // were in this tick's processed support set.
+        for pos in deferred_drops {
+            self.pending_support.insert(pos);
+        }
         // Clear timers only after the world save succeeded, so a storage
         // failure cannot silently leave a permanently powered component.
         for pos in expired_timers {
@@ -1885,7 +1964,7 @@ impl World {
             changed.push((x, i32::from(y), z));
             self.wake_block_updates(x, i32::from(y), z);
         }
-        Ok(changed)
+        Ok((changed, committed_drops))
     }
 
     /// Commit a creeper explosion as one durable world transition.
