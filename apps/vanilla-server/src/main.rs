@@ -2608,6 +2608,29 @@ fn play(
                     .map_err(|_| bad("game rules mutex poisoned"))?;
                 (rules.keep_inventory(), rules.show_death_messages())
             };
+            // Log before drop I/O. A failed inventory/journal commit must
+            // not erase the only available account of the fatal hit.
+            if newly_dead {
+                let record = DeathRecord {
+                    player: name,
+                    hit: fatal_hit.take(),
+                    position: *player,
+                    dimension: session_dimension.protocol_id() as i32,
+                    tick: now_tick,
+                };
+                // A server-generated ID correlates the console line with
+                // the durable JSONL event. Reuse it for any in-session retry.
+                // It is not yet a persisted transaction ID for other files.
+                let event_id = format!("d2-{:032x}", rand::random::<u128>());
+                println!("{} event_id={event_id}", record.console_summary());
+                if let Err(error) = record.append_with_event_id(world_path, &event_id) {
+                    // Optional diagnostic output must not block drops or respawn.
+                    eprintln!("DEATH LOG WRITE ERROR event_id={event_id}: {error}");
+                }
+                if show_death_messages {
+                    hub.broadcast(chat_event(&record.chat_message())?);
+                }
+            }
             if !keep_inventory {
                 commit_death_drops(
                     inventory,
@@ -2618,23 +2641,6 @@ fn play(
                     hub,
                     location,
                 )?;
-            }
-            if newly_dead {
-                let record = DeathRecord {
-                    player: name,
-                    hit: fatal_hit.take(),
-                    position: *player,
-                    dimension: session_dimension.protocol_id() as i32,
-                    tick: now_tick,
-                };
-                println!("{}", record.console_summary());
-                if let Err(error) = record.append(world_path) {
-                    // Optional diagnostic output must not block drops or respawn.
-                    eprintln!("DEATH LOG WRITE ERROR: {error}");
-                }
-                if show_death_messages {
-                    hub.broadcast(chat_event(&record.chat_message())?);
-                }
             }
             if hardcore {
                 // Persist the dead state before ending the connection. Future
