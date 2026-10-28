@@ -11279,3 +11279,93 @@ mod command_world_settings_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+
+#[cfg(test)]
+mod queued_leaf_drop_persistence_tests {
+    use super::*;
+
+    fn item(id: i16) -> Stack {
+        Stack {
+            id,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        }
+    }
+
+    fn root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "industrialrust1710-{label}-{}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn queued_leaf_drops_at_distinct_positions_save_in_one_batch() {
+        let dir = root("leaf-drops-batch");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ground.json");
+        let mut world = World::new();
+        world.queue_test_drop((5, 83, -7), item(6));
+        world.queue_test_drop((-2, 72, 12), item(260));
+        let mut ground = GroundItems::default();
+        let spawned = flush_pending_world_drops(&mut world, &mut ground, &path).unwrap();
+        assert_eq!(spawned.len(), 2);
+        assert!(world.queued_drops().is_empty());
+        assert_eq!(spawned[0].stack.id, 6);
+        assert_eq!(spawned[1].stack.id, 260);
+        assert_eq!(spawned[0].position, [5 * 32 + 16, 83 * 32 + 16, -7 * 32 + 16]);
+        assert_eq!(spawned[1].position, [-2 * 32 + 16, 72 * 32 + 16, 12 * 32 + 16]);
+        let saved = GroundItems::load(&path).unwrap();
+        assert_eq!(saved.items().count(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn full_ground_pool_keeps_world_drops_until_space_is_available() {
+        let dir = root("leaf-drops-capacity");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let full_path = dir.join("full.json");
+        let free_path = dir.join("free.json");
+        let mut full = GroundItems::default();
+        let staged = full.stage_put_many(&vec![item(6); 512], (0, 65, 0)).unwrap();
+        full.commit_staged_put(&full_path, staged).unwrap();
+        assert_eq!(full.remaining_capacity(), 0);
+        let mut world = World::new();
+        world.queue_test_drop((1, 65, 1), item(260));
+        assert!(flush_pending_world_drops(&mut world, &mut full, &full_path)
+            .unwrap()
+            .is_empty());
+        assert_eq!(world.queued_drops().len(), 1);
+        assert_eq!(GroundItems::load(&full_path).unwrap().items().count(), 512);
+        let mut free = GroundItems::default();
+        let spawned = flush_pending_world_drops(&mut world, &mut free, &free_path).unwrap();
+        assert_eq!(spawned.len(), 1);
+        assert!(world.queued_drops().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn failed_ground_save_does_not_consume_pending_world_drops() {
+        let dir = root("leaf-drops-retry");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let invalid_path = dir.join("existing-directory");
+        std::fs::create_dir_all(&invalid_path).unwrap();
+        let good_path = dir.join("ground.json");
+        let mut world = World::new();
+        world.queue_test_drop((7, 65, 7), item(6));
+        let mut ground = GroundItems::default();
+        assert!(flush_pending_world_drops(&mut world, &mut ground, &invalid_path).is_err());
+        assert_eq!(world.queued_drops().len(), 1);
+        assert_eq!(ground.items().count(), 0);
+        let items = flush_pending_world_drops(&mut world, &mut ground, &good_path).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(GroundItems::load(&good_path).unwrap().items().count(), 1);
+        assert!(world.queued_drops().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
