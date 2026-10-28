@@ -739,6 +739,50 @@ mod tests {
     }
 
     #[test]
+    fn projectile_provenance_survives_tail_repair_and_idempotent_retry() {
+        let (world, path) = test_log_path("projectile-id-replay");
+        let death = DeathRecord {
+            player: "Alex",
+            hit: Some(FatalHit {
+                cause: DeathCause::Projectile {
+                    kind: "Arrow",
+                    shooter_kind: Some("Skeleton"),
+                    shooter_id: Some(500_002),
+                },
+                previous_health: 2.0,
+                applied_damage: 2.0,
+            }),
+            position: PlayerPosition::default(),
+            dimension: 0,
+            tick: 123,
+        };
+        assert_eq!(death.chat_message(), "Alex was shot by Skeleton");
+        assert!(death.append_with_event_id(&world, "projectile-death-001").unwrap());
+
+        // Model a crash between the JSON write and the trailing delimiter.
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        fs::write(&path, bytes).unwrap();
+
+        // The same ID must recover the delimiter, not add a second death.
+        assert!(!death.append_with_event_id(&world, "projectile-death-001").unwrap());
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.ends_with('\n'));
+        assert_eq!(raw.lines().count(), 1);
+        let value: Value = serde_json::from_str(raw.trim_end()).unwrap();
+        assert_eq!(value["event"], "player_death");
+        assert_eq!(value["event_id"], "projectile-death-001");
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["cause"], "projectile");
+        assert_eq!(value["source_type"], "Skeleton");
+        assert_eq!(value["source_entity_id"], 500_002);
+        assert_eq!(value["projectile_type"], "Arrow");
+        assert_eq!(value["death_message"], death.chat_message());
+        assert!(value["block_position"].is_object());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn existing_dead_player_has_safe_fallback_without_fabricated_cause() {
         let record = DeathRecord {
             player: "Alex",
