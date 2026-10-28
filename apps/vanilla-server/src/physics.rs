@@ -636,7 +636,9 @@ const MAX_CATCH_UP_STEPS: u64 = 4;
 
 /// Resolve vertical descent against solid block top faces without tunnelling.
 fn resolve_descent(world: &World, position: &PlayerPosition, wanted_y: f64) -> f64 {
-    let wanted = wanted_y.max(0.0);
+    // Blocks only exist from Y=0 to 255, but falling entities continue into
+    // the void. Do not turn Y=0 into an invisible floor.
+    let wanted = wanted_y.max(-256.0);
     let (min_x, max_x, min_z, max_z) = horizontal_box(position);
     let mut best = wanted;
     for x in min_x..=max_x {
@@ -895,6 +897,29 @@ mod tests {
         assert!(!supported(&world, &at(0.5, 64.5, 0.5)));
         world.import_block(0, 63, 0, 0).unwrap();
         assert!(!supported(&world, &at(0.5, 64.0, 0.5)));
+    }
+
+    #[test]
+    fn empty_world_has_no_invisible_floor_at_y_zero() {
+        let world = World::new();
+        let position = PlayerPosition {
+            x: 0.5,
+            y: 0.05,
+            z: 0.5,
+        };
+        let below = resolve_descent(&world, &position, -0.3);
+        assert!(below < 0.0);
+        let underworld = PlayerPosition {
+            y: -64.5,
+            ..position
+        };
+        assert!(!collides(&world, &underworld));
+        assert!(!supported(&world, &underworld));
+        assert!(valid_movement(
+            &world,
+            &PlayerPosition { y: 0.05, ..position },
+            &PlayerPosition { y: -0.3, ..position }
+        ));
     }
 
     #[test]
