@@ -3942,26 +3942,39 @@ fn play(
                                                     .map_err(|_| bad("decorations lock poisoned"))?
                                                     .occupied(target));
                                         if !occupied {
-                                            let bonus = survival::additional_drop(
-                                                w.get(x, y, z),
-                                                target,
-                                                now_tick,
-                                            );
-                                            // Collect ordinary and bonus drops before any
-                                            // irreversible world edit. Two drops now require
-                                            // one durable ground-item snapshot, not two.
-                                            let mut drop_stacks = Vec::with_capacity(2);
-                                            if let Some(drop) = result.drop {
-                                                drop_stacks.push(Stack {
-                                                    id: drop.id,
-                                                    count: 1,
-                                                    damage: drop.damage,
-                                                    nbt: None,
-                                                });
-                                            }
-                                            if let Some(stack) = bonus {
-                                                drop_stacks.push(stack);
-                                            }
+                                            // Precompute every drop before the first
+                                            // irreversible edit. Leaves can independently
+                                            // yield a sapling and an apple; valid shears
+                                            // instead collect the leaves or vine block.
+                                            // All drops share one durable ground snapshot.
+                                            let block_state = w.get(x, y, z);
+                                            let drop_stacks =
+                                                if let Some(foliage) = survival::manual_foliage_drops(
+                                                    block_state,
+                                                    target,
+                                                    now_tick,
+                                                    inventory.held(),
+                                                ) {
+                                                    foliage
+                                                } else {
+                                                    let mut stacks = Vec::with_capacity(2);
+                                                    if let Some(drop) = result.drop {
+                                                        stacks.push(Stack {
+                                                            id: drop.id,
+                                                            count: 1,
+                                                            damage: drop.damage,
+                                                            nbt: None,
+                                                        });
+                                                    }
+                                                    if let Some(bonus) = survival::additional_drop(
+                                                        block_state,
+                                                        target,
+                                                        now_tick,
+                                                    ) {
+                                                        stacks.push(bonus);
+                                                    }
+                                                    stacks
+                                                };
                                             let mut ground = ground_items.lock().map_err(|_| {
                                                 io::Error::other("ground items lock poisoned")
                                             })?;
