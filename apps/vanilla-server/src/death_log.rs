@@ -5,10 +5,76 @@ use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_RECORD_BYTES: usize = 2048;
+// Only recent IDs are scanned: this is an audit-log retry guard, not a
+// cross-file exactly-once transaction or a permanent event-id index.
+const EVENT_ID_SCAN_BYTES: usize = MAX_RECORD_BYTES * 128;
+static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(0);
+
+fn generated_event_id() -> io::Result<String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid system clock"))?
+        .as_nanos();
+    let seq = NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed);
+    Ok(format!("d2-{nanos:032x}-{:08x}-{seq:016x}", std::process::id()))
+}
+
+fn valid_event_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 80
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+/// Detect an immediate retry, including one after reopening the file. Scan
+/// at most 256 KiB rather than causing unbounded O(log_size) work on death.
+fn recent_event_present(file: &mut fs::File, id: &str, record: &DeathRecord<'_>) -> io::Result<bool> {
+    let len = file.metadata()?.len();
+    let scan_len = len.min(EVENT_ID_SCAN_BYTES as u64) as usize;
+    if scan_len == 0 {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::Start(len - scan_len as u64))?;
+    let mut bytes = vec![0; scan_len];
+    file.read_exact(&mut bytes)?;
+    // The window may start in the middle of an older JSONL entry.
+    let offset = if len > scan_len as u64 {
+        bytes
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(scan_len, |index| index + 1)
+    } else {
+        0
+    };
+    for line in bytes[offset..].split(|&byte| byte == b'\n').filter(|line| !line.is_empty()) {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if value.get("event_id").and_then(Value::as_str) != Some(id) {
+            continue;
+        }
+        if value.get("event").and_then(Value::as_str) != Some("player_death")
+            || value.get("player").and_then(Value::as_str) != Some(record.player)
+            || value.get("cause").and_then(Value::as_str) != Some(record.cause().code())
+            || value.get("dimension").and_then(Value::as_i64) != Some(i64::from(record.dimension))
+            || value.get("server_tick").and_then(Value::as_u64) != Some(record.tick)
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "death event ID reused for a different event",
+            ));
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 
 /// A human at negative fractional coordinates is inside the lower block,
 /// not in the block obtained by truncation toward zero. Do not invent a
@@ -53,8 +119,15 @@ fn reconcile_jsonl_tail(file: &mut fs::File) -> io::Result<()> {
         ));
     }
     let start = last_newline.map_or(0, |index| index + 1);
-    if serde_json::from_slice::<Value>(&tail[start..]).is_ok() {
-        // A fully written object may only have lost the final delimiter.
+    if let Ok(value) = serde_json::from_slice::<Value>(&tail[start..]) {
+        // Never silently accept arbitrary complete JSON as a death record.
+        if value.get("event").and_then(Value::as_str) != Some("player_death") {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "unexpected complete JSON value at death-log tail",
+            ));
+        }
+        // A fully written death event may only have lost its final delimiter.
         file.write_all(b"\n")?;
     } else {
         let valid_len = file_len - (window - start) as u64;
@@ -188,14 +261,30 @@ impl DeathRecord<'_> {
         world_path.with_extension("deaths.jsonl")
     }
 
-    /// One append per death; failures are reported by the caller but never
-    /// prevent a dead player's normal drops/respawn path.
+    /// Callers without a stable ID still get a new observable ID. Retries
+    /// are idempotent only when the caller explicitly reuses the same ID.
+    #[allow(dead_code)] // Legacy test helper; production passes an explicit ID.
     pub fn append(&self, world_path: &Path) -> io::Result<()> {
+        self.append_with_event_id(world_path, &generated_event_id()?)
+            .map(|_| ())
+    }
+
+    /// Return true for a new append, false when this ID already appears in
+    /// the bounded recent-record window. No changes to scoreboard or drops.
+    pub fn append_with_event_id(&self, world_path: &Path, id: &str) -> io::Result<bool> {
+        if !valid_event_id(id) {
+            return Err(io::Error::new(ErrorKind::InvalidInput, "invalid death event ID"));
+        }
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid system clock"))?
             .as_millis();
-        let mut line = serde_json::to_vec(&self.json(timestamp_ms))?;
+        let mut payload = self.json(timestamp_ms);
+        payload
+            .as_object_mut()
+            .expect("death event is always a JSON object")
+            .insert("event_id".to_string(), Value::String(id.to_string()));
+        let mut line = serde_json::to_vec(&payload)?;
         if line.len() >= MAX_RECORD_BYTES {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
@@ -217,6 +306,9 @@ impl DeathRecord<'_> {
             .append(true)
             .open(path)?;
         reconcile_jsonl_tail(&mut file)?;
+        if recent_event_present(&mut file, id, self)? {
+            return Ok(false);
+        }
         let previous_len = file.metadata()?.len();
         if let Err(error) = file.write_all(&line) {
             // Preserve the pre-append length if a short write is reported.
@@ -230,7 +322,8 @@ impl DeathRecord<'_> {
         }
         // Sync the new line before reporting success to the player session.
         // This is not an atomic transaction with player HP, items, or scores.
-        file.sync_data()
+        file.sync_data()?;
+        Ok(true)
     }
 
     pub fn console_summary(&self) -> String {
@@ -469,6 +562,53 @@ mod tests {
             .collect();
         assert_eq!(entries.len(), 12);
         assert!(entries.iter().all(|event| event["player"] == "Alex"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn event_id_deduplicates_retries_after_reopening_and_interleaved_records() {
+        let (world, path) = test_log_path("idempotency");
+        let record = sample_record();
+        assert!(record.append_with_event_id(&world, "same-event-001").unwrap());
+        assert!(!record.append_with_event_id(&world, "same-event-001").unwrap());
+        assert!(record.append_with_event_id(&world, "another-event-002").unwrap());
+        assert!(!record.append_with_event_id(&world, "same-event-001").unwrap());
+        let lines: Vec<Value> = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["event_id"], "same-event-001");
+        assert_eq!(lines[1]["event_id"], "another-event-002");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn event_id_collision_cannot_hide_a_different_players_death() {
+        let (world, path) = test_log_path("collision");
+        sample_record()
+            .append_with_event_id(&world, "shared-id-001")
+            .unwrap();
+        let other = DeathRecord {
+            player: "Steve",
+            hit: None,
+            position: PlayerPosition::default(),
+            dimension: 0,
+            tick: 123,
+        };
+        assert!(other.append_with_event_id(&world, "shared-id-001").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
+        assert!(other.append_with_event_id(&world, "invalid id").is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn complete_non_death_json_tail_is_not_silently_accepted() {
+        let (world, path) = test_log_path("foreign-json");
+        fs::write(&path, b"{\"other\":true}").unwrap();
+        assert!(sample_record().append(&world).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"{\"other\":true}");
         fs::remove_file(path).unwrap();
     }
 
