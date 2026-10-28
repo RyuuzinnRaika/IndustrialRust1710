@@ -4700,6 +4700,11 @@ mod tests {
         ));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
+        // 1.7.10 carpet supports a non-solid block as long as it is non-air.
+        let mut supported_by_torch = World::new();
+        supported_by_torch.import_block(3, 64, 4, 50 << 4).unwrap();
+        assert!(supported_by_torch.can_support(3, 65, 4, 171 << 4));
+        assert!(!supported_by_torch.can_support(3, 66, 4, 171 << 4));
         let carpet = (171 << 4) | 11;
         world.update_and_save(&path, 3, 64, 3, carpet).unwrap();
         assert!(world.can_support(3, 64, 3, carpet));
