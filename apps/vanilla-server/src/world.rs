@@ -3744,6 +3744,106 @@ mod tests {
     }
 
     #[test]
+    fn journaled_devices_and_brewer_keep_every_occupied_slot_after_mining() {
+        use crate::brewing::{Brewer, Brewers};
+        use crate::dispensers::{Devices, DEVICE_SLOTS};
+        use crate::ground_items::GroundItems;
+        use crate::inventory::Stack;
+
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-device-brewer-mining-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for id in [23_u16, 158, 117] {
+            let world_path = root.join(format!("{id}.irw"));
+            let ground_path = GroundItems::location(&world_path);
+            let journal_path = world_path.with_extension("pending-txn.json");
+            let mut world = World::new();
+            world.import_block(0, 64, 0, id << 4).unwrap();
+            world.save(&world_path).unwrap();
+            let staged_world = world.stage_mining_removal(0, 64, 0).unwrap().unwrap();
+            let make_stack = |id, count| Stack {
+                id,
+                count,
+                damage: 0,
+                nbt: None,
+            };
+            let (storage_path, old_bytes, new_bytes, contents) = if id == 117 {
+                let mut stand = Brewer::default();
+                stand.slots[0] = Some(make_stack(373, 1));
+                stand.slots[2] = Some(make_stack(374, 1));
+                stand.slots[3] = Some(make_stack(372, 5));
+                let original = Brewers::default().staged_update((0, 64, 0), stand).unwrap();
+                let staged = original
+                    .staged_update((0, 64, 0), Brewer::default())
+                    .unwrap();
+                (
+                    Brewers::location(&world_path),
+                    original.encoded().unwrap(),
+                    staged.encoded().unwrap(),
+                    stand.slots.into_iter().flatten().collect::<Vec<_>>(),
+                )
+            } else {
+                let mut slots = [None; DEVICE_SLOTS];
+                slots[0] = Some(make_stack(1, 64));
+                slots[4] = Some(make_stack(264, 17));
+                slots[8] = Some(make_stack(373, 1));
+                let original = Devices::default().staged_update((0, 64, 0), slots).unwrap();
+                let staged = original
+                    .staged_update((0, 64, 0), [None; DEVICE_SLOTS])
+                    .unwrap();
+                (
+                    Devices::location(&world_path),
+                    original.encoded().unwrap(),
+                    staged.encoded().unwrap(),
+                    slots.into_iter().flatten().collect::<Vec<_>>(),
+                )
+            };
+            fs::write(&storage_path, old_bytes).unwrap();
+            let block_item = make_stack(if id == 117 { 379 } else { id as i16 }, 1);
+            let mut all_drops = vec![block_item];
+            all_drops.extend(contents.iter().copied());
+            let (staged_ground, _) = GroundItems::default()
+                .stage_put_many(&all_drops, (0, 64, 0))
+                .unwrap();
+            crate::journal::commit(
+                &journal_path,
+                &[
+                    (world_path.as_path(), staged_world.encoded().unwrap()),
+                    (storage_path.as_path(), new_bytes),
+                    (ground_path.as_path(), staged_ground.encoded().unwrap()),
+                ],
+            )
+            .unwrap();
+            assert_eq!(World::load(&world_path).unwrap().get(0, 64, 0), 0);
+            if id == 117 {
+                assert_eq!(
+                    Brewers::load(&storage_path).unwrap().get((0, 64, 0)),
+                    Brewer::default()
+                );
+            } else {
+                assert!(Devices::load(&storage_path)
+                    .unwrap()
+                    .slots((0, 64, 0))
+                    .iter()
+                    .all(Option::is_none));
+            }
+            let saved_drops = GroundItems::load(&ground_path)
+                .unwrap()
+                .items()
+                .map(|entity| entity.stack)
+                .collect::<Vec<_>>();
+            assert_eq!(saved_drops, all_drops, "every stack survives for block {id}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn staged_mining_removal_keeps_original_unchanged_until_publish() {
         let world = World::new();
         let original = world.get(0, 63, 0);
