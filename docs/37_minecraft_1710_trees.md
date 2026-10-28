@@ -61,9 +61,14 @@ identical four-block oak with a square crown.
 - World seed and current server tick deterministically choose each grown
   tree's shape. This approximates the vanilla species and placement behavior,
   but is not Mojang's original 1.7.10 PRNG.
+- Leaf sapling drops use the pre-flattening species metadata:
+  oak, spruce, birch, acacia and dark oak have a 1/20 chance, while
+  **jungle leaves have only a 1/40 chance**. Oak and dark-oak apples
+  continue to use the existing 1/200 approximation.
 - Tests cover species IDs and metadata, giant 2×2 trunks, obstruction
-  safety and bone-meal transaction sizing. These tests still require
-  local execution on a Rust machine; no Actions/Rust CI were used.
+  safety, drop probabilities and bone-meal transaction sizing. These
+  tests still require local execution on a Rust machine; no Actions/Rust
+  CI were used.
 
 ## Leaf decay speed (Java 1.7.10 defaults)
 
