@@ -1116,7 +1116,7 @@ impl World {
             }
             if matches!(
                 id,
-                6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142 | 161
+                6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 106 | 115 | 127 | 141 | 142 | 161
             ) {
                 self.pending_ecology.insert(pos);
             } else {
@@ -1133,6 +1133,7 @@ impl World {
                     | 83
                     | 104
                     | 105
+                    | 106
                     | 115
                     | 127
                     | 55
@@ -1245,8 +1246,18 @@ impl World {
             for dz in -4..=4 {
                 for dy in -4..=4 {
                     let (nx, ny, nz) = (x + dx, y + dy, z + dz);
-                    if in_bounds(nx, ny, nz) && matches!(self.get(nx, ny, nz) >> 4, 18 | 161) {
-                        self.pending_ecology.insert((nx, ny as u8, nz));
+                    if !in_bounds(nx, ny, nz) {
+                        continue;
+                    }
+                    match self.get(nx, ny, nz) >> 4 {
+                        18 | 161 => {
+                            self.pending_ecology.insert((nx, ny as u8, nz));
+                        }
+                        106 => {
+                            self.pending_ecology.insert((nx, ny as u8, nz));
+                            self.pending_support.insert((nx, ny as u8, nz));
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -2631,7 +2642,7 @@ impl World {
             }
             if matches!(
                 block >> 4,
-                6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 115 | 127 | 141 | 142 | 161
+                6 | 18 | 51 | 59 | 60 | 78 | 79 | 81 | 83 | 104 | 105 | 106 | 115 | 127 | 141 | 142 | 161
             ) {
                 world.pending_ecology.insert((x, y, z));
             }
