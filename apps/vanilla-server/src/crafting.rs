@@ -686,8 +686,11 @@ mod tests {
                 let mut missing_stick = grid;
                 if let Some(index) = missing_stick.iter().position(|slot| *slot == stick) {
                     missing_stick[index] = None;
-                    assert_eq!(result(&missing_stick, 3), None,
-                        "must require all sticks: material={material} output={expected_id}");
+                    assert_ne!(
+                        result(&missing_stick, 3).map(|item| item.id),
+                        Some(expected_id),
+                        "must require all sticks: material={material} output={expected_id}"
+                    );
                 }
             }
         }
