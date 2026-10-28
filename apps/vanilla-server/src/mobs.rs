@@ -4841,7 +4841,13 @@ mod tests {
         };
         mobs.pending_blast_damage.insert(
             702,
-            (5, DamageOrigin::Explosion { kind: "TNT", source_id: Some(9) }),
+            (
+                5,
+                DamageOrigin::Explosion {
+                    kind: "TNT",
+                    source_id: Some(9),
+                },
+            ),
         );
         mobs.pending_hits.push((
             pos,
@@ -4866,17 +4872,35 @@ mod tests {
         assert!(mobs.hurt_player(45, player, 20) > 0);
         mobs.pending_blast_damage.insert(
             45,
-            (8, DamageOrigin::Explosion { kind: "Creeper", source_id: Some(500_001) }),
+            (
+                8,
+                DamageOrigin::Explosion {
+                    kind: "Creeper",
+                    source_id: Some(500_001),
+                },
+            ),
         );
         assert_eq!(mobs.hurt_player(45, player, 21), 0);
         mobs.pending_blast_damage.insert(
             45,
-            (8, DamageOrigin::Explosion { kind: "Creeper", source_id: Some(500_001) }),
+            (
+                8,
+                DamageOrigin::Explosion {
+                    kind: "Creeper",
+                    source_id: Some(500_001),
+                },
+            ),
         );
         assert!(mobs.hurt_player(45, player, 30) > 0);
         mobs.pending_blast_damage.insert(
             46,
-            (8, DamageOrigin::Explosion { kind: "Creeper", source_id: Some(500_001) }),
+            (
+                8,
+                DamageOrigin::Explosion {
+                    kind: "Creeper",
+                    source_id: Some(500_001),
+                },
+            ),
         );
         assert!(mobs.hurt_player(46, player, 31) > 0);
     }
@@ -7810,7 +7834,10 @@ mod tests {
         let explosions = [Explosion {
             position: nearby,
             radius: 3.0,
-            origin: DamageOrigin::Explosion { kind: "Creeper", source_id: Some(123) },
+            origin: DamageOrigin::Explosion {
+                kind: "Creeper",
+                source_id: Some(123),
+            },
         }];
         mobs.queue_explosion_hits(
             &World::new(),
@@ -8374,7 +8401,10 @@ mod tests {
         let blast = Explosion {
             position: source,
             radius: 3.0,
-            origin: DamageOrigin::Explosion { kind: "Creeper", source_id: None },
+            origin: DamageOrigin::Explosion {
+                kind: "Creeper",
+                source_id: None,
+            },
         };
         let clear = blast_damage(&world, &blast, target);
         assert!(clear > 0);
