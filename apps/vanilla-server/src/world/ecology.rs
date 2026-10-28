@@ -307,12 +307,17 @@ impl World {
                 return;
             }
             let existing = self.get(px, py, pz);
-            if existing != 0
-                && !(py == y
-                    && is_sapling_root(px, pz)
-                    && existing >> 4 == 6
-                    && existing & 7 == species)
-            {
+            let id = existing >> 4;
+            let root_sapling = py == y
+                && is_sapling_root(px, pz)
+                && id == 6
+                && existing & 7 == species;
+            // Vanilla trees can grow through ordinary natural foliage.
+            // Never erase logs, another sapling, buildings, or deliberately
+            // placed/permanent leaves (metadata 0x4).
+            let replaceable = matches!(id, 0 | 31 | 32 | 37 | 38 | 78 | 106)
+                || (matches!(id, 18 | 161) && existing & 4 == 0);
+            if !root_sapling && !replaceable {
                 return;
             }
             proposed.insert((px, py as u8, pz), block);
@@ -325,6 +330,18 @@ impl World {
             })
         }) {
             return;
+        }
+        // Growing saplings turn grass (and cultivated farmland) directly
+        // beneath their trunk roots into dirt in the same atomic transition.
+        let side = if large { 2 } else { 1 };
+        for dx in 0..side {
+            for dz in 0..side {
+                let px = origin.0 + dx;
+                let pz = origin.1 + dz;
+                if matches!(self.get(px, y - 1, pz) >> 4, 2 | 60) {
+                    proposed.insert((px, (y - 1) as u8, pz), 3 << 4);
+                }
+            }
         }
         changes.extend(proposed);
     }
@@ -783,6 +800,25 @@ mod regression_tests {
             assert_eq!(changes.get(&(0, 64, 0)).unwrap() >> 4, expected_log);
             assert!(changes.len() < 2048);
         }
+    }
+
+    #[test]
+    fn tree_growth_turns_grass_to_dirt_and_replaces_only_natural_foliage() {
+        let mut world = World::new();
+        world.import_block(0, 63, 0, 2 << 4).unwrap();
+        world.import_block(0, 64, 0, 6 << 4).unwrap();
+        world.import_block(0, 65, 0, 31 << 4).unwrap();
+        let mut grown = BTreeMap::new();
+        world.grow_tree(0, 64, 0, &mut grown);
+        assert_eq!(grown.get(&(0, 63, 0)), Some(&(3 << 4)));
+        assert_eq!(grown.get(&(0, 64, 0)).map(|b| b >> 4), Some(17));
+        assert_eq!(grown.get(&(0, 65, 0)).map(|b| b >> 4), Some(17));
+        // A player-placed (persistent) leaf is part of a build and must
+        // not be overwritten by a later tree growth attempt.
+        world.import_block(0, 65, 0, (18 << 4) | 4).unwrap();
+        grown.clear();
+        world.grow_tree(0, 64, 0, &mut grown);
+        assert!(grown.is_empty());
     }
 
     #[test]
