@@ -1623,6 +1623,95 @@ fn creative_can_break_flat_bedrock_at_y60_with_one_start_packet() {
 }
 
 #[test]
+fn survival_bed_head_mining_removes_both_halves_and_drops_one_bed() {
+    let server = NativeServer::start_with_mode_and_items(true, &[(36, 355)]);
+    let (mut client, _, _) = server.join("RustTester");
+    // Place a two-block bed on y63 grass; initial yaw=0 faces north (-Z).
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&355i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |p| p.len() == 11 && p[4] == 64 && p[9] == 26);
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 64 && i32::from_be_bytes(p[5..9].try_into().unwrap()) == -1
+            && p[9] == 26
+    });
+
+    // Destroy the HEAD, not the foot. Its own drop is None, but the intact
+    // foot contributes exactly one bed item to the shared ground pool.
+    let mut start = vec![0u8];
+    start.extend_from_slice(&0i32.to_be_bytes());
+    start.push(64);
+    start.extend_from_slice(&(-1i32).to_be_bytes());
+    start.push(1);
+    let mut finish = start.clone();
+    finish[0] = 2;
+    client.write_all(&frame(7, &start)).unwrap();
+    thread::sleep(Duration::from_millis(450));
+    client.write_all(&frame(7, &finish)).unwrap();
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 64 && i32::from_be_bytes(p[5..9].try_into().unwrap()) == -1
+            && p[9] == 0
+    });
+    until_packet(&mut client, 0x23, |p| {
+        p.len() == 11 && p[4] == 64 && i32::from_be_bytes(p[5..9].try_into().unwrap()) == 0
+            && p[9] == 0
+    });
+    let drop_path = server.directory.join("flat.drops.json");
+    await_file(&drop_path);
+    let ground: Value = serde_json::from_slice(&fs::read(drop_path).unwrap()).unwrap();
+    let entries = ground["entries"].as_object().unwrap();
+    assert_eq!(entries.len(), 1, "one intact bed must create only one item entity");
+    assert_eq!(entries.values().next().unwrap()["stack"]["id"], 355);
+}
+
+#[test]
+fn survival_upper_door_mining_removes_lower_half_and_drops_one_door() {
+    let server = NativeServer::start_with_mode_and_items(true, &[(36, 324), (37, 286)]);
+    let (mut client, _, _) = server.join("RustTester");
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&324i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |p| p.len() == 11 && p[4] == 64 && p[9] == 64);
+    until_packet(&mut client, 0x23, |p| p.len() == 11 && p[4] == 65 && p[9] == 64);
+
+    // Switch from consumed door item to a gold axe: 1.7.10 wooden-door
+    // hardness requires ~400 ms, not a bare-hand 4.5 second wait.
+    client.write_all(&frame(9, &1i16.to_be_bytes())).unwrap();
+    let mut start = vec![0u8];
+    start.extend_from_slice(&0i32.to_be_bytes());
+    start.push(65);
+    start.extend_from_slice(&0i32.to_be_bytes());
+    start.push(1);
+    let mut finish = start.clone();
+    finish[0] = 2;
+    client.write_all(&frame(7, &start)).unwrap();
+    thread::sleep(Duration::from_millis(650));
+    client.write_all(&frame(7, &finish)).unwrap();
+    until_packet(&mut client, 0x23, |p| p.len() == 11 && p[4] == 65 && p[9] == 0);
+    until_packet(&mut client, 0x23, |p| p.len() == 11 && p[4] == 64 && p[9] == 0);
+    let drop_path = server.directory.join("flat.drops.json");
+    await_file(&drop_path);
+    let ground: Value = serde_json::from_slice(&fs::read(drop_path).unwrap()).unwrap();
+    let entries = ground["entries"].as_object().unwrap();
+    assert_eq!(entries.len(), 1, "one wooden door must create one item entity");
+    assert_eq!(entries.values().next().unwrap()["stack"]["id"], 324);
+}
+
+#[test]
 fn survival_shovel_mining_wears_out_last_use_and_persists_dirt_drop() {
     let server = NativeServer::start_with_mode(true);
     let player_inventory = server
