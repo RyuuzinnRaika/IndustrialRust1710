@@ -9,6 +9,18 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_RECORD_BYTES: usize = 2048;
+
+/// A human at negative fractional coordinates is inside the lower block,
+/// not in the block obtained by truncation toward zero. Do not invent a
+/// block coordinate from corrupted/non-finite player positions.
+fn block_coordinate(value: f64) -> Option<i32> {
+    let block = value.floor();
+    if block.is_finite() && (i32::MIN as f64..=i32::MAX as f64).contains(&block) {
+        Some(block as i32)
+    } else {
+        None
+    }
+}
 // A single write_all remains serialized across all concurrent player sessions.
 static DEATH_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -107,14 +119,21 @@ impl DeathRecord<'_> {
     pub fn json(&self, timestamp_ms: u128) -> Value {
         json!({
             "event": "player_death",
+            "schema_version": 1,
             "timestamp_ms": timestamp_ms,
             "player": self.player,
             "cause": self.cause().code(),
+            "death_message": self.chat_message(),
             "dimension": self.dimension,
             "position": {
                 "x": self.position.x,
                 "y": self.position.y,
                 "z": self.position.z
+            },
+            "block_position": {
+                "x": block_coordinate(self.position.x),
+                "y": block_coordinate(self.position.y),
+                "z": block_coordinate(self.position.z)
             },
             "health_before": self.hit.map(|hit| hit.previous_health),
             "applied_damage": self.hit.map(|hit| hit.applied_damage),
@@ -163,8 +182,8 @@ impl DeathRecord<'_> {
             |hit| format!("{:.1}", hit.applied_damage),
         );
         format!(
-            "[death] player={} cause={} dimension={} x={:.2} y={:.2} z={:.2} health_before={} applied_damage={} tick={}",
-            self.player,
+            "[death] player={} cause={} dimension={} x={:.2} y={:.2} z={:.2} health_before={} applied_damage={} tick={} message={:?}",
+            self.player.escape_debug(),
             self.cause().code(),
             self.dimension,
             self.position.x,
@@ -172,7 +191,8 @@ impl DeathRecord<'_> {
             self.position.z,
             health,
             damage,
-            self.tick
+            self.tick,
+            self.chat_message()
         )
     }
 }
@@ -209,7 +229,14 @@ mod tests {
         let data = record.json(123);
         assert_eq!(data["cause"], "drowning");
         assert_eq!(data["dimension"], -1);
+        assert_eq!(data["schema_version"], 1);
+        assert_eq!(data["death_message"], record.chat_message());
         assert_eq!(data["server_tick"], 234);
+        // Console is a single line even when a supplied name contains controls.
+        let console = record.console_summary();
+        assert!(!console.contains('\n'));
+        assert!(!console.contains('\r'));
+        assert!(console.contains("message="));
         let wire = serde_json::to_string(&data).unwrap();
         assert!(!wire.contains('\n'));
         let decoded: Value = serde_json::from_str(&wire).unwrap();
@@ -256,6 +283,38 @@ mod tests {
             DeathCause::MixedHazards.message("Alex"),
             "Alex died from multiple environmental hazards"
         );
+    }
+
+    #[test]
+    fn block_positions_floor_negative_coordinates_without_fabricating_invalid_values() {
+        let mut record = DeathRecord {
+            player: "Alex",
+            hit: Some(FatalHit {
+                cause: DeathCause::Fall,
+                previous_health: 4.0,
+                applied_damage: 4.0,
+            }),
+            position: PlayerPosition {
+                x: -0.01,
+                y: 64.99,
+                z: -12.0,
+            },
+            dimension: 0,
+            tick: 9,
+        };
+        let data = record.json(321);
+        assert_eq!(data["block_position"]["x"], -1);
+        assert_eq!(data["block_position"]["y"], 64);
+        assert_eq!(data["block_position"]["z"], -12);
+        assert_eq!(data["death_message"], "Alex fell from a high place");
+        assert_eq!(data["timestamp_ms"], 321);
+
+        record.position.x = f64::NAN;
+        record.position.z = f64::INFINITY;
+        let invalid = record.json(322);
+        assert!(invalid["block_position"]["x"].is_null());
+        assert!(invalid["block_position"]["z"].is_null());
+        assert_eq!(invalid["block_position"]["y"], 64);
     }
 
     #[test]
