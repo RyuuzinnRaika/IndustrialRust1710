@@ -1789,11 +1789,42 @@ impl World {
         if !changes.is_empty() {
             // Decaying oak leaves may yield a sapling or apple. Stage these
             // before mutation, but expose them only after a successful save.
-            let detached_drops: Vec<WorldDrop> = changes
+            let mut detached_drops: Vec<WorldDrop> = changes
                 .iter()
                 .filter_map(|(&pos, &next)| self.tick_drop_for_change(pos, next))
                 .take(256)
                 .collect();
+            // A falling flower pot carries its flower; a removed jukebox
+            // contains a separate music disc. Neither may be lost when the
+            // block and its decorative sidecar are removed by a world tick.
+            let mut decoration_positions = Vec::new();
+            if let Some((stored, _)) = decorations.as_ref() {
+                for (&(x, y, z), &next) in &changes {
+                    let old_id = self.get(x, i32::from(y), z) >> 4;
+                    if old_id == next >> 4 || !matches!(old_id, 25 | 63 | 68 | 84 | 140) {
+                        continue;
+                    }
+                    let at = (x, i32::from(y), z);
+                    decoration_positions.push(at);
+                    if old_id == 84 {
+                        if let Some(id) = stored.record(at) {
+                            detached_drops.push(WorldDrop {
+                                pos: at,
+                                stack: crate::inventory::Stack {
+                                    id,
+                                    count: 1,
+                                    damage: 0,
+                                    nbt: None,
+                                },
+                            });
+                        }
+                    } else if old_id == 140 {
+                        if let Some(stack) = stored.pot(at) {
+                            detached_drops.push(WorldDrop { pos: at, stack });
+                        }
+                    }
+                }
+            }
             let dirty_light: Vec<_> = changes
                 .iter()
                 .filter_map(|(&(x, y, z), &new)| {
