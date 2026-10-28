@@ -345,6 +345,19 @@ mod tests {
         assert!(!complete("/", 4, &people).contains(&"/fill".to_owned()));
     }
     #[test]
+    fn command_kill_and_instant_damage_suggestions_obey_op_level() {
+        let people = names();
+        assert!(complete("/kill", 0, &people).is_empty());
+        assert_eq!(complete("/kill", 2, &people), vec!["/kill"]);
+        assert_eq!(complete("/kill Al", 2, &people), vec!["Alex"]);
+        assert!(complete("/kill Al", 0, &people).is_empty());
+        assert_eq!(
+            complete("/effect Steve instant_d", 2, &people),
+            vec!["instant_damage"]
+        );
+    }
+
+    #[test]
     fn completes_player_names_and_legacy_arguments() {
         let people = names();
         assert_eq!(complete("/tell st", 0, &people), vec!["Stefan", "Steve"]);
