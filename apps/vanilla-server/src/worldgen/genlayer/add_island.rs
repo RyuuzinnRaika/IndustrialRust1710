@@ -164,7 +164,6 @@ mod tests {
         assert!(map(seed, 1, 0, 0, 8, 0).is_empty());
     }
 
-
     #[test]
     fn add_island_matches_java_oracle_at_signed_coordinate_wrap() {
         // Independent Java 21 reference: parent uses Java int arithmetic,
