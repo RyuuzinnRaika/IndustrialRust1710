@@ -1268,6 +1268,29 @@ fn mining_environment(world: &World, player: &PlayerPosition) -> (bool, bool) {
     (submerged, physics::supported(world, player))
 }
 
+const LEGACY_VOID_DAMAGE_Y: f64 = -64.0;
+const LEGACY_VOID_DAMAGE_INTERVAL: u64 = 10;
+
+fn void_damage_due(y: f64, tick: u64, last_hit: Option<u64>) -> bool {
+    y.is_finite()
+        && y < LEGACY_VOID_DAMAGE_Y
+        && last_hit.is_none_or(|last| tick.saturating_sub(last) >= LEGACY_VOID_DAMAGE_INTERVAL)
+}
+
+#[cfg(test)]
+mod void_damage_tests {
+    use super::*;
+
+    #[test]
+    fn void_damage_is_below_legacy_build_floor_by_sixty_four_blocks() {
+        assert!(!void_damage_due(-64.0, 10, None));
+        assert!(void_damage_due(-64.001, 10, None));
+        assert!(!void_damage_due(-64.001, 19, Some(10)));
+        assert!(void_damage_due(-64.001, 20, Some(10)));
+        assert!(!void_damage_due(f64::NAN, 20, None));
+    }
+}
+
 /// Normal HP updates keep the existing player NBT format. The first fatal
 /// update instead publishes player NBT, event outbox and deathCount scoreboard
 /// in ONE durable redo transaction; no client observes a partially committed
@@ -1441,6 +1464,7 @@ fn play(
     let mut sprinting = false;
     let mut hazards = Hazards::new();
     let mut last_hazards_tick = clock.ticks();
+    let mut last_void_hit_tick: Option<u64> = None;
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
     let mut death_recorded = vitals.health <= 0.0;
@@ -2415,6 +2439,39 @@ fn play(
                     hub,
                 )?;
                 send(s, 0x06, &health_packet(*vitals))?;
+            }
+        }
+        // Java 1.7.10: the void below Y=-64 deals 4 armor-bypassing
+        // damage every ten server ticks. Y=0 is not a collision floor.
+        if survival && vitals.health > 0.0 {
+            if void_damage_due(player.y, now_tick, last_void_hit_tick) {
+                last_void_hit_tick = Some(now_tick);
+                let previous_health = vitals.health;
+                vitals.health = (vitals.health - 4.0).max(0.0);
+                death_log::record_fatal(
+                    &mut fatal_hit,
+                    previous_health,
+                    vitals.health,
+                    DeathCause::Void,
+                );
+                save_damage_state(
+                    player,
+                    *vitals,
+                    session_dimension.protocol_id() as i32,
+                    fatal_hit,
+                    &mut death_count_committed,
+                    name,
+                    clock,
+                    player_path,
+                    root_world_path,
+                    world_path,
+                    scoreboard,
+                    scoreboard_path,
+                    hub,
+                )?;
+                send(s, 0x06, &health_packet(*vitals))?;
+            } else if player.y >= LEGACY_VOID_DAMAGE_Y {
+                last_void_hit_tick = None;
             }
         }
         // A stationary player continues pressing a plate. Refresh its timer
@@ -3421,7 +3478,7 @@ fn play(
                     || !y.is_finite()
                     || !stance.is_finite()
                     || !z.is_finite()
-                    || !(0.0..256.0).contains(&y)
+                    || !(-256.0..256.0).contains(&y)
                 {
                     return Err(bad("invalid player coordinates"));
                 }
@@ -6566,6 +6623,7 @@ fn play(
                     last_effect_tick = now_tick;
                     hazards = Hazards::new();
                     last_hazards_tick = now_tick;
+                    last_void_hit_tick = None;
                     // In vanilla, death loses XP and may leave up to 100 XP in orbs.
                     if !keep_inventory {
                         let drop_amount =
