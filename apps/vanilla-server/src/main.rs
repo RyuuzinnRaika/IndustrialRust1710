@@ -1119,10 +1119,11 @@ fn sprint_action(current: bool, action: i32, food: i32) -> bool {
 }
 
 /// World-changing packets must not reach gameplay logic while a Survival
-/// player is on the death screen. Client Status (22) is intentionally allowed
+/// player is on the death screen (including held-slot saves and GUI close
+/// input reclamation). Client Status (22) is intentionally allowed
 /// so the authoritative respawn path remains reachable.
 fn blocked_while_dead(id: i32) -> bool {
-    matches!(id, 2 | 3 | 4 | 5 | 6 | 7 | 8 | 10 | 11 | 12 | 14 | 16 | 17 | 18 | 19 | 23)
+    matches!(id, 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 16 | 17 | 18 | 19 | 23)
 }
 
 #[cfg(test)]
@@ -1131,14 +1132,14 @@ mod dead_session_packet_tests {
 
     #[test]
     fn dead_players_cannot_attack_move_place_or_mutate_containers() {
-        for id in [2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 14, 16, 17, 18, 19, 23] {
+        for id in [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 23] {
             assert!(blocked_while_dead(id), "packet {id} must be ignored");
         }
     }
 
     #[test]
-    fn keepalive_chat_close_window_and_respawn_remain_available() {
-        for id in [0, 1, 9, 13, 15, 20, 21, 22] {
+    fn keepalive_chat_transaction_ack_and_respawn_remain_available() {
+        for id in [0, 1, 15, 20, 21, 22] {
             assert!(!blocked_while_dead(id), "packet {id} must remain available");
         }
     }
@@ -2722,7 +2723,7 @@ fn play(
         }
         // Dead players cannot attack Mobs, mutate inventory, or act in the
         // world before a Protocol 5 Client Status respawn request succeeds.
-        // KeepAlive, chat, Close Window and the respawn request still work.
+        // KeepAlive, chat, transaction acknowledgement and respawn still work.
         if survival && vitals.health <= 0.0 && blocked_while_dead(id) {
             continue;
         }
