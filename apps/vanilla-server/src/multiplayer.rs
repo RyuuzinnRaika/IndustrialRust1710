@@ -30,6 +30,8 @@ pub const DISPENSER_ARROW_DAMAGE_EVENT: u32 = u32::MAX - 6;
 pub const FALLING_ANVIL_DAMAGE_EVENT: u32 = u32::MAX - 12;
 /// Authenticated administrator /kill, applied only by target's own session.
 pub const ADMIN_KILL_EVENT: u32 = u32::MAX - 13;
+/// Lightning strike originates in server weather, never a client packet.
+pub const LIGHTNING_DAMAGE_EVENT: u32 = u32::MAX - 14;
 /// Validated console/verified-OP item grant; applied by the inventory owner.
 pub const ADMIN_GIVE_EVENT: u32 = u32::MAX - 7;
 pub const ADMIN_CLEAR_EVENT: u32 = u32::MAX - 8;
@@ -528,6 +530,35 @@ impl Hub {
             .map_err(|_| {
                 peer.overloaded.store(true, Ordering::Release);
                 io::Error::other("target session kill mailbox unavailable")
+            })?;
+        Ok(true)
+    }
+
+    /// Report a server-generated storm strike to the matching world
+    /// session, never modifying player HP from the weather worker.
+    pub fn request_lightning_damage(
+        &self,
+        entity_id: i32,
+        dimension: Dimension,
+    ) -> io::Result<bool> {
+        let inner = self.0.lock().map_err(|_| poisoned())?;
+        let Some(peer) = inner.players.get(&entity_id) else {
+            return Ok(false);
+        };
+        if peer.dimension != dimension {
+            return Ok(false);
+        }
+        peer.tx
+            .try_send(stamp_event(
+                peer,
+                Event {
+                    id: LIGHTNING_DAMAGE_EVENT,
+                    body: Vec::new(),
+                },
+            ))
+            .map_err(|_| {
+                peer.overloaded.store(true, Ordering::Release);
+                io::Error::other("lightning damage mailbox unavailable")
             })?;
         Ok(true)
     }
