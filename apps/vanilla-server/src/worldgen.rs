@@ -11,6 +11,18 @@ mod genlayer;
 #[path = "worldgen_trees.rs"]
 mod trees;
 
+/// Shared shape implementation for generated terrain and player-grown saplings.
+pub(crate) fn sapling_tree_blocks(
+    seed: u64,
+    x: i32,
+    y: i32,
+    z: i32,
+    species: u16,
+    large: bool,
+) -> Vec<(i32, i32, i32, u16)> {
+    trees::sapling_blocks(seed, x, y, z, species, large)
+}
+
 const SEA: i32 = 62;
 const AIR: u16 = 0;
 fn b(id: u16) -> u16 {
