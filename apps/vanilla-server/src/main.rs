@@ -4393,7 +4393,7 @@ fn play(
                                                     .lock()
                                                     .map_err(|_| bad("decorations lock poisoned"))?
                                                     .occupied(target));
-                                        if matches!(block, 54 | 146 | 61 | 62 | 154) {
+                                        if matches!(block, 54 | 146 | 61 | 62 | 154 | 23 | 158 | 117) {
                                             // Mine a populated container without destroying
                                             // any inventory first. Keep the live World, tile
                                             // inventory, ground pool and held tool untouched
@@ -4426,6 +4426,24 @@ fn play(
                                             } else {
                                                 None
                                             };
+                                            let mut device_guard = if matches!(block, 23 | 158) {
+                                                Some(
+                                                    devices
+                                                        .lock()
+                                                        .map_err(|_| bad("device lock poisoned"))?,
+                                                )
+                                            } else {
+                                                None
+                                            };
+                                            let mut brewer_guard = if block == 117 {
+                                                Some(
+                                                    brewers
+                                                        .lock()
+                                                        .map_err(|_| bad("brewer lock poisoned"))?,
+                                                )
+                                            } else {
+                                                None
+                                            };
                                             let mut drops = Vec::new();
                                             if let Some(drop) = result.drop {
                                                 drops.push(Stack {
@@ -4450,6 +4468,12 @@ fn play(
                                                     storage.slots(target).into_iter().flatten(),
                                                 );
                                             }
+                                            if let Some(storage) = device_guard.as_ref() {
+                                                drops.extend(storage.slots(target).into_iter().flatten());
+                                            }
+                                            if let Some(storage) = brewer_guard.as_ref() {
+                                                drops.extend(storage.get(target).slots.into_iter().flatten());
+                                            }
                                             let mut ground = ground_items
                                                 .lock()
                                                 .map_err(|_| bad("ground items lock poisoned"))?;
@@ -4464,6 +4488,8 @@ fn play(
                                                     let mut next_chests = None;
                                                     let mut next_furnaces = None;
                                                     let mut next_hoppers = None;
+                                                    let mut next_devices = None;
+                                                    let mut next_brewers = None;
                                                     let (storage_path, storage_bytes) =
                                                         if let Some(storage) = chest_guard.as_ref()
                                                         {
@@ -4492,6 +4518,26 @@ fn play(
                                                             let bytes = staged.encoded()?;
                                                             next_hoppers = Some(staged);
                                                             (hopper_path, bytes)
+                                                        } else if let Some(storage) =
+                                                            device_guard.as_ref()
+                                                        {
+                                                            let staged = storage.staged_update(
+                                                                target,
+                                                                [None; dispensers::DEVICE_SLOTS],
+                                                            )?;
+                                                            let bytes = staged.encoded()?;
+                                                            next_devices = Some(staged);
+                                                            (device_path, bytes)
+                                                        } else if let Some(storage) =
+                                                            brewer_guard.as_ref()
+                                                        {
+                                                            let staged = storage.staged_update(
+                                                                target,
+                                                                Brewer::default(),
+                                                            )?;
+                                                            let bytes = staged.encoded()?;
+                                                            next_brewers = Some(staged);
+                                                            (brewer_path, bytes)
                                                         } else {
                                                             unreachable!("container branch has one tile storage")
                                                         };
@@ -4530,6 +4576,16 @@ fn play(
                                                     }
                                                     if let (Some(storage), Some(staged)) =
                                                         (hopper_guard.as_mut(), next_hoppers)
+                                                    {
+                                                        **storage = staged;
+                                                    }
+                                                    if let (Some(storage), Some(staged)) =
+                                                        (device_guard.as_mut(), next_devices)
+                                                    {
+                                                        **storage = staged;
+                                                    }
+                                                    if let (Some(storage), Some(staged)) =
+                                                        (brewer_guard.as_mut(), next_brewers)
                                                     {
                                                         **storage = staged;
                                                     }
