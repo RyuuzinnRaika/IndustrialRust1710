@@ -1753,6 +1753,7 @@ impl World {
             let detached_drops: Vec<WorldDrop> = changes
                 .iter()
                 .filter_map(|(&pos, &next)| self.tick_drop_for_change(pos, next))
+                .take(256)
                 .collect();
             let dirty_light: Vec<_> = changes
                 .iter()
