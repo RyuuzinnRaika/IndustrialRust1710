@@ -106,7 +106,7 @@ use multiplayer::{
     ADMIN_ENCHANT_EVENT, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT,
     ADMIN_KILL_EVENT,
     ADMIN_SPAWNPOINT_EVENT, ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT,
-    FALLING_ANVIL_DAMAGE_EVENT, MAX_PLAYERS,
+    FALLING_ANVIL_DAMAGE_EVENT, LIGHTNING_DAMAGE_EVENT, MAX_PLAYERS,
     PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
 };
 use online_auth::{Connection, ServerIdentity};
@@ -1292,6 +1292,27 @@ fn instant_damage_health(amplifier: u8) -> f32 {
     f32::from(6u16 << amplifier.min(3))
 }
 
+/// Vanilla 1.7.10 S2C packet 0x2C (Spawn Global Entity). The lightning
+/// packet is server-generated; no client may select its position.
+fn lightning_spawn_packet(strike: PlayerPosition, id: i32) -> io::Result<Event> {
+    if !strike.is_valid() || id <= 0 {
+        return Err(bad("invalid lightning origin or entity id"));
+    }
+    let mut body = Vec::with_capacity(18);
+    write_varint(id, &mut body)?;
+    body.push(1); // Global entity type 1 = lightning bolt
+    for value in [strike.x, strike.y, strike.z] {
+        let fixed = (value * 32.0).floor() as i32;
+        body.extend_from_slice(&fixed.to_be_bytes());
+    }
+    Ok(Event { id: 0x2c, body })
+}
+
+fn lightning_strike_touches_player(strike: PlayerPosition, player: PlayerPosition) -> bool {
+    (strike.x - player.x).hypot(strike.z - player.z) <= 3.0
+        && (strike.y - player.y).abs() <= 3.0
+}
+
 fn void_damage_due(y: f64, tick: u64, last_hit: Option<u64>) -> bool {
     y.is_finite()
         && y < LEGACY_VOID_DAMAGE_Y
@@ -1317,6 +1338,27 @@ mod void_damage_tests {
             PlayerPosition { x: 4.5, y: 67.0, z: 4.5 },
             at
         ));
+    }
+
+    #[test]
+    fn global_lightning_packet_and_victim_radius_are_bounded() {
+        let bolt = PlayerPosition {
+            x: 4.5,
+            y: 64.0,
+            z: -5.5,
+        };
+        let event = lightning_spawn_packet(bolt, 12345).unwrap();
+        assert_eq!(event.id, 0x2c);
+        assert_eq!(event.body[2], 1); // 12345 encodes as a two-byte VarInt
+        assert!(lightning_strike_touches_player(
+            bolt,
+            PlayerPosition { x: 6.5, ..bolt }
+        ));
+        assert!(!lightning_strike_touches_player(
+            bolt,
+            PlayerPosition { x: 9.0, ..bolt }
+        ));
+        assert!(lightning_spawn_packet(bolt, -1).is_err());
     }
 
     #[test]
@@ -1893,6 +1935,46 @@ fn play(
                             id: 0x1a,
                             body: hurt,
                         },
+                    );
+                }
+                continue;
+            }
+            if event.id == LIGHTNING_DAMAGE_EVENT {
+                if !event.body.is_empty() {
+                    return Err(bad("invalid private lightning damage event"));
+                }
+                if survival && vitals.health > 0.0 {
+                    let before = vitals.health;
+                    // The strike is 5 health points of direct lightning
+                    // damage; the fire it may ignite is a separate hazard.
+                    vitals.health = (vitals.health - 5.0).max(0.0);
+                    death_log::record_fatal(
+                        &mut fatal_hit,
+                        before,
+                        vitals.health,
+                        DeathCause::Lightning,
+                    );
+                    save_damage_state(
+                        player,
+                        *vitals,
+                        session_dimension.protocol_id() as i32,
+                        fatal_hit,
+                        &mut death_count_committed,
+                        name,
+                        clock,
+                        player_path,
+                        root_world_path,
+                        world_path,
+                        scoreboard,
+                        scoreboard_path,
+                        hub,
+                    )?;
+                    send(s, 0x06, &health_packet(*vitals))?;
+                    let mut animation = entity_id.to_be_bytes().to_vec();
+                    animation.push(2);
+                    hub.broadcast_in_view(
+                        *player,
+                        Event { id: 0x1a, body: animation },
                     );
                 }
                 continue;
