@@ -301,7 +301,9 @@ pub fn mine_rule(block: u16, held: Option<Stack>) -> Option<(Duration, MineResul
         Duration::from_millis(ticks.saturating_mul(50)),
         MineResult {
             drop,
-            wear_tool: equipped.is_some(),
+            // Since Java 1.3.1, breaking a block which is instant by
+            // bare hand must not consume tool durability, even if held.
+            wear_tool: equipped.is_some() && spec.hardness > 0.0,
         },
     ))
 }
@@ -405,6 +407,25 @@ mod tests {
             nbt: None,
         })
     }
+    #[test]
+    fn s03_instant_hand_breaks_do_not_damage_held_iron_tools() {
+        let iron_pickaxe = stack(257, 0);
+        let iron_sword = stack(267, 0);
+        // Grass, dandelions, crops and TNT are all hardness-zero blocks.
+        // A mining tool must not lose durability from instant hand breaks.
+        for block in [31u16, 37, 38, 59, 141, 142, 46] {
+            for held in [iron_pickaxe, iron_sword] {
+                let (duration, result) = mine_rule(block << 4, held).unwrap();
+                assert_eq!(duration, Duration::ZERO, "block {block}");
+                assert!(!result.wear_tool, "block {block}, held {held:?}");
+            }
+        }
+        // Genuine stone and log breaking still consumes tool durability.
+        assert!(mine_rule(1 << 4, iron_pickaxe).unwrap().1.wear_tool);
+        assert!(mine_rule(17 << 4, iron_sword).unwrap().1.wear_tool);
+        assert!(!mine_rule(1 << 4, None).unwrap().1.wear_tool);
+    }
+
     #[test]
     fn s01_log_orientation_is_not_an_inventory_item_variant() {
         // Pre-flattening log metadata has species in its low bits and axis in
