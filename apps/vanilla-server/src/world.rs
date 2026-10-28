@@ -1129,6 +1129,9 @@ impl World {
                     | 37
                     | 38
                     | 50
+                    | 63
+                    | 68
+                    | 140
                     | 81
                     | 83
                     | 104
@@ -1267,6 +1270,9 @@ impl World {
             27 | 28 | 66 | 157 => id as i16,
             37..=40 => id as i16,
             63 | 68 => 323, // signs use the standing-sign item
+            140 => 390,     // flower pot block -> item
+            84 => 84,       // jukebox destroyed by a world tick
+            25 => 25,       // note block destroyed by a world tick
             65 | 69 | 70 | 72 | 77 | 131 | 143 | 147 | 148 => id as i16,
             132 => 287,       // tripwire drops string
             149 | 150 => 404, // comparator item, not powered block
@@ -2755,6 +2761,9 @@ impl World {
                 6 | 50
                     | 55
                     | 59
+                    | 63
+                    | 68
+                    | 140
                     | 27
                     | 28
                     | 65
