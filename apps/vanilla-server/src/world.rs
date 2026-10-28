@@ -1787,12 +1787,10 @@ impl World {
                     let previous = self.get(x, i32::from(y), z);
                     let old_id = previous >> 4;
                     let new_id = new >> 4;
-                    (previous != new && matches!(old_id, 17 | 18 | 161 | 162))
-                        .then_some((x, i32::from(y), z, matches!(old_id, 17 | 162)))
-                        .or_else(|| {
-                            (previous != new && matches!(new_id, 17 | 162))
-                                .then_some((x, i32::from(y), z, true))
-                        })
+                    let affects_logs =
+                        matches!(old_id, 17 | 162) || matches!(new_id, 17 | 162);
+                    (previous != new && (affects_logs || matches!(old_id, 18 | 161)))
+                        .then_some((x, i32::from(y), z, affects_logs))
                 })
                 .collect();
             let undo: Vec<(Position, Option<u16>)> = changes
