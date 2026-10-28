@@ -44,6 +44,10 @@ pub struct World {
     generation: Generation,
     // In-memory wake-up queue only. Reconstructed from placed blocks on load.
     pending_gravity: BTreeSet<Position>,
+    // In-flight origin height for 1.7.10 anvils. Snapshot reconstruction
+    // cannot recover this height across restart; never fabricate damage
+    // from a partial fall that was interrupted by process shutdown.
+    falling_anvils: BTreeMap<Position, i32>,
     pending_fluid: BTreeSet<Position>,
     pending_circuit: BTreeSet<Position>,
     pending_support: BTreeSet<Position>,
@@ -201,6 +205,8 @@ pub struct PistonAction {
 pub struct GravityMove {
     pub from: (i32, i32, i32),
     pub to: (i32, i32, i32),
+    /// Nonzero only when a tracked anvil lands on a block below its new cell.
+    pub anvil_landing_damage: u8,
 }
 
 fn invalid(message: &'static str) -> io::Error {
@@ -1018,6 +1024,7 @@ impl World {
         let scheduled: Vec<Position> = self.pending_gravity.iter().take(budget).copied().collect();
         let mut undo: BTreeMap<Position, Option<u16>> = BTreeMap::new();
         let mut moved = Vec::new();
+        let mut anvil_updates = Vec::new();
         for &(x, y, z) in &scheduled {
             let height = i32::from(y);
             let block = self.get(x, height, z);
@@ -1035,9 +1042,24 @@ impl World {
             }
             self.set_gravity_cell(upper, 0);
             self.set_gravity_cell(lower, block);
+            let mut landing_damage = 0;
+            if block >> 4 == 145 {
+                let origin_height = self
+                    .falling_anvils
+                    .get(&upper)
+                    .copied()
+                    .unwrap_or(height);
+                let landing = height >= 2 && self.get(x, height - 2, z) != 0;
+                let blocks_fallen = origin_height.saturating_sub(height - 1);
+                if landing && blocks_fallen > 1 {
+                    landing_damage = (2 * (blocks_fallen - 1)).min(40) as u8;
+                }
+                anvil_updates.push((upper, lower, origin_height, landing));
+            }
             moved.push(GravityMove {
                 from: (x, height, z),
                 to: (x, height - 1, z),
+                anvil_landing_damage: landing_damage,
             });
         }
         if !moved.is_empty() {
@@ -1058,6 +1080,16 @@ impl World {
                     }
                 }
                 return Err(error);
+            }
+        }
+        // Update the in-memory flight origins ONLY after the world mutation
+        // succeeds. A failed save must leave the heights and queue intact.
+        for (upper, lower, origin, landed) in anvil_updates {
+            self.falling_anvils.remove(&upper);
+            if landed {
+                self.falling_anvils.remove(&lower);
+            } else {
+                self.falling_anvils.insert(lower, origin);
             }
         }
         for position in scheduled {
@@ -4533,6 +4565,30 @@ mod tests {
         assert!(!w.drain_light_chunks(32).is_empty());
         let restored = World::load(&path).unwrap();
         assert_eq!(restored.get(15, 64, 15), 0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn three_block_anvil_fall_emits_one_landing_event_with_four_damage() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-anvil-fall-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 4, 68, 4, 145 << 4).unwrap();
+        let mut events = Vec::new();
+        for _ in 0..5 {
+            events.extend(world.gravity_tick(&path, 64).unwrap());
+        }
+        let hits: Vec<_> = events
+            .iter()
+            .filter(|event| event.anvil_landing_damage > 0)
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].anvil_landing_damage, 4);
+        assert_eq!(hits[0].to, (4, 65, 4));
         fs::remove_file(path).unwrap();
     }
 
