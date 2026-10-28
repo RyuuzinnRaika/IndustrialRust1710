@@ -46,7 +46,18 @@ try {
         }
     }
     else {
+        # Cargo test returns exit 0 even if a filter selects zero tests.
+        # Query the compiled binary's inventory first to detect renamed,
+        # skipped or missing regression cases instead of reporting success.
+        $available = & cargo test -p vanilla-server --bin vanilla-server -- --list
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not list the local vanilla-server tests (exit $LASTEXITCODE)"
+        }
         foreach ($filter in $filters) {
+            $found = $available | Where-Object { $_.Contains($filter) }
+            if (-not $found) {
+                throw "Required regression test not found: $filter"
+            }
             Write-Host "Running local test: $filter"
             & cargo test -p vanilla-server --bin vanilla-server $filter -- --nocapture
             if ($LASTEXITCODE -ne 0) {
