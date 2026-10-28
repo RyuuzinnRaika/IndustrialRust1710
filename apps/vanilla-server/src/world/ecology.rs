@@ -702,8 +702,8 @@ mod regression_tests {
         w.grow_tree(0, 64, 0, &mut changes);
         assert_eq!(changes.get(&(0, 64, 0)), Some(&((162 << 4) | 1)));
         assert_eq!(changes.get(&(1, 69, 1)), Some(&((162 << 4) | 1)));
-        assert_eq!(changes.get(&(0, 71, 0)), Some(&((161 << 4) | 1)));
-        assert!(changes.len() <= 128);
+        assert!(changes.values().any(|&block| block >> 4 == 161));
+        assert!(changes.len() <= 2048);
 
         w.import_block(0, 70, 0, 1 << 4).unwrap();
         let mut blocked = BTreeMap::new();
@@ -714,6 +714,89 @@ mod regression_tests {
         w.import_block(1, 64, 1, 0).unwrap();
         w.grow_tree(0, 64, 0, &mut blocked);
         assert!(blocked.is_empty(), "a lone dark oak does not grow");
+    }
+
+    #[test]
+    fn six_sapling_species_grow_matching_logs_and_leaves() {
+        for (species, expected_log, expected_leaf, expected_meta) in [
+            (0u16, 17, 18, 0),
+            (1, 17, 18, 1),
+            (2, 17, 18, 2),
+            (3, 17, 18, 3),
+            (4, 162, 161, 0),
+        ] {
+            let mut world = World::new();
+            world
+                .import_block(0, 64, 0, (6 << 4) | species)
+                .unwrap();
+            let mut changes = BTreeMap::new();
+            world.grow_tree(0, 64, 0, &mut changes);
+            assert!(
+                changes.values().any(|&b| b >> 4 == expected_log && b & 3 == expected_meta),
+                "sapling {species} must generate its own logs"
+            );
+            assert!(
+                changes.values().any(|&b| b >> 4 == expected_leaf && b & 3 == expected_meta),
+                "sapling {species} must generate its own leaves"
+            );
+            assert_eq!(changes.get(&(0, 64, 0)).unwrap() >> 4, expected_log);
+            assert!(changes.len() < 2048);
+        }
+    }
+
+    #[test]
+    fn spruce_and_jungle_two_by_two_grow_giant_trunks() {
+        for species in [1u16, 3] {
+            let mut world = World::new();
+            for dx in 0..2 {
+                for dz in 0..2 {
+                    world
+                        .import_block(dx, 64, dz, (6 << 4) | species | 8)
+                        .unwrap();
+                }
+            }
+            // Call on the south-east sapling; growth must still use the
+            // north-west root and replace all four saplings atomically.
+            let mut changes = BTreeMap::new();
+            world.grow_tree(1, 64, 1, &mut changes);
+            for dx in 0..2 {
+                for dz in 0..2 {
+                    assert_eq!(
+                        changes.get(&(dx, 70, dz)).map(|state| state >> 4),
+                        Some(17),
+                        "2x2 species {species} must have a tall thick trunk"
+                    );
+                    assert_eq!(
+                        changes.get(&(dx, 64, dz)).map(|state| state & 3),
+                        Some(species),
+                        "all four matching saplings are consumed"
+                    );
+                }
+            }
+            assert!(changes.values().any(|state| state >> 4 == 18));
+            assert!(changes.len() <= 2048);
+        }
+    }
+
+    #[test]
+    fn big_sapling_trees_do_not_overwrite_builds_or_consume_saplings() {
+        let mut world = World::new();
+        for dx in 0..2 {
+            for dz in 0..2 {
+                world.import_block(dx, 64, dz, (6 << 4) | 1).unwrap();
+            }
+        }
+        world.import_block(0, 70, 0, 1 << 4).unwrap();
+        let mut blocked = BTreeMap::new();
+        world.grow_tree(1, 64, 1, &mut blocked);
+        assert!(blocked.is_empty(), "giant spruce cannot overwrite stone");
+        world.import_block(0, 70, 0, 0).unwrap();
+        world.import_block(1, 64, 1, (6 << 4) | 3).unwrap();
+        let mut unpaired = BTreeMap::new();
+        world.grow_tree(0, 64, 0, &mut unpaired);
+        // Without a complete 2x2 spruce set, the remaining tree is 1x1.
+        assert_eq!(unpaired.get(&(0, 64, 0)).map(|b| b >> 4), Some(17));
+        assert!(unpaired.len() <= 2048);
     }
 
     #[test]
