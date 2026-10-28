@@ -212,7 +212,10 @@ others may take several minutes.
   world-drop backlog and persisted in that *same* atomic world write.
   The backwards-compatible **TNT5** trailer carries up to 2,048 drops
   (each stores coordinates, item ID, count and metadata). The existing
-  TNT1–TNT4 trailers and IRW1–IRW4 generation identities remain readable.
+  TNT1–TNT4 trailers and IRW1–IRW4 generation identities remain readable
+  **by this updated server**. Older server executables do **not** understand
+  TNT5 and may refuse to open saves written by the new code; preserve a
+  full pre-upgrade backup before deploying or attempting a downgrade.
   Malformed counts, truncated entries, invalid stacks and trailing
   data are rejected rather than silently losing items.
 - Delivery to `world.drops.json` is a **two-file redo transaction**:
