@@ -103,6 +103,10 @@ impl World {
         let below = self.get(x, y - 1, z) >> 4;
         match id {
             6 | 31 | 37 | 38 => plantable(below),
+            106 => {
+                self.supported_vine_mask(x, y, z, block & 15) != 0
+                    || self.vine_has_ceiling(x, y, z)
+            }
             32 => matches!(below, 12 | 159 | 172), // dead bush on sand/terracotta
             25 | 63 | 84 | 92 | 140 => solid(below),
             68 => {
@@ -758,12 +762,14 @@ mod regression_tests {
         let mut world = World::new();
         world.import_block(1, 65, 0, 17 << 4).unwrap();
         world.import_block(0, 65, 0, (106 << 4) | 8 | 1).unwrap();
+        assert!(world.can_support(0, 65, 0, (106 << 4) | 8));
         assert_eq!(
             world.ecology_changes(64).get(&(0, 65, 0)),
             Some(&((106 << 4) | 8)),
             "south attachment should clear but east-facing wall survives"
         );
         world.import_block(1, 65, 0, 0).unwrap();
+        assert!(!world.can_support(0, 65, 0, (106 << 4) | 8));
         assert_eq!(world.ecology_changes(64).get(&(0, 65, 0)), Some(&0));
     }
 
