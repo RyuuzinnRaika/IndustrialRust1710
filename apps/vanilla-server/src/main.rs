@@ -104,6 +104,7 @@ use mobs::{DamageOrigin, Mobs};
 use multiplayer::{
     Event, Hub, JoinError, SessionEvents, ADMIN_CLEAR_EVENT, ADMIN_EFFECT_EVENT,
     ADMIN_ENCHANT_EVENT, ADMIN_GAMEMODE_EVENT, ADMIN_GIVE_EVENT, ADMIN_KICK_EVENT,
+    ADMIN_KILL_EVENT,
     ADMIN_SPAWNPOINT_EVENT, ADMIN_TELEPORT_EVENT, DISPENSER_ARROW_DAMAGE_EVENT,
     FALLING_ANVIL_DAMAGE_EVENT, MAX_PLAYERS,
     PEARL_TELEPORT_EVENT, PISTON_PUSH_EVENT,
@@ -1515,6 +1516,8 @@ fn play(
     let mut active_effects: Vec<ActiveEffect> = Vec::new();
     let mut last_effect_tick = clock.ticks();
     let mut death_recorded = vitals.health <= 0.0;
+    // Commands may kill a Creative player without changing their saved gamemode.
+    let mut command_dead = false;
     // Commit HP, deathCount and the durable event in one redo transaction.
     let mut death_count_committed = death_recorded;
     let mut fatal_hit: Option<FatalHit> = None;
@@ -1801,6 +1804,39 @@ fn play(
                 // container is open. Opening inventory again shows saved items.
                 send(s, 0x30, &inventory.window_items())?;
                 as_chat(s, &format!("Received {total} item(s) (ID {id})."))?;
+                continue;
+            }
+            if event.id == ADMIN_KILL_EVENT {
+                if !event.body.is_empty() {
+                    return Err(bad("invalid internal kill event"));
+                }
+                if vitals.health > 0.0 {
+                    let previous_health = vitals.health;
+                    vitals.health = 0.0;
+                    death_log::record_fatal(
+                        &mut fatal_hit,
+                        previous_health,
+                        vitals.health,
+                        DeathCause::CommandKill,
+                    );
+                    save_damage_state(
+                        player,
+                        *vitals,
+                        session_dimension.protocol_id() as i32,
+                        fatal_hit,
+                        &mut death_count_committed,
+                        name,
+                        clock,
+                        player_path,
+                        root_world_path,
+                        world_path,
+                        scoreboard,
+                        scoreboard_path,
+                        hub,
+                    )?;
+                    command_dead = !survival;
+                    send(s, 0x06, &health_packet(*vitals))?;
+                }
                 continue;
             }
             if event.id == ADMIN_KICK_EVENT {
@@ -2893,7 +2929,7 @@ fn play(
                 }
             }
         }
-        if survival && vitals.health <= 0.0 {
+        if (survival || command_dead) && vitals.health <= 0.0 {
             eating = None;
             let newly_dead = !death_recorded;
             if newly_dead && !death_count_committed {
@@ -3020,7 +3056,7 @@ fn play(
         }
         // Dead players cannot interact with or move through the world until
         // their Protocol 5 Client Status respawn request is accepted.
-        if survival && vitals.health <= 0.0 && matches!(id, 4 | 6 | 7 | 8) {
+        if (survival || command_dead) && vitals.health <= 0.0 && matches!(id, 4 | 6 | 7 | 8) {
             continue;
         }
         // Before C04/C06 confirms the authoritative destination, ignore
@@ -6652,7 +6688,7 @@ fn play(
                         send(s, event.id, &event.body)?;
                     }
                 }
-                if survival && action == 0 && vitals.health <= 0.0 {
+                if (survival || command_dead) && action == 0 && vitals.health <= 0.0 {
                     if hardcore {
                         player.save_state_in_dimension(
                             player_path,
@@ -6744,6 +6780,7 @@ fn play(
                     *player = origin;
                     death_recorded = false;
                     death_count_committed = false;
+                    command_dead = false;
                     fatal_hit = None;
                     fall = FallTracker::new(origin.y);
                     idle_gravity = IdleGravity::new(now_tick);
@@ -6776,7 +6813,10 @@ fn play(
                     let mut respawn = (respawn_dimension.protocol_id() as i32)
                         .to_be_bytes()
                         .to_vec();
-                    respawn.extend_from_slice(&[difficulty.load(Ordering::Acquire), 0]); // current difficulty, survival
+                    respawn.extend_from_slice(&[
+                        difficulty.load(Ordering::Acquire),
+                        if survival { 0 } else { 1 },
+                    ]); // Preserve the player's game mode across /kill respawn.
                     write_string("default", &mut respawn)?;
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks and entities on respawn
