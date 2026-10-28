@@ -2951,7 +2951,15 @@ impl World {
     ) -> (u16, Vec<u8>, Vec<(i32, i32, i32)>) {
         let block_cache = self.chunk_block_cache(chunk_x, chunk_z);
         let mut vines = Vec::new();
-        let mut mask: u16 = if self.extended_identity().is_some() {
+        let mut mask: u16 = if matches!(
+            self.generation,
+            Generation::Expanded(_, crate::dimensions::Dimension::Overworld)
+        ) {
+            // Tall 1.7.10 spruce/jungle crowns may reach Y=158.
+            // Keep section 9 (Y=144..159), or clients would see
+            // severed high canopies and unbreakable invisible leaves.
+            0x03ff
+        } else if self.extended_identity().is_some() {
             0x01ff
         } else if self.is_natural() {
             0x00ff
@@ -3130,8 +3138,8 @@ mod tests {
 
         let (mask, data) = world.chunk_data(0, 0);
         assert_eq!(
-            mask, 0x01ff,
-            "expanded Overworld must stream terrain sections"
+            mask, 0x03ff,
+            "expanded Overworld must stream Y=144..159 for tall jungle/spruce crowns"
         );
         // Protocol 5 chunk data ends with 256 column biome IDs in Z-major order.
         let transmitted_biomes = &data[data.len() - 256..];
