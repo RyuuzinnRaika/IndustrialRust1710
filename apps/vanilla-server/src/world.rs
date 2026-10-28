@@ -2632,6 +2632,9 @@ impl World {
                 world.pending_buttons.insert((x, y, z), 20);
             }
         }
+        // Natural leaves around generated logs removed in a saved IRW4
+        // world must remain eligible for random-tick decay after restart.
+        world.restore_generated_leaf_checks();
         Ok(world)
     }
     fn write_to(&self, f: &mut impl Write) -> io::Result<()> {
