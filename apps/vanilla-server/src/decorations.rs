@@ -259,6 +259,23 @@ impl Decorations {
         next.encoded()?;
         Ok(next)
     }
+    /// Prepare removal of all tile data owned by one mined decorative block.
+    /// The caller must commit this snapshot together with the world edit and
+    /// any dropped disc/plant before publishing either live state.
+    pub fn staged_remove(&self, position: Position) -> io::Result<Self> {
+        if !world::in_bounds(position.0, position.1, position.2) {
+            return Err(invalid("invalid decoration removal position"));
+        }
+        let mut next = self.clone();
+        let position = key(position);
+        next.signs.remove(&position);
+        next.notes.remove(&position);
+        next.records.remove(&position);
+        next.pots.remove(&position);
+        next.encoded()?;
+        Ok(next)
+    }
+
     pub fn remove(&mut self, path: &Path, position: Position) -> io::Result<()> {
         let mut next = self.clone();
         let key = key(position);
