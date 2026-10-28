@@ -2948,8 +2948,14 @@ fn tab_complete_protocol5_returns_public_commands_and_online_player_names() {
     assert!(read_completions(&mut player, "/gi").is_empty());
     assert!(read_completions(&mut player, "/op").is_empty());
     assert!(read_completions(&mut player, "/help ").is_empty());
-    assert_eq!(read_completions(&mut player, "/tell Rus"), vec!["RustTester"]);
-    assert_eq!(read_completions(&mut player, "/msg Pos"), Vec::<String>::new());
+    assert_eq!(
+        read_completions(&mut player, "/tell Rus"),
+        vec!["RustTester"]
+    );
+    assert_eq!(
+        read_completions(&mut player, "/msg Pos"),
+        Vec::<String>::new()
+    );
     // A second player appears in the real Hub names list.
     let (other, _, _) = server.join("Positioner");
     assert_eq!(
@@ -2959,4 +2965,3 @@ fn tab_complete_protocol5_returns_public_commands_and_online_player_names() {
     drop(other);
     drop(player);
 }
-
