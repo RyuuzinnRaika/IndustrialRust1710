@@ -592,7 +592,15 @@ fn queue_chunk(world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<chunk_pipel
         w.observe_weather_chunk(cx, cz);
         w.chunk_read_snapshot(cx, cz)
     };
-    let (mask, data) = snapshot.chunk_data(cx, cz);
+    let (mask, data, vines) = snapshot.chunk_data_with_vines(cx, cz);
+    if !vines.is_empty() {
+        // Chunk generation/lighting happened outside the world mutex.
+        // Only register the already-observed vine coordinates here.
+        world
+            .lock()
+            .map_err(|_| bad("world mutex poisoned"))?
+            .observe_vines_chunk(&vines);
+    }
     chunk_pipeline::submit(cx, cz, mask, data)
 }
 /// Send the chunk under the player first so the loading screen can display
