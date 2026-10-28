@@ -22,6 +22,9 @@ static DEATH_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeathCause {
     Void,
+    Magic,
+    Lightning,
+    CommandKill,
     FallingAnvil,
     Cactus,
     Fall,
@@ -51,6 +54,9 @@ impl DeathCause {
     pub fn code(self) -> &'static str {
         match self {
             Self::Void => "void",
+            Self::Magic => "magic",
+            Self::Lightning => "lightning",
+            Self::CommandKill => "command_kill",
             Self::FallingAnvil => "falling_anvil",
             Self::Cactus => "cactus",
             Self::Fall => "fall",
@@ -107,6 +113,9 @@ impl DeathCause {
         }
         let description = match self {
             Self::Void => "fell out of the world",
+            Self::Magic => "was killed by magic",
+            Self::Lightning => "was struck by lightning",
+            Self::CommandKill => "fell out of the world",
             Self::FallingAnvil => "was squashed by a falling anvil",
             Self::Cactus => "was pricked to death",
             Self::Fall => "fell from a high place",
@@ -889,6 +898,14 @@ mod tests {
             DeathCause::FallingAnvil.message("Alex"),
             "Alex was squashed by a falling anvil"
         );
+    }
+
+    #[test]
+    fn command_magic_and_lightning_have_distinct_auditable_causes() {
+        assert_eq!(DeathCause::CommandKill.code(), "command_kill");
+        assert_eq!(DeathCause::CommandKill.message("Alex"), "Alex fell out of the world");
+        assert_eq!(DeathCause::Magic.message("Alex"), "Alex was killed by magic");
+        assert_eq!(DeathCause::Lightning.message("Alex"), "Alex was struck by lightning");
     }
 
     #[test]
