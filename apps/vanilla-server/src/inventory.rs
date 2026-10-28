@@ -1155,9 +1155,11 @@ impl Inventory {
                     {
                         continue;
                     }
-                    if existing
-                        .is_some_and(|other| other.id != cursor.id || other.damage != cursor.damage)
-                    {
+                    if existing.is_some_and(|other| {
+                        other.id != cursor.id
+                            || other.damage != cursor.damage
+                            || other.nbt != cursor.nbt
+                    }) {
                         continue;
                     }
                     let count = existing.map_or(0, |other| other.count);
@@ -1232,7 +1234,10 @@ impl Inventory {
             let Some(mut existing) = self.chest_stack(chest, position) else {
                 continue;
             };
-            if existing.id != carried.id || existing.damage != carried.damage {
+            if existing.id != carried.id
+                || existing.damage != carried.damage
+                || existing.nbt != carried.nbt
+            {
                 continue;
             }
             let amount = (carried.max_count() - carried.count).min(existing.count);
@@ -1297,7 +1302,8 @@ impl Inventory {
                     && existing.is_some()
                     && carried.is_some()
                     && (existing.unwrap().id != carried.unwrap().id
-                        || existing.unwrap().damage != carried.unwrap().damage)
+                        || existing.unwrap().damage != carried.unwrap().damage
+                        || existing.unwrap().nbt != carried.unwrap().nbt)
                 {
                     return None;
                 }
@@ -2299,6 +2305,24 @@ mod tests {
         // Double-click collect also must not mix tagged and untagged items.
         assert!(inventory.click_window(0, 9, 0, 6));
         assert_eq!(inventory.slots[9], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
+
+        // A chest is independently persisted; it must obey the same
+        // exact ItemStack identity rule for left/right clicks and drag.
+        let mut chest = [None; 27];
+        chest[0] = Some(a);
+        assert!(inventory.chest_click_window(1, &mut chest, 0, 1, 0).is_none());
+        assert_eq!(chest[0], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
+
+        assert!(inventory.chest_click_window(1, &mut chest, -999, 0, 5).is_some());
+        assert!(inventory.chest_click_window(1, &mut chest, 0, 1, 5).is_some());
+        assert!(inventory.chest_click_window(1, &mut chest, -999, 2, 5).is_some());
+        assert_eq!(chest[0], Some(a));
+        assert_eq!(inventory.cursor, Some(b));
+
+        assert!(inventory.chest_click_window(1, &mut chest, 0, 0, 6).is_some());
+        assert_eq!(chest[0], Some(a));
         assert_eq!(inventory.cursor, Some(b));
     }
 
