@@ -51,6 +51,31 @@ enum Kind {
     Wither,
 }
 impl Kind {
+    fn death_name(self) -> &'static str {
+        match self {
+            Self::Zombie => "Zombie",
+            Self::Cow => "Cow",
+            Self::Pig => "Pig",
+            Self::Horse => "Horse",
+            Self::Sheep => "Sheep",
+            Self::Chicken => "Chicken",
+            Self::Skeleton => "Skeleton",
+            Self::Creeper => "Creeper",
+            Self::Spider => "Spider",
+            Self::CaveSpider => "Cave Spider",
+            Self::Enderman => "Enderman",
+            Self::Slime => "Slime",
+            Self::Witch => "Witch",
+            Self::Ghast => "Ghast",
+            Self::Blaze => "Blaze",
+            Self::ZombiePigman => "Zombie Pigman",
+            Self::MagmaCube => "Magma Cube",
+            Self::Villager => "Villager",
+            Self::IronGolem => "Iron Golem",
+            Self::EnderDragon => "Ender Dragon",
+            Self::Wither => "Wither",
+        }
+    }
     fn protocol(self) -> u8 {
         match self {
             Self::Zombie => 54,
@@ -450,6 +475,9 @@ struct Arrow {
     position: PlayerPosition,
     velocity: [f64; 3],
     shooter: Option<i32>,
+    // Preserve the firing Mob's species even if it despawns before impact.
+    #[serde(default)]
+    shooter_kind: Option<Kind>,
     hostile: bool,
     #[serde(default)]
     kind: ProjectileKind,
@@ -482,10 +510,32 @@ pub struct Attack {
     pub drop: Option<(Stack, (i32, i32, i32))>,
     pub experience: u32,
 }
+/// Source attribution is observation-only and never changes damage numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DamageOrigin {
+    Mob { kind: &'static str, entity_id: i32 },
+    Projectile {
+        kind: &'static str,
+        shooter_kind: Option<&'static str>,
+        shooter_id: Option<i32>,
+    },
+    Explosion { kind: &'static str, source_id: Option<i32> },
+    WitherEffect,
+    Mixed,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayerHit {
+    pub amount: u8,
+    pub origin: DamageOrigin,
+}
+
 #[derive(Debug)]
 pub struct Explosion {
     pub position: PlayerPosition,
     pub radius: f64,
+    pub origin: DamageOrigin,
 }
 impl Explosion {
     pub fn packet(&self) -> Event {
@@ -510,9 +560,9 @@ pub struct Mobs {
     arrows: BTreeMap<i32, Arrow>,
     orbs: BTreeMap<i32, (PlayerPosition, u16, u64)>,
     #[serde(skip)]
-    pending_hits: Vec<(PlayerPosition, u8, u64)>,
+    pending_hits: Vec<(PlayerPosition, u8, u64, DamageOrigin)>,
     #[serde(skip)]
-    pending_blast_damage: BTreeMap<i32, u8>,
+    pending_blast_damage: BTreeMap<i32, (u8, DamageOrigin)>,
     /// Ten-tick post-hit immunity is per authenticated player, not per Mob.
     #[serde(skip)]
     last_player_damage_tick: BTreeMap<i32, u64>,
@@ -1648,8 +1698,14 @@ impl Mobs {
                 if raw == 0 {
                     continue;
                 }
-                let entry = self.pending_blast_damage.entry(id).or_default();
-                *entry = entry.saturating_add(raw).min(40);
+                let entry = self
+                    .pending_blast_damage
+                    .entry(id)
+                    .or_insert((0, explosion.origin));
+                entry.0 = entry.0.saturating_add(raw).min(40);
+                if entry.1 != explosion.origin {
+                    entry.1 = DamageOrigin::Mixed;
+                }
             }
             let affected: Vec<_> = self
                 .entities
@@ -2273,10 +2329,12 @@ impl Mobs {
         let vy = -p.sin() * speed;
         let id = self.next_id;
         self.next_id += 1;
-        let hostile = shooter.is_some_and(|id| self.entities.contains_key(&id));
+        let shooter_kind = shooter.and_then(|id| self.entities.get(&id).map(|mob| mob.kind));
+        let hostile = shooter_kind.is_some();
         let arrow = Arrow {
             id,
             hostile,
+            shooter_kind,
             position: PlayerPosition {
                 y: at.y + 1.3,
                 ..at
@@ -2747,7 +2805,7 @@ impl Mobs {
             }
         });
         self.pending_hits
-            .retain(|(_, _, t)| now.saturating_sub(*t) < 30);
+            .retain(|(_, _, t, _)| now.saturating_sub(*t) < 30);
         if self.difficulty == Some(0) {
             self.entities.retain(|id, mob| {
                 if mob.kind.peaceful_safe() {
@@ -3013,6 +3071,10 @@ impl Mobs {
                         self.explosions.push(Explosion {
                             position: mob.position,
                             radius: 3.0,
+                            origin: DamageOrigin::Explosion {
+                                kind: "Creeper",
+                                source_id: Some(mob.id),
+                            },
                         });
                         dead.push(mob.id);
                         continue;
@@ -3281,6 +3343,14 @@ impl Mobs {
                         self.explosions.push(Explosion {
                             position: sample,
                             radius: 1.0,
+                            origin: DamageOrigin::Explosion {
+                                kind: if arrow.kind == ProjectileKind::WitherSkull {
+                                    "Wither Skull"
+                                } else {
+                                    "Ghast Fireball"
+                                },
+                                source_id: arrow.shooter,
+                            },
                         });
                     }
                     impacted = true;
@@ -3291,7 +3361,22 @@ impl Mobs {
                         (p.x - sample.x).hypot(p.z - sample.z) < 0.85
                             && (p.y + 0.9 - sample.y).abs() < 1.3
                     }) {
-                        self.pending_hits.push((*hit, arrow.damage, now));
+                        self.pending_hits.push((
+                            *hit,
+                            arrow.damage,
+                            now,
+                            DamageOrigin::Projectile {
+                                kind: match arrow.kind {
+                                    ProjectileKind::Arrow => "Arrow",
+                                    ProjectileKind::WitchPotion => "Witch Potion",
+                                    ProjectileKind::GhastFireball => "Ghast Fireball",
+                                    ProjectileKind::BlazeFireball => "Blaze Fireball",
+                                    ProjectileKind::WitherSkull => "Wither Skull",
+                                },
+                                shooter_kind: arrow.shooter_kind.map(Kind::death_name),
+                                shooter_id: arrow.shooter,
+                            },
+                        ));
                         match arrow.kind {
                             ProjectileKind::WitchPotion => {
                                 self.pending_effects.push((*hit, 19, 160, now));
@@ -3303,6 +3388,10 @@ impl Mobs {
                                 self.explosions.push(Explosion {
                                     position: sample,
                                     radius: 1.0,
+                                    origin: DamageOrigin::Explosion {
+                                        kind: "Ghast Fireball",
+                                        source_id: arrow.shooter,
+                                    },
                                 });
                             }
                             _ => {}
@@ -3420,6 +3509,7 @@ impl Mobs {
         std::mem::take(&mut self.pending_melee_animations)
     }
 
+    #[cfg(test)]
     pub fn hurt_player_with_health(
         &mut self,
         player_id: i32,
@@ -3427,13 +3517,41 @@ impl Mobs {
         tick: u64,
         health: f32,
     ) -> u8 {
-        let mut amount = self.pending_blast_damage.remove(&player_id).unwrap_or(0);
-        self.pending_hits.retain(|(p, d, t)| {
-            if tick.saturating_sub(*t) < 30 && (p.x - player.x).hypot(p.z - player.z) < 0.75 {
-                amount = amount.saturating_add(*d);
+        self.hurt_player_detailed(player_id, player, tick, health).amount
+    }
+
+    /// Return the exact damage used for combat plus provenance captured
+    /// when the attack was emitted, without trusting a client-supplied name.
+    pub fn hurt_player_detailed(
+        &mut self,
+        player_id: i32,
+        player: PlayerPosition,
+        tick: u64,
+        health: f32,
+    ) -> PlayerHit {
+        let (mut amount, mut source) = match self.pending_blast_damage.remove(&player_id) {
+            Some((damage, origin)) if damage > 0 => (damage, Some(origin)),
+            _ => (0, None),
+        };
+        let mut accumulate = |damage: u8, origin: DamageOrigin| {
+            if damage == 0 {
+                return;
+            }
+            amount = amount.saturating_add(damage);
+            source = Some(match source {
+                None => origin,
+                Some(previous) if previous == origin => previous,
+                Some(_) => DamageOrigin::Mixed,
+            });
+        };
+        self.pending_hits.retain(|(p, damage, when, origin)| {
+            if tick.saturating_sub(*when) < 30
+                && (p.x - player.x).hypot(p.z - player.z) < 0.75
+            {
+                accumulate(*damage, *origin);
                 false
             } else {
-                tick.saturating_sub(*t) < 30
+                tick.saturating_sub(*when) < 30
             }
         });
         for mob in self.entities.values_mut() {
@@ -3460,15 +3578,19 @@ impl Mobs {
                 if self.difficulty != Some(0) {
                     self.pending_melee_animations.push(mob.attack_animation());
                 }
-                amount =
-                    amount.saturating_add(if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
-                        2
-                    } else {
-                        3
-                    });
-                // Cave spiders cause poison only on Normal/Hard (7s / 15s).
-                // Directly target this participant; a collocated player must
-                // never inherit the victim's effect.
+                let points = if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
+                    2
+                } else {
+                    3
+                };
+                accumulate(
+                    points,
+                    DamageOrigin::Mob {
+                        kind: mob.kind.death_name(),
+                        entity_id: mob.id,
+                    },
+                );
+                // Only the targeted player receives the cave-spider effect.
                 let poison_duration = match self.difficulty.unwrap_or(2) {
                     2 if mob.kind == Kind::CaveSpider => 140,
                     3 if mob.kind == Kind::CaveSpider => 300,
@@ -3481,18 +3603,24 @@ impl Mobs {
                 break;
             }
         }
-        // Poison (19) cannot kill by itself; Wither (20) can. Both are
-        // server-timed regardless of the client's displayed potion animation.
         if let Some((effect, expires, last)) = self.active_effects.get_mut(&player_id) {
             if tick >= *expires {
                 self.active_effects.remove(&player_id);
             } else if tick.saturating_sub(*last) >= (if *effect == 19 { 25 } else { 40 }) {
                 *last = tick;
                 if *effect == 20 || health > 1.0 {
-                    amount = amount.saturating_add(1);
+                    accumulate(
+                        1,
+                        if *effect == 20 {
+                            DamageOrigin::WitherEffect
+                        } else {
+                            DamageOrigin::Unknown
+                        },
+                    );
                 }
             }
         }
+        // Keep damage scaling and invulnerability behavior unchanged.
         let scaled = match self.difficulty.unwrap_or(1) {
             0 => 0,
             1 => amount.div_ceil(2),
@@ -3500,19 +3628,26 @@ impl Mobs {
             _ => amount,
         };
         if scaled > 0 {
-            // Vanilla 1.7.10: after a hit the player is briefly immune to
-            // another equal/lower hit. Do not stack multiple Mob bites,
-            // projectiles and explosions in a single half-second window.
             if self
                 .last_player_damage_tick
                 .get(&player_id)
                 .is_some_and(|&last| tick >= last && tick - last < 10)
             {
-                return 0;
+                return PlayerHit {
+                    amount: 0,
+                    origin: DamageOrigin::Unknown,
+                };
             }
             self.last_player_damage_tick.insert(player_id, tick);
         }
-        scaled
+        PlayerHit {
+            amount: scaled,
+            origin: if scaled == 0 {
+                DamageOrigin::Unknown
+            } else {
+                source.unwrap_or(DamageOrigin::Unknown)
+            },
+        }
     }
 }
 /// Minecraft 1.7.10 BiomeGenBase spawn entries: sheep/pig/chicken/cow
@@ -4642,16 +4777,107 @@ mod tests {
     }
 
     #[test]
+    fn death_provenance_tracks_the_mob_entity_from_melee() {
+        let pos = PlayerPosition::default();
+        let mut mobs = Mobs {
+            difficulty: Some(2),
+            ..Mobs::default()
+        };
+        mobs.insert(Kind::Zombie, pos, false);
+        let killer_id = mobs.next_id - 1;
+        let hit = mobs.hurt_player_detailed(700, pos, 30, 2.0);
+        assert!(hit.amount > 0);
+        assert_eq!(
+            hit.origin,
+            DamageOrigin::Mob {
+                kind: "Zombie",
+                entity_id: killer_id,
+            }
+        );
+        assert_eq!(mobs.hurt_player_detailed(700, pos, 31, 2.0).amount, 0);
+    }
+
+    #[test]
+    fn projectile_keeps_source_species_after_shooter_disappears() {
+        let pos = PlayerPosition::default();
+        let mut mobs = Mobs {
+            difficulty: Some(2),
+            ..Mobs::default()
+        };
+        mobs.insert(Kind::Skeleton, pos, false);
+        let shooter_id = mobs.next_id - 1;
+        mobs.fire_arrow(Some(shooter_id), pos, 0.0, 0.0, 1.5, 3)
+            .unwrap();
+        let arrow = *mobs.arrows.values().next().unwrap();
+        assert_eq!(arrow.shooter_kind, Some(Kind::Skeleton));
+        mobs.entities.remove(&shooter_id);
+        mobs.pending_hits.push((
+            pos,
+            arrow.damage,
+            40,
+            DamageOrigin::Projectile {
+                kind: "Arrow",
+                shooter_kind: arrow.shooter_kind.map(Kind::death_name),
+                shooter_id: arrow.shooter,
+            },
+        ));
+        let hit = mobs.hurt_player_detailed(701, pos, 40, 3.0);
+        assert_eq!(
+            hit.origin,
+            DamageOrigin::Projectile {
+                kind: "Arrow",
+                shooter_kind: Some("Skeleton"),
+                shooter_id: Some(shooter_id),
+            }
+        );
+    }
+
+    #[test]
+    fn multiple_distinct_causes_never_claim_one_killer() {
+        let pos = PlayerPosition::default();
+        let mut mobs = Mobs {
+            difficulty: Some(2),
+            ..Mobs::default()
+        };
+        mobs.pending_blast_damage.insert(
+            702,
+            (5, DamageOrigin::Explosion { kind: "TNT", source_id: Some(9) }),
+        );
+        mobs.pending_hits.push((
+            pos,
+            3,
+            50,
+            DamageOrigin::Projectile {
+                kind: "Arrow",
+                shooter_kind: Some("Skeleton"),
+                shooter_id: Some(123),
+            },
+        ));
+        let hit = mobs.hurt_player_detailed(702, pos, 50, 4.0);
+        assert_eq!(hit.amount, 8);
+        assert_eq!(hit.origin, DamageOrigin::Mixed);
+    }
+
+    #[test]
     fn hostile_hits_have_per_player_ten_tick_damage_grace() {
         let player = PlayerPosition::default();
         let mut mobs = Mobs::default();
         mobs.insert(Kind::Zombie, player, false);
         assert!(mobs.hurt_player(45, player, 20) > 0);
-        mobs.pending_blast_damage.insert(45, 8);
+        mobs.pending_blast_damage.insert(
+            45,
+            (8, DamageOrigin::Explosion { kind: "Creeper", source_id: Some(500_001) }),
+        );
         assert_eq!(mobs.hurt_player(45, player, 21), 0);
-        mobs.pending_blast_damage.insert(45, 8);
+        mobs.pending_blast_damage.insert(
+            45,
+            (8, DamageOrigin::Explosion { kind: "Creeper", source_id: Some(500_001) }),
+        );
         assert!(mobs.hurt_player(45, player, 30) > 0);
-        mobs.pending_blast_damage.insert(46, 8);
+        mobs.pending_blast_damage.insert(
+            46,
+            (8, DamageOrigin::Explosion { kind: "Creeper", source_id: Some(500_001) }),
+        );
         assert!(mobs.hurt_player(46, player, 31) > 0);
     }
 
@@ -7584,6 +7810,7 @@ mod tests {
         let explosions = [Explosion {
             position: nearby,
             radius: 3.0,
+            origin: DamageOrigin::Explosion { kind: "Creeper", source_id: Some(123) },
         }];
         mobs.queue_explosion_hits(
             &World::new(),
@@ -8147,6 +8374,7 @@ mod tests {
         let blast = Explosion {
             position: source,
             radius: 3.0,
+            origin: DamageOrigin::Explosion { kind: "Creeper", source_id: None },
         };
         let clear = blast_damage(&world, &blast, target);
         assert!(clear > 0);
