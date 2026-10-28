@@ -21,6 +21,7 @@ static DEATH_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeathCause {
+    Void,
     Cactus,
     Fall,
     Starvation,
@@ -48,6 +49,7 @@ pub enum DeathCause {
 impl DeathCause {
     pub fn code(self) -> &'static str {
         match self {
+            Self::Void => "void",
             Self::Cactus => "cactus",
             Self::Fall => "fall",
             Self::Starvation => "starvation",
@@ -102,6 +104,7 @@ impl DeathCause {
             _ => {}
         }
         let description = match self {
+            Self::Void => "fell out of the world",
             Self::Cactus => "was pricked to death",
             Self::Fall => "fell from a high place",
             Self::Starvation => "starved to death",
@@ -874,6 +877,12 @@ mod tests {
             serde_json::from_slice(&fs::read(&scoreboard_path).unwrap()).unwrap();
         assert!(encoded["scores"]["deaths"].get("Alice").is_none());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn void_death_matches_legacy_1_7_10_chat_vocabulary() {
+        assert_eq!(DeathCause::Void.code(), "void");
+        assert_eq!(DeathCause::Void.message("Alex"), "Alex fell out of the world");
     }
 
     #[test]
