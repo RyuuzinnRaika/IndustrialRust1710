@@ -2633,7 +2633,10 @@ impl World {
                 // like binary plates, or a saved nonzero level stays powered.
                 || (matches!(block >> 4, 147 | 148) && block & 15 != 0)
             {
-                world.pending_buttons.insert((x, y, z), 20);
+                // Existing weighted-plate contacts expire after 10 ticks.
+                // Keep this consistent across save/reload; other devices retain 20.
+                let release_delay = if matches!(block >> 4, 147 | 148) { 10 } else { 20 };
+                world.pending_buttons.insert((x, y, z), release_delay);
             }
         }
         Ok(world)
@@ -4932,8 +4935,8 @@ mod group_b_regression_tests {
 
             let mut restored = World::load(&path).unwrap();
             assert_eq!(restored.get(0, 65, 0), (id << 4) | level);
-            assert_eq!(restored.pending_buttons.get(&(0, 65, 0)), Some(&20u64));
-            for _ in 0..19 {
+            assert_eq!(restored.pending_buttons.get(&(0, 65, 0)), Some(&10u64));
+            for _ in 0..9 {
                 restored.block_tick(&path, 64).unwrap();
                 assert_eq!(restored.get(0, 65, 0), (id << 4) | level);
             }
