@@ -174,19 +174,27 @@ The cactus source merges into \`mixed_environmental\` when a separate
 environmental hit is also applied in the same hazard batch; it never
 arbitrarily replaces the first source.
 
-### Remaining D05 sources
-- [ ] Void/out-of-world: requires safe server-owned movement below Y=0 and a
-      carefully specified Y=-64 kill threshold; current player position
-      validation forbids negative Y.
-- [ ] Falling anvil: requires actual falling-block entity and impact tracking,
-      not just an anvil block check.
-- [ ] Lightning: requires authoritative strike damage source and event linkage.
-- [ ] Potions and other magic: split current generic projectile/effect source
-      only when server-owned effects have stable provenance.
-- [ ] \`/kill\` should emit a distinct cause after command authorization and
-      vanilla 1.7.10 syntax are implemented.
-- [ ] Check collision, armor, death drops, position sync and 1.7.10 client
-      behavior through native tests.
+### D05 implementation status (source-level; not yet tested)
+
+- **Void**: negative-Y movement, -64 boundary, server-owned 4 HP/10 tick
+  fatal source. Moving and respawning in the void require real client tests.
+- **Cactus**: AABB contact and single-hazard/mixed-hazard classification.
+- **Falling anvil**: server world records bounded landing damage and routes it
+  to the victim's owning session. Flight origins are now durably co-saved in
+  the IRW world snapshot (TNT5 trailer) so reloads preserve distance.
+  The falling block still uses an emulated block-to-block model rather than
+  a true 1.7.10 falling-block entity.
+- **Lightning**: bounded natural storm strike generation, Protocol 5 S2C
+  Spawn Global Entity (0x2C) for client visualization, and server-owned 5 HP
+  direct-hit damage. Subsequent burning/charged-creeper effects and exact
+  vanilla per-chunk probabilities need further implementation.
+- **Magic**: authorized `/effect <player> 7 [seconds] [amplifier]` applies
+  6, 12, 24 or 48 instant HP damage once, with `magic` source.
+  Splash potion ownership and other indirect magic remain incomplete.
+- **/kill**: verified OP level 2 or host console requests a target-owned kill,
+  which follows the same durable HP/deathCount/event/respawn pipeline.
+  Supports Survival and Creative; entity selectors and mob killing still
+  require dedicated command handling.
 
 This work does not create a PR because the repository's
 \`.github/workflows/ops-python.yml\` is configured to launch GitHub Actions
@@ -209,13 +217,12 @@ non-default, non-release branch avoid those workflow triggers.
   is delivered only to intersecting players in the active dimension; the
   authenticated owning session performs the health mutation, death
   transaction, health packet, and `falling_anvil` death message.
-- Important limitation: the world currently emulates falling blocks as
-  block-to-block moves instead of Protocol 5 falling-block entities. The
-  in-memory anvil origin height is lost across restart; after restart the
-  damage can be undercounted. Replaying a made-up origin would be worse.
-  **D05 anvil is therefore partial, not a claim of complete 1.7.10
-  falling-entity equivalence.** Armor/helmet-specific falling-anvil reduction
-  is also not yet implemented.
+- The world still emulates falling blocks as block-to-block moves,
+  not Protocol 5 falling-block entities. A later change saves and loads
+  anvil flight origin heights together with the IRW world image in a
+  bounded TNT5 extension. This fixes the previously documented loss of
+  distance across restart but does **not** implement full vanilla falling
+  physics, damage caps across helmet/armor, or falling-block network entities.
 
 ### Acceptance tests before integration
 
@@ -234,3 +241,38 @@ non-default, non-release branch avoid those workflow triggers.
       the existing 37+ protocol5 end-to-end tests.
 - [ ] Verify no GitHub Actions were triggered; Actions are **not** a test
       destination for this project.
+
+## 2026-10-28 continuation: D05 weather/effects/commands and D06 text
+
+Implemented in the same feature branch:
+
+- In-flight anvil height is part of the **same IRW save** as its new block
+  position, not a non-transactional sidecar. TNT1..4 snapshots remain
+  readable; TNT5 adds a bounded origin table. Corrupt/truncated tables fail
+  closed. Restart-resume test added.
+- During Overworld thunderstorms, one bounded random lightning trial is made
+  per simulated world tick, with a strike near an online player. A source
+  event is dispatched to each intersecting player session (not an untrusted
+  network request); the 1.7.10 client is shown global-entity type 1.
+  Lightning does not yet implement fire, mob conversions, or exact vanilla
+  probability and should not be marked full behavioral parity.
+- The command `/summon LightningBolt` is **not** implemented: that command
+  target was not available in Minecraft Java 1.7.10 (added in 1.8).
+- Effect ID 7 is **instant** harm, never queued as a continuing status
+  effect. Fatal damage uses the same journaled scoreboard/HP/log transaction.
+- Admin `/kill` uses authenticated OP authorization (or console) and a
+  private owner-session mailbox. Creative respawn preserves game mode and
+  avoids survival inventory/XP drops.
+- D06 begins differentiating arrow, Ghast/Blaze fireballs, witch potion magic,
+  Creeper, TNT and Wither Skull death text; exact item/killer ownership and
+  recent-attack contextual variants are not finished.
+- A post-development merge from `main` retained existing non-death world
+  and player changes without using GitHub Actions.
+
+**Unverified gates**: `cargo fmt --all -- --check`,
+`cargo test -p vanilla-server`, Clippy, native 1.7.10 protocol client,
+concurrent deaths, outbox failpoints, anvil restart, lightning packet decoding,
+command authorization and Creative respawn. No test or CI pass is claimed.
+
+**GitHub Actions must not be started**. No PR was opened for this branch
+because existing repository workflows run on pull-request events.
