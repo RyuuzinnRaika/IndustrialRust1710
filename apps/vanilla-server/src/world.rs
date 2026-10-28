@@ -1238,9 +1238,101 @@ impl World {
         }
     }
 
+    /// Item created when a world tick removes or piston-breaks a block.
+    /// Evaluated against the pre-tick world so its legacy metadata survives.
+    fn tick_drop_for_change(&self, (x, y, z): Position, next: u16) -> Option<WorldDrop> {
+        let old = self.get(x, i32::from(y), z);
+        // A piston can replace a fragile torch/rail directly
+        // with its head or the last shifted solid. The destroyed
+        // attachment still drops an item even if the new cell is
+        // non-air. Other replacement paths retain prior behavior.
+        if old == 0 || (next != 0 && (next == old || !devices::piston_breakable(old))) {
+            return None;
+        }
+        let pos = (x, i32::from(y), z);
+        let id = old >> 4;
+        let item_id = match id {
+            6 => 6,
+            50 => 50,
+            55 => 331,
+            59 => {
+                if old & 7 == 7 {
+                    296
+                } else {
+                    295
+                }
+            }
+            // Piston-destroy reaction still drops the block's
+            // *item*, including powered/detector/activator rails.
+            27 | 28 | 66 | 157 => id as i16,
+            37..=40 => id as i16,
+            63 | 68 => 323, // signs use the standing-sign item
+            65 | 69 | 70 | 72 | 77 | 131 | 143 | 147 | 148 => id as i16,
+            132 => 287,       // tripwire drops string
+            149 | 150 => 404, // comparator item, not powered block
+            30 => 287,        // cobweb without silk touch
+            81 | 83 | 111 | 171 => id as i16,
+            127 => 351, // cocoa beans (brown dye)
+            115 => 372, // nether wart item
+            175 => 175, // double-height flower
+            75 | 76 => 76,
+            93 | 94 => 356,
+            141 => 391,
+            142 => 392,
+            64 if old & 8 == 0 => 324,
+            71 if old & 8 == 0 => 330,
+            96 => 96,
+            18 | 161 => {
+                return crate::survival::additional_drop(old, pos, self.fluid_phase)
+                    .map(|stack| WorldDrop { pos, stack });
+            }
+            _ => return None,
+        };
+        let stack = crate::inventory::Stack {
+            id: item_id,
+            count: if id == 127 {
+                (1 + ((old & 12) >> 2)) as u8
+            } else {
+                1
+            },
+            damage: if id == 127 {
+                3 // cocoa item/dye damage
+            } else if matches!(id, 6 | 38 | 171 | 175) {
+                (old & 15) as i16
+            } else {
+                0
+            },
+            nbt: None,
+        };
+        Some(WorldDrop { pos, stack })
+    }
+
     /// Bounded 20TPS flow/conduction step. IRW save occurs once per tick.
     /// Empty fluid destinations and wire strengths are staged before mutation.
     pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
+        self.block_tick_inner(path, budget, None).map(|(changed, _)| changed)
+    }
+
+    /// Tick world blocks together with their materialized ground-item drops.
+    /// A detached attachment and the item it creates have one crash-recoverable
+    /// world/ground journal transaction; no item is broadcast before commit.
+    pub fn block_tick_with_ground(
+        &mut self,
+        path: &Path,
+        budget: usize,
+        ground: &mut crate::ground_items::GroundItems,
+        ground_path: &Path,
+    ) -> io::Result<(Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>)> {
+        self.block_tick_inner(path, budget, Some((ground, ground_path)))
+    }
+
+    fn block_tick_inner(
+        &mut self,
+        path: &Path,
+        budget: usize,
+        mut ground: Option<(&mut crate::ground_items::GroundItems, &Path)>,
+    ) -> io::Result<(Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>)> {
+        let mut committed_drops = Vec::new();
         self.fluid_phase = self.fluid_phase.wrapping_add(1);
         // Snapshot before any TNT movement; disk failure restores exactly
         // the positions and velocities that were durably committed.
@@ -1557,6 +1649,26 @@ impl World {
             }
             changes.remove(&pos);
         }
+        // Block supports must not disappear unless every corresponding
+        // item can also be stored. On a full ground pool, keep the original
+        // block in the world and retry its support check on a later tick.
+        // This applies to regular support detachments and piston breakage.
+        let mut deferred_drops = Vec::new();
+        if let Some((ground, _)) = ground.as_ref() {
+            let mut reserved = 0usize;
+            for (&pos, &next) in &changes {
+                if self.tick_drop_for_change(pos, next).is_some() {
+                    if reserved >= 256 || !ground.has_capacity_for(reserved + 1) {
+                        deferred_drops.push(pos);
+                    } else {
+                        reserved += 1;
+                    }
+                }
+            }
+            for pos in &deferred_drops {
+                changes.remove(pos);
+            }
+        }
         // Never spawn an entity for a TNT block whose removal was dropped by
         // the edit budget. Otherwise /stop persists a TNT block AND entity.
         primed_on_commit.retain(|&(x, y, z)| changes.get(&(x, y as u8, z)) == Some(&0));
@@ -1640,72 +1752,7 @@ impl World {
             // before mutation, but expose them only after a successful save.
             let detached_drops: Vec<WorldDrop> = changes
                 .iter()
-                .filter_map(|(&(x, y, z), &next)| {
-                    let old = self.get(x, i32::from(y), z);
-                    // A piston can replace a fragile torch/rail directly
-                    // with its head or the last shifted solid. The destroyed
-                    // attachment still drops an item even if the new cell is
-                    // non-air. Other replacement paths retain prior behavior.
-                    if old == 0 || (next != 0 && (next == old || !devices::piston_breakable(old))) {
-                        return None;
-                    }
-                    let pos = (x, i32::from(y), z);
-                    let id = old >> 4;
-                    let item_id = match id {
-                        6 => 6,
-                        50 => 50,
-                        55 => 331,
-                        59 => {
-                            if old & 7 == 7 {
-                                296
-                            } else {
-                                295
-                            }
-                        }
-                        // Piston-destroy reaction still drops the block's
-                        // *item*, including powered/detector/activator rails.
-                        27 | 28 | 66 | 157 => id as i16,
-                        37..=40 => id as i16,
-                        63 | 68 => 323, // signs use the standing-sign item
-                        65 | 69 | 70 | 72 | 77 | 131 | 143 | 147 | 148 => id as i16,
-                        132 => 287,       // tripwire drops string
-                        149 | 150 => 404, // comparator item, not powered block
-                        30 => 287,        // cobweb without silk touch
-                        81 | 83 | 111 | 171 => id as i16,
-                        127 => 351, // cocoa beans (brown dye)
-                        115 => 372, // nether wart item
-                        175 => 175, // double-height flower
-                        75 | 76 => 76,
-                        93 | 94 => 356,
-                        141 => 391,
-                        142 => 392,
-                        64 if old & 8 == 0 => 324,
-                        71 if old & 8 == 0 => 330,
-                        96 => 96,
-                        18 | 161 => {
-                            return crate::survival::additional_drop(old, pos, self.fluid_phase)
-                                .map(|stack| WorldDrop { pos, stack });
-                        }
-                        _ => return None,
-                    };
-                    let stack = crate::inventory::Stack {
-                        id: item_id,
-                        count: if id == 127 {
-                            (1 + ((old & 12) >> 2)) as u8
-                        } else {
-                            1
-                        },
-                        damage: if id == 127 {
-                            3 // cocoa item/dye damage
-                        } else if matches!(id, 6 | 38 | 171 | 175) {
-                            (old & 15) as i16
-                        } else {
-                            0
-                        },
-                        nbt: None,
-                    };
-                    Some(WorldDrop { pos, stack })
-                })
+                .filter_map(|(&pos, &next)| self.tick_drop_for_change(pos, next))
                 .take(256)
                 .collect();
             let dirty_light: Vec<_> = changes
@@ -1777,8 +1824,30 @@ impl World {
             for (&position, &block) in &changes {
                 self.set_gravity_cell(position, block);
             }
+            let mut committed_pool = None;
             let saved = if self.edits.len() > MAX_EDITS {
                 Err(invalid("fluid or redstone exceeds world edit budget"))
+            } else if !detached_drops.is_empty() {
+                if let Some((pool, ground_path)) = ground.as_ref() {
+                    // All drop positions have already been accepted by the
+                    // capacity gate. Stage all of them before committing
+                    // either the world or the ground-item sidecar.
+                    (|| -> io::Result<()> {
+                        let positions = detached_drops
+                            .iter()
+                            .map(|drop| (drop.stack, drop.pos))
+                            .collect::<Vec<_>>();
+                        let (staged, spawned) = pool.stage_put_at_positions(&positions)?;
+                        crate::journal::commit(
+                            &path.with_extension("pending-txn.json"),
+                            &[(path, self.encoded()?), (*ground_path, staged.encoded()?)],
+                        )?;
+                        committed_pool = Some((staged, spawned));
+                        Ok(())
+                    })()
+                } else {
+                    self.save(path)
+                }
             } else {
                 self.save(path)
             };
@@ -1806,7 +1875,16 @@ impl World {
                 }
                 return Err(error);
             }
-            self.pending_drops.extend(detached_drops);
+            if let Some((pool, spawned)) = committed_pool {
+                if let Some((live, _)) = ground.as_mut() {
+                    **live = pool;
+                }
+                committed_drops = spawned;
+            } else {
+                // Preserve the stand-alone block_tick API used by existing
+                // offline tests and tools, which still drain these events.
+                self.pending_drops.extend(detached_drops);
+            }
             self.pending_device_activations.extend(fired_devices);
             self.pending_piston_actions.extend(piston_actions);
             for (position, (facing, extending)) in swept {
@@ -1871,6 +1949,11 @@ impl World {
         for pos in supported {
             self.pending_support.remove(&pos);
         }
+        // Capacity-deferred blocks retain a wake-up marker, even if they
+        // were in this tick's processed support set.
+        for pos in deferred_drops {
+            self.pending_support.insert(pos);
+        }
         // Clear timers only after the world save succeeded, so a storage
         // failure cannot silently leave a permanently powered component.
         for pos in expired_timers {
@@ -1881,7 +1964,7 @@ impl World {
             changed.push((x, i32::from(y), z));
             self.wake_block_updates(x, i32::from(y), z);
         }
-        Ok(changed)
+        Ok((changed, committed_drops))
     }
 
     /// Commit a creeper explosion as one durable world transition.
@@ -4726,6 +4809,126 @@ mod tests {
         assert_eq!(fallen[0].stack.damage, 11);
         assert_eq!(World::load(&path).unwrap().get(3, 64, 3), 0);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn world_tick_commits_different_attachment_drops_with_world_in_one_journal() {
+        use crate::ground_items::GroundItems;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-atomic-world-drops-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let drops_path = GroundItems::location(&path);
+        let mut world = World::new();
+        for (x, block) in [
+            (1, 50 << 4 | 5),   // floor torch
+            (2, 27 << 4 | 8),   // powered rail
+            (3, 38 << 4 | 5),   // colored flower
+            (4, 171 << 4 | 3), // colored carpet
+        ] {
+            world.update_and_save(&path, x, 64, 1, block).unwrap();
+            world.update_and_save(&path, x, 63, 1, 0).unwrap();
+        }
+        let mut ground = GroundItems::default();
+        let (changed, spawned) = world
+            .block_tick_with_ground(&path, 64, &mut ground, &drops_path)
+            .unwrap();
+        assert_eq!(changed.len(), 4);
+        assert_eq!(spawned.len(), 4);
+        assert!(world.drain_drops().is_empty(), "server must not emit duplicate drops");
+        let saved = World::load(&path).unwrap();
+        for x in 1..=4 {
+            assert_eq!(saved.get(x, 64, 1), 0, "attachment must be cleared in IRW");
+        }
+        let reloaded = GroundItems::load(&drops_path).unwrap();
+        let items = reloaded.items().map(|item| item.stack).collect::<Vec<_>>();
+        assert_eq!(items.len(), 4);
+        assert!(items.iter().any(|stack| stack.id == 50));
+        assert!(items.iter().any(|stack| stack.id == 27));
+        assert!(items.iter().any(|stack| stack.id == 38 && stack.damage == 5));
+        assert!(items.iter().any(|stack| stack.id == 171 && stack.damage == 3));
+        for (x, id) in [(1, 50), (2, 27), (3, 38), (4, 171)] {
+            let dropped = spawned.iter().find(|item| item.stack.id == id).unwrap();
+            assert_eq!(dropped.position, [(x * 32) + 16, (64 * 32) + 16, (1 * 32) + 16]);
+        }
+        assert!(!path.with_extension("pending-txn.json").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn full_ground_pool_defers_attachment_until_capacity_returns() {
+        use crate::ground_items::GroundItems;
+        use crate::inventory::Stack;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-deferred-world-drops-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let drops_path = GroundItems::location(&path);
+        let item = Stack { id: 4, count: 1, damage: 0, nbt: None };
+        // Ground item pool has 512 slots in this server.
+        let filled = vec![(item, (0, 64, 0)); 512];
+        let (mut ground, _) = GroundItems::default()
+            .stage_put_at_positions(&filled)
+            .unwrap();
+        assert!(!ground.has_capacity_for(1));
+        let mut world = World::new();
+        world.update_and_save(&path, 10, 64, 10, 50 << 4 | 5).unwrap();
+        world.update_and_save(&path, 10, 63, 10, 0).unwrap();
+        let (changed, spawned) = world
+            .block_tick_with_ground(&path, 64, &mut ground, &drops_path)
+            .unwrap();
+        assert!(spawned.is_empty());
+        assert!(!changed.contains(&(10, 64, 10)));
+        assert_eq!(World::load(&path).unwrap().get(10, 64, 10) >> 4, 50);
+        let id = ground.items().next().unwrap().id;
+        let (with_room, _) = ground.stage_take(id).unwrap().unwrap();
+        ground = with_room;
+        let (changed, spawned) = world
+            .block_tick_with_ground(&path, 64, &mut ground, &drops_path)
+            .unwrap();
+        assert!(changed.contains(&(10, 64, 10)));
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].stack.id, 50);
+        assert_eq!(World::load(&path).unwrap().get(10, 64, 10), 0);
+        assert_eq!(GroundItems::load(&drops_path).unwrap().items().count(), 512);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_journal_target_rejects_auto_drop_without_removing_block() {
+        use crate::ground_items::GroundItems;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-failed-world-drops-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let drops_path = GroundItems::location(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 12, 64, 12, 50 << 4 | 5).unwrap();
+        world.update_and_save(&path, 12, 63, 12, 0).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut pool = GroundItems::default();
+        // An identical world/ground path is rejected before writing the redo
+        // record, exercising the rollback branch deterministically.
+        assert!(world.block_tick_with_ground(&path, 64, &mut pool, &path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(world.get(12, 64, 12) >> 4, 50);
+        assert_eq!(pool.items().count(), 0);
+        assert!(!path.with_extension("pending-txn.json").exists());
+        let (_, spawned) = world
+            .block_tick_with_ground(&path, 64, &mut pool, &drops_path)
+            .unwrap();
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(GroundItems::load(&drops_path).unwrap().items().count(), 1);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -9184,8 +9184,29 @@ fn main() -> io::Result<()> {
                         .then(|| gravity_world.blast_exposure_snapshot());
                     // Queued fluid and redstone updates use the same tick and
                     // save all staged block changes with one world-file commit.
-                    match gravity_world.block_tick(&furnace_world_path, 64) {
-                        Ok(changed) => {
+                    // Keep the ground pool locked while the world tick
+                    // reserves every generated attachment drop. World blocks
+                    // and item entities are journaled together before any
+                    // corresponding packets can be sent to clients.
+                    let block_result = {
+                        let mut ground = match leaf_drops.lock() {
+                            Ok(value) => value,
+                            Err(_) => return,
+                        };
+                        gravity_world.block_tick_with_ground(
+                            &furnace_world_path,
+                            64,
+                            &mut ground,
+                            &leaf_drops_file,
+                        )
+                    };
+                    match block_result {
+                        Ok((changed, spawned_drops)) => {
+                            for item in spawned_drops {
+                                for packet in item.spawn() {
+                                    furnace_hub.broadcast(packet);
+                                }
+                            }
                             let piston_actions = gravity_world.drain_piston_actions();
                             for &action in &piston_actions {
                                 furnace_hub.broadcast(piston_action_event(action));
@@ -9678,29 +9699,11 @@ fn main() -> io::Result<()> {
                                     furnace_hub.broadcast(packet);
                                 }
                             }
-                            let decayed = gravity_world.drain_drops();
-                            if !decayed.is_empty() {
-                                let mut ground = match leaf_drops.lock() {
-                                    Ok(value) => value,
-                                    Err(_) => return,
-                                };
-                                for fallen in decayed {
-                                    if ground.is_full() {
-                                        break;
-                                    }
-                                    match ground.put(&leaf_drops_file, fallen.stack, fallen.pos) {
-                                        Ok(item) => {
-                                            for packet in item.spawn() {
-                                                furnace_hub.broadcast(packet);
-                                            }
-                                        }
-                                        Err(error) => {
-                                            eprintln!("LEAF DROP STORAGE ERROR: {error}");
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
+                            // block_tick_with_ground already persisted and
+                            // broadcast its complete drop batch. Keep legacy
+                            // pending drops visible only to standalone callers;
+                            // the server must never attempt a second save.
+                            debug_assert!(gravity_world.drain_drops().is_empty());
                         }
                         Err(error) => {
                             eprintln!("BLOCK TICK STORAGE ERROR: {error}");
