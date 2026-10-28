@@ -4812,6 +4812,122 @@ mod tests {
     }
 
     #[test]
+    fn world_tick_commits_different_attachment_drops_with_world_in_one_journal() {
+        use crate::ground_items::GroundItems;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-atomic-world-drops-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let drops_path = GroundItems::location(&path);
+        let mut world = World::new();
+        for (x, block) in [
+            (1, 50 << 4 | 5),   // floor torch
+            (2, 27 << 4 | 8),   // powered rail
+            (3, 38 << 4 | 5),   // colored flower
+            (4, 171 << 4 | 3), // colored carpet
+        ] {
+            world.update_and_save(&path, x, 64, 1, block).unwrap();
+            world.update_and_save(&path, x, 63, 1, 0).unwrap();
+        }
+        let mut ground = GroundItems::default();
+        let (changed, spawned) = world
+            .block_tick_with_ground(&path, 64, &mut ground, &drops_path)
+            .unwrap();
+        assert_eq!(changed.len(), 4);
+        assert_eq!(spawned.len(), 4);
+        assert!(world.drain_drops().is_empty(), "server must not emit duplicate drops");
+        let saved = World::load(&path).unwrap();
+        for x in 1..=4 {
+            assert_eq!(saved.get(x, 64, 1), 0, "attachment must be cleared in IRW");
+        }
+        let reloaded = GroundItems::load(&drops_path).unwrap();
+        let items = reloaded.items().map(|item| item.stack).collect::<Vec<_>>();
+        assert_eq!(items.len(), 4);
+        assert!(items.iter().any(|stack| stack.id == 50));
+        assert!(items.iter().any(|stack| stack.id == 27));
+        assert!(items.iter().any(|stack| stack.id == 38 && stack.damage == 5));
+        assert!(items.iter().any(|stack| stack.id == 171 && stack.damage == 3));
+        assert!(!path.with_extension("pending-txn.json").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn full_ground_pool_defers_attachment_until_capacity_returns() {
+        use crate::ground_items::GroundItems;
+        use crate::inventory::Stack;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-deferred-world-drops-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let drops_path = GroundItems::location(&path);
+        let item = Stack { id: 4, count: 1, damage: 0, nbt: None };
+        // Ground item pool has 512 slots in this server.
+        let filled = vec![(item, (0, 64, 0)); 512];
+        let (mut ground, _) = GroundItems::default()
+            .stage_put_at_positions(&filled)
+            .unwrap();
+        assert!(!ground.has_capacity_for(1));
+        let mut world = World::new();
+        world.update_and_save(&path, 10, 64, 10, 50 << 4 | 5).unwrap();
+        world.update_and_save(&path, 10, 63, 10, 0).unwrap();
+        let (changed, spawned) = world
+            .block_tick_with_ground(&path, 64, &mut ground, &drops_path)
+            .unwrap();
+        assert!(spawned.is_empty());
+        assert!(!changed.contains(&(10, 64, 10)));
+        assert_eq!(World::load(&path).unwrap().get(10, 64, 10) >> 4, 50);
+        let id = ground.items().next().unwrap().id;
+        let (with_room, _) = ground.stage_take(id).unwrap().unwrap();
+        ground = with_room;
+        let (changed, spawned) = world
+            .block_tick_with_ground(&path, 64, &mut ground, &drops_path)
+            .unwrap();
+        assert!(changed.contains(&(10, 64, 10)));
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].stack.id, 50);
+        assert_eq!(World::load(&path).unwrap().get(10, 64, 10), 0);
+        assert_eq!(GroundItems::load(&drops_path).unwrap().items().count(), 512);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_journal_target_rejects_auto_drop_without_removing_block() {
+        use crate::ground_items::GroundItems;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-failed-world-drops-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("world.irw");
+        let drops_path = GroundItems::location(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 12, 64, 12, 50 << 4 | 5).unwrap();
+        world.update_and_save(&path, 12, 63, 12, 0).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut pool = GroundItems::default();
+        // An identical world/ground path is rejected before writing the redo
+        // record, exercising the rollback branch deterministically.
+        assert!(world.block_tick_with_ground(&path, 64, &mut pool, &path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(world.get(12, 64, 12) >> 4, 50);
+        assert_eq!(pool.items().count(), 0);
+        assert!(!path.with_extension("pending-txn.json").exists());
+        let (_, spawned) = world
+            .block_tick_with_ground(&path, 64, &mut pool, &drops_path)
+            .unwrap();
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(GroundItems::load(&drops_path).unwrap().items().count(), 1);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn unsupported_torch_detaches_into_an_item_after_commit() {
         let path =
             std::env::temp_dir().join(format!("ir1710-attachment-{}.irw", std::process::id()));
