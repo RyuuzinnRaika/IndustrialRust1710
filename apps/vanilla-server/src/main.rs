@@ -9019,6 +9019,8 @@ fn main() -> io::Result<()> {
     let furnace_hub = Arc::clone(&hub);
     let leaf_drops = Arc::clone(&ground_items);
     let leaf_drops_file = Arc::clone(&ground_path);
+    let tick_decorations = Arc::clone(&decorations);
+    let tick_decoration_file = Arc::clone(&decoration_path);
     // Keep the world -> mob lock ordering used by player sessions.
     // TNT blast damage is applied by the *existing* 20TPS world worker.
     let tnt_mobs = Arc::clone(&mobs);
@@ -9193,11 +9195,17 @@ fn main() -> io::Result<()> {
                             Ok(value) => value,
                             Err(_) => return,
                         };
-                        gravity_world.block_tick_with_ground(
+                        let mut stored = match tick_decorations.lock() {
+                            Ok(value) => value,
+                            Err(_) => return,
+                        };
+                        gravity_world.block_tick_with_ground_and_decorations(
                             &furnace_world_path,
                             64,
                             &mut ground,
                             &leaf_drops_file,
+                            &mut stored,
+                            &tick_decoration_file,
                         )
                     };
                     match block_result {
