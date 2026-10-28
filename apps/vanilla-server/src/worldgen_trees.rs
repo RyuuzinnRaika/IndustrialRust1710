@@ -457,11 +457,30 @@ pub(super) fn sapling_blocks(
     blocks
 }
 
+/// Maximum horizontal displacement of any part of each silhouette,
+/// including giant needles, branch-tip leaves and hanging trunk vines.
+/// This filters candidates only *after* the biome/shape has been chosen,
+/// so it cannot affect the tree seed, species or first-tree precedence.
+fn footprint(shape: Shape) -> i32 {
+    match shape {
+        Shape::Oak | Shape::SwampOak | Shape::Birch | Shape::Jungle => 2,
+        Shape::Pine => 2,
+        Shape::Spruce => 3,
+        Shape::DarkOak => 4,
+        Shape::FancyOak | Shape::MegaPine | Shape::Acacia => 5,
+        Shape::MegaSpruce | Shape::MegaJungle => 6,
+    }
+}
+
 fn candidates<F: FnMut(Tree) -> bool>(seed: u64, x: i32, z: i32, mut visit: F) {
     'outer: for tx in x.saturating_sub(REACH)..=x.saturating_add(REACH) {
         for tz in z.saturating_sub(REACH)..=z.saturating_add(REACH) {
             if let Some(t) = candidate(seed, tx, tz) {
-                if visit(t) {
+                let reach = footprint(t.shape);
+                if (x - t.x).abs() <= reach
+                    && (z - t.z).abs() <= reach
+                    && visit(t)
+                {
                     break 'outer;
                 }
             }
@@ -563,6 +582,42 @@ mod tests {
         let spruce = sample(Shape::Spruce);
         assert!(foliage_at(spruce, 2, spruce.height / 2, 0));
         assert!(!foliage_at(spruce, 2, spruce.height + 1, 0));
+    }
+
+    #[test]
+    fn silhouette_footprints_cover_every_emitted_tree_voxel() {
+        for shape in [
+            Shape::Oak,
+            Shape::FancyOak,
+            Shape::SwampOak,
+            Shape::Birch,
+            Shape::Spruce,
+            Shape::Pine,
+            Shape::MegaSpruce,
+            Shape::MegaPine,
+            Shape::Jungle,
+            Shape::MegaJungle,
+            Shape::Acacia,
+            Shape::DarkOak,
+        ] {
+            for variation in [0, 1, 12, 1337, 0xffff] {
+                let mut tree = sample(shape);
+                tree.variation = variation;
+                for dx in -REACH..=REACH {
+                    for dz in -REACH..=REACH {
+                        for dy in 1..=tree.height + 2 {
+                            if voxel(tree, dx, tree.root + dy, dz).is_some() {
+                                assert!(
+                                    dx.abs() <= footprint(shape) && dz.abs() <= footprint(shape),
+                                    "footprint cannot prune a {:?} block at ({dx},{dy},{dz})",
+                                    shape
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
