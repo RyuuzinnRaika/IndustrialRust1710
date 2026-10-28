@@ -388,7 +388,7 @@ pub enum EffectRequest {
     },
 }
 pub fn valid_effect_kind(kind: u8) -> bool {
-    matches!(kind, 1 | 10 | 17 | 19)
+    matches!(kind, 1 | 7 | 10 | 17 | 19)
 }
 pub fn effect_args(parts: &[&str]) -> io::Result<EffectRequest> {
     if parts.len() == 1 && parts[0] == "clear" {
@@ -402,6 +402,7 @@ pub fn effect_args(parts: &[&str]) -> io::Result<EffectRequest> {
     let kind = match parts[0] {
         "speed" => 1,
         "regeneration" => 10,
+        "instant_damage" | "harm" | "harming" => 7,
         "hunger" => 17,
         "poison" => 19,
         text => text
@@ -625,6 +626,27 @@ pub fn seed_text(world: &crate::world::World) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_harming_effect_is_a_bounded_server_owned_request() {
+        assert_eq!(
+            effect_args(&["instant_damage", "1", "1"]).unwrap(),
+            EffectRequest::Add {
+                kind: 7,
+                seconds: 1,
+                amplifier: 1
+            }
+        );
+        assert_eq!(
+            effect_args(&["7", "1", "0"]).unwrap(),
+            EffectRequest::Add {
+                kind: 7,
+                seconds: 1,
+                amplifier: 0
+            }
+        );
+        assert!(effect_args(&["7", "1", "4"]).is_err());
+    }
 
     #[test]
     fn spawnpoint_1710_coordinates_reject_invalid_and_console_relative() {
