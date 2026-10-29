@@ -661,8 +661,8 @@ mod tests {
         // Java 1.7.10 has no copper/netherite tier. Every output must be
         // generated from an actual workbench pattern, not supplied by C0E.
         for (material, sword, pickaxe, axe, shovel, hoe) in [
-            (5, 268, 270, 271, 269, 290), // planks
-            (4, 272, 274, 275, 273, 291), // cobblestone
+            (5, 268, 270, 271, 269, 290),   // planks
+            (4, 272, 274, 275, 273, 291),   // cobblestone
             (265, 267, 257, 258, 256, 292), // iron
             (266, 283, 285, 286, 284, 294), // gold
             (264, 276, 278, 279, 277, 293), // diamond
@@ -673,7 +673,10 @@ mod tests {
                 (sword, [None, m, None, None, m, None, None, stick, None]),
                 (pickaxe, [m, m, m, None, stick, None, None, stick, None]),
                 (axe, [m, m, None, m, stick, None, None, stick, None]),
-                (shovel, [None, m, None, None, stick, None, None, stick, None]),
+                (
+                    shovel,
+                    [None, m, None, None, stick, None, None, stick, None],
+                ),
                 (hoe, [m, m, None, None, stick, None, None, stick, None]),
             ];
             for (expected_id, grid) in patterns {
@@ -699,7 +702,10 @@ mod tests {
             let plank = product(5, 1, species);
             let stick = product(280, 1, 0);
             assert_eq!(
-                result(&[plank, plank, plank, None, stick, None, None, stick, None], 3),
+                result(
+                    &[plank, plank, plank, None, stick, None, None, stick, None],
+                    3
+                ),
                 product(270, 1, 0)
             );
         }

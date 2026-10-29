@@ -264,7 +264,11 @@ impl GroundItems {
         // Preserve the single-position API's validation even for an empty
         // batch; invalid positions must never be silently accepted.
         drop_position(block)?;
-        let positions = stacks.iter().copied().map(|stack| (stack, block)).collect::<Vec<_>>();
+        let positions = stacks
+            .iter()
+            .copied()
+            .map(|stack| (stack, block))
+            .collect::<Vec<_>>();
         self.stage_put_at_positions(&positions)
     }
 
@@ -468,8 +472,18 @@ mod tests {
     #[test]
     fn staged_world_drop_batch_keeps_positions_and_does_not_publish_on_error() {
         let ground = GroundItems::default();
-        let one = Stack { id: 50, count: 1, damage: 0, nbt: None };
-        let two = Stack { id: 171, count: 1, damage: 3, nbt: None };
+        let one = Stack {
+            id: 50,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let two = Stack {
+            id: 171,
+            count: 1,
+            damage: 3,
+            nbt: None,
+        };
         let entries = [(one, (-3, 64, 5)), (two, (9, 65, -8))];
         let (staged, spawned) = ground.stage_put_at_positions(&entries).unwrap();
         assert_eq!(spawned.len(), 2);
@@ -478,9 +492,9 @@ mod tests {
         assert_eq!(spawned[1].stack.damage, 3);
         assert_eq!(ground.items().count(), 0);
         assert_eq!(staged.items().count(), 2);
-        assert!(ground.stage_put_at_positions(
-            &[(one, (0, 64, 0)), (two, (WORLD_LIMIT, 64, 0))],
-        ).is_err());
+        assert!(ground
+            .stage_put_at_positions(&[(one, (0, 64, 0)), (two, (WORLD_LIMIT, 64, 0))],)
+            .is_err());
         assert_eq!(ground.items().count(), 0);
         assert!(ground.stage_put_many(&[], (WORLD_LIMIT, 64, 0)).is_err());
     }

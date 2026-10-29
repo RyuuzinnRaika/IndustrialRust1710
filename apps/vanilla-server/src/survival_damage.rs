@@ -186,12 +186,8 @@ mod tests {
         let mut hazard = Hazards::new();
         let mut simultaneous = false;
         for tick in 1..=320 {
-            let (amount, origin) = hazard.tick_detailed(
-                &world,
-                position,
-                tick,
-                &Inventory::default(),
-            );
+            let (amount, origin) =
+                hazard.tick_detailed(&world, position, tick, &Inventory::default());
             if amount > 0.0 && origin == HazardAttribution::Mixed {
                 simultaneous = true;
             }

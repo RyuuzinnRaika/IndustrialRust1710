@@ -97,13 +97,7 @@ mod tests {
         // output cell via a Java-long overflow checksum.
         let cases: &[(i64, i32, i32, &[usize], u64)] = &[
             (42, -17, -17, &[], 0xb574_4e49_d73f_dd00),
-            (
-                -12_345,
-                15,
-                -17,
-                &[13, 25, 53, 231],
-                0x1f2b_5268_1db4_f700,
-            ),
+            (-12_345, 15, -17, &[13, 25, 53, 231], 0x1f2b_5268_1db4_f700),
             (0, -1, -1, &[202], 0x844d_f4df_2308_0080),
             (
                 i64::MAX,
@@ -132,9 +126,7 @@ mod tests {
     #[test]
     fn preserves_non_plains_and_already_mutated_biomes() {
         for id in [0, 2, 4, 14, 24, 129] {
-            let result = rare_biome_map(42, 1001, -32, -32, 32, 32, |_, _, w, h| {
-                vec![id; w * h]
-            });
+            let result = rare_biome_map(42, 1001, -32, -32, 32, 32, |_, _, w, h| vec![id; w * h]);
             assert!(result.iter().all(|&value| value == id), "biome {id}");
         }
     }
@@ -145,15 +137,7 @@ mod tests {
         let whole = rare_biome_map(seed, 1001, -17, -17, 16, 16, patterned_parent);
         for dz in (0..16).rev() {
             for dx in (0..16).rev() {
-                let single = rare_biome_map(
-                    seed,
-                    1001,
-                    -17 + dx,
-                    -17 + dz,
-                    1,
-                    1,
-                    patterned_parent,
-                );
+                let single = rare_biome_map(seed, 1001, -17 + dx, -17 + dz, 1, 1, patterned_parent);
                 assert_eq!(single[0], whole[(dz * 16 + dx) as usize]);
             }
         }

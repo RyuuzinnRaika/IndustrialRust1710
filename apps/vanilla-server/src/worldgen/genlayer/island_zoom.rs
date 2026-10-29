@@ -225,13 +225,7 @@ mod tests {
             assert_eq!(bits(&whole), expected, "seed={seed} x={x} z={z}");
             for dz in 0_i32..4 {
                 for dx in 0_i32..4 {
-                    let cell = island_map(
-                        seed,
-                        x.wrapping_add(dx),
-                        z.wrapping_add(dz),
-                        1,
-                        1,
-                    );
+                    let cell = island_map(seed, x.wrapping_add(dx), z.wrapping_add(dz), 1, 1);
                     assert_eq!(cell[0], whole[(dz * 4 + dx) as usize]);
                 }
             }

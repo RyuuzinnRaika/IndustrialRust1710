@@ -61,8 +61,8 @@ pub fn burn_duration(item: Stack) -> Option<u16> {
         280 => 100,                      // stick
         6 => 100,                        // sapling
         126 => 150,                      // wooden slab (half a wooden block)
-        5 | 17 | 162 | 54 | 58 | 53 | 85 | 107 | 134 | 135 | 136 | 125 | 143 | 158 | 47
-        | 84 | 96 | 64 => 300,
+        5 | 17 | 162 | 54 | 58 | 53 | 85 | 107 | 134 | 135 | 136 | 125 | 143 | 158 | 47 | 84
+        | 96 | 64 => 300,
         268..=271 | 290 => 200, // wooden tools
         _ => return None,
     };
@@ -485,9 +485,7 @@ mod tests {
         // Use the smelted output in the actual 3x3 iron pickaxe recipe.
         let ingot = two.slots[2];
         let stick = stack(280, 1);
-        let grid = [
-            ingot, ingot, ingot, None, stick, None, None, stick, None,
-        ];
+        let grid = [ingot, ingot, ingot, None, stick, None, None, stick, None];
         assert_eq!(
             crate::crafting::result(&grid, 3).map(|item| (item.id, item.count)),
             Some((257, 1))

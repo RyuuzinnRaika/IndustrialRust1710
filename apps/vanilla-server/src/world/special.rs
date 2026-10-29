@@ -1716,7 +1716,10 @@ mod tests {
             );
             // The refreshed analog output must remain active until tick 10
             // after last contact, including when the release save fails.
-            assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), expected_level as u8);
+            assert_eq!(
+                world.signal_into((0, 64, 0), (1, 64, 0)),
+                expected_level as u8
+            );
             for _ in 0..9 {
                 world.block_tick(&path, 64).unwrap();
                 assert_eq!(world.get(0, 64, 0), (id << 4) | expected_level);

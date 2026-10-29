@@ -414,8 +414,7 @@ impl MiningProgress {
 }
 
 fn mining_elapsed_is_legal(elapsed: Duration, required: Duration) -> bool {
-    let slack = Duration::from_millis(100)
-        .min(required.saturating_sub(Duration::from_millis(50)));
+    let slack = Duration::from_millis(100).min(required.saturating_sub(Duration::from_millis(50)));
     elapsed.saturating_add(slack) >= required
 }
 
@@ -466,17 +465,23 @@ mod tests {
                     Some(uses),
                     "last valid use: {material} id={id}"
                 );
-                assert_eq!(tool_max_uses(Stack { damage: uses, ..item }), None);
+                assert_eq!(
+                    tool_max_uses(Stack {
+                        damage: uses,
+                        ..item
+                    }),
+                    None
+                );
             }
             // The real server harvest rule must check material tier before
             // giving an ore drop, not just the pickaxe's faster mining time.
             for (ore, required, drop) in [
                 (1u16, 0, 4), // stone -> cobblestone
                 (16, 0, 263), // coal ore -> coal
-                (15, 1, 15), // iron ore -> itself
-                (14, 2, 14), // gold ore -> itself
+                (15, 1, 15),  // iron ore -> itself
+                (14, 2, 14),  // gold ore -> itself
                 (56, 2, 264), // diamond ore -> diamond
-                (49, 3, 49), // obsidian -> itself
+                (49, 3, 49),  // obsidian -> itself
             ] {
                 let (_, mined) = mine_rule(ore << 4, stack(pick, 0)).unwrap();
                 assert_eq!(
@@ -838,11 +843,11 @@ mod tests {
         // Cover every recognized tool family, not only pickaxes. A malformed
         // signed damage value must behave like an empty hand for mining.
         for (tool_id, block_id) in [
-            (270_i16, 1_u16),  // pickaxe / stone
-            (269, 3),          // shovel / dirt
-            (271, 17),         // axe / log
-            (268, 3),          // sword / dirt
-            (290, 3),          // hoe / dirt
+            (270_i16, 1_u16), // pickaxe / stone
+            (269, 3),         // shovel / dirt
+            (271, 17),        // axe / log
+            (268, 3),         // sword / dirt
+            (290, 3),         // hoe / dirt
         ] {
             let bare = mine_rule(block_id << 4, None).unwrap();
             for damage in [i16::MIN, -1] {
@@ -1092,8 +1097,14 @@ mod tests {
         let (two_ticks, _) = mine_rule(quick, shovel).unwrap();
         assert_eq!(two_ticks, Duration::from_millis(100));
         assert!(!mining_elapsed_is_legal(Duration::ZERO, two_ticks));
-        assert!(!mining_elapsed_is_legal(Duration::from_millis(49), two_ticks));
-        assert!(mining_elapsed_is_legal(Duration::from_millis(50), two_ticks));
+        assert!(!mining_elapsed_is_legal(
+            Duration::from_millis(49),
+            two_ticks
+        ));
+        assert!(mining_elapsed_is_legal(
+            Duration::from_millis(50),
+            two_ticks
+        ));
         assert!(mining_elapsed_is_legal(Duration::ZERO, Duration::ZERO));
 
         // Verify the live MiningProgress finish path also accepts a legal

@@ -1123,7 +1123,10 @@ fn sprint_action(current: bool, action: i32, food: i32) -> bool {
 /// input reclamation). Client Status (22) is intentionally allowed
 /// so the authoritative respawn path remains reachable.
 fn blocked_while_dead(id: i32) -> bool {
-    matches!(id, 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 16 | 17 | 18 | 19 | 23)
+    matches!(
+        id,
+        2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 16 | 17 | 18 | 19 | 23
+    )
 }
 
 #[cfg(test)]
@@ -1132,7 +1135,9 @@ mod dead_session_packet_tests {
 
     #[test]
     fn dead_players_cannot_attack_move_place_or_mutate_containers() {
-        for id in [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 23] {
+        for id in [
+            2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 23,
+        ] {
             assert!(blocked_while_dead(id), "packet {id} must be ignored");
         }
     }
@@ -2175,9 +2180,15 @@ fn play(
                 vitals.health = (vitals.health - damage.ceil()).max(0.0);
                 let cause = match incoming.origin {
                     DamageOrigin::Mob { kind, entity_id } => DeathCause::Mob { kind, entity_id },
-                    DamageOrigin::Projectile { kind, shooter_kind, shooter_id } => {
-                        DeathCause::Projectile { kind, shooter_kind, shooter_id }
-                    }
+                    DamageOrigin::Projectile {
+                        kind,
+                        shooter_kind,
+                        shooter_id,
+                    } => DeathCause::Projectile {
+                        kind,
+                        shooter_kind,
+                        shooter_id,
+                    },
                     DamageOrigin::Explosion { kind, source_id } => {
                         DeathCause::Explosion { kind, source_id }
                     }
@@ -2185,12 +2196,7 @@ fn play(
                     DamageOrigin::Mixed => DeathCause::Mixed,
                     DamageOrigin::Unknown => DeathCause::CombatOrExplosion,
                 };
-                death_log::record_fatal(
-                    &mut fatal_hit,
-                    previous_health,
-                    vitals.health,
-                    cause,
-                );
+                death_log::record_fatal(&mut fatal_hit, previous_health, vitals.health, cause);
                 player.save_state_in_dimension(
                     player_path,
                     *vitals,
@@ -3996,7 +4002,10 @@ fn play(
                                                     .lock()
                                                     .map_err(|_| bad("decorations lock poisoned"))?
                                                     .occupied(target));
-                                        if matches!(block, 54 | 146 | 61 | 62 | 154 | 23 | 158 | 117) {
+                                        if matches!(
+                                            block,
+                                            54 | 146 | 61 | 62 | 154 | 23 | 158 | 117
+                                        ) {
                                             // Mine a populated container without destroying
                                             // any inventory first. Keep the live World, tile
                                             // inventory, ground pool and held tool untouched
@@ -4072,10 +4081,14 @@ fn play(
                                                 );
                                             }
                                             if let Some(storage) = device_guard.as_ref() {
-                                                drops.extend(storage.slots(target).into_iter().flatten());
+                                                drops.extend(
+                                                    storage.slots(target).into_iter().flatten(),
+                                                );
                                             }
                                             if let Some(storage) = brewer_guard.as_ref() {
-                                                drops.extend(storage.get(target).slots.into_iter().flatten());
+                                                drops.extend(
+                                                    storage.get(target).slots.into_iter().flatten(),
+                                                );
                                             }
                                             let mut ground = ground_items
                                                 .lock()
@@ -4221,8 +4234,16 @@ fn play(
                                             let mut stored = decorations
                                                 .lock()
                                                 .map_err(|_| bad("decorations lock poisoned"))?;
-                                            let disc = if block == 84 { stored.record(target) } else { None };
-                                            let plant = if block == 140 { stored.pot(target) } else { None };
+                                            let disc = if block == 84 {
+                                                stored.record(target)
+                                            } else {
+                                                None
+                                            };
+                                            let plant = if block == 140 {
+                                                stored.pot(target)
+                                            } else {
+                                                None
+                                            };
                                             let mut drops = Vec::with_capacity(3);
                                             if let Some(item) = result.drop {
                                                 drops.push(Stack {
@@ -4233,7 +4254,12 @@ fn play(
                                                 });
                                             }
                                             if let Some(id) = disc {
-                                                drops.push(Stack { id, count: 1, damage: 0, nbt: None });
+                                                drops.push(Stack {
+                                                    id,
+                                                    count: 1,
+                                                    damage: 0,
+                                                    nbt: None,
+                                                });
                                             }
                                             if let Some(stack) = plant {
                                                 drops.push(stack);
@@ -4244,21 +4270,31 @@ fn play(
                                             if ground.has_capacity_for(drops.len()) {
                                                 let (staged_ground, spawned) =
                                                     ground.stage_put_many(&drops, target)?;
-                                                if let Some(staged_world) = w.stage_mining_removal(x, y, z)? {
-                                                    let staged_decorations = stored.staged_remove(target)?;
+                                                if let Some(staged_world) =
+                                                    w.stage_mining_removal(x, y, z)?
+                                                {
+                                                    let staged_decorations =
+                                                        stored.staged_remove(target)?;
                                                     let mut staged_inventory = inventory.clone();
                                                     let wore = result.wear_tool
                                                         && staged_inventory.wear_held_tool();
                                                     let mut writes = vec![
                                                         (world_path, staged_world.encoded()?),
-                                                        (decoration_path, staged_decorations.encoded()?),
+                                                        (
+                                                            decoration_path,
+                                                            staged_decorations.encoded()?,
+                                                        ),
                                                         (ground_path, staged_ground.encoded()?),
                                                     ];
                                                     if wore {
-                                                        writes.push((inventory_path, staged_inventory.encoded()?));
+                                                        writes.push((
+                                                            inventory_path,
+                                                            staged_inventory.encoded()?,
+                                                        ));
                                                     }
                                                     journal::commit(
-                                                        &world_path.with_extension("pending-txn.json"),
+                                                        &world_path
+                                                            .with_extension("pending-txn.json"),
                                                         &writes,
                                                     )?;
                                                     *w = staged_world;
@@ -4266,7 +4302,12 @@ fn play(
                                                     *ground = staged_ground;
                                                     if wore {
                                                         *inventory = staged_inventory;
-                                                        send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                                        send(
+                                                            s,
+                                                            0x2f,
+                                                            &inventory
+                                                                .set_slot(inventory.held_slot())?,
+                                                        )?;
                                                     }
                                                     for item in spawned {
                                                         for packet in item.spawn() {
@@ -6672,9 +6713,9 @@ fn play(
                     eating = None;
                     bow_start = None;
                     sprinting = false; // fresh client session has no sprint flag
-                    // Death clears every temporary potion effect; stale
-                    // regeneration must never resurrect a dead player before
-                    // the server has committed death drops and respawn.
+                                       // Death clears every temporary potion effect; stale
+                                       // regeneration must never resurrect a dead player before
+                                       // the server has committed death drops and respawn.
                     active_effects.clear();
                     last_effect_tick = now_tick;
                     hazards = Hazards::new();

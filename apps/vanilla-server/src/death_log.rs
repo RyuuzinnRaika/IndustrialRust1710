@@ -21,7 +21,10 @@ fn generated_event_id() -> io::Result<String> {
         .map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid system clock"))?
         .as_nanos();
     let seq = NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed);
-    Ok(format!("d2-{nanos:032x}-{:08x}-{seq:016x}", std::process::id()))
+    Ok(format!(
+        "d2-{nanos:032x}-{:08x}-{seq:016x}",
+        std::process::id()
+    ))
 }
 
 fn valid_event_id(id: &str) -> bool {
@@ -364,7 +367,10 @@ impl DeathRecord<'_> {
     /// the bounded recent-record window. No changes to scoreboard or drops.
     pub fn append_with_event_id(&self, world_path: &Path, id: &str) -> io::Result<bool> {
         if !valid_event_id(id) {
-            return Err(io::Error::new(ErrorKind::InvalidInput, "invalid death event ID"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "invalid death event ID",
+            ));
         }
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -623,8 +629,14 @@ mod tests {
         let raw = fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = raw.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert_eq!(serde_json::from_str::<Value>(lines[0]).unwrap()["timestamp_ms"], 101);
-        assert_eq!(serde_json::from_str::<Value>(lines[1]).unwrap()["event"], "player_death");
+        assert_eq!(
+            serde_json::from_str::<Value>(lines[0]).unwrap()["timestamp_ms"],
+            101
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(lines[1]).unwrap()["event"],
+            "player_death"
+        );
         fs::remove_file(path).unwrap();
     }
 
@@ -668,10 +680,18 @@ mod tests {
     fn event_id_deduplicates_retries_after_reopening_and_interleaved_records() {
         let (world, path) = test_log_path("idempotency");
         let record = sample_record();
-        assert!(record.append_with_event_id(&world, "same-event-001").unwrap());
-        assert!(!record.append_with_event_id(&world, "same-event-001").unwrap());
-        assert!(record.append_with_event_id(&world, "another-event-002").unwrap());
-        assert!(!record.append_with_event_id(&world, "same-event-001").unwrap());
+        assert!(record
+            .append_with_event_id(&world, "same-event-001")
+            .unwrap());
+        assert!(!record
+            .append_with_event_id(&world, "same-event-001")
+            .unwrap());
+        assert!(record
+            .append_with_event_id(&world, "another-event-002")
+            .unwrap());
+        assert!(!record
+            .append_with_event_id(&world, "same-event-001")
+            .unwrap());
         let lines: Vec<Value> = fs::read_to_string(&path)
             .unwrap()
             .lines()
@@ -720,7 +740,9 @@ mod tests {
             dimension: 0,
             tick: 123,
         };
-        assert!(original.append_with_event_id(&world, "same-projectile-id").unwrap());
+        assert!(original
+            .append_with_event_id(&world, "same-projectile-id")
+            .unwrap());
         let conflicting_source = DeathRecord {
             hit: Some(FatalHit {
                 cause: DeathCause::Projectile {
@@ -762,7 +784,9 @@ mod tests {
         assert!(conflicting_damage
             .append_with_event_id(&world, "same-projectile-id")
             .is_err());
-        assert!(!original.append_with_event_id(&world, "same-projectile-id").unwrap());
+        assert!(!original
+            .append_with_event_id(&world, "same-projectile-id")
+            .unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
         fs::remove_file(path).unwrap();
     }
@@ -797,12 +821,16 @@ mod tests {
     fn retry_repairs_lost_newline_then_recognizes_existing_event() {
         let (world, path) = test_log_path("retry-missing-lf");
         let record = sample_record();
-        assert!(record.append_with_event_id(&world, "previous-event-001").unwrap());
+        assert!(record
+            .append_with_event_id(&world, "previous-event-001")
+            .unwrap());
         let mut bytes = fs::read(&path).unwrap();
         assert_eq!(bytes.pop(), Some(b'\n'));
         fs::write(&path, &bytes).unwrap();
         // The existing JSON is complete. Repair its newline, then deduplicate.
-        assert!(!record.append_with_event_id(&world, "previous-event-001").unwrap());
+        assert!(!record
+            .append_with_event_id(&world, "previous-event-001")
+            .unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
         assert_eq!(fs::read(&path).unwrap().last(), Some(&b'\n'));
         fs::remove_file(path).unwrap();
@@ -845,7 +873,9 @@ mod tests {
         assert_eq!(death.json(0)["source_type"], "Zombie");
         assert_eq!(death.json(0)["source_entity_id"], 500_002);
         assert_eq!(death.json(0)["death_message"], death.chat_message());
-        assert!(death.console_summary().contains("source_entity_id=Some(500002)"));
+        assert!(death
+            .console_summary()
+            .contains("source_entity_id=Some(500002)"));
         assert_eq!(death.json(0)["projectile_type"], Value::Null);
         let arrow = DeathCause::Projectile {
             kind: "Arrow",
@@ -879,7 +909,9 @@ mod tests {
             tick: 123,
         };
         assert_eq!(death.chat_message(), "Alex was shot by Skeleton");
-        assert!(death.append_with_event_id(&world, "projectile-death-001").unwrap());
+        assert!(death
+            .append_with_event_id(&world, "projectile-death-001")
+            .unwrap());
 
         // Model a crash between the JSON write and the trailing delimiter.
         let mut bytes = fs::read(&path).unwrap();
@@ -887,7 +919,9 @@ mod tests {
         fs::write(&path, bytes).unwrap();
 
         // The same ID must recover the delimiter, not add a second death.
-        assert!(!death.append_with_event_id(&world, "projectile-death-001").unwrap());
+        assert!(!death
+            .append_with_event_id(&world, "projectile-death-001")
+            .unwrap());
         let raw = fs::read_to_string(&path).unwrap();
         assert!(raw.ends_with('\n'));
         assert_eq!(raw.lines().count(), 1);

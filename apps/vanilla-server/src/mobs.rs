@@ -636,13 +636,19 @@ pub struct Attack {
 /// Source attribution is observation-only and never changes damage numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DamageOrigin {
-    Mob { kind: &'static str, entity_id: i32 },
+    Mob {
+        kind: &'static str,
+        entity_id: i32,
+    },
     Projectile {
         kind: &'static str,
         shooter_kind: Option<&'static str>,
         shooter_id: Option<i32>,
     },
-    Explosion { kind: &'static str, source_id: Option<i32> },
+    Explosion {
+        kind: &'static str,
+        source_id: Option<i32>,
+    },
     WitherEffect,
     Mixed,
     Unknown,
@@ -1924,7 +1930,11 @@ impl Mobs {
             events: if killed {
                 vec![mob.status(3), multiplayer::destroy(id)]
             } else {
-                vec![mob.status(2), mob.health_metadata(), impulse.expect("living mob")]
+                vec![
+                    mob.status(2),
+                    mob.health_metadata(),
+                    impulse.expect("living mob"),
+                ]
             },
             drop: if killed { mob.death_drop() } else { None },
             experience: if killed {
@@ -3675,7 +3685,8 @@ impl Mobs {
         tick: u64,
         health: f32,
     ) -> u8 {
-        self.hurt_player_detailed(player_id, player, tick, health).amount
+        self.hurt_player_detailed(player_id, player, tick, health)
+            .amount
     }
 
     /// Return the exact damage used for combat plus provenance captured
@@ -3703,9 +3714,7 @@ impl Mobs {
             });
         };
         self.pending_hits.retain(|(p, damage, when, origin)| {
-            if tick.saturating_sub(*when) < 30
-                && (p.x - player.x).hypot(p.z - player.z) < 0.75
-            {
+            if tick.saturating_sub(*when) < 30 && (p.x - player.x).hypot(p.z - player.z) < 0.75 {
                 accumulate(*damage, *origin);
                 false
             } else {
@@ -4193,19 +4202,25 @@ mod tests {
             y: 70.0,
             z: 0.5,
         };
-        let attacker = PlayerPosition {
-            x: -1.0,
-            ..at
-        };
+        let attacker = PlayerPosition { x: -1.0, ..at };
         mobs.insert(Kind::Zombie, at, false);
         let id = mobs.next_id - 1;
         let attack = mobs.player_attack(id, attacker, None, 20).unwrap();
         let velocity = attack.events.iter().find(|event| event.id == 0x12).unwrap();
         assert_eq!(velocity.body.len(), 10);
         assert_eq!(&velocity.body[..4], &id.to_be_bytes());
-        assert_eq!(i16::from_be_bytes(velocity.body[4..6].try_into().unwrap()), 3200);
-        assert_eq!(i16::from_be_bytes(velocity.body[6..8].try_into().unwrap()), 3200);
-        assert_eq!(i16::from_be_bytes(velocity.body[8..10].try_into().unwrap()), 0);
+        assert_eq!(
+            i16::from_be_bytes(velocity.body[4..6].try_into().unwrap()),
+            3200
+        );
+        assert_eq!(
+            i16::from_be_bytes(velocity.body[6..8].try_into().unwrap()),
+            3200
+        );
+        assert_eq!(
+            i16::from_be_bytes(velocity.body[8..10].try_into().unwrap()),
+            0
+        );
         assert!(mobs.player_attack(id, attacker, None, 21).is_none());
         assert_eq!(mobs.entities[&id].knockback, [0.4, 0.4, 0.0]);
         let events = mobs.tick(21, &World::new(), &[]);
@@ -4222,10 +4237,7 @@ mod tests {
             y: 70.0,
             z: 0.5,
         };
-        let attacker = PlayerPosition {
-            x: -1.0,
-            ..at
-        };
+        let attacker = PlayerPosition { x: -1.0, ..at };
         let mut mobs = Mobs::default();
         mobs.insert(Kind::Zombie, at, false);
         let id = mobs.next_id - 1;
@@ -4234,7 +4246,12 @@ mod tests {
             mobs.tick(tick, &world, &[]);
         }
         assert!(mobs.entities[&id].position.x <= 0.551);
-        assert!(!physics::collides_sized(&world, &mobs.entities[&id].position, 0.45, 1.95));
+        assert!(!physics::collides_sized(
+            &world,
+            &mobs.entities[&id].position,
+            0.45,
+            1.95
+        ));
     }
 
     #[test]
@@ -4247,16 +4264,8 @@ mod tests {
         };
         mobs.insert(Kind::Zombie, at, false);
         let id = mobs.next_id - 1;
-        mobs.player_attack(
-            id,
-            PlayerPosition {
-                x: -1.0,
-                ..at
-            },
-            None,
-            20,
-        )
-        .unwrap();
+        mobs.player_attack(id, PlayerPosition { x: -1.0, ..at }, None, 20)
+            .unwrap();
         let json = serde_json::to_string(&mobs.entities[&id]).unwrap();
         assert!(!json.contains("knockback"));
         let restored: Mob = serde_json::from_str(&json).unwrap();
@@ -4318,15 +4327,35 @@ mod tests {
         };
         for (id, damage) in [
             // All five sword materials.
-            (268, 4), (272, 5), (267, 6), (276, 7), (283, 4),
+            (268, 4),
+            (272, 5),
+            (267, 6),
+            (276, 7),
+            (283, 4),
             // Wood, stone, iron, diamond, gold axes.
-            (271, 3), (275, 4), (258, 5), (279, 6), (286, 3),
+            (271, 3),
+            (275, 4),
+            (258, 5),
+            (279, 6),
+            (286, 3),
             // Wood, stone, iron, diamond, gold pickaxes.
-            (270, 2), (274, 3), (257, 4), (278, 5), (285, 2),
+            (270, 2),
+            (274, 3),
+            (257, 4),
+            (278, 5),
+            (285, 2),
             // Shovels.
-            (269, 1), (273, 2), (256, 3), (277, 4), (284, 1),
+            (269, 1),
+            (273, 2),
+            (256, 3),
+            (277, 4),
+            (284, 1),
             // Hoes were not bonus-attack tools in Java 1.7.10.
-            (290, 1), (291, 1), (292, 1), (293, 1), (294, 1),
+            (290, 1),
+            (291, 1),
+            (292, 1),
+            (293, 1),
+            (294, 1),
             (265, 1), // An iron ingot is not an iron weapon.
         ] {
             assert_eq!(damage_held(equipped(id)), damage, "item ID {id}");
@@ -4360,7 +4389,10 @@ mod tests {
         assert!(fatal.drop.is_some());
         assert!(!mobs.entities.contains_key(&id));
         assert!(mobs.player_attack(id, pos, stack(267), 40).is_none());
-        assert_eq!(fatal.events.iter().filter(|event| event.id == 0x13).count(), 1);
+        assert_eq!(
+            fatal.events.iter().filter(|event| event.id == 0x13).count(),
+            1
+        );
     }
     #[test]
     fn command_summon_in_flat_world_survives_restart_without_enabling_natural_spawns() {
@@ -6732,8 +6764,7 @@ mod tests {
                 snapshot
                     .iter()
                     .filter(|(packet, body)| {
-                        matches!(*packet, 0x0e | 0x0f | 0x11)
-                            && body.starts_with(&encoded)
+                        matches!(*packet, 0x0e | 0x0f | 0x11) && body.starts_with(&encoded)
                     })
                     .count(),
                 1,
@@ -6919,10 +6950,7 @@ mod tests {
         let death = attacks.into_iter().flatten().next().unwrap();
         assert_eq!(death.events[0].id, 0x1a);
         assert_eq!(death.events[1].id, 0x13);
-        assert_eq!(
-            death.events[1].body,
-            multiplayer::destroy(parent_id).body
-        );
+        assert_eq!(death.events[1].body, multiplayer::destroy(parent_id).body);
 
         let mobs = shared.into_inner().unwrap();
         let children = death.events.len() - 2;
@@ -8893,10 +8921,7 @@ mod protocol5_facing_regression_tests {
         let mut mobs = Mobs::default();
         mobs.insert(Kind::Zombie, origin, false);
         let id = mobs.next_id - 1;
-        mobs.entities.get_mut(&id).unwrap().waypoint = Some(PlayerPosition {
-            x: 1.5,
-            ..origin
-        });
+        mobs.entities.get_mut(&id).unwrap().waypoint = Some(PlayerPosition { x: 1.5, ..origin });
 
         let events = mobs.tick(1, &world, &[target]);
         let movement = events

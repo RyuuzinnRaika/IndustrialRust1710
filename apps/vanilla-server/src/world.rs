@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod devices;
 mod ecology;
 mod lighting;
+mod special;
 #[cfg(test)]
 mod terrain_packet_regressions;
-mod special;
 pub(crate) use lighting::LightSampler;
 pub use special::TntEvent;
 use std::fs::{self, File};
@@ -1321,7 +1321,8 @@ impl World {
     /// Empty fluid destinations and wire strengths are staged before mutation.
     #[cfg(test)]
     pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
-        self.block_tick_inner(path, budget, None, None).map(|(changed, _)| changed)
+        self.block_tick_inner(path, budget, None, None)
+            .map(|(changed, _)| changed)
     }
 
     /// Tick world blocks together with their materialized ground-item drops.
@@ -2896,7 +2897,11 @@ impl World {
             {
                 // Existing weighted-plate contacts expire after 10 ticks.
                 // Keep this consistent across save/reload; other devices retain 20.
-                let release_delay = if matches!(block >> 4, 147 | 148) { 10 } else { 20 };
+                let release_delay = if matches!(block >> 4, 147 | 148) {
+                    10
+                } else {
+                    20
+                };
                 world.pending_buttons.insert((x, y, z), release_delay);
             }
         }
@@ -3827,7 +3832,11 @@ mod tests {
             assert_eq!(original_world.get(0, 64, 0) >> 4, id);
             let ground = GroundItems::default();
             let block_drop = Stack {
-                id: match id { 61 => 61, 117 => 379, _ => id as i16 },
+                id: match id {
+                    61 => 61,
+                    117 => 379,
+                    _ => id as i16,
+                },
                 count: 1,
                 damage: 0,
                 nbt: None,
@@ -3915,9 +3924,13 @@ mod tests {
                 154 => assert!(!Hoppers::load(&storage_file)
                     .unwrap()
                     .has_contents((0, 64, 0))),
-                23 | 158 => assert!(Devices::load(&storage_file).unwrap()
-                    .slots((0, 64, 0)).iter().all(Option::is_none)),
-                117 => assert!(!Brewers::load(&storage_file).unwrap()
+                23 | 158 => assert!(Devices::load(&storage_file)
+                    .unwrap()
+                    .slots((0, 64, 0))
+                    .iter()
+                    .all(Option::is_none)),
+                117 => assert!(!Brewers::load(&storage_file)
+                    .unwrap()
                     .is_nonempty((0, 64, 0))),
                 _ => unreachable!(),
             };
@@ -4026,7 +4039,10 @@ mod tests {
                 .items()
                 .map(|entity| entity.stack)
                 .collect::<Vec<_>>();
-            assert_eq!(saved_drops, all_drops, "every stack survives for block {id}");
+            assert_eq!(
+                saved_drops, all_drops,
+                "every stack survives for block {id}"
+            );
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -4812,10 +4828,7 @@ mod tests {
     }
     #[test]
     fn powered_detector_activator_and_plain_rails_drop_when_floor_removed() {
-        let root = std::env::temp_dir().join(format!(
-            "ir1710-rail-support-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("ir1710-rail-support-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         for id in [27_u16, 28, 66, 157] {
@@ -4829,7 +4842,10 @@ mod tests {
             // Reconstruct support queues from saved edits after a server restart.
             let mut recovered = World::load(&path).unwrap();
             assert_eq!(recovered.get(0, 64, 0), rail);
-            assert!(recovered.block_tick(&path, 64).unwrap().contains(&(0, 64, 0)));
+            assert!(recovered
+                .block_tick(&path, 64)
+                .unwrap()
+                .contains(&(0, 64, 0)));
             assert_eq!(recovered.get(0, 64, 0), 0);
             let items = recovered.drain_drops();
             assert_eq!(items.len(), 1, "rail {id} must drop once");
@@ -4842,10 +4858,8 @@ mod tests {
 
     #[test]
     fn ladder_detaches_when_backing_wall_breaks_but_not_other_neighbor() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-ladder-support-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-ladder-support-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
         // Legacy metadata 2 attaches to a block at Z+1.
@@ -4868,10 +4882,8 @@ mod tests {
 
     #[test]
     fn carpet_drops_when_floor_breaks_and_survives_an_unrelated_edit() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-carpet-support-{}.irw",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ir1710-carpet-support-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut world = World::new();
         // 1.7.10 carpet supports a non-solid block as long as it is non-air.
@@ -4901,16 +4913,19 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "ir1710-atomic-world-drops-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
         ));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("world.irw");
         let drops_path = GroundItems::location(&path);
         let mut world = World::new();
         for (x, block) in [
-            (1, 50 << 4 | 5),   // floor torch
-            (2, 27 << 4 | 8),   // powered rail
-            (3, 38 << 4 | 5),   // colored flower
+            (1, 50 << 4 | 5),  // floor torch
+            (2, 27 << 4 | 8),  // powered rail
+            (3, 38 << 4 | 5),  // colored flower
             (4, 171 << 4 | 3), // colored carpet
         ] {
             world.update_and_save(&path, x, 64, 1, block).unwrap();
@@ -4922,7 +4937,10 @@ mod tests {
             .unwrap();
         assert_eq!(changed.len(), 4);
         assert_eq!(spawned.len(), 4);
-        assert!(world.drain_drops().is_empty(), "server must not emit duplicate drops");
+        assert!(
+            world.drain_drops().is_empty(),
+            "server must not emit duplicate drops"
+        );
         let saved = World::load(&path).unwrap();
         for x in 1..=4 {
             assert_eq!(saved.get(x, 64, 1), 0, "attachment must be cleared in IRW");
@@ -4932,8 +4950,12 @@ mod tests {
         assert_eq!(items.len(), 4);
         assert!(items.iter().any(|stack| stack.id == 50));
         assert!(items.iter().any(|stack| stack.id == 27));
-        assert!(items.iter().any(|stack| stack.id == 38 && stack.damage == 5));
-        assert!(items.iter().any(|stack| stack.id == 171 && stack.damage == 3));
+        assert!(items
+            .iter()
+            .any(|stack| stack.id == 38 && stack.damage == 5));
+        assert!(items
+            .iter()
+            .any(|stack| stack.id == 171 && stack.damage == 3));
         for (x, id) in [(1, 50), (2, 27), (3, 38), (4, 171)] {
             let dropped = spawned.iter().find(|item| item.stack.id == id).unwrap();
             assert_eq!(dropped.position, [(x * 32) + 16, (64 * 32) + 16, 32 + 16]);
@@ -4949,12 +4971,20 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "ir1710-deferred-world-drops-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
         ));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("world.irw");
         let drops_path = GroundItems::location(&path);
-        let item = Stack { id: 4, count: 1, damage: 0, nbt: None };
+        let item = Stack {
+            id: 4,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
         // Ground item pool has 512 slots in this server.
         let filled = vec![(item, (0, 64, 0)); 512];
         let (mut ground, _) = GroundItems::default()
@@ -4962,7 +4992,9 @@ mod tests {
             .unwrap();
         assert!(!ground.has_capacity_for(1));
         let mut world = World::new();
-        world.update_and_save(&path, 10, 64, 10, 50 << 4 | 5).unwrap();
+        world
+            .update_and_save(&path, 10, 64, 10, 50 << 4 | 5)
+            .unwrap();
         world.update_and_save(&path, 10, 63, 10, 0).unwrap();
         let (changed, spawned) = world
             .block_tick_with_ground(&path, 64, &mut ground, &drops_path)
@@ -4990,19 +5022,26 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "ir1710-failed-world-drops-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
         ));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("world.irw");
         let drops_path = GroundItems::location(&path);
         let mut world = World::new();
-        world.update_and_save(&path, 12, 64, 12, 50 << 4 | 5).unwrap();
+        world
+            .update_and_save(&path, 12, 64, 12, 50 << 4 | 5)
+            .unwrap();
         world.update_and_save(&path, 12, 63, 12, 0).unwrap();
         let before = fs::read(&path).unwrap();
         let mut pool = GroundItems::default();
         // An identical world/ground path is rejected before writing the redo
         // record, exercising the rollback branch deterministically.
-        assert!(world.block_tick_with_ground(&path, 64, &mut pool, &path).is_err());
+        assert!(world
+            .block_tick_with_ground(&path, 64, &mut pool, &path)
+            .is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(world.get(12, 64, 12) >> 4, 50);
         assert_eq!(pool.items().count(), 0);
@@ -5034,16 +5073,28 @@ mod tests {
         let ground_path = GroundItems::location(&path);
         let sign = (0, 64, 0);
         let pot = (2, 64, 0);
-        let flower = Stack { id: 38, count: 1, damage: 2, nbt: None };
+        let flower = Stack {
+            id: 38,
+            count: 1,
+            damage: 2,
+            nbt: None,
+        };
         let mut w = World::new();
-        w.update_and_save(&path, sign.0, sign.1, sign.2, 63 << 4).unwrap();
-        w.update_and_save(&path, pot.0, pot.1, pot.2, 140 << 4).unwrap();
+        w.update_and_save(&path, sign.0, sign.1, sign.2, 63 << 4)
+            .unwrap();
+        w.update_and_save(&path, pot.0, pot.1, pot.2, 140 << 4)
+            .unwrap();
         let mut stored = Decorations::default();
         stored
             .set_sign(
                 &decoration_path,
                 sign,
-                ["Saved text".into(), String::new(), String::new(), String::new()],
+                [
+                    "Saved text".into(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ],
             )
             .unwrap();
         stored = stored.stage_pot(pot, Some(flower)).unwrap();
@@ -5052,19 +5103,32 @@ mod tests {
 
         // Break both supports, then atomically save the detached blocks,
         // their contained items, and the now-empty tile-entity sidecar.
-        w.update_and_save(&path, sign.0, sign.1 - 1, sign.2, 0).unwrap();
-        w.update_and_save(&path, pot.0, pot.1 - 1, pot.2, 0).unwrap();
+        w.update_and_save(&path, sign.0, sign.1 - 1, sign.2, 0)
+            .unwrap();
+        w.update_and_save(&path, pot.0, pot.1 - 1, pot.2, 0)
+            .unwrap();
         let mut ground = GroundItems::default();
         let (changed, spawned) = w
             .block_tick_with_ground_and_decorations(
-                &path, 64, &mut ground, &ground_path, &mut stored, &decoration_path,
+                &path,
+                64,
+                &mut ground,
+                &ground_path,
+                &mut stored,
+                &decoration_path,
             )
             .unwrap();
         assert!(changed.contains(&sign));
         assert!(changed.contains(&pot));
         assert_eq!(spawned.len(), 3);
-        assert_eq!(spawned.iter().filter(|item| item.stack.id == 323).count(), 1);
-        assert_eq!(spawned.iter().filter(|item| item.stack.id == 390).count(), 1);
+        assert_eq!(
+            spawned.iter().filter(|item| item.stack.id == 323).count(),
+            1
+        );
+        assert_eq!(
+            spawned.iter().filter(|item| item.stack.id == 390).count(),
+            1
+        );
         assert!(spawned.iter().any(|item| item.stack == flower));
         assert!(w.drain_drops().is_empty());
         let restarted_world = World::load(&path).unwrap();
@@ -5102,35 +5166,63 @@ mod tests {
         let decoration_path = Decorations::location(&path);
         let ground_path = GroundItems::location(&path);
         let pos = (4, 64, 4);
-        let flower = Stack { id: 37, count: 1, damage: 0, nbt: None };
+        let flower = Stack {
+            id: 37,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
         let mut w = World::new();
-        w.update_and_save(&path, pos.0, pos.1, pos.2, 140 << 4).unwrap();
-        w.update_and_save(&path, pos.0, pos.1 - 1, pos.2, 0).unwrap();
+        w.update_and_save(&path, pos.0, pos.1, pos.2, 140 << 4)
+            .unwrap();
+        w.update_and_save(&path, pos.0, pos.1 - 1, pos.2, 0)
+            .unwrap();
         let mut stored = Decorations::default().stage_pot(pos, Some(flower)).unwrap();
         fs::write(&decoration_path, stored.encoded().unwrap()).unwrap();
 
-        let filler = Stack { id: 4, count: 1, damage: 0, nbt: None };
+        let filler = Stack {
+            id: 4,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
         let (mut ground, _) = GroundItems::default()
             .stage_put_at_positions(&vec![(filler, (0, 64, 0)); 511])
             .unwrap();
         let (changed, spawned) = w
             .block_tick_with_ground_and_decorations(
-                &path, 64, &mut ground, &ground_path, &mut stored, &decoration_path,
+                &path,
+                64,
+                &mut ground,
+                &ground_path,
+                &mut stored,
+                &decoration_path,
             )
             .unwrap();
         assert!(!changed.contains(&pos));
         assert!(spawned.is_empty());
         assert_eq!(w.get(pos.0, pos.1, pos.2) >> 4, 140);
         assert_eq!(stored.pot(pos), Some(flower));
-        assert_eq!(World::load(&path).unwrap().get(pos.0, pos.1, pos.2) >> 4, 140);
-        assert_eq!(Decorations::load(&decoration_path).unwrap().pot(pos), Some(flower));
+        assert_eq!(
+            World::load(&path).unwrap().get(pos.0, pos.1, pos.2) >> 4,
+            140
+        );
+        assert_eq!(
+            Decorations::load(&decoration_path).unwrap().pot(pos),
+            Some(flower)
+        );
 
         let removed_id = ground.items().next().unwrap().id;
         let (with_room, _) = ground.stage_take(removed_id).unwrap().unwrap();
         ground = with_room;
         let (changed, spawned) = w
             .block_tick_with_ground_and_decorations(
-                &path, 64, &mut ground, &ground_path, &mut stored, &decoration_path,
+                &path,
+                64,
+                &mut ground,
+                &ground_path,
+                &mut stored,
+                &decoration_path,
             )
             .unwrap();
         assert!(changed.contains(&pos));
@@ -5142,7 +5234,10 @@ mod tests {
             .unwrap()
             .verify_world_references(&restarted_world)
             .unwrap();
-        assert_eq!(GroundItems::load(&ground_path).unwrap().items().count(), 512);
+        assert_eq!(
+            GroundItems::load(&ground_path).unwrap().items().count(),
+            512
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

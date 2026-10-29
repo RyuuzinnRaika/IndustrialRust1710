@@ -1690,9 +1690,9 @@ fn survival_decorative_mining_drops_blocks_and_clears_tile_state() {
     // blocks and the item->block IDs of signs and flowerpots.
     for (held_block, placed_block, drop_id) in [
         (25_i16, 25_i16, 25_i16), // note block
-        (323, 63, 323),         // standing sign
-        (84, 84, 84),           // jukebox
-        (390, 140, 390),        // flower pot
+        (323, 63, 323),           // standing sign
+        (84, 84, 84),             // jukebox
+        (390, 140, 390),          // flower pot
     ] {
         let server = NativeServer::start_with_mode_and_items(
             true,

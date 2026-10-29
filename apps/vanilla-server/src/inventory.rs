@@ -928,9 +928,7 @@ impl Inventory {
             let Some(mut other) = self.lookup(window, slot) else {
                 continue;
             };
-            if other.id != carried.id
-                || other.damage != carried.damage
-                || other.nbt != carried.nbt
+            if other.id != carried.id || other.damage != carried.damage || other.nbt != carried.nbt
             {
                 continue;
             }
@@ -2277,7 +2275,9 @@ mod tests {
             furnace.slots[slot] = Some(full);
             inventory.cursor = Some(Stack { count: 3, ..full });
             for _ in 0..5 {
-                assert!(inventory.furnace_click(&mut furnace, slot as i16, 1, 0).is_some());
+                assert!(inventory
+                    .furnace_click(&mut furnace, slot as i16, 1, 0)
+                    .is_some());
                 assert_eq!(furnace.slots[slot], Some(full));
                 assert_eq!(inventory.cursor, Some(Stack { count: 3, ..full }));
             }
@@ -2340,17 +2340,27 @@ mod tests {
         // exact ItemStack identity rule for left/right clicks and drag.
         let mut chest = [None; 27];
         chest[0] = Some(a);
-        assert!(inventory.chest_click_window(1, &mut chest, 0, 1, 0).is_none());
+        assert!(inventory
+            .chest_click_window(1, &mut chest, 0, 1, 0)
+            .is_none());
         assert_eq!(chest[0], Some(a));
         assert_eq!(inventory.cursor, Some(b));
 
-        assert!(inventory.chest_click_window(1, &mut chest, -999, 0, 5).is_some());
-        assert!(inventory.chest_click_window(1, &mut chest, 0, 1, 5).is_some());
-        assert!(inventory.chest_click_window(1, &mut chest, -999, 2, 5).is_some());
+        assert!(inventory
+            .chest_click_window(1, &mut chest, -999, 0, 5)
+            .is_some());
+        assert!(inventory
+            .chest_click_window(1, &mut chest, 0, 1, 5)
+            .is_some());
+        assert!(inventory
+            .chest_click_window(1, &mut chest, -999, 2, 5)
+            .is_some());
         assert_eq!(chest[0], Some(a));
         assert_eq!(inventory.cursor, Some(b));
 
-        assert!(inventory.chest_click_window(1, &mut chest, 0, 0, 6).is_some());
+        assert!(inventory
+            .chest_click_window(1, &mut chest, 0, 0, 6)
+            .is_some());
         assert_eq!(chest[0], Some(a));
         assert_eq!(inventory.cursor, Some(b));
     }
@@ -2578,7 +2588,10 @@ mod tests {
                 inventory
                     .creative_set(36, Some(make(id, uses - 2)))
                     .unwrap();
-                assert!(inventory.wear_held_tool_on_mob_attack(), "{material} id={id}");
+                assert!(
+                    inventory.wear_held_tool_on_mob_attack(),
+                    "{material} id={id}"
+                );
                 assert_eq!(inventory.held(), None, "{material} id={id} combat break");
 
                 inventory
@@ -2595,7 +2608,10 @@ mod tests {
             inventory
                 .creative_set(36, Some(make(hoe, uses - 1)))
                 .unwrap();
-            assert!(!inventory.wear_held_tool_on_mob_attack(), "{material} hoe melee");
+            assert!(
+                !inventory.wear_held_tool_on_mob_attack(),
+                "{material} hoe melee"
+            );
             assert_eq!(inventory.held(), Some(make(hoe, uses - 1)));
             assert!(inventory.wear_held_tool(), "{material} hoe tilling");
             assert_eq!(inventory.held(), None, "{material} hoe breaks when used");
@@ -2614,17 +2630,34 @@ mod tests {
         };
         inventory.creative_set(36, Some(iron_pickaxe)).unwrap();
         assert!(inventory.wear_held_tool_on_mob_attack());
-        assert_eq!(inventory.held(), Some(Stack { damage: 249, ..iron_pickaxe }));
+        assert_eq!(
+            inventory.held(),
+            Some(Stack {
+                damage: 249,
+                ..iron_pickaxe
+            })
+        );
         assert!(inventory.wear_held_tool_on_mob_attack());
-        assert!(inventory.held().is_none(), "iron pickaxe must break at 250 uses");
+        assert!(
+            inventory.held().is_none(),
+            "iron pickaxe must break at 250 uses"
+        );
 
         // Unlike combat, mining one block consumes only one durability.
         inventory.creative_set(36, Some(iron_pickaxe)).unwrap();
         assert!(inventory.wear_held_tool());
-        assert_eq!(inventory.held(), Some(Stack { damage: 248, ..iron_pickaxe }));
+        assert_eq!(
+            inventory.held(),
+            Some(Stack {
+                damage: 248,
+                ..iron_pickaxe
+            })
+        );
 
         for id in [258, 256] {
-            inventory.creative_set(36, Some(Stack { id, ..iron_pickaxe })).unwrap();
+            inventory
+                .creative_set(36, Some(Stack { id, ..iron_pickaxe }))
+                .unwrap();
             assert!(inventory.wear_held_tool_on_mob_attack());
             assert_eq!(inventory.held().unwrap().damage, 249, "item ID {id}");
         }
@@ -2645,7 +2678,15 @@ mod tests {
 
         // Breaking a non-instant block with a sword spends two uses,
         // unlike the single use spent on a confirmed Mob hit.
-        inventory.creative_set(36, Some(Stack { damage: 248, ..iron_sword })).unwrap();
+        inventory
+            .creative_set(
+                36,
+                Some(Stack {
+                    damage: 248,
+                    ..iron_sword
+                }),
+            )
+            .unwrap();
         assert!(inventory.wear_held_tool());
         assert!(inventory.held().is_none());
 

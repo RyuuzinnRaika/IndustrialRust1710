@@ -34,7 +34,10 @@ fn expanded_overworld_chunk_wire_matches_live_blocks_and_biomes_across_origin() 
     // integer division must not silently map (-1, -1) to chunk (0, 0).
     for (chunk_x, chunk_z) in [(-1, -1), (0, 0)] {
         let (mask, bytes) = world.chunk_data(chunk_x, chunk_z);
-        assert_eq!(mask, 0x01ff, "IRW4 Overworld must transmit terrain sections");
+        assert_eq!(
+            mask, 0x01ff,
+            "IRW4 Overworld must transmit terrain sections"
+        );
         assert_eq!(bytes.len(), mask.count_ones() as usize * 10240 + 256);
         for z in [0usize, 7, 15] {
             for x in [0usize, 7, 15] {
@@ -66,12 +69,17 @@ fn flat_world_remains_flat_and_has_distinct_wire_layout_from_irw4() {
     let (flat_mask, flat_bytes) = flat.chunk_data(-1, 0);
     assert_eq!(flat_mask, 0x0018);
     assert_eq!(flat_bytes.len(), 2 * 10240 + 256);
-    assert!(flat_bytes[flat_bytes.len() - 256..].iter().all(|&id| id == 1));
+    assert!(flat_bytes[flat_bytes.len() - 256..]
+        .iter()
+        .all(|&id| id == 1));
     assert_eq!(protocol5_block(flat_mask, &flat_bytes, 15, 63, 0) >> 4, 2);
     assert_eq!(protocol5_block(flat_mask, &flat_bytes, 15, 64, 0), 0);
 
     let expanded = World::expanded(42, Dimension::Overworld);
-    assert_eq!(expanded.extended_identity(), Some((42, Dimension::Overworld)));
+    assert_eq!(
+        expanded.extended_identity(),
+        Some((42, Dimension::Overworld))
+    );
     assert_eq!(expanded.chunk_data(-1, 0).0, 0x01ff);
 }
 
@@ -89,7 +97,10 @@ fn irw4_save_and_reload_preserve_seed_and_negative_coordinate_terrain() {
     let original = World::expanded(42, Dimension::Overworld);
     original.save_new(&path).unwrap();
     let restored = World::load(&path).unwrap();
-    assert_eq!(restored.extended_identity(), Some((42, Dimension::Overworld)));
+    assert_eq!(
+        restored.extended_identity(),
+        Some((42, Dimension::Overworld))
+    );
     for (x, z) in [(-17, -17), (-16, -1), (-1, 0), (0, 0), (15, 16), (16, 15)] {
         assert_eq!(restored.biome_at(x, z), original.biome_at(x, z));
         let height = original.surface_height_at(x, z).unwrap();

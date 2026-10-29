@@ -33,12 +33,7 @@ where
     let output_cells = width
         .checked_mul(height)
         .expect("GenLayer output area overflow");
-    let source = parent(
-        x.wrapping_sub(1),
-        z.wrapping_sub(1),
-        stride,
-        parent_height,
-    );
+    let source = parent(x.wrapping_sub(1), z.wrapping_sub(1), stride, parent_height);
     assert_eq!(source.len(), parent_cells);
 
     let mut result = Vec::with_capacity(output_cells);
@@ -91,22 +86,30 @@ mod tests {
         type OracleCase = (i64, i32, i32, [i32; 16], [i32; 16]);
         let cases: [OracleCase; 4] = [
             (
-                0, 0, 0,
+                0,
+                0,
+                0,
                 [0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0],
                 [1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 0],
             ),
             (
-                42, -17, 31,
+                42,
+                -17,
+                31,
                 [0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1],
                 [0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0],
             ),
             (
-                -12_345, 16, -17,
+                -12_345,
+                16,
+                -17,
                 [0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0],
                 [0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1],
             ),
             (
-                i64::MAX, i32::MAX, i32::MIN,
+                i64::MAX,
+                i32::MAX,
+                i32::MIN,
                 [0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0],
                 [0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1],
             ),
@@ -127,13 +130,9 @@ mod tests {
 
     #[test]
     fn never_changes_existing_land_or_nonzero_biomes() {
-        let result = remove_too_much_ocean_map(42, -1, -1, 3, 3, |_, _, w, h| {
-            vec![24; w * h]
-        });
+        let result = remove_too_much_ocean_map(42, -1, -1, 3, 3, |_, _, w, h| vec![24; w * h]);
         assert_eq!(result, vec![24; 9]);
-        let result = remove_too_much_ocean_map(42, -1, -1, 3, 3, |_, _, w, h| {
-            vec![1; w * h]
-        });
+        let result = remove_too_much_ocean_map(42, -1, -1, 3, 3, |_, _, w, h| vec![1; w * h]);
         assert_eq!(result, vec![1; 9]);
     }
 
@@ -144,14 +143,7 @@ mod tests {
         assert!(whole.contains(&1));
         for dz in (0..16).rev() {
             for dx in (0..16).rev() {
-                let one = remove_too_much_ocean_map(
-                    42,
-                    -17 + dx,
-                    -17 + dz,
-                    1,
-                    1,
-                    patterned_parent,
-                );
+                let one = remove_too_much_ocean_map(42, -17 + dx, -17 + dz, 1, 1, patterned_parent);
                 assert_eq!(one[0], whole[(dz * 16 + dx) as usize]);
             }
         }

@@ -444,7 +444,12 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let pos = (0, 64, 0);
-        let plant = Stack { id: 37, count: 1, damage: 0, nbt: None };
+        let plant = Stack {
+            id: 37,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
         for id in [25_u16, 63, 68, 84, 140] {
             let world_path = root.join(format!("decoration-{id}.irw"));
             let decoration_path = Decorations::location(&world_path);
@@ -455,13 +460,17 @@ mod tests {
             world.save(&world_path).unwrap();
             let mut original = Decorations::default();
             match id {
-                25 => { original.next_note(&decoration_path, pos).unwrap(); }
+                25 => {
+                    original.next_note(&decoration_path, pos).unwrap();
+                }
                 63 | 68 => {
-                    original.set_sign(
-                        &decoration_path,
-                        pos,
-                        ["Hello".into(), String::new(), String::new(), String::new()],
-                    ).unwrap();
+                    original
+                        .set_sign(
+                            &decoration_path,
+                            pos,
+                            ["Hello".into(), String::new(), String::new(), String::new()],
+                        )
+                        .unwrap();
                 }
                 84 => {
                     original = original.stage_record(pos, Some(2256)).unwrap();
@@ -474,8 +483,10 @@ mod tests {
             fs::write(&decoration_path, original.encoded().unwrap()).unwrap();
             original.verify_world_references(&world).unwrap();
             let staged_decorations = original.staged_remove(pos).unwrap();
-            let staged_world = world.stage_mining_removal(pos.0, pos.1, pos.2)
-                .unwrap().unwrap();
+            let staged_world = world
+                .stage_mining_removal(pos.0, pos.1, pos.2)
+                .unwrap()
+                .unwrap();
             let (_, mined) = crate::survival::mine_rule(id << 4, None).unwrap();
             let mut drops = vec![Stack {
                 id: mined.drop.unwrap().id,
@@ -484,34 +495,56 @@ mod tests {
                 nbt: None,
             }];
             if id == 84 {
-                drops.push(Stack { id: 2256, count: 1, damage: 0, nbt: None });
+                drops.push(Stack {
+                    id: 2256,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                });
             } else if id == 140 {
                 drops.push(plant);
             }
-            let (next_ground, spawned) = GroundItems::default().stage_put_many(&drops, pos).unwrap();
+            let (next_ground, spawned) =
+                GroundItems::default().stage_put_many(&drops, pos).unwrap();
             assert_eq!(spawned.len(), drops.len());
             // Both in-memory sources remain live and unchanged before commit.
             assert_eq!(world.get(pos.0, pos.1, pos.2) >> 4, id);
-            if id == 84 { assert_eq!(original.record(pos), Some(2256)); }
-            if id == 140 { assert_eq!(original.pot(pos), Some(plant)); }
+            if id == 84 {
+                assert_eq!(original.record(pos), Some(2256));
+            }
+            if id == 140 {
+                assert_eq!(original.pot(pos), Some(plant));
+            }
             crate::journal::commit(
                 &transaction,
                 &[
                     (world_path.as_path(), staged_world.encoded().unwrap()),
-                    (decoration_path.as_path(), staged_decorations.encoded().unwrap()),
+                    (
+                        decoration_path.as_path(),
+                        staged_decorations.encoded().unwrap(),
+                    ),
                     (ground_path.as_path(), next_ground.encoded().unwrap()),
                 ],
-            ).unwrap();
+            )
+            .unwrap();
             let restored_world = World::load(&world_path).unwrap();
             let restored_decorations = Decorations::load(&decoration_path).unwrap();
             assert_eq!(restored_world.get(pos.0, pos.1, pos.2), 0);
-            restored_decorations.verify_world_references(&restored_world).unwrap();
+            restored_decorations
+                .verify_world_references(&restored_world)
+                .unwrap();
             assert_eq!(restored_decorations.note(pos), 0);
             assert_eq!(restored_decorations.record(pos), None);
             assert_eq!(restored_decorations.pot(pos), None);
-            assert!(restored_decorations.sign_packets_in(&[(0, 0)].into_iter().collect()).unwrap().is_empty());
-            let actual: Vec<_> = GroundItems::load(&ground_path).unwrap()
-                .items().map(|item| item.stack).collect();
+            assert!(restored_decorations
+                .sign_packets_in(&[(0, 0)].into_iter().collect())
+                .unwrap()
+                .is_empty());
+            let actual: Vec<_> = GroundItems::load(&ground_path)
+                .unwrap()
+                .items()
+                .map(|item| item.stack)
+                .collect();
             assert_eq!(actual, drops);
         }
         fs::remove_dir_all(&root).unwrap();

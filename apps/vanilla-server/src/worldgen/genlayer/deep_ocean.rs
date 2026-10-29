@@ -9,13 +9,7 @@
 /// The parent is queried with a one-cell halo. Java's signed-int coordinate
 /// wrapping is preserved at the edge of the coordinate domain. This layer
 /// consumes no RNG, so requests are independent of seed and traversal order.
-pub(super) fn deep_ocean_map<F>(
-    x: i32,
-    z: i32,
-    width: usize,
-    height: usize,
-    parent: F,
-) -> Vec<i32>
+pub(super) fn deep_ocean_map<F>(x: i32, z: i32, width: usize, height: usize, parent: F) -> Vec<i32>
 where
     F: Fn(i32, i32, usize, usize) -> Vec<i32>,
 {
@@ -33,16 +27,18 @@ where
         for dx in 0..width {
             let center = (dz + 1) * stride + dx + 1;
             let value = source[center];
-            result.push(if value == 0
-                && source[center - stride] == 0
-                && source[center + stride] == 0
-                && source[center - 1] == 0
-                && source[center + 1] == 0
-            {
-                24
-            } else {
-                value
-            });
+            result.push(
+                if value == 0
+                    && source[center - stride] == 0
+                    && source[center + stride] == 0
+                    && source[center - 1] == 0
+                    && source[center + 1] == 0
+                {
+                    24
+                } else {
+                    value
+                },
+            );
         }
     }
     result
