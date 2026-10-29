@@ -283,11 +283,22 @@ fn live_protocol5_entity_chunk_inventory_and_window_golden() {
             0x0c => {
                 // Golden Spawn Player 1.7.10: entity VarInt, UUID/name strings,
                 // empty properties, XYZ fixed *32, yaw/pitch, item and metadata.
+                // The Y field carries feet height: the flat fixture's top solid
+                // block is the grass layer at y=63, so a joining player stands
+                // at 64.0 (64.0 * 32 = 2048). This became the wire value when
+                // #669 routed joining through the world-spawn surface search;
+                // before that the server sent 65.0, one block above the floor.
                 let mut expected = vec![2, 36];
                 expected.extend_from_slice(b"1110dc55-a244-318c-9843-101d405cbf34");
                 expected.extend_from_slice(&[4, b'B', b'e', b't', b'a', 0]);
-                expected
-                    .extend_from_slice(&[0, 0, 0, 16, 0, 0, 8, 32, 0, 0, 0, 16, 0, 0, 0, 0, 0x7f]);
+                expected.extend_from_slice(&[
+                    0, 0, 0, 16, // X = 0.5 blocks * 32
+                    0, 0, 8, 0, // Y = 64.0 feet * 32
+                    0, 0, 0, 16, // Z = 0.5 blocks * 32
+                    0, 0, // yaw, pitch
+                    0, 0,    // item (short -1 equivalent in this encoder)
+                    0x7f, // trailing metadata terminator
+                ]);
                 assert_eq!(body, expected, "Spawn Player Protocol 5 golden bytes");
                 saw_entity = true;
             }
