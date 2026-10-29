@@ -8634,6 +8634,31 @@ mod protocol5_facing_regression_tests {
     use super::*;
 
     #[test]
+    fn walking_mob_faces_its_waypoint_when_path_differs_from_target() {
+        let world = World::new();
+        let origin = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let target = PlayerPosition { z: -5.5, ..origin };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, origin, false);
+        let id = mobs.next_id - 1;
+        mobs.entities.get_mut(&id).unwrap().waypoint = Some(PlayerPosition {
+            x: 1.5,
+            ..origin
+        });
+
+        let events = mobs.tick(1, &world, &[target]);
+        let movement = events
+            .iter()
+            .find(|event| event.id == 0x18 && event.body[..4] == id.to_be_bytes())
+            .expect("zombie should walk towards the waypoint");
+        assert_eq!(movement.body[16], 192, "walking east should face east");
+    }
+
+    #[test]
     fn mob_looks_towards_player_on_both_axes() {
         let origin = PlayerPosition {
             x: 0.5,

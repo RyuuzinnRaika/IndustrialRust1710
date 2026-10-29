@@ -381,6 +381,14 @@ fn read_position(packet: &[u8]) -> [f64; 3] {
         f64::from_be_bytes(packet[16..24].try_into().unwrap()),
     ]
 }
+
+fn block_change_is(packet: &[u8], y: u8, block: u32) -> bool {
+    if packet.len() < 11 || packet[4] != y {
+        return false;
+    }
+    let mut rest = &packet[9..];
+    matches!(read_varint(&mut rest), Ok(id) if id == block && rest.len() == 1)
+}
 /// Read a Play packet while acting like a live Protocol 5 client:
 /// server KeepAlive requests must be acknowledged even during long E2E tests.
 #[track_caller]
@@ -1691,6 +1699,9 @@ fn survival_decorative_mining_drops_blocks_and_clears_tile_state() {
             &[(36, held_block), (37, 286)], // golden axe
         );
         let (mut client, _, _) = server.join("RustTester");
+        // Move before placing a solid block at the spawn position. Moving out
+        // afterwards crosses that block and correctly triggers a correction.
+        send_position(&mut client, 4.5, 64.0, 0.5);
         let mut place = 0i32.to_be_bytes().to_vec();
         place.push(63);
         place.extend_from_slice(&0i32.to_be_bytes());
@@ -1702,10 +1713,9 @@ fn survival_decorative_mining_drops_blocks_and_clears_tile_state() {
         place.extend_from_slice(&[8, 8, 8]);
         client.write_all(&frame(8, &place)).unwrap();
         until_packet(&mut client, 0x23, |p| {
-            p.len() == 11 && p[4] == 64 && i16::from(p[9]) == placed_block
+            block_change_is(p, 64, placed_block as u32)
         });
         client.write_all(&frame(9, &1i16.to_be_bytes())).unwrap();
-        send_position(&mut client, 4.5, 64.0, 0.5);
         let mut start = vec![0u8];
         start.extend_from_slice(&0i32.to_be_bytes());
         start.push(64);
@@ -1754,6 +1764,9 @@ fn survival_container_break_uses_durable_world_and_ground_drop() {
         eprintln!("survival container mining scenario: block={block}, tool={tool}");
         let server = NativeServer::start_with_mode_and_items(true, &[(36, block), (37, tool)]);
         let (mut client, _, _) = server.join("RustTester");
+        // Stay within reach but outside pickup range, and move before the
+        // container occupies the spawn position and blocks the swept path.
+        send_position(&mut client, 4.5, 64.0, 0.5);
         let placed_block = if block == 379 { 117 } else { block };
         let mut place = 0i32.to_be_bytes().to_vec();
         place.push(63);
@@ -1766,11 +1779,9 @@ fn survival_container_break_uses_durable_world_and_ground_drop() {
         place.extend_from_slice(&[8, 8, 8]);
         client.write_all(&frame(8, &place)).unwrap();
         until_packet(&mut client, 0x23, |p| {
-            p.len() == 11 && p[4] == 64 && i16::from(p[9]) == placed_block
+            block_change_is(p, 64, placed_block as u32)
         });
         client.write_all(&frame(9, &1i16.to_be_bytes())).unwrap();
-        // Mine within reach but away from the automatic item pickup radius.
-        send_position(&mut client, 4.5, 64.0, 0.5);
         let mut start = vec![0u8];
         start.extend_from_slice(&0i32.to_be_bytes());
         start.push(64);
@@ -3041,6 +3052,35 @@ fn survival_boat_consumes_item_and_drops_boat_when_broken() {
     let entries = drops["entries"].as_object().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries.values().next().unwrap()["stack"]["id"], 333);
+}
+
+#[test]
+fn survival_zombie_attack_returns_hurt_status_and_reduces_health() {
+    let mut server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+    writeln!(
+        server.process.stdin.as_mut().unwrap(),
+        "/summon Zombie 0.5 65 2.5"
+    )
+    .unwrap();
+    let spawn = until_packet(&mut client, 0x0f, |body| {
+        let mut remaining = body;
+        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&54)
+    });
+    let mut remaining = spawn.as_slice();
+    let id = i32::try_from(read_varint(&mut remaining).unwrap()).unwrap();
+    let mut attack = id.to_be_bytes().to_vec();
+    attack.push(1);
+    client.write_all(&frame(0x02, &attack)).unwrap();
+    until_packet(&mut client, 0x1a, |body| {
+        body.len() == 5 && body[..4] == id.to_be_bytes() && body[4] == 2
+    });
+    until_packet(&mut client, 0x1c, |body| {
+        body.len() == 10
+            && body[..4] == id.to_be_bytes()
+            && body[4] == ((3 << 5) | 6)
+            && body[5..9] == 19.0f32.to_be_bytes()
+    });
 }
 
 #[test]

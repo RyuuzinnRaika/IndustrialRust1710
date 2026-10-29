@@ -153,6 +153,7 @@ fn reconcile_jsonl_tail(file: &mut fs::File) -> io::Result<()> {
             ));
         }
         // A fully written death event may only have lost its final delimiter.
+        file.seek(SeekFrom::End(0))?;
         file.write_all(b"\n")?;
     } else {
         let valid_len = file_len - (window - start) as u64;
@@ -392,14 +393,19 @@ impl DeathRecord<'_> {
         }
         let mut file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
-            .append(true)
+            .write(true)
             .open(path)?;
         reconcile_jsonl_tail(&mut file)?;
         if recent_event_present(&mut file, &payload)? {
             return Ok(false);
         }
         let previous_len = file.metadata()?.len();
+        // Windows append-only handles cannot truncate an interrupted tail or
+        // roll back a partial write. The process lock protects this seek and
+        // write; it does not provide cross-process locking.
+        file.seek(SeekFrom::End(0))?;
         if let Err(error) = file.write_all(&line) {
             // Preserve the pre-append length if a short write is reported.
             // The process-local mutex also protects this rollback.
