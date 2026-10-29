@@ -5712,6 +5712,11 @@ mod tests {
             world
                 .update_and_save(&path, 0, 64, 0, (33 << 4) | 5)
                 .unwrap();
+            if block_id == 68 {
+                // A metadata-2 wall sign needs its south (+Z) support;
+                // otherwise attachment cleanup removes it before piston contact.
+                world.update_and_save(&path, 1, 64, 1, 1 << 4).unwrap();
+            }
             world
                 .update_and_save(&path, 1, 64, 0, (block_id << 4) | metadata)
                 .unwrap();
