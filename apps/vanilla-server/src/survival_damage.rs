@@ -175,14 +175,20 @@ mod tests {
     #[test]
     fn simultaneous_heat_and_drowning_never_claim_single_source() {
         let mut world = World::new();
-        world.import_block(0, 64, 0, 10 << 4).unwrap(); // lava at feet
-        world.import_block(0, 66, 0, 9 << 4).unwrap(); // water at eye
+        let position = PlayerPosition::default();
+        // Put lava at the actual feet and water at the actual eye level.
+        world
+            .import_block(0, position.y.floor() as i32, 0, 10 << 4)
+            .unwrap();
+        world
+            .import_block(0, (position.y + 1.62).floor() as i32, 0, 9 << 4)
+            .unwrap();
         let mut hazard = Hazards::new();
         let mut simultaneous = false;
         for tick in 1..=320 {
             let (amount, origin) = hazard.tick_detailed(
                 &world,
-                PlayerPosition::default(),
+                position,
                 tick,
                 &Inventory::default(),
             );
