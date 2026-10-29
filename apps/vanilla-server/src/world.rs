@@ -1317,6 +1317,7 @@ impl World {
 
     /// Bounded 20TPS flow/conduction step. IRW save occurs once per tick.
     /// Empty fluid destinations and wire strengths are staged before mutation.
+    #[cfg(test)]
     pub fn block_tick(&mut self, path: &Path, budget: usize) -> io::Result<Vec<(i32, i32, i32)>> {
         self.block_tick_inner(path, budget, None, None).map(|(changed, _)| changed)
     }
@@ -1324,6 +1325,7 @@ impl World {
     /// Tick world blocks together with their materialized ground-item drops.
     /// A detached attachment and the item it creates have one crash-recoverable
     /// world/ground journal transaction; no item is broadcast before commit.
+    #[cfg(test)]
     pub fn block_tick_with_ground(
         &mut self,
         path: &Path,
