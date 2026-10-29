@@ -88,7 +88,8 @@ mod tests {
     fn matches_independent_java_long_oracle_for_ocean_and_coast() {
         // Produced with an independent Java long-overflow implementation of
         // the 1.7.10 layer's salt=2 RNG and five-cell cardinal rule.
-        let cases: [(i64, i32, i32, [i32; 16], [i32; 16]); 4] = [
+        type OracleCase = (i64, i32, i32, [i32; 16], [i32; 16]);
+        let cases: [OracleCase; 4] = [
             (
                 0, 0, 0,
                 [0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0],

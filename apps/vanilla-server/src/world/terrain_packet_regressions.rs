@@ -19,7 +19,7 @@ fn protocol5_block(mask: u16, bytes: &[u8], x: usize, y: usize, z: usize) -> u16
     let cell = (y % 16) * 256 + z * 16 + x;
     let id = u16::from(bytes[preceding * 4096 + cell]);
     let packed = bytes[sections * 4096 + preceding * 2048 + cell / 2];
-    let meta = if cell % 2 == 0 {
+    let meta = if cell.is_multiple_of(2) {
         packed & 0x0f
     } else {
         packed >> 4
