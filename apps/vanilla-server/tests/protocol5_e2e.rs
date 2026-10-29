@@ -3044,6 +3044,35 @@ fn survival_boat_consumes_item_and_drops_boat_when_broken() {
 }
 
 #[test]
+fn survival_zombie_attack_returns_hurt_status_and_reduces_health() {
+    let mut server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+    writeln!(
+        server.process.stdin.as_mut().unwrap(),
+        "/summon Zombie 0.5 65 2.5"
+    )
+    .unwrap();
+    let spawn = until_packet(&mut client, 0x0f, |body| {
+        let mut remaining = body;
+        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&54)
+    });
+    let mut remaining = spawn.as_slice();
+    let id = i32::try_from(read_varint(&mut remaining).unwrap()).unwrap();
+    let mut attack = id.to_be_bytes().to_vec();
+    attack.push(1);
+    client.write_all(&frame(0x02, &attack)).unwrap();
+    until_packet(&mut client, 0x1a, |body| {
+        body.len() == 5 && body[..4] == id.to_be_bytes() && body[4] == 2
+    });
+    until_packet(&mut client, 0x1c, |body| {
+        body.len() == 10
+            && body[..4] == id.to_be_bytes()
+            && body[4] == ((3 << 5) | 6)
+            && body[5..9] == 19.0f32.to_be_bytes()
+    });
+}
+
+#[test]
 fn creative_mob_feed_and_attack_keep_items_and_award_kill_rewards() {
     let server = NativeServer::start_with_mode_and_cow(false, &[(36, 296), (37, 267)]);
     let (mut client, _, _) = server.join("RustTester");
