@@ -452,7 +452,10 @@ impl Mob {
         // vertical lift but still lose horizontal impulse through drag.
         self.knockback[0] *= 0.6;
         self.knockback[2] *= 0.6;
-        let flying = matches!(self.kind, Kind::Ghast | Kind::Blaze | Kind::Wither | Kind::EnderDragon);
+        let flying = matches!(
+            self.kind,
+            Kind::Ghast | Kind::Blaze | Kind::Wither | Kind::EnderDragon
+        );
         if !flying {
             if physics::supported(world, &self.position) && self.knockback[1] <= 0.0 {
                 self.knockback[1] = 0.0;
@@ -4183,8 +4186,15 @@ mod tests {
     #[test]
     fn melee_knockback_is_away_from_attacker_and_respects_hit_immunity() {
         let mut mobs = Mobs::default();
-        let at = PlayerPosition { x: 0.5, y: 70.0, z: 0.5 };
-        let attacker = PlayerPosition { x: -1.0, ..at };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 70.0,
+            z: 0.5,
+        };
+        let attacker = PlayerPosition {
+            x: -1.0,
+            ..at
+        };
         mobs.insert(Kind::Zombie, at, false);
         let id = mobs.next_id - 1;
         let attack = mobs.player_attack(id, attacker, None, 20).unwrap();
@@ -4205,8 +4215,15 @@ mod tests {
     fn knockback_sweeps_mob_hitbox_against_wall_without_tunnelling() {
         let mut world = World::new();
         world.import_block(1, 70, 0, 1 << 4).unwrap();
-        let at = PlayerPosition { x: 0.5, y: 70.0, z: 0.5 };
-        let attacker = PlayerPosition { x: -1.0, ..at };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 70.0,
+            z: 0.5,
+        };
+        let attacker = PlayerPosition {
+            x: -1.0,
+            ..at
+        };
         let mut mobs = Mobs::default();
         mobs.insert(Kind::Zombie, at, false);
         let id = mobs.next_id - 1;
@@ -4221,10 +4238,23 @@ mod tests {
     #[test]
     fn mob_motion_is_transient_across_snapshots() {
         let mut mobs = Mobs::default();
-        let at = PlayerPosition { x: 0.5, y: 70.0, z: 0.5 };
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 70.0,
+            z: 0.5,
+        };
         mobs.insert(Kind::Zombie, at, false);
         let id = mobs.next_id - 1;
-        mobs.player_attack(id, PlayerPosition { x: -1.0, ..at }, None, 20).unwrap();
+        mobs.player_attack(
+            id,
+            PlayerPosition {
+                x: -1.0,
+                ..at
+            },
+            None,
+            20,
+        )
+        .unwrap();
         let json = serde_json::to_string(&mobs.entities[&id]).unwrap();
         assert!(!json.contains("knockback"));
         let restored: Mob = serde_json::from_str(&json).unwrap();
