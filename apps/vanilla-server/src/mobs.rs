@@ -221,6 +221,9 @@ struct Mob {
     position: PlayerPosition,
     health: i16,
     hit_tick: u64,
+    /// 1.7.10 hit impulse is runtime motion, not persistent world-state data.
+    #[serde(skip)]
+    knockback: [f64; 3],
     /// Consecutive simulated ticks outside every player's 32-block safe zone.
     /// Missing in older snapshots, so default to a fresh despawn grace period.
     #[serde(default)]
@@ -350,6 +353,123 @@ impl Mob {
         body.push(value);
         Event { id: 0x1a, body }
     }
+    /// Protocol 5 S12 Entity Velocity: i32 entity ID and three i16 speeds (x8000).
+    fn velocity_packet(self) -> Event {
+        let mut body = Vec::with_capacity(10);
+        body.extend_from_slice(&self.id.to_be_bytes());
+        for velocity in self.knockback {
+            let value = (velocity * 8000.0)
+                .round()
+                .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+        Event { id: 0x12, body }
+    }
+
+    /// Vanilla-style living-entity hit impulse: away from the attacker, with
+    /// half of any existing motion retained and upward speed capped at 0.4.
+    fn knockback_from(&mut self, attacker: PlayerPosition) -> Event {
+        let dx = self.position.x - attacker.x;
+        let dz = self.position.z - attacker.z;
+        let length = dx.hypot(dz);
+        // Identical positions are possible in multiplayer and must not cause NaNs.
+        let (x, z) = if length > 1e-6 {
+            (dx / length, dz / length)
+        } else if self.id & 1 == 0 {
+            (1.0, 0.0)
+        } else {
+            (-1.0, 0.0)
+        };
+        self.knockback[0] = (self.knockback[0] * 0.5 + x * 0.4).clamp(-0.8, 0.8);
+        self.knockback[1] = (self.knockback[1] * 0.5 + 0.4).min(0.4);
+        self.knockback[2] = (self.knockback[2] * 0.5 + z * 0.4).clamp(-0.8, 0.8);
+        self.waypoint = None;
+        self.velocity_packet()
+    }
+
+    /// Integrate an authoritative 20Hz knockback step, stopping at the actual
+    /// species hitbox rather than teleporting through a solid block. Resolve
+    /// each axis separately so a wall does not cancel sliding along it.
+    fn tick_knockback(&mut self, world: &World) -> Option<PlayerPosition> {
+        let original = self.position;
+        let (half_width, height) = projectile_hitbox(self);
+        for axis in [0usize, 2, 1] {
+            let velocity = self.knockback[axis];
+            if velocity.abs() < 0.001 {
+                continue;
+            }
+            let origin = self.position;
+            let steps = (velocity.abs() / 0.2).ceil() as usize;
+            let mut clear_fraction = 0.0;
+            let mut collision = false;
+            for step in 1..=steps {
+                let fraction = step as f64 / steps as f64;
+                let mut candidate = origin;
+                match axis {
+                    0 => candidate.x += velocity * fraction,
+                    1 => candidate.y += velocity * fraction,
+                    _ => candidate.z += velocity * fraction,
+                }
+                if !candidate.is_valid()
+                    || physics::collides_sized(world, &candidate, half_width, height)
+                {
+                    let mut low = clear_fraction;
+                    let mut high = fraction;
+                    // Resolve the face within a fraction of one block; no
+                    // tunnelling through thin partial blocks or floor jitter.
+                    for _ in 0..12 {
+                        let mid = (low + high) * 0.5;
+                        let mut probe = origin;
+                        match axis {
+                            0 => probe.x += velocity * mid,
+                            1 => probe.y += velocity * mid,
+                            _ => probe.z += velocity * mid,
+                        }
+                        if probe.is_valid()
+                            && !physics::collides_sized(world, &probe, half_width, height)
+                        {
+                            low = mid;
+                        } else {
+                            high = mid;
+                        }
+                    }
+                    clear_fraction = low;
+                    collision = true;
+                    break;
+                }
+                clear_fraction = fraction;
+            }
+            match axis {
+                0 => self.position.x += velocity * clear_fraction,
+                1 => self.position.y += velocity * clear_fraction,
+                _ => self.position.z += velocity * clear_fraction,
+            }
+            if collision {
+                self.knockback[axis] = 0.0;
+            }
+        }
+        // Ordinary living mobs slow down and fall. Flying species keep their
+        // vertical lift but still lose horizontal impulse through drag.
+        self.knockback[0] *= 0.6;
+        self.knockback[2] *= 0.6;
+        let flying = matches!(self.kind, Kind::Ghast | Kind::Blaze | Kind::Wither | Kind::EnderDragon);
+        if !flying {
+            if physics::supported(world, &self.position) && self.knockback[1] <= 0.0 {
+                self.knockback[1] = 0.0;
+            } else {
+                self.knockback[1] = (self.knockback[1] - 0.08) * 0.98;
+            }
+        } else {
+            self.knockback[1] *= 0.6;
+        }
+        for component in &mut self.knockback {
+            if component.abs() < 0.01 {
+                *component = 0.0;
+            }
+        }
+        (distance_3d(original, self.position) > 1e-7).then_some(self.position)
+    }
+
     fn attack_animation(self) -> Event {
         // 1.7.10 S0B Animation: entity ID VarInt, animation 0 (swing arm).
         let mut body = Vec::with_capacity(6);
@@ -1283,6 +1403,7 @@ impl Mobs {
                 kind.health()
             },
             hit_tick: 0,
+            knockback: [0.0; 3],
             far_from_player_ticks: 0,
             bite_tick: 0,
             fuse: 0,
@@ -1460,6 +1581,7 @@ impl Mobs {
             events.push(villager.status(if villager.health <= 0 { 3 } else { 2 }));
             if villager.health > 0 {
                 events.push(villager.health_metadata());
+                events.push(villager.knockback_from(origin));
                 continue;
             }
             // Old entity ID must be destroyed before any replacement is sent
@@ -1741,6 +1863,7 @@ impl Mobs {
                     events.push(mob.status(if mob.health <= 0 { 3 } else { 2 }));
                     if mob.health > 0 {
                         events.push(mob.health_metadata());
+                        events.push(mob.knockback_from(explosion.position));
                     }
                     if mob.health <= 0 {
                         dead.push(id);
@@ -1791,11 +1914,12 @@ impl Mobs {
         mob.hit_tick = tick;
         mob.health -= damage_held(held);
         let killed = mob.health <= 0;
+        let impulse = (!killed).then(|| mob.knockback_from(at));
         let result = Attack {
             events: if killed {
                 vec![mob.status(3), multiplayer::destroy(id)]
             } else {
-                vec![mob.status(2), mob.health_metadata()]
+                vec![mob.status(2), mob.health_metadata(), impulse.expect("living mob")]
             },
             drop: if killed { mob.death_drop() } else { None },
             experience: if killed {
@@ -2937,6 +3061,13 @@ impl Mobs {
                     events.push(mob.status(2));
                     events.push(mob.health_metadata());
                 }
+                if mob.knockback != [0.0; 3] {
+                    if let Some(position) = mob.tick_knockback(world) {
+                        events.push(multiplayer::teleport(mob.id, &position, 0.0, 0.0));
+                    }
+                    // Do not let A* pursuit overwrite the hit impulse this tick.
+                    continue;
+                }
                 if mob.rider.is_some() || mob.leash_holder.is_some() || mob.fence_anchor.is_some() {
                     continue; // Mounted or leashed animals never wander independently.
                 }
@@ -3269,6 +3400,7 @@ impl Mobs {
                         events.push(enemy.status(if enemy.health <= 0 { 3 } else { 2 }));
                         if enemy.health > 0 {
                             events.push(enemy.health_metadata());
+                            events.push(enemy.knockback_from(guardian.position));
                         }
                         if enemy.health <= 0 {
                             if let Some(drop) = enemy.death_drop() {
@@ -3431,6 +3563,7 @@ impl Mobs {
                         mob.id,
                         arrow.damage,
                         !arrow.hostile && arrow.shooter.is_some(),
+                        arrow.position,
                     ));
                     impacted = true;
                     break;
@@ -3444,7 +3577,7 @@ impl Mobs {
             events.push(multiplayer::teleport(arrow.id, &next, 0.0, 0.0));
         }
         let mut earned_xp = Vec::new();
-        for (id, damage, player_shot) in arrow_hits {
+        for (id, damage, player_shot, from) in arrow_hits {
             if let Some(mob) = self.entities.get_mut(&id) {
                 mob.health -= i16::from(damage);
                 if mob.health <= 0 {
@@ -3466,6 +3599,7 @@ impl Mobs {
                 } else {
                     events.push(mob.status(2));
                     events.push(mob.health_metadata());
+                    events.push(mob.knockback_from(from));
                 }
             }
         }
@@ -4045,6 +4179,57 @@ fn natural_spawn_location_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn melee_knockback_is_away_from_attacker_and_respects_hit_immunity() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition { x: 0.5, y: 70.0, z: 0.5 };
+        let attacker = PlayerPosition { x: -1.0, ..at };
+        mobs.insert(Kind::Zombie, at, false);
+        let id = mobs.next_id - 1;
+        let attack = mobs.player_attack(id, attacker, None, 20).unwrap();
+        let velocity = attack.events.iter().find(|event| event.id == 0x12).unwrap();
+        assert_eq!(velocity.body.len(), 10);
+        assert_eq!(&velocity.body[..4], &id.to_be_bytes());
+        assert_eq!(i16::from_be_bytes(velocity.body[4..6].try_into().unwrap()), 3200);
+        assert_eq!(i16::from_be_bytes(velocity.body[6..8].try_into().unwrap()), 3200);
+        assert_eq!(i16::from_be_bytes(velocity.body[8..10].try_into().unwrap()), 0);
+        assert!(mobs.player_attack(id, attacker, None, 21).is_none());
+        assert_eq!(mobs.entities[&id].knockback, [0.4, 0.4, 0.0]);
+        let events = mobs.tick(21, &World::new(), &[]);
+        assert!(mobs.entities[&id].position.x > at.x);
+        assert!(events.iter().any(|event| event.id == 0x18));
+    }
+
+    #[test]
+    fn knockback_sweeps_mob_hitbox_against_wall_without_tunnelling() {
+        let mut world = World::new();
+        world.import_block(1, 70, 0, 1 << 4).unwrap();
+        let at = PlayerPosition { x: 0.5, y: 70.0, z: 0.5 };
+        let attacker = PlayerPosition { x: -1.0, ..at };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, at, false);
+        let id = mobs.next_id - 1;
+        mobs.player_attack(id, attacker, None, 20).unwrap();
+        for tick in 21..=25 {
+            mobs.tick(tick, &world, &[]);
+        }
+        assert!(mobs.entities[&id].position.x <= 0.551);
+        assert!(!physics::collides_sized(&world, &mobs.entities[&id].position, 0.45, 1.95));
+    }
+
+    #[test]
+    fn mob_motion_is_transient_across_snapshots() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition { x: 0.5, y: 70.0, z: 0.5 };
+        mobs.insert(Kind::Zombie, at, false);
+        let id = mobs.next_id - 1;
+        mobs.player_attack(id, PlayerPosition { x: -1.0, ..at }, None, 20).unwrap();
+        let json = serde_json::to_string(&mobs.entities[&id]).unwrap();
+        assert!(!json.contains("knockback"));
+        let restored: Mob = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.knockback, [0.0; 3]);
+    }
 
     #[test]
     fn s07_every_materials_25_tool_types_inflict_correct_mob_melee_damage() {
@@ -4795,7 +4980,8 @@ mod tests {
         assert_eq!(spawn.id, 0x0f);
         assert!(spawn.body.ends_with(&[0x66, 0x41, 0x20, 0, 0, 0x7f]));
         let attack = mobs.player_attack(id, at, None, 20).unwrap();
-        assert_eq!(attack.events.len(), 2);
+        assert_eq!(attack.events.len(), 3);
+        assert_eq!(attack.events[2].id, 0x12);
         let health_packet = &attack.events[1];
         assert_eq!(health_packet.id, 0x1c);
         assert_eq!(&health_packet.body[..4], &id.to_be_bytes());
