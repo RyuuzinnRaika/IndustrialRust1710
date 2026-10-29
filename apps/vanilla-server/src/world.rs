@@ -41,7 +41,7 @@ enum Generation {
 }
 type Position = (i32, u8, i32);
 // Reuse a compact name for the block tick's changed positions and committed drops.
-type BlockTickResult = (Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>);
+pub type BlockTickResult = (Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>);
 #[derive(Default, Clone, Debug)]
 pub struct World {
     edits: BTreeMap<Position, u16>,
