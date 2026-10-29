@@ -3345,12 +3345,13 @@ impl Mobs {
                 if let Some(candidate) =
                     navigation::advance_step(world, mob.position, waypoint, speed)
                 {
+                    let (movement_yaw, movement_pitch) = facing_angles(mob.position, candidate);
                     mob.position = candidate;
                     events.push(multiplayer::teleport(
                         mob.id,
                         &candidate,
-                        facing_yaw,
-                        facing_pitch,
+                        movement_yaw,
+                        movement_pitch,
                     ));
                 } else if matches!(mob.kind, Kind::Spider | Kind::CaveSpider) {
                     // Both spider variants climb alongside a wall, never through it.
@@ -8911,7 +8912,10 @@ mod protocol5_facing_regression_tests {
 
     #[test]
     fn walking_mob_faces_its_waypoint_when_path_differs_from_target() {
-        let world = World::new();
+        let mut world = World::new();
+        for x in 0..=1 {
+            world.import_block(x, 64, 0, 1u16 << 4).unwrap();
+        }
         let origin = PlayerPosition {
             x: 0.5,
             y: 65.0,

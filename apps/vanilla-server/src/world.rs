@@ -5816,6 +5816,12 @@ mod tests {
                 // otherwise attachment cleanup removes it before piston contact.
                 world.update_and_save(&path, 1, 64, 1, 1 << 4).unwrap();
             }
+            if block_id == 127 {
+                // Cocoa metadata 0 faces south and needs a jungle log behind it.
+                world
+                    .update_and_save(&path, 1, 64, 1, (17u16 << 4) | 3)
+                    .unwrap();
+            }
             world
                 .update_and_save(&path, 1, 64, 0, (block_id << 4) | metadata)
                 .unwrap();
