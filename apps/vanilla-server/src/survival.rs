@@ -403,16 +403,20 @@ impl MiningProgress {
         let penalty = self
             .penalty
             .max(environment_penalty(head_submerged, on_ground));
-        // Dig progress is reported in client ticks but start/finish packets
-        // are processed on separate server polls. Allow one 20TPS tick of
-        // quantization slack, not an arbitrary fast-mine bypass.
-        (self
-            .started
-            .elapsed()
-            .saturating_add(Duration::from_millis(50))
-            >= minimum.saturating_mul(penalty))
-        .then_some(result)
+        // Vanilla reports completion in 20TPS client ticks, while start and
+        // finish are timestamped by independently scheduled server socket polls.
+        // Up to two ticks of phase/poll skew must not reject a legitimate finish.
+        // Preserve at least one full server tick for non-instant blocks so an
+        // immediate forged Finish cannot mine a short-duration block for free.
+        let required = minimum.saturating_mul(penalty);
+        mining_elapsed_is_legal(self.started.elapsed(), required).then_some(result)
     }
+}
+
+fn mining_elapsed_is_legal(elapsed: Duration, required: Duration) -> bool {
+    let slack = Duration::from_millis(100)
+        .min(required.saturating_sub(Duration::from_millis(50)));
+    elapsed.saturating_add(slack) >= required
 }
 
 fn environment_penalty(head_submerged: bool, on_ground: bool) -> u32 {
@@ -1061,6 +1065,42 @@ mod tests {
         for id in [0_u16, 7, 8, 9, 10, 11, 90, 119, 120, 137, 166] {
             assert!(mine_rule(id << 4, None).is_none(), "protected block {id}");
         }
+    }
+
+    #[test]
+    fn mining_accepts_two_ticks_of_client_server_skew_without_instant_bypass() {
+        let dirt = 3 << 4;
+        let (required, _) = mine_rule(dirt, None).unwrap();
+        assert_eq!(required, Duration::from_millis(750));
+
+        // One or two ticks of client/server phase skew are tolerated.
+        assert!(mining_elapsed_is_legal(
+            required - Duration::from_millis(75),
+            required
+        ));
+        assert!(!mining_elapsed_is_legal(
+            required - Duration::from_millis(125),
+            required
+        ));
+        assert!(!mining_elapsed_is_legal(Duration::ZERO, required));
+
+        // Snow layer with a wooden shovel needs two client ticks. A forged
+        // same-poll Finish must not bypass the remaining one-tick minimum.
+        let quick = 78 << 4;
+        let shovel = stack(269, 0);
+        let (two_ticks, _) = mine_rule(quick, shovel).unwrap();
+        assert_eq!(two_ticks, Duration::from_millis(100));
+        assert!(!mining_elapsed_is_legal(Duration::ZERO, two_ticks));
+        assert!(!mining_elapsed_is_legal(Duration::from_millis(49), two_ticks));
+        assert!(mining_elapsed_is_legal(Duration::from_millis(50), two_ticks));
+        assert!(mining_elapsed_is_legal(Duration::ZERO, Duration::ZERO));
+
+        // Verify the live MiningProgress finish path also accepts a legal
+        // near-boundary completion while preserving block/tool consistency.
+        let target = (0, 63, 0);
+        let mut attempt = MiningProgress::start(target, dirt, None).unwrap();
+        attempt.started = Instant::now() - (required - Duration::from_millis(75));
+        assert!(attempt.finish(target, dirt, None).is_some());
     }
 
     #[test]
