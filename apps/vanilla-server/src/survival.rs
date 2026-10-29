@@ -719,7 +719,8 @@ mod tests {
         }
         for variant in [1u16, 2] {
             let (time, mined) = mine_rule((31 << 4) | variant, None).unwrap();
-            assert_eq!(time, Duration::from_millis(50));
+            // Zero-hardness tall grass and ferns must break in the same client tick.
+            assert_eq!(time, Duration::ZERO);
             assert_eq!(mined.drop, None);
             assert!(!mined.wear_tool);
         }

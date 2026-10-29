@@ -369,7 +369,8 @@ mod tests {
             vec![
                 "minecraft:diamond",
                 "minecraft:diamond_pickaxe",
-                "minecraft:diamond_sword"
+                "minecraft:diamond_sword",
+                "minecraft:dirt"
             ]
         );
         assert!(complete("/tp Steve ~", 2, &people).contains(&"~".to_owned()));
