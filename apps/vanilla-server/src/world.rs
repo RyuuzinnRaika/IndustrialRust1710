@@ -40,6 +40,8 @@ enum Generation {
     Expanded(u64, crate::dimensions::Dimension),
 }
 type Position = (i32, u8, i32);
+// Reuse a compact name for the block tick's changed positions and committed drops.
+type BlockTickResult = (Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>);
 #[derive(Default, Clone, Debug)]
 pub struct World {
     edits: BTreeMap<Position, u16>,
@@ -1330,7 +1332,7 @@ impl World {
         budget: usize,
         ground: &mut crate::ground_items::GroundItems,
         ground_path: &Path,
-    ) -> io::Result<(Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>)> {
+    ) -> io::Result<BlockTickResult> {
         self.block_tick_inner(path, budget, Some((ground, ground_path)), None)
     }
 
@@ -1344,7 +1346,7 @@ impl World {
         ground_path: &Path,
         decorations: &mut crate::decorations::Decorations,
         decoration_path: &Path,
-    ) -> io::Result<(Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>)> {
+    ) -> io::Result<BlockTickResult> {
         self.block_tick_inner(
             path,
             budget,
@@ -1359,7 +1361,7 @@ impl World {
         budget: usize,
         mut ground: Option<(&mut crate::ground_items::GroundItems, &Path)>,
         mut decorations: Option<(&mut crate::decorations::Decorations, &Path)>,
-    ) -> io::Result<(Vec<(i32, i32, i32)>, Vec<crate::ground_items::GroundItem>)> {
+    ) -> io::Result<BlockTickResult> {
         let mut committed_drops = Vec::new();
         self.fluid_phase = self.fluid_phase.wrapping_add(1);
         // Snapshot before any TNT movement; disk failure restores exactly
@@ -4932,7 +4934,7 @@ mod tests {
         assert!(items.iter().any(|stack| stack.id == 171 && stack.damage == 3));
         for (x, id) in [(1, 50), (2, 27), (3, 38), (4, 171)] {
             let dropped = spawned.iter().find(|item| item.stack.id == id).unwrap();
-            assert_eq!(dropped.position, [(x * 32) + 16, (64 * 32) + 16, (1 * 32) + 16]);
+            assert_eq!(dropped.position, [(x * 32) + 16, (64 * 32) + 16, 32 + 16]);
         }
         assert!(!path.with_extension("pending-txn.json").exists());
         fs::remove_dir_all(&root).unwrap();
