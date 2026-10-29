@@ -202,6 +202,37 @@ mod tests {
         assert!(WorldSpawn::new(i32::MAX, 65, 0).is_err());
     }
 
+    /// Joining a fresh default world must place a player's feet on top of the
+    /// flat surface layer (grass occupies y=63), not one block above the floor.
+    /// The Protocol 5 Spawn Player golden in tests/protocol5_e41_golden.rs
+    /// freezes the same feet height as `64.0 * 32`.
+    #[test]
+    fn default_worldspawn_lands_feet_on_the_flat_surface_block() {
+        let world = World::default();
+        assert_eq!(world.get(0, 63, 0) >> 4, 2, "flat grass layer");
+        assert_eq!(world.get(0, 64, 0), 0, "air at standing feet");
+        assert_eq!(world.get(0, 65, 0), 0, "air at body height");
+
+        // Both the world file and its spawn sidecar are deliberately absent:
+        // this exercises the read-only default and creates no disk state.
+        let world_path = std::env::temp_dir().join(format!(
+            "ir1710-worldspawn-surface-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        assert_eq!(load(&world_path).unwrap(), None);
+        let standing = player_spawn(&world_path, &world).unwrap();
+        assert_eq!(standing.y, 64.0);
+        assert_eq!((standing.x, standing.z), (0.5, 0.5));
+        // The wire value the live golden test compares against.
+        assert_eq!((standing.y * 32.0) as i32, 2048);
+        assert_eq!(
+            effective(&world_path, &world).unwrap().coordinates(),
+            (0, 64, 0)
+        );
+        assert!(fs::symlink_metadata(location(&world_path)).is_err());
+    }
+
     #[test]
     fn world_spawn_persists_and_rejects_corruption() {
         let root = std::env::temp_dir().join(format!(
