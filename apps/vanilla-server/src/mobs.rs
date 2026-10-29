@@ -1813,9 +1813,11 @@ impl Mobs {
             d <= 2.25
         })?;
         self.orbs.remove(&id);
-        let mut body = Vec::new();
-        write_varint(id as u32, &mut body);
-        write_varint(collector as u32, &mut body);
+        // Protocol 5 S0D Collect Item reads two big-endian i32 entity IDs.
+        // VarInts make this packet too short, disconnecting vanilla 1.7.10.
+        let mut body = Vec::with_capacity(8);
+        body.extend_from_slice(&id.to_be_bytes());
+        body.extend_from_slice(&collector.to_be_bytes());
         Some((
             u32::from(amount),
             vec![Event { id: 0x0d, body }, multiplayer::destroy(id)],
@@ -8186,6 +8188,36 @@ mod tests {
         assert_eq!(mobs.hurt_player(1, nearby, 10), 0);
         assert_eq!(mobs.hurt_player(2, nearby, 10), 0);
         assert_eq!(mobs.hurt_player(3, far, 10), 0);
+    }
+
+    #[test]
+    fn xp_orb_pickup_uses_protocol5_fixed_width_entity_ids() {
+        let pos = PlayerPosition::default();
+        for collector in [1i32, 128, -7] {
+            let mut mobs = Mobs {
+                next_id: BASE_ID,
+                ..Mobs::default()
+            };
+            let spawn = mobs.spawn_xp(pos, 5).unwrap();
+            assert_eq!(spawn.id, 0x11);
+            let (amount, events) = mobs.collect_xp(pos, collector).unwrap();
+            assert_eq!(amount, 5);
+            assert_eq!(events.len(), 2);
+            let pickup = &events[0];
+            assert_eq!(pickup.id, 0x0d);
+            let mut expected = BASE_ID.to_be_bytes().to_vec();
+            expected.extend_from_slice(&collector.to_be_bytes());
+            assert_eq!(pickup.body, expected);
+            assert_eq!(pickup.body.len(), 8);
+            assert_eq!(events[1].id, 0x13);
+            assert_eq!(events[1].body, {
+                let mut bytes = vec![1u8];
+                bytes.extend_from_slice(&BASE_ID.to_be_bytes());
+                bytes
+            });
+            assert!(mobs.orbs.is_empty());
+            assert!(mobs.collect_xp(pos, collector).is_none());
+        }
     }
 
     #[test]
