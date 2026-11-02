@@ -5319,6 +5319,50 @@ mod tests {
     }
 
     #[test]
+    fn lit_and_unlit_redstone_torches_drop_once_when_attachment_is_destroyed() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-redstone-torch-support-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for block_id in [75u16, 76] {
+            for (metadata, support) in [
+                (1u16, (-1, 64, 0)),
+                (2, (1, 64, 0)),
+                (3, (0, 64, -1)),
+                (4, (0, 64, 1)),
+                (5, (0, 63, 0)),
+            ] {
+                let path = root.join(format!("{block_id}-{metadata}.irw"));
+                let mut world = World::new();
+                world
+                    .update_and_save(&path, support.0, support.1, support.2, 1 << 4)
+                    .unwrap();
+                let torch = (block_id << 4) | metadata;
+                assert!(world.can_support(0, 64, 0, torch));
+                world.update_and_save(&path, 0, 64, 0, torch).unwrap();
+                world
+                    .update_and_save(&path, support.0, support.1, support.2, 0)
+                    .unwrap();
+                assert!(world.block_tick(&path, 64).unwrap().contains(&(0, 64, 0)));
+                assert_eq!(world.get(0, 64, 0), 0);
+                let drops = world.drain_drops();
+                assert_eq!(
+                    drops.iter().filter(|drop| drop.stack.id == 76).count(),
+                    1,
+                    "torch ID {block_id}, mount {metadata}"
+                );
+                world.block_tick(&path, 64).unwrap();
+                assert!(world.drain_drops().is_empty(), "duplicate torch drop");
+                assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 0);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn unsupported_torch_detaches_into_an_item_after_commit() {
         let path =
             std::env::temp_dir().join(format!("ir1710-attachment-{}.irw", std::process::id()));
