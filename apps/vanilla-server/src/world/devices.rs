@@ -1084,6 +1084,38 @@ mod redstone_regression_tests {
     }
 
     #[test]
+    fn lever_strongly_powers_only_its_eight_legacy_attachment_variants() {
+        for (metadata, support) in [
+            (0u16, (0, 65, 0)),
+            (7, (0, 65, 0)),
+            (1, (-1, 64, 0)),
+            (2, (1, 64, 0)),
+            (3, (0, 64, -1)),
+            (4, (0, 64, 1)),
+            (5, (0, 63, 0)),
+            (6, (0, 63, 0)),
+        ] {
+            let mut world = World::new();
+            world.import_block(0, 63, 0, 0).unwrap();
+            world
+                .import_block(support.0, support.1, support.2, 1 << 4)
+                .unwrap();
+            let lever = (69 << 4) | metadata;
+            world.import_block(0, 64, 0, lever).unwrap();
+            assert_eq!(world.strong_signal_into((0, 64, 0), support), 0);
+            assert_eq!(world.signal_into((0, 64, 0), support), 0);
+            world.import_block(0, 64, 0, lever | 8).unwrap();
+            assert_eq!(world.strong_signal_into((0, 64, 0), support), 15);
+            assert_eq!(world.signal_into((0, 64, 0), support), 15);
+            assert_eq!(
+                world.strong_signal_into((0, 64, 0), (0, 64, 2)),
+                0,
+                "lever state {metadata} strongly powers an unrelated side"
+            );
+        }
+    }
+
+    #[test]
     fn torch_inverts_powered_attachment_after_two_world_ticks() {
         let path =
             std::env::temp_dir().join(format!("ir1710-torch-invert-{}.irw", std::process::id()));
