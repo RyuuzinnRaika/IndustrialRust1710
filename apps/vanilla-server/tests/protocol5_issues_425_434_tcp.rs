@@ -67,16 +67,19 @@ impl Server {
                 );
             }
             match TcpStream::connect(("127.0.0.1", port)) {
-                Ok(socket) => {
-                    Self::probe_ready(port, socket).unwrap_or_else(|error| {
-                        panic!(
-                            "test server failed Protocol 5 status readiness: {error}\n{}",
-                            server.diagnostics()
-                        )
-                    });
-                    break;
-                }
-                Err(error) if Instant::now() < deadline => {
+                Ok(socket) => match Self::probe_ready(port, socket) {
+                    Ok(()) => break,
+                    Err(error)
+                        if Self::retryable_probe_error(&error) && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(40));
+                    }
+                    Err(error) => panic!(
+                        "test server failed Protocol 5 status readiness: {error}\n{}",
+                        server.diagnostics()
+                    ),
+                },
+                Err(_error) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(40));
                 }
                 Err(error) => panic!(
@@ -93,9 +96,23 @@ impl Server {
             .unwrap_or_else(|error| format!("could not read server stderr: {error}"))
     }
 
-    // A bare TCP readiness probe occupies a pre-login per-IP permit until the
-    // server's five-second handshake timeout. Complete Status/Ping instead,
-    // so ADD011's two simultaneous logins do not race with a stale probe.
+    // Retry only transport failures during startup. A malformed Status/Pong
+    // must still fail immediately rather than masking a protocol regression.
+    fn retryable_probe_error(error: &io::Error) -> bool {
+        matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::TimedOut
+                | io::ErrorKind::WouldBlock
+                | io::ErrorKind::BrokenPipe
+        )
+    }
+
+    // TCP accept alone does not prove Protocol 5 readiness. Require a valid
+    // Status Response and matching Ping/Pong before running login assertions.
     fn probe_ready(port: u16, mut socket: TcpStream) -> io::Result<()> {
         socket.set_read_timeout(Some(Duration::from_secs(10)))?;
         socket.set_write_timeout(Some(Duration::from_secs(10)))?;
@@ -214,6 +231,27 @@ impl Drop for Server {
             );
         }
         let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[test]
+fn readiness_probe_retries_only_transient_transport_failures() {
+    for kind in [
+        io::ErrorKind::ConnectionRefused,
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::ConnectionAborted,
+        io::ErrorKind::UnexpectedEof,
+        io::ErrorKind::TimedOut,
+        io::ErrorKind::WouldBlock,
+        io::ErrorKind::BrokenPipe,
+    ] {
+        assert!(Server::retryable_probe_error(&io::Error::from(kind)), "{kind:?}");
+    }
+    for kind in [io::ErrorKind::InvalidData, io::ErrorKind::PermissionDenied] {
+        assert!(
+            !Server::retryable_probe_error(&io::Error::from(kind)),
+            "{kind:?}"
+        );
     }
 }
 
