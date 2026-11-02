@@ -208,7 +208,7 @@ impl Drop for Server {
             let mut stderr = io::stderr();
             let _ = writeln!(
                 stderr,
-                "Protocol 5 test server stderr (port {}):\\n{}",
+                "Protocol 5 test server stderr (port {}):\n{}",
                 self.port,
                 self.diagnostics()
             );
