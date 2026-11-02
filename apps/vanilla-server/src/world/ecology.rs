@@ -111,6 +111,21 @@ impl World {
                 };
                 solid(support)
             }
+            69 => {
+                // Lever metadata differs from torches. 0/7 attach upward
+                // (ceiling), 5/6 downward (floor), 1..4 to the four walls.
+                // The powered bit must not change the mounting direction.
+                let support = match block & 7 {
+                    0 | 7 => self.get(x, y + 1, z) >> 4,
+                    1 => self.get(x - 1, y, z) >> 4,
+                    2 => self.get(x + 1, y, z) >> 4,
+                    3 => self.get(x, y, z - 1) >> 4,
+                    4 => self.get(x, y, z + 1) >> 4,
+                    5 | 6 => below,
+                    _ => unreachable!(),
+                };
+                solid(support)
+            }
             // Carpet was allowed on non-solid blocks in Java 1.7.10;
             // it only falls when its supporting cell becomes air.
             171 => below != 0,
@@ -330,6 +345,7 @@ impl World {
                     | 59
                     | 63
                     | 68
+                    | 69
                     | 140
                     | 27
                     | 28
@@ -610,6 +626,40 @@ mod regression_tests {
         world.import_block(0, 66, 0, 0).unwrap();
         assert!(world.rain_reaches(0, 65, 0));
         assert_eq!(world.ecology_changes(64).get(&(0, 65, 0)), Some(&0));
+    }
+
+    #[test]
+    fn lever_mount_requires_the_selected_solid_face_for_all_eight_states() {
+        for (metadata, backing) in [
+            (0u16, (0, 65, 0)), // ceiling east-west
+            (7, (0, 65, 0)),    // ceiling north-south
+            (1, (-1, 64, 0)),   // east-facing wall
+            (2, (1, 64, 0)),    // west-facing wall
+            (3, (0, 64, -1)),   // south-facing wall
+            (4, (0, 64, 1)),    // north-facing wall
+            (5, (0, 63, 0)),   // floor north-south
+            (6, (0, 63, 0)),   // floor east-west
+        ] {
+            let mut world = World::new();
+            // World::new has a grass floor at Y=63. Clear it so these
+            // cases fail without the chosen attachment instead of
+            // inadvertently succeeding from natural terrain.
+            world.import_block(0, 63, 0, 0).unwrap();
+            let lever = (69 << 4) | metadata;
+            assert!(!world.can_support(0, 64, 0, lever));
+            world
+                .import_block(backing.0, backing.1, backing.2, 1 << 4)
+                .unwrap();
+            for power in [0u16, 8] {
+                assert!(world.can_support(0, 64, 0, lever | power));
+            }
+            world.import_block(0, 64, 0, lever | 8).unwrap();
+            world
+                .import_block(backing.0, backing.1, backing.2, 0)
+                .unwrap();
+            assert!(!world.can_support(0, 64, 0, lever | 8));
+            assert_eq!(world.ecology_changes(64).get(&(0, 64, 0)), Some(&0));
+        }
     }
 
     #[test]
