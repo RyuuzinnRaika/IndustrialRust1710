@@ -903,13 +903,15 @@ fn piston_placement_facing(yaw: f32, player: (f64, f64, f64), target: (i32, i32,
 /// Protocol 5 clicked-face -> 1.7.10 wall/floor torch metadata.
 /// Undersides cannot support vanilla or redstone torches.
 fn torch_attachment_metadata(face: i8) -> Option<u16> {
+    // Vanilla 1.7.10 BlockTorch#onBlockPlaced: metadata points *toward*
+    // the mounting block, opposite the clicked face's outward normal.
     match face {
-        1 => Some(5), // floor
-        2 => Some(3), // north support
-        3 => Some(4), // south support
-        4 => Some(1), // west support
-        5 => Some(2), // east support
-        _ => None,
+        1 => Some(5), // floor: support at Y-1
+        2 => Some(4), // clicked north face: support at Z+1
+        3 => Some(3), // clicked south face: support at Z-1
+        4 => Some(2), // clicked west face: support at X+1
+        5 => Some(1), // clicked east face: support at X-1
+        _ => None,    // torches cannot hang from ceilings
     }
 }
 
@@ -11075,7 +11077,7 @@ mod legacy_placement_orientation_tests {
 
     #[test]
     fn torch_attachment_matches_every_clicked_face() {
-        for (face, metadata) in [(1, 5), (2, 3), (3, 4), (4, 1), (5, 2)] {
+        for (face, metadata) in [(1, 5), (2, 4), (3, 3), (4, 2), (5, 1)] {
             assert_eq!(torch_attachment_metadata(face), Some(metadata));
         }
         assert_eq!(torch_attachment_metadata(0), None);

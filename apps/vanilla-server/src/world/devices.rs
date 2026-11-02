@@ -332,9 +332,13 @@ impl World {
             }
             147 | 148 | 151 => (block & 15) as u8,
             76 => {
-                // Torch activation is the inverse of the block it is
-                // attached to. The unlit block 75 emits no signal.
-                if to == redstone_torch_support(x, y, z, block) {
+                // Weak power reaches only the five adjacent faces that are
+                // not the attachment block; vanilla does not energize its
+                // backing block or any distant/diagonal position.
+                let (dx, dy, dz) = (to.0 - x, to.1 - y, to.2 - z);
+                if dx.abs() + dy.abs() + dz.abs() != 1
+                    || to == redstone_torch_support(x, y, z, block)
+                {
                     0
                 } else {
                     15
@@ -687,6 +691,21 @@ impl World {
                     let support = redstone_torch_support(x, y, z, current);
                     let should_light = !self.power_into(support, (x, y, z));
                     let lit = current >> 4 == 76;
+                    // After eight shutoffs within 60 ticks, vanilla keeps
+                    // the torch unlit and schedules a retry after 160 ticks.
+                    // A surrounding update must not relight it prematurely.
+                    if !lit && should_light {
+                        if let Some(&until) = self.torch_burnout_until.get(&pos) {
+                            if self.fluid_phase < until {
+                                self.pending_torches.remove(&pos);
+                                continue;
+                            }
+                            // This is the vanilla 160-tick scheduled recovery
+                            // check: do not add a second two-tick delay.
+                            self.pending_torches.insert(pos, (self.fluid_phase, true));
+                            self.torch_burnout_until.remove(&pos);
+                        }
+                    }
                     if should_light == lit {
                         self.pending_torches.remove(&pos);
                     } else {
@@ -704,6 +723,11 @@ impl World {
                                 pos,
                                 ((if should_light { 76u16 } else { 75u16 }) << 4) | (current & 15),
                             );
+                            if !should_light {
+                                // Count after the world transition has been
+                                // durably committed by block_tick_inner.
+                                self.pending_torch_extinguishes.insert(pos);
+                            }
                             self.pending_torches.remove(&pos);
                         }
                     }
@@ -1153,6 +1177,52 @@ mod redstone_regression_tests {
     }
 
     #[test]
+    fn torch_burns_out_after_eight_shutoffs_in_sixty_ticks_then_recovers() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-torch-burnout-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
+        world
+            .update_and_save(&path, 0, 65, 0, (76 << 4) | 5)
+            .unwrap();
+        for cycle in 0..8 {
+            // Wall-mounted lever strongly powers the torch's stone support.
+            world
+                .update_and_save(&path, -1, 64, 0, (69 << 4) | 10)
+                .unwrap();
+            for _ in 0..3 {
+                world.block_tick(&path, 128).unwrap();
+            }
+            assert_eq!(world.get(0, 65, 0) >> 4, 75);
+            world
+                .update_and_save(&path, -1, 64, 0, (69 << 4) | 2)
+                .unwrap();
+            for _ in 0..3 {
+                world.block_tick(&path, 128).unwrap();
+            }
+            assert_eq!(
+                world.get(0, 65, 0) >> 4,
+                if cycle < 7 { 76 } else { 75 },
+                "unexpected torch state after cycle {cycle}"
+            );
+        }
+        assert!(world.torch_burnout_until.contains_key(&(0, 65, 0)));
+        for _ in 0..10 {
+            world.block_tick(&path, 128).unwrap();
+        }
+        assert_eq!(world.get(0, 65, 0) >> 4, 75);
+        for _ in 0..160 {
+            world.block_tick(&path, 128).unwrap();
+        }
+        assert_eq!(world.get(0, 65, 0) >> 4, 76);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn powered_support_below_dust_feeds_full_strength_without_a_side_wire() {
         let path =
             std::env::temp_dir().join(format!("ir1710-dust-vertical-{}.irw", std::process::id()));
@@ -1280,6 +1350,45 @@ mod redstone_regression_tests {
         assert!(w.powered_near(1, 64, 0));
         assert!(!w.powered_near(-1, 64, 0));
         assert!(!w.powered_near(0, 64, 1));
+    }
+
+    #[test]
+    fn redstone_torch_weak_power_is_adjacent_and_excludes_attached_face() {
+        for (meta, backing) in [
+            (1u16, (-1, 64, 0)),
+            (2, (1, 64, 0)),
+            (3, (0, 64, -1)),
+            (4, (0, 64, 1)),
+            (5, (0, 63, 0)),
+        ] {
+            let mut world = World::new();
+            world.import_block(0, 64, 0, (76 << 4) | meta).unwrap();
+            for target in [
+                (-1, 64, 0),
+                (1, 64, 0),
+                (0, 64, -1),
+                (0, 64, 1),
+                (0, 65, 0),
+                (0, 63, 0),
+            ] {
+                let expected = if target == backing { 0 } else { 15 };
+                assert_eq!(
+                    world.signal_into((0, 64, 0), target),
+                    expected,
+                    "torch orientation {meta}, target {target:?}"
+                );
+                assert_eq!(
+                    world.strong_signal_into((0, 64, 0), target),
+                    if target == (0, 65, 0) { 15 } else { 0 }
+                );
+            }
+            for far in [(2, 64, 0), (0, 66, 0), (1, 65, 0)] {
+                assert_eq!(world.signal_into((0, 64, 0), far), 0);
+            }
+            world.import_block(0, 64, 0, (75 << 4) | meta).unwrap();
+            assert_eq!(world.signal_into((0, 64, 0), (0, 65, 0)), 0);
+            assert_eq!(world.strong_signal_into((0, 64, 0), (0, 65, 0)), 0);
+        }
     }
 
     #[test]

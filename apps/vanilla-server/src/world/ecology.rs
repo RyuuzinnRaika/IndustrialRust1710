@@ -102,14 +102,35 @@ impl World {
                 support >> 4 == 17 && support & 3 == 3
             }
             50 | 75 | 76 => {
-                let support = match block & 7 {
-                    1 => self.get(x - 1, y, z) >> 4,
-                    2 => self.get(x + 1, y, z) >> 4,
-                    3 => self.get(x, y, z - 1) >> 4,
-                    4 => self.get(x, y, z + 1) >> 4,
-                    _ => below,
+                // Legacy metadata 1..4 attaches to the matching wall;
+                // metadata 5 stands on a top face. 0 and 6..15 are not
+                // valid vanilla torch orientations (unlike levers).
+                let support = match block & 15 {
+                    1 => self.get(x - 1, y, z),
+                    2 => self.get(x + 1, y, z),
+                    3 => self.get(x, y, z - 1),
+                    4 => self.get(x, y, z + 1),
+                    5 => self.get(x, y - 1, z),
+                    _ => return false,
                 };
-                solid(support)
+                let support_id = support >> 4;
+                if block & 15 == 5 {
+                    // Minecraft 1.7.10 also supports a torch on glass and
+                    // top slabs/stairs (top-half variants), not bottom slabs.
+                    if matches!(support_id, 44 | 126) {
+                        support & 8 != 0
+                    } else if matches!(
+                        support_id,
+                        53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164
+                    ) {
+                        support & 4 != 0
+                    } else {
+                        solid(support_id) || support_id == 20
+                    }
+                } else {
+                    // A fence or wall has no full vertical mounting face.
+                    solid(support_id) && !matches!(support_id, 44 | 85 | 113 | 126 | 139)
+                }
             }
             69 => {
                 // Lever metadata differs from torches. 0/7 attach upward
@@ -626,6 +647,45 @@ mod regression_tests {
         world.import_block(0, 66, 0, 0).unwrap();
         assert!(world.rain_reaches(0, 65, 0));
         assert_eq!(world.ecology_changes(64).get(&(0, 65, 0)), Some(&0));
+    }
+
+    #[test]
+    fn redstone_torch_mounts_only_on_the_matching_face_and_valid_top_surfaces() {
+        for torch_id in [50u16, 75, 76] {
+            for (meta, support) in [
+                (1u16, (-1, 64, 0)),
+                (2, (1, 64, 0)),
+                (3, (0, 64, -1)),
+                (4, (0, 64, 1)),
+                (5, (0, 63, 0)),
+            ] {
+                let mut world = World::new();
+                world.import_block(0, 63, 0, 0).unwrap();
+                let torch = (torch_id << 4) | meta;
+                assert!(!world.can_support(0, 64, 0, torch));
+                world
+                    .import_block(support.0, support.1, support.2, 1 << 4)
+                    .unwrap();
+                assert!(world.can_support(0, 64, 0, torch));
+                world
+                    .import_block(support.0, support.1, support.2, 0)
+                    .unwrap();
+                assert!(!world.can_support(0, 64, 0, torch));
+            }
+            for meta in [0u16, 6, 7, 8, 15] {
+                assert!(!World::new().can_support(0, 64, 0, (torch_id << 4) | meta));
+            }
+            let mut world = World::new();
+            world.import_block(0, 63, 0, 20 << 4).unwrap();
+            assert!(world.can_support(0, 64, 0, (torch_id << 4) | 5));
+            assert!(!world.can_support(0, 64, 0, (torch_id << 4) | 3));
+            world.import_block(0, 63, 0, 44 << 4).unwrap();
+            assert!(!world.can_support(0, 64, 0, (torch_id << 4) | 5));
+            world.import_block(0, 63, 0, (44 << 4) | 8).unwrap();
+            assert!(world.can_support(0, 64, 0, (torch_id << 4) | 5));
+            world.import_block(-1, 64, 0, 85 << 4).unwrap();
+            assert!(!world.can_support(0, 64, 0, (torch_id << 4) | 1));
+        }
     }
 
     #[test]

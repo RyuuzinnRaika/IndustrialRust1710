@@ -62,6 +62,12 @@ pub struct World {
     // Java 1.7.10 torches invert their supporting block after a two-game-tick
     // delay. A timestamped target prevents instantaneous oscillation.
     pending_torches: BTreeMap<Position, (u64, bool)>,
+    // Only successful 76->75 transitions count toward torch burn-out.
+    // Runtime-only, as in vanilla: 8 extinguishes in 60 game ticks cause
+    // a 160-tick cool-down before the torch may relight.
+    pending_torch_extinguishes: BTreeSet<Position>,
+    torch_toggle_history: BTreeMap<Position, VecDeque<u64>>,
+    torch_burnout_until: BTreeMap<Position, u64>,
     // Comparator analog output (0..15) is not encoded in block metadata.
     // Reconstructed by queued evaluation after loading IRW snapshots.
     comparator_outputs: BTreeMap<Position, u8>,
@@ -1174,6 +1180,9 @@ impl World {
             }
             if !matches!(id, 75 | 76) {
                 self.pending_torches.remove(&pos);
+                self.pending_torch_extinguishes.remove(&pos);
+                self.torch_toggle_history.remove(&pos);
+                self.torch_burnout_until.remove(&pos);
             }
             if matches!(
                 id,
@@ -1951,6 +1960,7 @@ impl World {
                 }
                 self.tnt_events.truncate(tnt_events_before);
                 self.comparator_ready.clear();
+                self.pending_torch_extinguishes.clear();
                 for (pos, original) in undo {
                     match original {
                         Some(block) => {
@@ -2018,7 +2028,28 @@ impl World {
                 }
                 self.tnt_events.truncate(tnt_events_before);
                 self.comparator_ready.clear();
+                self.pending_torch_extinguishes.clear();
                 return Err(error);
+            }
+        }
+
+        // Count only extinguishes that were actually committed; otherwise a
+        // failed world save could burn out a torch that never switched off.
+        for pos in std::mem::take(&mut self.pending_torch_extinguishes) {
+            if self.get(pos.0, i32::from(pos.1), pos.2) >> 4 != 75 {
+                continue;
+            }
+            let toggles = self.torch_toggle_history.entry(pos).or_default();
+            while toggles
+                .front()
+                .is_some_and(|&tick| self.fluid_phase.saturating_sub(tick) > 60)
+            {
+                toggles.pop_front();
+            }
+            toggles.push_back(self.fluid_phase);
+            if toggles.len() >= 8 {
+                self.torch_burnout_until
+                    .insert(pos, self.fluid_phase.saturating_add(160));
             }
         }
 
@@ -5283,6 +5314,50 @@ mod tests {
             let items = world.drain_drops();
             assert_eq!(items.iter().filter(|drop| drop.stack.id == 69).count(), 1);
             assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 0);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lit_and_unlit_redstone_torches_drop_once_when_attachment_is_destroyed() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-redstone-torch-support-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for block_id in [75u16, 76] {
+            for (metadata, support) in [
+                (1u16, (-1, 64, 0)),
+                (2, (1, 64, 0)),
+                (3, (0, 64, -1)),
+                (4, (0, 64, 1)),
+                (5, (0, 63, 0)),
+            ] {
+                let path = root.join(format!("{block_id}-{metadata}.irw"));
+                let mut world = World::new();
+                world
+                    .update_and_save(&path, support.0, support.1, support.2, 1 << 4)
+                    .unwrap();
+                let torch = (block_id << 4) | metadata;
+                assert!(world.can_support(0, 64, 0, torch));
+                world.update_and_save(&path, 0, 64, 0, torch).unwrap();
+                world
+                    .update_and_save(&path, support.0, support.1, support.2, 0)
+                    .unwrap();
+                assert!(world.block_tick(&path, 64).unwrap().contains(&(0, 64, 0)));
+                assert_eq!(world.get(0, 64, 0), 0);
+                let drops = world.drain_drops();
+                assert_eq!(
+                    drops.iter().filter(|drop| drop.stack.id == 76).count(),
+                    1,
+                    "torch ID {block_id}, mount {metadata}"
+                );
+                world.block_tick(&path, 64).unwrap();
+                assert!(world.drain_drops().is_empty(), "duplicate torch drop");
+                assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 0);
+            }
         }
         fs::remove_dir_all(root).unwrap();
     }
