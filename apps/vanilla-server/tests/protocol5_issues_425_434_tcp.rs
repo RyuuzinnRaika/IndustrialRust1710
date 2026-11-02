@@ -8,10 +8,13 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NEXT_SERVER_DIR_ID: AtomicU64 = AtomicU64::new(0);
+// Serializes ephemeral port reservation and child readiness across tests.
+static SERVER_START_LOCK: Mutex<()> = Mutex::new(());
 
 struct Server {
     child: Child,
@@ -47,6 +50,11 @@ impl Server {
             .unwrap(),
         )
         .unwrap();
+        // A port selected with bind(:0) becomes free before the child binds.
+        // Do not let another test in this process reserve the same port.
+        let launch_guard = SERVER_START_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -98,6 +106,7 @@ impl Server {
                 ),
             }
         }
+        drop(launch_guard);
         server
     }
 
