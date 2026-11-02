@@ -694,15 +694,17 @@ impl World {
                     // After eight shutoffs within 60 ticks, vanilla keeps
                     // the torch unlit and schedules a retry after 160 ticks.
                     // A surrounding update must not relight it prematurely.
-                    if !lit
-                        && should_light
-                        && self
-                            .torch_burnout_until
-                            .get(&pos)
-                            .is_some_and(|&until| self.fluid_phase < until)
-                    {
-                        self.pending_torches.remove(&pos);
-                        continue;
+                    if !lit && should_light {
+                        if let Some(&until) = self.torch_burnout_until.get(&pos) {
+                            if self.fluid_phase < until {
+                                self.pending_torches.remove(&pos);
+                                continue;
+                            }
+                            // This is the vanilla 160-tick scheduled recovery
+                            // check: do not add a second two-tick delay.
+                            self.pending_torches.insert(pos, (self.fluid_phase, true));
+                            self.torch_burnout_until.remove(&pos);
+                        }
                     }
                     if should_light == lit {
                         self.pending_torches.remove(&pos);
