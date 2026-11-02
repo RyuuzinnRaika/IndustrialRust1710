@@ -5469,7 +5469,7 @@ mod tests {
         assert!(w.block_tick(&path, 64).unwrap().contains(&(6, 64, 5)));
         assert_eq!(w.get(6, 64, 5), (8 << 4) | 1);
         // Lever -> one wire -> adjacent wire, with 15 and then 14.
-        w.update_and_save(&path, 0, 64, 0, (69 << 4) | 8).unwrap();
+        w.update_and_save(&path, 0, 64, 0, (69 << 4) | 13).unwrap();
         w.update_and_save(&path, 1, 64, 0, 55 << 4).unwrap();
         w.update_and_save(&path, 2, 64, 0, 55 << 4).unwrap();
         w.block_tick(&path, 64).unwrap();
@@ -5477,7 +5477,7 @@ mod tests {
         w.block_tick(&path, 64).unwrap();
         assert_eq!(w.get(2, 64, 0), (55 << 4) | 14);
         // Turning off the lever decays a wire chain to zero.
-        w.update_and_save(&path, 0, 64, 0, 69 << 4).unwrap();
+        w.update_and_save(&path, 0, 64, 0, (69 << 4) | 5).unwrap();
         for _ in 0..35 {
             w.block_tick(&path, 64).unwrap();
         }
@@ -5818,7 +5818,7 @@ mod tests {
         let _ = fs::remove_file(&path);
         let mut world = World::new();
         world
-            .update_and_save(&path, -1, 64, 0, (69 << 4) | 8)
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 13)
             .unwrap();
         world
             .update_and_save(&path, 0, 64, 0, (33 << 4) | 5)
@@ -5910,7 +5910,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("ir1710-device-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
-        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
+        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 13).unwrap();
         w.update_and_save(&path, 0, 64, 0, 55 << 4).unwrap();
         w.update_and_save(&path, 1, 64, 0, (33 << 4) | 5).unwrap();
         w.update_and_save(&path, 2, 64, 0, 1 << 4).unwrap();
@@ -5920,7 +5920,7 @@ mod tests {
         assert_eq!(w.get(1, 64, 0), (33 << 4) | 13);
         assert_eq!(w.get(2, 64, 0), (34 << 4) | 5);
         assert_eq!(w.get(3, 64, 0), 1 << 4);
-        w.update_and_save(&path, -1, 64, 0, 69 << 4).unwrap();
+        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 5).unwrap();
         for _ in 0..35 {
             w.block_tick(&path, 64).unwrap();
         }
@@ -6024,8 +6024,10 @@ mod group_b_regression_tests {
         let mut world = World::new();
         // Comparator requires a floor; world reload checks support validity.
         world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
+        // A floor-mounted source must have a solid block directly below.
+        world.update_and_save(&path, -1, 64, 0, 1 << 4).unwrap();
         world
-            .update_and_save(&path, -1, 65, 0, (69 << 4) | 8)
+            .update_and_save(&path, -1, 65, 0, (69 << 4) | 13)
             .unwrap();
         world
             .update_and_save(&path, 0, 65, 0, (149 << 4) | 1)
