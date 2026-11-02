@@ -66,15 +66,24 @@ impl Server {
                     server.diagnostics()
                 );
             }
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                break;
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(socket) => {
+                    Self::probe_ready(port, socket).unwrap_or_else(|error| {
+                        panic!(
+                            "test server failed Protocol 5 status readiness: {error}\n{}",
+                            server.diagnostics()
+                        )
+                    });
+                    break;
+                }
+                Err(error) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(40));
+                }
+                Err(error) => panic!(
+                    "test server failed to bind: {error}\n{}",
+                    server.diagnostics()
+                ),
             }
-            assert!(
-                Instant::now() < deadline,
-                "test server failed to bind\n{}",
-                server.diagnostics()
-            );
-            thread::sleep(Duration::from_millis(40));
         }
         server
     }
@@ -82,6 +91,52 @@ impl Server {
     fn diagnostics(&self) -> String {
         fs::read_to_string(&self.stderr_log)
             .unwrap_or_else(|error| format!("could not read server stderr: {error}"))
+    }
+
+    // A bare TCP readiness probe occupies a pre-login per-IP permit until the
+    // server's five-second handshake timeout. Complete Status/Ping instead,
+    // so ADD011's two simultaneous logins do not race with a stale probe.
+    fn probe_ready(port: u16, mut socket: TcpStream) -> io::Result<()> {
+        socket.set_read_timeout(Some(Duration::from_secs(10)))?;
+        socket.set_write_timeout(Some(Duration::from_secs(10)))?;
+        socket.write_all(&handshake(port, "localhost", 1))?;
+        socket.write_all(&frame(0, &[]))?;
+
+        let response = read_frame(&mut socket)?;
+        let mut payload = response.as_slice();
+        if read_varint(&mut payload)? != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "readiness probe expected a status response",
+            ));
+        }
+        let mut cursor = Cursor::new(payload);
+        let json_text = cursor
+            .read_string(65536)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        let status: Value = serde_json::from_str(json_text)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        cursor
+            .finish()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        if status["version"]["protocol"] != 5 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "readiness probe received an unexpected protocol version",
+            ));
+        }
+
+        let ping = 0i64.to_be_bytes();
+        socket.write_all(&frame(1, &ping))?;
+        let pong = read_frame(&mut socket)?;
+        let mut payload = pong.as_slice();
+        if read_varint(&mut payload)? != 1 || payload != &ping[..] {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "readiness probe received an invalid status pong",
+            ));
+        }
+        Ok(())
     }
 
     fn connect(&self) -> TcpStream {
