@@ -14,6 +14,7 @@ struct Server {
     child: Child,
     dir: PathBuf,
     port: u16,
+    stderr_log: PathBuf,
 }
 
 impl Server {
@@ -39,6 +40,8 @@ impl Server {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
+        let stderr_log = dir.join("server.stderr.log");
+        let stderr_file = fs::File::create(&stderr_log).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
             .args(["--bind", &format!("127.0.0.1:{port}")])
             .arg("--whitelist")
@@ -46,16 +49,39 @@ impl Server {
             .arg("--world")
             .arg(dir.join("security.irw"))
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr_file))
             .spawn()
             .unwrap();
-        let server = Self { child, dir, port };
+        let mut server = Self {
+            child,
+            dir,
+            port,
+            stderr_log,
+        };
         let deadline = Instant::now() + Duration::from_secs(15);
-        while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(Instant::now() < deadline, "test server failed to bind");
+        loop {
+            if let Some(status) = server.child.try_wait().unwrap() {
+                panic!(
+                    "test server exited before readiness: {status}\n{}",
+                    server.diagnostics()
+                );
+            }
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "test server failed to bind\n{}",
+                server.diagnostics()
+            );
             thread::sleep(Duration::from_millis(40));
         }
         server
+    }
+
+    fn diagnostics(&self) -> String {
+        fs::read_to_string(&self.stderr_log)
+            .unwrap_or_else(|error| format!("could not read server stderr: {error}"))
     }
 
     fn connect(&self) -> TcpStream {
@@ -72,7 +98,10 @@ impl Server {
                 {
                     thread::sleep(Duration::from_millis(50));
                 }
-                Err(error) => panic!("test TCP server unavailable: {error}"),
+                Err(error) => panic!(
+                    "test TCP server unavailable: {error}\n{}",
+                    self.diagnostics()
+                ),
             }
         };
         s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
@@ -323,20 +352,26 @@ fn add011_two_simultaneous_tcp_logins_have_exactly_one_play_owner() {
         .into_iter()
         .map(|mut socket| {
             let start = Arc::clone(&barrier);
-            thread::spawn(move || {
+            thread::spawn(move || -> io::Result<(u32, TcpStream)> {
                 start.wait();
-                socket
-                    .write_all(&frame(0, &mc_string("RustTester")))
-                    .unwrap();
-                let (packet_id, _) = receive(&mut socket);
-                (packet_id, socket)
+                socket.write_all(&frame(0, &mc_string("RustTester")))?;
+                let packet = read_frame(&mut socket)?;
+                let mut input = packet.as_slice();
+                let packet_id = read_varint(&mut input)?;
+                Ok((packet_id, socket))
             })
         })
         .collect();
     let mut results: Vec<_> = threads
         .into_iter()
-        .map(|join| join.join().unwrap())
-        .collect();
+        .map(|join| join.join().expect("simultaneous login worker panicked"))
+        .collect::<io::Result<Vec<_>>>()
+        .unwrap_or_else(|error| {
+            panic!(
+                "simultaneous login TCP receive failed: {error}\nserver stderr:\n{}",
+                server.diagnostics()
+            )
+        });
     results.sort_by_key(|(packet_id, _)| *packet_id);
     assert_eq!(
         results
