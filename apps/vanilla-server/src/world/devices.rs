@@ -1308,7 +1308,7 @@ mod redstone_regression_tests {
             std::env::temp_dir().join(format!("ir1710-redstone-facing-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
-        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
+        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 13).unwrap();
         w.update_and_save(&path, 0, 64, 0, (93 << 4) | 1).unwrap();
         w.update_and_save(&path, 1, 64, 0, 55 << 4).unwrap();
         w.update_and_save(&path, 0, 64, 1, 55 << 4).unwrap();
@@ -1829,13 +1829,13 @@ mod redstone_regression_tests {
             .unwrap();
         world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
         world
-            .update_and_save(&path, -1, 64, 0, (69 << 4) | 8)
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 13)
             .unwrap();
         world.block_tick(&path, 64).unwrap();
         assert!(world.piston_extending_at(2, 64, 0, 5));
         assert_eq!(world.get(2, 64, 0), 1 << 4);
         // Switch power off before the moving piston completes its animation.
-        world.update_and_save(&path, -1, 64, 0, 69 << 4).unwrap();
+        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 5).unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(0, 64, 0), (29 << 4) | 5);
         assert_eq!(world.get(1, 64, 0), 0);
@@ -1860,13 +1860,13 @@ mod redstone_regression_tests {
             .unwrap();
         world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
         world
-            .update_and_save(&path, -1, 64, 0, (69 << 4) | 8)
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 13)
             .unwrap();
         world.block_tick(&path, 64).unwrap();
         for _ in 0..3 {
             world.block_tick(&path, 64).unwrap();
         }
-        world.update_and_save(&path, -1, 64, 0, 69 << 4).unwrap();
+        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 5).unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(0, 64, 0), (29 << 4) | 5);
         assert_eq!(world.get(1, 64, 0), 1 << 4);
@@ -2273,7 +2273,7 @@ mod redstone_regression_tests {
             ));
             let _ = fs::remove_file(&path);
             let mut w = World::new();
-            w.update_and_save(&path, -2, 64, 0, (69 << 4) | 8).unwrap();
+            w.update_and_save(&path, -2, 64, 0, (69 << 4) | 13).unwrap();
             w.update_and_save(&path, -1, 64, 0, (33 << 4) | 5).unwrap();
             for x in 0..number {
                 w.update_and_save(&path, x, 64, 0, 1 << 4).unwrap();
