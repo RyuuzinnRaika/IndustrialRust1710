@@ -7,8 +7,11 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+static NEXT_SERVER_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
 struct Server {
     child: Child,
@@ -18,16 +21,23 @@ struct Server {
 }
 
 impl Server {
+    fn unique_dir(nonce: u128) -> PathBuf {
+        let sequence = NEXT_SERVER_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "industrialrust1710-p5-security-{}-{nonce}-{sequence}",
+            std::process::id()
+        ))
+    }
+
     fn launch() -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "industrialrust1710-p5-security-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        // Parallel tests can observe the same clock tick on coarse-resolution
+        // systems. Never let two server processes share a world/session.lock.
+        let dir = Self::unique_dir(nonce);
+        fs::create_dir(&dir).unwrap();
         fs::write(
             dir.join("whitelist.json"),
             serde_json::to_vec(&json!([
@@ -232,6 +242,17 @@ impl Drop for Server {
         }
         let _ = fs::remove_dir_all(&self.dir);
     }
+}
+
+#[test]
+fn server_temp_dirs_are_unique_when_clock_ticks_match() {
+    use std::collections::HashSet;
+
+    let threads: Vec<_> = (0..32)
+        .map(|_| thread::spawn(|| Server::unique_dir(0)))
+        .collect();
+    let dirs: HashSet<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(dirs.len(), 32);
 }
 
 #[test]
