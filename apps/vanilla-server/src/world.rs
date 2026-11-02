@@ -1135,6 +1135,7 @@ impl World {
                     | 50
                     | 63
                     | 68
+                    | 69
                     | 140
                     | 81
                     | 83
@@ -2849,6 +2850,7 @@ impl World {
                     | 59
                     | 63
                     | 68
+                    | 69
                     | 140
                     | 27
                     | 28
@@ -5238,6 +5240,50 @@ mod tests {
             GroundItems::load(&ground_path).unwrap().items().count(),
             512
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lever_drops_after_its_backing_block_is_removed_on_every_mount() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-lever-mount-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for (metadata, support) in [
+            (0u16, (0, 65, 0)),
+            (7, (0, 65, 0)),
+            (1, (-1, 64, 0)),
+            (2, (1, 64, 0)),
+            (3, (0, 64, -1)),
+            (4, (0, 64, 1)),
+            (5, (0, 63, 0)),
+            (6, (0, 63, 0)),
+        ] {
+            let path = root.join(format!("lever-{metadata}.irw"));
+            let mut world = World::new();
+            world
+                .update_and_save(&path, support.0, support.1, support.2, 1 << 4)
+                .unwrap();
+            let lever = (69 << 4) | metadata | 8;
+            assert!(world.can_support(0, 64, 0, lever));
+            world.update_and_save(&path, 0, 64, 0, lever).unwrap();
+            world.block_tick(&path, 64).unwrap();
+            assert_eq!(world.get(0, 64, 0), lever);
+            world
+                .update_and_save(&path, support.0, support.1, support.2, 0)
+                .unwrap();
+            assert!(
+                world.block_tick(&path, 64).unwrap().contains(&(0, 64, 0)),
+                "mount metadata {metadata} did not detach"
+            );
+            assert_eq!(world.get(0, 64, 0), 0);
+            let items = world.drain_drops();
+            assert_eq!(items.iter().filter(|drop| drop.stack.id == 69).count(), 1);
+            assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 0);
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
