@@ -202,6 +202,17 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if thread::panicking() {
+            // Preserve diagnostics for panics outside explicit error handlers.
+            // Print before cleanup; do not leave test world data behind.
+            let mut stderr = io::stderr();
+            let _ = writeln!(
+                stderr,
+                "Protocol 5 test server stderr (port {}):\\n{}",
+                self.port,
+                self.diagnostics()
+            );
+        }
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
