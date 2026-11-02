@@ -1135,6 +1135,7 @@ impl World {
                     | 50
                     | 63
                     | 68
+                    | 69
                     | 140
                     | 81
                     | 83
@@ -2849,6 +2850,7 @@ impl World {
                     | 59
                     | 63
                     | 68
+                    | 69
                     | 140
                     | 27
                     | 28
@@ -5242,6 +5244,50 @@ mod tests {
     }
 
     #[test]
+    fn lever_drops_after_its_backing_block_is_removed_on_every_mount() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-lever-mount-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for (metadata, support) in [
+            (0u16, (0, 65, 0)),
+            (7, (0, 65, 0)),
+            (1, (-1, 64, 0)),
+            (2, (1, 64, 0)),
+            (3, (0, 64, -1)),
+            (4, (0, 64, 1)),
+            (5, (0, 63, 0)),
+            (6, (0, 63, 0)),
+        ] {
+            let path = root.join(format!("lever-{metadata}.irw"));
+            let mut world = World::new();
+            world
+                .update_and_save(&path, support.0, support.1, support.2, 1 << 4)
+                .unwrap();
+            let lever = (69 << 4) | metadata | 8;
+            assert!(world.can_support(0, 64, 0, lever));
+            world.update_and_save(&path, 0, 64, 0, lever).unwrap();
+            world.block_tick(&path, 64).unwrap();
+            assert_eq!(world.get(0, 64, 0), lever);
+            world
+                .update_and_save(&path, support.0, support.1, support.2, 0)
+                .unwrap();
+            assert!(
+                world.block_tick(&path, 64).unwrap().contains(&(0, 64, 0)),
+                "mount metadata {metadata} did not detach"
+            );
+            assert_eq!(world.get(0, 64, 0), 0);
+            let items = world.drain_drops();
+            assert_eq!(items.iter().filter(|drop| drop.stack.id == 69).count(), 1);
+            assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 0);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn unsupported_torch_detaches_into_an_item_after_commit() {
         let path =
             std::env::temp_dir().join(format!("ir1710-attachment-{}.irw", std::process::id()));
@@ -5423,7 +5469,7 @@ mod tests {
         assert!(w.block_tick(&path, 64).unwrap().contains(&(6, 64, 5)));
         assert_eq!(w.get(6, 64, 5), (8 << 4) | 1);
         // Lever -> one wire -> adjacent wire, with 15 and then 14.
-        w.update_and_save(&path, 0, 64, 0, (69 << 4) | 8).unwrap();
+        w.update_and_save(&path, 0, 64, 0, (69 << 4) | 13).unwrap();
         w.update_and_save(&path, 1, 64, 0, 55 << 4).unwrap();
         w.update_and_save(&path, 2, 64, 0, 55 << 4).unwrap();
         w.block_tick(&path, 64).unwrap();
@@ -5431,7 +5477,7 @@ mod tests {
         w.block_tick(&path, 64).unwrap();
         assert_eq!(w.get(2, 64, 0), (55 << 4) | 14);
         // Turning off the lever decays a wire chain to zero.
-        w.update_and_save(&path, 0, 64, 0, 69 << 4).unwrap();
+        w.update_and_save(&path, 0, 64, 0, (69 << 4) | 5).unwrap();
         for _ in 0..35 {
             w.block_tick(&path, 64).unwrap();
         }
@@ -5772,7 +5818,7 @@ mod tests {
         let _ = fs::remove_file(&path);
         let mut world = World::new();
         world
-            .update_and_save(&path, -1, 64, 0, (69 << 4) | 8)
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 13)
             .unwrap();
         world
             .update_and_save(&path, 0, 64, 0, (33 << 4) | 5)
@@ -5864,7 +5910,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("ir1710-device-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
-        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
+        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 13).unwrap();
         w.update_and_save(&path, 0, 64, 0, 55 << 4).unwrap();
         w.update_and_save(&path, 1, 64, 0, (33 << 4) | 5).unwrap();
         w.update_and_save(&path, 2, 64, 0, 1 << 4).unwrap();
@@ -5874,7 +5920,7 @@ mod tests {
         assert_eq!(w.get(1, 64, 0), (33 << 4) | 13);
         assert_eq!(w.get(2, 64, 0), (34 << 4) | 5);
         assert_eq!(w.get(3, 64, 0), 1 << 4);
-        w.update_and_save(&path, -1, 64, 0, 69 << 4).unwrap();
+        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 5).unwrap();
         for _ in 0..35 {
             w.block_tick(&path, 64).unwrap();
         }
@@ -5978,8 +6024,10 @@ mod group_b_regression_tests {
         let mut world = World::new();
         // Comparator requires a floor; world reload checks support validity.
         world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
+        // A floor-mounted source must have a solid block directly below.
+        world.update_and_save(&path, -1, 64, 0, 1 << 4).unwrap();
         world
-            .update_and_save(&path, -1, 65, 0, (69 << 4) | 8)
+            .update_and_save(&path, -1, 65, 0, (69 << 4) | 13)
             .unwrap();
         world
             .update_and_save(&path, 0, 65, 0, (149 << 4) | 1)

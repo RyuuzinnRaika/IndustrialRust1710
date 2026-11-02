@@ -1084,6 +1084,38 @@ mod redstone_regression_tests {
     }
 
     #[test]
+    fn lever_strongly_powers_only_its_eight_legacy_attachment_variants() {
+        for (metadata, support) in [
+            (0u16, (0, 65, 0)),
+            (7, (0, 65, 0)),
+            (1, (-1, 64, 0)),
+            (2, (1, 64, 0)),
+            (3, (0, 64, -1)),
+            (4, (0, 64, 1)),
+            (5, (0, 63, 0)),
+            (6, (0, 63, 0)),
+        ] {
+            let mut world = World::new();
+            world.import_block(0, 63, 0, 0).unwrap();
+            world
+                .import_block(support.0, support.1, support.2, 1 << 4)
+                .unwrap();
+            let lever = (69 << 4) | metadata;
+            world.import_block(0, 64, 0, lever).unwrap();
+            assert_eq!(world.strong_signal_into((0, 64, 0), support), 0);
+            assert_eq!(world.signal_into((0, 64, 0), support), 0);
+            world.import_block(0, 64, 0, lever | 8).unwrap();
+            assert_eq!(world.strong_signal_into((0, 64, 0), support), 15);
+            assert_eq!(world.signal_into((0, 64, 0), support), 15);
+            assert_eq!(
+                world.strong_signal_into((0, 64, 0), (0, 64, 2)),
+                0,
+                "lever state {metadata} strongly powers an unrelated side"
+            );
+        }
+    }
+
+    #[test]
     fn torch_inverts_powered_attachment_after_two_world_ticks() {
         let path =
             std::env::temp_dir().join(format!("ir1710-torch-invert-{}.irw", std::process::id()));
@@ -1308,7 +1340,7 @@ mod redstone_regression_tests {
             std::env::temp_dir().join(format!("ir1710-redstone-facing-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
         let mut w = World::new();
-        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 8).unwrap();
+        w.update_and_save(&path, -1, 64, 0, (69 << 4) | 13).unwrap();
         w.update_and_save(&path, 0, 64, 0, (93 << 4) | 1).unwrap();
         w.update_and_save(&path, 1, 64, 0, 55 << 4).unwrap();
         w.update_and_save(&path, 0, 64, 1, 55 << 4).unwrap();
@@ -1829,13 +1861,13 @@ mod redstone_regression_tests {
             .unwrap();
         world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
         world
-            .update_and_save(&path, -1, 64, 0, (69 << 4) | 8)
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 13)
             .unwrap();
         world.block_tick(&path, 64).unwrap();
         assert!(world.piston_extending_at(2, 64, 0, 5));
         assert_eq!(world.get(2, 64, 0), 1 << 4);
         // Switch power off before the moving piston completes its animation.
-        world.update_and_save(&path, -1, 64, 0, 69 << 4).unwrap();
+        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 5).unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(0, 64, 0), (29 << 4) | 5);
         assert_eq!(world.get(1, 64, 0), 0);
@@ -1860,13 +1892,13 @@ mod redstone_regression_tests {
             .unwrap();
         world.update_and_save(&path, 1, 64, 0, 1 << 4).unwrap();
         world
-            .update_and_save(&path, -1, 64, 0, (69 << 4) | 8)
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 13)
             .unwrap();
         world.block_tick(&path, 64).unwrap();
         for _ in 0..3 {
             world.block_tick(&path, 64).unwrap();
         }
-        world.update_and_save(&path, -1, 64, 0, 69 << 4).unwrap();
+        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 5).unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(0, 64, 0), (29 << 4) | 5);
         assert_eq!(world.get(1, 64, 0), 1 << 4);
@@ -2273,7 +2305,7 @@ mod redstone_regression_tests {
             ));
             let _ = fs::remove_file(&path);
             let mut w = World::new();
-            w.update_and_save(&path, -2, 64, 0, (69 << 4) | 8).unwrap();
+            w.update_and_save(&path, -2, 64, 0, (69 << 4) | 13).unwrap();
             w.update_and_save(&path, -1, 64, 0, (33 << 4) | 5).unwrap();
             for x in 0..number {
                 w.update_and_save(&path, x, 64, 0, 1 << 4).unwrap();

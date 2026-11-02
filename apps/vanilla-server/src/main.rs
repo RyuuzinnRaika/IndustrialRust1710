@@ -913,6 +913,26 @@ fn torch_attachment_metadata(face: i8) -> Option<u16> {
     }
 }
 
+/// Legacy 1.7.10 lever facing (lower 3 metadata bits). Unlike wall torches,
+/// levers support ceilings as well as walls and floors. The clicked face
+/// selects the mounting block; yaw only rotates ceiling/floor levers.
+/// The powered flag (bit 3) is set by interaction, never by placement.
+fn lever_attachment_metadata(face: i8, yaw: f32) -> Option<u16> {
+    let north_south = (((f64::from(yaw) * 4.0 / 360.0 + 0.5).floor() as i32)
+        .rem_euclid(4)
+        & 1)
+        == 0;
+    match face {
+        0 => Some(if north_south { 7 } else { 0 }), // ceiling
+        1 => Some(if north_south { 5 } else { 6 }), // floor
+        2 => Some(4), // north-facing wall, support at Z+1
+        3 => Some(3), // south-facing wall, support at Z-1
+        4 => Some(2), // west-facing wall, support at X+1
+        5 => Some(1), // east-facing wall, support at X-1
+        _ => None,
+    }
+}
+
 fn near(player: (f64, f64, f64), x: i32, y: i32, z: i32) -> bool {
     let dx = player.0 - (x as f64 + 0.5);
     let dy = player.1 - (y as f64 + 0.5);
@@ -5815,6 +5835,9 @@ fn play(
                                     5 => 3,
                                     _ => 0,
                                 }
+                            } else if block_id == 69 {
+                                lever_attachment_metadata(face, yaw)
+                                    .expect("valid clicked face must map to a lever mounting face")
                             } else if matches!(block_id, 50 | 75 | 76 | 77 | 143) {
                                 torch_attachment_metadata(face).unwrap_or(0)
                             } else if matches!(block_id, 29 | 33) {
@@ -11057,6 +11080,28 @@ mod legacy_placement_orientation_tests {
         }
         assert_eq!(torch_attachment_metadata(0), None);
         assert_eq!(torch_attachment_metadata(-1), None);
+    }
+
+    #[test]
+    fn lever_metadata_matches_1710_ceiling_walls_and_floor() {
+        for (face, expected) in [(2, 4), (3, 3), (4, 2), (5, 1)] {
+            for yaw in [0.0, 90.0, 180.0, 270.0] {
+                assert_eq!(lever_attachment_metadata(face, yaw), Some(expected));
+            }
+        }
+        for (yaw, ceiling, floor) in [
+            (0.0, 7, 5),
+            (90.0, 0, 6),
+            (180.0, 7, 5),
+            (270.0, 0, 6),
+            (-90.0, 0, 6),
+            (360.0, 7, 5),
+        ] {
+            assert_eq!(lever_attachment_metadata(0, yaw), Some(ceiling));
+            assert_eq!(lever_attachment_metadata(1, yaw), Some(floor));
+        }
+        assert_eq!(lever_attachment_metadata(-1, 0.0), None);
+        assert_eq!(lever_attachment_metadata(6, 0.0), None);
     }
 
     #[test]
