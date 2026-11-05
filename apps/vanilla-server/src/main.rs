@@ -3427,14 +3427,30 @@ fn play(
                     if !physics::valid_movement(&collision_world, player, &candidate) {
                         let trace_rejection = trace_movement
                             && last_movement_trace.elapsed() >= Duration::from_secs(2);
-                        let from_collision =
-                            trace_rejection && physics::collides(&collision_world, player);
-                        let to_collision =
-                            trace_rejection && physics::collides(&collision_world, &candidate);
+                        // Sample local terrain only for rate-limited movement
+                        // diagnostics. Normal gameplay keeps the cheap path.
+                        let diagnostic = trace_rejection.then(|| {
+                            let (bx, by, bz) = (
+                                candidate.x.floor() as i32,
+                                candidate.y.floor() as i32,
+                                candidate.z.floor() as i32,
+                            );
+                            (
+                                physics::collides(&collision_world, player),
+                                physics::collides(&collision_world, &candidate),
+                                collision_world.get(bx, by - 1, bz),
+                                collision_world.get(bx, by, bz),
+                                collision_world.get(bx, by + 1, bz),
+                            )
+                        });
                         drop(collision_world);
-                        if trace_rejection {
+                        if let Some((from_collision, to_collision, below, feet, head)) = diagnostic {
                             eprintln!(
-                                "movement trace: rejected from={player:?} to={candidate:?} from_collision={from_collision} to_collision={to_collision} yaw={yaw} pitch={pitch}"
+                                "movement trace: rejected from={player:?} to={candidate:?} delta=({:.4},{:.4},{:.4}) stance_delta={:.4} from_collision={from_collision} to_collision={to_collision} block_below={below:#06x} block_feet={feet:#06x} block_head={head:#06x} yaw={yaw} pitch={pitch}",
+                                candidate.x - player.x,
+                                candidate.y - player.y,
+                                candidate.z - player.z,
+                                stance - y
                             );
                             last_movement_trace = Instant::now();
                         }
