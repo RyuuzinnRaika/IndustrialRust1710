@@ -2698,11 +2698,17 @@ impl World {
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
-        let bytes = match fs::read(path) {
-            Ok(v) => v,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::new()),
-            Err(e) => return Err(e),
-        };
+        // fs::read follows symbolic links (even a dangling link used to look
+        // like a missing world). Refuse non-regular entries before reading.
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(invalid("world file must be a real regular file"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::new()),
+            Err(error) => return Err(error),
+        }
+        let bytes = fs::read(path)?;
         if bytes.len() < 8 {
             return Err(invalid("bad world header"));
         }
@@ -3064,7 +3070,30 @@ impl World {
             }
         }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent)?;
+            // Never stage a world save inside a linked directory.
+            match fs::symlink_metadata(parent) {
+                Ok(metadata) if !metadata.file_type().is_dir() => {
+                    return Err(invalid("world save parent must be a real directory"));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    fs::create_dir_all(parent)?;
+                }
+                Err(error) => return Err(error),
+            }
+            if !fs::symlink_metadata(parent)?.file_type().is_dir() {
+                return Err(invalid("world save parent changed during preflight"));
+            }
+        }
+        // The destination may be absent on first save, but may never be a
+        // symbolic link or special file on subsequent saves.
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(invalid("world save destination must be a regular file"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
         let temp = path.with_extension("tmp");
         // File::create follows a substituted symlink and truncates its target.
@@ -3263,6 +3292,64 @@ mod tests {
         assert_eq!(fs::read(&unrelated).unwrap(), sentinel.to_vec());
         assert!(fs::symlink_metadata(&staging).unwrap().file_type().is_symlink());
         assert!(!save.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_world_file_is_not_loaded_or_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-linked-world-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let real = root.join("real.irw");
+        World::new().save(&real).unwrap();
+        let original = fs::read(&real).unwrap();
+        let link = root.join("alias.irw");
+        symlink(&real, &link).unwrap();
+        assert_eq!(
+            World::load(&link).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            World::new().save(&link).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&real).unwrap(), original);
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_world_parent_is_rejected_before_staging() {
+        use std::os::unix::fs::symlink;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-linked-parent-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let unrelated = root.join("unrelated");
+        fs::create_dir(&unrelated).unwrap();
+        let linked = root.join("world-link");
+        symlink(&unrelated, &linked).unwrap();
+        let world_path = linked.join("flat.irw");
+        let error = World::new().save(&world_path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!unrelated.join("flat.tmp").exists());
+        assert!(!unrelated.join("flat.irw").exists());
         fs::remove_dir_all(&root).unwrap();
     }
 
