@@ -1,0 +1,7 @@
+[package]
+name = "industrial-verify"
+version = "0.1.0"
+edition = "2021"
+description = "One-command local verification runner for IndustrialRust1710"
+
+# The runner deliberately has no third-party dependencies.
