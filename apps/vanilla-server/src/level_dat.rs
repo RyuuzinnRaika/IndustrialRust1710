@@ -370,6 +370,41 @@ mod tests {
     }
 
     #[test]
+    fn highly_compressed_level_dat_bomb_is_rejected_without_modifying_source() {
+        // The gzip image is small, but its uncompressed contents exceed the
+        // 4 MiB parser limit. This must not allocate unbounded output or
+        // attempt to create/repair any world files.
+        let raw = vec![0x42u8; MAX_DECOMPRESSED_BYTES + 1];
+        let mut compressor = GzEncoder::new(Vec::new(), Compression::fast());
+        compressor.write_all(&raw).unwrap();
+        let compressed = compressor.finish().unwrap();
+        assert!(compressed.len() as u64 <= MAX_COMPRESSED_BYTES);
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-level-bomb-{}-{stamp}.dat",
+            std::process::id()
+        ));
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        output.write_all(&compressed).unwrap();
+        output.sync_all().unwrap();
+        drop(output);
+
+        let error = read_level_file(&path).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).unwrap(), compressed);
+        assert!(!path.with_extension("creating").exists());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn wrong_version_invalid_spawn_and_corrupt_nbt_fail_closed() {
         let mut wrong = sample();
         wrong.data.format_version = 19132;
