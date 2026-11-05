@@ -3303,7 +3303,8 @@ mod tests {
         let error = World::new().save(&save).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(&unrelated).unwrap(), sentinel.to_vec());
-        assert!(fs::symlink_metadata(&staging).unwrap().file_type().is_symlink());
+        let staging_type = fs::symlink_metadata(&staging).unwrap().file_type();
+        assert!(staging_type.is_symlink());
         assert!(!save.exists());
         fs::remove_dir_all(&root).unwrap();
     }
@@ -3336,7 +3337,8 @@ mod tests {
             io::ErrorKind::InvalidData
         );
         assert_eq!(fs::read(&real).unwrap(), original);
-        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        let link_type = fs::symlink_metadata(&link).unwrap().file_type();
+        assert!(link_type.is_symlink());
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -3402,7 +3404,7 @@ mod tests {
             file.write_all(&bytes).unwrap();
             file.sync_all().unwrap();
             drop(file);
-            let error = World::load(&path).err().expect("must fail closed");
+            let error = World::load(&path).expect_err("must fail closed");
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
             assert_eq!(fs::read(&path).unwrap(), bytes, "{name}");
             fs::remove_file(path).unwrap();
