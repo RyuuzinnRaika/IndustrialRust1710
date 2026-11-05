@@ -272,8 +272,8 @@ fn json_string(value: &str) -> String {
     let mut result = String::from("\"");
     for ch in value.chars() {
         match ch {
-            '"' => result.push_str("\\""),
-            '\\' => result.push_str("\\\"),
+            '"' => result.push_str("\\\""),
+            '\\' => result.push_str("\\\\"),
             '\n' => result.push_str("\\n"),
             '\r' => result.push_str("\\r"),
             '\t' => result.push_str("\\t"),
@@ -567,7 +567,7 @@ test-seed=deadbeef-11\n";
 
     #[test]
     fn json_escapes_special_characters() {
-        assert_eq!(json_string("a\\b\"\n"), "\"a\\\\b\\"\\n\"");
+        assert_eq!(json_string("a\\b\"\n"), "\"a\\\\b\\\"\\n\"");
     }
 
     #[test]
