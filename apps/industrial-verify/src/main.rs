@@ -266,8 +266,8 @@ fn json_string(value: &str) -> String {
     let mut result = String::from("\"");
     for ch in value.chars() {
         match ch {
-            '"' => result.push_str("\\\""),
-            '\\' => result.push_str("\\\\"),
+            '"' => result.push_str("\\""),
+            '\\' => result.push_str("\\\"),
             '\n' => result.push_str("\\n"),
             '\r' => result.push_str("\\r"),
             '\t' => result.push_str("\\t"),
@@ -502,9 +502,39 @@ test inventory::keeps_items ... FAILED\n";
 
     #[test]
     fn seeds_are_optional_and_constrained_to_safe_characters() {
-        assert_eq!(logged_test_seed("test failed; seed=deadbeef-11\n"), Some("deadbeef-11".into()));
+        assert_eq!(
+            logged_test_seed("test failed; seed=deadbeef-11\n"),
+            Some("deadbeef-11".into())
+        );
         assert_eq!(logged_test_seed("no explicit seed here\n"), None);
         assert_eq!(logged_test_seed("seed=; SECRET=should-not-leak\n"), None);
+    }
+
+    #[test]
+    fn report_contains_reproduction_data_without_inserting_raw_error_lines() {
+        let target = env::temp_dir().join(format!(
+            "ir1710-verify-report-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let check = Check {
+            name: "Rust unit",
+            command: "cargo test --workspace --all-targets".to_owned(),
+            status: Status::Fail,
+            exit_code: Some(101),
+            log: None,
+            note: "failed".to_owned(),
+            failed_tests: vec!["world::piston::case_one".to_owned()],
+            seed: Some("deadbeef".to_owned()),
+        };
+        write_report(&target, "0123456789abcdef", &[check], 1).unwrap();
+        let output = fs::read_to_string(&target).unwrap();
+        assert!(output.contains("\"failed_tests\":[\"world::piston::case_one\"]"));
+        assert!(output.contains("\"seed\":\"deadbeef\""));
+        assert!(output.contains("cargo test --workspace --all-targets"));
+        assert!(output.contains("\"host_os\":"));
+        assert!(output.contains("\"host_arch\":"));
+        fs::remove_file(target).unwrap();
     }
 
     #[test]
@@ -522,7 +552,7 @@ test inventory::keeps_items ... FAILED\n";
 
     #[test]
     fn json_escapes_special_characters() {
-        assert_eq!(json_string("a\\b\"\n"), "\"a\\\\b\\\"\\n\"");
+        assert_eq!(json_string("a\\b\"\n"), "\"a\\\\b\\"\\n\"");
     }
 
     #[test]
