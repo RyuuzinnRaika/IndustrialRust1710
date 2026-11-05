@@ -9111,11 +9111,14 @@ fn main() -> io::Result<()> {
     let brewer_path = Arc::new(Brewers::location(&world_path));
     let brewers = Arc::new(Mutex::new(Brewers::load(&brewer_path)?));
     let listener = TcpListener::bind(bind)?;
+    let actual_bind = listener.local_addr()?;
     println!(
         "IndustrialRust1710: listening on {} (1.7.10 vanilla, up to 8 players)",
-        listener.local_addr()?
+        actual_bind
     );
-    println!("WARNING: offline-mode has no account authentication. Do not expose to the internet.");
+    if let Some(message) = server_config::offline_exposure_warning(actual_bind, online_mode) {
+        eprintln!("{message}");
+    }
     let hub = Arc::new(Hub::default());
     let connections = Arc::new(AtomicUsize::new(0));
     let limiter = Arc::new(ConnectionLimiter::default());
