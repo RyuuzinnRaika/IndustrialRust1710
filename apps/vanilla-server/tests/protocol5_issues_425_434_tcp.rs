@@ -7,26 +7,40 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+static NEXT_SERVER_DIR_ID: AtomicU64 = AtomicU64::new(0);
+// Serializes ephemeral port reservation and child readiness across tests.
+static SERVER_START_LOCK: Mutex<()> = Mutex::new(());
 
 struct Server {
     child: Child,
     dir: PathBuf,
     port: u16,
+    stderr_log: PathBuf,
 }
 
 impl Server {
+    fn unique_dir(nonce: u128) -> PathBuf {
+        let sequence = NEXT_SERVER_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "industrialrust1710-p5-security-{}-{nonce}-{sequence}",
+            std::process::id()
+        ))
+    }
+
     fn launch() -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "industrialrust1710-p5-security-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        // Parallel tests can observe the same clock tick on coarse-resolution
+        // systems. Never let two server processes share a world/session.lock.
+        let dir = Self::unique_dir(nonce);
+        fs::create_dir(&dir).unwrap();
         fs::write(
             dir.join("whitelist.json"),
             serde_json::to_vec(&json!([
@@ -36,9 +50,16 @@ impl Server {
             .unwrap(),
         )
         .unwrap();
+        // A port selected with bind(:0) becomes free before the child binds.
+        // Do not let another test in this process reserve the same port.
+        let launch_guard = SERVER_START_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
+        let stderr_log = dir.join("server.stderr.log");
+        let stderr_file = fs::File::create(&stderr_log).unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
             .args(["--bind", &format!("127.0.0.1:{port}")])
             .arg("--whitelist")
@@ -46,16 +67,112 @@ impl Server {
             .arg("--world")
             .arg(dir.join("security.irw"))
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr_file))
             .spawn()
             .unwrap();
-        let server = Self { child, dir, port };
+        let mut server = Self {
+            child,
+            dir,
+            port,
+            stderr_log,
+        };
         let deadline = Instant::now() + Duration::from_secs(15);
-        while TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(Instant::now() < deadline, "test server failed to bind");
-            thread::sleep(Duration::from_millis(40));
+        loop {
+            if let Some(status) = server.child.try_wait().unwrap() {
+                panic!(
+                    "test server exited before readiness: {status}\n{}",
+                    server.diagnostics()
+                );
+            }
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(socket) => match Self::probe_ready(port, socket) {
+                    Ok(()) => break,
+                    Err(error)
+                        if Self::retryable_probe_error(&error) && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(40));
+                    }
+                    Err(error) => panic!(
+                        "test server failed Protocol 5 status readiness: {error}\n{}",
+                        server.diagnostics()
+                    ),
+                },
+                Err(_error) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(40));
+                }
+                Err(error) => panic!(
+                    "test server failed to bind: {error}\n{}",
+                    server.diagnostics()
+                ),
+            }
         }
+        drop(launch_guard);
         server
+    }
+
+    fn diagnostics(&self) -> String {
+        fs::read_to_string(&self.stderr_log)
+            .unwrap_or_else(|error| format!("could not read server stderr: {error}"))
+    }
+
+    // Retry only transport failures during startup. A malformed Status/Pong
+    // must still fail immediately rather than masking a protocol regression.
+    fn retryable_probe_error(error: &io::Error) -> bool {
+        matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::TimedOut
+                | io::ErrorKind::WouldBlock
+                | io::ErrorKind::BrokenPipe
+        )
+    }
+
+    // TCP accept alone does not prove Protocol 5 readiness. Require a valid
+    // Status Response and matching Ping/Pong before running login assertions.
+    fn probe_ready(port: u16, mut socket: TcpStream) -> io::Result<()> {
+        socket.set_read_timeout(Some(Duration::from_secs(10)))?;
+        socket.set_write_timeout(Some(Duration::from_secs(10)))?;
+        socket.write_all(&handshake(port, "localhost", 1))?;
+        socket.write_all(&frame(0, &[]))?;
+
+        let response = read_frame(&mut socket)?;
+        let mut payload = response.as_slice();
+        if read_varint(&mut payload)? != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "readiness probe expected a status response",
+            ));
+        }
+        let mut cursor = Cursor::new(payload);
+        let json_text = cursor
+            .read_string(65536)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        let status: Value = serde_json::from_str(json_text)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        cursor
+            .finish()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        if status["version"]["protocol"] != 5 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "readiness probe received an unexpected protocol version",
+            ));
+        }
+
+        let ping = 0i64.to_be_bytes();
+        socket.write_all(&frame(1, &ping))?;
+        let pong = read_frame(&mut socket)?;
+        let mut payload = pong.as_slice();
+        if read_varint(&mut payload)? != 1 || payload != &ping[..] {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "readiness probe received an invalid status pong",
+            ));
+        }
+        Ok(())
     }
 
     fn connect(&self) -> TcpStream {
@@ -72,7 +189,10 @@ impl Server {
                 {
                     thread::sleep(Duration::from_millis(50));
                 }
-                Err(error) => panic!("test TCP server unavailable: {error}"),
+                Err(error) => panic!(
+                    "test TCP server unavailable: {error}\n{}",
+                    self.diagnostics()
+                ),
             }
         };
         s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
@@ -118,7 +238,50 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if thread::panicking() {
+            // Preserve diagnostics for panics outside explicit error handlers.
+            // Print before cleanup; do not leave test world data behind.
+            let mut stderr = io::stderr();
+            let _ = writeln!(
+                stderr,
+                "Protocol 5 test server stderr (port {}):\n{}",
+                self.port,
+                self.diagnostics()
+            );
+        }
         let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[test]
+fn server_temp_dirs_are_unique_when_clock_ticks_match() {
+    use std::collections::HashSet;
+
+    let threads: Vec<_> = (0..32)
+        .map(|_| thread::spawn(|| Server::unique_dir(0)))
+        .collect();
+    let dirs: HashSet<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(dirs.len(), 32);
+}
+
+#[test]
+fn readiness_probe_retries_only_transient_transport_failures() {
+    for kind in [
+        io::ErrorKind::ConnectionRefused,
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::ConnectionAborted,
+        io::ErrorKind::UnexpectedEof,
+        io::ErrorKind::TimedOut,
+        io::ErrorKind::WouldBlock,
+        io::ErrorKind::BrokenPipe,
+    ] {
+        assert!(Server::retryable_probe_error(&io::Error::from(kind)), "{kind:?}");
+    }
+    for kind in [io::ErrorKind::InvalidData, io::ErrorKind::PermissionDenied] {
+        assert!(
+            !Server::retryable_probe_error(&io::Error::from(kind)),
+            "{kind:?}"
+        );
     }
 }
 
@@ -323,20 +486,26 @@ fn add011_two_simultaneous_tcp_logins_have_exactly_one_play_owner() {
         .into_iter()
         .map(|mut socket| {
             let start = Arc::clone(&barrier);
-            thread::spawn(move || {
+            thread::spawn(move || -> io::Result<(u32, TcpStream)> {
                 start.wait();
-                socket
-                    .write_all(&frame(0, &mc_string("RustTester")))
-                    .unwrap();
-                let (packet_id, _) = receive(&mut socket);
-                (packet_id, socket)
+                socket.write_all(&frame(0, &mc_string("RustTester")))?;
+                let packet = read_frame(&mut socket)?;
+                let mut input = packet.as_slice();
+                let packet_id = read_varint(&mut input)?;
+                Ok((packet_id, socket))
             })
         })
         .collect();
     let mut results: Vec<_> = threads
         .into_iter()
-        .map(|join| join.join().unwrap())
-        .collect();
+        .map(|join| join.join().expect("simultaneous login worker panicked"))
+        .collect::<io::Result<Vec<_>>>()
+        .unwrap_or_else(|error| {
+            panic!(
+                "simultaneous login TCP receive failed: {error}\nserver stderr:\n{}",
+                server.diagnostics()
+            )
+        });
     results.sort_by_key(|(packet_id, _)| *packet_id);
     assert_eq!(
         results
