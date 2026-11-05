@@ -1,11 +1,6 @@
 name: TNT 1.7.10 stress validation
 
 on:
-  pull_request:
-    paths:
-      - "tools/tnt_stress_benchmark.py"
-      - "tools/test_tnt_stress_benchmark.py"
-      - ".github/workflows/tnt-stress.yml"
   workflow_dispatch:
     inputs:
       counts:

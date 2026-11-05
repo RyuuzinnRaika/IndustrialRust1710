@@ -1,9 +1,6 @@
 name: Windows and Linux verified binaries
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 permissions:
   contents: read
 jobs:

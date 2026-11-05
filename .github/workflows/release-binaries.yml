@@ -1,9 +1,6 @@
 name: Release binaries (Windows and Linux)
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 permissions:
   contents: read
 
