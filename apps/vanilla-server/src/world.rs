@@ -3073,11 +3073,11 @@ impl World {
             .create_new(true)
             .open(&temp)
             .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("create temporary world save {}: {error}", temp.display()),
-            )
-        })?;
+                io::Error::new(
+                    error.kind(),
+                    format!("create temporary world save {}: {error}", temp.display()),
+                )
+            })?;
         self.write_to(&mut f)?;
         f.sync_all()?;
         drop(f);
