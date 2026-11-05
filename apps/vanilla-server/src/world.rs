@@ -2698,6 +2698,18 @@ impl World {
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
+        // The immediate world parent must also be real: a symlink parent
+        // otherwise makes even a regular world file refer outside this world.
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            match fs::symlink_metadata(parent) {
+                Ok(metadata) if !metadata.file_type().is_dir() => {
+                    return Err(invalid("world load parent must be a real directory"));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::new()),
+                Err(error) => return Err(error),
+            }
+        }
         // fs::read follows symbolic links (even a dangling link used to look
         // like a missing world). Refuse non-regular entries before reading.
         match fs::symlink_metadata(path) {
@@ -3343,8 +3355,14 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let unrelated = root.join("unrelated");
         fs::create_dir(&unrelated).unwrap();
+        let existing = unrelated.join("existing.irw");
+        World::new().save(&existing).unwrap();
+        let original = fs::read(&existing).unwrap();
         let linked = root.join("world-link");
         symlink(&unrelated, &linked).unwrap();
+        let load_error = World::load(&linked.join("existing.irw")).unwrap_err();
+        assert_eq!(load_error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&existing).unwrap(), original);
         let world_path = linked.join("flat.irw");
         let error = World::new().save(&world_path).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
