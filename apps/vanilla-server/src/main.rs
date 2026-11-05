@@ -140,7 +140,7 @@ const CLIENT_PLAYER_Y_OFFSET: f64 = 1.62_f32 as f64;
 /// Client C03 (onGround only) and C05 (look only) have no authoritative
 /// position. They must not indefinitely postpone the server's gravity
 /// fallback for a player suspended in the air.
-fn observe_position_packet_for_gravity(packet_id: u32, gravity: &mut IdleGravity, tick: u64) {
+fn observe_position_packet_for_gravity(packet_id: i32, gravity: &mut IdleGravity, tick: u64) {
     if matches!(packet_id, 4 | 6) {
         gravity.observe_client(tick);
     }
