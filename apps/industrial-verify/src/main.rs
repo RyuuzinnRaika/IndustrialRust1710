@@ -42,7 +42,7 @@ struct Check {
 
 fn usage() -> &'static str {
     "IndustrialRust1710 local verification (Minecraft Java 1.7.10 / Protocol 5)\n\
-Usage: cargo run --release -p industrial-verify -- [OPTIONS]\n\
+Usage: .\\verify-windows.ps1 [OPTIONS] (Windows) / bash ./verify-ubuntu.sh [OPTIONS]\n\
   --automated-only           Allow real-client E42 to remain NOT_RUN\n\
   --client-report PATH       Existing E42 human-observation JSON report\n\
   --evidence-root PATH       Directory containing E42 evidence files\n\
