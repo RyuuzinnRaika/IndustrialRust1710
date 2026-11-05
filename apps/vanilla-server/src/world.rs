@@ -3283,7 +3283,7 @@ mod tests {
         ] {
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
-        assert_eq!(fs::read(&outside).unwrap(), original);
+        assert_eq!(fs::read(&outside).unwrap(), original.to_vec());
         assert!(!root.join("outside.tmp").exists());
         assert!(!root.join("outside.importing").exists());
         fs::remove_dir_all(&root).unwrap();
