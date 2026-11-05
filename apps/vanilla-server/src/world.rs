@@ -3065,7 +3065,14 @@ impl World {
             fs::create_dir_all(parent)?;
         }
         let temp = path.with_extension("tmp");
-        let mut f = File::create(&temp).map_err(|error| {
+        // File::create follows a substituted symlink and truncates its target.
+        // A stale or malicious staging path must fail closed instead of
+        // overwriting another file (possibly outside this world directory).
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("create temporary world save {}: {error}", temp.display()),
@@ -3203,6 +3210,59 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_save_does_not_truncate_an_existing_staging_file() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-safe-staging-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let save = root.join("flat.irw");
+        let staging = save.with_extension("tmp");
+        let sentinel = b"do not overwrite a left-over staging file";
+        fs::write(&staging, sentinel).unwrap();
+        let error = World::new().save(&save).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&staging).unwrap(), sentinel);
+        assert!(!save.exists());
+        fs::remove_file(&staging).unwrap();
+        World::new().save(&save).unwrap();
+        assert!(World::load(&save).is_ok());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_save_rejects_staging_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-symlink-staging-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let save = root.join("flat.irw");
+        let staging = save.with_extension("tmp");
+        let unrelated = root.join("unrelated.dat");
+        let sentinel = b"never truncate unrelated data";
+        fs::write(&unrelated, sentinel).unwrap();
+        symlink(&unrelated, &staging).unwrap();
+        let error = World::new().save(&save).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&unrelated).unwrap(), sentinel);
+        assert!(fs::symlink_metadata(&staging).unwrap().file_type().is_symlink());
+        assert!(!save.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn creeper_blast_is_single_durable_transition_and_preserves_tile_blocks() {
