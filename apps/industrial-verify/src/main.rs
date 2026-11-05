@@ -522,10 +522,7 @@ test inventory::keeps_items ... FAILED\n";
 request_url=https://example.invalid/?seed=PRIVATE\n\
 test-seed=deadbeef-11\n";
         assert_eq!(logged_test_seed(output), Some("deadbeef-11".into()));
-        assert_eq!(
-            logged_test_seed("auth_token_seed=DoNotCopy\n"),
-            None
-        );
+        assert_eq!(logged_test_seed("auth_token_seed=DoNotCopy\n"), None);
     }
 
     #[test]
