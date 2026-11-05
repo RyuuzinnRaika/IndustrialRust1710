@@ -9,7 +9,9 @@ mod special;
 mod terrain_packet_regressions;
 pub(crate) use lighting::LightSampler;
 pub use special::TntEvent;
-use std::fs::{self, File};
+use std::fs;
+#[cfg(test)]
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
