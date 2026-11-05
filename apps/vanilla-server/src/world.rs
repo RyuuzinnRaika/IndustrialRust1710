@@ -9,7 +9,9 @@ mod special;
 mod terrain_packet_regressions;
 pub(crate) use lighting::LightSampler;
 pub use special::TntEvent;
-use std::fs::{self, File};
+use std::fs;
+#[cfg(test)]
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -2696,11 +2698,30 @@ impl World {
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
-        let bytes = match fs::read(path) {
-            Ok(v) => v,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::new()),
-            Err(e) => return Err(e),
-        };
+        // The immediate world parent must also be real: a symlink parent
+        // otherwise makes even a regular world file refer outside this world.
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            match fs::symlink_metadata(parent) {
+                Ok(metadata) if !metadata.file_type().is_dir() => {
+                    return Err(invalid("world load parent must be a real directory"));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::new()),
+                Err(error) => return Err(error),
+            }
+        }
+        // fs::read follows symbolic links (even a dangling link used to look
+        // like a missing world). Refuse non-regular entries before reading.
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(invalid("world file must be a real regular file"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::new()),
+            Err(error) => return Err(error),
+        }
+        let bytes = fs::read(path)?;
+
         if bytes.len() < 8 {
             return Err(invalid("bad world header"));
         }
@@ -3062,15 +3083,45 @@ impl World {
             }
         }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            fs::create_dir_all(parent)?;
+            // Never stage a world save inside a linked directory.
+            match fs::symlink_metadata(parent) {
+                Ok(metadata) if !metadata.file_type().is_dir() => {
+                    return Err(invalid("world save parent must be a real directory"));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    fs::create_dir_all(parent)?;
+                }
+                Err(error) => return Err(error),
+            }
+            if !fs::symlink_metadata(parent)?.file_type().is_dir() {
+                return Err(invalid("world save parent changed during preflight"));
+            }
+        }
+        // The destination may be absent on first save, but may never be a
+        // symbolic link or special file on subsequent saves.
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(invalid("world save destination must be a regular file"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
         let temp = path.with_extension("tmp");
-        let mut f = File::create(&temp).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("create temporary world save {}: {error}", temp.display()),
-            )
-        })?;
+        // File::create follows a substituted symlink and truncates its target.
+        // A stale or malicious staging path must fail closed instead of
+        // overwriting another file (possibly outside this world directory).
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("create temporary world save {}: {error}", temp.display()),
+                )
+            })?;
         self.write_to(&mut f)?;
         f.sync_all()?;
         drop(f);
@@ -3203,6 +3254,160 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn world_save_does_not_truncate_an_existing_staging_file() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-safe-staging-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let save = root.join("flat.irw");
+        let staging = save.with_extension("tmp");
+        let sentinel = b"do not overwrite a left-over staging file";
+        fs::write(&staging, sentinel).unwrap();
+        let error = World::new().save(&save).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&staging).unwrap(), sentinel.to_vec());
+        assert!(!save.exists());
+        fs::remove_file(&staging).unwrap();
+        World::new().save(&save).unwrap();
+        assert!(World::load(&save).is_ok());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_save_rejects_staging_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-symlink-staging-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let save = root.join("flat.irw");
+        let staging = save.with_extension("tmp");
+        let unrelated = root.join("unrelated.dat");
+        let sentinel = b"never truncate unrelated data";
+        fs::write(&unrelated, sentinel).unwrap();
+        symlink(&unrelated, &staging).unwrap();
+        let error = World::new().save(&save).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&unrelated).unwrap(), sentinel.to_vec());
+        assert!(fs::symlink_metadata(&staging).unwrap().file_type().is_symlink());
+        assert!(!save.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_world_file_is_not_loaded_or_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-linked-world-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let real = root.join("real.irw");
+        World::new().save(&real).unwrap();
+        let original = fs::read(&real).unwrap();
+        let link = root.join("alias.irw");
+        symlink(&real, &link).unwrap();
+        assert_eq!(
+            World::load(&link).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            World::new().save(&link).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&real).unwrap(), original);
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_world_parent_is_rejected_before_staging() {
+        use std::os::unix::fs::symlink;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-linked-parent-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let unrelated = root.join("unrelated");
+        fs::create_dir(&unrelated).unwrap();
+        let existing = unrelated.join("existing.irw");
+        World::new().save(&existing).unwrap();
+        let original = fs::read(&existing).unwrap();
+        let linked = root.join("world-link");
+        symlink(&unrelated, &linked).unwrap();
+        let load_error = World::load(&linked.join("existing.irw")).unwrap_err();
+        assert_eq!(load_error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&existing).unwrap(), original);
+        let world_path = linked.join("flat.irw");
+        let error = World::new().save(&world_path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!unrelated.join("flat.tmp").exists());
+        assert!(!unrelated.join("flat.irw").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn unsupported_world_versions_fail_closed_without_touching_original_bytes() {
+        // All files belong to this test. Never use a real user's world path.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mut invalid_dimension = b"IRW4".to_vec();
+        invalid_dimension.extend_from_slice(&42u64.to_be_bytes());
+        invalid_dimension.push(9); // Not Overworld/Nether/End.
+        invalid_dimension.extend_from_slice(&0u32.to_be_bytes());
+        let fixtures = [
+            ("unknown-irw", b"IRW5\0\0\0\0".to_vec()),
+            ("unknown-trailer", b"IRW1\0\0\0\0TNT5\0\0".to_vec()),
+            ("unknown-dimension", invalid_dimension),
+        ];
+        for (name, bytes) in fixtures {
+            let path = std::env::temp_dir().join(format!(
+                "ir1710-unsupported-{name}-{}-{stamp}.irw",
+                std::process::id()
+            ));
+            // create_new prevents accidental overwrite of an unrelated file.
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(&bytes).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            let error = World::load(&path).err().expect("must fail closed");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{name}");
+            fs::remove_file(path).unwrap();
+        }
+    }
 
     #[test]
     fn creeper_blast_is_single_durable_transition_and_preserves_tile_blocks() {

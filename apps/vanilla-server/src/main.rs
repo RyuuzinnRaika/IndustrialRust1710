@@ -136,6 +136,15 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(40);
 // Vanilla 1.7.10 EntityPlayer stores yOffset as a float before widening it.
 const CLIENT_PLAYER_Y_OFFSET: f64 = 1.62_f32 as f64;
+
+/// Client C03 (onGround only) and C05 (look only) have no authoritative
+/// position. They must not indefinitely postpone the server's gravity
+/// fallback for a player suspended in the air.
+fn observe_position_packet_for_gravity(packet_id: i32, gravity: &mut IdleGravity, tick: u64) {
+    if matches!(packet_id, 4 | 6) {
+        gravity.observe_client(tick);
+    }
+}
 // Internal to Hub; no such packet ID is ever sent on the Protocol 5 wire.
 const CHUNK_RELIGHT_EVENT: u32 = u32::MAX;
 fn bad(reason: &'static str) -> io::Error {
@@ -920,17 +929,19 @@ fn torch_attachment_metadata(face: i8) -> Option<u16> {
 /// selects the mounting block; yaw only rotates ceiling/floor levers.
 /// The powered flag (bit 3) is set by interaction, never by placement.
 fn lever_attachment_metadata(face: i8, yaw: f32) -> Option<u16> {
-    let north_south = (((f64::from(yaw) * 4.0 / 360.0 + 0.5).floor() as i32)
-        .rem_euclid(4)
-        & 1)
-        == 0;
+    let yaw_quadrant = (f64::from(yaw) * 4.0 / 360.0 + 0.5).floor() as i32;
+    let north_south = (yaw_quadrant.rem_euclid(4) & 1) == 0;
     match face {
         0 => Some(if north_south { 7 } else { 0 }), // ceiling
         1 => Some(if north_south { 5 } else { 6 }), // floor
-        2 => Some(4), // north-facing wall, support at Z+1
-        3 => Some(3), // south-facing wall, support at Z-1
-        4 => Some(2), // west-facing wall, support at X+1
-        5 => Some(1), // east-facing wall, support at X-1
+        // North wall: support on the block at Z+1.
+        2 => Some(4),
+        // South wall: support on the block at Z-1.
+        3 => Some(3),
+        // West wall: support on the block at X+1.
+        4 => Some(2),
+        // East wall: support on the block at X-1.
+        5 => Some(1),
         _ => None,
     }
 }
@@ -3344,7 +3355,7 @@ fn play(
             3 => {
                 input.u8()?;
                 input.finish()?;
-                idle_gravity.observe_client(now_tick);
+                observe_position_packet_for_gravity(id, &mut idle_gravity, now_tick);
             } // flying/onGround
             4 | 6 => {
                 // Vanilla 1.7.10 C04/C06 wire order is X, feet Y, stance, Z.
@@ -3427,14 +3438,30 @@ fn play(
                     if !physics::valid_movement(&collision_world, player, &candidate) {
                         let trace_rejection = trace_movement
                             && last_movement_trace.elapsed() >= Duration::from_secs(2);
-                        let from_collision =
-                            trace_rejection && physics::collides(&collision_world, player);
-                        let to_collision =
-                            trace_rejection && physics::collides(&collision_world, &candidate);
+                        // Sample local terrain only for rate-limited movement
+                        // diagnostics. Normal gameplay keeps the cheap path.
+                        let diagnostic = trace_rejection.then(|| {
+                            let (bx, by, bz) = (
+                                candidate.x.floor() as i32,
+                                candidate.y.floor() as i32,
+                                candidate.z.floor() as i32,
+                            );
+                            (
+                                physics::collides(&collision_world, player),
+                                physics::collides(&collision_world, &candidate),
+                                collision_world.get(bx, by - 1, bz),
+                                collision_world.get(bx, by, bz),
+                                collision_world.get(bx, by + 1, bz),
+                            )
+                        });
                         drop(collision_world);
-                        if trace_rejection {
+                        if let Some((from_collision, to_collision, below, feet, head)) = diagnostic {
                             eprintln!(
-                                "movement trace: rejected from={player:?} to={candidate:?} from_collision={from_collision} to_collision={to_collision} yaw={yaw} pitch={pitch}"
+                                "movement trace: rejected from={player:?} to={candidate:?} delta=({:.4},{:.4},{:.4}) stance_delta={:.4} from_collision={from_collision} to_collision={to_collision} block_below={below:#06x} block_feet={feet:#06x} block_head={head:#06x} yaw={yaw} pitch={pitch}",
+                                candidate.x - player.x,
+                                candidate.y - player.y,
+                                candidate.z - player.z,
+                                stance - y
                             );
                             last_movement_trace = Instant::now();
                         }
@@ -3500,7 +3527,7 @@ fn play(
                         send(s, 0x06, &health_packet(*vitals))?;
                     }
                 }
-                idle_gravity.observe_client(now_tick);
+                observe_position_packet_for_gravity(id, &mut idle_gravity, now_tick);
                 if survival {
                     let fx = x.floor() as i32;
                     let fz = z.floor() as i32;
@@ -3711,7 +3738,7 @@ fn play(
                     eprintln!("movement trace: look yaw={yaw} pitch={pitch}");
                     last_look_trace = Instant::now();
                 }
-                idle_gravity.observe_client(now_tick);
+                observe_position_packet_for_gravity(id, &mut idle_gravity, now_tick);
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, *player, yaw, pitch);
                     last_movement_broadcast = Instant::now();
@@ -9111,11 +9138,14 @@ fn main() -> io::Result<()> {
     let brewer_path = Arc::new(Brewers::location(&world_path));
     let brewers = Arc::new(Mutex::new(Brewers::load(&brewer_path)?));
     let listener = TcpListener::bind(bind)?;
+    let actual_bind = listener.local_addr()?;
     println!(
         "IndustrialRust1710: listening on {} (1.7.10 vanilla, up to 8 players)",
-        listener.local_addr()?
+        actual_bind
     );
-    println!("WARNING: offline-mode has no account authentication. Do not expose to the internet.");
+    if let Some(message) = server_config::offline_exposure_warning(actual_bind, online_mode) {
+        eprintln!("{message}");
+    }
     let hub = Arc::new(Hub::default());
     let connections = Arc::new(AtomicUsize::new(0));
     let limiter = Arc::new(ConnectionLimiter::default());
@@ -11270,6 +11300,64 @@ mod initial_join_disconnect_tests {
         assert!(
             join_failure_reason(&io::Error::other("internal secret")).contains("loading failed")
         );
+    }
+}
+
+#[cfg(test)]
+mod nonpositional_packet_gravity_tests {
+    use super::*;
+
+    #[test]
+    fn ground_and_look_only_packets_do_not_keep_airborne_player_suspended() {
+        let world = World::new();
+        let airborne = PlayerPosition {
+            x: 0.5,
+            y: 70.0,
+            z: 0.5,
+        };
+        let mut gravity = IdleGravity::new(0);
+        let mut descended = false;
+        for tick in 1..=20 {
+            // Both packets may be repeated while the client sends no C04/C06.
+            observe_position_packet_for_gravity(3, &mut gravity, tick);
+            observe_position_packet_for_gravity(5, &mut gravity, tick);
+            descended |= gravity.advance(&world, &airborne, tick).is_some();
+        }
+        assert!(descended, "non-position packets must not defer gravity forever");
+    }
+
+    #[test]
+    fn nonposition_packets_do_not_cause_grounded_player_corrections() {
+        let world = World::new();
+        let grounded = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        assert!(physics::supported(&world, &grounded));
+        let mut gravity = IdleGravity::new(0);
+        for tick in 1..=40 {
+            observe_position_packet_for_gravity(3, &mut gravity, tick);
+            observe_position_packet_for_gravity(5, &mut gravity, tick);
+            assert_eq!(gravity.advance(&world, &grounded, tick), None);
+        }
+    }
+
+    #[test]
+    fn accepted_c04_and_c06_position_packets_keep_gravity_client_driven() {
+        let world = World::new();
+        let airborne = PlayerPosition {
+            x: 0.5,
+            y: 70.0,
+            z: 0.5,
+        };
+        for packet_id in [4, 6] {
+            let mut gravity = IdleGravity::new(0);
+            for tick in 1..=20 {
+                observe_position_packet_for_gravity(packet_id, &mut gravity, tick);
+                assert_eq!(gravity.advance(&world, &airborne, tick), None);
+            }
+        }
     }
 }
 
