@@ -66,7 +66,13 @@ fn failed_test_names(output: &str) -> Vec<String> {
 /// Surface an explicitly recorded non-secret test seed, when available.
 fn logged_test_seed(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
-        let (_, suffix) = line.split_once("seed=")?;
+        // Do not treat substrings such as "password_seed=" or URL query
+        // parameters as test seeds. Only explicit test seed records qualify.
+        let line = line.trim_start();
+        let suffix = line
+            .strip_prefix("seed=")
+            .or_else(|| line.strip_prefix("test-seed="))
+            .or_else(|| line.strip_prefix("test failed; seed="))?;
         let value: String = suffix
             .chars()
             .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
@@ -508,6 +514,18 @@ test inventory::keeps_items ... FAILED\n";
         );
         assert_eq!(logged_test_seed("no explicit seed here\n"), None);
         assert_eq!(logged_test_seed("seed=; SECRET=should-not-leak\n"), None);
+    }
+
+    #[test]
+    fn seed_parser_ignores_sensitive_lookalikes_in_untrusted_logs() {
+        let output = "password_seed=SHOULD_NOT_APPEAR\n\
+request_url=https://example.invalid/?seed=PRIVATE\n\
+test-seed=deadbeef-11\n";
+        assert_eq!(logged_test_seed(output), Some("deadbeef-11".into()));
+        assert_eq!(
+            logged_test_seed("auth_token_seed=DoNotCopy\n"),
+            None
+        );
     }
 
     #[test]
