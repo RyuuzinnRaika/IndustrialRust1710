@@ -150,6 +150,18 @@ fn run_check(
     println!("{:<7}{name}", status.as_str());
     if status != Status::Pass {
         if let Ok(content) = fs::read_to_string(&log) {
+            if name == "rustfmt" {
+                let differences = content
+                    .lines()
+                    .filter(|line| line.trim_start().starts_with("Diff in "))
+                    .collect::<Vec<_>>();
+                if !differences.is_empty() {
+                    println!("  All rustfmt diff locations ({}):", differences.len());
+                    for location in &differences {
+                        println!("  {}", location.trim());
+                    }
+                }
+            }
             let tail = content.lines().rev().take(12).collect::<Vec<_>>();
             if !tail.is_empty() {
                 println!("  Log tail (newest last):");

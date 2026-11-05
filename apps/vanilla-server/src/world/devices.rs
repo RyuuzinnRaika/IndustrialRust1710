@@ -1976,7 +1976,9 @@ mod redstone_regression_tests {
         assert!(world.piston_extending_at(2, 64, 0, 5));
         assert_eq!(world.get(2, 64, 0), 1 << 4);
         // Switch power off before the moving piston completes its animation.
-        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 5).unwrap();
+        world
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 5)
+            .unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(0, 64, 0), (29 << 4) | 5);
         assert_eq!(world.get(1, 64, 0), 0);
@@ -2007,7 +2009,9 @@ mod redstone_regression_tests {
         for _ in 0..3 {
             world.block_tick(&path, 64).unwrap();
         }
-        world.update_and_save(&path, -1, 64, 0, (69 << 4) | 5).unwrap();
+        world
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 5)
+            .unwrap();
         world.block_tick(&path, 64).unwrap();
         assert_eq!(world.get(0, 64, 0), (29 << 4) | 5);
         assert_eq!(world.get(1, 64, 0), 1 << 4);
