@@ -273,34 +273,30 @@ fn execute(options: Options) -> io::Result<i32> {
     println!("Existing worlds and GitHub Actions are never operated on.\n");
 
     let mut checks = Vec::new();
-    let commands: [(&str, &[&str], &str, &str); 5] = [
-        ("rustfmt", &["fmt", "--all", "--", "--check"], "format", "format"),
+    let commands: [(&str, &[&str], &str); 5] = [
+        ("rustfmt", &["fmt", "--all", "--", "--check"], "format"),
         (
             "Rust unit/integration/Protocol 5 TCP",
             &["test", "--workspace", "--all-targets"],
-            "tests",
             "tests",
         ),
         (
             "Clippy strict",
             &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
             "clippy",
-            "clippy",
         ),
         (
             "Release server binaries",
             &["build", "--release", "-p", "vanilla-server", "-p", "legacy-status-server"],
-            "build",
             "build",
         ),
         (
             "Server --help smoke",
             &["run", "--release", "-p", "vanilla-server", "--", "--help"],
             "smoke",
-            "smoke",
         ),
     ];
-    for (name, args, _key, log) in commands {
+    for (name, args, log) in commands {
         checks.push(run_check(name, "cargo", args, &root, &output_dir, log)?);
     }
 
@@ -375,7 +371,10 @@ fn execute(options: Options) -> io::Result<i32> {
         println!("Only the automated checks are an exit-code gate. E42 is NOT_RUN.");
     }
     println!(
-        "A PASS here does not establish complete vanilla 1.7.10 gameplay compatibility,          24-case client acceptance, or coverage of all requirements."
+        concat!(
+            "A PASS here does not establish complete vanilla 1.7.10 gameplay compatibility, ",
+            "24-case client acceptance, or coverage of all requirements."
+        )
     );
     Ok(exit_code)
 }
