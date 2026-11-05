@@ -136,6 +136,15 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(40);
 // Vanilla 1.7.10 EntityPlayer stores yOffset as a float before widening it.
 const CLIENT_PLAYER_Y_OFFSET: f64 = 1.62_f32 as f64;
+
+/// Client C03 (onGround only) and C05 (look only) have no authoritative
+/// position. They must not indefinitely postpone the server's gravity
+/// fallback for a player suspended in the air.
+fn observe_position_packet_for_gravity(packet_id: u32, gravity: &mut IdleGravity, tick: u64) {
+    if matches!(packet_id, 4 | 6) {
+        gravity.observe_client(tick);
+    }
+}
 // Internal to Hub; no such packet ID is ever sent on the Protocol 5 wire.
 const CHUNK_RELIGHT_EVENT: u32 = u32::MAX;
 fn bad(reason: &'static str) -> io::Error {
@@ -3344,7 +3353,7 @@ fn play(
             3 => {
                 input.u8()?;
                 input.finish()?;
-                idle_gravity.observe_client(now_tick);
+                observe_position_packet_for_gravity(id, &mut idle_gravity, now_tick);
             } // flying/onGround
             4 | 6 => {
                 // Vanilla 1.7.10 C04/C06 wire order is X, feet Y, stance, Z.
@@ -3516,7 +3525,7 @@ fn play(
                         send(s, 0x06, &health_packet(*vitals))?;
                     }
                 }
-                idle_gravity.observe_client(now_tick);
+                observe_position_packet_for_gravity(id, &mut idle_gravity, now_tick);
                 if survival {
                     let fx = x.floor() as i32;
                     let fz = z.floor() as i32;
@@ -3727,7 +3736,7 @@ fn play(
                     eprintln!("movement trace: look yaw={yaw} pitch={pitch}");
                     last_look_trace = Instant::now();
                 }
-                idle_gravity.observe_client(now_tick);
+                observe_position_packet_for_gravity(id, &mut idle_gravity, now_tick);
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, *player, yaw, pitch);
                     last_movement_broadcast = Instant::now();
@@ -11286,6 +11295,47 @@ mod initial_join_disconnect_tests {
         assert!(
             join_failure_reason(&io::Error::other("internal secret")).contains("loading failed")
         );
+    }
+}
+
+#[cfg(test)]
+mod nonpositional_packet_gravity_tests {
+    use super::*;
+
+    #[test]
+    fn ground_and_look_only_packets_do_not_keep_airborne_player_suspended() {
+        let world = World::new();
+        let airborne = PlayerPosition {
+            x: 0.5,
+            y: 70.0,
+            z: 0.5,
+        };
+        let mut gravity = IdleGravity::new(0);
+        let mut descended = false;
+        for tick in 1..=20 {
+            // Both packets may be repeated while the client sends no C04/C06.
+            observe_position_packet_for_gravity(3, &mut gravity, tick);
+            observe_position_packet_for_gravity(5, &mut gravity, tick);
+            descended |= gravity.advance(&world, &airborne, tick).is_some();
+        }
+        assert!(descended, "non-position packets must not defer gravity forever");
+    }
+
+    #[test]
+    fn accepted_c04_and_c06_position_packets_keep_gravity_client_driven() {
+        let world = World::new();
+        let airborne = PlayerPosition {
+            x: 0.5,
+            y: 70.0,
+            z: 0.5,
+        };
+        for packet_id in [4, 6] {
+            let mut gravity = IdleGravity::new(0);
+            for tick in 1..=20 {
+                observe_position_packet_for_gravity(packet_id, &mut gravity, tick);
+                assert_eq!(gravity.advance(&world, &airborne, tick), None);
+            }
+        }
     }
 }
 
