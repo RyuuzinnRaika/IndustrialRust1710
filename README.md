@@ -178,7 +178,7 @@ cargo run -p vanilla-server -- --survival --expanded-seed 42 --dimension-root ./
 
 ## ビルドと検証
 
-**1コマンド統合検証:** `cargo run --release -p industrial-verify -- --automated-only` で、既存のRust/Python自動テスト・静的検査・Releaseビルドをローカル実行し、PASS/FAIL/NOT_RUNとログを記録します。実Minecraft Java 1.7.10のE42受入証拠を検証に含める場合は [統合検証アプリの使い方](docs/36_統合検証アプリ.md) を参照してください。GitHub Actionsは起動しません。
+**1コマンド統合検証:** Windowsの `.\verify-windows.ps1` またはUbuntuの `bash ./verify-ubuntu.sh` で、既存のRust/Python自動テスト・静的検査・Releaseビルドをローカル実行し、PASS/FAIL/NOT_RUNとログを記録します。実Minecraft Java 1.7.10のE42受入証拠を検証に含める場合は [統合検証アプリの使い方](docs/36_統合検証アプリ.md) を参照してください。GitHub Actionsは起動しません。
 
 ```bash
 cargo fmt --all -- --check
