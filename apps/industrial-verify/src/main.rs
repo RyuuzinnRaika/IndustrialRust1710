@@ -241,13 +241,14 @@ fn write_report(path: &Path, sha: &str, checks: &[Check], exit_code: i32) -> io:
         if index != 0 {
             report.push_str(",\n");
         }
-        let log = check
-            .log
-            .as_ref()
-            .map_or(String::from("null"), |p| json_string(&p.display().to_string()));
-        let code = check
-            .exit_code
-            .map_or(String::from("null"), |number| number.to_string());
+        let log = match check.log.as_ref() {
+            Some(path) => json_string(&path.display().to_string()),
+            None => String::from("null"),
+        };
+        let code = match check.exit_code {
+            Some(number) => number.to_string(),
+            None => String::from("null"),
+        };
         report.push_str(&format!(
             "    {{\"name\":{},\"status\":{},\"command\":{},\"exit_code\":{},\"log\":{},\"note\":{}}}",
             json_string(check.name),
@@ -294,12 +295,26 @@ fn execute(options: Options) -> io::Result<i32> {
         ),
         (
             "Clippy strict",
-            &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+            &[
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
             "clippy",
         ),
         (
             "Release server binaries",
-            &["build", "--release", "-p", "vanilla-server", "-p", "legacy-status-server"],
+            &[
+                "build",
+                "--release",
+                "-p",
+                "vanilla-server",
+                "-p",
+                "legacy-status-server",
+            ],
             "build",
         ),
         (
@@ -326,7 +341,16 @@ fn execute(options: Options) -> io::Result<i32> {
         Some(executable) => checks.push(run_check(
             "Python verifier unit tests",
             executable,
-            &["-m", "unittest", "discover", "-s", "tools", "-p", "test_*.py", "-v"],
+            &[
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tools",
+                "-p",
+                "test_*.py",
+                "-v",
+            ],
             &root,
             &output_dir,
             "python",
@@ -391,12 +415,8 @@ fn execute(options: Options) -> io::Result<i32> {
     if options.automated_only {
         println!("Only the automated checks are an exit-code gate. E42 is NOT_RUN.");
     }
-    println!(
-        concat!(
-            "A PASS here does not establish complete vanilla 1.7.10 gameplay compatibility, ",
-            "24-case client acceptance, or coverage of all requirements."
-        )
-    );
+    println!("A PASS does not establish complete vanilla 1.7.10 gameplay compatibility.");
+    println!("24-case client acceptance or coverage of all requirements is not established.");
     Ok(exit_code)
 }
 

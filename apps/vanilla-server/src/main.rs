@@ -920,17 +920,19 @@ fn torch_attachment_metadata(face: i8) -> Option<u16> {
 /// selects the mounting block; yaw only rotates ceiling/floor levers.
 /// The powered flag (bit 3) is set by interaction, never by placement.
 fn lever_attachment_metadata(face: i8, yaw: f32) -> Option<u16> {
-    let north_south = (((f64::from(yaw) * 4.0 / 360.0 + 0.5).floor() as i32)
-        .rem_euclid(4)
-        & 1)
-        == 0;
+    let yaw_quadrant = (f64::from(yaw) * 4.0 / 360.0 + 0.5).floor() as i32;
+    let north_south = (yaw_quadrant.rem_euclid(4) & 1) == 0;
     match face {
         0 => Some(if north_south { 7 } else { 0 }), // ceiling
         1 => Some(if north_south { 5 } else { 6 }), // floor
-        2 => Some(4), // north-facing wall, support at Z+1
-        3 => Some(3), // south-facing wall, support at Z-1
-        4 => Some(2), // west-facing wall, support at X+1
-        5 => Some(1), // east-facing wall, support at X-1
+        // North wall: support on the block at Z+1.
+        2 => Some(4),
+        // South wall: support on the block at Z-1.
+        3 => Some(3),
+        // West wall: support on the block at X+1.
+        4 => Some(2),
+        // East wall: support on the block at X-1.
+        5 => Some(1),
         _ => None,
     }
 }
