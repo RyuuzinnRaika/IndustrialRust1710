@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 import contextlib
 
 import save_fixture_report as scan
@@ -104,6 +105,46 @@ class SaveFixtureTests(unittest.TestCase):
         report = scan.inspect(self.target, server=server)
         self.assertEqual(report["classification"], "native_failed")
         self.assertEqual(report["repair_action"], "restore_from_verified_backup_only")
+
+    @patch.object(scan.subprocess, "run")
+    def test_source_swap_between_snapshot_and_copy_is_rejected(self, runner):
+        server = self.root / "server.bin"
+        server.write_bytes(b"placeholder")
+        initial = b"IRW1\x00\x00\x00\x00"
+        replacement = b"IRW1\x00\x00\x00\x01"
+        self.target.write_bytes(initial)
+        original_read = scan._read_source
+        inspected = False
+
+        def swap_after_first_inspection(path):
+            nonlocal inspected
+            value = original_read(path)
+            if path == self.target and not inspected:
+                inspected = True
+                self.target.write_bytes(replacement)
+            return value
+
+        with patch.object(scan, "_read_source", side_effect=swap_after_first_inspection):
+            with self.assertRaisesRegex(scan.InspectionFailure, "changed before native"):
+                scan.inspect(self.target, server=server)
+        runner.assert_not_called()
+        self.assertEqual(self.target.read_bytes(), replacement)
+
+    @patch.object(scan.subprocess, "run")
+    def test_native_verifier_cannot_mutate_fixture_and_still_report_success(self, runner):
+        server = self.root / "server.bin"
+        server.write_bytes(b"placeholder")
+        original = b"IRW1\x00\x00\x00\x00"
+        self.target.write_bytes(original)
+
+        def corrupt_temporary_copy(argv, **_kwargs):
+            Path(argv[2]).write_bytes(b"IRW1\x00\x00\x00\x01")
+            return SimpleNamespace(returncode=0)
+
+        runner.side_effect = corrupt_temporary_copy
+        with self.assertRaisesRegex(scan.InspectionFailure, "altered copied fixture"):
+            scan.inspect(self.target, server=server)
+        self.assertEqual(self.target.read_bytes(), original)
 
     def test_cli_emits_json_not_destructive_write(self):
         data = b"IRW5\x00\x00\x00\x00"
