@@ -275,7 +275,8 @@ fn readiness_probe_retries_only_transient_transport_failures() {
         io::ErrorKind::WouldBlock,
         io::ErrorKind::BrokenPipe,
     ] {
-        assert!(Server::retryable_probe_error(&io::Error::from(kind)), "{kind:?}");
+        let error = io::Error::from(kind);
+        assert!(Server::retryable_probe_error(&error), "{kind:?}");
     }
     for kind in [io::ErrorKind::InvalidData, io::ErrorKind::PermissionDenied] {
         assert!(

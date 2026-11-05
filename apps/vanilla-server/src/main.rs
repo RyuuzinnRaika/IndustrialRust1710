@@ -3455,7 +3455,8 @@ fn play(
                             )
                         });
                         drop(collision_world);
-                        if let Some((from_collision, to_collision, below, feet, head)) = diagnostic {
+                        if let Some(details) = diagnostic {
+                            let (from_collision, to_collision, below, feet, head) = details;
                             eprintln!(
                                 "movement trace: rejected from={player:?} to={candidate:?} delta=({:.4},{:.4},{:.4}) stance_delta={:.4} from_collision={from_collision} to_collision={to_collision} block_below={below:#06x} block_feet={feet:#06x} block_head={head:#06x} yaw={yaw} pitch={pitch}",
                                 candidate.x - player.x,
@@ -11342,7 +11343,8 @@ mod nonpositional_packet_gravity_tests {
             observe_position_packet_for_gravity(5, &mut gravity, tick);
             descended |= gravity.advance(&world, &airborne, tick).is_some();
         }
-        assert!(descended, "non-position packets must not defer gravity forever");
+        let explanation = "non-position packets must not defer gravity forever";
+        assert!(descended, "{explanation}");
     }
 
     #[test]

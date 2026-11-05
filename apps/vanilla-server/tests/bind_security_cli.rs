@@ -12,10 +12,9 @@ fn isolated_directory(tag: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "ir1710-bind-security-{tag}-{}-{nanos}",
-        std::process::id()
-    ));
+    let process_id = std::process::id();
+    let directory_name = format!("ir1710-bind-security-{tag}-{process_id}-{nanos}");
+    let path = std::env::temp_dir().join(directory_name);
     // Create-only: never delete a pre-existing directory or real world.
     fs::create_dir(&path).unwrap();
     path
@@ -60,8 +59,9 @@ fn offline_mode_refuses_all_non_loopback_listeners_before_world_creation() {
 #[test]
 fn loopback_and_explicit_exposure_options_pass_the_bind_permission_gate() {
     // The missing whitelist must fail before any listener, even when the
-    // address choice itself is accepted. The missing-whitelist OS error 2 is a *file error*,
-    // not proof that starting a public server is safe.
+    // address choice itself is accepted. Check the stable Rust error kind,
+    // not a localized OS error message (Windows error 2 is translated).
+    // This is not proof that starting a public server is safe.
     let scenarios: [(Option<&str>, &[&str]); 5] = [
         (None, &[]),
         (Some("127.0.0.1:0"), &[]),
@@ -79,7 +79,7 @@ fn loopback_and_explicit_exposure_options_pass_the_bind_permission_gate() {
             "{address:?} {flags:?}: rejected valid explicit/loopback bind: {stderr}"
         );
         assert!(
-            stderr.contains("os error 2"),
+            stderr.contains("kind: NotFound"),
             "{address:?} {flags:?}: expected missing whitelist before server startup, got: {stderr}"
         );
         assert!(!root.join("isolated").exists());
