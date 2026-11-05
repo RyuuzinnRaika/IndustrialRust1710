@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Local-only verification wrapper. Explicit bash invocation needs no executable bit.
+# Build, then run the verifier outside Cargo's run lock.
 set -Eeuo pipefail
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
 if [[ "$#" -eq 0 ]]; then
   set -- --automated-only
 fi
-exec cargo run --release -p industrial-verify -- "$@"
+cargo build --release -p industrial-verify
+exec "$ROOT/target/release/industrial-verify" "$@"
