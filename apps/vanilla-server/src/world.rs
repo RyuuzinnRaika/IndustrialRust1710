@@ -3205,6 +3205,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unsupported_world_versions_fail_closed_without_touching_original_bytes() {
+        // All files belong to this test. Never use a real user's world path.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mut invalid_dimension = b"IRW4".to_vec();
+        invalid_dimension.extend_from_slice(&42u64.to_be_bytes());
+        invalid_dimension.push(9); // Not Overworld/Nether/End.
+        invalid_dimension.extend_from_slice(&0u32.to_be_bytes());
+        let fixtures = [
+            ("unknown-irw", b"IRW5\0\0\0\0".to_vec()),
+            ("unknown-trailer", b"IRW1\0\0\0\0TNT5\0\0".to_vec()),
+            ("unknown-dimension", invalid_dimension),
+        ];
+        for (name, bytes) in fixtures {
+            let path = std::env::temp_dir().join(format!(
+                "ir1710-unsupported-{name}-{}-{stamp}.irw",
+                std::process::id()
+            ));
+            // create_new prevents accidental overwrite of an unrelated file.
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(&bytes).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            let error = World::load(&path).err().expect("must fail closed");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{name}");
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
     fn creeper_blast_is_single_durable_transition_and_preserves_tile_blocks() {
         let path = std::env::temp_dir().join(format!(
             "industrialrust1710-creeper-batch-{}.irw",
