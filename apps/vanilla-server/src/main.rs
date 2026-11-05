@@ -11322,6 +11322,23 @@ mod nonpositional_packet_gravity_tests {
     }
 
     #[test]
+    fn nonposition_packets_do_not_cause_grounded_player_corrections() {
+        let world = World::new();
+        let grounded = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        assert!(physics::supported(&world, &grounded));
+        let mut gravity = IdleGravity::new(0);
+        for tick in 1..=40 {
+            observe_position_packet_for_gravity(3, &mut gravity, tick);
+            observe_position_packet_for_gravity(5, &mut gravity, tick);
+            assert_eq!(gravity.advance(&world, &grounded, tick), None);
+        }
+    }
+
+    #[test]
     fn accepted_c04_and_c06_position_packets_keep_gravity_client_driven() {
         let world = World::new();
         let airborne = PlayerPosition {
