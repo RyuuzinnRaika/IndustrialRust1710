@@ -292,7 +292,16 @@ fn execute(options: Options) -> io::Result<i32> {
         ),
         (
             "Server --help smoke",
-            &["run", "--release", "-p", "vanilla-server", "--bin", "vanilla-server", "--", "--help"],
+            &[
+                "run",
+                "--release",
+                "-p",
+                "vanilla-server",
+                "--bin",
+                "vanilla-server",
+                "--",
+                "--help",
+            ],
             "smoke",
         ),
     ];
