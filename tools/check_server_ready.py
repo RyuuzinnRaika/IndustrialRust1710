@@ -7,6 +7,7 @@ as ready: the service must respond with IndustrialRust1710 status Protocol 5.
 
 import argparse
 import json
+import math
 import socket
 import struct
 import sys
@@ -63,7 +64,7 @@ def _frame(payload):
 
 def probe(host, port, timeout=2.0):
     """Probe status once. Return a verified status dict; raise on failure."""
-    if not 1 <= port <= 65535 or timeout <= 0:
+    if not 1 <= port <= 65535 or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("invalid port or timeout")
     host_bytes = host.encode("utf-8")
     if not host_bytes or len(host_bytes) > 255:
@@ -92,7 +93,8 @@ def probe(host, port, timeout=2.0):
         raise ValueError("malformed status object")
     if status.get("version", {}).get("protocol") != 5:
         raise ValueError("not a Minecraft Java 1.7.10 Protocol 5 server")
-    if "IndustrialRust1710" not in status.get("description", {}).get("text", ""):
+    description = status["description"].get("text")
+    if not isinstance(description, str) or "IndustrialRust1710" not in description:
         raise ValueError("status responder is not IndustrialRust1710")
     return status
 
@@ -112,7 +114,12 @@ def _decode_varint(data, offset):
 
 
 def wait_for_ready(host, port, timeout=30.0, interval=0.25):
-    if timeout <= 0 or interval <= 0:
+    if (
+        not math.isfinite(timeout)
+        or not math.isfinite(interval)
+        or timeout <= 0
+        or interval <= 0
+    ):
         raise ValueError("timeout and interval must be positive")
     deadline = time.monotonic() + timeout
     last_error = "no status response"
