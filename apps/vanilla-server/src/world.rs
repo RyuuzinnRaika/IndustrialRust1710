@@ -3230,7 +3230,7 @@ mod tests {
         fs::write(&staging, sentinel).unwrap();
         let error = World::new().save(&save).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(fs::read(&staging).unwrap(), sentinel);
+        assert_eq!(fs::read(&staging).unwrap(), sentinel.to_vec());
         assert!(!save.exists());
         fs::remove_file(&staging).unwrap();
         World::new().save(&save).unwrap();
@@ -3260,7 +3260,7 @@ mod tests {
         symlink(&unrelated, &staging).unwrap();
         let error = World::new().save(&save).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(fs::read(&unrelated).unwrap(), sentinel);
+        assert_eq!(fs::read(&unrelated).unwrap(), sentinel.to_vec());
         assert!(fs::symlink_metadata(&staging).unwrap().file_type().is_symlink());
         assert!(!save.exists());
         fs::remove_dir_all(&root).unwrap();
