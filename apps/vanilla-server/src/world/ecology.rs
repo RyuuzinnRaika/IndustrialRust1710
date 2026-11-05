@@ -697,8 +697,8 @@ mod regression_tests {
             (2, (1, 64, 0)),    // west-facing wall
             (3, (0, 64, -1)),   // south-facing wall
             (4, (0, 64, 1)),    // north-facing wall
-            (5, (0, 63, 0)),   // floor north-south
-            (6, (0, 63, 0)),   // floor east-west
+            (5, (0, 63, 0)),    // floor north-south
+            (6, (0, 63, 0)),    // floor east-west
         ] {
             let mut world = World::new();
             // World::new has a grass floor at Y=63. Clear it so these
