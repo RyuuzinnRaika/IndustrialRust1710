@@ -25,9 +25,8 @@ fn check(path: &Path) -> io::Result<()> {
     println!("Hardcore: {}", config.hardcore);
     println!("Online authentication: {}", config.online_mode);
     println!("Level name: {}", config.level_name);
-    if let Some(message) =
-        server_config::offline_exposure_warning(config.bind, config.online_mode)
-    {
+    let warning = server_config::offline_exposure_warning(config.bind, config.online_mode);
+    if let Some(message) = warning {
         eprintln!("{message}");
     }
     if config.online_mode && !config.bind.ip().is_loopback() {
