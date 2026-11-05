@@ -315,6 +315,23 @@ mod tests {
     }
 
     #[test]
+    fn high_ratio_item_nbt_bomb_is_rejected_before_parsing_or_interning() {
+        // Compressed ItemStack NBT fits the on-wire short field, but expands
+        // beyond its stricter 256 KiB cap. The client bytes must remain intact.
+        let raw = vec![b'A'; MAX_DECOMPRESSED + 1];
+        let mut compressor = GzEncoder::new(Vec::new(), Compression::fast());
+        compressor.write_all(&raw).unwrap();
+        let compressed = compressor.finish().unwrap();
+        assert!(compressed.len() < MAX_WIRE);
+        let before = compressed.clone();
+        let error = decoded(&compressed).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(error.to_string().contains("decompression limit"));
+        assert!(intern(&compressed).is_err());
+        assert_eq!(compressed, before);
+    }
+
+    #[test]
     fn add007_nbt_preflight_enforces_depth_without_recursion() {
         assert!(validate_nbt_wire(&nested_compound(MAX_NBT_DEPTH - 1)).is_ok());
         assert!(validate_nbt_wire(&nested_compound(MAX_NBT_DEPTH)).is_err());
