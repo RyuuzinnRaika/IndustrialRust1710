@@ -38,6 +38,48 @@ struct Check {
     exit_code: Option<i32>,
     log: Option<PathBuf>,
     note: String,
+    failed_tests: Vec<String>,
+    seed: Option<String>,
+}
+
+/// Extract bounded test identifiers, never arbitrary error lines or absolute paths.
+fn failed_test_names(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("test ")?
+                .strip_suffix(" ... FAILED")
+                .filter(|name| {
+                    !name.is_empty()
+                        && name.len() <= 160
+                        && name
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == ':')
+                })
+                .map(str::to_owned)
+        })
+        .take(32)
+        .collect()
+}
+
+/// Surface an explicitly recorded non-secret test seed, when available.
+fn logged_test_seed(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        // Do not treat substrings such as "password_seed=" or URL query
+        // parameters as test seeds. Only explicit test seed records qualify.
+        let line = line.trim_start();
+        let suffix = line
+            .strip_prefix("seed=")
+            .or_else(|| line.strip_prefix("test-seed="))
+            .or_else(|| line.strip_prefix("test failed; seed="))?;
+        let value: String = suffix
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+            .take(64)
+            .collect();
+        (!value.is_empty()).then_some(value)
+    })
 }
 
 fn usage() -> &'static str {
@@ -147,6 +189,14 @@ fn run_check(
             format!("Could not start command: {error}"),
         ),
     };
+    let (failed_tests, seed) = if status == Status::Fail {
+        match fs::read_to_string(&log) {
+            Ok(content) => (failed_test_names(&content), logged_test_seed(&content)),
+            Err(_) => (Vec::new(), None),
+        }
+    } else {
+        (Vec::new(), None)
+    };
     println!("{:<7}{name}", status.as_str());
     if status != Status::Pass {
         if let Ok(content) = fs::read_to_string(&log) {
@@ -178,6 +228,8 @@ fn run_check(
         exit_code,
         log: Some(log),
         note,
+        failed_tests,
+        seed,
     })
 }
 
@@ -190,6 +242,8 @@ fn not_run(name: &'static str, note: &str) -> Check {
         exit_code: None,
         log: None,
         note: note.to_owned(),
+        failed_tests: Vec::new(),
+        seed: None,
     }
 }
 
@@ -233,8 +287,10 @@ fn json_string(value: &str) -> String {
 
 fn write_report(path: &Path, sha: &str, checks: &[Check], exit_code: i32) -> io::Result<()> {
     let mut report = format!(
-        "{{\n  \"schema_version\": 1,\n  \"commit\": {},\n  \"exit_code\": {},\n  \"checks\": [\n",
+        "{{\n  \"schema_version\": 1,\n  \"commit\": {},\n  \"host_os\": {},\n  \"host_arch\": {},\n  \"exit_code\": {},\n  \"checks\": [\n",
         json_string(sha),
+        json_string(env::consts::OS),
+        json_string(env::consts::ARCH),
         exit_code
     );
     for (index, check) in checks.iter().enumerate() {
@@ -249,14 +305,29 @@ fn write_report(path: &Path, sha: &str, checks: &[Check], exit_code: i32) -> io:
             Some(number) => number.to_string(),
             None => String::from("null"),
         };
+        let failed_tests = format!(
+            "[{}]",
+            check
+                .failed_tests
+                .iter()
+                .map(|name| json_string(name))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let seed = check
+            .seed
+            .as_deref()
+            .map_or_else(|| String::from("null"), json_string);
         report.push_str(&format!(
-            "    {{\"name\":{},\"status\":{},\"command\":{},\"exit_code\":{},\"log\":{},\"note\":{}}}",
+            "    {{\"name\":{},\"status\":{},\"command\":{},\"exit_code\":{},\"log\":{},\"note\":{},\"failed_tests\":{},\"seed\":{}}}",
             json_string(check.name),
             json_string(check.status.as_str()),
             json_string(&check.command),
             code,
             log,
-            json_string(&check.note)
+            json_string(&check.note),
+            failed_tests,
+            seed
         ));
     }
     report.push_str("\n  ]\n}\n");
@@ -441,6 +512,65 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_failed_test_names_without_copying_log_content_or_private_paths() {
+        let text = "test world::piston::case_one ... FAILED\n\
+test world::normal_case ... ok\n\
+Diff in C:\\Users\\someone\\private\\world.rs:123\n\
+test ../secret ... FAILED\n\
+test inventory::keeps_items ... FAILED\n";
+        assert_eq!(
+            failed_test_names(text),
+            ["world::piston::case_one", "inventory::keeps_items"]
+        );
+    }
+
+    #[test]
+    fn seeds_are_optional_and_constrained_to_safe_characters() {
+        assert_eq!(
+            logged_test_seed("test failed; seed=deadbeef-11\n"),
+            Some("deadbeef-11".into())
+        );
+        assert_eq!(logged_test_seed("no explicit seed here\n"), None);
+        assert_eq!(logged_test_seed("seed=; SECRET=should-not-leak\n"), None);
+    }
+
+    #[test]
+    fn seed_parser_ignores_sensitive_lookalikes_in_untrusted_logs() {
+        let output = "password_seed=SHOULD_NOT_APPEAR\n\
+request_url=https://example.invalid/?seed=PRIVATE\n\
+test-seed=deadbeef-11\n";
+        assert_eq!(logged_test_seed(output), Some("deadbeef-11".into()));
+        assert_eq!(logged_test_seed("auth_token_seed=DoNotCopy\n"), None);
+    }
+
+    #[test]
+    fn report_contains_reproduction_data_without_inserting_raw_error_lines() {
+        let target = env::temp_dir().join(format!(
+            "ir1710-verify-report-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let check = Check {
+            name: "Rust unit",
+            command: "cargo test --workspace --all-targets".to_owned(),
+            status: Status::Fail,
+            exit_code: Some(101),
+            log: None,
+            note: "failed".to_owned(),
+            failed_tests: vec!["world::piston::case_one".to_owned()],
+            seed: Some("deadbeef".to_owned()),
+        };
+        write_report(&target, "0123456789abcdef", &[check], 1).unwrap();
+        let output = fs::read_to_string(&target).unwrap();
+        assert!(output.contains("\"failed_tests\":[\"world::piston::case_one\"]"));
+        assert!(output.contains("\"seed\":\"deadbeef\""));
+        assert!(output.contains("cargo test --workspace --all-targets"));
+        assert!(output.contains("\"host_os\":"));
+        assert!(output.contains("\"host_arch\":"));
+        fs::remove_file(target).unwrap();
+    }
 
     #[test]
     fn evidence_options_must_be_paired() {
