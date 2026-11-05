@@ -25,12 +25,11 @@ fn check(path: &Path) -> io::Result<()> {
     println!("Hardcore: {}", config.hardcore);
     println!("Online authentication: {}", config.online_mode);
     println!("Level name: {}", config.level_name);
-    if !config.online_mode {
-        eprintln!(
-            "WARNING: offline usernames are unauthenticated; do not expose this server publicly."
-        );
+    let warning = server_config::offline_exposure_warning(config.bind, config.online_mode);
+    if let Some(message) = warning {
+        eprintln!("{message}");
     }
-    if !config.bind.ip().is_loopback() {
+    if config.online_mode && !config.bind.ip().is_loopback() {
         eprintln!(
             "WARNING: binding to a non-loopback address; verify firewall and account authentication."
         );
