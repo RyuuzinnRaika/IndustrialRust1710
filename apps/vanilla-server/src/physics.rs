@@ -545,9 +545,11 @@ pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPos
     // A normal jump or step moves upward before crossing a block edge; a
     // descent can move over the edge before dropping. A straight diagonal
     // between the two reported positions incorrectly cuts through the block.
-    // Bound this alternative to ordinary small player movements and sweep
-    // both legs so neither can pass through a wall or ceiling.
-    if dy != 0.0 && dy.abs() <= 1.25 && horizontal <= 1.5 {
+    // A late C04/C06 packet can combine moving off a ledge with a
+    // multi-block drop. Its straight endpoint-to-endpoint diagonal would
+    // falsely hit the ledge. Still bound the alternate route horizontally,
+    // and collision-check both legs. Do not extend the upward jump limit.
+    if horizontal <= 1.5 && (dy < 0.0 || (dy > 0.0 && dy <= 1.25)) {
         let corner = if dy > 0.0 {
             PlayerPosition {
                 y: next.y,
@@ -829,6 +831,38 @@ mod tests {
         assert!(!collides(&world, &on_surface));
         assert!(valid_movement(&world, &in_hole, &jumping), "jump out");
         assert!(valid_movement(&world, &on_surface, &in_hole), "drop in");
+    }
+
+    #[test]
+    fn delayed_ledge_drop_avoids_false_rubber_band_in_both_coordinate_signs() {
+        // The client can walk off the ledge and then fall multiple blocks
+        // between two position reports; the straight diagonal clips stone.
+        for (ledge_x, start_x, destination_x) in [(0, 0.5, 1.5), (-1, -0.5, 0.5)] {
+            let mut world = World::new();
+            world.import_block(ledge_x, 69, 0, 1 << 4).unwrap();
+            let before = at(start_x, 70.0, 0.5);
+            let after = at(destination_x, 66.5, 0.5);
+            assert!(!collides(&world, &before));
+            assert!(!collides(&world, &after));
+            assert!(!swept_path_clear(&world, &before, &after));
+            assert!(valid_movement(&world, &before, &after));
+
+            // A real wall along that same horizontal movement remains solid.
+            world.import_block(ledge_x + 1, 70, 0, 1 << 4).unwrap();
+            assert!(!valid_movement(&world, &before, &after));
+        }
+    }
+
+    #[test]
+    fn ledge_drop_exception_does_not_allow_ceiling_or_large_upward_jump() {
+        let mut world = World::new();
+        world.import_block(0, 69, 0, 1 << 4).unwrap();
+        world.import_block(0, 72, 0, 1 << 4).unwrap();
+        let before = at(0.5, 70.0, 0.5);
+        let after = at(1.5, 73.0, 0.5);
+        assert!(!collides(&world, &before));
+        assert!(!collides(&world, &after));
+        assert!(!valid_movement(&world, &before, &after));
     }
 
     #[test]
