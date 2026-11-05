@@ -62,6 +62,26 @@ class ReadinessTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "malformed status object"):
                 ready.probe("127.0.0.1", port)
 
+    def test_description_requires_a_string(self):
+        for bad_description in (["IndustrialRust1710"], None, 42):
+            with self.subTest(description=bad_description):
+                with status_server(document={
+                    "version": {"protocol": 5},
+                    "description": {"text": bad_description},
+                }) as port:
+                    with self.assertRaisesRegex(ValueError, "not IndustrialRust1710"):
+                        ready.probe("127.0.0.1", port)
+
+    def test_nan_infinity_and_zero_duration_are_rejected(self):
+        for bad in (float("nan"), float("inf"), float("-inf"), 0):
+            with self.subTest(duration=bad):
+                with self.assertRaises(ValueError):
+                    ready.probe("127.0.0.1", 25565, timeout=bad)
+                with self.assertRaises(ValueError):
+                    ready.wait_for_ready("127.0.0.1", 25565, timeout=bad)
+                with self.assertRaises(ValueError):
+                    ready.wait_for_ready("127.0.0.1", 25565, interval=bad)
+
     def test_wrong_protocol_is_not_ready(self):
         with status_server(protocol=47) as port:
             with self.assertRaisesRegex(ValueError, "Protocol 5"):
