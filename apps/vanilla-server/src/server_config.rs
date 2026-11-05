@@ -9,6 +9,18 @@ use std::path::{Path, PathBuf};
 
 const MAX_PROPERTIES_BYTES: u64 = 64 * 1024;
 
+/// Explain the actual authentication risk of the requested listener.
+/// A name whitelist in offline-mode is NOT identity authentication.
+pub fn offline_exposure_warning(bind: SocketAddr, online_mode: bool) -> Option<&'static str> {
+    if online_mode {
+        None
+    } else if bind.ip().is_loopback() {
+        Some("WARNING: offline-mode usernames are unauthenticated; use loopback for testing and never forward this port to the internet.")
+    } else {
+        Some("CRITICAL: offline-mode is listening on a non-loopback address. Anyone who can reach it may impersonate a whitelisted username. Restrict to a trusted LAN using firewall rules; never forward this port to the internet.")
+    }
+}
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
 }
@@ -272,6 +284,24 @@ difficulty=1
 max-players=8
 gamemode=1
 ";
+
+    #[test]
+    fn offline_warning_matches_authentication_and_ipv4_ipv6_exposure() {
+        for local in ["127.0.0.1:25565", "[::1]:25565"] {
+            let bind: SocketAddr = local.parse().unwrap();
+            let warning = offline_exposure_warning(bind, false).unwrap();
+            assert!(warning.starts_with("WARNING:"));
+            assert!(!warning.contains("CRITICAL:"));
+            assert_eq!(offline_exposure_warning(bind, true), None);
+        }
+        for public in ["0.0.0.0:25565", "192.168.0.5:25565", "[::]:25565"] {
+            let bind: SocketAddr = public.parse().unwrap();
+            let warning = offline_exposure_warning(bind, false).unwrap();
+            assert!(warning.starts_with("CRITICAL:"));
+            assert!(warning.contains("impersonate"));
+            assert_eq!(offline_exposure_warning(bind, true), None);
+        }
+    }
 
     #[test]
     fn accepts_safe_1710_config_and_maps_legacy_irw_path() {
