@@ -992,6 +992,48 @@ fn protocol5_server_list_ping_echoes_latency_token_after_status_response() {
 }
 
 #[test]
+fn reg123_status_ping_keeps_signed_tokens_isolated_between_sessions() {
+    let server = NativeServer::start();
+
+    // Every payload is an opaque signed 64-bit token. Opening a new
+    // connection must not reuse the token from the previous Status session.
+    for token in [0_i64, 1, -1, i64::MIN, i64::MAX] {
+        let elapsed = server.status_ping(token);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "Status Ping for {token} took {elapsed:?}"
+        );
+    }
+
+    // Both connections must be able to finish Status before either sends
+    // Ping. This also catches a shared/global pending-token slot.
+    let mut clients = [server.client(), server.client()];
+    for client in &mut clients {
+        client.write_all(&handshake(server.port, 1)).unwrap();
+        client.write_all(&frame(0, &[])).unwrap();
+        let (id, response) = receive(client);
+        assert_eq!(id, 0);
+        let mut cursor = Cursor::new(&response);
+        let _: Value = serde_json::from_str(cursor.read_string(65536).unwrap()).unwrap();
+        cursor.finish().unwrap();
+    }
+
+    let first = i64::MIN + 0x12345;
+    let second = i64::MAX - 0x23456;
+    clients[0]
+        .write_all(&frame(1, &first.to_be_bytes()))
+        .unwrap();
+    clients[1]
+        .write_all(&frame(1, &second.to_be_bytes()))
+        .unwrap();
+
+    let (first_id, first_reply) = receive(&mut clients[0]);
+    let (second_id, second_reply) = receive(&mut clients[1]);
+    assert_eq!((first_id, first_reply), (1, first.to_be_bytes().to_vec()));
+    assert_eq!((second_id, second_reply), (1, second.to_be_bytes().to_vec()));
+}
+
+#[test]
 fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     let server = NativeServer::start_with_mode(true);
     let (mut client, _, _) = server.join("RustTester");
