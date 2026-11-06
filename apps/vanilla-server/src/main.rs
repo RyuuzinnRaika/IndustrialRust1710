@@ -1981,6 +1981,16 @@ fn play(
                     )?;
                     *ground = staged_ground;
                     *inventory = candidate;
+                    if trace_mining {
+                        eprintln!(
+                            "mining trace: pickup committed entity={} item={} count={} remaining={} changed_slots={}",
+                            item.id,
+                            item.stack.id,
+                            count,
+                            remainder.as_ref().map_or(0, |left| left.stack.count),
+                            slots.len()
+                        );
+                    }
                     if let Some(remaining) = remainder {
                         // A partial pickup keeps the same ground entity;
                         // update DataWatcher item count instead of
