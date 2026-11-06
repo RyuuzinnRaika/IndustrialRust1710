@@ -4286,7 +4286,7 @@ mod tests {
                 "zombie entered solid wall at tick {tick}"
             );
         }
-        // The old 0.45-wide hitbox stopped at x=0.55; the correct
+        // The old 0.45 half-width stopped at x=0.55; the correct
         // 1.7.10 zombie reaches the wall without tunnelling through it.
         assert!(mobs.entities[&id].position.x > 0.6);
     }
