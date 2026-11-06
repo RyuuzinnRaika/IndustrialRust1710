@@ -1,7 +1,7 @@
 """Compare two local industrial-verify reports without reading logs or world data.
 
 Usage: python tools/verify_local_report_pair.py --windows win/report.json --ubuntu linux/report.json
-Exit: 0 = identical statuses, 1 = different statuses, 2 = invalid/incomplete evidence.
+Exit: 0 = both verifiers succeeded with matching statuses; 1 = mismatch or failure; 2 = invalid evidence.
 """
 import argparse
 import json
@@ -55,6 +55,15 @@ def load_report(path: Path, expected_os: str) -> dict:
         status = check.get("status")
         if not isinstance(status, str) or status not in STATUSES:
             raise EvidenceError(f"{expected_os}: invalid check status")
+        code = check.get("exit_code")
+        if code is not None and type(code) is not int:
+            raise EvidenceError(f"{expected_os}: malformed check exit_code")
+        if status == "PASS" and code != 0:
+            raise EvidenceError(f"{expected_os}: PASS without zero exit_code")
+        if status == "FAIL" and code == 0:
+            raise EvidenceError(f"{expected_os}: FAIL with zero exit_code")
+        if status == "NOT_RUN" and code is not None:
+            raise EvidenceError(f"{expected_os}: NOT_RUN with an exit_code")
     if tuple(names) != CHECK_NAMES:
         raise EvidenceError(f"{expected_os}: unexpected check names or order")
     return report
@@ -77,6 +86,7 @@ def compare_reports(windows: dict, ubuntu: dict) -> dict:
         "windows_arch": windows["host_arch"],
         "linux_arch": ubuntu["host_arch"],
         "identical_statuses": all(entry["match"] for entry in entries),
+        "both_verifiers_succeeded": windows["exit_code"] == ubuntu["exit_code"] == 0,
         "checks": entries,
     }
 
@@ -101,7 +111,8 @@ def main(argv: list[str] | None = None) -> int:
             except OSError as error:
                 raise EvidenceError(f"could not create output: {type(error).__name__}") from error
         print(encoded, end="")
-        return 0 if summary["identical_statuses"] else 1
+        # Matching failures or incomplete verifications are not a PASS gate.
+        return 0 if summary["identical_statuses"] and summary["both_verifiers_succeeded"] else 1
     except EvidenceError as error:
         print(f"invalid comparison evidence: {error}", file=sys.stderr)
         return 2
