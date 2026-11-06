@@ -3022,6 +3022,144 @@ mod tests {
     }
 
     #[test]
+    fn randomized_chest_clicks_preserve_every_item_identity_and_count() {
+        // Deterministic property sweep: 2 chest sizes x 32 seeds x 512 steps.
+        // These actions deliberately exclude Q/drop and Creative clone: items
+        // are neither created nor destroyed by ordinary container transfers.
+        fn next(state: &mut u64) -> u64 {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            *state
+        }
+        fn identity_counts(
+            inventory: &Inventory,
+            chest: &[Option<Stack>],
+        ) -> std::collections::BTreeMap<(i16, i16, Option<u64>), u32> {
+            let mut counts = std::collections::BTreeMap::new();
+            let mut record = |stack: &Option<Stack>| {
+                if let Some(stack) = stack {
+                    *counts
+                        .entry((stack.id, stack.damage, stack.nbt))
+                        .or_insert(0) += u32::from(stack.count);
+                }
+            };
+            for stack in inventory
+                .slots
+                .iter()
+                .chain(inventory.workbench.iter())
+                .chain(inventory.anvil_inputs.iter())
+                .chain(inventory.ender_chest.iter())
+                .chain(chest.iter())
+            {
+                record(stack);
+            }
+            record(&inventory.enchant_input);
+            record(&inventory.cursor);
+            counts
+        }
+        // Include ordinary stackables, metadata-bearing variants and a
+        // single-stack tool to catch overstacking as well as count drift.
+        let ids = [4i16, 5, 17, 20, 257];
+        for chest_slots in [27usize, 54] {
+            for seed in 1u64..=32 {
+                let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                let mut inventory = Inventory::default();
+                let mut chest = vec![None; chest_slots];
+                for slot in 9..45 {
+                    if next(&mut state) % 4 == 0 {
+                        let id = ids[(next(&mut state) % ids.len() as u64) as usize];
+                        inventory.slots[slot] = Some(Stack {
+                            id,
+                            count: (next(&mut state)
+                                % u64::from(crate::items_1710::max_count(id))
+                                + 1) as u8,
+                            damage: if matches!(id, 5 | 17) {
+                                (next(&mut state) % 2) as i16
+                            } else {
+                                0
+                            },
+                            nbt: None,
+                        });
+                    }
+                }
+                for target in &mut chest {
+                    if next(&mut state) % 3 == 0 {
+                        let id = ids[(next(&mut state) % ids.len() as u64) as usize];
+                        *target = Some(Stack {
+                            id,
+                            count: (next(&mut state)
+                                % u64::from(crate::items_1710::max_count(id))
+                                + 1) as u8,
+                            damage: if matches!(id, 5 | 17) {
+                                (next(&mut state) % 2) as i16
+                            } else {
+                                0
+                            },
+                            nbt: None,
+                        });
+                    }
+                }
+                let expected = identity_counts(&inventory, &chest);
+                let size = chest_slots as i16;
+                for step in 0..512 {
+                    let choice = next(&mut state) % 7;
+                    let slot = (next(&mut state) % (chest_slots as u64 + 36)) as i16;
+                    match choice {
+                        0 | 1 => {
+                            inventory.chest_click_window(2, &mut chest, slot, choice as i8, 0);
+                        }
+                        2 | 3 => {
+                            inventory.chest_click_window(
+                                2,
+                                &mut chest,
+                                slot,
+                                (choice - 2) as i8,
+                                1,
+                            );
+                        }
+                        4 => {
+                            // Hotbar swap is limited to the player 36 slots.
+                            let player_slot = size + (next(&mut state) % 36) as i16;
+                            let hotbar = (next(&mut state) % 9) as i8;
+                            inventory.chest_click_window(2, &mut chest, player_slot, hotbar, 2);
+                        }
+                        5 => {
+                            inventory.chest_click_window(2, &mut chest, slot, 0, 6);
+                        }
+                        _ => {
+                            // Three-phase left/right drag. No outside drop.
+                            let start = if next(&mut state) % 2 == 0 { 0 } else { 4 };
+                            inventory.chest_click_window(2, &mut chest, -999, start, 5);
+                            let slots = (next(&mut state) % 4 + 1) as usize;
+                            for _ in 0..slots {
+                                let dest = (next(&mut state) % (chest_slots as u64 + 36)) as i16;
+                                inventory.chest_click_window(2, &mut chest, dest, start + 1, 5);
+                            }
+                            inventory.chest_click_window(2, &mut chest, -999, start + 2, 5);
+                        }
+                    }
+                    assert!(
+                        inventory
+                            .slots
+                            .iter()
+                            .chain(chest.iter())
+                            .chain(std::iter::once(&inventory.cursor))
+                            .flatten()
+                            .all(|stack| stack.is_valid()),
+                        "invalid stack: seed={seed} chest_slots={chest_slots} step={step}"
+                    );
+                    assert_eq!(
+                        identity_counts(&inventory, &chest),
+                        expected,
+                        "seed={seed} chest_slots={chest_slots} step={step} operation={choice}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn chest_moves_are_bounded_and_conserve_items() {
         let mut inv = Inventory::default();
         let mut chest = [None; 27];
