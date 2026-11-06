@@ -3514,18 +3514,15 @@ impl PacketReplayDiagnostics {
                 self.zombie_hurt |= body[4] == 2;
                 self.push(format!("S1A zombie status={}", body[4]));
             }
-            0x1c
-                if body.len() == 10
-                    && zombie.is_some_and(|z| body[..4] == z.to_be_bytes())
-                    && body[4] == 0x66 =>
+            0x1c if body.len() == 10
+                && zombie.is_some_and(|z| body[..4] == z.to_be_bytes())
+                && body[4] == 0x66 =>
             {
                 let health = f32::from_be_bytes(body[5..9].try_into().unwrap());
                 self.zombie_health.push(health);
                 self.push(format!("S1C zombie HP={health:.1}"));
             }
-            0x12
-                if body.len() == 10 && zombie.is_some_and(|z| body[..4] == z.to_be_bytes()) =>
-            {
+            0x12 if body.len() == 10 && zombie.is_some_and(|z| body[..4] == z.to_be_bytes()) => {
                 self.zombie_velocity = true;
                 let vx = i16::from_be_bytes(body[4..6].try_into().unwrap());
                 let vy = i16::from_be_bytes(body[6..8].try_into().unwrap());
@@ -3649,7 +3646,12 @@ fn protocol5_replay_jump_trace_reports_server_position_and_health() {
         "normal jump damaged player:\n{}",
         log.summary()
     );
-    assert_eq!(saved, [0.5, 64.0, 0.5], "lost jump landing:\n{}", log.summary());
+    assert_eq!(
+        saved,
+        [0.5, 64.0, 0.5],
+        "lost jump landing:\n{}",
+        log.summary()
+    );
     drop(rejoined);
     server.wait_idle();
 }
@@ -3689,7 +3691,11 @@ fn protocol5_replay_zombie_attack_reports_status_health_velocity() {
         }
     }
     eprintln!("PROTOCOL5_ZOMBIE_REPLAY\n{}", log.summary());
-    assert!(log.zombie_hurt, "missing zombie hurt status:\n{}", log.summary());
+    assert!(
+        log.zombie_hurt,
+        "missing zombie hurt status:\n{}",
+        log.summary()
+    );
     assert!(
         log.zombie_health.contains(&19.0),
         "missing 19 HP zombie metadata:\n{}",
