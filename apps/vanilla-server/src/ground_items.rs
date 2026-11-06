@@ -2,10 +2,10 @@
 //!
 //! Items persist separately from IRW1 in a capped JSON file. They do not
 //! simulate gravity, collisions, liquids or merging yet.
-//! Ordering prioritizes preventing duplicate pickups: remove+persist the
-//! ground item before writing the receiver's inventory. A storage failure
-//! between these two commits can lose an item; a multi-file transaction is
-//! needed for full crash consistency.
+//! Ground-item pickups and player-thrown items use recoverable multi-file
+//! journal transactions with the inventory. Ordinary block mining likewise
+//! commits world edits, ground drops and tool durability together.
+//! Item physics (gravity, collision, liquids and merging) is not yet modeled.
 use crate::inventory::Stack;
 use crate::multiplayer::{self, Event};
 use crate::world::WORLD_LIMIT;
