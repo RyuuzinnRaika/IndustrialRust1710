@@ -277,6 +277,9 @@ pub fn help_lines(audience: HelpAudience) -> Vec<String> {
         .iter()
         .filter(|guide| audience == HelpAudience::Console || !guide.console_only)
         .map(|guide| {
+            // The canonical name is part of every usage. Keep this check
+            // in the production rendering path as well as the unit test.
+            debug_assert!(guide.usage.starts_with(guide.name));
             format!(
                 "{} | {} | example: {}",
                 guide.usage, guide.access, guide.example
