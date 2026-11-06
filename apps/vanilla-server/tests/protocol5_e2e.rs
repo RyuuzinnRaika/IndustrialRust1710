@@ -169,7 +169,7 @@ impl NativeServer {
                 "entries": {
                     "1000000001": {
                         "id": 1000000001i32,
-                        "position": [144, 120 * 32 + 16, 16],
+                        "position": [144, 3856, 16],
                         "stack": { "id": 3, "count": 1, "damage": 0 }
                     }
                 }
