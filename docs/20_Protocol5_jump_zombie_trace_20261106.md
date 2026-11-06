@@ -43,12 +43,15 @@ prove the executable/client version.
   `physics::valid_movement` and pin its acceptance and fall-damage behavior
   to the anonymized packet trace; **do not invent an additional server jump
   impulse on C03/C04**.
-- Fix the Mob near-melee test to use horizontal range plus vertical **body
-  overlap**. Feet-to-feet 3D distance is an incorrect hit test when a player
-  jumps approximately 1.25 blocks next to a zombie. Preserve the existing
-  1.6-block horizontal guard, 20-tick Mob bite interval, difficulty scaling,
-  and per-player damage grace. Add regression tests for airborne contact,
-  high/out-of-reach misses, and bite intervals.
+- For zombies, replace the generic 1.6-block 3D sphere with the legacy
+  EntityAIAttackOnCollide reach check: squared feet distance must be at most
+  `(zombie_width * 2)^2 + player_width` (adult width 0.6, player width 0.6).
+  This **narrows** overly generous reach, including some jump-apex hits;
+  it does not interpret vertical hitbox overlap as permission to hit.
+  Preserve the 20-tick bite interval, difficulty scaling, and per-player
+  damage grace. Other Mob kinds retain their preexisting reach pending
+  species-specific review. Add tests for valid airborne contact, an airborne
+  miss that the old 1.6 sphere incorrectly accepted, and bite intervals.
 - These are **bounded fidelity improvements**, not proof of full 1.7.10
   combat compatibility. AI awareness, wall occlusion, enchantments, armor,
   multiple attackers, hit invulnerability details, knockback, and the
