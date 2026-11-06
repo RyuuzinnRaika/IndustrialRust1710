@@ -628,6 +628,62 @@ mod tests {
     }
 
     #[test]
+    fn source_pickup_delays_survive_persistence_and_legacy_load() {
+        let block_drop = Stack {
+            id: 3,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let (initial, block_spawned) = GroundItems::default()
+            .stage_put_many(&[block_drop], (0, 64, 0))
+            .unwrap();
+        let block_id = block_spawned[0].id;
+        let (staged, thrown_spawned) = initial
+            .stage_put_many_with_delay(&[block_drop], (1, 64, 0), 40)
+            .unwrap();
+        let throw_id = thrown_spawned[0].id;
+        assert_eq!(staged.entries[&block_id].pickup_delay_ticks, 10);
+        assert_eq!(staged.entries[&throw_id].pickup_delay_ticks, 40);
+        assert!(staged
+            .stage_put_many_with_delay(&[block_drop], (1, 64, 0), 41)
+            .is_err());
+
+        // The block default is omitted to preserve the legacy JSON shape;
+        // player-thrown items retain their 40-tick class across a restart.
+        let json = String::from_utf8(staged.encoded().unwrap()).unwrap();
+        assert!(json.contains("\"pickup_delay_ticks\":40"));
+        assert!(!json.contains("\"pickup_delay_ticks\":10"));
+        let path = std::env::temp_dir().join(format!(
+            "industrialrust1710-pickup-delay-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, json).unwrap();
+        let earliest = Instant::now();
+        let loaded = GroundItems::load(&path).unwrap();
+        let latest = Instant::now();
+        assert_eq!(loaded.entries[&block_id].pickup_delay_ticks, 10);
+        assert_eq!(loaded.entries[&throw_id].pickup_delay_ticks, 40);
+        assert!(
+            *loaded.eligible_after.get(&block_id).unwrap()
+                >= earliest + Duration::from_millis(500)
+        );
+        assert!(
+            *loaded.eligible_after.get(&block_id).unwrap()
+                <= latest + Duration::from_millis(500)
+        );
+        assert!(
+            *loaded.eligible_after.get(&throw_id).unwrap()
+                >= earliest + Duration::from_secs(2)
+        );
+        assert!(
+            *loaded.eligible_after.get(&throw_id).unwrap()
+                <= latest + Duration::from_secs(2)
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn s01_unready_or_distant_drops_never_reach_the_inventory_selector() {
         let (mut drops, added) = GroundItems::default()
             .stage_put_many(
