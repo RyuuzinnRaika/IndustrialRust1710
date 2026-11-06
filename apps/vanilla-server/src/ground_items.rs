@@ -980,6 +980,80 @@ mod tests {
     }
 
     #[test]
+    fn falling_item_lands_on_solid_ground_and_emits_protocol5_s18() {
+        let world = World::new();
+        let stack = Stack {
+            id: 3,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let (mut drops, spawned) = GroundItems::default()
+            .stage_put_many(&[stack], (0, 70, 0))
+            .unwrap();
+        let id = spawned[0].id;
+        let mut last = spawned[0].position[1];
+        let mut saw_movement = false;
+        for _ in 0..80 {
+            let (next, moved) = drops.stage_gravity_ticks(&world, 1).unwrap();
+            assert_eq!(next.items().count(), 1);
+            assert!(next.entries[&id].position[1] <= last, "item moved upward");
+            for moved_item in &moved {
+                assert_eq!(moved_item.id, id);
+                assert_eq!(moved_item.stack, stack);
+                let packet = GroundItems::movement_event(moved_item);
+                assert_eq!(packet.id, 0x18);
+                assert_eq!(packet.body.len(), 18);
+                assert_eq!(&packet.body[..4], &id.to_be_bytes());
+                assert_eq!(
+                    &packet.body[8..12],
+                    &moved_item.position[1].to_be_bytes()
+                );
+                saw_movement = true;
+            }
+            last = next.entries[&id].position[1];
+            drops = next;
+        }
+        assert!(saw_movement, "falling item never received an S18 update");
+        // The flat world's grass at y=63 tops out at y=64. The item AABB
+        // is 1/4 block high, so its center rests at y=64.125.
+        assert_eq!(drops.entries[&id].position[1], 64 * 32 + 4);
+        let (settled, changed) = drops.stage_gravity_ticks(&world, 5).unwrap();
+        assert!(changed.is_empty(), "settled item should stop moving");
+        assert_eq!(settled.entries[&id].stack, stack);
+    }
+
+    #[test]
+    fn falling_item_reacts_to_mined_floor_without_tunnelling() {
+        let world = World::new();
+        // Remove the top grass block before the item falls into the hole.
+        // The lower dirt layer remains a solid collision surface.
+        let mined = world.stage_mining_removal(0, 63, 0).unwrap().unwrap();
+        assert_ne!(world.get(0, 63, 0), 0);
+        assert_eq!(mined.get(0, 63, 0), 0);
+        let stack = Stack {
+            id: 17,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let (mut drops, added) = GroundItems::default()
+            .stage_put_many(&[stack], (0, 68, 0))
+            .unwrap();
+        for _ in 0..80 {
+            let (next, _) = drops.stage_gravity_ticks(&mined, 1).unwrap();
+            drops = next;
+        }
+        // The entity must rest on the new lower layer, without entering it.
+        assert_eq!(drops.entries[&added[0].id].position[1], 63 * 32 + 4);
+        let bytes = drops.encoded().unwrap();
+        let restored: GroundItems = serde_json::from_slice(&bytes).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored.entries[&added[0].id].position, drops.entries[&added[0].id].position);
+        assert_eq!(restored.entries[&added[0].id].stack, stack);
+    }
+
+    #[test]
     fn protocol5_item_packets_and_range() {
         let item = GroundItem {
             id: 1_000_000_001,
