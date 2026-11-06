@@ -12,6 +12,319 @@ pub enum PublicCommand<'a> {
     Tell { target: &'a str, message: &'a str },
 }
 
+/// Where the command is shown. The console has an authenticated local
+/// authority; a player needs a verified OP level for privileged commands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelpAudience {
+    Player,
+    Console,
+}
+
+struct CommandGuide {
+    name: &'static str,
+    usage: &'static str,
+    example: &'static str,
+    access: &'static str,
+    console_only: bool,
+}
+
+/// A single display registry for both /help entrypoints. Implemented
+/// commands only: changes to dispatch or permissions must update this table
+/// and the regression checks below together.
+const COMMAND_GUIDE: &[CommandGuide] = &[
+    CommandGuide {
+        name: "/help",
+        usage: "/help (alias /?)",
+        example: "/help",
+        access: "All players",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/list",
+        usage: "/list",
+        example: "/list",
+        access: "All players",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/me",
+        usage: "/me <action>",
+        example: "/me waves",
+        access: "Chat permission",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/tell",
+        usage: "/tell <player> <message> (aliases /msg, /w)",
+        example: "/tell RustTester hello",
+        access: "Chat permission",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/say",
+        usage: "/say <message>",
+        example: "/say maintenance in 5 minutes",
+        access: "Console only",
+        console_only: true,
+    },
+    CommandGuide {
+        name: "/give",
+        usage: "/give <player> <item> [amount] [data]",
+        example: "/give RustTester stone 1",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/clear",
+        usage: "/clear [player] [item] [data] [maxCount] (console requires player)",
+        example: "/clear RustTester",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/setblock",
+        usage: "/setblock <x> <y> <z> <block> [data] [replace|keep]",
+        example: "/setblock 0 64 0 stone",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/effect",
+        usage: "/effect <player> <id|clear> [seconds] [amplifier]",
+        example: "/effect RustTester speed 10",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/summon",
+        usage: "/summon <entity> [x y z] (console requires coordinates)",
+        example: "/summon Zombie 0 64 0",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/enchant",
+        usage: "/enchant <player> <numeric-id> [level]",
+        example: "/enchant RustTester 16 1",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/testforblock",
+        usage: "/testforblock <x> <y> <z> <block> [data]",
+        example: "/testforblock 0 64 0 stone",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/seed",
+        usage: "/seed",
+        example: "/seed",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/spawnpoint",
+        usage: "/spawnpoint [player] [x y z] (console requires player)",
+        example: "/spawnpoint RustTester 0 65 0",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/setworldspawn",
+        usage: "/setworldspawn [x y z] (console requires coordinates)",
+        example: "/setworldspawn 0 65 0",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/tp",
+        usage: "/tp <player> <x> <y> <z> (alias /teleport; player OP may omit player)",
+        example: "/tp RustTester 0 65 0",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/gamemode",
+        usage: "/gamemode <mode> <player> (player OP may omit player)",
+        example: "/gamemode 1 RustTester",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/time",
+        usage: "/time <set|add|query daytime> [ticks|day|night]",
+        example: "/time set day",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/weather",
+        usage: "/weather [set] <clear|rain|thunder> (console also supports query)",
+        example: "/weather set clear",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/difficulty",
+        usage: "/difficulty <peaceful|easy|normal|hard> (console supports query)",
+        example: "/difficulty normal",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/gamerule",
+        usage: "/gamerule <key> [value]",
+        example: "/gamerule doDaylightCycle false",
+        access: "Verified OP level 2",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/scoreboard",
+        usage: "/scoreboard <objectives|players|teams> ...",
+        example: "/scoreboard objectives list",
+        access: "Console only",
+        console_only: true,
+    },
+    CommandGuide {
+        name: "/save",
+        usage: "/save",
+        example: "/save",
+        access: "Verified OP level 4",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/op",
+        usage: "/op <player>",
+        example: "/op RustTester",
+        access: "Verified OP level 4",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/deop",
+        usage: "/deop <player>",
+        example: "/deop RustTester",
+        access: "Verified OP level 4",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/kick",
+        usage: "/kick <player> [reason]",
+        example: "/kick RustTester maintenance",
+        access: "Verified OP level 3",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/ban",
+        usage: "/ban <player> [reason]",
+        example: "/ban RustTester griefing",
+        access: "Verified OP level 3",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/pardon",
+        usage: "/pardon <player>",
+        example: "/pardon RustTester",
+        access: "Verified OP level 3",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/pardon-uuid",
+        usage: "/pardon-uuid <uuid>",
+        example: "/pardon-uuid 00000000-0000-0000-0000-000000000001",
+        access: "Verified OP level 3",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/ban-ip",
+        usage: "/ban-ip <address> [reason]",
+        example: "/ban-ip 192.0.2.1 abuse",
+        access: "Verified OP level 3",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/pardon-ip",
+        usage: "/pardon-ip <address>",
+        example: "/pardon-ip 192.0.2.1",
+        access: "Verified OP level 3",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/whitelist",
+        usage: "/whitelist <list|reload>",
+        example: "/whitelist list",
+        access: "Console only",
+        console_only: true,
+    },
+    CommandGuide {
+        name: "/permission",
+        usage: "/permission <player> <kind> <allow|deny>",
+        example: "/permission RustTester chat allow",
+        access: "Verified OP level 4",
+        console_only: false,
+    },
+    CommandGuide {
+        name: "/stop",
+        usage: "/stop",
+        example: "/stop",
+        access: "Console only",
+        console_only: true,
+    },
+];
+
+pub fn help_lines(audience: HelpAudience) -> Vec<String> {
+    COMMAND_GUIDE
+        .iter()
+        .filter(|guide| audience == HelpAudience::Console || !guide.console_only)
+        .map(|guide| {
+            format!(
+                "{} | {} | example: {}",
+                guide.usage, guide.access, guide.example
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod command_guide_tests {
+    use super::*;
+
+    #[test]
+    fn both_help_surfaces_use_one_registry_without_unsupported_commands() {
+        let player = help_lines(HelpAudience::Player);
+        let console = help_lines(HelpAudience::Console);
+        assert_eq!(player.len() + 4, console.len());
+        assert!(player.iter().all(|line| console.contains(line)));
+        assert!(player.iter().all(|line| !line.contains("Console only")));
+        assert!(console.iter().any(|line| line.starts_with("/scoreboard")));
+        assert!(console.iter().any(|line| line.starts_with("/whitelist")));
+        assert!(console.iter().any(|line| line.starts_with("/stop")));
+        assert!(player.iter().any(|line| line.starts_with("/ban-ip")));
+        assert!(player.iter().any(|line| line.starts_with("/pardon-uuid")));
+        assert!(!console.iter().any(|line| line.contains("/execute ")));
+        assert!(!console.iter().any(|line| line.contains("/data ")));
+    }
+
+    #[test]
+    fn guide_examples_match_canonical_command_and_names_are_unique() {
+        let mut names = std::collections::BTreeSet::new();
+        for guide in COMMAND_GUIDE {
+            assert!(names.insert(guide.name), "duplicate command: {}", guide.name);
+            assert!(
+                guide.usage.starts_with(guide.name),
+                "usage must start with its command: {}",
+                guide.name
+            );
+            assert!(
+                guide.example.starts_with(guide.name),
+                "example must start with its command: {}",
+                guide.name
+            );
+            assert!(!guide.access.is_empty());
+        }
+    }
+}
+
 /// Recognized unprivileged commands, including invalid usage. Unknown commands
 /// return None and continue through the *verified* administrator permission gate.
 pub fn parse_public(message: &str) -> Option<Result<PublicCommand<'_>, &'static str>> {
