@@ -389,7 +389,8 @@ impl World {
                     .copied()
                     .unwrap_or(0),
             ),
-            92 => Some(14u8.saturating_sub((state as u8 & 7).min(7) * 2)),
+            // Cake never supplied a comparator override in Java 1.7.10.
+            // This was introduced in snapshot 14w28a for Java 1.8.
             118 => Some((state & 3) as u8),
             120 => Some(if state & 4 != 0 { 15 } else { 0 }),
             _ => None,
@@ -1471,8 +1472,8 @@ mod redstone_regression_tests {
         let rear = (-1, 64, 0);
         let target = (0, 64, 0);
         for (block, expected) in [
-            ((92 << 4), 14),
-            ((92 << 4) | 6, 2),
+            ((92 << 4), 0),  // 1.7.10 cake: no comparator override.
+            ((92 << 4) | 5, 0),
             ((118 << 4) | 3, 3),
             ((118 << 4), 0),
             ((120 << 4) | 4, 15),
@@ -1485,9 +1486,10 @@ mod redstone_regression_tests {
     }
 
     #[test]
-    fn reg166_cake_bites_update_comparator_and_survive_reload() {
-        // A whole 1.7.10 cake has 6 edible slices. Comparator override is
-        // 14 - 2 * bites, and the last bite removes the block completely.
+    fn reg166_cake_bites_do_not_power_comparator_in_java_1_7_10() {
+        // Java 1.7.10 cake has six edible slices but NO comparator override.
+        // Snapshot 14w28a first added cake analog output for Java 1.8.
+        // The last cake bite still removes the block completely.
         // Each test uses a create-only scratch world, never an existing save.
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1510,12 +1512,15 @@ mod redstone_regression_tests {
             for _ in 0..4 {
                 world.block_tick(&path, 64).unwrap();
             }
-            let expected = 14 - (bites as u8) * 2;
-            assert_eq!(world.comparator_rear_input((-1, 64, 0), (0, 64, 0)), expected);
+            assert_eq!(
+                world.comparator_rear_input((-1, 64, 0), (0, 64, 0)),
+                0,
+                "1.7.10 cake unexpectedly supplied comparator power after {bites} bites"
+            );
             assert_eq!(
                 world.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0),
-                expected,
-                "wrong comparator output after {bites} bites"
+                0,
+                "1.7.10 cake unexpectedly powered comparator after {bites} bites"
             );
             assert_eq!(
                 world.signal_into((-1, 64, 0), (0, 64, 0)),
@@ -1539,7 +1544,10 @@ mod redstone_regression_tests {
         for _ in 0..4 {
             reloaded.block_tick(&path, 64).unwrap();
         }
-        assert_eq!(reloaded.comparator_outputs.get(&(0, 64, 0)), Some(&8));
+        assert_eq!(
+            reloaded.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0),
+            0
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1769,7 +1777,9 @@ mod redstone_regression_tests {
         // Unpowered dust decays, while daylight sensors are recalculated by
         // the day/night cycle; neither holds an arbitrary analog test value.
         w.update_and_save(&path, 0, 64, 0, (149 << 4) | 1).unwrap();
-        w.update_and_save(&path, -1, 64, 0, 92 << 4).unwrap(); // Whole cake: 14.
+        // Weighted pressure plate supplies 14 (cake did not in Java 1.7.10).
+        w.update_and_save(&path, -1, 64, 0, (148 << 4) | 14)
+            .unwrap();
         w.update_and_save(&path, 0, 64, 1, (147 << 4) | 5).unwrap();
         for _ in 0..3 {
             w.block_tick(&path, 64).unwrap();
