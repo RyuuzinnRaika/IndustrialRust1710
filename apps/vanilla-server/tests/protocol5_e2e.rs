@@ -40,12 +40,20 @@ impl NativeServer {
         Self::start_with_mode_and_items(survival, &[])
     }
     fn start_with_mode_and_items(survival: bool, items: &[(usize, i16)]) -> Self {
-        Self::start_with_seed(survival, items, false)
+        Self::start_with_seed(survival, items, false, false)
     }
     fn start_with_mode_and_cow(survival: bool, items: &[(usize, i16)]) -> Self {
-        Self::start_with_seed(survival, items, true)
+        Self::start_with_seed(survival, items, true, false)
     }
-    fn start_with_seed(survival: bool, items: &[(usize, i16)], cow: bool) -> Self {
+    fn start_with_falling_drop() -> Self {
+        Self::start_with_seed(true, &[], false, true)
+    }
+    fn start_with_seed(
+        survival: bool,
+        items: &[(usize, i16)],
+        cow: bool,
+        falling_drop: bool,
+    ) -> Self {
         let exclusive = SERVER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -148,6 +156,27 @@ impl NativeServer {
             fs::write(
                 directory.join("flat.mobs.json"),
                 serde_json::to_vec(&mobs).unwrap(),
+            )
+            .unwrap();
+        }
+        if falling_drop {
+            // Preload a single high-altitude ground item before the native
+            // server starts. Keep it four blocks from the login spawn so
+            // that it falls visibly rather than being picked up immediately.
+            let data = json!({
+                "version": 1,
+                "next_id": 1000000001i32,
+                "entries": {
+                    "1000000001": {
+                        "id": 1000000001i32,
+                        "position": [144, 3856, 16],
+                        "stack": { "id": 3, "count": 1, "damage": 0 }
+                    }
+                }
+            });
+            fs::write(
+                directory.join("flat.drops.json"),
+                serde_json::to_vec(&data).unwrap(),
             )
             .unwrap();
         }
@@ -989,6 +1018,58 @@ fn protocol5_server_list_ping_echoes_latency_token_after_status_response() {
         elapsed < Duration::from_secs(3),
         "Ping Response took {elapsed:?}"
     );
+}
+
+/// A real TCP client sees S18 while a persisted high-altitude item falls,
+/// and can collect the same entity once it lands on the native flat world.
+#[test]
+fn survival_ground_item_gravity_sends_s18_then_still_allows_pickup() {
+    let server = NativeServer::start_with_falling_drop();
+    let (mut client, _, _) = server.join("RustTester");
+    let entity_id = 1_000_000_001i32;
+    until_packet(&mut client, 0x0e, |body| body.len() == 24 && body[5] == 2);
+    let first_move = until_packet(&mut client, 0x18, |body| {
+        body.len() == 18
+            && body[..4] == entity_id.to_be_bytes()
+            && i32::from_be_bytes(body[8..12].try_into().unwrap()) < 120 * 32 + 16
+    });
+    assert_eq!(&first_move[..4], &entity_id.to_be_bytes());
+    let drops_file = server.directory.join("flat.drops.json");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let data: Value = serde_json::from_slice(&fs::read(&drops_file).unwrap()).unwrap();
+        let item = &data["entries"]["1000000001"];
+        if item["position"][1].as_i64() == Some(64 * 32 + 4) {
+            assert_eq!(item["stack"]["id"], 3);
+            assert_eq!(item["stack"]["count"], 1);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ground item never landed on the flat surface: {item}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    send_position(&mut client, 4.5, 64.0, 0.5);
+    until_packet(&mut client, 0x2f, |body| {
+        body == [0, 0, 36, 0, 3, 1, 0, 0, 255, 255]
+    });
+    drop(client);
+    server.wait_idle();
+    let after: Value = serde_json::from_slice(&fs::read(&drops_file).unwrap()).unwrap();
+    assert!(after["entries"].as_object().unwrap().is_empty());
+    let inv: Value = serde_json::from_slice(
+        &fs::read(
+            server
+                .directory
+                .join("players/rusttester.survival.inventory.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(inv["slots"][36]["id"], 3);
+    assert_eq!(inv["slots"][36]["count"], 1);
 }
 
 /// Full Protocol 5 acceptance: mine one survival block, observe the dropped
