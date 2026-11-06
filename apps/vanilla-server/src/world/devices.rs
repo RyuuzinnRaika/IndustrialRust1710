@@ -1474,6 +1474,9 @@ mod redstone_regression_tests {
         for (block, expected) in [
             ((92 << 4), 0), // 1.7.10 cake: no comparator override.
             ((92 << 4) | 5, 0),
+            ((92 << 4) | 6, 0), // Invalid/over-eaten legacy metadata.
+            ((92 << 4) | 7, 0),
+            ((92 << 4) | 15, 0),
             ((118 << 4) | 3, 3),
             ((118 << 4), 0),
             ((120 << 4) | 4, 15),
