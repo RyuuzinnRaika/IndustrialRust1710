@@ -1,8 +1,8 @@
-# 19 PRs integration snapshot — 18 open, #855 merged
+# 19 PRs integration snapshot — 17 open, #855 and #858 merged
 
 **This branch is a disposable validation candidate, not a production merge or a release.**
 
-main snapshot: `b7f3b7f8f61312ea0e4ca2df6064f3b94cc38d5d`
+main snapshot: `dd3c2675ced96b03724b34f736b343a702261f30`
 
 ## Included GitHub PR heads
 - #729: `eebf33db24524342d1281af29a6a290893cf30a2`
@@ -67,3 +67,7 @@ Snapshot branch and PR heads may advance independently. Compare PR HEAD SHAs bef
 ## Merged upstream PR #855
 
 PR #855 (cake comparator compatibility) merged into main as `b7f3b7f8f61312ea0e4ca2df6064f3b94cc38d5d` after this snapshot was created. The merged `apps/vanilla-server/src/world/devices.rs` differs from the initial #855 blob, so this refreshed integration snapshot adopts **main's newer blob** and no longer overlays the old #855 source file. All other 18 open-PR code paths are retained. Their Rust gates remain NOT_RUN on the combined candidate.
+
+## Merged upstream PR #858
+
+PR #858 (daylight detector regressions) merged to main as `dd3c2675ced96b03724b34f736b343a702261f30`. The new main `apps/vanilla-server/src/world/special.rs` is adopted instead of the outdated #858 snapshot. 17 other PRs remain Draft; combined Rust validation is NOT_RUN. Upstream changes can continue after this snapshot.

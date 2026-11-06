@@ -1061,7 +1061,8 @@ mod tests {
             assert_eq!(
                 world.get(0, 64, 0),
                 (151 << 4) | expected,
-                "wrong solar output with roof block {}", roof >> 4
+                "wrong solar output with roof block {}",
+                roof >> 4
             );
             assert_eq!(
                 World::load(&path).unwrap().get(0, 64, 0),
