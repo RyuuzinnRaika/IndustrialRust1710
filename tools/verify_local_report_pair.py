@@ -66,6 +66,20 @@ def load_report(path: Path, expected_os: str) -> dict:
             raise EvidenceError(f"{expected_os}: NOT_RUN with an exit_code")
     if tuple(names) != CHECK_NAMES:
         raise EvidenceError(f"{expected_os}: unexpected check names or order")
+
+    # industrial-verify reports exit 1 for any FAIL, 2 for missing required
+    # checks, and 0 only when every requested check passed. The optional E42
+    # check may be NOT_RUN when --automated-only was used (the flag is not
+    # included in schema v1). An inconsistent report must never pass a gate.
+    statuses = [check["status"] for check in checks]
+    failed = "FAIL" in statuses
+    incomplete = "NOT_RUN" in statuses
+    required_incomplete = "NOT_RUN" in statuses[:-1]
+    exit_code = report["exit_code"]
+    if (exit_code == 0 and (failed or required_incomplete)) or (
+        exit_code == 1 and not failed
+    ) or (exit_code == 2 and (failed or not incomplete)):
+        raise EvidenceError(f"{expected_os}: summary exit_code conflicts with check statuses")
     return report
 
 
