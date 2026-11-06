@@ -4460,6 +4460,19 @@ fn play(
                                                     let mut candidate = inventory.clone();
                                                     let wore = result.wear_tool
                                                         && candidate.wear_held_tool();
+                                                    // Any decoration sidecar cleanup belongs
+                                                    // to the same recoverable mining transaction.
+                                                    let mut stored = decorations
+                                                        .lock()
+                                                        .map_err(|_| {
+                                                            bad("decorations lock poisoned")
+                                                        })?;
+                                                    let staged_decorations =
+                                                        if stored.contains_position(target) {
+                                                            Some(stored.staged_remove(target)?)
+                                                        } else {
+                                                            None
+                                                        };
                                                     let mut writes =
                                                         vec![(world_path, staged_world.encoded()?)];
                                                     if let Some((next_ground, _)) =
@@ -4476,6 +4489,12 @@ fn play(
                                                             candidate.encoded()?,
                                                         ));
                                                     }
+                                                    if let Some(ref cleaned) = staged_decorations {
+                                                        writes.push((
+                                                            decoration_path,
+                                                            cleaned.encoded()?,
+                                                        ));
+                                                    }
                                                     // World edit, durability, and every block
                                                     // drop must succeed or fail together.
                                                     journal::commit(
@@ -4484,6 +4503,10 @@ fn play(
                                                         &writes,
                                                     )?;
                                                     *w = staged_world;
+                                                    if let Some(cleaned) = staged_decorations {
+                                                        *stored = cleaned;
+                                                    }
+                                                    drop(stored);
                                                     if let Some((next_ground, spawned)) = staged_drops
                                                     {
                                                         *ground = next_ground;
@@ -4503,12 +4526,6 @@ fn play(
                                                             "mining trace: committed target={target:?} block={block} drops=0 tool_worn={wore}"
                                                         );
                                                     }
-                                                    decorations
-                                                        .lock()
-                                                        .map_err(|_| {
-                                                            bad("decorations lock poisoned")
-                                                        })?
-                                                        .remove(decoration_path, target)?;
                                                     if wore {
                                                         *inventory = candidate;
                                                         send(
