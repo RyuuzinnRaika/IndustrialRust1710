@@ -80,6 +80,12 @@ class PairReportTests(unittest.TestCase):
         with self.assertRaisesRegex(pair.EvidenceError, "invalid check status"):
             pair.load_report(self.write("broken.json", broken), "windows")
 
+    def test_nested_unhashable_status_is_rejected_without_traceback(self):
+        invalid = self.report("windows")
+        invalid["checks"][0]["status"] = ["PASS"]
+        with self.assertRaisesRegex(pair.EvidenceError, "invalid check status"):
+            pair.load_report(self.write("nested_status.json", invalid), "windows")
+
     def test_oversized_report_is_rejected_without_reading_logs(self):
         path = self.root / "oversized.json"
         path.write_bytes(b" " * (pair.MAX_REPORT_BYTES + 1))
