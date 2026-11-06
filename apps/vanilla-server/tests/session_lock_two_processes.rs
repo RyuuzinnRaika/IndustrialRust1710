@@ -2,6 +2,7 @@
 //! This test uses a create-only disposable world. Never point it at a user save.
 use std::fs;
 use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -16,9 +17,9 @@ impl Drop for Server {
     }
 }
 
-fn command(exe: &str, world: &Path, whitelist: &Path) -> Command {
+fn command(exe: &str, world: &Path, whitelist: &Path, bind: &str) -> Command {
     let mut cmd = Command::new(exe);
-    cmd.args(["--bind", "127.0.0.1:0", "--world"])
+    cmd.args(["--bind", bind, "--world"])
         .arg(world)
         .arg("--whitelist")
         .arg(whitelist)
@@ -26,8 +27,16 @@ fn command(exe: &str, world: &Path, whitelist: &Path) -> Command {
     cmd
 }
 
-fn launch(exe: &str, world: &Path, whitelist: &Path) -> Server {
-    let child = command(exe, world, whitelist)
+fn temporary_loopback_port() -> u16 {
+    // Use a distinct listener port for each owner and :0 for the contender.
+    // The probed port must be bound *after* world session.lock is acquired.
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    probe.local_addr().unwrap().port()
+}
+
+fn launch(exe: &str, world: &Path, whitelist: &Path, port: u16) -> Server {
+    let bind = format!("127.0.0.1:{port}");
+    let child = command(exe, world, whitelist, &bind)
         .stdin(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -35,32 +44,33 @@ fn launch(exe: &str, world: &Path, whitelist: &Path) -> Server {
     Server(child)
 }
 
-fn wait_for_world(server: &mut Server, world: &Path, lock_path: &Path) {
+fn wait_for_world(server: &mut Server, world: &Path, lock_path: &Path, port: u16) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        if world.is_file()
+        let files_ready = world.is_file()
             && fs::metadata(lock_path)
-                .is_ok_and(|metadata| metadata.is_file() && metadata.len() == 8)
-        {
-            // A lock-file appearing alone is not sufficient to prove that
-            // the first server is ready; the world must exist as well.
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() == 8);
+        if files_ready && TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            // The old world/lock files survive a restart, so file existence
+            // alone cannot prove that the new process acquired the lock.
+            // The server binds its TCP listener only after world startup.
             assert!(server.0.try_wait().unwrap().is_none());
             return;
         }
         assert!(
             server.0.try_wait().unwrap().is_none(),
-            "first server exited before its world and session.lock existed"
+            "server exited before binding its isolated listener and world"
         );
         assert!(
             Instant::now() < deadline,
-            "first server never initialized its disposable world"
+            "server never initialized its world and TCP listener"
         );
         thread::sleep(Duration::from_millis(40));
     }
 }
 
 fn denied_second_start(exe: &str, world: &Path, whitelist: &Path) -> (ExitStatus, String) {
-    let mut child = command(exe, world, whitelist)
+    let mut child = command(exe, world, whitelist, "127.0.0.1:0")
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -126,8 +136,9 @@ fn reg184_second_process_cannot_rewrite_a_live_world_and_lock_is_released() {
     fs::write(&whitelist, r#"[{"name":"RustTester"}]"#).unwrap();
 
     let exe = env!("CARGO_BIN_EXE_vanilla-server");
-    let mut first = launch(exe, &world, &whitelist);
-    wait_for_world(&mut first, &world, &lock_path);
+    let initial_port = temporary_loopback_port();
+    let mut first = launch(exe, &world, &whitelist, initial_port);
+    wait_for_world(&mut first, &world, &lock_path, initial_port);
     let world_before = fs::read(&world).unwrap();
 
     #[cfg(unix)]
@@ -156,8 +167,9 @@ fn reg184_second_process_cannot_rewrite_a_live_world_and_lock_is_released() {
 
     stop(&mut first);
     drop(first);
-    let mut restarted = launch(exe, &world, &whitelist);
-    wait_for_world(&mut restarted, &world, &lock_path);
+    let restarted_port = temporary_loopback_port();
+    let mut restarted = launch(exe, &world, &whitelist, restarted_port);
+    wait_for_world(&mut restarted, &world, &lock_path, restarted_port);
     stop(&mut restarted);
     drop(restarted);
 
