@@ -80,6 +80,7 @@ class LanguagePolicyTest(unittest.TestCase):
             "tools/tnt_stress_benchmark.py",
             "tools/verify_backup_restore.py",
             "tools/check_world_format.py",
+            "tools/verify_save_fixture_report.py",
             "tools/GenLayerAddSnowOracle.java",
         ):
             with self.subTest(allowed=allowed):
@@ -88,6 +89,7 @@ class LanguagePolicyTest(unittest.TestCase):
             "apps/vanilla-server/server.py",
             "crates/world/src/world.py",
             "tools/world_runtime.py",
+            "tools/save_fixture_report.py",
             "tools/ServerGui2.cs",
             "scripts/deploy.py",
             "scripts/new_supervisor.py",
