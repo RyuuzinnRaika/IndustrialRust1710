@@ -1030,7 +1030,10 @@ fn reg123_status_ping_keeps_signed_tokens_isolated_between_sessions() {
     let (first_id, first_reply) = receive(&mut clients[0]);
     let (second_id, second_reply) = receive(&mut clients[1]);
     assert_eq!((first_id, first_reply), (1, first.to_be_bytes().to_vec()));
-    assert_eq!((second_id, second_reply), (1, second.to_be_bytes().to_vec()));
+    assert_eq!(
+        (second_id, second_reply),
+        (1, second.to_be_bytes().to_vec())
+    );
 
     // Status Ping accepts exactly packet id 1 with an eight-byte body.
     // Malformed lengths and wrong IDs must close the connection, not echo
