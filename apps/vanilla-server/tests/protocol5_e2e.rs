@@ -1020,9 +1020,6 @@ fn protocol5_server_list_ping_echoes_latency_token_after_status_response() {
     );
 }
 
-/// Full Protocol 5 acceptance: mine one survival block, observe the dropped
-/// entity, pick it up exactly once, and ensure the saved inventory and ground
-/// entity pool agree after a fresh login. No real player world is accessed.
 /// A real TCP client sees S18 while a persisted high-altitude item falls,
 /// and can collect the same entity once it lands on the native flat world.
 #[test]
@@ -1030,9 +1027,7 @@ fn survival_ground_item_gravity_sends_s18_then_still_allows_pickup() {
     let server = NativeServer::start_with_falling_drop();
     let (mut client, _, _) = server.join("RustTester");
     let entity_id = 1_000_000_001i32;
-    until_packet(&mut client, 0x0e, |body| {
-        body.len() == 24 && body[5] == 2
-    });
+    until_packet(&mut client, 0x0e, |body| body.len() == 24 && body[5] == 2);
     let first_move = until_packet(&mut client, 0x18, |body| {
         body.len() == 18
             && body[..4] == entity_id.to_be_bytes()
@@ -1077,6 +1072,9 @@ fn survival_ground_item_gravity_sends_s18_then_still_allows_pickup() {
     assert_eq!(inv["slots"][36]["count"], 1);
 }
 
+/// Full Protocol 5 acceptance: mine one survival block, observe the dropped
+/// entity, pick it up exactly once, and ensure the saved inventory and ground
+/// entity pool agree after a fresh login. No real player world is accessed.
 #[test]
 fn survival_mined_block_drop_pickup_persists_without_duplication() {
     let server = NativeServer::start_with_mode(true);
