@@ -645,9 +645,8 @@ mod tests {
         let throw_id = thrown_spawned[0].id;
         assert_eq!(staged.entries[&block_id].pickup_delay_ticks, 10);
         assert_eq!(staged.entries[&throw_id].pickup_delay_ticks, 40);
-        assert!(staged
-            .stage_put_many_with_delay(&[block_drop], (1, 64, 0), 41)
-            .is_err());
+        let invalid_delay = staged.stage_put_many_with_delay(&[block_drop], (1, 64, 0), 41);
+        assert!(invalid_delay.is_err());
 
         // The block default is omitted to preserve the legacy JSON shape;
         // player-thrown items retain their 40-tick class across a restart.
@@ -664,22 +663,12 @@ mod tests {
         let latest = Instant::now();
         assert_eq!(loaded.entries[&block_id].pickup_delay_ticks, 10);
         assert_eq!(loaded.entries[&throw_id].pickup_delay_ticks, 40);
-        assert!(
-            *loaded.eligible_after.get(&block_id).unwrap()
-                >= earliest + Duration::from_millis(500)
-        );
-        assert!(
-            *loaded.eligible_after.get(&block_id).unwrap()
-                <= latest + Duration::from_millis(500)
-        );
-        assert!(
-            *loaded.eligible_after.get(&throw_id).unwrap()
-                >= earliest + Duration::from_secs(2)
-        );
-        assert!(
-            *loaded.eligible_after.get(&throw_id).unwrap()
-                <= latest + Duration::from_secs(2)
-        );
+        let block_ready = *loaded.eligible_after.get(&block_id).unwrap();
+        let thrown_ready = *loaded.eligible_after.get(&throw_id).unwrap();
+        assert!(block_ready >= earliest + Duration::from_millis(500));
+        assert!(block_ready <= latest + Duration::from_millis(500));
+        assert!(thrown_ready >= earliest + Duration::from_secs(2));
+        assert!(thrown_ready <= latest + Duration::from_secs(2));
         let _ = std::fs::remove_file(&path);
     }
 
