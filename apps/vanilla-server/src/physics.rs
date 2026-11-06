@@ -819,6 +819,52 @@ mod tests {
         }
     }
 
+    /// Sanitized feet-Y samples decoded from a user's unmodified 1.7.10
+    /// Protocol 5 C04 position packets, approximately one packet per 50 ms.
+    /// Local addresses, usernames, and unrelated traffic are not retained.
+    /// Vertical timing and landing must not be rejected or cause fall damage.
+    #[test]
+    fn vanilla_1710_packet_trace_jump_apex_and_landing_are_accepted() {
+        let world = World::new();
+        // The original captured floor was Y=68; shift the complete motion
+        // down four blocks to the flat fixture floor at Y=64.
+        let feet_y = [
+            64.0,
+            64.419999986887,
+            64.753199980521,
+            65.001335979112,
+            65.166109260938,
+            65.249187078745,
+            65.249187078745,
+            65.170787077219,
+            65.015555072702,
+            64.785027703789,
+            64.480710876332,
+            64.104080378093,
+            64.0,
+        ];
+        let mut tracker = FallTracker::new(feet_y[0]);
+        assert!(supported(&world, &at(0.5, feet_y[0], 0.5)));
+        for (index, pair) in feet_y.windows(2).enumerate() {
+            let previous = at(0.5, pair[0], 0.5);
+            let next = at(0.5, pair[1], 0.5);
+            assert!(
+                valid_movement(&world, &previous, &next),
+                "rejects Protocol 5 jump tick {}",
+                index + 1
+            );
+            let landed = index + 2 == feet_y.len();
+            assert_eq!(tracker.update(next.y, landed), 0);
+            if landed {
+                assert!(supported(&world, &next));
+            }
+        }
+        let apex = feet_y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!((apex - 65.249187078745).abs() < 1e-9);
+        assert!((feet_y[1] - feet_y[0] - 0.42).abs() < 1e-6);
+        assert!((feet_y[2] - feet_y[1] - 0.3332).abs() < 1e-6);
+    }
+
     #[test]
     fn jumping_out_of_and_dropping_into_a_one_block_hole_remains_valid() {
         let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);

@@ -10,7 +10,6 @@ import argparse
 import hashlib
 import json
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -82,19 +81,25 @@ def _repair_action(classification: str) -> str:
     return "restore_from_verified_backup_only"
 
 
-def _verify_on_copy(server: Path, original: Path, timeout: int) -> bool:
+def _verify_on_copy(server: Path, original: Path, timeout: int,
+                    expected_sha256: str, expected_size: int) -> bool:
     if not server.is_file():
         raise InspectionFailure("native server binary not found")
     with tempfile.TemporaryDirectory(prefix="ir1710-save-fixture-") as scratch:
         target = Path(scratch) / "fixture.irw"
-        # Copy only a bounded number of bytes to a new temporary location.
+        # The fixture can change between initial inspection and this copy.
+        # Never report that a different set of bytes passed native validation.
+        copied_sha256 = hashlib.sha256()
         total = 0
         with original.open("rb") as source, target.open("xb") as destination:
             while chunk := source.read(1024 * 1024):
                 total += len(chunk)
                 if total > MAX_BYTES:
                     raise InspectionFailure("source grew during verification copy")
+                copied_sha256.update(chunk)
                 destination.write(chunk)
+        if total != expected_size or copied_sha256.hexdigest() != expected_sha256:
+            raise InspectionFailure("source changed before native verification copy")
         try:
             result = subprocess.run(
                 [str(server.resolve()), "--verify-world", str(target)],
@@ -102,6 +107,11 @@ def _verify_on_copy(server: Path, original: Path, timeout: int) -> bool:
             )
         except subprocess.TimeoutExpired:
             return False
+        # Even an accidental write by the verifier must not be mistaken for
+        # successful validation of the original, pre-verified fixture.
+        verified_sha256, verified_size, _ = _read_source(target)
+        if (verified_sha256, verified_size) != (expected_sha256, expected_size):
+            raise InspectionFailure("native verification altered copied fixture")
         # Do not print arbitrary subprocess stdout/stderr: it can contain
         # paths, personal data or externally supplied payloads.
         return result.returncode == 0
@@ -119,7 +129,7 @@ def inspect(path: Path, expected_sha256: str | None = None,
     if expected_sha256 is not None and original_hash.lower() != expected_sha256.lower():
         classification = "checksum_mismatch"
     elif classification == "requires_native_verification" and server is not None:
-        native_ok = _verify_on_copy(server, path, timeout)
+        native_ok = _verify_on_copy(server, path, timeout, original_hash, size)
         native = "PASS" if native_ok else "FAIL"
         classification = "native_verified" if native_ok else "native_failed"
     after_hash, after_size, _ = _read_source(path)
