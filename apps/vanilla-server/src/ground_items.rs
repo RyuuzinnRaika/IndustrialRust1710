@@ -19,7 +19,23 @@ use std::time::{Duration, Instant};
 
 const MAX_DROPS: usize = 512;
 const MAX_BYTES: u64 = 128 * 1024;
-const PICKUP_DELAY: Duration = Duration::from_millis(750);
+const BLOCK_PICKUP_DELAY_TICKS: u16 = 10;
+const PLAYER_DROP_PICKUP_DELAY_TICKS: u16 = 40;
+const TICK_MILLIS: u64 = 50;
+
+/// Vanilla 1.7.10 block-spawned items wait 10 ticks; a player throwing an
+/// item with Q/Ctrl+Q waits 40 ticks before anybody can pick it back up.
+fn pickup_delay(ticks: u16) -> Duration {
+    Duration::from_millis(u64::from(ticks) * TICK_MILLIS)
+}
+
+fn default_pickup_delay_ticks() -> u16 {
+    BLOCK_PICKUP_DELAY_TICKS
+}
+
+fn default_pickup_delay_is_implicit(value: &u16) -> bool {
+    *value == BLOCK_PICKUP_DELAY_TICKS
+}
 const VERSION: u8 = 1;
 
 fn invalid(message: &'static str) -> io::Error {
@@ -52,11 +68,22 @@ pub struct GroundItem {
     pub id: i32,
     pub position: [i32; 3], // Protocol 5 absolute coordinates, fixed point /32
     pub stack: Stack,
+    /// Persist the source-specific wait across reconnects/restarts.
+    /// Missing in older worlds means the legacy block-drop default (10 ticks).
+    #[serde(
+        default = "default_pickup_delay_ticks",
+        skip_serializing_if = "default_pickup_delay_is_implicit"
+    )]
+    pub pickup_delay_ticks: u16,
 }
 impl GroundItem {
     fn valid(&self) -> bool {
         self.id > 1_000_000_000
             && self.stack.is_valid()
+            && matches!(
+                self.pickup_delay_ticks,
+                0 | BLOCK_PICKUP_DELAY_TICKS | PLAYER_DROP_PICKUP_DELAY_TICKS
+            )
             && (-WORLD_LIMIT..WORLD_LIMIT).contains(&self.position[0].div_euclid(32))
             && (0..=255).contains(&self.position[1].div_euclid(32))
             && (-WORLD_LIMIT..WORLD_LIMIT).contains(&self.position[2].div_euclid(32))
@@ -167,9 +194,11 @@ impl GroundItems {
         let mut state: Self =
             serde_json::from_slice(&data).map_err(|_| invalid("invalid ground-item JSON"))?;
         state.validate()?;
-        let ready = Instant::now() + PICKUP_DELAY;
-        for id in state.entries.keys() {
-            state.eligible_after.insert(*id, ready);
+        let now = Instant::now();
+        for (id, item) in &state.entries {
+            state
+                .eligible_after
+                .insert(*id, now + pickup_delay(item.pickup_delay_ticks));
         }
         Ok(state)
     }
@@ -232,6 +261,7 @@ impl GroundItems {
             id,
             position,
             stack,
+            pickup_delay_ticks: BLOCK_PICKUP_DELAY_TICKS,
         };
         if !item.valid() {
             return Err(invalid("invalid drop position"));
@@ -244,7 +274,7 @@ impl GroundItems {
             return Err(err);
         }
         self.eligible_after
-            .insert(id, Instant::now() + PICKUP_DELAY);
+            .insert(id, Instant::now() + pickup_delay(item.pickup_delay_ticks));
         Ok(item)
     }
     /// Reserve capacity before clearing an inventory. The entire death-drop
@@ -261,6 +291,15 @@ impl GroundItems {
         stacks: &[Stack],
         block: (i32, i32, i32),
     ) -> io::Result<(Self, Vec<GroundItem>)> {
+        self.stage_put_many_with_delay(stacks, block, BLOCK_PICKUP_DELAY_TICKS)
+    }
+
+    pub fn stage_put_many_with_delay(
+        &self,
+        stacks: &[Stack],
+        block: (i32, i32, i32),
+        delay_ticks: u16,
+    ) -> io::Result<(Self, Vec<GroundItem>)> {
         // Preserve the single-position API's validation even for an empty
         // batch; invalid positions must never be silently accepted.
         drop_position(block)?;
@@ -269,7 +308,7 @@ impl GroundItems {
             .copied()
             .map(|stack| (stack, block))
             .collect::<Vec<_>>();
-        self.stage_put_at_positions(&positions)
+        self.stage_put_at_positions_with_delay(&positions, delay_ticks)
     }
 
     /// Stage a world-tick batch with distinct item positions. A tick may
@@ -281,6 +320,20 @@ impl GroundItems {
         &self,
         entries: &[(Stack, (i32, i32, i32))],
     ) -> io::Result<(Self, Vec<GroundItem>)> {
+        self.stage_put_at_positions_with_delay(entries, BLOCK_PICKUP_DELAY_TICKS)
+    }
+
+    fn stage_put_at_positions_with_delay(
+        &self,
+        entries: &[(Stack, (i32, i32, i32))],
+        delay_ticks: u16,
+    ) -> io::Result<(Self, Vec<GroundItem>)> {
+        if !matches!(
+            delay_ticks,
+            0 | BLOCK_PICKUP_DELAY_TICKS | PLAYER_DROP_PICKUP_DELAY_TICKS
+        ) {
+            return Err(invalid("invalid pickup delay"));
+        }
         if !self.has_capacity_for(entries.len())
             || entries.iter().any(|(stack, _)| !stack.is_valid())
         {
@@ -288,7 +341,7 @@ impl GroundItems {
         }
         let mut candidate = self.clone();
         let mut inserted = Vec::with_capacity(entries.len());
-        let ready = Instant::now() + PICKUP_DELAY;
+        let ready = Instant::now() + pickup_delay(delay_ticks);
         for &(stack, block) in entries {
             let position = drop_position(block)?;
             candidate.next_id += 1;
@@ -296,6 +349,7 @@ impl GroundItems {
                 id: candidate.next_id,
                 position,
                 stack,
+                pickup_delay_ticks: delay_ticks,
             };
             if !item.valid() {
                 return Err(invalid("invalid world-drop location"));
@@ -753,6 +807,7 @@ mod tests {
                 damage: 0,
                 nbt: None,
             },
+            pickup_delay_ticks: BLOCK_PICKUP_DELAY_TICKS,
         };
         let [object, metadata] = item.spawn();
         assert_eq!(object.id, 0x0e);
@@ -842,6 +897,7 @@ mod tests {
                 damage: 0,
                 nbt: None,
             },
+            pickup_delay_ticks: BLOCK_PICKUP_DELAY_TICKS,
         };
         assert!(!item.valid());
     }
