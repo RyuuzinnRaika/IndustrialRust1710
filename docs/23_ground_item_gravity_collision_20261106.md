@@ -42,6 +42,13 @@ Unit tests added to `apps/vanilla-server/src/ground_items.rs`:
 - `falling_item_reacts_to_mined_floor_without_tunnelling`: mines the
   top grass before a drop falls, checks landing on the lower dirt
   layer and serialized drop-position round-trip.
+- `survival_ground_item_gravity_sends_s18_then_still_allows_pickup`
+  (native TCP integration): preload a one-item drop high above the flat
+  surface in a disposable world, join over Protocol 5, observe a real
+  S0E and descending S18, wait for the durable fixed-point position
+  at the flat-world grass surface, walk into pickup range, verify
+  S2F Set Slot, confirm an empty ground sidecar and one persisted
+  inventory item after logout.
 - Previous PR #857 covers block C07 mining, dropped entity spawn,
   pickup, no duplicate collection, inventory save/relogin and 10/40
   tick source-specific eligibility.
@@ -53,6 +60,7 @@ git fetch origin
 git switch --detach origin/feat/ground-item-gravity-collision-20261106
 cargo fmt --all -- --check
 cargo test -p vanilla-server falling_item_ -- --nocapture
+cargo test -p vanilla-server --test protocol5_e2e survival_ground_item_gravity_sends_s18_then_still_allows_pickup -- --nocapture
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 .\verify-windows.ps1
