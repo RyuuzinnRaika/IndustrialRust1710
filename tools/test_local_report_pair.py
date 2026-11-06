@@ -21,10 +21,12 @@ class PairReportTests(unittest.TestCase):
             "commit": commit,
             "host_os": os_name,
             "host_arch": "x86_64" if os_name == "linux" else "x86_64",
-            "exit_code": 0,
+            "exit_code": 0 if status == "PASS" else 1,
             "checks": [
                 {"name": name, "status": "NOT_RUN" if name.startswith("E42") else status,
-                 "command": "private optional details", "exit_code": 0, "log": "private/path"}
+                 "command": "private optional details",
+                 "exit_code": None if name.startswith("E42") else (0 if status == "PASS" else 1),
+                 "log": "private/path"}
                 for name in pair.CHECK_NAMES
             ],
         }
@@ -47,6 +49,8 @@ class PairReportTests(unittest.TestCase):
         w = self.write("win.json", self.report("windows"))
         alternate = self.report("linux")
         alternate["checks"][0]["status"] = "FAIL"
+        alternate["checks"][0]["exit_code"] = 101
+        alternate["exit_code"] = 1
         l = self.write("lin.json", alternate)
         output = self.root / "comparison.json"
         with contextlib.redirect_stdout(io.StringIO()):
@@ -55,6 +59,30 @@ class PairReportTests(unittest.TestCase):
         result = json.loads(output.read_text(encoding="utf-8"))
         self.assertFalse(result["identical_statuses"])
         self.assertEqual(result["checks"][0]["linux"], "FAIL")
+
+    def test_matching_failed_verifiers_are_not_reported_as_success(self):
+        w = self.write("win.json", self.report("windows", status="FAIL"))
+        l = self.write("lin.json", self.report("linux", status="FAIL"))
+        with contextlib.redirect_stdout(io.StringIO()) as shown:
+            self.assertEqual(pair.main(["--windows", str(w), "--ubuntu", str(l)]), 1)
+        summary = json.loads(shown.getvalue())
+        self.assertTrue(summary["identical_statuses"])
+        self.assertFalse(summary["both_verifiers_succeeded"])
+
+    def test_invalid_exit_code_status_combinations_are_rejected(self):
+        cases = [
+            ("PASS", None, "PASS without zero"),
+            ("PASS", 1, "PASS without zero"),
+            ("FAIL", 0, "FAIL with zero"),
+            ("NOT_RUN", 0, "NOT_RUN with an exit_code"),
+            ("PASS", [0], "malformed check exit_code"),
+        ]
+        for index, (status, code, error) in enumerate(cases):
+            invalid = self.report("windows")
+            invalid["checks"][0]["status"] = status
+            invalid["checks"][0]["exit_code"] = code
+            with self.subTest(index=index), self.assertRaisesRegex(pair.EvidenceError, error):
+                pair.load_report(self.write(f"invalid_exit_{index}.json", invalid), "windows")
 
     def test_different_commit_is_rejected(self):
         win = self.report("windows")
