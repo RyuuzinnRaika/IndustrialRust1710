@@ -23,8 +23,19 @@ if (-not $cargo) { throw 'Cargo not found. Run .\setup-windows.ps1 first.' }
 Write-Host 'Checking/building vanilla-server from the current source...'
 # Cargo's incremental build is a no-op when inputs are current. Always ask it
 # to check so a stale release executable is never reused after source changes.
-& $cargo.Source build --release -p vanilla-server --bins
-if ($LASTEXITCODE -ne 0) { throw 'Rust release build failed.' }
+# Windows PowerShell 5.1 wraps redirected native stderr as NativeCommandError.
+# Cargo writes ordinary progress ("Finished ...") to stderr, so a caller using
+# 2>&1 | Tee-Object must not turn a successful build into a terminating error.
+# Keep strict PowerShell error handling outside native calls, and check exit codes.
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    & $cargo.Source build --release -p vanilla-server --bins
+    $buildExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+if ($buildExitCode -ne 0) { throw "Rust release build failed (exit code $buildExitCode)." }
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
     throw 'Rust release build succeeded but vanilla-server.exe is missing.'
 }
@@ -68,8 +79,24 @@ if (-not $NoGui -and $desktop -and -not $offlineMode) {
     $argsLiteral = '@(' + ($quotedArgs -join ', ') + ')'
     $guiCommand = "& $(Quote-GuiArgument $guiScript) -ServerExe $(Quote-GuiArgument $exe) -WhitelistPath $(Quote-GuiArgument $whitelist) -ServerArgs $argsLiteral"
     $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($guiCommand))
-    & $windowsPowerShell -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -EncodedCommand $encodedCommand
-    exit $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $windowsPowerShell -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -EncodedCommand $encodedCommand
+        $guiExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    exit $guiExitCode
 }
-& $exe --whitelist $whitelist @ServerArgs
-exit $LASTEXITCODE
+# Preserve streamed server diagnostics for Tee-Object without aborting the
+# session on informational stderr. Non-zero server exit codes still propagate.
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    & $exe --whitelist $whitelist @ServerArgs
+    $serverExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+exit $serverExitCode
