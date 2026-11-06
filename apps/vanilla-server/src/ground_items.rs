@@ -7,11 +7,13 @@
 //! commits world edits, ground drops and tool durability together.
 //! Item physics (gravity, collision, liquids and merging) is not yet modeled.
 use crate::inventory::Stack;
+use crate::player::PlayerPosition;
+use crate::world::World;
 use crate::multiplayer::{self, Event};
 use crate::world::WORLD_LIMIT;
 use legacy_protocol::write_varint;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -22,6 +24,12 @@ const MAX_BYTES: u64 = 128 * 1024;
 const BLOCK_PICKUP_DELAY_TICKS: u16 = 10;
 const PLAYER_DROP_PICKUP_DELAY_TICKS: u16 = 40;
 const TICK_MILLIS: u64 = 50;
+const ITEM_HALF_WIDTH: f64 = 0.125;
+const ITEM_HEIGHT: f64 = 0.25;
+const GRAVITY_PER_TICK: f64 = 0.03999999910593033;
+const AIR_DRAG: f64 = 0.9800000190734863;
+const SWEEP_STEP: f64 = 1.0 / 16.0;
+const MAX_FALL_STEPS_PER_TICK: usize = 64;
 
 /// Vanilla 1.7.10 block-spawned items wait 10 ticks; a player throwing an
 /// item with Q/Ctrl+Q waits 40 ticks before anybody can pick it back up.
@@ -150,6 +158,14 @@ pub struct GroundItems {
     entries: BTreeMap<i32, GroundItem>,
     #[serde(skip)]
     eligible_after: BTreeMap<i32, Instant>,
+    // Runtime sub-1/32-position precision and vertical velocity. Only the
+    // bounded authoritative fixed-point position is persisted to the sidecar.
+    #[serde(skip)]
+    precise_y: BTreeMap<i32, f64>,
+    #[serde(skip)]
+    velocity_y: BTreeMap<i32, f64>,
+    #[serde(skip)]
+    resting: BTreeSet<i32>,
 }
 impl Default for GroundItems {
     fn default() -> Self {
@@ -158,6 +174,9 @@ impl Default for GroundItems {
             next_id: 1_000_000_000,
             entries: BTreeMap::new(),
             eligible_after: BTreeMap::new(),
+            precise_y: BTreeMap::new(),
+            velocity_y: BTreeMap::new(),
+            resting: BTreeSet::new(),
         }
     }
 }
@@ -244,6 +263,119 @@ impl GroundItems {
     }
     pub fn items(&self) -> impl Iterator<Item = &GroundItem> {
         self.entries.values()
+    }
+
+    /// Protocol 5 S18 Entity Teleport carries Int entity ID, Int XYZ in
+    /// 1/32-block units, then yaw and pitch bytes (no onGround in 1.7.10).
+    /// This is a position update for an existing S0E item entity, not a spawn.
+    pub fn movement_event(item: &GroundItem) -> Event {
+        let mut body = Vec::with_capacity(18);
+        body.extend_from_slice(&item.id.to_be_bytes());
+        for axis in item.position {
+            body.extend_from_slice(&axis.to_be_bytes());
+        }
+        body.extend_from_slice(&[0, 0]);
+        Event { id: 0x18, body }
+    }
+
+    /// Advance only the server's bounded ground-entity set. Vanilla 1.7.10
+    /// applies gravity of ~0.04 and vertical drag 0.98 each 20TPS tick.
+    /// Fall collision is swept in 1/16-block steps against the shared
+    /// block-shape resolver (slabs, stairs, fences, solid blocks).
+    ///
+    /// The candidate is not persisted or made visible here. A worker must
+    /// durably commit any changed entity positions before publishing S18.
+    /// Sub-fixed-point motion remains in-memory and is safely reconstructed
+    /// at the saved fixed-point position following a restart.
+    pub fn stage_gravity_ticks(
+        &self,
+        world: &World,
+        ticks: u32,
+    ) -> io::Result<(Self, Vec<GroundItem>)> {
+        if ticks > 20 {
+            return Err(invalid("too many ground physics catch-up ticks"));
+        }
+        let mut candidate = self.clone();
+        let mut moved = BTreeMap::new();
+        for _ in 0..ticks {
+            let ids: Vec<i32> = candidate.entries.keys().copied().collect();
+            for id in ids {
+                let Some(item) = candidate.entries.get_mut(&id) else {
+                    continue;
+                };
+                let x = f64::from(item.position[0]) / 32.0;
+                let z = f64::from(item.position[2]) / 32.0;
+                let y = candidate
+                    .precise_y
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(f64::from(item.position[1]) / 32.0);
+                let blocked = |center_y: f64| {
+                    center_y < ITEM_HALF_WIDTH
+                        || crate::physics::collides_sized(
+                            world,
+                            &PlayerPosition {
+                                x,
+                                y: center_y - ITEM_HALF_WIDTH,
+                                z,
+                            },
+                            ITEM_HALF_WIDTH,
+                            ITEM_HEIGHT,
+                        )
+                };
+                // Resting objects are checked for support every tick, so a
+                // subsequently mined floor immediately wakes falling items.
+                if candidate.resting.contains(&id) && blocked(y - SWEEP_STEP) {
+                    continue;
+                }
+                candidate.resting.remove(&id);
+                let old_velocity = candidate.velocity_y.get(&id).copied().unwrap_or(0.0);
+                let fall = (old_velocity - GRAVITY_PER_TICK).max(-3.0);
+                let wanted = (y + fall).max(ITEM_HALF_WIDTH);
+                let mut next_y = y;
+                let mut hit = false;
+                for _ in 0..MAX_FALL_STEPS_PER_TICK {
+                    if next_y <= wanted + 1.0e-9 {
+                        break;
+                    }
+                    let next = (next_y - SWEEP_STEP).max(wanted);
+                    if blocked(next) {
+                        // End just above the first obstacle. A binary search
+                        // avoids hanging drops 1/16 block above thin shapes.
+                        let mut lo = next;
+                        let mut hi = next_y;
+                        for _ in 0..12 {
+                            let mid = (lo + hi) / 2.0;
+                            if blocked(mid) {
+                                lo = mid;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        next_y = hi;
+                        hit = true;
+                        break;
+                    }
+                    next_y = next;
+                }
+                if hit || next_y <= ITEM_HALF_WIDTH {
+                    candidate.resting.insert(id);
+                    candidate.velocity_y.insert(id, 0.0);
+                } else {
+                    candidate.velocity_y.insert(id, fall * AIR_DRAG);
+                }
+                candidate.precise_y.insert(id, next_y);
+                // EntityItem network positions are fixed point /32. Keep the
+                // original ID, X/Z and full item stack unchanged.
+                let fixed_y = (next_y * 32.0).floor() as i32;
+                if fixed_y != item.position[1] {
+                    item.position[1] = fixed_y;
+                    moved.insert(id, item.clone());
+                }
+            }
+        }
+        candidate.encoded()?;
+        Ok((candidate, moved.into_values().collect()))
     }
     /// Add the drop after an IRW1 edit succeeds. Persist before announcing.
     pub fn put(
@@ -372,6 +504,9 @@ impl GroundItems {
         let mut candidate = self.clone();
         candidate.entries.remove(&id);
         candidate.eligible_after.remove(&id);
+        candidate.precise_y.remove(&id);
+        candidate.velocity_y.remove(&id);
+        candidate.resting.remove(&id);
         candidate.encoded()?;
         Ok(Some((candidate, item)))
     }
@@ -397,6 +532,9 @@ impl GroundItems {
         let remainder = if count == item.stack.count {
             candidate.entries.remove(&id);
             candidate.eligible_after.remove(&id);
+            candidate.precise_y.remove(&id);
+            candidate.velocity_y.remove(&id);
+            candidate.resting.remove(&id);
             None
         } else {
             let mut remaining = item;
