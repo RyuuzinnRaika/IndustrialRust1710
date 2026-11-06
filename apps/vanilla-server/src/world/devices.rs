@@ -1498,10 +1498,8 @@ mod redstone_regression_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "ir1710-reg166-cake-{}-{stamp}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ir1710-reg166-cake-{}-{stamp}", std::process::id()));
         fs::create_dir(&dir).unwrap();
         let path = dir.join("cake.irw");
         let mut world = World::new();
@@ -1511,7 +1509,9 @@ mod redstone_regression_tests {
         // comparator would also report zero and make the test vacuously pass.
         world.update_and_save(&path, 0, 63, 0, 1 << 4).unwrap();
         world.update_and_save(&path, -1, 63, 0, 1 << 4).unwrap();
-        world.update_and_save(&path, 0, 64, 0, (149 << 4) | 1).unwrap();
+        world
+            .update_and_save(&path, 0, 64, 0, (149 << 4) | 1)
+            .unwrap();
         world.update_and_save(&path, -1, 64, 0, 92 << 4).unwrap();
         for bites in 0u16..=5 {
             let cake = (92 << 4) | bites;
@@ -1529,7 +1529,11 @@ mod redstone_regression_tests {
                 "1.7.10 cake unexpectedly supplied comparator power after {bites} bites"
             );
             assert_eq!(
-                world.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0),
+                world
+                    .comparator_outputs
+                    .get(&(0, 64, 0))
+                    .copied()
+                    .unwrap_or(0),
                 0,
                 "1.7.10 cake unexpectedly powered comparator after {bites} bites"
             );
@@ -1551,11 +1555,20 @@ mod redstone_regression_tests {
         for _ in 0..4 {
             world.block_tick(&path, 64).unwrap();
         }
-        assert_eq!(world.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0), 0);
+        assert_eq!(
+            world
+                .comparator_outputs
+                .get(&(0, 64, 0))
+                .copied()
+                .unwrap_or(0),
+            0
+        );
         assert_eq!(World::load(&path).unwrap().get(-1, 64, 0), 0);
 
         // Reload a partially eaten cake; no analog output may appear.
-        world.update_and_save(&path, -1, 64, 0, (92 << 4) | 3).unwrap();
+        world
+            .update_and_save(&path, -1, 64, 0, (92 << 4) | 3)
+            .unwrap();
         let mut reloaded = World::load(&path).unwrap();
         for _ in 0..4 {
             reloaded.block_tick(&path, 64).unwrap();
@@ -1565,7 +1578,11 @@ mod redstone_regression_tests {
             "reloaded comparator unexpectedly disappeared"
         );
         assert_eq!(
-            reloaded.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0),
+            reloaded
+                .comparator_outputs
+                .get(&(0, 64, 0))
+                .copied()
+                .unwrap_or(0),
             0
         );
         fs::remove_dir_all(dir).unwrap();

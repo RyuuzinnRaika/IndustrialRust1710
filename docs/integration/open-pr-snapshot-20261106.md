@@ -1,8 +1,8 @@
-# 19 Open PRs — integration snapshot
+# 19 PRs integration snapshot — 18 open, #855 merged
 
 **This branch is a disposable validation candidate, not a production merge or a release.**
 
-main snapshot: `ef28c275bcda09b945b66aaff0e318a838c6cfb3`
+main snapshot: `b7f3b7f8f61312ea0e4ca2df6064f3b94cc38d5d`
 
 ## Included GitHub PR heads
 - #729: `eebf33db24524342d1281af29a6a290893cf30a2`
@@ -63,3 +63,7 @@ Snapshot branch and PR heads may advance independently. Compare PR HEAD SHAs bef
 - New changes have only been checked for scoped code overlap and marker preservation. **Cargo tests, rustfmt, Clippy, crash injection, 1.7.10 client, and physics load tests remain NOT_RUN.**
 - `cargo test -p vanilla-server falling_item_ -- --nocapture` and `cargo test -p vanilla-server --bin vanilla-server add059_ -- --nocapture` are targeted additional gates.
 - Do not merge the stacked #861 to main, or close #856/#483, until both parent tests and these new tests pass.
+
+## Merged upstream PR #855
+
+PR #855 (cake comparator compatibility) merged into main as `b7f3b7f8f61312ea0e4ca2df6064f3b94cc38d5d` after this snapshot was created. The merged `apps/vanilla-server/src/world/devices.rs` differs from the initial #855 blob, so this refreshed integration snapshot adopts **main's newer blob** and no longer overlays the old #855 source file. All other 18 open-PR code paths are retained. Their Rust gates remain NOT_RUN on the combined candidate.
