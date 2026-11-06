@@ -182,7 +182,7 @@ const COMMAND_GUIDE: &[CommandGuide] = &[
     CommandGuide {
         name: "/scoreboard",
         usage: "/scoreboard <objectives|players|teams> ...",
-        example: "/scoreboard objectives list",
+        example: "/scoreboard objectives add demo dummy Demo",
         access: "Console only",
         console_only: true,
     },
@@ -300,6 +300,11 @@ mod command_guide_tests {
         assert!(player.iter().all(|line| console.contains(line)));
         assert!(player.iter().all(|line| !line.contains("Console only")));
         assert!(console.iter().any(|line| line.starts_with("/scoreboard")));
+        // 'objectives list' is a vanilla command but is NOT implemented by
+        // IndustrialRust1710's current console scoreboard dispatch.
+        assert!(!console
+            .iter()
+            .any(|line| line.contains("/scoreboard objectives list")));
         assert!(console.iter().any(|line| line.starts_with("/whitelist")));
         assert!(console.iter().any(|line| line.starts_with("/stop")));
         assert!(player.iter().any(|line| line.starts_with("/ban-ip")));
