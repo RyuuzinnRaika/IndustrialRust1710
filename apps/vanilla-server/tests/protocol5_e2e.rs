@@ -991,6 +991,103 @@ fn protocol5_server_list_ping_echoes_latency_token_after_status_response() {
     );
 }
 
+/// Full Protocol 5 acceptance: mine one survival block, observe the dropped
+/// entity, pick it up exactly once, and ensure the saved inventory and ground
+/// entity pool agree after a fresh login. No real player world is accessed.
+#[test]
+fn survival_mined_block_drop_pickup_persists_without_duplication() {
+    let server = NativeServer::start_with_mode(true);
+    let (mut client, _, at) = server.join("RustTester");
+    assert_eq!(at, [0.5, 64.0, 0.5]);
+    // Stand within block reach but outside pickup range.
+    send_position(&mut client, 4.5, 64.0, 0.5);
+    let mut start = vec![0u8];
+    start.extend_from_slice(&0i32.to_be_bytes());
+    start.push(63);
+    start.extend_from_slice(&0i32.to_be_bytes());
+    start.push(1);
+    let mut finish = start.clone();
+    finish[0] = 2;
+    client.write_all(&frame(7, &start)).unwrap();
+    thread::sleep(Duration::from_millis(950));
+    client.write_all(&frame(7, &finish)).unwrap();
+
+    let spawn = until_packet(&mut client, 0x0e, |body| body.len() == 24 && body[5] == 2);
+    let mut payload = spawn.as_slice();
+    let entity_id = i32::try_from(read_varint(&mut payload).unwrap()).unwrap();
+    until_packet(&mut client, 0x23, |body| {
+        block_change_is(body, 63, 0)
+    });
+    let ground_file = server.directory.join("flat.drops.json");
+    await_file(&ground_file);
+    let on_ground: Value = serde_json::from_slice(&fs::read(&ground_file).unwrap()).unwrap();
+    let entries = on_ground["entries"].as_object().unwrap();
+    assert_eq!(entries.len(), 1, "mined block must yield one ground entity");
+    let saved_item = entries.values().next().unwrap();
+    assert_eq!(saved_item["stack"]["id"], 3);
+    assert!(
+        saved_item.get("pickup_delay_ticks").is_none(),
+        "mined blocks use the backward-compatible 10-tick delay"
+    );
+
+    // Wait for the server's pickup delay, then enter range. Item Collect,
+    // Destroy and Set Slot may arrive in different orders.
+    thread::sleep(Duration::from_millis(900));
+    send_position(&mut client, 0.5, 64.0, 0.5);
+    let mut collected = false;
+    let mut destroyed = false;
+    let mut received = false;
+    for _ in 0..MAX_PACKETS {
+        if collected && destroyed && received {
+            break;
+        }
+        let (id, body) = receive(&mut client);
+        match id {
+            0 if body.len() == 4 => client.write_all(&frame(0, &body)).unwrap(),
+            0x0d if body.len() == 8 && body[..4] == entity_id.to_be_bytes() => {
+                assert!(!collected, "duplicate pickup event");
+                collected = true;
+            }
+            0x13 if body.len() == 5 && body[0] == 1
+                && body[1..] == entity_id.to_be_bytes() =>
+            {
+                assert!(!destroyed, "duplicate item destroy");
+                destroyed = true;
+            }
+            0x2f if body == [0, 0, 36, 0, 3, 1, 0, 0, 255, 255] => {
+                assert!(!received, "duplicate slot grant");
+                received = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        collected && destroyed && received,
+        "Protocol 5 pickup incomplete: collect={collected} destroy={destroyed} slot={received}"
+    );
+    drop(client);
+    server.wait_idle();
+
+    let inventory_file = server
+        .directory
+        .join("players/rusttester.survival.inventory.json");
+    await_file(&inventory_file);
+    let saved_inventory: Value =
+        serde_json::from_slice(&fs::read(inventory_file).unwrap()).unwrap();
+    assert_eq!(saved_inventory["slots"][36]["id"], 3);
+    assert_eq!(saved_inventory["slots"][36]["count"], 1);
+    let saved_ground: Value = serde_json::from_slice(&fs::read(&ground_file).unwrap()).unwrap();
+    assert!(
+        saved_ground["entries"].as_object().unwrap().is_empty(),
+        "picked item must not remain in the world sidecar"
+    );
+
+    let (rejoined, _, at) = server.join("RustTester");
+    assert_eq!(at, [0.5, 64.0, 0.5]);
+    drop(rejoined);
+    server.wait_idle();
+}
+
 #[test]
 fn survival_mining_requires_delay_and_inventory_pays_for_placements() {
     let server = NativeServer::start_with_mode(true);
@@ -2027,6 +2124,14 @@ fn native_protocol5_survival_q_and_ctrl_q_drop_authoritative_stacks() {
         .collect();
     counts.sort_unstable();
     assert_eq!(counts, [1, 11]);
+    assert!(
+        drops["entries"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|entry| entry["pickup_delay_ticks"] == 40),
+        "Q and Ctrl+Q drops must retain their vanilla 40-tick pickup delay"
+    );
 }
 
 #[test]

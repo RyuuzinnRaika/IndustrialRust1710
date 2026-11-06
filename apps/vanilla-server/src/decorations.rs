@@ -214,6 +214,15 @@ impl Decorations {
     pub fn occupied(&self, position: Position) -> bool {
         self.records.contains_key(&key(position)) || self.pots.contains_key(&key(position))
     }
+    /// Check all persisted tile data, including signs and note blocks.
+    /// This avoids rewriting an unchanged sidecar for ordinary mining.
+    pub fn contains_position(&self, position: Position) -> bool {
+        let name = key(position);
+        self.signs.contains_key(&name)
+            || self.notes.contains_key(&name)
+            || self.records.contains_key(&name)
+            || self.pots.contains_key(&name)
+    }
     /// Stage a jukebox disc change without making it visible. The caller
     /// journals this snapshot with the inventory debit or item return to
     /// prevent disc loss across a crash between otherwise separate saves.
@@ -548,6 +557,46 @@ mod tests {
             assert_eq!(actual, drops);
         }
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn staged_sidecar_removal_detects_all_decorations_without_publishing() {
+        let pos = (3, 64, 5);
+        let name = key(pos);
+        let mut store = Decorations::default();
+        assert!(!store.contains_position(pos));
+
+        store.signs.insert(
+            name.clone(),
+            ["Sign".into(), String::new(), String::new(), String::new()],
+        );
+        assert!(store.contains_position(pos));
+        store.signs.remove(&name);
+
+        store.notes.insert(name.clone(), 3);
+        assert!(store.contains_position(pos));
+        store.notes.remove(&name);
+
+        store.records.insert(name.clone(), 2256);
+        assert!(store.contains_position(pos));
+        store.records.remove(&name);
+
+        store.pots.insert(
+            name,
+            Stack {
+                id: 37,
+                count: 1,
+                damage: 0,
+                nbt: None,
+            },
+        );
+        assert!(store.contains_position(pos));
+        let staged = store.staged_remove(pos).unwrap();
+        assert!(!staged.contains_position(pos));
+        assert!(
+            store.contains_position(pos),
+            "staging must not mutate the live sidecar"
+        );
     }
 
     #[test]
