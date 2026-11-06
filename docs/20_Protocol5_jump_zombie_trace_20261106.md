@@ -68,7 +68,8 @@ Run on a machine with the Rust toolchain, using the patch commit SHA:
 cargo fmt --all -- --check
 cargo test -p vanilla-server --bin vanilla-server vanilla_1710_packet_trace_jump_apex_and_landing_are_accepted
 cargo test -p vanilla-server --bin vanilla-server zombie_melee_reaches_jump_apex_and_respects_bite_timing
-cargo test -p vanilla-server --bin vanilla-server zombie_melee_cannot_hit_above_its_body_or_beyond_horizontal_reach
+cargo test -p vanilla-server --bin vanilla-server zombie_melee_refuses_jump_reach_exceeding_vanilla_squared_limit
+cargo test -p vanilla-server --bin vanilla-server zombie_projectile_and_knockback_hitboxes_match_1710_spawn_dimensions
 .\verify-windows.ps1
 ```
 
