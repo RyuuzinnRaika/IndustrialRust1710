@@ -132,6 +132,13 @@ fn status(port: u16) -> Value {
     let mut parser = Cursor::new(&payload);
     let response: Value = serde_json::from_str(parser.read_string(65536).unwrap()).unwrap();
     parser.finish().unwrap();
+    // Complete the Protocol 5 Status state instead of abandoning the socket
+    // after Status Response; this also prevents lingering per-IP slots.
+    let token = i64::MAX - 1234;
+    client.write_all(&frame(1, &token.to_be_bytes())).unwrap();
+    let (ping_id, echo) = receive(&mut client);
+    assert_eq!(ping_id, 1, "Status Ping Response packet ID");
+    assert_eq!(echo, token.to_be_bytes(), "Status Ping token changed");
     response
 }
 
