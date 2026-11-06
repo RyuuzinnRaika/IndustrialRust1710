@@ -34,7 +34,7 @@ struct CommandGuide {
 const COMMAND_GUIDE: &[CommandGuide] = &[
     CommandGuide {
         name: "/help",
-        usage: "/help [page] (alias /?)",
+        usage: "/help [page] (page: players only; alias /?)",
         example: "/help",
         access: "Player: no OP needed; console: local audit",
         console_only: false,
