@@ -115,3 +115,37 @@ The jump replay above covers a flat-ground trajectory; it **does not yet
 reproduce the specific 10-correction terrain case**. Issue #628 tracks
 the additional world/terrain-dependent acceptance and rejection cases.
 The raw PCAP, user identifiers, and absolute coordinates are not committed.
+
+## Windows PowerShell 5.1 stderr piping for movement diagnostics
+
+Cargo writes successful build progress to stderr. Windows PowerShell 5.1
+can wrap that text as a `NativeCommandError` when the caller uses
+`2>&1 | Tee-Object`. The launcher temporarily uses
+`$ErrorActionPreference = 'Continue'` **only while running native tools**
+and still checks `$LASTEXITCODE`; strict PowerShell error handling is
+restored immediately afterward. A successful Cargo build must not abort
+before the Minecraft server starts.
+
+To reproduce movement corrections on a **new, disposable world** while
+recording text-only diagnostics:
+
+```powershell
+$env:IR_TRACE_MOVEMENT = '1'
+$world = "world/debug-$(Get-Date -Format yyyyMMdd-HHmmss).irw"
+.\run-windows.ps1 -NoGui --survival --expanded-seed 42 --world $world 2>&1 |
+    ForEach-Object { $_.ToString() } |
+    Tee-Object -FilePath ".\movement-debug.log"
+```
+
+`ForEach-Object` converts Windows PowerShell 5.1's redirected native stderr
+records to readable text before writing the log. It is not an error filter.
+Stop the server with Ctrl+C, and never delete/overwrite an existing
+world or publish raw logs with sensitive identifiers.
+
+Windows-only acceptance after changing the launcher:
+1. The build prints `Finished release profile ...` without aborting.
+2. A normal loopback server reaches its listening message and can be stopped.
+3. `movement-debug.log` contains server `movement trace:` entries after
+   reproducing a rejected movement with `IR_TRACE_MOVEMENT=1`.
+4. A real non-zero Cargo build failure still prevents server startup.
+5. No original player world is modified.
