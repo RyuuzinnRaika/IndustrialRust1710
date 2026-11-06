@@ -3923,14 +3923,24 @@ fn play(
                                         (location.1.floor() as i32).clamp(0, 254),
                                         location.2.floor() as i32,
                                     );
-                                    // Inventory debit before entity persistence prevents
-                                    // duplication; failure between saves may lose items.
-                                    candidate.save(inventory_path)?;
+                                    // Debit and spawn are one redo transaction. A failed
+                                    // ground save must not remove items from the hotbar.
+                                    let (staged_ground, spawned) =
+                                        ground.stage_put_many(&[stack], target)?;
+                                    journal::commit(
+                                        &world_path.with_extension("pending-txn.json"),
+                                        &[
+                                            (inventory_path, candidate.encoded()?),
+                                            (ground_path, staged_ground.encoded()?),
+                                        ],
+                                    )?;
                                     *inventory = candidate;
-                                    let item = ground.put(ground_path, stack, target)?;
+                                    *ground = staged_ground;
                                     send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                                    for packet in item.spawn() {
-                                        hub.broadcast(packet);
+                                    for item in spawned {
+                                        for packet in item.spawn() {
+                                            hub.broadcast(packet);
+                                        }
                                     }
                                 } else {
                                     send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
@@ -4427,88 +4437,99 @@ fn play(
                                                             .stage_put_many(&drop_stacks, target)?,
                                                     )
                                                 };
-                                                let mut candidate = inventory.clone();
-                                                let wore =
-                                                    result.wear_tool && candidate.wear_held_tool();
-                                                // Commit durability consumption before
-                                                // changing the world, not vice-versa.
-                                                if wore {
-                                                    candidate.save(inventory_path)?;
-                                                }
-                                                let saved =
+                                                if let Some(mut staged_world) =
+                                                    w.stage_mining_removal(x, y, z)?
+                                                {
                                                     if let Some((px, py, pz)) = mining_partner {
-                                                        w.update_many_and_save(
-                                                            world_path,
-                                                            &[(x, y, z, 0), (px, py, pz, 0)],
-                                                        )
-                                                    } else {
-                                                        w.update_and_save(world_path, x, y, z, 0)
+                                                        staged_world = staged_world
+                                                            .stage_mining_removal(px, py, pz)?
+                                                            .ok_or_else(|| {
+                                                                bad("mining companion changed")
+                                                            })?;
+                                                    }
+                                                    let mut candidate = inventory.clone();
+                                                    let wore = result.wear_tool
+                                                        && candidate.wear_held_tool();
+                                                    let mut writes =
+                                                        vec![(world_path, staged_world.encoded()?)];
+                                                    if let Some((next_ground, _)) =
+                                                        staged_drops.as_ref()
+                                                    {
+                                                        writes.push((
+                                                            ground_path,
+                                                            next_ground.encoded()?,
+                                                        ));
+                                                    }
+                                                    if wore {
+                                                        writes.push((
+                                                            inventory_path,
+                                                            candidate.encoded()?,
+                                                        ));
+                                                    }
+                                                    // World edit, durability, and every block
+                                                    // drop must succeed or fail together.
+                                                    journal::commit(
+                                                        &world_path
+                                                            .with_extension("pending-txn.json"),
+                                                        &writes,
+                                                    )?;
+                                                    *w = staged_world;
+                                                    if let Some((next_ground, spawned)) = staged_drops
+                                                    {
+                                                        *ground = next_ground;
+                                                        if trace_mining {
+                                                            eprintln!(
+                                                                "mining trace: committed target={target:?} block={block} drops={} tool_worn={wore}",
+                                                                spawned.len()
+                                                            );
+                                                        }
+                                                        for item in spawned {
+                                                            for packet in item.spawn() {
+                                                                hub.broadcast(packet);
+                                                            }
+                                                        }
+                                                    } else if trace_mining {
+                                                        eprintln!(
+                                                            "mining trace: committed target={target:?} block={block} drops=0 tool_worn={wore}"
+                                                        );
+                                                    }
+                                                    decorations
+                                                        .lock()
+                                                        .map_err(|_| {
+                                                            bad("decorations lock poisoned")
+                                                        })?
+                                                        .remove(decoration_path, target)?;
+                                                    if wore {
+                                                        *inventory = candidate;
+                                                        send(
+                                                            s,
+                                                            0x2f,
+                                                            &inventory.set_slot(
+                                                                inventory.held_slot(),
+                                                            )?,
+                                                        )?;
+                                                    }
+                                                    changed = true;
+                                                    companion_changed = mining_partner;
+                                                    let reward = match block {
+                                                        16 => 2,
+                                                        21 => 4,
+                                                        56 => 5,
+                                                        73 | 74 => 3,
+                                                        129 => 5,
+                                                        153 => 3,
+                                                        _ => 0,
                                                     };
-                                                match saved {
-                                                    Ok(true) => {
-                                                        decorations
+                                                    if reward > 0 {
+                                                        if let Some(orb) = mobs
                                                             .lock()
                                                             .map_err(|_| {
-                                                                bad("decorations lock poisoned")
+                                                                bad("mob mutex poisoned")
                                                             })?
-                                                            .remove(decoration_path, target)?;
-                                                        if wore {
-                                                            *inventory = candidate;
-                                                            send(
-                                                                s,
-                                                                0x2f,
-                                                                &inventory.set_slot(
-                                                                    inventory.held_slot(),
-                                                                )?,
-                                                            )?;
+                                                            .spawn_xp(*player, reward)
+                                                        {
+                                                            hub.broadcast(orb);
                                                         }
-                                                        if let Some(staged) = staged_drops {
-                                                            // One fsync/rename for every drop
-                                                            // created by this mining action.
-                                                            // Publish only after successful save.
-                                                            let items = ground.commit_staged_put(
-                                                                ground_path,
-                                                                staged,
-                                                            )?;
-                                                            for item in items {
-                                                                for packet in item.spawn() {
-                                                                    hub.broadcast(packet);
-                                                                }
-                                                            }
-                                                        }
-                                                        changed = true;
-                                                        companion_changed = mining_partner;
-                                                        let reward = match block {
-                                                            16 => 2,
-                                                            21 => 4,
-                                                            56 => 5,
-                                                            73 | 74 => 3,
-                                                            129 => 5,
-                                                            153 => 3,
-                                                            _ => 0,
-                                                        };
-                                                        if reward > 0 {
-                                                            if let Some(orb) = mobs
-                                                                .lock()
-                                                                .map_err(|_| {
-                                                                    bad("mob mutex poisoned")
-                                                                })?
-                                                                .spawn_xp(*player, reward)
-                                                            {
-                                                                hub.broadcast(orb);
-                                                            }
-                                                        }
-                                                    }
-                                                    Ok(false) => {
-                                                        if wore {
-                                                            inventory.save(inventory_path)?;
-                                                        }
-                                                    }
-                                                    Err(error) => {
-                                                        if wore {
-                                                            inventory.save(inventory_path)?;
-                                                        }
-                                                        return Err(error);
                                                     }
                                                 }
                                             }
