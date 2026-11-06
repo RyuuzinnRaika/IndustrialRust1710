@@ -11,9 +11,18 @@ fn minimized_invalid_frame_corpus_fails_closed_in_both_decoders() {
     let invalid: &[(&str, &[u8])] = &[
         ("zero_length", include_bytes!("../../../fuzz/corpus/protocol5_frames/zero_length")),
         ("excess_varint", include_bytes!("../../../fuzz/corpus/protocol5_frames/excess_varint")),
-        ("invalid_fifth_byte", include_bytes!("../../../fuzz/corpus/protocol5_frames/invalid_fifth_byte")),
-        ("oversize_frame_header", include_bytes!("../../../fuzz/corpus/protocol5_frames/oversize_frame_header")),
-        ("truncated_frame", include_bytes!("../../../fuzz/corpus/protocol5_frames/truncated_frame")),
+        (
+            "invalid_fifth_byte",
+            include_bytes!("../../../fuzz/corpus/protocol5_frames/invalid_fifth_byte"),
+        ),
+        (
+            "oversize_frame_header",
+            include_bytes!("../../../fuzz/corpus/protocol5_frames/oversize_frame_header"),
+        ),
+        (
+            "truncated_frame",
+            include_bytes!("../../../fuzz/corpus/protocol5_frames/truncated_frame"),
+        ),
     ];
     for &(label, bytes) in invalid {
         let mut direct = bytes;
