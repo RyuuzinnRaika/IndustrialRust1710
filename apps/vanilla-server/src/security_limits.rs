@@ -115,7 +115,7 @@ impl ChatLimiter {
         }
         let invalid = message.is_empty()
             || message.len() > 400
-            || message.chars().count() > 100
+            || message.encode_utf16().count() > 100
             || message.chars().any(|c| {
                 c.is_control() && c != '\t'
                     || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
@@ -169,6 +169,24 @@ mod tests {
             .acquire("192.0.2.43".parse().unwrap())
             .unwrap()
             .login_attempt());
+    }
+
+    #[test]
+    fn chat_unicode_boundaries_follow_java_utf16_units() {
+        // Java 1.7.10 counts UTF-16 units, not Unicode scalar values.
+        // Emoji use two units apiece; Japanese BMP code points use one.
+        let valid_emoji = "😀".repeat(50);
+        let too_many_emoji = "😀".repeat(51);
+        assert_eq!(valid_emoji.encode_utf16().count(), 100);
+        assert_eq!(too_many_emoji.encode_utf16().count(), 102);
+        assert!(ChatLimiter::default().check(&valid_emoji).is_ok());
+        assert_eq!(ChatLimiter::default().check(&too_many_emoji), Err(false));
+
+        assert!(ChatLimiter::default().check(&"あ".repeat(100)).is_ok());
+        assert_eq!(ChatLimiter::default().check(&"あ".repeat(101)), Err(false));
+        // Leave Unicode text intact while rejecting unsafe control chars.
+        assert!(ChatLimiter::default().check("こんにちは😀").is_ok());
+        assert_eq!(ChatLimiter::default().check("こんにちは\u{202E}"), Err(false));
     }
 
     #[test]
