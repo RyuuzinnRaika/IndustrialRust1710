@@ -84,6 +84,51 @@ class PairReportTests(unittest.TestCase):
             with self.subTest(index=index), self.assertRaisesRegex(pair.EvidenceError, error):
                 pair.load_report(self.write(f"invalid_exit_{index}.json", invalid), "windows")
 
+    def test_summary_zero_cannot_hide_failed_or_required_missing_checks(self):
+        for index, (status, check_code) in enumerate((("FAIL", 101), ("NOT_RUN", None))):
+            report = self.report("windows")
+            report["checks"][0]["status"] = status
+            report["checks"][0]["exit_code"] = check_code
+            # Intentionally keep summary exit_code at zero.
+            with self.subTest(index=index), self.assertRaisesRegex(
+                pair.EvidenceError, "summary exit_code conflicts"
+            ):
+                pair.load_report(self.write(f"false_success_{index}.json", report), "windows")
+
+    def test_summary_failure_and_incomplete_codes_need_matching_checks(self):
+        for exit_code, status in ((1, "PASS"), (2, "PASS")):
+            report = self.report("windows")
+            report["exit_code"] = exit_code
+            if status == "PASS":
+                report["checks"][-1]["status"] = "PASS"
+                report["checks"][-1]["exit_code"] = 0
+            with self.subTest(exit_code=exit_code), self.assertRaisesRegex(
+                pair.EvidenceError, "summary exit_code conflicts"
+            ):
+                pair.load_report(self.write(f"false_exit_{exit_code}.json", report), "windows")
+
+    def test_only_optional_client_evidence_may_be_unrun_on_success(self):
+        automated_only = self.report("windows")
+        automated_only["exit_code"] = 0
+        self.assertEqual(
+            pair.load_report(self.write("automated_only.json", automated_only), "windows")["exit_code"],
+            0,
+        )
+        missing_client_evidence = self.report("windows")
+        missing_client_evidence["exit_code"] = 2
+        self.assertEqual(
+            pair.load_report(self.write("missing_client.json", missing_client_evidence), "windows")["exit_code"],
+            2,
+        )
+        unavailable_rust = self.report("windows")
+        unavailable_rust["checks"][0]["status"] = "NOT_RUN"
+        unavailable_rust["checks"][0]["exit_code"] = None
+        unavailable_rust["exit_code"] = 2
+        self.assertEqual(
+            pair.load_report(self.write("missing_rust.json", unavailable_rust), "windows")["exit_code"],
+            2,
+        )
+
     def test_different_commit_is_rejected(self):
         win = self.report("windows")
         lin = self.report("linux", commit="b" * 40)
