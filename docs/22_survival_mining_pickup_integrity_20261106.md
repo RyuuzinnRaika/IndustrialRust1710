@@ -57,15 +57,23 @@ piping to `Tee-Object`. Do not post unredacted logs publicly.
 
 ## Remaining gameplay limitations (not fixed here)
 
-`GroundItems` currently **does not simulate item gravity, block
-collision, fluids or merging**, and pickup eligibility uses a fixed
-750 ms delay rather than distinct vanilla 1.7.10 source-specific
-delays. Thus blocks destroyed overhead can leave floating drops
-instead of items settling naturally. Those require separate item
-entity physics, packet-position updates, persistence and acceptance
-tests. This patch must not be described as complete 1.7.10 drop
-physics fidelity. Existing saved worlds must not be migrated or
-rewritten for testing.
+`GroundItems` still **does not simulate item gravity, block
+collision, fluids or merging**. Thus blocks destroyed overhead can
+leave floating drops instead of items settling naturally. Those
+require separate item-entity physics, packet-position updates,
+persistence and acceptance tests; see Issue #856.
+
+This patch separately fixes the *source-specific pickup wait*:
+normal block/item spawns use 10 ticks (500 ms), and player Q/Ctrl+Q
+and death drops use 40 ticks (2 s). The delay category is persisted
+with `GroundItem` using a backward-compatible optional JSON field;
+legacy drop files without this field default to 10 ticks. After a
+restart, the full category delay begins again (remaining elapsed
+ticks are not persisted). Unit and TCP tests cover the source class.
+
+This patch must not be described as complete 1.7.10 drop physics
+fidelity. Existing saved worlds must not be migrated or rewritten
+for testing.
 
 This code path is important for item conservation; **hold the PR
 until a Windows cargo fmt, workspace test and gameplay check**, or
