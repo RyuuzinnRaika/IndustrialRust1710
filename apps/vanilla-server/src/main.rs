@@ -3936,7 +3936,7 @@ fn play(
                                     // Debit and spawn are one redo transaction. A failed
                                     // ground save must not remove items from the hotbar.
                                     let (staged_ground, spawned) =
-                                        ground.stage_put_many(&[stack], target)?;
+                                        ground.stage_put_many_with_delay(&[stack], target, 40)?;
                                     journal::commit(
                                         &world_path.with_extension("pending-txn.json"),
                                         &[
@@ -6924,7 +6924,8 @@ fn commit_death_drops(
         (location.1.floor() as i32).clamp(0, 254),
         (location.2.floor() as i32).clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
     );
-    let (staged_ground, spawned) = ground.stage_put_many(&possessions, block)?;
+    let (staged_ground, spawned) =
+        ground.stage_put_many_with_delay(&possessions, block, 40)?;
     journal::commit(
         &world_path.with_extension("pending-txn.json"),
         &[
