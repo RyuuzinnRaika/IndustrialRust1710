@@ -1507,6 +1507,10 @@ mod redstone_regression_tests {
         let mut world = World::new();
 
         // Comparator faces east; cake is immediately behind it to the west.
+        // Both require an actual supporting block, otherwise a broken
+        // comparator would also report zero and make the test vacuously pass.
+        world.update_and_save(&path, 0, 63, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, -1, 63, 0, 1 << 4).unwrap();
         world.update_and_save(&path, 0, 64, 0, (149 << 4) | 1).unwrap();
         world.update_and_save(&path, -1, 64, 0, 92 << 4).unwrap();
         for bites in 0u16..=5 {
@@ -1515,6 +1519,10 @@ mod redstone_regression_tests {
             for _ in 0..4 {
                 world.block_tick(&path, 64).unwrap();
             }
+            assert!(
+                matches!(world.get(0, 64, 0) >> 4, 149 | 150),
+                "comparator disappeared instead of remaining at zero output"
+            );
             assert_eq!(
                 world.comparator_rear_input((-1, 64, 0), (0, 64, 0)),
                 0,
@@ -1530,7 +1538,12 @@ mod redstone_regression_tests {
                 0,
                 "cake must neither power a comparator nor output ordinary redstone power"
             );
-            assert_eq!(World::load(&path).unwrap().get(-1, 64, 0), cake);
+            let persisted = World::load(&path).unwrap();
+            assert_eq!(persisted.get(-1, 64, 0), cake);
+            assert!(
+                matches!(persisted.get(0, 64, 0) >> 4, 149 | 150),
+                "comparator must survive each snapshot"
+            );
         }
 
         // The sixth bite removes the cake, and the comparator must decay to 0.
@@ -1547,6 +1560,10 @@ mod redstone_regression_tests {
         for _ in 0..4 {
             reloaded.block_tick(&path, 64).unwrap();
         }
+        assert!(
+            matches!(reloaded.get(0, 64, 0) >> 4, 149 | 150),
+            "reloaded comparator unexpectedly disappeared"
+        );
         assert_eq!(
             reloaded.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0),
             0
