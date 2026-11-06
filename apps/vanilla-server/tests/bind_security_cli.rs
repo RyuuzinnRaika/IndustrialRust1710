@@ -20,11 +20,7 @@ fn isolated_directory(tag: &str) -> PathBuf {
     path
 }
 
-fn start_with_missing_whitelist(
-    working_dir: &Path,
-    bind: Option<&str>,
-    flags: &[&str],
-) -> Output {
+fn start_with_missing_whitelist(working_dir: &Path, bind: Option<&str>, flags: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_vanilla-server"));
     command
         .current_dir(working_dir)
