@@ -25,6 +25,13 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
 }
 
+fn invalid_property(key: &str, expected: &str) -> io::Error {
+    io::Error::new(
+        ErrorKind::InvalidData,
+        format!("server.properties {key}: expected {expected}"),
+    )
+}
+
 #[derive(Debug)]
 pub struct ServerProperties {
     pub bind: SocketAddr,
@@ -46,7 +53,7 @@ fn boolean(map: &BTreeMap<String, String>, key: &str, default: bool) -> io::Resu
         Some("true") => Ok(true),
         Some("false") => Ok(false),
         None => Ok(default),
-        _ => Err(invalid("server.properties has invalid boolean")),
+        _ => Err(invalid_property(key, "true or false")),
     }
 }
 
@@ -156,9 +163,9 @@ impl ServerProperties {
             .map(String::as_str)
             .unwrap_or("25565")
             .parse::<u16>()
-            .map_err(|_| invalid("invalid server-port"))?;
+            .map_err(|_| invalid_property("server-port", "an integer in 1..=65535"))?;
         if port == 0 {
-            return Err(invalid("server-port cannot be zero"));
+            return Err(invalid_property("server-port", "an integer in 1..=65535"));
         }
         let host = values.get("server-ip").map(String::as_str).unwrap_or("");
         let ip = if host.is_empty() {
@@ -178,9 +185,9 @@ impl ServerProperties {
             .map(String::as_str)
             .unwrap_or("1")
             .parse::<u8>()
-            .map_err(|_| invalid("difficulty must be in 0..=3"))?;
+            .map_err(|_| invalid_property("difficulty", "an integer in 0..=3"))?;
         if difficulty > 3 {
-            return Err(invalid("difficulty must be in 0..=3"));
+            return Err(invalid_property("difficulty", "an integer in 0..=3"));
         }
         if hardcore && (!survival || difficulty != 3) {
             return Err(invalid(
@@ -190,9 +197,7 @@ impl ServerProperties {
         // These settings remain fixed until their runtime subsystems can honour them.
         for (name, only) in [("view-distance", "2"), ("max-players", "8")] {
             if values.get(name).is_some_and(|value| value != only) {
-                return Err(invalid(
-                    "server.properties requests an unsupported view-distance/difficulty/max-players",
-                ));
+                return Err(invalid_property(name, only));
             }
         }
         let level_seed = values
@@ -244,16 +249,17 @@ impl ServerProperties {
             "level-seed",
             "level-type",
         ];
-        let ignored: Vec<&str> = values
+        if let Some(key) = values
             .keys()
             .map(String::as_str)
-            .filter(|key| !accepted.contains(key))
-            .collect();
-        if !ignored.is_empty() {
-            eprintln!(
-                "server.properties: unsupported keys are NOT applied: {}",
-                ignored.join(", ")
-            );
+            .find(|key| !accepted.contains(key))
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "unsupported server.properties key '{key}'; remove it or correct the spelling"
+                ),
+            ));
         }
         Ok(Self {
             bind: SocketAddr::new(ip, port),
@@ -352,6 +358,37 @@ gamemode=1
             assert!(ServerProperties::parse(&bad).is_err(), "{bad}");
         }
         assert!(ServerProperties::parse("level-name=world").is_err());
+    }
+
+    #[test]
+    fn unknown_keys_fail_closed_and_identify_the_typo() {
+        for key in ["white-lits", "server-prort", "motd"] {
+            let input = format!("{SAFE}{key}=ignored\n");
+            let error = ServerProperties::parse(&input).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            assert!(error.to_string().contains(key), "{error}");
+            assert!(error.to_string().contains("remove"), "{error}");
+        }
+    }
+
+    #[test]
+    fn invalid_value_errors_identify_the_setting() {
+        for (key, input) in [
+            ("online-mode", SAFE.replace("online-mode=false", "online-mode=no")),
+            ("white-list", SAFE.replace("white-list=true", "white-list=1")),
+            ("hardcore", format!("{SAFE}hardcore=perhaps\n")),
+            ("enable-rcon", format!("{SAFE}enable-rcon=1\n")),
+            ("server-port", SAFE.replace("server-port=25580", "server-port=abc")),
+            ("server-port", SAFE.replace("server-port=25580", "server-port=0")),
+            ("difficulty", SAFE.replace("difficulty=1", "difficulty=easy")),
+            ("difficulty", SAFE.replace("difficulty=1", "difficulty=4")),
+            ("view-distance", SAFE.replace("view-distance=2", "view-distance=far")),
+            ("max-players", SAFE.replace("max-players=8", "max-players=unlimited")),
+        ] {
+            let error = ServerProperties::parse(&input).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            assert!(error.to_string().contains(key), "{key}: {error}");
+        }
     }
 
     #[test]
