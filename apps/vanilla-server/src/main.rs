@@ -10001,6 +10001,44 @@ fn main() -> io::Result<()> {
                         }
                     }
                 }
+                // Ground item motion shares the existing authoritative 20TPS
+                // world worker. Hold world -> ground in the established lock
+                // order; persist changed positions before sending S18 teleports
+                // or making the new positions eligible for player pickup.
+                if survival {
+                    let mut ground = match leaf_drops.lock() {
+                        Ok(value) => value,
+                        Err(_) => return,
+                    };
+                    let (next, moved) = match ground.stage_gravity_ticks(&gravity_world, steps) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            eprintln!("GROUND GRAVITY TICK ERROR: {error}");
+                            return;
+                        }
+                    };
+                    if !moved.is_empty() {
+                        let bytes = match next.encoded() {
+                            Ok(value) => value,
+                            Err(error) => {
+                                eprintln!("GROUND GRAVITY ENCODING ERROR: {error}");
+                                return;
+                            }
+                        };
+                        if let Err(error) = journal::commit(
+                            &furnace_world_path.with_extension("pending-txn.json"),
+                            &[(&*leaf_drops_file, bytes)],
+                        ) {
+                            eprintln!("GROUND GRAVITY JOURNAL ERROR: {error}");
+                            return;
+                        }
+                    }
+                    *ground = next;
+                    drop(ground);
+                    for item in moved {
+                        furnace_hub.broadcast(GroundItems::movement_event(&item));
+                    }
+                }
                 // Every fifth existing 20TPS tick, check bounded Mob and
                 // ground-item contacts. A stationary entity renews hook timers;
                 // when it leaves, the normal block_tick releases the signal.

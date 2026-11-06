@@ -1,4 +1,4 @@
-# 17 Open PRs — integration snapshot
+# 19 Open PRs — integration snapshot
 
 **This branch is a disposable validation candidate, not a production merge or a release.**
 
@@ -23,6 +23,8 @@ main snapshot: `ef28c275bcda09b945b66aaff0e318a838c6cfb3`
 - #857: `0b95f3dde3b10f3fb5e2b32caeb70c3951a41607`
 - #858: `bc1f42707d50799b7d02160f9210cfb9d8e08a92`
 
+- #861 (stacked on #857): `51f827a537f5b565da3520a538381a84512dec65`
+- #862: `917500cdca123188e82c0ea33c6cb70550cc103b`
 ## Overlapping files resolved for combined verification
 - `apps/vanilla-server/src/main.rs`: #846, #852, #857, #729
 - `apps/vanilla-server/src/server_config.rs`: #736, #729
@@ -52,3 +54,12 @@ PR #859 had three rustfmt hunks in `apps/vanilla-server/tests/protocol5_e2e.rs`.
 PRs #855, #857, and #858 incorporated the same new main formatting in their branch ancestry; the source-specific blobs in this integration candidate are unchanged.
 **Rust validation on this integration branch is still NOT_RUN**. PR #859 describes Windows fmt/clippy success on its own branch, but its 2 failing TCP integration tests are not a success claim for this candidate.
 Snapshot branch and PR heads may advance independently. Compare PR HEAD SHAs before taking a release or merge decision.
+
+## 19-PR expanded staging (still NOT_RUN)
+
+- #861 gravity/collision is stacked on #857, and **cannot be merged before its parent**. Added the 20TPS worker in `main.rs`, its `ground_items.rs` source and `docs/23_ground_item_gravity_collision_20261106.md`.
+- #862 note-block support material mapping was merged into `decorations.rs` without dropping #857's `contains_position` and `staged_sidecar_removal_detects_all_decorations_without_publishing` tests.
+- #861 `protocol5_e2e.rs` contains its new gravity E2E test and #857's mining tests; #841's REG-123 Status Ping test was reinserted exactly. The earlier rustfmt #859 changes remain present.
+- New changes have only been checked for scoped code overlap and marker preservation. **Cargo tests, rustfmt, Clippy, crash injection, 1.7.10 client, and physics load tests remain NOT_RUN.**
+- `cargo test -p vanilla-server falling_item_ -- --nocapture` and `cargo test -p vanilla-server --bin vanilla-server add059_ -- --nocapture` are targeted additional gates.
+- Do not merge the stacked #861 to main, or close #856/#483, until both parent tests and these new tests pass.
