@@ -295,6 +295,9 @@ impl GroundItems {
         if ticks > 20 {
             return Err(invalid("too many ground physics catch-up ticks"));
         }
+        if ticks == 0 || self.entries.is_empty() {
+            return Ok((self.clone(), Vec::new()));
+        }
         let mut candidate = self.clone();
         let mut moved = BTreeMap::new();
         for _ in 0..ticks {
@@ -374,7 +377,9 @@ impl GroundItems {
                 }
             }
         }
-        candidate.encoded()?;
+        // The worker calls encoded() only when a fixed-point position has
+        // actually changed. This avoids serializing up to 512 items on each
+        // empty or subpixel-only 20TPS update.
         Ok((candidate, moved.into_values().collect()))
     }
     /// Add the drop after an IRW1 edit succeeds. Persist before announcing.
