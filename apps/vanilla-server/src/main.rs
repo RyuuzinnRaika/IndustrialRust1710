@@ -9950,14 +9950,13 @@ fn main() -> io::Result<()> {
                         Ok(value) => value,
                         Err(_) => return,
                     };
-                    let (next, moved) =
-                        match ground.stage_gravity_ticks(&gravity_world, steps) {
-                            Ok(value) => value,
-                            Err(error) => {
-                                eprintln!("GROUND GRAVITY TICK ERROR: {error}");
-                                return;
-                            }
-                        };
+                    let (next, moved) = match ground.stage_gravity_ticks(&gravity_world, steps) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            eprintln!("GROUND GRAVITY TICK ERROR: {error}");
+                            return;
+                        }
+                    };
                     if !moved.is_empty() {
                         let bytes = match next.encoded() {
                             Ok(value) => value,
