@@ -120,6 +120,25 @@ pub(crate) fn inspect_region_bytes(path: &Path, raw: &[u8]) -> io::Result<usize>
 mod tests {
     use super::*;
     use crate::{anvil_export, world::World};
+    use flate2::{write::GzEncoder, write::ZlibEncoder, Compression};
+    use std::io::Write;
+
+    #[test]
+    fn gzip_and_zlib_bombs_stop_at_expanded_chunk_bound_without_mutating_input() {
+        let raw = vec![0x41u8; MAX_CHUNK_NBT as usize + 1024];
+        let mut gz = GzEncoder::new(Vec::new(), Compression::fast());
+        gz.write_all(&raw).unwrap();
+        let mut zlib = ZlibEncoder::new(Vec::new(), Compression::fast());
+        zlib.write_all(&raw).unwrap();
+        for (kind, compressed) in [(1u8, gz.finish().unwrap()), (2, zlib.finish().unwrap())] {
+            assert!(compressed.len() < raw.len() / 100);
+            let original = compressed.clone();
+            let error = decompress(&compressed, kind).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData, "compression={kind}");
+            assert!(error.to_string().contains("NBT size limit"));
+            assert_eq!(compressed, original);
+        }
+    }
 
     #[test]
     fn reads_own_1710_regions_across_zero_and_negative_indices() {

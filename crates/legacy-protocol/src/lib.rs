@@ -179,7 +179,9 @@ impl<'a> Cursor<'a> {
         }
         let b = self.take(n as usize)?;
         let s = std::str::from_utf8(b).map_err(|_| invalid("utf8"))?;
-        if s.chars().count() > max_chars {
+        // Minecraft Java String.length() counts UTF-16 code units,
+        // not Unicode scalar values. Astral characters take two units.
+        if s.encode_utf16().count() > max_chars {
             return Err(invalid("string chars"));
         }
         Ok(s)
@@ -280,6 +282,30 @@ mod tests {
         assert_eq!(c.read_string(255).unwrap(), "localhost");
         assert_eq!(c.read_u16().unwrap(), 25565);
         c.finish().unwrap();
+    }
+
+    #[test]
+    fn java_1710_string_limits_count_utf16_units_not_unicode_scalars() {
+        // Eight supplementary characters use sixteen Java UTF-16 units.
+        let mut allowed = Vec::new();
+        write_string(&"😀".repeat(8), &mut allowed).unwrap();
+        let mut reader = Cursor::new(&allowed);
+        assert_eq!(reader.read_string(16).unwrap(), "😀".repeat(8));
+        reader.finish().unwrap();
+
+        // Nine of the same characters use eighteen Java UTF-16 units.
+        let mut too_long = Vec::new();
+        write_string(&"😀".repeat(9), &mut too_long).unwrap();
+        assert_eq!(
+            Cursor::new(&too_long).read_string(16).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        // BMP CJK characters and formatting markers each use one unit.
+        let mut legacy_formatted = Vec::new();
+        write_string("§a世界", &mut legacy_formatted).unwrap();
+        assert_eq!(Cursor::new(&legacy_formatted).read_string(4).unwrap(), "§a世界");
+        assert!(Cursor::new(&legacy_formatted).read_string(3).is_err());
     }
 
     #[test]

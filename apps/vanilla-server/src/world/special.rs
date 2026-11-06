@@ -970,6 +970,109 @@ mod tests {
     }
 
     #[test]
+    fn reg168_daylight_recomputes_through_rain_and_time_changes() {
+        // REG-168 / #804: avoid a stale detector output after clock/weather
+        // updates, including repeated transitions back to the same state.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-reg168-daylight-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("sensor.irw");
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 63, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, 0, 64, 0, 151 << 4).unwrap();
+
+        for (time, rain, strength) in [
+            (6_000i64, false, 15u16),
+            (6_000, true, 12),
+            (18_000, true, 0),
+            (18_000, false, 0),
+            (6_000, false, 15),
+            (6_000, true, 12),
+            (6_000, false, 15),
+        ] {
+            world.set_day_time(time);
+            world.set_raining(rain);
+            for _ in 0..4 {
+                world.block_tick(&path, 64).unwrap();
+            }
+            assert_eq!(
+                world.get(0, 64, 0),
+                (151 << 4) | strength,
+                "unexpected daylight output at time={time}, rain={rain}"
+            );
+            assert_eq!(
+                World::load(&path).unwrap().get(0, 64, 0),
+                (151 << 4) | strength,
+                "committed daylight state was not persisted"
+            );
+        }
+
+        // Load reconstructs pending_devices; a restarted server must still
+        // update the detector when time advances or rain changes.
+        let mut restarted = World::load(&path).unwrap();
+        restarted.set_day_time(18_000);
+        restarted.set_raining(false);
+        for _ in 0..4 {
+            restarted.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(restarted.get(0, 64, 0), 151 << 4);
+        restarted.set_day_time(6_000);
+        restarted.set_raining(false);
+        for _ in 0..4 {
+            restarted.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(restarted.get(0, 64, 0), (151 << 4) | 15);
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), (151 << 4) | 15);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn add060_daylight_sensor_respects_opaque_roof_but_not_glass() {
+        // ADD-060 / #484: the 1.7.10 sensor is not a later inverted sensor.
+        // Its analog output must be zero under an opaque roof even at noon.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-add060-daylight-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("sensor.irw");
+        let mut world = World::new();
+        world.set_day_time(6_000);
+        world.set_raining(false);
+        world.update_and_save(&path, 0, 63, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, 0, 64, 0, 151 << 4).unwrap();
+
+        for (roof, expected) in [(0u16, 15u16), (1 << 4, 0), (20 << 4, 15), (0, 15)] {
+            world.update_and_save(&path, 0, 65, 0, roof).unwrap();
+            for _ in 0..4 {
+                world.block_tick(&path, 64).unwrap();
+            }
+            assert_eq!(
+                world.get(0, 64, 0),
+                (151 << 4) | expected,
+                "wrong solar output with roof block {}", roof >> 4
+            );
+            assert_eq!(
+                World::load(&path).unwrap().get(0, 64, 0),
+                (151 << 4) | expected
+            );
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cauldron_metadata_and_item_conservation() {
         let mut w = World::new();
         let path = file("cauldron");

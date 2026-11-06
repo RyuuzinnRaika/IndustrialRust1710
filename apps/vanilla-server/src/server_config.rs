@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const MAX_PROPERTIES_BYTES: u64 = 64 * 1024;
 
@@ -23,6 +23,27 @@ pub fn offline_exposure_warning(bind: SocketAddr, online_mode: bool) -> Option<&
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
+}
+
+fn invalid_property(key: &str, expected: &str) -> io::Error {
+    io::Error::new(
+        ErrorKind::InvalidData,
+        format!("server.properties {key}: expected {expected}"),
+    )
+}
+
+/// Prevent a user-controlled path from escaping its selected directory
+/// through an explicit '..' component before any lock or write is attempted.
+/// Safe relative paths and intentionally provided absolute paths remain valid.
+pub fn reject_parent_traversal(path: &Path) -> io::Result<()> {
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(invalid("unsafe path: empty or parent-directory traversal"));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -46,7 +67,7 @@ fn boolean(map: &BTreeMap<String, String>, key: &str, default: bool) -> io::Resu
         Some("true") => Ok(true),
         Some("false") => Ok(false),
         None => Ok(default),
-        _ => Err(invalid("server.properties has invalid boolean")),
+        _ => Err(invalid_property(key, "true or false")),
     }
 }
 
@@ -73,6 +94,7 @@ fn legacy_world_name(name: &str) -> io::Result<()> {
 
 /// Never let an IRW prototype start writing alongside real vanilla level.dat.
 pub fn verify_legacy_storage(world_file: &Path) -> io::Result<()> {
+    reject_parent_traversal(world_file)?;
     let parent = world_file
         .parent()
         .ok_or_else(|| invalid("world path has no parent"))?;
@@ -156,9 +178,9 @@ impl ServerProperties {
             .map(String::as_str)
             .unwrap_or("25565")
             .parse::<u16>()
-            .map_err(|_| invalid("invalid server-port"))?;
+            .map_err(|_| invalid_property("server-port", "an integer in 1..=65535"))?;
         if port == 0 {
-            return Err(invalid("server-port cannot be zero"));
+            return Err(invalid_property("server-port", "an integer in 1..=65535"));
         }
         let host = values.get("server-ip").map(String::as_str).unwrap_or("");
         let ip = if host.is_empty() {
@@ -178,9 +200,9 @@ impl ServerProperties {
             .map(String::as_str)
             .unwrap_or("1")
             .parse::<u8>()
-            .map_err(|_| invalid("difficulty must be in 0..=3"))?;
+            .map_err(|_| invalid_property("difficulty", "an integer in 0..=3"))?;
         if difficulty > 3 {
-            return Err(invalid("difficulty must be in 0..=3"));
+            return Err(invalid_property("difficulty", "an integer in 0..=3"));
         }
         if hardcore && (!survival || difficulty != 3) {
             return Err(invalid(
@@ -190,9 +212,7 @@ impl ServerProperties {
         // These settings remain fixed until their runtime subsystems can honour them.
         for (name, only) in [("view-distance", "2"), ("max-players", "8")] {
             if values.get(name).is_some_and(|value| value != only) {
-                return Err(invalid(
-                    "server.properties requests an unsupported view-distance/difficulty/max-players",
-                ));
+                return Err(invalid_property(name, only));
             }
         }
         let level_seed = values
@@ -244,16 +264,17 @@ impl ServerProperties {
             "level-seed",
             "level-type",
         ];
-        let ignored: Vec<&str> = values
+        if let Some(key) = values
             .keys()
             .map(String::as_str)
-            .filter(|key| !accepted.contains(key))
-            .collect();
-        if !ignored.is_empty() {
-            eprintln!(
-                "server.properties: unsupported keys are NOT applied: {}",
-                ignored.join(", ")
-            );
+            .find(|key| !accepted.contains(key))
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "unsupported server.properties key '{key}'; remove it or correct the spelling"
+                ),
+            ));
         }
         Ok(Self {
             bind: SocketAddr::new(ip, port),
@@ -284,6 +305,31 @@ difficulty=1
 max-players=8
 gamemode=1
 ";
+
+    #[test]
+    fn world_paths_allow_normal_relative_and_absolute_paths_but_reject_parent_traversal() {
+        for safe in ["world/flat.irw", "./world/flat.irw", "world", "."] {
+            assert!(reject_parent_traversal(Path::new(safe)).is_ok(), "{safe}");
+        }
+        let absolute = std::env::temp_dir().join("ir1710-path-test/flat.irw");
+        assert!(reject_parent_traversal(&absolute).is_ok());
+        for unsafe_path in [
+            "",
+            "../outside/flat.irw",
+            "world/../outside.irw",
+            "world/nested/../../outside.irw",
+        ] {
+            let error = reject_parent_traversal(Path::new(unsafe_path)).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData, "{unsafe_path}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_parent_traversal_and_drive_prefixes_are_distinguished() {
+        assert!(reject_parent_traversal(Path::new(r"C:\Worlds\flat.irw")).is_ok());
+        assert!(reject_parent_traversal(Path::new(r"C:\Worlds\..\escape.irw")).is_err());
+    }
 
     #[test]
     fn offline_warning_matches_authentication_and_ipv4_ipv6_exposure() {
@@ -352,6 +398,37 @@ gamemode=1
             assert!(ServerProperties::parse(&bad).is_err(), "{bad}");
         }
         assert!(ServerProperties::parse("level-name=world").is_err());
+    }
+
+    #[test]
+    fn unknown_keys_fail_closed_and_identify_the_typo() {
+        for key in ["white-lits", "server-prort", "motd"] {
+            let input = format!("{SAFE}{key}=ignored\n");
+            let error = ServerProperties::parse(&input).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            assert!(error.to_string().contains(key), "{error}");
+            assert!(error.to_string().contains("remove"), "{error}");
+        }
+    }
+
+    #[test]
+    fn invalid_value_errors_identify_the_setting() {
+        for (key, input) in [
+            ("online-mode", SAFE.replace("online-mode=false", "online-mode=no")),
+            ("white-list", SAFE.replace("white-list=true", "white-list=1")),
+            ("hardcore", format!("{SAFE}hardcore=perhaps\n")),
+            ("enable-rcon", format!("{SAFE}enable-rcon=1\n")),
+            ("server-port", SAFE.replace("server-port=25580", "server-port=abc")),
+            ("server-port", SAFE.replace("server-port=25580", "server-port=0")),
+            ("difficulty", SAFE.replace("difficulty=1", "difficulty=easy")),
+            ("difficulty", SAFE.replace("difficulty=1", "difficulty=4")),
+            ("view-distance", SAFE.replace("view-distance=2", "view-distance=far")),
+            ("max-players", SAFE.replace("max-players=8", "max-players=unlimited")),
+        ] {
+            let error = ServerProperties::parse(&input).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            assert!(error.to_string().contains(key), "{key}: {error}");
+        }
     }
 
     #[test]
