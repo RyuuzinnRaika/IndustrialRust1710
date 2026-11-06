@@ -9,7 +9,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 import contextlib
 
-import save_fixture_report as scan
+import verify_save_fixture_report as scan
 
 
 class SaveFixtureTests(unittest.TestCase):
