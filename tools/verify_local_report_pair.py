@@ -52,7 +52,8 @@ def load_report(path: Path, expected_os: str) -> dict:
         if not isinstance(check, dict):
             raise EvidenceError(f"{expected_os}: malformed check entry")
         names.append(check.get("name"))
-        if check.get("status") not in STATUSES:
+        status = check.get("status")
+        if not isinstance(status, str) or status not in STATUSES:
             raise EvidenceError(f"{expected_os}: invalid check status")
     if tuple(names) != CHECK_NAMES:
         raise EvidenceError(f"{expected_os}: unexpected check names or order")
