@@ -25,7 +25,10 @@ impl Drop for TestServer {
         if thread::panicking() {
             let log = fs::read(&self.stderr).unwrap_or_default();
             let start = log.len().saturating_sub(8 * 1024);
-            eprintln!("REG-122 server diagnostic tail: {}", String::from_utf8_lossy(&log[start..]));
+            eprintln!(
+                "REG-122 server diagnostic tail: {}",
+                String::from_utf8_lossy(&log[start..])
+            );
         }
         let _ = fs::remove_dir_all(&self.root);
         let _ = fs::remove_file(&self.stderr);
@@ -175,8 +178,14 @@ fn reg122_srv_style_handshake_preserves_status_and_login_behavior() {
 fn reg122_hostname_byte_and_java_utf16_boundaries() {
     let server = TestServer::start();
     // ASCII and multibyte UTF-8 host strings at the 255-unit limit.
-    assert_eq!(status(&server, &"a".repeat(255), server.port)["version"]["protocol"], 5);
-    assert_eq!(status(&server, &"界".repeat(255), server.port)["version"]["protocol"], 5);
+    assert_eq!(
+        status(&server, &"a".repeat(255), server.port)["version"]["protocol"],
+        5
+    );
+    assert_eq!(
+        status(&server, &"界".repeat(255), server.port)["version"]["protocol"],
+        5
+    );
     assert_eq!(
         status(&server, &format!("{}x", "😀".repeat(127)), server.port)["version"]["protocol"],
         5
@@ -186,8 +195,12 @@ fn reg122_hostname_byte_and_java_utf16_boundaries() {
     // connection. The supplementary-plane case also regresses #504/#846.
     for oversized in ["a".repeat(256), "😀".repeat(128)] {
         let mut client = server.connect();
-        write_frame(&mut client, &handshake(&oversized, server.port, 1)).unwrap();
-        transmit(&mut client, 0, &[]);
+        // Send both frames in one buffer, so an immediate server rejection
+        // cannot make a second write race with TCP connection closure.
+        let mut frames = Vec::new();
+        write_frame(&mut frames, &handshake(&oversized, server.port, 1)).unwrap();
+        write_frame(&mut frames, &packet(0, &[])).unwrap();
+        client.write_all(&frames).unwrap();
         assert!(
             read_frame(&mut client).is_err(),
             "accepted 256 UTF-16 units in Protocol 5 hostname"
