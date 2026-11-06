@@ -1224,6 +1224,22 @@ fn projectile_hitbox(mob: &Mob) -> (f64, f64) {
         _ => (0.45, if mob.baby { 1.0 } else { 1.95 }),
     }
 }
+/// Melee reach checks both horizontal proximity and vertical body overlap.
+/// A feet-to-feet 3D sphere incorrectly makes a nearby zombie miss a jumping
+/// player at the 1.7.10 jump apex (roughly 1.249 blocks above ground).
+/// Keep the existing 1.6-block horizontal bound; do not widen reach through
+/// distant targets. Occlusion and precise vanilla AI reach remain separate.
+fn melee_reaches_player(mob: &Mob, player: PlayerPosition) -> bool {
+    if !player.is_valid() {
+        return false;
+    }
+    let (_, mob_height) = projectile_hitbox(mob);
+    let horizontal = (mob.position.x - player.x).hypot(mob.position.z - player.z);
+    horizontal <= 1.6
+        && player.y < mob.position.y + mob_height
+        && player.y + 1.8 > mob.position.y
+}
+
 /// Projectile collisions must intersect the mob's body, not its feet.
 fn projectile_hits_mob(mob: &Mob, point: PlayerPosition) -> bool {
     let (radius, height) = projectile_hitbox(mob);
@@ -3739,7 +3755,7 @@ impl Mobs {
                         | Kind::EnderDragon
                         | Kind::Wither
                 )
-                && mob.nearby(player, 1.6)
+                && melee_reaches_player(mob, player)
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
                 mob.bite_tick = tick;
@@ -5232,6 +5248,67 @@ mod tests {
         let hit = mobs.hurt_player_detailed(702, pos, 50, 4.0);
         assert_eq!(hit.amount, 8);
         assert_eq!(hit.origin, DamageOrigin::Mixed);
+    }
+
+    /// Real Protocol 5 jump trace has feet Y = ground+1.249187 at the apex.
+    /// A zombie 1.4 blocks away can still touch the player's body while
+    /// the player is airborne; feet-to-feet distance incorrectly rejects it.
+    #[test]
+    fn zombie_melee_reaches_jump_apex_and_respects_bite_timing() {
+        let grounded = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let jumping = PlayerPosition {
+            y: 65.24918707874468,
+            ..grounded
+        };
+        let mob_pos = PlayerPosition {
+            x: 1.9,
+            ..grounded
+        };
+        let mut mobs = Mobs {
+            difficulty: Some(2),
+            ..Mobs::default()
+        };
+        mobs.insert(Kind::Zombie, mob_pos, false);
+        let id = mobs.next_id - 1;
+        assert!(!mobs.entities[&id].nearby(jumping, 1.6));
+        assert!(melee_reaches_player(&mobs.entities[&id], jumping));
+        assert_eq!(mobs.hurt_player(51, jumping, 20), 3);
+        assert_eq!(mobs.hurt_player(51, jumping, 39), 0);
+        assert_eq!(mobs.hurt_player(51, jumping, 40), 3);
+    }
+
+    #[test]
+    fn zombie_melee_cannot_hit_above_its_body_or_beyond_horizontal_reach() {
+        let grounded = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.insert(
+            Kind::Zombie,
+            PlayerPosition { x: 1.9, ..grounded },
+            false,
+        );
+        let zombie = &mobs.entities[&(mobs.next_id - 1)];
+        assert!(!melee_reaches_player(
+            zombie,
+            PlayerPosition {
+                y: 66.1,
+                ..grounded
+            }
+        ));
+        assert!(!melee_reaches_player(
+            zombie,
+            PlayerPosition {
+                x: -0.2,
+                ..grounded
+            }
+        ));
     }
 
     #[test]
