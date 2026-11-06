@@ -46,6 +46,9 @@ prove the executable/client version.
 - For zombies, replace the generic 1.6-block 3D sphere with the legacy
   EntityAIAttackOnCollide reach check: squared feet distance must be at most
   `(zombie_width * 2)^2 + player_width` (adult width 0.6, player width 0.6).
+  For projectile hits and knockback collision, use the same 1.7.10
+  zombie body dimensions as the existing spawn verifier (adult half-width
+  0.3, height 1.8; baby dimensions scaled by 0.5).
   This **narrows** overly generous reach, including some jump-apex hits;
   it does not interpret vertical hitbox overlap as permission to hit.
   Preserve the 20-tick bite interval, difficulty scaling, and per-player
@@ -75,4 +78,6 @@ migrate, truncate or overwrite an existing player world for these tests.
 Historical references: Minecraft 1.7.10 packet ID map
 (https://gist.github.com/leafypout/5d2d966450055ca686cf96979c08794d),
 1.7.10-era living-entity hit behavior
-(https://skmedix.github.io/ForgeJavaDocs/javadoc/forge/1.7.10-10.13.4.1614/net/minecraft/entity/EntityLivingBase.html).
+(https://skmedix.github.io/ForgeJavaDocs/javadoc/forge/1.7.10-10.13.4.1614/net/minecraft/entity/EntityLivingBase.html),
+and 1.7.10-era `EntityAIAttackOnCollide`
+(https://www.javatips.net/api/WildAnimalsPlus-1.7.10-master/build/tmp/recompSrc/net/minecraft/entity/ai/EntityAIAttackOnCollide.java).
