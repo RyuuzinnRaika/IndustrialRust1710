@@ -6,7 +6,7 @@ use std::io::{self, ErrorKind};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PublicCommand<'a> {
-    Help,
+    Help(usize),
     List,
     Me(&'a str),
     Tell { target: &'a str, message: &'a str },
@@ -34,7 +34,7 @@ struct CommandGuide {
 const COMMAND_GUIDE: &[CommandGuide] = &[
     CommandGuide {
         name: "/help",
-        usage: "/help (alias /?)",
+        usage: "/help [page] (alias /?)",
         example: "/help",
         access: "Player: no OP needed; console: local audit",
         console_only: false,
@@ -272,6 +272,29 @@ const COMMAND_GUIDE: &[CommandGuide] = &[
     },
 ];
 
+const PLAYER_HELP_PAGE_SIZE: usize = 5;
+
+pub fn player_help_page_count() -> usize {
+    let entries = COMMAND_GUIDE.iter().filter(|guide| !guide.console_only).count();
+    (entries + PLAYER_HELP_PAGE_SIZE - 1) / PLAYER_HELP_PAGE_SIZE
+}
+
+/// Return only one bounded page of player help, not 30 chat packets at once.
+/// A page number outside the implemented command list never wraps around.
+pub fn player_help_page(page: usize) -> Option<Vec<String>> {
+    if page == 0 || page > player_help_page_count() {
+        return None;
+    }
+    let start = (page - 1) * PLAYER_HELP_PAGE_SIZE;
+    Some(
+        help_lines(HelpAudience::Player)
+            .into_iter()
+            .skip(start)
+            .take(PLAYER_HELP_PAGE_SIZE)
+            .collect(),
+    )
+}
+
 pub fn help_lines(audience: HelpAudience) -> Vec<String> {
     COMMAND_GUIDE
         .iter()
@@ -321,6 +344,40 @@ mod command_guide_tests {
     }
 
     #[test]
+    fn player_help_is_paginated_without_flooding_or_skipping_commands() {
+        let all = help_lines(HelpAudience::Player);
+        let total_pages = player_help_page_count();
+        assert_eq!(total_pages, 6);
+        assert_eq!(all.len(), 30);
+        assert!(player_help_page(0).is_none());
+        assert!(player_help_page(total_pages + 1).is_none());
+        assert!(player_help_page(usize::MAX).is_none());
+        let flattened: Vec<String> = (1..=total_pages)
+            .flat_map(|page| {
+                let lines = player_help_page(page).unwrap();
+                assert!(!lines.is_empty() && lines.len() <= PLAYER_HELP_PAGE_SIZE);
+                lines
+            })
+            .collect();
+        assert_eq!(flattened, all);
+    }
+
+    #[test]
+    fn public_help_parser_accepts_bounded_pages_and_rejects_invalid_inputs() {
+        assert_eq!(parse_public("/help"), Some(Ok(PublicCommand::Help(1))));
+        assert_eq!(parse_public("/?"), Some(Ok(PublicCommand::Help(1))));
+        assert_eq!(parse_public("/help 6"), Some(Ok(PublicCommand::Help(6))));
+        assert_eq!(parse_public("/? 2"), Some(Ok(PublicCommand::Help(2))));
+        for invalid in ["/help 0", "/help 7", "/help -1", "/help abc", "/help 1 2"] {
+            assert_eq!(
+                parse_public(invalid),
+                Some(Err("Usage: /help [page]")),
+                "input: {invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn guide_examples_match_canonical_command_and_names_are_unique() {
         let mut names = std::collections::BTreeSet::new();
         for guide in COMMAND_GUIDE {
@@ -345,11 +402,19 @@ mod command_guide_tests {
 pub fn parse_public(message: &str) -> Option<Result<PublicCommand<'_>, &'static str>> {
     let command = message.split_whitespace().next()?;
     match command {
-        "/help" | "/?" => Some(if message.split_whitespace().count() == 1 {
-            Ok(PublicCommand::Help)
-        } else {
-            Err("Usage: /help")
-        }),
+        "/help" | "/?" => {
+            let words: Vec<&str> = message.split_whitespace().collect();
+            Some(match words.as_slice() {
+                [_] => Ok(PublicCommand::Help(1)),
+                [_, number] => match number.parse::<usize>() {
+                    Ok(page) if page > 0 && page <= player_help_page_count() => {
+                        Ok(PublicCommand::Help(page))
+                    }
+                    _ => Err("Usage: /help [page]"),
+                },
+                _ => Err("Usage: /help [page]"),
+            })
+        }
         "/list" => Some(if message.split_whitespace().count() == 1 {
             Ok(PublicCommand::List)
         } else {
@@ -1006,8 +1071,8 @@ mod tests {
 
     #[test]
     fn public_commands_are_bounded_and_distinct_from_op_commands() {
-        assert_eq!(parse_public("/help"), Some(Ok(PublicCommand::Help)));
-        assert_eq!(parse_public("/?"), Some(Ok(PublicCommand::Help)));
+        assert_eq!(parse_public("/help"), Some(Ok(PublicCommand::Help(1))));
+        assert_eq!(parse_public("/?"), Some(Ok(PublicCommand::Help(1))));
         assert_eq!(parse_public("/list"), Some(Ok(PublicCommand::List)));
         assert_eq!(
             parse_public("/me waves"),
