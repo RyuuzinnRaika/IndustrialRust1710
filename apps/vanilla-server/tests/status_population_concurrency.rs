@@ -8,7 +8,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -130,8 +130,7 @@ fn status(port: u16) -> Value {
     let (id, payload) = receive(&mut client);
     assert_eq!(id, 0, "Status Response packet ID");
     let mut parser = Cursor::new(&payload);
-    let response: Value =
-        serde_json::from_str(parser.read_string(65536).unwrap()).unwrap();
+    let response: Value = serde_json::from_str(parser.read_string(65536).unwrap()).unwrap();
     parser.finish().unwrap();
     response
 }
@@ -163,10 +162,18 @@ fn join(port: u16, username: &str) -> TcpStream {
     panic!("no complete Play join after 160 Protocol 5 packets");
 }
 
-fn wait_for_online(port: u16, target: u64) {
+fn serialized_status(port: u16, gate: &Mutex<()>) -> Value {
+    // MAX_ACTIVE_PER_IP is four. Two logged-in players and two concurrent
+    // Status probes would exhaust the admission budget at connection churn.
+    // Serialize only Status probes; login/disconnect still race against them.
+    let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+    status(port)
+}
+
+fn wait_for_online(port: u16, target: u64, gate: &Mutex<()>) {
     let deadline = Instant::now() + Duration::from_secs(12);
     loop {
-        let state = status(port);
+        let state = serialized_status(port, gate);
         if state["players"]["online"].as_u64() == Some(target) {
             return;
         }
@@ -188,13 +195,15 @@ fn reg121_status_json_is_coherent_during_player_churn() {
         "Status MOTD must be a nonempty JSON text component"
     );
 
+    let gate = Arc::new(Mutex::new(()));
     let running = Arc::new(AtomicBool::new(true));
     let monitor_running = Arc::clone(&running);
+    let monitor_gate = Arc::clone(&gate);
     let port = server.port;
     let monitor = thread::spawn(move || {
         let mut samples = 0usize;
         while monitor_running.load(Ordering::Relaxed) || samples < 12 {
-            let sample = status(port);
+            let sample = serialized_status(port, &monitor_gate);
             assert_eq!(sample["version"]["protocol"], 5);
             assert_eq!(sample["players"]["max"], 8);
             let online = sample["players"]["online"]
@@ -210,17 +219,17 @@ fn reg121_status_json_is_coherent_during_player_churn() {
     });
 
     let alpha = join(server.port, "RustTester");
-    wait_for_online(server.port, 1);
+    wait_for_online(server.port, 1, &gate);
     let beta = join(server.port, "TwinAlpha");
-    wait_for_online(server.port, 2);
+    wait_for_online(server.port, 2, &gate);
     drop(beta);
-    wait_for_online(server.port, 1);
+    wait_for_online(server.port, 1, &gate);
     drop(alpha);
-    wait_for_online(server.port, 0);
+    wait_for_online(server.port, 0, &gate);
     let reconnect = join(server.port, "RustTester");
-    wait_for_online(server.port, 1);
+    wait_for_online(server.port, 1, &gate);
     drop(reconnect);
-    wait_for_online(server.port, 0);
+    wait_for_online(server.port, 0, &gate);
 
     running.store(false, Ordering::Relaxed);
     assert!(monitor.join().unwrap() >= 12);
