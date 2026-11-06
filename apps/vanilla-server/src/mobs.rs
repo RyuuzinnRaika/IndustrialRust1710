@@ -1221,9 +1221,39 @@ fn projectile_hitbox(mob: &Mob) -> (f64, f64) {
         Kind::Spider | Kind::CaveSpider => (0.7, 0.9),
         Kind::Chicken => (0.3, 0.7),
         Kind::Cow | Kind::Pig | Kind::Sheep => (0.55, 1.4),
+        Kind::Zombie => {
+            // Reuse the verified 1.7.10 spawn dimensions: adult 0.6x1.8,
+            // baby 0.3x0.9. Current-version wiki sizes are not 1.7.10.
+            let (half_width, height) = natural_spawn_body_dimensions(Kind::Zombie, 1);
+            if mob.baby {
+                (half_width * 0.5, height * 0.5)
+            } else {
+                (half_width, height)
+            }
+        }
         _ => (0.45, if mob.baby { 1.0 } else { 1.95 }),
     }
 }
+/// 1.7.10 EntityAIAttackOnCollide compares squared *feet* distance
+/// against (attacker.width * 2)^2 + target.width. A generic 1.6-block
+/// sphere makes zombies strike too far, especially while a player jumps.
+/// Limit this legacy-specific correction to zombies; other Mob AI reach
+/// remains on the original path until separately verified.
+fn melee_reaches_player(mob: &Mob, player: PlayerPosition) -> bool {
+    if mob.kind != Kind::Zombie {
+        return mob.nearby(player, 1.6);
+    }
+    if !player.is_valid() {
+        return false;
+    }
+    let (half_width, _) = projectile_hitbox(mob);
+    let reach_squared = (half_width * 4.0).powi(2) + 0.6;
+    let dx = mob.position.x - player.x;
+    let dy = mob.position.y - player.y;
+    let dz = mob.position.z - player.z;
+    dx * dx + dy * dy + dz * dz <= reach_squared
+}
+
 /// Projectile collisions must intersect the mob's body, not its feet.
 fn projectile_hits_mob(mob: &Mob, point: PlayerPosition) -> bool {
     let (radius, height) = projectile_hitbox(mob);
@@ -3739,7 +3769,7 @@ impl Mobs {
                         | Kind::EnderDragon
                         | Kind::Wither
                 )
-                && mob.nearby(player, 1.6)
+                && melee_reaches_player(mob, player)
                 && (mob.bite_tick == 0 || tick.saturating_sub(mob.bite_tick) >= ATTACK_INTERVAL)
             {
                 mob.bite_tick = tick;
@@ -5232,6 +5262,103 @@ mod tests {
         let hit = mobs.hurt_player_detailed(702, pos, 50, 4.0);
         assert_eq!(hit.amount, 8);
         assert_eq!(hit.origin, DamageOrigin::Mixed);
+    }
+
+    #[test]
+    fn zombie_projectile_and_knockback_hitboxes_match_1710_spawn_dimensions() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition::default();
+        let adult_id = mobs.next_id;
+        mobs.insert(Kind::Zombie, at, false);
+        let baby_id = mobs.next_id;
+        mobs.insert(Kind::Zombie, at, true);
+        let adult = &mobs.entities[&adult_id];
+        let baby = &mobs.entities[&baby_id];
+        assert_eq!(projectile_hitbox(adult), (0.3, 1.8));
+        assert_eq!(projectile_hitbox(baby), (0.15, 0.9));
+        assert!(projectile_hits_mob(
+            adult,
+            PlayerPosition {
+                x: at.x + 0.29,
+                ..at
+            }
+        ));
+        assert!(!projectile_hits_mob(
+            adult,
+            PlayerPosition {
+                x: at.x + 0.31,
+                ..at
+            }
+        ));
+    }
+
+    /// Reconstructed Protocol 5 jump apex: nearby contact remains possible
+    /// when the full 1.7.10 squared-distance rule (not an AABB shortcut) passes.
+    #[test]
+    fn zombie_melee_reaches_jump_apex_and_respects_bite_timing() {
+        let grounded = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let jumping = PlayerPosition {
+            y: 65.24918707874468,
+            ..grounded
+        };
+        let mob_pos = PlayerPosition {
+            x: 1.1,
+            ..grounded
+        };
+        let mut mobs = Mobs {
+            difficulty: Some(2),
+            ..Mobs::default()
+        };
+        mobs.insert(Kind::Zombie, mob_pos, false);
+        let id = mobs.next_id - 1;
+        assert!(melee_reaches_player(&mobs.entities[&id], jumping));
+        assert_eq!(mobs.hurt_player(51, jumping, 20), 3);
+        assert_eq!(mobs.hurt_player(51, jumping, 39), 0);
+        assert_eq!(mobs.hurt_player(51, jumping, 40), 3);
+    }
+
+    #[test]
+    fn zombie_melee_refuses_jump_reach_exceeding_vanilla_squared_limit() {
+        let grounded = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let mob_pos = PlayerPosition {
+            x: 1.1,
+            ..grounded
+        };
+        let mut mobs = Mobs {
+            difficulty: Some(2),
+            ..Mobs::default()
+        };
+        mobs.insert(Kind::Zombie, mob_pos, false);
+        let id = mobs.next_id - 1;
+        let jumping = PlayerPosition {
+            x: 0.2,
+            y: 65.24918707874468,
+            ..grounded
+        };
+        // Generic 1.6-block distance accepts this, but vanilla's
+        // (0.6*2)^2 + 0.6 squared reach rejects it.
+        assert!(mobs.entities[&id].nearby(jumping, 1.6));
+        assert!(!melee_reaches_player(&mobs.entities[&id], jumping));
+        assert_eq!(mobs.hurt_player(52, jumping, 20), 0);
+
+        let high = PlayerPosition {
+            y: 66.1,
+            ..grounded
+        };
+        assert!(!melee_reaches_player(&mobs.entities[&id], high));
+        let too_far = PlayerPosition {
+            x: -0.5,
+            ..grounded
+        };
+        assert!(!melee_reaches_player(&mobs.entities[&id], too_far));
     }
 
     #[test]
