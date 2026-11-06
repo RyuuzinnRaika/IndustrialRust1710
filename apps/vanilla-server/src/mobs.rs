@@ -4273,16 +4273,22 @@ mod tests {
         mobs.insert(Kind::Zombie, at, false);
         let id = mobs.next_id - 1;
         mobs.player_attack(id, attacker, None, 20).unwrap();
+        let (half_width, height) = projectile_hitbox(&mobs.entities[&id]);
+        assert_eq!((half_width, height), (0.3, 1.8));
         for tick in 21..=25 {
             mobs.tick(tick, &world, &[]);
+            let position = mobs.entities[&id].position;
+            // The wall begins at x=1.0: the zombie's right edge must
+            // stop at that face, using its 1.7.10 half-width of 0.3.
+            assert!(position.x <= 1.0 - half_width + 0.001, "tick {tick}");
+            assert!(
+                !physics::collides_sized(&world, &position, half_width, height),
+                "zombie entered solid wall at tick {tick}"
+            );
         }
-        assert!(mobs.entities[&id].position.x <= 0.551);
-        assert!(!physics::collides_sized(
-            &world,
-            &mobs.entities[&id].position,
-            0.45,
-            1.95
-        ));
+        // The old 0.45-wide hitbox stopped at x=0.55; the correct
+        // 1.7.10 zombie reaches the wall without tunnelling through it.
+        assert!(mobs.entities[&id].position.x > 0.6);
     }
 
     #[test]
@@ -5305,10 +5311,7 @@ mod tests {
             y: 65.24918707874468,
             ..grounded
         };
-        let mob_pos = PlayerPosition {
-            x: 1.1,
-            ..grounded
-        };
+        let mob_pos = PlayerPosition { x: 1.1, ..grounded };
         let mut mobs = Mobs {
             difficulty: Some(2),
             ..Mobs::default()
@@ -5328,10 +5331,7 @@ mod tests {
             y: 64.0,
             z: 0.5,
         };
-        let mob_pos = PlayerPosition {
-            x: 1.1,
-            ..grounded
-        };
+        let mob_pos = PlayerPosition { x: 1.1, ..grounded };
         let mut mobs = Mobs {
             difficulty: Some(2),
             ..Mobs::default()
