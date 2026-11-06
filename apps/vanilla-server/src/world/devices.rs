@@ -1472,7 +1472,7 @@ mod redstone_regression_tests {
         let rear = (-1, 64, 0);
         let target = (0, 64, 0);
         for (block, expected) in [
-            ((92 << 4), 0),  // 1.7.10 cake: no comparator override.
+            ((92 << 4), 0), // 1.7.10 cake: no comparator override.
             ((92 << 4) | 5, 0),
             ((118 << 4) | 3, 3),
             ((118 << 4), 0),
@@ -1503,7 +1503,7 @@ mod redstone_regression_tests {
         let path = dir.join("cake.irw");
         let mut world = World::new();
 
-        // Comparator faces east. Rear cake is one block west, on a floor.
+        // Comparator faces east; cake is immediately behind it to the west.
         world.update_and_save(&path, 0, 64, 0, (149 << 4) | 1).unwrap();
         world.update_and_save(&path, -1, 64, 0, 92 << 4).unwrap();
         for bites in 0u16..=5 {
@@ -1525,7 +1525,7 @@ mod redstone_regression_tests {
             assert_eq!(
                 world.signal_into((-1, 64, 0), (0, 64, 0)),
                 0,
-                "cake must supply comparator override, not ordinary redstone power"
+                "cake must neither power a comparator nor output ordinary redstone power"
             );
             assert_eq!(World::load(&path).unwrap().get(-1, 64, 0), cake);
         }
@@ -1538,7 +1538,7 @@ mod redstone_regression_tests {
         assert_eq!(world.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0), 0);
         assert_eq!(World::load(&path).unwrap().get(-1, 64, 0), 0);
 
-        // Reload a partially eaten cake and recalculate the analog output.
+        // Reload a partially eaten cake; no analog output may appear.
         world.update_and_save(&path, -1, 64, 0, (92 << 4) | 3).unwrap();
         let mut reloaded = World::load(&path).unwrap();
         for _ in 0..4 {
