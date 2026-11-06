@@ -93,3 +93,25 @@ failures rather than weakening assertions.
 A passing replay demonstrates those selected cases on the native server; it
 does **not** establish full Minecraft Java 1.7.10 gameplay compatibility.
 E42 manual client acceptance remains **NOT_RUN** until independently observed.
+
+## Additional no-cheat gameplay evidence (second capture)
+
+A second user-provided ordinary-gameplay PCAP (`minecraft(1).pcapng`)
+was inspected off-repository. Its Minecraft-shaped stream spans about 54.7
+seconds. The relevant observations were 500 C04 position packets, 222 C06
+position-and-look packets, and 19 S08 server position packets (including
+expected join/respawn position messages). In the interval approximately
+42.2–53.4 seconds, **10 S08 packets repeatedly selected the same XYZ**.
+The client sent back the specified position after each correction but was
+subsequently returned to that position again.
+
+This is **not evidence of cheating**. Potential causes include an overly
+strict `physics::valid_movement` collision sweep, a world/block discrepancy,
+or `pending_teleport` acknowledgement handling. The packet trace does not
+identify which condition caused the correction; server-side movement tracing
+(`IR_TRACE_MOVEMENT=1`) in a separate disposable world is needed.
+
+The jump replay above covers a flat-ground trajectory; it **does not yet
+reproduce the specific 10-correction terrain case**. Issue #628 tracks
+the additional world/terrain-dependent acceptance and rejection cases.
+The raw PCAP, user identifiers, and absolute coordinates are not committed.
