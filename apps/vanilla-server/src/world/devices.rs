@@ -1485,6 +1485,65 @@ mod redstone_regression_tests {
     }
 
     #[test]
+    fn reg166_cake_bites_update_comparator_and_survive_reload() {
+        // A whole 1.7.10 cake has 6 edible slices. Comparator override is
+        // 14 - 2 * bites, and the last bite removes the block completely.
+        // Each test uses a create-only scratch world, never an existing save.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ir1710-reg166-cake-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("cake.irw");
+        let mut world = World::new();
+
+        // Comparator faces east. Rear cake is one block west, on a floor.
+        world.update_and_save(&path, 0, 64, 0, (149 << 4) | 1).unwrap();
+        world.update_and_save(&path, -1, 64, 0, 92 << 4).unwrap();
+        for bites in 0u16..=5 {
+            let cake = (92 << 4) | bites;
+            assert!(world.update_and_save(&path, -1, 64, 0, cake).unwrap() || bites == 0);
+            for _ in 0..4 {
+                world.block_tick(&path, 64).unwrap();
+            }
+            let expected = 14 - (bites as u8) * 2;
+            assert_eq!(world.comparator_rear_input((-1, 64, 0), (0, 64, 0)), expected);
+            assert_eq!(
+                world.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0),
+                expected,
+                "wrong comparator output after {bites} bites"
+            );
+            assert_eq!(
+                world.signal_into((-1, 64, 0), (0, 64, 0)),
+                0,
+                "cake must supply comparator override, not ordinary redstone power"
+            );
+            assert_eq!(World::load(&path).unwrap().get(-1, 64, 0), cake);
+        }
+
+        // The sixth bite removes the cake, and the comparator must decay to 0.
+        world.update_and_save(&path, -1, 64, 0, 0).unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.comparator_outputs.get(&(0, 64, 0)).copied().unwrap_or(0), 0);
+        assert_eq!(World::load(&path).unwrap().get(-1, 64, 0), 0);
+
+        // Reload a partially eaten cake and recalculate the analog output.
+        world.update_and_save(&path, -1, 64, 0, (92 << 4) | 3).unwrap();
+        let mut reloaded = World::load(&path).unwrap();
+        for _ in 0..4 {
+            reloaded.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(reloaded.comparator_outputs.get(&(0, 64, 0)), Some(&8));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn comparator_reads_override_through_one_solid_block_only() {
         let mut w = World::new();
         let comparator = (0, 64, 0);
