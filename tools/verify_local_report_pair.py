@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import stat
 import sys
 
 MAX_REPORT_BYTES = 1024 * 1024
@@ -28,12 +29,24 @@ class EvidenceError(ValueError):
 
 def load_report(path: Path, expected_os: str) -> dict:
     try:
-        if path.stat().st_size > MAX_REPORT_BYTES:
+        metadata = path.stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise EvidenceError("report must be a regular file")
+        if metadata.st_size > MAX_REPORT_BYTES:
             raise EvidenceError("report exceeds 1 MiB")
-        report = json.loads(path.read_text(encoding="utf-8"))
+        # The file might grow after stat(): never read more than the cap + 1.
+        with path.open("rb") as source:
+            raw = source.read(MAX_REPORT_BYTES + 1)
+        if len(raw) > MAX_REPORT_BYTES:
+            raise EvidenceError("report exceeds 1 MiB")
+        report = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise EvidenceError(f"could not read {expected_os} report: {type(error).__name__}") from error
-    if not isinstance(report, dict) or report.get("schema_version") != 1:
+    if (
+        not isinstance(report, dict)
+        or type(report.get("schema_version")) is not int
+        or report["schema_version"] != 1
+    ):
         raise EvidenceError(f"{expected_os}: unsupported report schema")
     if report.get("host_os") != expected_os:
         raise EvidenceError(f"{expected_os}: host_os mismatch")
@@ -66,6 +79,20 @@ def load_report(path: Path, expected_os: str) -> dict:
             raise EvidenceError(f"{expected_os}: NOT_RUN with an exit_code")
     if tuple(names) != CHECK_NAMES:
         raise EvidenceError(f"{expected_os}: unexpected check names or order")
+
+    # industrial-verify reports exit 1 for any FAIL, 2 for missing required
+    # checks, and 0 only when every requested check passed. The optional E42
+    # check may be NOT_RUN when --automated-only was used (the flag is not
+    # included in schema v1). An inconsistent report must never pass a gate.
+    statuses = [check["status"] for check in checks]
+    failed = "FAIL" in statuses
+    incomplete = "NOT_RUN" in statuses
+    required_incomplete = "NOT_RUN" in statuses[:-1]
+    exit_code = report["exit_code"]
+    if (exit_code == 0 and (failed or required_incomplete)) or (
+        exit_code == 1 and not failed
+    ) or (exit_code == 2 and (failed or not incomplete)):
+        raise EvidenceError(f"{expected_os}: summary exit_code conflicts with check statuses")
     return report
 
 
