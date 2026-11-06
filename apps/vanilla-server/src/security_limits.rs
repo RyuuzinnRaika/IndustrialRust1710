@@ -180,22 +180,13 @@ mod tests {
         assert_eq!(valid_emoji.encode_utf16().count(), 100);
         assert_eq!(too_many_emoji.encode_utf16().count(), 102);
         assert!(ChatLimiter::default().check(&valid_emoji).is_ok());
-        assert_eq!(
-            ChatLimiter::default().check(&too_many_emoji),
-            Err(false)
-        );
+        assert_eq!(ChatLimiter::default().check(&too_many_emoji), Err(false));
 
         assert!(ChatLimiter::default().check(&"あ".repeat(100)).is_ok());
-        assert_eq!(
-            ChatLimiter::default().check(&"あ".repeat(101)),
-            Err(false)
-        );
+        assert_eq!(ChatLimiter::default().check(&"あ".repeat(101)), Err(false));
         // Leave Unicode text intact while rejecting unsafe control chars.
         assert!(ChatLimiter::default().check("こんにちは😀").is_ok());
-        assert_eq!(
-            ChatLimiter::default().check("こんにちは\u{202E}"),
-            Err(false)
-        );
+        assert_eq!(ChatLimiter::default().check("こんにちは\u{202E}"), Err(false));
     }
 
     #[test]
