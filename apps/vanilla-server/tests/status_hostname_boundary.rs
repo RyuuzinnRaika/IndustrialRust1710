@@ -140,6 +140,14 @@ fn status(server: &TestServer, host: &str, advertised_port: u16) -> Value {
     let mut cursor = Cursor::new(&response);
     let value: Value = serde_json::from_str(cursor.read_string(65536).unwrap()).unwrap();
     cursor.finish().unwrap();
+    // Finish the Status state with a Ping round trip. Closing after Status
+    // Response alone can leave a per-IP admission slot temporarily occupied,
+    // making subsequent boundary tests intermittently fail.
+    let token: i64 = 0x0123_4567_89ab_cdef;
+    transmit(&mut client, 1, &token.to_be_bytes());
+    let (ping_id, echo) = next_packet(&mut client);
+    assert_eq!(ping_id, 1, "Status Ping Response packet ID");
+    assert_eq!(echo, token.to_be_bytes(), "Status Ping token mismatch");
     value
 }
 
