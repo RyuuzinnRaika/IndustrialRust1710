@@ -1013,6 +1013,23 @@ mod tests {
             );
         }
 
+        // Load reconstructs pending_devices; a restarted server must still
+        // update the detector when time advances or rain changes.
+        let mut restarted = World::load(&path).unwrap();
+        restarted.set_day_time(18_000);
+        restarted.set_raining(false);
+        for _ in 0..4 {
+            restarted.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(restarted.get(0, 64, 0), 151 << 4);
+        restarted.set_day_time(6_000);
+        restarted.set_raining(false);
+        for _ in 0..4 {
+            restarted.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(restarted.get(0, 64, 0), (151 << 4) | 15);
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), (151 << 4) | 15);
+
         fs::remove_dir_all(root).unwrap();
     }
 
