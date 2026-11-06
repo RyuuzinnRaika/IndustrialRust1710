@@ -3365,3 +3365,234 @@ fn tab_complete_protocol5_returns_public_commands_and_online_player_names() {
     drop(other);
     drop(player);
 }
+
+/// Replays only sanitized, bounded, Protocol 5 inputs derived from an
+/// unmodified 1.7.10 capture. Never log full packets or a user's PCAP.
+#[derive(Default)]
+struct PacketReplayDiagnostics {
+    lines: Vec<String>,
+    corrections: Vec<[f64; 3]>,
+    player_health: Vec<f32>,
+    zombie_health: Vec<f32>,
+    zombie_hurt: bool,
+    zombie_velocity: bool,
+}
+
+impl PacketReplayDiagnostics {
+    fn push(&mut self, value: String) {
+        // Keep failed-test output readable even when the server is chatty.
+        if self.lines.len() < 96 {
+            self.lines.push(value);
+        }
+    }
+
+    fn summary(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    fn observe(&mut self, id: u32, body: &[u8], zombie: Option<i32>) {
+        match id {
+            0x08 if body.len() == 33 => {
+                let position = read_position(body);
+                self.corrections.push(position);
+                self.push(format!(
+                    "S08 position correction: x={:.5}, feet_y={:.9}, z={:.5}",
+                    position[0], position[1], position[2]
+                ));
+            }
+            0x06 if body.len() == 10 => {
+                let health = f32::from_be_bytes(body[..4].try_into().unwrap());
+                self.player_health.push(health);
+                self.push(format!("S06 player HP={health:.1}"));
+            }
+            0x1a if body.len() == 5 && zombie.is_some_and(|z| body[..4] == z.to_be_bytes()) => {
+                self.zombie_hurt |= body[4] == 2;
+                self.push(format!("S1A zombie status={}", body[4]));
+            }
+            0x1c
+                if body.len() == 10
+                    && zombie.is_some_and(|z| body[..4] == z.to_be_bytes())
+                    && body[4] == 0x66 =>
+            {
+                let health = f32::from_be_bytes(body[5..9].try_into().unwrap());
+                self.zombie_health.push(health);
+                self.push(format!("S1C zombie HP={health:.1}"));
+            }
+            0x12
+                if body.len() == 10 && zombie.is_some_and(|z| body[..4] == z.to_be_bytes()) =>
+            {
+                self.zombie_velocity = true;
+                let vx = i16::from_be_bytes(body[4..6].try_into().unwrap());
+                let vy = i16::from_be_bytes(body[6..8].try_into().unwrap());
+                let vz = i16::from_be_bytes(body[8..10].try_into().unwrap());
+                self.push(format!("S12 zombie velocity: ({vx}, {vy}, {vz}) / 8000"));
+            }
+            0x03 => {} // Periodic world time; not part of the replay's result.
+            _ => self.push(format!("S{id:02X} length={}", body.len())),
+        }
+    }
+}
+
+/// A real TCP packet received from the local test server. Keepalive responses
+/// must be emitted while observing its asynchronous movement/combat packets.
+fn replay_receive(
+    socket: &mut TcpStream,
+    diagnostics: &mut PacketReplayDiagnostics,
+    zombie: Option<i32>,
+) -> (u32, Vec<u8>) {
+    let wire = read_frame(&mut *socket).unwrap_or_else(|error| {
+        panic!(
+            "Protocol 5 replay TCP read failed: {error}\n{}",
+            diagnostics.summary()
+        )
+    });
+    let mut payload = wire.as_slice();
+    let id = read_varint(&mut payload).unwrap_or_else(|error| {
+        panic!(
+            "Protocol 5 replay invalid packet ID: {error}\n{}",
+            diagnostics.summary()
+        )
+    });
+    diagnostics.observe(id, payload, zombie);
+    if id == 0 && payload.len() == 4 {
+        socket
+            .write_all(&frame(0, payload))
+            .expect("acknowledge server KeepAlive during packet replay");
+    }
+    (id, payload.to_vec())
+}
+
+fn replay_c04(
+    socket: &mut TcpStream,
+    feet_y: f64,
+    on_ground: bool,
+    diagnostics: &mut PacketReplayDiagnostics,
+    step: usize,
+) {
+    let mut data = Vec::with_capacity(33);
+    // 1.7.10 C04 is X, feetY, stance, Z, onGround (not the 1.8+ order).
+    for value in [0.5, feet_y, feet_y + 1.62, 0.5] {
+        data.extend_from_slice(&value.to_be_bytes());
+    }
+    data.push(u8::from(on_ground));
+    socket.write_all(&frame(4, &data)).unwrap();
+    diagnostics.push(format!(
+        "C04 jump step={step:02} feet_y={feet_y:.9} onGround={on_ground}"
+    ));
+}
+
+/// Reproduce a short client-predicted 20TPS jump using the anonymized feet-Y
+/// trace. Observe the *actual server response*, including any rubber-banding,
+/// damage, and the position recovered through a fresh TCP login.
+#[test]
+fn protocol5_replay_jump_trace_reports_server_position_and_health() {
+    let server = NativeServer::start_with_mode(true);
+    let (mut client, _, spawn) = server.join("Positioner");
+    assert_eq!(spawn, [0.5, 64.0, 0.5]);
+    let mut log = PacketReplayDiagnostics::default();
+    log.push("EXPECT: no S08 correction, no S06 damage, saved feet Y=64.0".to_owned());
+
+    let feet_y = [
+        64.419999986887,
+        64.753199980521,
+        65.001335979112,
+        65.166109260938,
+        65.249187078745,
+        65.249187078745,
+        65.170787077219,
+        65.015555072702,
+        64.785027703789,
+        64.480710876332,
+        64.104080378093,
+        64.0,
+    ];
+    for (index, y) in feet_y.into_iter().enumerate() {
+        let landed = index + 1 == feet_y.len();
+        replay_c04(&mut client, y, landed, &mut log, index + 1);
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // A chat response is an ordered barrier: it is processed after the C04
+    // packets on this TCP stream. Also record all earlier server packets.
+    client.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    log.push("C01 /list: wait for server barrier".to_owned());
+    let mut barrier_observed = false;
+    for _ in 0..MAX_PACKETS {
+        let (id, body) = replay_receive(&mut client, &mut log, None);
+        if id == 2 && body.windows(10).any(|chunk| chunk == b"Online (1)") {
+            barrier_observed = true;
+            break;
+        }
+    }
+    assert!(barrier_observed, "missing chat barrier:\n{}", log.summary());
+
+    drop(client);
+    server.wait_idle();
+    let (rejoined, _, saved) = server.join("Positioner");
+    log.push(format!(
+        "RELOGIN saved feet=({:.5}, {:.9}, {:.5})",
+        saved[0], saved[1], saved[2]
+    ));
+    eprintln!("PROTOCOL5_JUMP_REPLAY\n{}", log.summary());
+    assert!(
+        log.corrections.is_empty(),
+        "unexpected S08 rubber-banding:\n{}",
+        log.summary()
+    );
+    assert!(
+        log.player_health.iter().all(|&hp| hp >= 20.0),
+        "normal jump damaged player:\n{}",
+        log.summary()
+    );
+    assert_eq!(saved, [0.5, 64.0, 0.5], "lost jump landing:\n{}", log.summary());
+    drop(rejoined);
+    server.wait_idle();
+}
+
+/// Send an authentic Protocol 5 C02 Use Entity attack to the live Rust
+/// server, and report all observed S1A/S1C/S12 effects with expected values.
+#[test]
+fn protocol5_replay_zombie_attack_reports_status_health_velocity() {
+    let mut server = NativeServer::start_with_mode(true);
+    let (mut client, _, _) = server.join("RustTester");
+    let mut log = PacketReplayDiagnostics::default();
+
+    writeln!(
+        server.process.stdin.as_mut().unwrap(),
+        "/summon Zombie 0.5 65 2.5"
+    )
+    .unwrap();
+    let spawned = until_packet(&mut client, 0x0f, |body| {
+        let mut remaining = body;
+        read_varint(&mut remaining).is_ok() && remaining.first() == Some(&54)
+    });
+    let mut remaining = spawned.as_slice();
+    let zombie_id = i32::try_from(read_varint(&mut remaining).unwrap()).unwrap();
+    log.push("SETUP S0F: spawned synthetic zombie in disposable world".to_owned());
+
+    let mut input = zombie_id.to_be_bytes().to_vec();
+    input.push(1);
+    client.write_all(&frame(0x02, &input)).unwrap();
+    log.push(format!(
+        "C02 attack: entity={zombie_id}, action=1; EXPECT S1A=2, S1C HP=19, S12 velocity"
+    ));
+
+    for _ in 0..MAX_PACKETS {
+        let _ = replay_receive(&mut client, &mut log, Some(zombie_id));
+        if log.zombie_hurt && log.zombie_health.contains(&19.0) && log.zombie_velocity {
+            break;
+        }
+    }
+    eprintln!("PROTOCOL5_ZOMBIE_REPLAY\n{}", log.summary());
+    assert!(log.zombie_hurt, "missing zombie hurt status:\n{}", log.summary());
+    assert!(
+        log.zombie_health.contains(&19.0),
+        "missing 19 HP zombie metadata:\n{}",
+        log.summary()
+    );
+    assert!(
+        log.zombie_velocity,
+        "missing zombie knockback velocity:\n{}",
+        log.summary()
+    );
+}
