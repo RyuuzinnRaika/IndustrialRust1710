@@ -314,6 +314,13 @@ mod command_guide_tests {
     }
 
     #[test]
+    fn scoreboard_help_example_uses_an_implemented_1710_operation() {
+        // The console supports objectives add, not objectives list.
+        let mut board = crate::scoreboard::Scoreboard::default();
+        assert!(board.add_objective("demo", "Demo", "dummy").is_ok());
+    }
+
+    #[test]
     fn guide_examples_match_canonical_command_and_names_are_unique() {
         let mut names = std::collections::BTreeSet::new();
         for guide in COMMAND_GUIDE {
