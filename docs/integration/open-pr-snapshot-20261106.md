@@ -2,7 +2,7 @@
 
 **This branch is a disposable validation candidate, not a production merge or a release.**
 
-main snapshot: `26cc4ec35530cc742a0f9ba3930cca8ef15eba42`
+main snapshot: `ef28c275bcda09b945b66aaff0e318a838c6cfb3`
 
 ## Included GitHub PR heads
 - #729: `eebf33db24524342d1281af29a6a290893cf30a2`
@@ -19,9 +19,9 @@ main snapshot: `26cc4ec35530cc742a0f9ba3930cca8ef15eba42`
 - #851: `c6e409be7339980368746e2a2a4ec65c326aba07`
 - #852: `c5eb6fa77338a29ca4c0f71be1a3a453da1e12d5`
 - #853: `0ae2d0446596133ce86feb8fcfd25a9462bf0896`
-- #855: `6b91086140f0fdf6e8be0256afdd8698c68c0cf2`
-- #857: `de0b288ea118c733a6e10fb9cff90e9076257f5b`
-- #858: `16dc898579f5c8a57207c831195d3d7a9f80559c`
+- #855: `354cfd3318032f410f19e43cbef77d5cd5355197`
+- #857: `0b95f3dde3b10f3fb5e2b32caeb70c3951a41607`
+- #858: `bc1f42707d50799b7d02160f9210cfb9d8e08a92`
 
 ## Overlapping files resolved for combined verification
 - `apps/vanilla-server/src/main.rs`: #846, #852, #857, #729
@@ -44,3 +44,11 @@ cargo build --workspace --release
 Real Windows/Linux Minecraft Java 1.7.10 compatibility, save recovery and fuzzing remain to be validated separately.
 **NOT_RUN:** Rustfmt, cargo tests, Clippy, release build, actual Minecraft client and fuzz campaign.
 GitHub Actions have not been invoked. Do not merge this candidate into main until validation evidence exists.
+
+## Reconciliation update — merged PR #859
+
+Latest main at update: `ef28c275bcda09b945b66aaff0e318a838c6cfb3`.
+PR #859 had three rustfmt hunks in `apps/vanilla-server/tests/protocol5_e2e.rs`. They have been applied to this integration branch while preserving both new Protocol 5 regression tests from PRs #841 and #857. GitHub comparison confirms 0 commits behind main, and no deletions in that test file versus main.
+PRs #855, #857, and #858 incorporated the same new main formatting in their branch ancestry; the source-specific blobs in this integration candidate are unchanged.
+**Rust validation on this integration branch is still NOT_RUN**. PR #859 describes Windows fmt/clippy success on its own branch, but its 2 failing TCP integration tests are not a success claim for this candidate.
+Snapshot branch and PR heads may advance independently. Compare PR HEAD SHAs before taking a release or merge decision.
