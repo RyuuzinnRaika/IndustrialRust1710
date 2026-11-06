@@ -3058,7 +3058,9 @@ mod tests {
             record(&inventory.cursor);
             counts
         }
-        let ids = [4i16, 5, 17, 20];
+        // Include ordinary stackables, metadata-bearing variants and a
+        // single-stack tool to catch overstacking as well as count drift.
+        let ids = [4i16, 5, 17, 20, 257];
         for chest_slots in [27usize, 54] {
             for seed in 1u64..=32 {
                 let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
@@ -3066,20 +3068,34 @@ mod tests {
                 let mut chest = vec![None; chest_slots];
                 for slot in 9..45 {
                     if next(&mut state) % 4 == 0 {
+                        let id = ids[(next(&mut state) % ids.len() as u64) as usize];
                         inventory.slots[slot] = Some(Stack {
-                            id: ids[(next(&mut state) % ids.len() as u64) as usize],
-                            count: (next(&mut state) % 64 + 1) as u8,
-                            damage: 0,
+                            id,
+                            count: (next(&mut state)
+                                % u64::from(crate::items_1710::max_count(id))
+                                + 1) as u8,
+                            damage: if matches!(id, 5 | 17) {
+                                (next(&mut state) % 2) as i16
+                            } else {
+                                0
+                            },
                             nbt: None,
                         });
                     }
                 }
                 for target in &mut chest {
                     if next(&mut state) % 3 == 0 {
+                        let id = ids[(next(&mut state) % ids.len() as u64) as usize];
                         *target = Some(Stack {
-                            id: ids[(next(&mut state) % ids.len() as u64) as usize],
-                            count: (next(&mut state) % 64 + 1) as u8,
-                            damage: 0,
+                            id,
+                            count: (next(&mut state)
+                                % u64::from(crate::items_1710::max_count(id))
+                                + 1) as u8,
+                            damage: if matches!(id, 5 | 17) {
+                                (next(&mut state) % 2) as i16
+                            } else {
+                                0
+                            },
                             nbt: None,
                         });
                     }
@@ -3123,6 +3139,16 @@ mod tests {
                             inventory.chest_click_window(2, &mut chest, -999, start + 2, 5);
                         }
                     }
+                    assert!(
+                        inventory
+                            .slots
+                            .iter()
+                            .chain(chest.iter())
+                            .chain(std::iter::once(&inventory.cursor))
+                            .flatten()
+                            .all(|stack| stack.is_valid()),
+                        "invalid stack: seed={seed} chest_slots={chest_slots} step={step}"
+                    );
                     assert_eq!(
                         identity_counts(&inventory, &chest),
                         expected,
