@@ -3,8 +3,11 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import stat
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import verify_local_report_pair as pair
 
@@ -128,6 +131,26 @@ class PairReportTests(unittest.TestCase):
             pair.load_report(self.write("missing_rust.json", unavailable_rust), "windows")["exit_code"],
             2,
         )
+
+    def test_boolean_schema_version_does_not_match_integer_one(self):
+        report = self.report("windows")
+        report["schema_version"] = True  # JSON true == Python 1 unless type checked.
+        with self.assertRaisesRegex(pair.EvidenceError, "unsupported report schema"):
+            pair.load_report(self.write("boolean_schema.json", report), "windows")
+
+    def test_nonregular_report_path_is_rejected(self):
+        with self.assertRaisesRegex(pair.EvidenceError, "regular file"):
+            pair.load_report(self.root, "windows")
+
+    def test_growth_between_stat_and_read_is_bounded(self):
+        path = self.root / "growing.json"
+        path.write_bytes(b" " * (pair.MAX_REPORT_BYTES + 2))
+        # Simulate stale size metadata from a pre-read stat(). The actual
+        # read still must detect the oversize input with a bounded buffer.
+        fake = SimpleNamespace(st_mode=stat.S_IFREG, st_size=1)
+        with mock.patch.object(Path, "stat", return_value=fake):
+            with self.assertRaisesRegex(pair.EvidenceError, "exceeds"):
+                pair.load_report(path, "windows")
 
     def test_different_commit_is_rejected(self):
         win = self.report("windows")
