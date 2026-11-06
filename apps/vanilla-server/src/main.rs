@@ -3266,10 +3266,19 @@ fn play(
                 if let Some(parsed) = commands::parse_public(&message) {
                     match parsed {
                         Err(usage) => as_chat(s, usage)?,
-                        Ok(PublicCommand::Help) => as_chat(
-                            s,
-                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /enchant, /testforblock, /seed, /spawnpoint, /setworldspawn, /gamerule, /difficulty, /time, /weather, /kick, /ban, /save.",
-                        )?,
+                        Ok(PublicCommand::Help(page)) => {
+                            if let Some(lines) = commands::player_help_page(page) {
+                                as_chat(
+                                    s,
+                                    &format!("Commands page {page}/{}:", commands::player_help_page_count()),
+                                )?;
+                                for line in lines {
+                                    as_chat(s, &line)?;
+                                }
+                            } else {
+                                as_chat(s, "Usage: /help [page]")?;
+                            }
+                        }
                         Ok(PublicCommand::List) => as_chat(
                             s,
                             &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")),
@@ -7962,7 +7971,9 @@ fn start_clock_console(
             }
             let result: io::Result<()> = match args.as_slice() {
                 ["/help"] | ["/?"] => {
-                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /seed /spawnpoint /setworldspawn /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    for line in commands::help_lines(commands::HelpAudience::Console) {
+                        println!("{line}");
+                    }
                     Ok(())
                 }
                 ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
