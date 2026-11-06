@@ -1023,7 +1023,12 @@ fn survival_mined_block_drop_pickup_persists_without_duplication() {
     let on_ground: Value = serde_json::from_slice(&fs::read(&ground_file).unwrap()).unwrap();
     let entries = on_ground["entries"].as_object().unwrap();
     assert_eq!(entries.len(), 1, "mined block must yield one ground entity");
-    assert_eq!(entries.values().next().unwrap()["stack"]["id"], 3);
+    let saved_item = entries.values().next().unwrap();
+    assert_eq!(saved_item["stack"]["id"], 3);
+    assert!(
+        saved_item.get("pickup_delay_ticks").is_none(),
+        "mined blocks use the backward-compatible 10-tick delay"
+    );
 
     // Wait for the server's pickup delay, then enter range. Item Collect,
     // Destroy and Set Slot may arrive in different orders.
@@ -2119,6 +2124,14 @@ fn native_protocol5_survival_q_and_ctrl_q_drop_authoritative_stacks() {
         .collect();
     counts.sort_unstable();
     assert_eq!(counts, [1, 11]);
+    assert!(
+        drops["entries"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|entry| entry["pickup_delay_ticks"] == 40),
+        "Q and Ctrl+Q drops must retain their vanilla 40-tick pickup delay"
+    );
 }
 
 #[test]
