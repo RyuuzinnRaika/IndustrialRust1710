@@ -3266,9 +3266,17 @@ fn play(
                 if let Some(parsed) = commands::parse_public(&message) {
                     match parsed {
                         Err(usage) => as_chat(s, usage)?,
-                        Ok(PublicCommand::Help) => {
-                            for line in commands::help_lines(commands::HelpAudience::Player) {
-                                as_chat(s, &line)?;
+                        Ok(PublicCommand::Help(page)) => {
+                            if let Some(lines) = commands::player_help_page(page) {
+                                as_chat(
+                                    s,
+                                    &format!("Commands page {page}/{}:", commands::player_help_page_count()),
+                                )?;
+                                for line in lines {
+                                    as_chat(s, &line)?;
+                                }
+                            } else {
+                                as_chat(s, "Usage: /help [page]")?;
                             }
                         }
                         Ok(PublicCommand::List) => as_chat(
