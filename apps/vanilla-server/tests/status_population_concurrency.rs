@@ -116,7 +116,7 @@ fn handshake(port: u16, state: u32) -> Vec<u8> {
     frame(0, &body)
 }
 
-fn receive(socket: &mut TcpStream) -> (i32, Vec<u8>) {
+fn receive(socket: &mut TcpStream) -> (u32, Vec<u8>) {
     let bytes = read_frame(socket).unwrap();
     let mut remaining = bytes.as_slice();
     let id = read_varint(&mut remaining).unwrap();
