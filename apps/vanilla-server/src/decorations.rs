@@ -365,12 +365,16 @@ pub fn note_action((x, y, z): Position, instrument: u8, pitch: u8) -> Vec<u8> {
     body
 }
 pub fn instrument(below: u16) -> u8 {
+    // Java 1.7.10 uses the *material* of the supporting block, not only
+    // its appearance. These representative legacy IDs cover material cases
+    // that were previously classified as the default harp.
     match below {
-        5 | 17 | 162 | 47 | 53 | 85 | 126 => 1, // wood/bass
-        12 | 13 | 88 => 2,                      // sand/snare
-        20 | 95 | 102 => 3,                     // glass/hat
-        1 | 4 | 14 | 15 | 16 | 48 | 49 => 4,    // stone/bass drum
-        _ => 0,                                 // harp/piano
+        5 | 17 | 25 | 47 | 53 | 58 | 85 | 125 | 126 | 134 | 135 | 136 | 162 | 163 | 164 => 1,
+        12 | 13 | 88 => 2, // sand, gravel, soul sand: snare
+        20 | 89 | 95 | 102 | 160 => 3, // glass, glowstone, panes: hat
+        1 | 4 | 7 | 14 | 15 | 16 | 21 | 22 | 24 | 41 | 42 | 45 | 48 | 49 | 56 | 57 | 73
+        | 74 | 87 | 98 | 112 | 129 | 133 | 152 | 153 | 155 => 4,
+        _ => 0, // dirt, air and other materials: harp/piano
     }
 }
 /// S35 Update Tile Entity: action 5 = FlowerPot; compressed NBT Short+GZip.
@@ -428,6 +432,76 @@ pub fn disc_event((x, y, z): Position, disc: Option<i16>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn add059_legacy_noteblock_instruments_use_support_material() {
+        // The five instrument IDs in Java 1.7.10 are harp (0), bass (1),
+        // snare (2), hat (3), and bass drum (4). A note block sitting on
+        // another note block must select bass, not harp.
+        for (block, expected) in [
+            (0, 0), // air
+            (2, 0), // grass/dirt material
+            (3, 0),
+            (5, 1), // planks
+            (25, 1), // another note block
+            (58, 1), // crafting table
+            (162, 1), // acacia log
+            (12, 2), // sand
+            (13, 2), // gravel
+            (88, 2), // soul sand
+            (20, 3), // glass
+            (89, 3), // glowstone
+            (102, 3), // glass pane
+            (160, 3), // stained glass pane
+            (1, 4), // stone
+            (45, 4), // brick block
+            (49, 4), // obsidian
+            (56, 4), // diamond ore
+            (73, 4), // redstone ore
+            (87, 4), // netherrack
+        ] {
+            assert_eq!(instrument(block), expected, "incorrect instrument for block {block}");
+        }
+    }
+
+    #[test]
+    fn add059_note_action_uses_protocol_five_s24_field_layout() {
+        // Protocol 5 Play packet 0x24: i32 x, i16 y, i32 z, u8 instrument,
+        // u8 pitch, VarInt block ID 25. These are the packet *body* bytes.
+        let body = note_action((-17, 64, 33), 4, 24);
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&(-17i32).to_be_bytes());
+        expected.extend_from_slice(&(64i16).to_be_bytes());
+        expected.extend_from_slice(&(33i32).to_be_bytes());
+        expected.extend_from_slice(&[4, 24, 25]);
+        assert_eq!(body, expected);
+        assert_eq!(body.len(), 13);
+    }
+
+    #[test]
+    fn add059_tuning_wraps_at_25_notes_and_persists_on_reload() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = std::env::temp_dir().join(format!(
+            "ir1710-add059-noteblock-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&scratch).unwrap();
+        let sidecar = scratch.join("decorations.json");
+        let position = (0, 64, 0);
+        let mut notes = Decorations::default();
+        for pitch in 1u8..=24 {
+            assert_eq!(notes.next_note(&sidecar, position).unwrap(), pitch);
+            assert_eq!(Decorations::load(&sidecar).unwrap().note(position), pitch);
+        }
+        assert_eq!(notes.next_note(&sidecar, position).unwrap(), 0);
+        let restored = Decorations::load(&sidecar).unwrap();
+        assert_eq!(restored.note(position), 0);
+        assert_eq!(note_action(position, instrument(25), restored.note(position))[10], 1);
+        fs::remove_dir_all(scratch).unwrap();
+    }
 
     #[test]
     fn mined_decoration_journal_clears_sidecar_and_preserves_record_or_plant() {
