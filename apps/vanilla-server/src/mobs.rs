@@ -1221,6 +1221,16 @@ fn projectile_hitbox(mob: &Mob) -> (f64, f64) {
         Kind::Spider | Kind::CaveSpider => (0.7, 0.9),
         Kind::Chicken => (0.3, 0.7),
         Kind::Cow | Kind::Pig | Kind::Sheep => (0.55, 1.4),
+        Kind::Zombie => {
+            // Reuse the verified 1.7.10 spawn dimensions: adult 0.6x1.8,
+            // baby 0.3x0.9. Current-version wiki sizes are not 1.7.10.
+            let (half_width, height) = natural_spawn_body_dimensions(Kind::Zombie, 1);
+            if mob.baby {
+                (half_width * 0.5, height * 0.5)
+            } else {
+                (half_width, height)
+            }
+        }
         _ => (0.45, if mob.baby { 1.0 } else { 1.95 }),
     }
 }
@@ -1236,8 +1246,8 @@ fn melee_reaches_player(mob: &Mob, player: PlayerPosition) -> bool {
     if !player.is_valid() {
         return false;
     }
-    let width = if mob.baby { 0.3_f64 } else { 0.6_f64 };
-    let reach_squared = (width * 2.0).powi(2) + 0.6;
+    let (half_width, _) = projectile_hitbox(mob);
+    let reach_squared = (half_width * 4.0).powi(2) + 0.6;
     let dx = mob.position.x - player.x;
     let dy = mob.position.y - player.y;
     let dz = mob.position.z - player.z;
@@ -5252,6 +5262,34 @@ mod tests {
         let hit = mobs.hurt_player_detailed(702, pos, 50, 4.0);
         assert_eq!(hit.amount, 8);
         assert_eq!(hit.origin, DamageOrigin::Mixed);
+    }
+
+    #[test]
+    fn zombie_projectile_and_knockback_hitboxes_match_1710_spawn_dimensions() {
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition::default();
+        let adult_id = mobs.next_id;
+        mobs.insert(Kind::Zombie, at, false);
+        let baby_id = mobs.next_id;
+        mobs.insert(Kind::Zombie, at, true);
+        let adult = &mobs.entities[&adult_id];
+        let baby = &mobs.entities[&baby_id];
+        assert_eq!(projectile_hitbox(adult), (0.3, 1.8));
+        assert_eq!(projectile_hitbox(baby), (0.15, 0.9));
+        assert!(projectile_hits_mob(
+            adult,
+            PlayerPosition {
+                x: at.x + 0.29,
+                ..at
+            }
+        ));
+        assert!(!projectile_hits_mob(
+            adult,
+            PlayerPosition {
+                x: at.x + 0.31,
+                ..at
+            }
+        ));
     }
 
     /// Reconstructed Protocol 5 jump apex: nearby contact remains possible
