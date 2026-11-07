@@ -3167,6 +3167,72 @@ mod tests {
         assert_eq!(inv.chest_window_items(2, &chest)[..3], [2, 0, 63]);
         assert_eq!(sum(&inv, &chest), 12);
     }
+    /// REG-132 / #768: double-click collection must honor max stack size
+    /// and the exact item metadata. Extra source items stay in place.
+    #[test]
+    fn reg132_double_click_respects_stack_cap_and_metadata_without_item_loss() {
+        let mut inventory = Inventory::default();
+        let wool = Stack {
+            id: 35,
+            count: 50,
+            damage: 2,
+            nbt: None,
+        };
+        inventory.cursor = Some(wool);
+        inventory.slots[9] = Some(Stack { count: 4, ..wool });
+        let mut chest = [None; 27];
+        chest[0] = Some(Stack { count: 8, ..wool });
+        chest[1] = Some(Stack {
+            count: 25,
+            damage: 3,
+            ..wool
+        });
+        chest[2] = Some(Stack { count: 20, ..wool });
+        chest[3] = Some(Stack { count: 7, ..wool });
+
+        let total = |inv: &Inventory, storage: &[Option<Stack>; 27]| -> u64 {
+            inv.slots[9..45]
+                .iter()
+                .chain(storage.iter())
+                .flatten()
+                .map(|item| u64::from(item.count))
+                .sum::<u64>()
+                + inv.cursor.map_or(0, |item| u64::from(item.count))
+        };
+        let initial_total = total(&inventory, &chest);
+        assert_eq!(
+            inventory.chest_click_window(1, &mut chest, 0, 0, 6),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(inventory.cursor, Some(Stack { count: 64, ..wool }));
+        assert_eq!(chest[0], None);
+        assert_eq!(chest[1], Some(Stack { count: 25, damage: 3, ..wool }));
+        assert_eq!(chest[2], Some(Stack { count: 14, ..wool }));
+        assert_eq!(chest[3], Some(Stack { count: 7, ..wool }));
+        assert_eq!(inventory.slots[9], Some(Stack { count: 4, ..wool }));
+        assert_eq!(total(&inventory, &chest), initial_total);
+
+        // Retrying the same double-click while the cursor is full must
+        // preserve the entire state, including unmatched metadata.
+        let previous = inventory.clone();
+        let previous_chest = chest;
+        assert!(inventory.chest_click_window(1, &mut chest, 0, 0, 6).is_some());
+        assert_eq!(inventory, previous);
+        assert_eq!(chest, previous_chest);
+        assert_eq!(total(&inventory, &chest), initial_total);
+
+        // Inventory and chest serializations independently survive reload
+        // without a new cursor stack or a lost chest remainder.
+        let player_save = inventory.encoded().unwrap();
+        let player_reloaded: Inventory = serde_json::from_slice(&player_save).unwrap();
+        let chest_save = serde_json::to_vec(&chest).unwrap();
+        let chest_reloaded: [Option<Stack>; 27] =
+            serde_json::from_slice(&chest_save).unwrap();
+        assert_eq!(player_reloaded, inventory);
+        assert_eq!(chest_reloaded, chest);
+        assert_eq!(total(&player_reloaded, &chest_reloaded), initial_total);
+    }
+
     #[test]
     fn chest_rejects_cross_storage_swaps_with_unlike_items() {
         let mut inv = Inventory::default();
