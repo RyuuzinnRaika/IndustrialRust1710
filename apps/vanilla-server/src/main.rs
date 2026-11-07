@@ -1151,6 +1151,16 @@ fn sprint_action(current: bool, action: i32, food: i32) -> bool {
     }
 }
 
+/// With keepInventory enabled, vanilla keeps both held items and earned XP;
+/// the respawn path must neither erase XP nor create a death XP orb.
+fn death_xp_drop_amount(experience: &Experience, keep_inventory: bool) -> Option<u16> {
+    if keep_inventory {
+        None
+    } else {
+        Some((u32::from(experience.level_and_fraction().0) * 7).min(100) as u16)
+    }
+}
+
 /// World-changing packets must not reach gameplay logic while a Survival
 /// player is on the death screen (including held-slot saves and GUI close
 /// input reclamation). Client Status (22) is intentionally allowed
@@ -6820,9 +6830,7 @@ fn play(
                     hazards = Hazards::new();
                     last_hazards_tick = now_tick;
                     // In vanilla, death loses XP and may leave up to 100 XP in orbs.
-                    if !keep_inventory {
-                        let drop_amount =
-                            (u32::from(experience.level_and_fraction().0) * 7).min(100) as u16;
+                    if let Some(drop_amount) = death_xp_drop_amount(experience, keep_inventory) {
                         *experience = Experience::default();
                         experience.save(experience_path)?;
                         if let Some(orb) = mobs
@@ -10744,6 +10752,30 @@ mod piston_action_wire_tests {
         assert_eq!(&packet.body[4..6], &65i16.to_be_bytes());
         assert_eq!(&packet.body[6..10], &(-40i32).to_be_bytes());
         assert_eq!(&packet.body[10..], &[0, 5, 33]);
+    }
+}
+
+#[cfg(test)]
+mod reg147_keep_inventory_xp_tests {
+    use super::{death_xp_drop_amount, Experience, GameRules};
+
+    #[test]
+    fn keep_inventory_retains_all_xp_and_emits_no_death_orb() {
+        let mut rules = GameRules::default();
+        let earned = Experience { total: 1_000 };
+        assert_eq!(death_xp_drop_amount(&earned, rules.keep_inventory()), Some(100));
+        rules.set("keepInventory", true).unwrap();
+        assert_eq!(death_xp_drop_amount(&earned, rules.keep_inventory()), None);
+        let bytes = serde_json::to_vec(&earned).unwrap();
+        let restored: Experience = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored, earned);
+        assert_eq!(restored.total, 1_000);
+        rules.set("keepInventory", false).unwrap();
+        assert_eq!(death_xp_drop_amount(&restored, rules.keep_inventory()), Some(100));
+        assert_eq!(
+            death_xp_drop_amount(&Experience::default(), false),
+            Some(0)
+        );
     }
 }
 
