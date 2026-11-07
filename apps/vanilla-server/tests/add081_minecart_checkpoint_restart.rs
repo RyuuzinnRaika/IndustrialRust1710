@@ -176,9 +176,29 @@ fn add081_minecart_checkpoint_persists_and_restarts_after_twenty_ticks() {
     let mut first_snapshot: Option<Vec<u8>> = None;
     for cycle in 0..2 {
         let mut server = Server::launch(&scratch, &world, &format!("cycle-{cycle}"));
-        // The projectile worker writes its initial minecart snapshot at >=20
-        // ticks. No actual minecart entity needs to exist for this checkpoint.
-        thread::sleep(Duration::from_millis(1750));
+        // The first projectile checkpoint happens at >=20 ticks. Do not
+        // assume the host always advances 20 server ticks in wall-clock 1s:
+        // bounded polling avoids making a slow Windows machine flaky.
+        if cycle == 0 {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !minecarts.is_file() {
+                assert!(
+                    server.child.try_wait().expect("server liveness").is_none(),
+                    "server exited before checkpoint\n{}",
+                    server.diagnostics()
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "minecart checkpoint timeout\n{}",
+                    server.diagnostics()
+                );
+                thread::sleep(Duration::from_millis(50));
+            }
+        } else {
+            // The snapshot already exists on restart: exercise a fresh 20TPS
+            // interval before stopping and comparing the persisted state.
+            thread::sleep(Duration::from_millis(1750));
+        }
         assert!(
             server.child.try_wait().expect("server liveness").is_none(),
             "server exited before checkpoint\n{}",
