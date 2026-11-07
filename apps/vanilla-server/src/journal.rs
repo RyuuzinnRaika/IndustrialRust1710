@@ -187,6 +187,12 @@ fn root(journal: &Path) -> &Path {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
 }
+/// Always close the write handle before unlinking a failed temporary file.
+/// On Windows a still-open File can prevent removing its own *.txn.tmp file.
+fn cleanup_failed_temporary_write(output: fs::File, temp: &Path) {
+    drop(output);
+    let _ = fs::remove_file(temp);
+}
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -197,7 +203,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .create_new(true)
         .open(&temp)?;
     if let Err(err) = output.write_all(bytes).and_then(|_| output.sync_all()) {
-        let _ = fs::remove_file(&temp);
+        cleanup_failed_temporary_write(output, &temp);
         return Err(err);
     }
     drop(output);
@@ -337,6 +343,38 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_atomic_temp_cleanup_releases_handle_and_keeps_original() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-failed-write-{}-{stamp}",
+            std::process::id()
+        ));
+        // Never delete or reuse an existing world or test directory.
+        fs::create_dir(&home).unwrap();
+        let target = home.join("flat.irw");
+        let temp = target.with_extension("txn.tmp");
+        fs::write(&target, b"original-world").unwrap();
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .unwrap();
+        output.write_all(b"partial-write").unwrap();
+
+        // Exercise the same cleanup helper used after write_all/sync_all errors.
+        // This specifically catches unlink-before-close on Windows.
+        cleanup_failed_temporary_write(output, &temp);
+        assert!(!temp.exists(), "failed temp file survived cleanup");
+        assert_eq!(fs::read(&target).unwrap(), b"original-world");
+
+        fs::remove_file(&target).unwrap();
+        fs::remove_dir(&home).unwrap();
+    }
 
     #[test]
     fn player_nbt_journal_targets_are_identity_scoped_and_gzip_bounded() {
