@@ -712,7 +712,11 @@ impl Hub {
     pub fn record_player_position(&self, id: i32, position: PlayerPosition) {
         if let Ok(mut inner) = self.0.lock() {
             if let Some(peer) = inner.players.get_mut(&id) {
+                let changed = peer.position != position;
                 peer.position = position;
+                if changed {
+                    inner.sleeping.remove(&id);
+                }
             }
         }
     }
@@ -723,6 +727,9 @@ impl Hub {
                 let old_position = peer.position;
                 peer.position = position;
                 let moved = peer.clone();
+                if old_position != position {
+                    inner.sleeping.remove(&id);
+                }
                 let packet = teleport(id, &position, yaw, pitch);
                 let appeared = spawn(&moved).ok();
                 let vanished = destroy(id);
