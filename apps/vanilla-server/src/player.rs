@@ -94,7 +94,10 @@ impl PlayerPosition {
         self.x.is_finite()
             && self.y.is_finite()
             && self.z.is_finite()
-            && (0.0..256.0).contains(&self.y)
+            // A player must be allowed to descend below the build floor so
+            // the void damage handler can kill/respawn them naturally.
+            // Keep a finite lower cap to reject absurd client coordinates.
+            && (-512.0..256.0).contains(&self.y)
             && (-limit..limit).contains(&self.x)
             && (-limit..limit).contains(&self.z)
     }
@@ -334,9 +337,16 @@ mod tests {
             z: 0.5
         })
         .is_valid());
-        assert!(!(PlayerPosition {
+        // Valid void descent is necessary for server-owned death handling.
+        assert!(PlayerPosition {
             x: 0.5,
             y: -1.0,
+            z: 0.5
+        }
+        .is_valid());
+        assert!(!(PlayerPosition {
+            x: 0.5,
+            y: -512.0,
             z: 0.5
         })
         .is_valid());

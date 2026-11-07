@@ -172,6 +172,7 @@ fn reconcile_jsonl_tail(file: &mut fs::File) -> io::Result<()> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeathCause {
     Fall,
+    Void,
     Starvation,
     Drowning,
     Suffocation,
@@ -204,6 +205,7 @@ impl DeathCause {
     pub fn code(self) -> &'static str {
         match self {
             Self::Fall => "fall",
+            Self::Void => "void",
             Self::Starvation => "starvation",
             Self::Drowning => "drowning",
             Self::Suffocation => "suffocation",
@@ -267,6 +269,7 @@ impl DeathCause {
         }
         let description = match self {
             Self::Fall => "fell from a high place",
+            Self::Void => "fell out of the world",
             Self::Starvation => "starved to death",
             Self::Drowning => "drowned",
             Self::Suffocation => "suffocated in a wall",
