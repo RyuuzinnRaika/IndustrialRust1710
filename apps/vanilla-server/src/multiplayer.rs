@@ -912,6 +912,55 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reg149_night_requires_every_overworld_player_and_resets_once() {
+        let hub = Hub::default();
+        let (alice, _a_rx, _) = hub
+            .add("SleepAlice".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        let (bob, _b_rx, _) = hub
+            .add("SleepBob".into(), "uuid-b".into(), PlayerPosition::default())
+            .unwrap();
+        assert_eq!(hub.complete_night_sleep().unwrap(), None);
+        hub.enter_bed(alice).unwrap();
+        assert_eq!(hub.complete_night_sleep().unwrap(), None);
+        hub.enter_bed(bob).unwrap();
+        assert_eq!(hub.complete_night_sleep().unwrap(), Some(vec![alice, bob]));
+        assert_eq!(hub.complete_night_sleep().unwrap(), None); // no double skip
+
+        // A Leave Bed packet revokes only that player's vote.
+        hub.enter_bed(alice).unwrap();
+        hub.enter_bed(bob).unwrap();
+        hub.leave_bed(bob);
+        assert_eq!(hub.complete_night_sleep().unwrap(), None);
+        hub.enter_bed(bob).unwrap();
+        assert_eq!(hub.complete_night_sleep().unwrap(), Some(vec![alice, bob]));
+
+        // A disconnected non-sleeper no longer blocks the surviving sleeper.
+        hub.enter_bed(alice).unwrap();
+        hub.remove(bob);
+        assert_eq!(hub.complete_night_sleep().unwrap(), Some(vec![alice]));
+        assert_eq!(hub.complete_night_sleep().unwrap(), None);
+    }
+
+    #[test]
+    fn reg149_netheriters_do_not_vote_in_overworld_sleep_quorum() {
+        let hub = Hub::default();
+        let (alice, _a_rx, _) = hub
+            .add("Overworld".into(), "uuid-over".into(), PlayerPosition::default())
+            .unwrap();
+        let (_nether, _n_rx, _) = hub
+            .add_in_dimension(
+                "NetherUser".into(),
+                "uuid-nether".into(),
+                PlayerPosition::default(),
+                Dimension::Nether,
+            )
+            .unwrap();
+        hub.enter_bed(alice).unwrap();
+        assert_eq!(hub.complete_night_sleep().unwrap(), Some(vec![alice]));
+    }
     #[test]
     fn nonfinite_and_extreme_positions_never_enter_interest_range() {
         let origin = PlayerPosition::default();
