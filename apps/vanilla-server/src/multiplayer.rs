@@ -6,7 +6,7 @@ use crate::items_1710;
 use crate::player::PlayerPosition;
 use crate::world::VIEW_DISTANCE;
 use legacy_protocol::{write_string, write_varint};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
@@ -88,6 +88,9 @@ pub struct Peer {
 struct Inner {
     next_id: i32,
     players: BTreeMap<i32, Peer>,
+    // Server-owned overnight state. A client cannot alter this except by
+    // successfully interacting with an authoritative bed.
+    sleeping: BTreeSet<i32>,
 }
 #[derive(Default)]
 pub struct Hub(Mutex<Inner>);
@@ -216,6 +219,48 @@ impl Hub {
     }
     pub fn count(&self) -> io::Result<usize> {
         Ok(self.0.lock().map_err(|_| poisoned())?.players.len())
+    }
+
+    /// A validated bed use marks the owning Overworld session as asleep.
+    pub fn enter_bed(&self, id: i32) -> io::Result<()> {
+        let mut inner = self.0.lock().map_err(|_| poisoned())?;
+        if inner
+            .players
+            .get(&id)
+            .is_some_and(|peer| peer.dimension == Dimension::Overworld)
+        {
+            inner.sleeping.insert(id);
+        }
+        Ok(())
+    }
+
+    /// Invalidate a sleeping vote on Leave Bed, death, portal or disconnect.
+    pub fn leave_bed(&self, id: i32) {
+        if let Ok(mut inner) = self.0.lock() {
+            inner.sleeping.remove(&id);
+        }
+    }
+
+    /// Atomically consume the sleep votes only when every current Overworld
+    /// participant is in bed. Another session cannot skip the night twice;
+    /// Nether and End clients are excluded from the Overworld quorum.
+    pub fn complete_night_sleep(&self) -> io::Result<Option<Vec<i32>>> {
+        let mut inner = self.0.lock().map_err(|_| poisoned())?;
+        let overworld: Vec<i32> = inner
+            .players
+            .values()
+            .filter(|peer| peer.dimension == Dimension::Overworld)
+            .map(|peer| peer.id)
+            .collect();
+        if overworld.is_empty()
+            || overworld.iter().any(|id| !inner.sleeping.contains(id))
+        {
+            return Ok(None);
+        }
+        for id in &overworld {
+            inner.sleeping.remove(id);
+        }
+        Ok(Some(overworld))
     }
     pub fn names(&self) -> io::Result<Vec<String>> {
         let inner = self.0.lock().map_err(|_| poisoned())?;
@@ -644,6 +689,7 @@ impl Hub {
     pub fn remove(&self, id: i32) {
         if let Ok(mut inner) = self.0.lock() {
             if let Some(gone) = inner.players.remove(&id) {
+                inner.sleeping.remove(&id);
                 let removed = list_entry(&gone.name, false).ok();
                 let entity = destroy(id);
                 for peer in inner.players.values() {
@@ -745,6 +791,8 @@ impl Hub {
             ));
         }
         let departing = current.clone();
+        inner.sleeping.remove(&id);
+        let current = inner.players.get_mut(&id).expect("session still registered");
         current.dimension = dimension;
         current.position = position;
         let arriving = current.clone();
