@@ -2074,11 +2074,11 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
+        let before_void_health = vitals.health;
         if survival && void_damage_tick(vitals, player.y, now_tick, &mut last_void_damage_tick) {
-            let previous_health = (vitals.health + 4.0).min(20.0);
             death_log::record_fatal(
                 &mut fatal_hit,
-                previous_health,
+                before_void_health,
                 vitals.health,
                 DeathCause::Void,
             );
