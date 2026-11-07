@@ -6339,6 +6339,57 @@ mod group_b_regression_tests {
         assert!(!world.can_support(1, 65, 0, 83 << 4));
     }
 
+    /// REG-161 / #797: sustained redstone source toggles must remain
+    /// bounded per authoritative 20TPS world update, then fully settle.
+    #[test]
+    fn reg161_high_frequency_clock_has_bounded_queue_and_can_be_stopped() {
+        let path = temp("reg161-redstone-clock");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        // One source and a 24-cell dust wire across a chunk boundary.
+        // Alternate at 20-tick intervals so the wake queue is repeatedly
+        // hit while previous signal propagation is still in progress.
+        for x in 1..=24 {
+            world.import_block(x, 64, 0, 55 << 4).unwrap();
+        }
+        for tick in 0..1200 {
+            if tick % 20 == 0 {
+                let powered = (tick / 20) % 2 == 0;
+                world
+                    .update_and_save(
+                        &path,
+                        0,
+                        64,
+                        0,
+                        (69 << 4) | if powered { 13 } else { 5 },
+                    )
+                    .unwrap();
+            }
+            let changed = world.block_tick(&path, 8).unwrap();
+            assert!(changed.len() <= 64, "unbounded block changes on tick {tick}");
+            assert!(
+                world.pending_circuit.len() <= 128,
+                "unbounded pending circuit on tick {tick}"
+            );
+            assert!(changed.iter().all(|&(x, y, z)| in_bounds(x, y, z)));
+        }
+        // Power off must eventually release the entire 24-cell line,
+        // including dust across x=15/16.
+        world.update_and_save(&path, 0, 64, 0, (69 << 4) | 5).unwrap();
+        for _ in 0..100 {
+            world.block_tick(&path, 8).unwrap();
+        }
+        for x in 1..=24 {
+            assert_eq!(world.get(x, 64, 0), 55 << 4, "stuck dust x={x}");
+        }
+        assert!(world.pending_circuit.len() <= 128);
+        let restored = World::load(&path).unwrap();
+        for x in [1, 15, 16, 24] {
+            assert_eq!(restored.get(x, 64, 0), 55 << 4);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn comparator_strength_is_not_rounded_up_to_fifteen_by_dust() {
         let path = temp("comparator-strength");
