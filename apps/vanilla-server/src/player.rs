@@ -337,9 +337,16 @@ mod tests {
             z: 0.5
         })
         .is_valid());
-        assert!(!(PlayerPosition {
+        // Valid void descent is necessary for server-owned death handling.
+        assert!(PlayerPosition {
             x: 0.5,
             y: -1.0,
+            z: 0.5
+        }
+        .is_valid());
+        assert!(!(PlayerPosition {
+            x: 0.5,
+            y: -512.0,
             z: 0.5
         })
         .is_valid());
