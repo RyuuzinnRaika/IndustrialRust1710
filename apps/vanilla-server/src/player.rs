@@ -97,7 +97,7 @@ impl PlayerPosition {
             // A player must be allowed to descend below the build floor so
             // the void damage handler can kill/respawn them naturally.
             // Keep a finite lower cap to reject absurd client coordinates.
-            && (-128.0..256.0).contains(&self.y)
+            && (-512.0..256.0).contains(&self.y)
             && (-limit..limit).contains(&self.x)
             && (-limit..limit).contains(&self.z)
     }
