@@ -2740,15 +2740,25 @@ fn play(
                 }
             }
             if !keep_inventory {
-                commit_death_drops(
-                    inventory,
-                    inventory_path,
-                    ground_items,
-                    ground_path,
-                    world_path,
-                    hub,
-                    location,
-                )?;
+                if player.y < -64.0 {
+                    // Vanilla void deaths destroy possessions rather than
+                    // materializing unreachable item entities below bedrock.
+                    // Persist this one-file debit before publishing death.
+                    let mut cleared = inventory.clone();
+                    cleared.clear_possessions();
+                    cleared.save(inventory_path)?;
+                    *inventory = cleared;
+                } else {
+                    commit_death_drops(
+                        inventory,
+                        inventory_path,
+                        ground_items,
+                        ground_path,
+                        world_path,
+                        hub,
+                        location,
+                    )?;
+                }
             }
             if hardcore {
                 // Persist the dead state before ending the connection. Future
@@ -3406,7 +3416,7 @@ fn play(
                     || !y.is_finite()
                     || !stance.is_finite()
                     || !z.is_finite()
-                    || !(-128.0..256.0).contains(&y)
+                    || !(-512.0..256.0).contains(&y)
                 {
                     return Err(bad("invalid player coordinates"));
                 }
@@ -6691,15 +6701,22 @@ fn play(
                         .map_err(|_| bad("game rules mutex poisoned"))?
                         .keep_inventory();
                     if !keep_inventory {
-                        commit_death_drops(
-                            inventory,
-                            inventory_path,
-                            ground_items,
-                            ground_path,
-                            world_path,
-                            hub,
-                            location,
-                        )?;
+                        if player.y < -64.0 {
+                            let mut cleared = inventory.clone();
+                            cleared.clear_possessions();
+                            cleared.save(inventory_path)?;
+                            *inventory = cleared;
+                        } else {
+                            commit_death_drops(
+                                inventory,
+                                inventory_path,
+                                ground_items,
+                                ground_path,
+                                world_path,
+                                hub,
+                                location,
+                            )?;
+                        }
                     }
                     // Preserve the death site before changing the saved player
                     // position. XP orbs belong beside the dropped inventory,
@@ -6806,12 +6823,16 @@ fn play(
                             (u32::from(experience.level_and_fraction().0) * 7).min(100) as u16;
                         *experience = Experience::default();
                         experience.save(experience_path)?;
-                        if let Some(orb) = mobs
-                            .lock()
-                            .map_err(|_| bad("mob mutex poisoned"))?
-                            .spawn_xp(death_position, drop_amount)
-                        {
-                            hub.broadcast(orb);
+                        // Void XP entities would be spawned beneath the
+                        // accessible world and should not persist there.
+                        if death_position.y >= -64.0 {
+                            if let Some(orb) = mobs
+                                .lock()
+                                .map_err(|_| bad("mob mutex poisoned"))?
+                                .spawn_xp(death_position, drop_amount)
+                            {
+                                hub.broadcast(orb);
+                            }
                         }
                     }
                     location = (origin.x, origin.y, origin.z);
@@ -10737,7 +10758,7 @@ mod reg150_void_death_tests {
         for y in [-0.01, -40.0, -65.0, -127.5] {
             assert!(PlayerPosition { x: 0.5, y, z: 0.5 }.is_valid());
         }
-        assert!(!PlayerPosition { x: 0.5, y: -128.0, z: 0.5 }.is_valid());
+        assert!(!PlayerPosition { x: 0.5, y: -512.0, z: 0.5 }.is_valid());
         let mut vitals = Vitals::default();
         let mut last = 0;
         assert!(!void_damage_tick(&mut vitals, -64.0, 100, &mut last));
