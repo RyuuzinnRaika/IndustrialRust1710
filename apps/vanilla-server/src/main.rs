@@ -1143,6 +1143,17 @@ fn tick_survival_vitals(vitals: &mut Vitals, steps: u64, difficulty: &AtomicU8) 
     vitals.tick_with_difficulty(steps, difficulty.load(Ordering::Acquire))
 }
 
+/// Void begins below Y=-64 in Java 1.7.10. The server applies bounded
+/// periodic damage rather than rejecting negative-Y movement as spoofing.
+fn void_damage_tick(vitals: &mut Vitals, y: f64, now: u64, last: &mut u64) -> bool {
+    if vitals.health <= 0.0 || !y.is_finite() || y >= -64.0 || now.saturating_sub(*last) < 10 {
+        return false;
+    }
+    *last = now;
+    vitals.health = (vitals.health - 4.0).max(0.0);
+    true
+}
+
 fn sprint_action(current: bool, action: i32, food: i32) -> bool {
     match action {
         3 => food > 6,
@@ -1468,6 +1479,7 @@ fn play(
     let mut last_plate_refresh_tick = clock.ticks();
     let mut last_map_tick = clock.ticks();
     let mut last_arrow_damage_tick: Option<u64> = None;
+    let mut last_void_damage_tick = clock.ticks();
     loop {
         if pending_teleport
             .as_ref()
@@ -2062,6 +2074,21 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
+        if survival && void_damage_tick(vitals, player.y, now_tick, &mut last_void_damage_tick) {
+            let previous_health = (vitals.health + 4.0).min(20.0);
+            death_log::record_fatal(
+                &mut fatal_hit,
+                previous_health,
+                vitals.health,
+                DeathCause::Void,
+            );
+            player.save_state_in_dimension(
+                player_path,
+                *vitals,
+                session_dimension.protocol_id() as i32,
+            )?;
+            send(s, 0x06, &health_packet(*vitals))?;
+        }
         let boat_mount = boats
             .lock()
             .map_err(|_| bad("boats mutex poisoned"))?
@@ -3379,7 +3406,7 @@ fn play(
                     || !y.is_finite()
                     || !stance.is_finite()
                     || !z.is_finite()
-                    || !(0.0..256.0).contains(&y)
+                    || !(-128.0..256.0).contains(&y)
                 {
                     return Err(bad("invalid player coordinates"));
                 }
@@ -10698,6 +10725,31 @@ mod piston_action_wire_tests {
         assert_eq!(&packet.body[4..6], &65i16.to_be_bytes());
         assert_eq!(&packet.body[6..10], &(-40i32).to_be_bytes());
         assert_eq!(&packet.body[10..], &[0, 5, 33]);
+    }
+}
+
+#[cfg(test)]
+mod reg150_void_death_tests {
+    use super::{void_damage_tick, DeathCause, PlayerPosition, Vitals};
+
+    #[test]
+    fn negative_y_is_valid_until_bounded_floor_and_void_damages_once_per_interval() {
+        for y in [-0.01, -40.0, -65.0, -127.5] {
+            assert!(PlayerPosition { x: 0.5, y, z: 0.5 }.is_valid());
+        }
+        assert!(!PlayerPosition { x: 0.5, y: -128.0, z: 0.5 }.is_valid());
+        let mut vitals = Vitals::default();
+        let mut last = 0;
+        assert!(!void_damage_tick(&mut vitals, -64.0, 100, &mut last));
+        assert!(!void_damage_tick(&mut vitals, -64.1, 9, &mut last));
+        for tick in [10, 20, 30, 40, 50] {
+            assert!(void_damage_tick(&mut vitals, -65.0, tick, &mut last));
+            assert!(!void_damage_tick(&mut vitals, -65.0, tick, &mut last));
+        }
+        assert_eq!(vitals.health, 0.0);
+        assert!(!void_damage_tick(&mut vitals, -65.0, 60, &mut last));
+        assert_eq!(DeathCause::Void.code(), "void");
+        assert!(DeathCause::Void.message("TestPlayer").contains("fell out of the world"));
     }
 }
 
