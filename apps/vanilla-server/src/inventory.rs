@@ -2059,6 +2059,94 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+    /// REG-135 / #771: a full 36-slot player inventory cannot swallow items
+    /// from a chest. When one partial stack is available, only that capacity
+    /// is consumed; the remainder stays in the server-owned chest.
+    #[test]
+    fn reg135_full_inventory_shift_click_keeps_chest_items_and_partial_remainder() {
+        let mut inventory = Inventory::default();
+        let stone = Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        let diamond = Stack {
+            id: 264,
+            count: 32,
+            damage: 0,
+            nbt: None,
+        };
+        for slot in 9..45 {
+            inventory.slots[slot] = Some(stone);
+        }
+        let mut chest = [None; 27];
+        chest[0] = Some(diamond);
+        chest[1] = Some(Stack {
+            count: 7,
+            ..diamond
+        });
+
+        let total = |inv: &Inventory, storage: &[Option<Stack>; 27]| -> u64 {
+            inv.slots[9..45]
+                .iter()
+                .chain(storage.iter())
+                .flatten()
+                .map(|stack| u64::from(stack.count))
+                .sum::<u64>()
+                + inv.cursor.map_or(0, |stack| u64::from(stack.count))
+        };
+
+        let full_inventory = inventory.clone();
+        let full_chest = chest;
+        let before_full = total(&inventory, &chest);
+        assert_eq!(
+            inventory.chest_click_window(1, &mut chest, 0, 0, 1),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(inventory, full_inventory);
+        assert_eq!(chest, full_chest);
+        assert_eq!(total(&inventory, &chest), before_full);
+
+        // Make exactly three spaces in a matching existing stack. A Shift
+        // transfer must debit only three of the 32 diamonds in the chest.
+        inventory.slots[9] = Some(Stack {
+            count: 61,
+            ..diamond
+        });
+        let before_partial = total(&inventory, &chest);
+        assert_eq!(
+            inventory.chest_click_window(1, &mut chest, 0, 0, 1),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(inventory.slots[9], Some(Stack { count: 64, ..diamond }));
+        assert_eq!(chest[0], Some(Stack { count: 29, ..diamond }));
+        assert_eq!(chest[1], Some(Stack { count: 7, ..diamond }));
+        assert!(inventory.cursor.is_none());
+        assert_eq!(total(&inventory, &chest), before_partial);
+
+        // With the player inventory full again, retrying cannot duplicate
+        // or erase the remainder even if the same client repeats the click.
+        let before_retry = total(&inventory, &chest);
+        let previous = inventory.clone();
+        let previous_chest = chest;
+        assert!(inventory.chest_click_window(1, &mut chest, 0, 0, 1).is_some());
+        assert_eq!(inventory, previous);
+        assert_eq!(chest, previous_chest);
+        assert_eq!(total(&inventory, &chest), before_retry);
+
+        // Reconnect/save representation preserves both the full player slot
+        // and the server-side residual chest stack.
+        let player_save = inventory.encoded().unwrap();
+        let player_reloaded: Inventory = serde_json::from_slice(&player_save).unwrap();
+        let chest_save = serde_json::to_vec(&chest).unwrap();
+        let chest_reloaded: [Option<Stack>; 27] =
+            serde_json::from_slice(&chest_save).unwrap();
+        assert_eq!(player_reloaded, inventory);
+        assert_eq!(chest_reloaded, chest);
+        assert_eq!(total(&player_reloaded, &chest_reloaded), before_retry);
+    }
+
     #[test]
     fn admin_clear_is_bounded_handles_variants_and_preserves_ender_chest() {
         let mut inventory = Inventory::default();
