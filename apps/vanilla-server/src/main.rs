@@ -8415,6 +8415,7 @@ fn main() -> io::Result<()> {
             return Err(bad("usage: --recover-level-dat STOPPED_WORLD_DIR"));
         }
         let world_directory = Path::new(&raw_args[1]);
+        server_config::reject_parent_traversal(world_directory)?;
         // Preflight is read-only. A corrupt backup or an existing level.dat
         // must not cause recovery to rewrite the world's session.lock.
         match std::fs::symlink_metadata(world_directory.join("level.dat")) {
@@ -8453,6 +8454,8 @@ fn main() -> io::Result<()> {
         if raw_args.len() != 3 || raw_args[0] != "--prepare-anvil-copy" {
             return Err(bad("usage: --prepare-anvil-copy SOURCE_DIR NEW_DEST_DIR"));
         }
+        server_config::reject_parent_traversal(Path::new(&raw_args[1]))?;
+        server_config::reject_parent_traversal(Path::new(&raw_args[2]))?;
         let stats = migration_staging::prepare_anvil_copy(
             Path::new(&raw_args[1]),
             Path::new(&raw_args[2]),
@@ -8556,6 +8559,7 @@ fn main() -> io::Result<()> {
                     .next()
                     .ok_or_else(|| bad("missing --world value"))?
                     .into();
+                server_config::reject_parent_traversal(&world_path)?;
                 explicit_world = true;
             }
             "--whitelist" => {
@@ -8699,6 +8703,21 @@ fn main() -> io::Result<()> {
             }
             _ => return Err(bad("unknown command-line argument")),
         }
+    }
+    // Validate all user-controlled storage paths before any offline backup,
+    // import/export, lock acquisition or world creation can write to disk.
+    server_config::reject_parent_traversal(&world_path)?;
+    for candidate in [
+        dimension_root.as_ref(),
+        anvil_import_path.as_ref(),
+        anvil_export_path.as_ref(),
+        backup_destination.as_ref(),
+        backup_rotation.as_ref().map(|(root, _)| root),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        server_config::reject_parent_traversal(candidate)?;
     }
     // Rotation must be a standalone offline command with an explicit world path.
     if backup_rotation.is_some()
