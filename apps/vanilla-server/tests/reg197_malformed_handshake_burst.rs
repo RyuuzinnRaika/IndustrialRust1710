@@ -15,6 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BURST: usize = 96;
+const PARALLEL_WAVES: usize = 4;
+const PARALLEL_CLIENTS: usize = 8;
 const SECRET_MARKER: &str = "REG197_PRIVATE_INPUT_MUST_NOT_BE_LOGGED";
 
 struct Server {
@@ -142,9 +144,22 @@ fn malformed_handshake(port: u16) {
     let mut socket = connect(port).expect("connect malformed client");
     // A nonzero packet ID is not a Handshake. The appended attacker-supplied
     // string must never be reflected into server logs.
-    send_packet(&mut socket, 127, SECRET_MARKER.as_bytes())
-        .expect("send invalid handshake");
-    socket.shutdown(Shutdown::Write).expect("half-close input");
+    if let Err(error) = send_packet(&mut socket, 127, SECRET_MARKER.as_bytes()) {
+        // More than four simultaneous unauthenticated clients from one IP
+        // are deliberately rejected before their packets can be read.
+        assert!(
+            matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::BrokenPipe
+            ),
+            "unexpected malformed send failure: {error}"
+        );
+        return;
+    }
+    // A concurrent admission rejection may already have closed the socket.
+    let _ = socket.shutdown(Shutdown::Write);
     let mut one = [0u8; 1];
     match socket.read(&mut one) {
         Ok(0) => {}
@@ -199,6 +214,33 @@ fn reg197_malformed_burst_has_bounded_logs_and_recovers_status() {
             );
         }
     }
+    // Exercise admission saturation as well as sequential malformed frames.
+    // A rejected excess connection may fail its write; it must not panic the
+    // server or strand one of the four per-IP slots.
+    for _ in 0..PARALLEL_WAVES {
+        let port = server.port;
+        let clients: Vec<_> = (0..PARALLEL_CLIENTS)
+            .map(|_| thread::spawn(move || malformed_handshake(port)))
+            .collect();
+        for client in clients {
+            client.join().expect("parallel malformed client panicked");
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if status_probe(port).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "valid Status failed to recover after concurrent admission burst"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            server.child.try_wait().expect("server status").is_none(),
+            "server exited under parallel malformed Handshakes"
+        );
+    }
     status_probe(server.port).expect("normal Protocol 5 status/pong after burst");
 
     let log = fs::read_to_string(&server.log).expect("read isolated stderr");
@@ -236,9 +278,10 @@ fn reg197_malformed_burst_has_bounded_logs_and_recovers_status() {
         eprintln!("REG-197 CPU sample NOT_RUN (procfs unavailable)");
     }
     eprintln!(
-        "REG-197 elapsed_ms={} malformed={} logged={}",
+        "REG-197 elapsed_ms={} malformed={} parallel={} logged={}",
         started.elapsed().as_millis(),
         BURST,
+        PARALLEL_WAVES * PARALLEL_CLIENTS,
         malformed_lines
     );
 }
