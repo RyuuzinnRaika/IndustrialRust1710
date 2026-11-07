@@ -162,7 +162,9 @@ impl Vitals {
         if self.health <= 0.0 || !horizontal_blocks.is_finite() || horizontal_blocks <= 0.0 {
             return false;
         }
-        if !sprinting {
+        if !sprinting || self.food <= 6 {
+            // Reject stale sprint input even if the caller forgot to clear
+            // Entity Action 3 after crossing the food threshold.
             return false;
         }
         self.add_exhaustion(horizontal_blocks.min(64.0) as f32 * 0.1)
@@ -279,6 +281,32 @@ mod tests {
             assert_eq!(v.health, minimum);
             assert!(v.valid());
         }
+    }
+
+    #[test]
+    fn reg144_sprint_exhaustion_stops_at_low_food_until_rearmed() {
+        let mut vitals = Vitals {
+            food: 7,
+            saturation: 0.0,
+            exhaustion: 3.95,
+            ..Vitals::default()
+        };
+        assert!(vitals.travel_with_sprint(1.0, true));
+        assert_eq!(vitals.food, 6);
+        let after_threshold = vitals;
+        assert!(!vitals.travel_with_sprint(1.0, true));
+        assert_eq!(vitals, after_threshold);
+
+        let apple = Stack {
+            id: 260,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        assert!(vitals.eat(apple));
+        assert!(vitals.food > 6);
+        assert!(vitals.travel_with_sprint(1.0, true));
+        assert!(vitals.valid());
     }
 
     #[test]
