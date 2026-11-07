@@ -418,6 +418,74 @@ mod tests {
         fs::remove_dir_all(home).unwrap();
     }
 
+    /// REG-189 / #825: the signed/unsigned book records and their unique
+    /// server-owned references survive a chest transfer and separate reload.
+    #[test]
+    fn reg189_multi_page_unicode_book_nbt_and_chest_save_roundtrip() {
+        let unsigned = Book {
+            pages: vec!["漢字とかな 😀".to_owned(), "第二ページ\n改行".to_owned()],
+            title: None,
+            author: None,
+        };
+        let signed = Book {
+            pages: vec!["日本語とemoji 🌸".to_owned(), "Last page / fin".to_owned()],
+            title: Some("研究ノート".to_owned()),
+            author: Some("Reader".to_owned()),
+        };
+        assert!(unsigned.valid(false));
+        assert!(signed.valid(true));
+        let mut store = Store {
+            next_id: 3,
+            ..Store::default()
+        };
+        store.books.insert(1, BookRecord { signed: true, book: signed.clone() });
+        store.books.insert(2, BookRecord { signed: false, book: unsigned.clone() });
+        let home = std::env::temp_dir().join(format!(
+            "ir-reg189-books-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir(&home).unwrap(); // never reuse a real world
+        let path = home.join("books.json");
+        fs::write(&path, store.encoded().unwrap()).unwrap();
+        let loaded = Store::load(&path).unwrap();
+        assert_eq!(loaded.books[&1].book, signed);
+        assert_eq!(loaded.books[&2].book, unsigned);
+        assert!(loaded.books[&1].signed);
+        assert!(!loaded.books[&2].signed);
+
+        let packed = compressed_nbt(&loaded.books[&1].book).unwrap();
+        let mut raw = Vec::new();
+        GzDecoder::new(packed.as_slice()).read_to_end(&mut raw).unwrap();
+        assert_eq!(fastnbt::from_bytes::<Book>(&raw).unwrap(), signed);
+
+        let signed_stack = Stack { id: 387, count: 1, damage: 1, nbt: None };
+        let editable_stack = Stack { id: 386, count: 1, damage: 2, nbt: None };
+        let mut chest = [None; 27];
+        chest[0] = Some(signed_stack);
+        chest[1] = Some(editable_stack);
+        let mut player = Inventory::default();
+        assert!(player.chest_click_window(1, &mut chest, 0, 0, 0).is_some());
+        assert!(player.chest_click_window(1, &mut chest, 27, 0, 0).is_some());
+        assert!(player.chest_click_window(1, &mut chest, 1, 0, 0).is_some());
+        assert!(player.chest_click_window(1, &mut chest, 28, 0, 0).is_some());
+        assert!(chest.iter().all(Option::is_none));
+        let player_reloaded: Inventory =
+            serde_json::from_slice(&player.encoded().unwrap()).unwrap();
+        assert!(player_reloaded.possessions().contains(&signed_stack));
+        assert!(player_reloaded.possessions().contains(&editable_stack));
+        assert_eq!(Store::load(&path).unwrap().books[&1].book, signed);
+
+        let oversized = Book {
+            pages: vec!["😀".repeat(129)],
+            title: None,
+            author: None,
+        };
+        assert!(!oversized.valid(false));
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&home).unwrap();
+    }
+
     #[test]
     fn rejects_missing_or_forged_book_reference() {
         let mut store = Store {
