@@ -3079,6 +3079,57 @@ mod tests {
         assert_eq!(inv.chest_window_items(2, &chest)[..3], [2, 0, 63]);
         assert_eq!(sum(&inv, &chest), 12);
     }
+    /// REG-134 / #770: Protocol 5 right-drag hover duplicates must never
+    /// charge the cursor more than once for the same container slot.
+    #[test]
+    fn reg134_right_drag_deduplicates_hovered_slots_and_preserves_total() {
+        let mut inv = Inventory::default();
+        let item = Stack {
+            id: 1,
+            count: 6,
+            damage: 0,
+            nbt: None,
+        };
+        inv.cursor = Some(item);
+        let mut chest = [None; 27];
+        chest[1] = Some(Stack { count: 63, ..item });
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 4, 5),
+            Some(ChestDirection::InventoryOnly)
+        );
+        for slot in [0, 0, 1, 1, 1, 2, 2] {
+            assert_eq!(
+                inv.chest_click_window(1, &mut chest, slot, 5, 5),
+                Some(ChestDirection::InventoryOnly)
+            );
+        }
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 6, 5),
+            Some(ChestDirection::IntoChest)
+        );
+        assert_eq!(chest[0], Some(Stack { count: 1, ..item }));
+        assert_eq!(chest[1], Some(Stack { count: 64, ..item }));
+        assert_eq!(chest[2], Some(Stack { count: 1, ..item }));
+        assert_eq!(inv.cursor, Some(Stack { count: 3, ..item }));
+        assert_eq!(
+            inv.cursor.map_or(0u32, |stack| u32::from(stack.count))
+                + chest.iter().flatten().map(|stack| u32::from(stack.count)).sum::<u32>(),
+            69
+        );
+        let before = (inv.clone(), chest);
+        // Replayed terminal packet without a new drag session is rejected.
+        assert_eq!(inv.chest_click_window(1, &mut chest, -999, 6, 5), None);
+        assert_eq!((inv.clone(), chest), before);
+
+        let player_save = inv.encoded().unwrap();
+        let player_reload: Inventory = serde_json::from_slice(&player_save).unwrap();
+        let chest_save = serde_json::to_vec(&chest).unwrap();
+        let chest_reload: [Option<Stack>; 27] =
+            serde_json::from_slice(&chest_save).unwrap();
+        assert_eq!(player_reload, inv);
+        assert_eq!(chest_reload, chest);
+    }
+
     #[test]
     fn chest_rejects_cross_storage_swaps_with_unlike_items() {
         let mut inv = Inventory::default();
