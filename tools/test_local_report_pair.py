@@ -138,6 +138,17 @@ class PairReportTests(unittest.TestCase):
         with self.assertRaisesRegex(pair.EvidenceError, "unsupported report schema"):
             pair.load_report(self.write("boolean_schema.json", report), "windows")
 
+
+    def test_symlinked_reports_are_rejected_before_open(self):
+        original = self.write("real-win.json", self.report("windows"))
+        alias = self.root / "linked-win.json"
+        try:
+            alias.symlink_to(original)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink not available on this host")
+        with self.assertRaisesRegex(pair.EvidenceError, "regular file"):
+            pair.load_report(alias, "windows")
+
     def test_nonregular_report_path_is_rejected(self):
         with self.assertRaisesRegex(pair.EvidenceError, "regular file"):
             pair.load_report(self.root, "windows")
