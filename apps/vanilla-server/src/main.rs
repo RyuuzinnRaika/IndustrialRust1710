@@ -6092,6 +6092,96 @@ fn play(
                 let mut requested_window = window >= 0 && window as u8 == active_window;
                 let mut accepted = false;
                 let response_items;
+                // C0E mode 4 (Q/Ctrl+Q) drops the server-owned slot rather
+                // than the cursor. Persist the slot and ground entity in the
+                // same journal transaction before broadcasting any spawn.
+                // This path covers the personal inventory and chest windows.
+                // Other GUI types stay rejected until they have equivalent
+                // container-aware atomic transactions.
+                if requested_window
+                    && slot >= 0
+                    && mode == 4
+                    && matches!(button, 0 | 1)
+                    && (active_window == 0 || active_chest.is_some())
+                {
+                    let mut candidate = inventory.clone();
+                    let mut staged_chests = None;
+                    let mut chest_guard = None;
+                    let removed = if let Some(pos) = active_chest {
+                        let still_open = {
+                            let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+                            w.get(pos.0, pos.1, pos.2) >> 4 == 54
+                                && near(location, pos.0, pos.1, pos.2)
+                                && active_chest_partner.is_none_or(|other| {
+                                    w.get(other.0, other.1, other.2) >> 4 == 54
+                                })
+                        };
+                        if still_open {
+                            let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
+                            let original = chest_window_state(&guard, pos, active_chest_partner);
+                            let mut next = original.clone();
+                            let removed = candidate.drop_gui_chest_slot(&mut next, slot, button);
+                            if removed.is_some() && original != next {
+                                staged_chests = Some(stage_chest_window(
+                                    &guard,
+                                    pos,
+                                    active_chest_partner,
+                                    &next,
+                                )?);
+                            }
+                            chest_guard = Some(guard);
+                            removed
+                        } else {
+                            None
+                        }
+                    } else {
+                        candidate.drop_gui_inventory_slot(slot, button)
+                    };
+                    if let Some(stack) = removed {
+                        let mut ground = ground_items
+                            .lock()
+                            .map_err(|_| bad("ground item lock poisoned"))?;
+                        if ground.has_capacity_for(1) {
+                            let at = (
+                                (location.0.floor() as i32)
+                                    .clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
+                                (location.1.floor() as i32).clamp(0, 254),
+                                (location.2.floor() as i32)
+                                    .clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
+                            );
+                            let (next_ground, spawned) = ground.stage_put_many(&[stack], at)?;
+                            let mut writes = vec![
+                                (inventory_path, candidate.encoded()?),
+                                (ground_path, next_ground.encoded()?),
+                            ];
+                            if let Some(staged) = staged_chests.as_ref() {
+                                writes.push((chest_path, staged.encoded()?));
+                            }
+                            journal::commit(
+                                &world_path.with_extension("pending-txn.json"),
+                                &writes,
+                            )?;
+                            *inventory = candidate;
+                            *ground = next_ground;
+                            if let (Some(guard), Some(staged)) =
+                                (chest_guard.as_mut(), staged_chests)
+                            {
+                                **guard = staged;
+                            }
+                            accepted = true;
+                            drop(ground);
+                            drop(chest_guard);
+                            for item in spawned {
+                                for event in item.spawn() {
+                                    hub.broadcast(event);
+                                }
+                            }
+                        }
+                    }
+                    // Never fall through to the ordinary click handlers:
+                    // a rejected mode-4 request must not debit a second time.
+                    requested_window = false;
+                }
                 // A left/right click outside the window is an inventory-to-world
                 // transaction, NOT an ordinary window slot. First stage both
                 // snapshots, then persist together through the redo journal.
