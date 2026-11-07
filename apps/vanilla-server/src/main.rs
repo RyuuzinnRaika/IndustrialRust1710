@@ -1175,6 +1175,48 @@ mod dead_session_packet_tests {
         }
     }
 
+    /// REG-146 / #782: the active chest's cursor is player-owned even
+    /// while the chest window is open. Death drops it exactly once, while
+    /// delayed container clicks are blocked until respawn resets the GUI.
+    #[test]
+    fn reg146_open_chest_cursor_death_preserves_total_and_blocks_stale_clicks() {
+        use super::{Inventory, Stack};
+        let item = Stack {
+            id: 17,
+            count: 9,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inv = Inventory::default();
+        let mut chest = [None; 27];
+        chest[0] = Some(item);
+        assert!(inv.chest_click_window(1, &mut chest, 0, 0, 0).is_some());
+        assert_eq!(chest[0], None);
+        assert_eq!(inv.possessions(), vec![item]);
+
+        // C0E stale Click Window, C0D Close Window and C09 Held Item Change
+        // may arrive after lethal damage but before C16 respawn.
+        for id in [14, 13, 9, 7, 8, 23] {
+            assert!(super::blocked_while_dead(id));
+        }
+        assert!(!super::blocked_while_dead(22)); // respawn remains possible
+
+        let drops = inv.possessions();
+        inv.clear_possessions(); // production death-drop path, one pass
+        assert!(inv.possessions().is_empty());
+        assert_eq!(drops.iter().map(|s| u32::from(s.count)).sum::<u32>(), 9);
+        assert_eq!(
+            drops.iter().map(|s| u32::from(s.count)).sum::<u32>()
+                + chest.iter().flatten().map(|s| u32::from(s.count)).sum::<u32>(),
+            9
+        );
+        assert!(inv.possessions().is_empty()); // no second death drop
+        let saved = inv.encoded().unwrap();
+        let reloaded: Inventory = serde_json::from_slice(&saved).unwrap();
+        assert!(reloaded.possessions().is_empty());
+        assert_eq!(chest[0], None); // same storage cannot be dropped again
+    }
+
     #[test]
     fn keepalive_chat_transaction_ack_and_respawn_remain_available() {
         for id in [0, 1, 15, 20, 21, 22] {
