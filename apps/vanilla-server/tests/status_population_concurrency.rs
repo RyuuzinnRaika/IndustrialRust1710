@@ -38,8 +38,12 @@ impl Drop for Server {
 
 fn connect(port: u16) -> TcpStream {
     let socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    socket.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
-    socket.set_write_timeout(Some(Duration::from_secs(8))).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    socket
+        .set_write_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
     socket
 }
 
@@ -49,10 +53,8 @@ impl Server {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ir1710-reg121-{}-{stamp}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ir1710-reg121-{}-{stamp}", std::process::id()));
         fs::create_dir(&root).expect("create-only isolated test world");
         fs::write(
             root.join("whitelist.json"),
@@ -184,7 +186,10 @@ fn wait_for_online(port: u16, target: u64, gate: &Mutex<()>) {
         if state["players"]["online"].as_u64() == Some(target) {
             return;
         }
-        assert!(Instant::now() < deadline, "online count failed to reach {target}");
+        assert!(
+            Instant::now() < deadline,
+            "online count failed to reach {target}"
+        );
         thread::sleep(Duration::from_millis(80));
     }
 }
@@ -198,7 +203,9 @@ fn reg121_status_json_is_coherent_during_player_churn() {
     assert_eq!(baseline["players"]["max"], 8);
     let description = baseline["description"].clone();
     assert!(
-        description["text"].as_str().is_some_and(|text| !text.is_empty()),
+        description["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
         "Status MOTD must be a nonempty JSON text component"
     );
 
@@ -219,7 +226,10 @@ fn reg121_status_json_is_coherent_during_player_churn() {
             assert!(online <= 2, "Status count exceeded admitted players");
             assert_eq!(sample["description"], description);
             samples += 1;
-            assert!(samples <= 300, "concurrent Status monitor did not terminate");
+            assert!(
+                samples <= 300,
+                "concurrent Status monitor did not terminate"
+            );
             thread::sleep(Duration::from_millis(80));
         }
         samples
