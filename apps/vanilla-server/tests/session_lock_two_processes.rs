@@ -110,7 +110,10 @@ fn stop(server: &mut Server) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(status) = server.0.try_wait().unwrap() {
-            assert!(status.success(), "server failed graceful shutdown: {status}");
+            assert!(
+                status.success(),
+                "server failed graceful shutdown: {status}"
+            );
             return;
         }
         assert!(Instant::now() < deadline, "server did not stop gracefully");
@@ -124,10 +127,8 @@ fn reg184_second_process_cannot_rewrite_a_live_world_and_lock_is_released() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let scratch = std::env::temp_dir().join(format!(
-        "ir1710-reg184-{}-{stamp}",
-        std::process::id()
-    ));
+    let scratch =
+        std::env::temp_dir().join(format!("ir1710-reg184-{}-{stamp}", std::process::id()));
     // Create-only prevents accidental reuse/removal of a real save directory.
     fs::create_dir(&scratch).unwrap();
     let world = scratch.join("isolated/flat.irw");
