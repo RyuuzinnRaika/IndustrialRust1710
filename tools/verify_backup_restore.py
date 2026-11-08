@@ -68,8 +68,11 @@ def verify_restore_point(server: Path, backup: Path, timeout: int = 120) -> int:
         if before != after or snapshot_hashes(backup) != before:
             raise ValueError("backup changed during restore drill or files differ")
         target = copy if anvil else copy / irw_files[0].name
-        subprocess.run([str(server), "--verify-world", str(target)],
-                       check=True, timeout=timeout)
+        # Run the native verifier from disposable scratch, never from the
+        # operator's current directory (which may contain a live world).
+        # Make the server path absolute before changing its working directory.
+        subprocess.run([str(server.resolve(strict=True)), "--verify-world", str(target)],
+                       check=True, timeout=timeout, cwd=str(copy.parent))
         # Detect source mutation even if it occurred while the native verifier ran.
         if snapshot_hashes(backup) != before:
             raise ValueError("backup changed during offline world inspection")
