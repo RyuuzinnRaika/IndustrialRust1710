@@ -2702,8 +2702,8 @@ mod tests {
             inv.chest_click_window(1, &mut chest, -999, 2, 5),
             Some(ChestDirection::IntoChest)
         );
-        for slot in 0..3 {
-            assert_eq!(chest[slot], Some(Stack { count: 5, ..item }));
+        for stack in chest.iter().take(3) {
+            assert_eq!(*stack, Some(Stack { count: 5, ..item }));
         }
         assert_eq!(inv.cursor, Some(Stack { count: 2, ..item }));
         assert!(chest[3..].iter().all(Option::is_none));
