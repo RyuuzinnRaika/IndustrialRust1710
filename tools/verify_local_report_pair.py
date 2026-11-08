@@ -29,7 +29,7 @@ class EvidenceError(ValueError):
 
 def load_report(path: Path, expected_os: str) -> dict:
     try:
-        metadata = path.stat()
+        metadata = path.lstat()  # Do not follow a symlink into mutable or private evidence.
         if not stat.S_ISREG(metadata.st_mode):
             raise EvidenceError("report must be a regular file")
         if metadata.st_size > MAX_REPORT_BYTES:
