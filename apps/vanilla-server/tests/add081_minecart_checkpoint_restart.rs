@@ -19,16 +19,10 @@ impl Scratch {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ir-add081-{}-{stamp}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("ir-add081-{}-{stamp}", std::process::id()));
         fs::create_dir(&root).expect("create-only scratch directory");
-        fs::write(
-            root.join("whitelist.json"),
-            r#"[{"name":"RustTester"}]"#,
-        )
-        .expect("isolated test whitelist");
+        fs::write(root.join("whitelist.json"), r#"[{"name":"RustTester"}]"#)
+            .expect("isolated test whitelist");
         Self(root)
     }
 
@@ -100,7 +94,10 @@ fn status_probe(port: u16) -> io::Result<()> {
     let pong = read_frame(&mut socket)?;
     let mut pong_body = pong.as_slice();
     if read_varint(&mut pong_body)? != 1 || pong_body != nonce.to_be_bytes() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "wrong Pong echo"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "wrong Pong echo",
+        ));
     }
     Ok(())
 }
@@ -154,7 +151,11 @@ impl Server {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             if let Some(status) = self.child.try_wait().expect("poll server exit") {
-                assert!(status.success(), "server exit {status}\n{}", self.diagnostics());
+                assert!(
+                    status.success(),
+                    "server exit {status}\n{}",
+                    self.diagnostics()
+                );
                 return;
             }
             assert!(
