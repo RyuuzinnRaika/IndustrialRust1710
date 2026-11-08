@@ -2645,6 +2645,74 @@ mod tests {
         assert!(inv.encoded().is_ok());
     }
 
+    /// REG-137 / #773: cake outputs and three empty buckets must be a
+    /// single server-owned crafting transition, even with no free inventory.
+    #[test]
+    fn reg137_cake_bucket_returns_with_full_inventory_and_shift_capacity() {
+        let milk = Stack {
+            id: 335,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let bucket = Stack { id: 325, ..milk };
+        let cake = Stack { id: 354, ..milk };
+        let stone = Stack {
+            id: 1,
+            count: 64,
+            ..milk
+        };
+        let sugar = Stack { id: 353, ..milk };
+        let egg = Stack { id: 344, ..milk };
+        let wheat = Stack { id: 296, ..milk };
+        let ingredients = [
+            Some(milk),
+            Some(milk),
+            Some(milk),
+            Some(sugar),
+            Some(egg),
+            Some(sugar),
+            Some(wheat),
+            Some(wheat),
+            Some(wheat),
+        ];
+        let mut inv = Inventory::default();
+        for slot in 9..45 {
+            inv.slots[slot] = Some(stone);
+        }
+        inv.workbench = ingredients;
+        assert_eq!(inv.crafting_result(1), Some(cake));
+        // Shift-click cannot place the cake in the fully occupied inventory;
+        // no milk, sugar, egg, or wheat may be charged.
+        let untouched = inv.clone();
+        assert!(inv.click_window(1, 0, 0, 1));
+        assert_eq!(inv, untouched);
+
+        // Normal click may place the cake on the cursor without requiring
+        // three empty player slots for the returned buckets.
+        assert!(inv.click_window(1, 0, 0, 0));
+        assert_eq!(inv.cursor, Some(cake));
+        assert_eq!(inv.workbench[..3], [Some(bucket); 3]);
+        assert!(inv.workbench[3..].iter().all(Option::is_none));
+        assert_eq!(inv.crafting_result(1), None);
+        assert_eq!(
+            inv.workbench.iter().flatten().filter(|s| s.id == 325).count(),
+            3
+        );
+
+        // Alternate successful Shift-click requires only cake output space;
+        // bucket returns remain inside the three workbench input slots.
+        let mut shift = untouched;
+        shift.slots[9] = None;
+        assert!(shift.click_window(1, 0, 0, 1));
+        assert_eq!(shift.slots[9], Some(cake));
+        assert!(shift.cursor.is_none());
+        assert_eq!(shift.workbench[..3], [Some(bucket); 3]);
+        assert!(shift.workbench[3..].iter().all(Option::is_none));
+        assert!(inv.encoded().is_ok());
+        assert!(shift.encoded().is_ok());
+    }
+
     #[test]
     fn shift_crafting_consumes_each_iteration_and_stops_at_capacity() {
         let mut inv = Inventory::default();
