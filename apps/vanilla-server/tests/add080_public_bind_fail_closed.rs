@@ -78,7 +78,10 @@ fn add080_default_config_is_loopback_and_offline_public_bind_fails_closed() {
             .current_dir(&root.0)
             .output()
             .expect("launch rejected offline bind");
-        assert!(!result.status.success(), "{address} must not start in offline mode");
+        assert!(
+            !result.status.success(),
+            "{address} must not start in offline mode"
+        );
         assert!(
             String::from_utf8_lossy(&result.stderr)
                 .contains("non-loopback bind requires explicit --insecure-offline-lan"),
