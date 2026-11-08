@@ -6374,7 +6374,9 @@ mod group_b_regression_tests {
         }
         // Remove sources and verify both sides of each chunk seam decay.
         for x in [-18, 14] {
-            world.update_and_save(&path, x, 64, 0, (69 << 4) | 5).unwrap();
+            world
+                .update_and_save(&path, x, 64, 0, (69 << 4) | 5)
+                .unwrap();
         }
         for _ in 0..64 {
             world.block_tick(&path, 32).unwrap();
