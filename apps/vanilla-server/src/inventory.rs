@@ -1166,7 +1166,11 @@ impl Inventory {
                     return Some(ChestDirection::InventoryOnly);
                 }
                 let each = if kind == 0 {
-                    cursor.count / slots.len().min(64) as u8
+                    // Use the actual number of visited slots, including
+                    // double-chest windows with more than 64 destinations.
+                    // With fewer items than slots, left-drag deposits zero
+                    // rather than treating the 65th slot as nonexistent.
+                    (usize::from(cursor.count) / slots.len()) as u8
                 } else {
                     1
                 };
@@ -2561,6 +2565,83 @@ mod tests {
         assert_eq!(inv.cursor.map(|stack| stack.id), Some(267));
         assert!(inv.click_window(1, 0, 0, 0)); // no recipe left: no second sword
         assert_eq!(inv.cursor, Some(Stack { id: 267, ..ingot }));
+        assert!(inv.encoded().is_ok());
+    }
+
+    /// REG-133 / #769: left drag uses all visited slots to calculate the
+    /// equal share, retaining the remainder on the cursor.
+    #[test]
+    fn reg133_left_drag_splits_seventeen_over_three_and_keeps_remainder() {
+        let mut inv = Inventory::default();
+        let item = Stack {
+            id: 1,
+            count: 17,
+            damage: 0,
+            nbt: None,
+        };
+        inv.cursor = Some(item);
+        let mut chest = [None; 54];
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 0, 5),
+            Some(ChestDirection::InventoryOnly)
+        );
+        for slot in 0..3 {
+            assert_eq!(
+                inv.chest_click_window(1, &mut chest, slot, 1, 5),
+                Some(ChestDirection::InventoryOnly)
+            );
+        }
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 2, 5),
+            Some(ChestDirection::IntoChest)
+        );
+        for slot in 0..3 {
+            assert_eq!(chest[slot], Some(Stack { count: 5, ..item }));
+        }
+        assert_eq!(inv.cursor, Some(Stack { count: 2, ..item }));
+        assert!(chest[3..].iter().all(Option::is_none));
+        assert_eq!(
+            chest
+                .iter()
+                .flatten()
+                .map(|stack| u32::from(stack.count))
+                .sum::<u32>()
+                + u32::from(inv.cursor.unwrap().count),
+            17
+        );
+    }
+
+    /// The old implementation clamped the denominator to 64. For a double
+    /// chest's 90 visible slots, visiting 65 slots with 64 items must leave
+    /// the cursor intact: floor(64 / 65) == 0, not floor(64 / 64) == 1.
+    #[test]
+    fn reg133_left_drag_over_sixty_four_slots_does_not_spend_cursor() {
+        let mut inv = Inventory::default();
+        let item = Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        inv.cursor = Some(item);
+        let mut chest = [None; 54];
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 0, 5),
+            Some(ChestDirection::InventoryOnly)
+        );
+        for slot in 0..65 {
+            assert_eq!(
+                inv.chest_click_window(1, &mut chest, slot, 1, 5),
+                Some(ChestDirection::InventoryOnly)
+            );
+        }
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 2, 5),
+            Some(ChestDirection::InventoryOnly)
+        );
+        assert_eq!(inv.cursor, Some(item));
+        assert!(chest.iter().all(Option::is_none));
+        assert!(inv.slots[9..45].iter().all(Option::is_none));
         assert!(inv.encoded().is_ok());
     }
 
