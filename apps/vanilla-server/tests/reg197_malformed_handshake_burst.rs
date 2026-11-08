@@ -51,11 +51,8 @@ impl Server {
             std::process::id()
         ));
         fs::create_dir(&root).expect("create-only scratch directory");
-        fs::write(
-            root.join("whitelist.json"),
-            r#"[{"name":"RustTester"}]"#,
-        )
-        .expect("write isolated whitelist");
+        fs::write(root.join("whitelist.json"), r#"[{"name":"RustTester"}]"#)
+            .expect("write isolated whitelist");
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve loopback port");
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -85,7 +82,10 @@ impl Server {
             if status_probe(port).is_ok() {
                 return server;
             }
-            assert!(Instant::now() < deadline, "Protocol 5 Status readiness timed out");
+            assert!(
+                Instant::now() < deadline,
+                "Protocol 5 Status readiness timed out"
+            );
             thread::sleep(Duration::from_millis(50));
         }
     }
@@ -120,7 +120,10 @@ fn status_probe(port: u16) -> io::Result<()> {
     let frame = read_frame(&mut socket)?;
     let mut body = frame.as_slice();
     if read_varint(&mut body)? != 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "missing status response"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing status response",
+        ));
     }
     let mut parser = Cursor::new(body);
     let response: Value = serde_json::from_str(parser.read_string(32768)?)
@@ -135,7 +138,10 @@ fn status_probe(port: u16) -> io::Result<()> {
     let pong = read_frame(&mut socket)?;
     let mut payload = pong.as_slice();
     if read_varint(&mut payload)? != 1 || payload != token.to_be_bytes() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "wrong ping echo"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "wrong ping echo",
+        ));
     }
     Ok(())
 }
@@ -248,7 +254,10 @@ fn reg197_malformed_burst_has_bounded_logs_and_recovers_status() {
         .lines()
         .filter(|line| line.contains("category=invalid_packet_or_state"))
         .count();
-    assert!(malformed_lines > 0, "malformed packet rejection was not observed");
+    assert!(
+        malformed_lines > 0,
+        "malformed packet rejection was not observed"
+    );
     assert!(
         malformed_lines <= 16,
         "invalid-packet log budget exceeded: {malformed_lines} lines"
