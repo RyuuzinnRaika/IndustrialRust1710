@@ -1,4 +1,4 @@
-﻿//! Bounded, server-owned Creative inventory for Minecraft Java 1.7.10.
+//! Bounded, server-owned Creative inventory for Minecraft Java 1.7.10.
 //! Window 0 has 45 slots; slots 36..44 are the nine hotbar entries.
 //! Intentionally excludes NBT-equipped items, other windows, crafting, drops,
 //! equipment and survival transactions until the matching game logic exists.
@@ -2123,9 +2123,27 @@ mod tests {
             inventory.chest_click_window(1, &mut chest, 0, 0, 1),
             Some(ChestDirection::OutOfChest)
         );
-        assert_eq!(inventory.slots[9], Some(Stack { count: 64, ..diamond }));
-        assert_eq!(chest[0], Some(Stack { count: 29, ..diamond }));
-        assert_eq!(chest[1], Some(Stack { count: 7, ..diamond }));
+        assert_eq!(
+            inventory.slots[9],
+            Some(Stack {
+                count: 64,
+                ..diamond
+            })
+        );
+        assert_eq!(
+            chest[0],
+            Some(Stack {
+                count: 29,
+                ..diamond
+            })
+        );
+        assert_eq!(
+            chest[1],
+            Some(Stack {
+                count: 7,
+                ..diamond
+            })
+        );
         assert!(inventory.cursor.is_none());
         assert_eq!(total(&inventory, &chest), before_partial);
 
@@ -2134,7 +2152,9 @@ mod tests {
         let before_retry = total(&inventory, &chest);
         let previous = inventory.clone();
         let previous_chest = chest;
-        assert!(inventory.chest_click_window(1, &mut chest, 0, 0, 1).is_some());
+        assert!(inventory
+            .chest_click_window(1, &mut chest, 0, 0, 1)
+            .is_some());
         assert_eq!(inventory, previous);
         assert_eq!(chest, previous_chest);
         assert_eq!(total(&inventory, &chest), before_retry);
@@ -2144,8 +2164,7 @@ mod tests {
         let player_save = inventory.encoded().unwrap();
         let player_reloaded: Inventory = serde_json::from_slice(&player_save).unwrap();
         let chest_save = serde_json::to_vec(&chest).unwrap();
-        let chest_reloaded: [Option<Stack>; 27] =
-            serde_json::from_slice(&chest_save).unwrap();
+        let chest_reloaded: [Option<Stack>; 27] = serde_json::from_slice(&chest_save).unwrap();
         assert_eq!(player_reloaded, inventory);
         assert_eq!(chest_reloaded, chest);
         assert_eq!(total(&player_reloaded, &chest_reloaded), before_retry);
@@ -2485,8 +2504,14 @@ mod tests {
             damage: 0,
             nbt: None,
         };
-        let worn = Stack { damage: 20, ..fresh };
-        let other = Stack { damage: 45, ..fresh };
+        let worn = Stack {
+            damage: 20,
+            ..fresh
+        };
+        let other = Stack {
+            damage: 45,
+            ..fresh
+        };
         assert_eq!(fresh.max_count(), 1);
         assert!(fresh.is_valid() && worn.is_valid() && other.is_valid());
         for slot in 9..45 {
@@ -2526,7 +2551,10 @@ mod tests {
         // Attempt a right-drag over an occupied, differently worn stack and
         // an empty slot. The occupied tool must not change durability.
         inv.cursor = Some(Stack { damage: 7, ..fresh });
-        chest[0] = Some(Stack { damage: 30, ..fresh });
+        chest[0] = Some(Stack {
+            damage: 30,
+            ..fresh
+        });
         assert_eq!(
             inv.chest_click_window(1, &mut chest, -999, 4, 5),
             Some(ChestDirection::InventoryOnly)
@@ -2538,7 +2566,13 @@ mod tests {
             inv.chest_click_window(1, &mut chest, -999, 6, 5),
             Some(ChestDirection::IntoChest)
         );
-        assert_eq!(chest[0], Some(Stack { damage: 30, ..fresh }));
+        assert_eq!(
+            chest[0],
+            Some(Stack {
+                damage: 30,
+                ..fresh
+            })
+        );
         assert_eq!(chest[1], Some(Stack { damage: 7, ..fresh }));
         assert!(inv.cursor.is_none());
         let encoded = inv.encoded().unwrap();
@@ -2769,7 +2803,11 @@ mod tests {
         assert!(inv.workbench[3..].iter().all(Option::is_none));
         assert_eq!(inv.crafting_result(1), None);
         assert_eq!(
-            inv.workbench.iter().flatten().filter(|s| s.id == 325).count(),
+            inv.workbench
+                .iter()
+                .flatten()
+                .filter(|s| s.id == 325)
+                .count(),
             3
         );
 
@@ -3428,7 +3466,14 @@ mod tests {
         );
         assert_eq!(inventory.cursor, Some(Stack { count: 64, ..wool }));
         assert_eq!(chest[0], None);
-        assert_eq!(chest[1], Some(Stack { count: 25, damage: 3, ..wool }));
+        assert_eq!(
+            chest[1],
+            Some(Stack {
+                count: 25,
+                damage: 3,
+                ..wool
+            })
+        );
         assert_eq!(chest[2], Some(Stack { count: 14, ..wool }));
         assert_eq!(chest[3], Some(Stack { count: 7, ..wool }));
         assert_eq!(inventory.slots[9], Some(Stack { count: 4, ..wool }));
@@ -3438,7 +3483,9 @@ mod tests {
         // preserve the entire state, including unmatched metadata.
         let previous = inventory.clone();
         let previous_chest = chest;
-        assert!(inventory.chest_click_window(1, &mut chest, 0, 0, 6).is_some());
+        assert!(inventory
+            .chest_click_window(1, &mut chest, 0, 0, 6)
+            .is_some());
         assert_eq!(inventory, previous);
         assert_eq!(chest, previous_chest);
         assert_eq!(total(&inventory, &chest), initial_total);
@@ -3448,8 +3495,7 @@ mod tests {
         let player_save = inventory.encoded().unwrap();
         let player_reloaded: Inventory = serde_json::from_slice(&player_save).unwrap();
         let chest_save = serde_json::to_vec(&chest).unwrap();
-        let chest_reloaded: [Option<Stack>; 27] =
-            serde_json::from_slice(&chest_save).unwrap();
+        let chest_reloaded: [Option<Stack>; 27] = serde_json::from_slice(&chest_save).unwrap();
         assert_eq!(player_reloaded, inventory);
         assert_eq!(chest_reloaded, chest);
         assert_eq!(total(&player_reloaded, &chest_reloaded), initial_total);
@@ -3489,7 +3535,11 @@ mod tests {
         assert_eq!(inv.cursor, Some(Stack { count: 3, ..item }));
         assert_eq!(
             inv.cursor.map_or(0u32, |stack| u32::from(stack.count))
-                + chest.iter().flatten().map(|stack| u32::from(stack.count)).sum::<u32>(),
+                + chest
+                    .iter()
+                    .flatten()
+                    .map(|stack| u32::from(stack.count))
+                    .sum::<u32>(),
             69
         );
         let before = (inv.clone(), chest);
@@ -3500,8 +3550,7 @@ mod tests {
         let player_save = inv.encoded().unwrap();
         let player_reload: Inventory = serde_json::from_slice(&player_save).unwrap();
         let chest_save = serde_json::to_vec(&chest).unwrap();
-        let chest_reload: [Option<Stack>; 27] =
-            serde_json::from_slice(&chest_save).unwrap();
+        let chest_reload: [Option<Stack>; 27] = serde_json::from_slice(&chest_save).unwrap();
         assert_eq!(player_reload, inv);
         assert_eq!(chest_reload, chest);
     }
