@@ -10763,7 +10763,10 @@ mod reg147_keep_inventory_xp_tests {
     fn keep_inventory_retains_all_xp_and_emits_no_death_orb() {
         let mut rules = GameRules::default();
         let earned = Experience { total: 1_000 };
-        assert_eq!(death_xp_drop_amount(&earned, rules.keep_inventory()), Some(100));
+        assert_eq!(
+            death_xp_drop_amount(&earned, rules.keep_inventory()),
+            Some(100)
+        );
         rules.set("keepInventory", true).unwrap();
         assert_eq!(death_xp_drop_amount(&earned, rules.keep_inventory()), None);
         let bytes = serde_json::to_vec(&earned).unwrap();
@@ -10771,11 +10774,11 @@ mod reg147_keep_inventory_xp_tests {
         assert_eq!(restored, earned);
         assert_eq!(restored.total, 1_000);
         rules.set("keepInventory", false).unwrap();
-        assert_eq!(death_xp_drop_amount(&restored, rules.keep_inventory()), Some(100));
         assert_eq!(
-            death_xp_drop_amount(&Experience::default(), false),
-            Some(0)
+            death_xp_drop_amount(&restored, rules.keep_inventory()),
+            Some(100)
         );
+        assert_eq!(death_xp_drop_amount(&Experience::default(), false), Some(0));
     }
 }
 
