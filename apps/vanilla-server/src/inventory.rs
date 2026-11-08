@@ -3067,12 +3067,11 @@ mod tests {
                 let mut inventory = Inventory::default();
                 let mut chest = vec![None; chest_slots];
                 for slot in 9..45 {
-                    if next(&mut state) % 4 == 0 {
+                    if next(&mut state).is_multiple_of(4) {
                         let id = ids[(next(&mut state) % ids.len() as u64) as usize];
                         inventory.slots[slot] = Some(Stack {
                             id,
-                            count: (next(&mut state)
-                                % u64::from(crate::items_1710::max_count(id))
+                            count: (next(&mut state) % u64::from(crate::items_1710::max_count(id))
                                 + 1) as u8,
                             damage: if matches!(id, 5 | 17) {
                                 (next(&mut state) % 2) as i16
@@ -3084,12 +3083,11 @@ mod tests {
                     }
                 }
                 for target in &mut chest {
-                    if next(&mut state) % 3 == 0 {
+                    if next(&mut state).is_multiple_of(3) {
                         let id = ids[(next(&mut state) % ids.len() as u64) as usize];
                         *target = Some(Stack {
                             id,
-                            count: (next(&mut state)
-                                % u64::from(crate::items_1710::max_count(id))
+                            count: (next(&mut state) % u64::from(crate::items_1710::max_count(id))
                                 + 1) as u8,
                             damage: if matches!(id, 5 | 17) {
                                 (next(&mut state) % 2) as i16
@@ -3129,7 +3127,7 @@ mod tests {
                         }
                         _ => {
                             // Three-phase left/right drag. No outside drop.
-                            let start = if next(&mut state) % 2 == 0 { 0 } else { 4 };
+                            let start = if next(&mut state).is_multiple_of(2) { 0 } else { 4 };
                             inventory.chest_click_window(2, &mut chest, -999, start, 5);
                             let slots = (next(&mut state) % 4 + 1) as usize;
                             for _ in 0..slots {
