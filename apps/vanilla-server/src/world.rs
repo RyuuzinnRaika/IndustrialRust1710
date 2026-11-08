@@ -6389,6 +6389,64 @@ mod group_b_regression_tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// REG-162 / #798: chunk boundaries at x=-16,0,16 must not change
+    /// the power-loss-per-dust rule (15,14,...,1,0).
+    #[test]
+    fn reg162_dust_strength_crosses_negative_and_positive_chunk_boundaries() {
+        let path = temp("reg162-chunk-dust");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        // Both chains cross 16-block chunk borders. Keep the endpoints
+        // separated so neither source powers the other chain.
+        for source_x in [-18, 14] {
+            world
+                .update_and_save(&path, source_x, 64, 0, (69 << 4) | 13)
+                .unwrap();
+            for distance in 1..=17 {
+                world
+                    .update_and_save(&path, source_x + distance, 64, 0, 55 << 4)
+                    .unwrap();
+            }
+        }
+        for _ in 0..48 {
+            world.block_tick(&path, 32).unwrap();
+        }
+        for source_x in [-18, 14] {
+            for distance in 1..=17 {
+                let expected = 15u16.saturating_sub((distance - 1) as u16);
+                let actual = world.get(source_x + distance, 64, 0);
+                assert_eq!(
+                    actual,
+                    (55 << 4) | expected,
+                    "source={source_x} distance={distance}"
+                );
+            }
+        }
+        // Remove sources and verify both sides of each chunk seam decay.
+        for x in [-18, 14] {
+            world
+                .update_and_save(&path, x, 64, 0, (69 << 4) | 5)
+                .unwrap();
+        }
+        for _ in 0..64 {
+            world.block_tick(&path, 32).unwrap();
+        }
+        for source_x in [-18, 14] {
+            for distance in 1..=17 {
+                assert_eq!(
+                    world.get(source_x + distance, 64, 0),
+                    55 << 4,
+                    "stale power source={source_x} distance={distance}"
+                );
+            }
+        }
+        let restored = World::load(&path).unwrap();
+        for x in [-17, -16, -1, 15, 16, 31] {
+            assert_eq!(restored.get(x, 64, 0), 55 << 4);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn comparator_strength_is_not_rounded_up_to_fifteen_by_dust() {
         let path = temp("comparator-strength");
