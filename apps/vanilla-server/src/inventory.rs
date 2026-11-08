@@ -1166,7 +1166,11 @@ impl Inventory {
                     return Some(ChestDirection::InventoryOnly);
                 }
                 let each = if kind == 0 {
-                    cursor.count / slots.len().min(64) as u8
+                    // Use the actual number of visited slots, including
+                    // double-chest windows with more than 64 destinations.
+                    // With fewer items than slots, left-drag deposits zero
+                    // rather than treating the 65th slot as nonexistent.
+                    (usize::from(cursor.count) / slots.len()) as u8
                 } else {
                     1
                 };
@@ -2059,6 +2063,113 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+    /// REG-135 / #771: a full 36-slot player inventory cannot swallow items
+    /// from a chest. When one partial stack is available, only that capacity
+    /// is consumed; the remainder stays in the server-owned chest.
+    #[test]
+    fn reg135_full_inventory_shift_click_keeps_chest_items_and_partial_remainder() {
+        let mut inventory = Inventory::default();
+        let stone = Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        let diamond = Stack {
+            id: 264,
+            count: 32,
+            damage: 0,
+            nbt: None,
+        };
+        for slot in 9..45 {
+            inventory.slots[slot] = Some(stone);
+        }
+        let mut chest = [None; 27];
+        chest[0] = Some(diamond);
+        chest[1] = Some(Stack {
+            count: 7,
+            ..diamond
+        });
+
+        let total = |inv: &Inventory, storage: &[Option<Stack>; 27]| -> u64 {
+            inv.slots[9..45]
+                .iter()
+                .chain(storage.iter())
+                .flatten()
+                .map(|stack| u64::from(stack.count))
+                .sum::<u64>()
+                + inv.cursor.map_or(0, |stack| u64::from(stack.count))
+        };
+
+        let full_inventory = inventory.clone();
+        let full_chest = chest;
+        let before_full = total(&inventory, &chest);
+        assert_eq!(
+            inventory.chest_click_window(1, &mut chest, 0, 0, 1),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(inventory, full_inventory);
+        assert_eq!(chest, full_chest);
+        assert_eq!(total(&inventory, &chest), before_full);
+
+        // Make exactly three spaces in a matching existing stack. A Shift
+        // transfer must debit only three of the 32 diamonds in the chest.
+        inventory.slots[9] = Some(Stack {
+            count: 61,
+            ..diamond
+        });
+        let before_partial = total(&inventory, &chest);
+        assert_eq!(
+            inventory.chest_click_window(1, &mut chest, 0, 0, 1),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(
+            inventory.slots[9],
+            Some(Stack {
+                count: 64,
+                ..diamond
+            })
+        );
+        assert_eq!(
+            chest[0],
+            Some(Stack {
+                count: 29,
+                ..diamond
+            })
+        );
+        assert_eq!(
+            chest[1],
+            Some(Stack {
+                count: 7,
+                ..diamond
+            })
+        );
+        assert!(inventory.cursor.is_none());
+        assert_eq!(total(&inventory, &chest), before_partial);
+
+        // With the player inventory full again, retrying cannot duplicate
+        // or erase the remainder even if the same client repeats the click.
+        let before_retry = total(&inventory, &chest);
+        let previous = inventory.clone();
+        let previous_chest = chest;
+        assert!(inventory
+            .chest_click_window(1, &mut chest, 0, 0, 1)
+            .is_some());
+        assert_eq!(inventory, previous);
+        assert_eq!(chest, previous_chest);
+        assert_eq!(total(&inventory, &chest), before_retry);
+
+        // Reconnect/save representation preserves both the full player slot
+        // and the server-side residual chest stack.
+        let player_save = inventory.encoded().unwrap();
+        let player_reloaded: Inventory = serde_json::from_slice(&player_save).unwrap();
+        let chest_save = serde_json::to_vec(&chest).unwrap();
+        let chest_reloaded: [Option<Stack>; 27] = serde_json::from_slice(&chest_save).unwrap();
+        assert_eq!(player_reloaded, inventory);
+        assert_eq!(chest_reloaded, chest);
+        assert_eq!(total(&player_reloaded, &chest_reloaded), before_retry);
+    }
+
     #[test]
     fn admin_clear_is_bounded_handles_variants_and_preserves_ender_chest() {
         let mut inventory = Inventory::default();
@@ -2382,6 +2493,94 @@ mod tests {
         assert_eq!(inv.held(), Some(bucket));
     }
 
+    /// REG-138 / #774: durable tools are non-stackable and their wear values
+    /// must never be collapsed by Shift-click or three-phase GUI drag.
+    #[test]
+    fn reg138_differently_worn_pickaxes_remain_separate_in_chest_moves() {
+        let mut inv = Inventory::default();
+        let fresh = Stack {
+            id: 274,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let worn = Stack {
+            damage: 20,
+            ..fresh
+        };
+        let other = Stack {
+            damage: 45,
+            ..fresh
+        };
+        assert_eq!(fresh.max_count(), 1);
+        assert!(fresh.is_valid() && worn.is_valid() && other.is_valid());
+        for slot in 9..45 {
+            inv.slots[slot] = Some(Stack {
+                id: 1,
+                count: 64,
+                damage: 0,
+                nbt: None,
+            });
+        }
+        inv.slots[9] = Some(fresh);
+        inv.slots[10] = Some(other);
+        let mut chest = [None; 27];
+        chest[0] = Some(worn);
+
+        // No free player slot: the differently worn pickaxe stays in storage.
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, 0, 0, 1),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(chest[0], Some(worn));
+        assert_eq!(inv.slots[9], Some(fresh));
+        assert_eq!(inv.slots[10], Some(other));
+
+        // One free slot: the worn pickaxe transfers without merging into
+        // either existing one-item tool stack of the same item ID.
+        inv.slots[11] = None;
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, 0, 0, 1),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(chest[0], None);
+        assert_eq!(inv.slots[9], Some(fresh));
+        assert_eq!(inv.slots[10], Some(other));
+        assert_eq!(inv.slots[11], Some(worn));
+
+        // Attempt a right-drag over an occupied, differently worn stack and
+        // an empty slot. The occupied tool must not change durability.
+        inv.cursor = Some(Stack { damage: 7, ..fresh });
+        chest[0] = Some(Stack {
+            damage: 30,
+            ..fresh
+        });
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 4, 5),
+            Some(ChestDirection::InventoryOnly)
+        );
+        for slot in [0, 1] {
+            assert!(inv.chest_click_window(1, &mut chest, slot, 5, 5).is_some());
+        }
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 6, 5),
+            Some(ChestDirection::IntoChest)
+        );
+        assert_eq!(
+            chest[0],
+            Some(Stack {
+                damage: 30,
+                ..fresh
+            })
+        );
+        assert_eq!(chest[1], Some(Stack { damage: 7, ..fresh }));
+        assert!(inv.cursor.is_none());
+        let encoded = inv.encoded().unwrap();
+        let restored: Inventory = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored, inv);
+        assert_eq!(restored.slots[11], Some(worn));
+    }
+
     #[test]
     fn legacy_item_caps_apply_in_player_chest_and_hopper_windows() {
         let potion = Stack {
@@ -2474,6 +2673,155 @@ mod tests {
         assert!(inv.click_window(1, 0, 0, 0)); // no recipe left: no second sword
         assert_eq!(inv.cursor, Some(Stack { id: 267, ..ingot }));
         assert!(inv.encoded().is_ok());
+    }
+
+    /// REG-133 / #769: left drag uses all visited slots to calculate the
+    /// equal share, retaining the remainder on the cursor.
+    #[test]
+    fn reg133_left_drag_splits_seventeen_over_three_and_keeps_remainder() {
+        let mut inv = Inventory::default();
+        let item = Stack {
+            id: 1,
+            count: 17,
+            damage: 0,
+            nbt: None,
+        };
+        inv.cursor = Some(item);
+        let mut chest = [None; 54];
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 0, 5),
+            Some(ChestDirection::InventoryOnly)
+        );
+        for slot in 0..3 {
+            assert_eq!(
+                inv.chest_click_window(1, &mut chest, slot, 1, 5),
+                Some(ChestDirection::InventoryOnly)
+            );
+        }
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 2, 5),
+            Some(ChestDirection::IntoChest)
+        );
+        for stack in chest.iter().take(3) {
+            assert_eq!(*stack, Some(Stack { count: 5, ..item }));
+        }
+        assert_eq!(inv.cursor, Some(Stack { count: 2, ..item }));
+        assert!(chest[3..].iter().all(Option::is_none));
+        assert_eq!(
+            chest
+                .iter()
+                .flatten()
+                .map(|stack| u32::from(stack.count))
+                .sum::<u32>()
+                + u32::from(inv.cursor.unwrap().count),
+            17
+        );
+    }
+
+    /// The old implementation clamped the denominator to 64. For a double
+    /// chest's 90 visible slots, visiting 65 slots with 64 items must leave
+    /// the cursor intact: floor(64 / 65) == 0, not floor(64 / 64) == 1.
+    #[test]
+    fn reg133_left_drag_over_sixty_four_slots_does_not_spend_cursor() {
+        let mut inv = Inventory::default();
+        let item = Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        inv.cursor = Some(item);
+        let mut chest = [None; 54];
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 0, 5),
+            Some(ChestDirection::InventoryOnly)
+        );
+        for slot in 0..65 {
+            assert_eq!(
+                inv.chest_click_window(1, &mut chest, slot, 1, 5),
+                Some(ChestDirection::InventoryOnly)
+            );
+        }
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 2, 5),
+            Some(ChestDirection::InventoryOnly)
+        );
+        assert_eq!(inv.cursor, Some(item));
+        assert!(chest.iter().all(Option::is_none));
+        assert!(inv.slots[9..45].iter().all(Option::is_none));
+        assert!(inv.encoded().is_ok());
+    }
+
+    /// REG-137 / #773: cake outputs and three empty buckets must be a
+    /// single server-owned crafting transition, even with no free inventory.
+    #[test]
+    fn reg137_cake_bucket_returns_with_full_inventory_and_shift_capacity() {
+        let milk = Stack {
+            id: 335,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let bucket = Stack { id: 325, ..milk };
+        let cake = Stack { id: 354, ..milk };
+        let stone = Stack {
+            id: 1,
+            count: 64,
+            ..milk
+        };
+        let sugar = Stack { id: 353, ..milk };
+        let egg = Stack { id: 344, ..milk };
+        let wheat = Stack { id: 296, ..milk };
+        let ingredients = [
+            Some(milk),
+            Some(milk),
+            Some(milk),
+            Some(sugar),
+            Some(egg),
+            Some(sugar),
+            Some(wheat),
+            Some(wheat),
+            Some(wheat),
+        ];
+        let mut inv = Inventory::default();
+        for slot in 9..45 {
+            inv.slots[slot] = Some(stone);
+        }
+        inv.workbench = ingredients;
+        assert_eq!(inv.crafting_result(1), Some(cake));
+        // Shift-click cannot place the cake in the fully occupied inventory;
+        // no milk, sugar, egg, or wheat may be charged.
+        let untouched = inv.clone();
+        assert!(inv.click_window(1, 0, 0, 1));
+        assert_eq!(inv, untouched);
+
+        // Normal click may place the cake on the cursor without requiring
+        // three empty player slots for the returned buckets.
+        assert!(inv.click_window(1, 0, 0, 0));
+        assert_eq!(inv.cursor, Some(cake));
+        assert_eq!(inv.workbench[..3], [Some(bucket); 3]);
+        assert!(inv.workbench[3..].iter().all(Option::is_none));
+        assert_eq!(inv.crafting_result(1), None);
+        assert_eq!(
+            inv.workbench
+                .iter()
+                .flatten()
+                .filter(|s| s.id == 325)
+                .count(),
+            3
+        );
+
+        // Alternate successful Shift-click requires only cake output space;
+        // bucket returns remain inside the three workbench input slots.
+        let mut shift = untouched;
+        shift.slots[9] = None;
+        assert!(shift.click_window(1, 0, 0, 1));
+        assert_eq!(shift.slots[9], Some(cake));
+        assert!(shift.cursor.is_none());
+        assert_eq!(shift.workbench[..3], [Some(bucket); 3]);
+        assert!(shift.workbench[3..].iter().all(Option::is_none));
+        assert!(inv.encoded().is_ok());
+        assert!(shift.encoded().is_ok());
     }
 
     #[test]
@@ -3079,6 +3427,134 @@ mod tests {
         assert_eq!(inv.chest_window_items(2, &chest)[..3], [2, 0, 63]);
         assert_eq!(sum(&inv, &chest), 12);
     }
+    /// REG-132 / #768: double-click collection must honor max stack size
+    /// and the exact item metadata. Extra source items stay in place.
+    #[test]
+    fn reg132_double_click_respects_stack_cap_and_metadata_without_item_loss() {
+        let mut inventory = Inventory::default();
+        let wool = Stack {
+            id: 35,
+            count: 50,
+            damage: 2,
+            nbt: None,
+        };
+        inventory.cursor = Some(wool);
+        inventory.slots[9] = Some(Stack { count: 4, ..wool });
+        let mut chest = [None; 27];
+        chest[0] = Some(Stack { count: 8, ..wool });
+        chest[1] = Some(Stack {
+            count: 25,
+            damage: 3,
+            ..wool
+        });
+        chest[2] = Some(Stack { count: 20, ..wool });
+        chest[3] = Some(Stack { count: 7, ..wool });
+
+        let total = |inv: &Inventory, storage: &[Option<Stack>; 27]| -> u64 {
+            inv.slots[9..45]
+                .iter()
+                .chain(storage.iter())
+                .flatten()
+                .map(|item| u64::from(item.count))
+                .sum::<u64>()
+                + inv.cursor.map_or(0, |item| u64::from(item.count))
+        };
+        let initial_total = total(&inventory, &chest);
+        assert_eq!(
+            inventory.chest_click_window(1, &mut chest, 0, 0, 6),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(inventory.cursor, Some(Stack { count: 64, ..wool }));
+        assert_eq!(chest[0], None);
+        assert_eq!(
+            chest[1],
+            Some(Stack {
+                count: 25,
+                damage: 3,
+                ..wool
+            })
+        );
+        assert_eq!(chest[2], Some(Stack { count: 14, ..wool }));
+        assert_eq!(chest[3], Some(Stack { count: 7, ..wool }));
+        assert_eq!(inventory.slots[9], Some(Stack { count: 4, ..wool }));
+        assert_eq!(total(&inventory, &chest), initial_total);
+
+        // Retrying the same double-click while the cursor is full must
+        // preserve the entire state, including unmatched metadata.
+        let previous = inventory.clone();
+        let previous_chest = chest;
+        assert!(inventory
+            .chest_click_window(1, &mut chest, 0, 0, 6)
+            .is_some());
+        assert_eq!(inventory, previous);
+        assert_eq!(chest, previous_chest);
+        assert_eq!(total(&inventory, &chest), initial_total);
+
+        // Inventory and chest serializations independently survive reload
+        // without a new cursor stack or a lost chest remainder.
+        let player_save = inventory.encoded().unwrap();
+        let player_reloaded: Inventory = serde_json::from_slice(&player_save).unwrap();
+        let chest_save = serde_json::to_vec(&chest).unwrap();
+        let chest_reloaded: [Option<Stack>; 27] = serde_json::from_slice(&chest_save).unwrap();
+        assert_eq!(player_reloaded, inventory);
+        assert_eq!(chest_reloaded, chest);
+        assert_eq!(total(&player_reloaded, &chest_reloaded), initial_total);
+    }
+
+    /// REG-134 / #770: Protocol 5 right-drag hover duplicates must never
+    /// charge the cursor more than once for the same container slot.
+    #[test]
+    fn reg134_right_drag_deduplicates_hovered_slots_and_preserves_total() {
+        let mut inv = Inventory::default();
+        let item = Stack {
+            id: 1,
+            count: 6,
+            damage: 0,
+            nbt: None,
+        };
+        inv.cursor = Some(item);
+        let mut chest = [None; 27];
+        chest[1] = Some(Stack { count: 63, ..item });
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 4, 5),
+            Some(ChestDirection::InventoryOnly)
+        );
+        for slot in [0, 0, 1, 1, 1, 2, 2] {
+            assert_eq!(
+                inv.chest_click_window(1, &mut chest, slot, 5, 5),
+                Some(ChestDirection::InventoryOnly)
+            );
+        }
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 6, 5),
+            Some(ChestDirection::IntoChest)
+        );
+        assert_eq!(chest[0], Some(Stack { count: 1, ..item }));
+        assert_eq!(chest[1], Some(Stack { count: 64, ..item }));
+        assert_eq!(chest[2], Some(Stack { count: 1, ..item }));
+        assert_eq!(inv.cursor, Some(Stack { count: 3, ..item }));
+        assert_eq!(
+            inv.cursor.map_or(0u32, |stack| u32::from(stack.count))
+                + chest
+                    .iter()
+                    .flatten()
+                    .map(|stack| u32::from(stack.count))
+                    .sum::<u32>(),
+            69
+        );
+        let before = (inv.clone(), chest);
+        // Replayed terminal packet without a new drag session is rejected.
+        assert_eq!(inv.chest_click_window(1, &mut chest, -999, 6, 5), None);
+        assert_eq!((inv.clone(), chest), before);
+
+        let player_save = inv.encoded().unwrap();
+        let player_reload: Inventory = serde_json::from_slice(&player_save).unwrap();
+        let chest_save = serde_json::to_vec(&chest).unwrap();
+        let chest_reload: [Option<Stack>; 27] = serde_json::from_slice(&chest_save).unwrap();
+        assert_eq!(player_reload, inv);
+        assert_eq!(chest_reload, chest);
+    }
+
     #[test]
     fn chest_rejects_cross_storage_swaps_with_unlike_items() {
         let mut inv = Inventory::default();
