@@ -2474,6 +2474,79 @@ mod tests {
         assert_eq!(inv.held(), Some(bucket));
     }
 
+    /// REG-138 / #774: durable tools are non-stackable and their wear values
+    /// must never be collapsed by Shift-click or three-phase GUI drag.
+    #[test]
+    fn reg138_differently_worn_pickaxes_remain_separate_in_chest_moves() {
+        let mut inv = Inventory::default();
+        let fresh = Stack {
+            id: 274,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let worn = Stack { damage: 20, ..fresh };
+        let other = Stack { damage: 45, ..fresh };
+        assert_eq!(fresh.max_count(), 1);
+        assert!(fresh.is_valid() && worn.is_valid() && other.is_valid());
+        for slot in 9..45 {
+            inv.slots[slot] = Some(Stack {
+                id: 1,
+                count: 64,
+                damage: 0,
+                nbt: None,
+            });
+        }
+        inv.slots[9] = Some(fresh);
+        inv.slots[10] = Some(other);
+        let mut chest = [None; 27];
+        chest[0] = Some(worn);
+
+        // No free player slot: the differently worn pickaxe stays in storage.
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, 0, 0, 1),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(chest[0], Some(worn));
+        assert_eq!(inv.slots[9], Some(fresh));
+        assert_eq!(inv.slots[10], Some(other));
+
+        // One free slot: the worn pickaxe transfers without merging into
+        // either existing one-item tool stack of the same item ID.
+        inv.slots[11] = None;
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, 0, 0, 1),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(chest[0], None);
+        assert_eq!(inv.slots[9], Some(fresh));
+        assert_eq!(inv.slots[10], Some(other));
+        assert_eq!(inv.slots[11], Some(worn));
+
+        // Attempt a right-drag over an occupied, differently worn stack and
+        // an empty slot. The occupied tool must not change durability.
+        inv.cursor = Some(Stack { damage: 7, ..fresh });
+        chest[0] = Some(Stack { damage: 30, ..fresh });
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 4, 5),
+            Some(ChestDirection::InventoryOnly)
+        );
+        for slot in [0, 1] {
+            assert!(inv.chest_click_window(1, &mut chest, slot, 5, 5).is_some());
+        }
+        assert_eq!(
+            inv.chest_click_window(1, &mut chest, -999, 6, 5),
+            Some(ChestDirection::IntoChest)
+        );
+        assert_eq!(chest[0], Some(Stack { damage: 30, ..fresh }));
+        assert_eq!(chest[1], Some(Stack { damage: 7, ..fresh }));
+        assert!(inv.cursor.is_none());
+        let encoded = inv.encoded().unwrap();
+        let restored: Inventory = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored, inv);
+        assert_eq!(restored.slots[11], Some(worn));
+    }
+
     #[test]
     fn legacy_item_caps_apply_in_player_chest_and_hopper_windows() {
         let potion = Stack {
