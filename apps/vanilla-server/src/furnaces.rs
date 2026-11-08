@@ -419,8 +419,7 @@ mod tests {
                 let mut next = previous;
                 let result = inventory.furnace_click(&mut next, 2, 0, 0);
                 assert!(result.is_some());
-                let output_exhausted =
-                    previous.slots[2].is_some() && next.slots[2].is_none();
+                let output_exhausted = previous.slots[2].is_some() && next.slots[2].is_none();
                 if next != previous {
                     let staged = guard.staged_update(pos, next).unwrap();
                     *guard = staged;
