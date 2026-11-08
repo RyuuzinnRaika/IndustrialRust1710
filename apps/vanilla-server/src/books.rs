@@ -438,8 +438,20 @@ mod tests {
             next_id: 3,
             ..Store::default()
         };
-        store.books.insert(1, BookRecord { signed: true, book: signed.clone() });
-        store.books.insert(2, BookRecord { signed: false, book: unsigned.clone() });
+        store.books.insert(
+            1,
+            BookRecord {
+                signed: true,
+                book: signed.clone(),
+            },
+        );
+        store.books.insert(
+            2,
+            BookRecord {
+                signed: false,
+                book: unsigned.clone(),
+            },
+        );
         let home = std::env::temp_dir().join(format!(
             "ir-reg189-books-{}-{:?}",
             std::process::id(),
@@ -456,11 +468,23 @@ mod tests {
 
         let packed = compressed_nbt(&loaded.books[&1].book).unwrap();
         let mut raw = Vec::new();
-        GzDecoder::new(packed.as_slice()).read_to_end(&mut raw).unwrap();
+        GzDecoder::new(packed.as_slice())
+            .read_to_end(&mut raw)
+            .unwrap();
         assert_eq!(fastnbt::from_bytes::<Book>(&raw).unwrap(), signed);
 
-        let signed_stack = Stack { id: 387, count: 1, damage: 1, nbt: None };
-        let editable_stack = Stack { id: 386, count: 1, damage: 2, nbt: None };
+        let signed_stack = Stack {
+            id: 387,
+            count: 1,
+            damage: 1,
+            nbt: None,
+        };
+        let editable_stack = Stack {
+            id: 386,
+            count: 1,
+            damage: 2,
+            nbt: None,
+        };
         let mut chest = [None; 27];
         chest[0] = Some(signed_stack);
         chest[1] = Some(editable_stack);
