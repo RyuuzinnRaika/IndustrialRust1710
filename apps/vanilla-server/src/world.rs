@@ -6356,17 +6356,14 @@ mod group_b_regression_tests {
             if tick % 20 == 0 {
                 let powered = (tick / 20) % 2 == 0;
                 world
-                    .update_and_save(
-                        &path,
-                        0,
-                        64,
-                        0,
-                        (69 << 4) | if powered { 13 } else { 5 },
-                    )
+                    .update_and_save(&path, 0, 64, 0, (69 << 4) | if powered { 13 } else { 5 })
                     .unwrap();
             }
             let changed = world.block_tick(&path, 8).unwrap();
-            assert!(changed.len() <= 64, "unbounded block changes on tick {tick}");
+            assert!(
+                changed.len() <= 64,
+                "unbounded block changes on tick {tick}"
+            );
             assert!(
                 world.pending_circuit.len() <= 128,
                 "unbounded pending circuit on tick {tick}"
@@ -6375,7 +6372,9 @@ mod group_b_regression_tests {
         }
         // Power off must eventually release the entire 24-cell line,
         // including dust across x=15/16.
-        world.update_and_save(&path, 0, 64, 0, (69 << 4) | 5).unwrap();
+        world
+            .update_and_save(&path, 0, 64, 0, (69 << 4) | 5)
+            .unwrap();
         for _ in 0..100 {
             world.block_tick(&path, 8).unwrap();
         }
