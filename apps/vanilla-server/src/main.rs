@@ -1207,7 +1207,11 @@ mod dead_session_packet_tests {
         assert_eq!(drops.iter().map(|s| u32::from(s.count)).sum::<u32>(), 9);
         assert_eq!(
             drops.iter().map(|s| u32::from(s.count)).sum::<u32>()
-                + chest.iter().flatten().map(|s| u32::from(s.count)).sum::<u32>(),
+                + chest
+                    .iter()
+                    .flatten()
+                    .map(|s| u32::from(s.count))
+                    .sum::<u32>(),
             9
         );
         assert!(inv.possessions().is_empty()); // no second death drop
