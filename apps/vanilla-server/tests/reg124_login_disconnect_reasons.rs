@@ -76,7 +76,10 @@ fn status(port: u16) -> io::Result<Value> {
     send(&mut socket, 0, &[])?;
     let (id, body) = receive(&mut socket)?;
     if id != 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "missing Status JSON"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing Status JSON",
+        ));
     }
     let mut reader = Cursor::new(&body);
     let json: Value = serde_json::from_str(reader.read_string(32768)?)
@@ -88,7 +91,10 @@ fn status(port: u16) -> io::Result<Value> {
     send(&mut socket, 1, &token.to_be_bytes())?;
     let (echo_id, payload) = receive(&mut socket)?;
     if echo_id != 1 || payload != token.to_be_bytes() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid Status Pong"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid Status Pong",
+        ));
     }
     if json["version"]["protocol"] != 5 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "not Protocol 5"));
@@ -128,11 +134,7 @@ impl Server {
             std::process::id()
         ));
         fs::create_dir(&root).expect("create-only isolated world");
-        fs::write(
-            root.join("whitelist.json"),
-            r#"[{"name":"RustTester"}]"#,
-        )
-        .unwrap();
+        fs::write(root.join("whitelist.json"), r#"[{"name":"RustTester"}]"#).unwrap();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -173,7 +175,10 @@ impl Server {
             if status(self.port).unwrap()["players"]["online"].as_u64() == Some(target) {
                 return;
             }
-            assert!(Instant::now() < deadline, "online count never reached {target}");
+            assert!(
+                Instant::now() < deadline,
+                "online count never reached {target}"
+            );
             thread::sleep(Duration::from_millis(50));
         }
     }
