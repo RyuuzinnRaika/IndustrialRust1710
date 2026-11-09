@@ -1144,8 +1144,14 @@ fn tick_survival_vitals(vitals: &mut Vitals, steps: u64, difficulty: &AtomicU8) 
 }
 
 fn sprint_action(current: bool, action: i32, food: i32) -> bool {
+    // Hunger can drop during a sprint (or due to status effects), without
+    // any corresponding client Stop Sprinting action. Invalidate that state
+    // immediately; eating must not silently rearm the old sprint flag.
+    if food <= 6 {
+        return false;
+    }
     match action {
-        3 => food > 6,
+        3 => true,
         4 => false,
         _ => current,
     }
@@ -1560,6 +1566,12 @@ fn play(
     let mut last_map_tick = clock.ticks();
     let mut last_arrow_damage_tick: Option<u64> = None;
     loop {
+        // Food may have changed due to exhaustion, a potion, or a meal on
+        // the previous iteration. A stale sprint flag must not survive
+        // across the <=6 hunger threshold.
+        if survival {
+            sprinting = sprint_action(sprinting, 0, vitals.food);
+        }
         if pending_teleport
             .as_ref()
             .is_some_and(|gate| gate.timed_out(Instant::now()))
@@ -3610,6 +3622,11 @@ fn play(
                     } else {
                         vitals.travel(distance);
                     }
+                    // A movement packet can consume the last food point
+                    // above the sprint threshold. Drop the state before
+                    // any later food restore, even if no client stop event
+                    // arrived in the meantime.
+                    sprinting = sprint_action(sprinting, 0, vitals.food);
                     if vitals.food != old_food || vitals.saturation != old_saturation {
                         player.save_state_in_dimension(
                             player_path,
@@ -10932,7 +10949,7 @@ mod reg147_keep_inventory_xp_tests {
 
 #[cfg(test)]
 mod sprint_action_tests {
-    use super::sprint_action;
+    use super::{sprint_action, Stack, Vitals};
 
     #[test]
     fn protocol5_sprint_starts_only_with_food_above_six() {
@@ -10940,6 +10957,42 @@ mod sprint_action_tests {
         assert!(sprint_action(false, 3, 7));
         assert!(sprint_action(true, 0, 20));
         assert!(!sprint_action(true, 4, 20));
+        // Low food invalidates an already-active sprint, regardless of the
+        // last Entity Action sent by the client.
+        assert!(!sprint_action(true, 0, 6));
+        assert!(!sprint_action(true, 3, 6));
+    }
+
+    #[test]
+    fn reg144_hunger_crossing_clears_sprint_and_eating_requires_new_start() {
+        let mut vitals = Vitals {
+            food: 7,
+            saturation: 0.0,
+            exhaustion: 3.95,
+            ..Vitals::default()
+        };
+        let mut sprinting = sprint_action(false, 3, vitals.food);
+        assert!(sprinting);
+        assert!(vitals.travel_with_sprint(1.0, sprinting));
+        assert_eq!(vitals.food, 6);
+        sprinting = sprint_action(sprinting, 0, vitals.food);
+        assert!(!sprinting);
+        assert!(!sprint_action(sprinting, 3, vitals.food));
+        assert!(!vitals.travel_with_sprint(1.0, sprinting));
+
+        // Eating restores sufficient food but must not resurrect the
+        // previous sprint action without a new Start Sprinting packet.
+        let apple = Stack {
+            id: 260,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        assert!(vitals.eat(apple));
+        assert!(vitals.food > 6);
+        assert!(!sprint_action(sprinting, 0, vitals.food));
+        assert!(sprint_action(sprinting, 3, vitals.food));
+        assert!(!sprint_action(true, 4, vitals.food));
     }
 }
 
