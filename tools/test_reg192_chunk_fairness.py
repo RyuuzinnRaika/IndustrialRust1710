@@ -1,8 +1,8 @@
-"""REG-192 packet/measurement checks (no Rust server needed)."""
+﻿"""REG-192 packet/measurement checks (no Rust server needed)."""
 import struct
 import unittest
 
-import reg192_chunk_fairness as fairness
+import verify_reg192_chunk_fairness as fairness
 
 
 class ChunkFairnessUnitTests(unittest.TestCase):
