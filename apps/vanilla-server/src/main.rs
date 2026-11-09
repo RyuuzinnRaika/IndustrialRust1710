@@ -7371,166 +7371,180 @@ fn handle(
             "UNAUTHENTICATED OFFLINE MODE"
         }
     );
-    if let Err(error) = join(
-        &mut s,
-        &world,
-        path.as_path(),
-        &clock,
-        entity_id,
-        InitialPlayer {
-            position: &player_state,
-            inventory: &inventory_state,
-            vitals: player_vitals,
-            survival,
-            hardcore,
-            difficulty: difficulty.load(Ordering::Acquire),
-        },
-    ) {
-        return Err(reject_failed_join(&mut s, error));
-    }
-    if survival {
-        send(&mut s, 0x1f, &experience_state.packet())?;
-    }
-    for packet in scoreboard
-        .lock()
-        .map_err(|_| bad("scoreboard lock poisoned"))?
-        .snapshot()?
-    {
-        send(&mut s, packet.id, &packet.body)?;
-    }
-    let achievements_packet = achievements_state.snapshot()?;
-    send(&mut s, achievements_packet.id, &achievements_packet.body)?;
-    // Chunks do not embed tile entities: replay persisted sign text after joining.
-    send_visible_signs(
-        &mut s,
-        &decorations,
-        &view_chunks(chunk_center(&player_state)),
-    )?;
-    send_hanging_delta(
-        &mut s,
-        &hangings,
-        &BTreeSet::new(),
-        &view_chunks(chunk_center(&player_state)),
-    )?;
-    // 1.7.10 tab list entries precede other player entity spawns.
-    let self_list = multiplayer::list_entry(&name, true)?;
-    send(&mut s, self_list.id, &self_list.body)?;
-    for other in &previous {
-        let list = multiplayer::list_entry(&other.name, true)?;
-        send(&mut s, list.id, &list.body)?;
-        if other.dimension == admission_dimension
-            && multiplayer::visible(&player_state, &other.position)
-        {
-            let spawn = multiplayer::spawn(other)?;
-            send(&mut s, spawn.id, &spawn.body)?;
+    // After Login Success the player is admitted: every later failure, including
+    // a socket reset in the middle of the initial chunk transfer, must still
+    // reach the persistence and entity-release tail at the end of handle().
+    // Returning early there discards a first join entirely (the account never
+    // gets playerdata) and skips the Mob/boat/minecart/fishing release.
+    let join_transfer = (|| -> io::Result<()> {
+        join(
+            &mut s,
+            &world,
+            path.as_path(),
+            &clock,
+            entity_id,
+            InitialPlayer {
+                position: &player_state,
+                inventory: &inventory_state,
+                vitals: player_vitals,
+                survival,
+                hardcore,
+                difficulty: difficulty.load(Ordering::Acquire),
+            },
+        )?;
+        if survival {
+            send(&mut s, 0x1f, &experience_state.packet())?;
         }
-    }
-    // Send world-owned entities to players in either game mode.
-    {
-        let ground = ground_items
+        for packet in scoreboard
             .lock()
-            .map_err(|_| io::Error::other("ground items lock poisoned"))?;
-        for item in ground.items() {
-            for packet in item.spawn() {
-                send(&mut s, packet.id, &packet.body)?;
+            .map_err(|_| bad("scoreboard lock poisoned"))?
+            .snapshot()?
+        {
+            send(&mut s, packet.id, &packet.body)?;
+        }
+        let achievements_packet = achievements_state.snapshot()?;
+        send(&mut s, achievements_packet.id, &achievements_packet.body)?;
+        // Chunks do not embed tile entities: replay persisted sign text after joining.
+        send_visible_signs(
+            &mut s,
+            &decorations,
+            &view_chunks(chunk_center(&player_state)),
+        )?;
+        send_hanging_delta(
+            &mut s,
+            &hangings,
+            &BTreeSet::new(),
+            &view_chunks(chunk_center(&player_state)),
+        )?;
+        // 1.7.10 tab list entries precede other player entity spawns.
+        let self_list = multiplayer::list_entry(&name, true)?;
+        send(&mut s, self_list.id, &self_list.body)?;
+        for other in &previous {
+            let list = multiplayer::list_entry(&other.name, true)?;
+            send(&mut s, list.id, &list.body)?;
+            if other.dimension == admission_dimension
+                && multiplayer::visible(&player_state, &other.position)
+            {
+                let spawn = multiplayer::spawn(other)?;
+                send(&mut s, spawn.id, &spawn.body)?;
             }
         }
-        drop(ground);
-        let creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
-        for mob in creatures.spawn_events() {
-            send(&mut s, mob.id, &mob.body)?;
-        }
-        for object in throwables
-            .lock()
-            .map_err(|_| bad("throwables mutex poisoned"))?
-            .snapshot(player_state)
+        // Send world-owned entities to players in either game mode.
         {
+            let ground = ground_items
+                .lock()
+                .map_err(|_| io::Error::other("ground items lock poisoned"))?;
+            for item in ground.items() {
+                for packet in item.spawn() {
+                    send(&mut s, packet.id, &packet.body)?;
+                }
+            }
+            drop(ground);
+            let creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
+            for mob in creatures.spawn_events() {
+                send(&mut s, mob.id, &mob.body)?;
+            }
+            for object in throwables
+                .lock()
+                .map_err(|_| bad("throwables mutex poisoned"))?
+                .snapshot(player_state)
+            {
+                send(&mut s, object.id, &object.body)?;
+            }
+            for object in fishing
+                .lock()
+                .map_err(|_| bad("fishing mutex poisoned"))?
+                .snapshot(player_state)
+            {
+                send(&mut s, object.id, &object.body)?;
+            }
+        }
+        // Vehicles exist independently of the joining player's game mode.
+        // Snapshot under the lock, then release it before writing to the socket.
+        let visible_boats = boats
+            .lock()
+            .map_err(|_| bad("boats mutex poisoned"))?
+            .snapshot(player_state);
+        let visible_carts = minecarts
+            .lock()
+            .map_err(|_| bad("minecarts mutex poisoned"))?
+            .snapshot(player_state);
+        for object in visible_boats.into_iter().chain(visible_carts) {
             send(&mut s, object.id, &object.body)?;
         }
-        for object in fishing
-            .lock()
-            .map_err(|_| bad("fishing mutex poisoned"))?
-            .snapshot(player_state)
-        {
-            send(&mut s, object.id, &object.body)?;
-        }
-    }
-    // Vehicles exist independently of the joining player's game mode.
-    // Snapshot under the lock, then release it before writing to the socket.
-    let visible_boats = boats
-        .lock()
-        .map_err(|_| bad("boats mutex poisoned"))?
-        .snapshot(player_state);
-    let visible_carts = minecarts
-        .lock()
-        .map_err(|_| bad("minecarts mutex poisoned"))?
-        .snapshot(player_state);
-    for object in visible_boats.into_iter().chain(visible_carts) {
-        send(&mut s, object.id, &object.body)?;
-    }
+        Ok(())
+    })();
+    // A dead socket cannot receive the Play Disconnect: reject_failed_join
+    // keeps the root error and only writes when the peer can still be told.
+    let join_transfer = join_transfer.map_err(|error| reject_failed_join(&mut s, error));
     let mut session_dimension = admission_dimension;
     let admission_world_path = session_world_path(
         path.as_path(),
         dimension_worlds.as_deref(),
         admission_dimension,
     );
-    let result = play(
-        &mut s,
-        &world,
-        admission_world_path,
-        &name,
-        &whitelist_path,
-        &clock,
-        PlayerSession {
-            position: &mut player_state,
-            vitals: &mut player_vitals,
-            experience: &mut experience_state,
-            experience_path: &experience_file,
-            achievements: &mut achievements_state,
-            achievements_path: &achievements_file,
-            save_path: &player_file,
-            inventory: &mut inventory_state,
-            inventory_path: &mut inventory_file,
-            ground_items: &ground_items,
-            ground_path: &ground_path,
-            mobs: &mobs,
-            throwables: &throwables,
-            boats: &boats,
-            minecarts: &minecarts,
-            fishing: &fishing,
-            chests: &chests,
-            chest_path: &chest_path,
-            furnaces: &furnaces,
-            furnace_path: &furnace_path,
-            hoppers: &hoppers,
-            hopper_path: &hopper_path,
-            devices: &devices,
-            device_path: &device_path,
-            brewers: &brewers,
-            brewer_path: &brewer_path,
-            decorations: &decorations,
-            decoration_path: &decoration_path,
-            maps: &maps,
-            map_path: &map_path,
-            hangings: &hangings,
-            hanging_path: &hanging_path,
-            dimension_worlds: dimension_worlds.as_deref(),
-            session_dimension: &mut session_dimension,
-            survival,
-            hardcore,
-            difficulty: &difficulty,
-            game_rules: &game_rules,
-            scoreboard: &scoreboard,
-            scoreboard_path: &scoreboard_path,
-            root_world_path: path.as_path(),
-            hub: &hub,
-            entity_id,
-            events: &events,
-            administration: &administration,
-            peer_ip,
-            verified_uuid: if online_mode { Some(&uuid) } else { None },
-        },
-    );
+    let result = match join_transfer {
+        Ok(()) => play(
+            &mut s,
+            &world,
+            admission_world_path,
+            &name,
+            &whitelist_path,
+            &clock,
+            PlayerSession {
+                position: &mut player_state,
+                vitals: &mut player_vitals,
+                experience: &mut experience_state,
+                experience_path: &experience_file,
+                achievements: &mut achievements_state,
+                achievements_path: &achievements_file,
+                save_path: &player_file,
+                inventory: &mut inventory_state,
+                inventory_path: &mut inventory_file,
+                ground_items: &ground_items,
+                ground_path: &ground_path,
+                mobs: &mobs,
+                throwables: &throwables,
+                boats: &boats,
+                minecarts: &minecarts,
+                fishing: &fishing,
+                chests: &chests,
+                chest_path: &chest_path,
+                furnaces: &furnaces,
+                furnace_path: &furnace_path,
+                hoppers: &hoppers,
+                hopper_path: &hopper_path,
+                devices: &devices,
+                device_path: &device_path,
+                brewers: &brewers,
+                brewer_path: &brewer_path,
+                decorations: &decorations,
+                decoration_path: &decoration_path,
+                maps: &maps,
+                map_path: &map_path,
+                hangings: &hangings,
+                hanging_path: &hanging_path,
+                dimension_worlds: dimension_worlds.as_deref(),
+                session_dimension: &mut session_dimension,
+                survival,
+                hardcore,
+                difficulty: &difficulty,
+                game_rules: &game_rules,
+                scoreboard: &scoreboard,
+                scoreboard_path: &scoreboard_path,
+                root_world_path: path.as_path(),
+                hub: &hub,
+                entity_id,
+                events: &events,
+                administration: &administration,
+                peer_ip,
+                verified_uuid: if online_mode { Some(&uuid) } else { None },
+            },
+        ),
+        // The join transfer failed: skip gameplay but still run the tail, so
+        // the admitted session persists its state and releases shared entities.
+        Err(error) => Err(error),
+    };
     // Save even on a clean disconnect, timeout, or access revocation.
     // Snapshot living entities on disconnect, not only on periodic 20TPS ticks.
     // Always lock world before mobs to match the gameplay tick lock order.
