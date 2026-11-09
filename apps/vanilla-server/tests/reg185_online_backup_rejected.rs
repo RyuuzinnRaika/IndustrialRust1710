@@ -223,6 +223,20 @@ fn reg185_backup_refuses_connected_players_then_copies_offline_snapshot() {
         8,
         "backup must carry a valid 1.7.10 world session marker"
     );
+    // Both logged-in users must be present at the same offline boundary.
+    // Comparing all saved bytes also detects copying a partial player NBT
+    // while the shutdown worker was still mutating it.
+    for player in ["twinalpha", "twinbeta"] {
+        let relative = Path::new("players").join(format!("{player}.dat"));
+        let original_player = fs::read(dir.join(&relative))
+            .unwrap_or_else(|error| panic!("missing saved {player}: {error}"));
+        let backed_up_player = fs::read(complete.join(&relative))
+            .unwrap_or_else(|error| panic!("missing backup {player}: {error}"));
+        assert_eq!(
+            backed_up_player, original_player,
+            "player {player} changed across the offline snapshot"
+        );
+    }
     let check = Command::new(exe)
         .arg("--verify-world")
         .arg(complete.join("flat.irw"))
