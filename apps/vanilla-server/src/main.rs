@@ -1566,6 +1566,26 @@ fn play(
     let mut last_map_tick = clock.ticks();
     let mut last_arrow_damage_tick: Option<u64> = None;
     loop {
+        // The Hub mutex atomically resolves the Overworld sleep quorum.
+        // One player sleeping never advances time while another stays awake.
+        // This also handles a sleeping player's peer disconnecting mid-night.
+        if survival
+            && *session_dimension == dimensions::Dimension::Overworld
+            && (12542..=23458).contains(&clock.day_time())
+        {
+            if let Some(waking) = hub.complete_night_sleep()? {
+                clock.skip_to_morning();
+                for sleeper_id in waking {
+                    let mut body = Vec::new();
+                    write_varint(sleeper_id as u32, &mut body);
+                    body.push(2); // Protocol 5 wake/leave bed animation
+                    hub.broadcast_in_dimension(
+                        dimensions::Dimension::Overworld,
+                        Event { id: 0x0b, body },
+                    );
+                }
+            }
+        }
         // Food may have changed due to exhaustion, a potion, or a meal on
         // the previous iteration. A stale sprint flag must not survive
         // across the <=6 hunger threshold.
@@ -2762,6 +2782,7 @@ fn play(
             }
         }
         if survival && vitals.health <= 0.0 {
+            hub.leave_bed(entity_id);
             eating = None;
             let newly_dead = !death_recorded;
             let death_record = if newly_dead {
@@ -3969,6 +3990,9 @@ fn play(
                 input.finish()?;
                 if survival {
                     sprinting = sprint_action(sprinting, action, vitals.food);
+                    if action == 2 {
+                        hub.leave_bed(entity_id); // leave-bed Entity Action
+                    }
                 }
             }
             7 => {
@@ -5444,15 +5468,10 @@ fn play(
                         packet.push(y as u8);
                         packet.extend_from_slice(&z.to_be_bytes());
                         send(s, 0x0a, &packet)?;
-                        // A lone player may complete sleep immediately. More
-                        // players must use their own beds; never skip their night.
-                        if hub.positions()?.len() <= 1 {
-                            clock.skip_to_morning();
-                            let mut wake = Vec::new();
-                            write_varint(entity_id as u32, &mut wake);
-                            wake.push(2); // leave bed animation
-                            send(s, 0x0b, &wake)?;
-                        }
+                        // Each session votes only after successfully using a
+                        // valid bed. Time advances when *all* Overworld
+                        // sessions have voted, not merely on the first use.
+                        hub.enter_bed(entity_id)?;
                     } else if survival {
                         as_chat(s, "You can only sleep at night.")?;
                     }
