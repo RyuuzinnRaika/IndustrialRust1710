@@ -374,16 +374,37 @@ gamemode=1
     #[test]
     fn invalid_value_errors_identify_the_setting() {
         for (key, input) in [
-            ("online-mode", SAFE.replace("online-mode=false", "online-mode=no")),
-            ("white-list", SAFE.replace("white-list=true", "white-list=1")),
+            (
+                "online-mode",
+                SAFE.replace("online-mode=false", "online-mode=no"),
+            ),
+            (
+                "white-list",
+                SAFE.replace("white-list=true", "white-list=1"),
+            ),
             ("hardcore", format!("{SAFE}hardcore=perhaps\n")),
             ("enable-rcon", format!("{SAFE}enable-rcon=1\n")),
-            ("server-port", SAFE.replace("server-port=25580", "server-port=abc")),
-            ("server-port", SAFE.replace("server-port=25580", "server-port=0")),
-            ("difficulty", SAFE.replace("difficulty=1", "difficulty=easy")),
+            (
+                "server-port",
+                SAFE.replace("server-port=25580", "server-port=abc"),
+            ),
+            (
+                "server-port",
+                SAFE.replace("server-port=25580", "server-port=0"),
+            ),
+            (
+                "difficulty",
+                SAFE.replace("difficulty=1", "difficulty=easy"),
+            ),
             ("difficulty", SAFE.replace("difficulty=1", "difficulty=4")),
-            ("view-distance", SAFE.replace("view-distance=2", "view-distance=far")),
-            ("max-players", SAFE.replace("max-players=8", "max-players=unlimited")),
+            (
+                "view-distance",
+                SAFE.replace("view-distance=2", "view-distance=far"),
+            ),
+            (
+                "max-players",
+                SAFE.replace("max-players=8", "max-players=unlimited"),
+            ),
         ] {
             let error = ServerProperties::parse(&input).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::InvalidData);
