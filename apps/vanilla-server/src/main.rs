@@ -9219,6 +9219,15 @@ fn main() -> io::Result<()> {
     for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         signal_hook::flag::register(signal, Arc::clone(&shutdown))?;
     }
+    // Console Ctrl+C / Ctrl+Break must not forcibly terminate before the
+    // ordinary worker drain and journal checkpoint. The ctrlc crate invokes
+    // this closure on a separate handler thread on Windows.
+    #[cfg(windows)]
+    {
+        let signal_shutdown = Arc::clone(&shutdown);
+        ctrlc::set_handler(move || signal_shutdown.store(true, Ordering::Release))
+            .map_err(|error| io::Error::other(format!("register console handler: {error}")))?;
+    }
     let console_command_gate = Arc::new(Mutex::new(()));
     let console_thread = start_clock_console(
         Arc::clone(&hub),
