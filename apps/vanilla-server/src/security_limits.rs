@@ -186,7 +186,10 @@ mod tests {
         assert_eq!(ChatLimiter::default().check(&"あ".repeat(101)), Err(false));
         // Leave Unicode text intact while rejecting unsafe control chars.
         assert!(ChatLimiter::default().check("こんにちは😀").is_ok());
-        assert_eq!(ChatLimiter::default().check("こんにちは\u{202E}"), Err(false));
+        assert_eq!(
+            ChatLimiter::default().check("こんにちは\u{202E}"),
+            Err(false)
+        );
     }
 
     #[test]
