@@ -25,3 +25,7 @@ ureq = "2.12"
 # Safe POSIX shutdown flag; Windows Ctrl+C requires separate acceptance testing.
 [target.'cfg(unix)'.dependencies]
 signal-hook = { version = "=0.3.18", default-features = false }
+
+# Windows console Ctrl+C / Ctrl+Break handling; Unix uses signal-hook.
+[target.'cfg(windows)'.dependencies]
+ctrlc = { version = "=3.5.2", default-features = false }
