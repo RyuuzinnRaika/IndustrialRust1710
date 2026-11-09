@@ -1,4 +1,4 @@
-//! Bounded, sparse, deterministic flat world streamed by chunk.
+﻿//! Bounded, sparse, deterministic flat world streamed by chunk.
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod devices;
@@ -3279,7 +3279,7 @@ mod tests {
         for error in [
             World::new().save(&traversing).unwrap_err(),
             World::new().save_new(&traversing).unwrap_err(),
-            World::load(&traversing).err().expect("unsafe path must fail"),
+            World::load(&traversing).expect_err("unsafe path must fail"),
         ] {
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         }
