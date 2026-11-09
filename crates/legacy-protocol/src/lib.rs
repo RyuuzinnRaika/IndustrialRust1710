@@ -304,7 +304,10 @@ mod tests {
         // BMP CJK characters and formatting markers each use one unit.
         let mut legacy_formatted = Vec::new();
         write_string("§a世界", &mut legacy_formatted).unwrap();
-        assert_eq!(Cursor::new(&legacy_formatted).read_string(4).unwrap(), "§a世界");
+        assert_eq!(
+            Cursor::new(&legacy_formatted).read_string(4).unwrap(),
+            "§a世界"
+        );
         assert!(Cursor::new(&legacy_formatted).read_string(3).is_err());
     }
 
