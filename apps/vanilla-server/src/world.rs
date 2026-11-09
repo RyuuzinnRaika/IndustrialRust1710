@@ -1,4 +1,4 @@
-//! Bounded, sparse, deterministic flat world streamed by chunk.
+﻿//! Bounded, sparse, deterministic flat world streamed by chunk.
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod devices;
@@ -2648,6 +2648,7 @@ impl World {
     /// An interrupted import may leave the .importing staging file, but never
     /// replaces a source world or an existing target.
     pub fn save_new(&self, path: &Path) -> io::Result<()> {
+        crate::server_config::reject_parent_traversal(path)?;
         if path.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -2698,6 +2699,7 @@ impl World {
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
+        crate::server_config::reject_parent_traversal(path)?;
         // The immediate world parent must also be real: a symlink parent
         // otherwise makes even a regular world file refer outside this world.
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -3059,6 +3061,7 @@ impl World {
         Ok(bytes)
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        crate::server_config::reject_parent_traversal(path)?;
         // Keep the session mutex held across staging and publication, so
         // another Rust write on the same world cannot interleave with us.
         // Re-verify immediately before renaming the finished IRW snapshot.
@@ -3254,6 +3257,37 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traversal_world_paths_are_rejected_before_creating_or_changing_files() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-path-traversal-{}-{stamp}",
+            std::process::id()
+        ));
+        let nested = root.join("child");
+        fs::create_dir_all(&nested).unwrap();
+        let outside = root.join("outside.irw");
+        let original = b"unrelated, not an IRW file";
+        fs::write(&outside, original).unwrap();
+        // The path would resolve to a real, existing file if its '..'
+        // component were followed. No path operation may touch that file.
+        let traversing = nested.join("..").join("outside.irw");
+        for error in [
+            World::new().save(&traversing).unwrap_err(),
+            World::new().save_new(&traversing).unwrap_err(),
+            World::load(&traversing).expect_err("unsafe path must fail"),
+        ] {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        assert_eq!(fs::read(&outside).unwrap(), original.to_vec());
+        assert!(!root.join("outside.tmp").exists());
+        assert!(!root.join("outside.importing").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn world_save_does_not_truncate_an_existing_staging_file() {
