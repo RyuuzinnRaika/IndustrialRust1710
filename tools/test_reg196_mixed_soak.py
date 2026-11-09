@@ -1,11 +1,11 @@
-"""REG-196 helper tests: no Rust process and no existing world are touched."""
+﻿"""REG-196 helper tests: no Rust process and no existing world are touched."""
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
-import reg196_mixed_soak as soak
+import verify_reg196_mixed_soak as soak
 
 
 class TestMixedSoakVerifier(TestCase):
