@@ -1031,11 +1031,6 @@ mod tests {
     #[test]
     fn falling_item_reacts_to_mined_floor_without_tunnelling() {
         let world = World::new();
-        // Remove the top grass block before the item falls into the hole.
-        // The lower dirt layer remains a solid collision surface.
-        let mined = world.stage_mining_removal(0, 63, 0).unwrap().unwrap();
-        assert_ne!(world.get(0, 63, 0), 0);
-        assert_eq!(mined.get(0, 63, 0), 0);
         let stack = Stack {
             id: 17,
             count: 1,
@@ -1045,17 +1040,41 @@ mod tests {
         let (mut drops, added) = GroundItems::default()
             .stage_put_many(&[stack], (0, 68, 0))
             .unwrap();
+        let id = added[0].id;
+        // First settle on the intact grass at y=63. This populates the
+        // in-memory resting cache, not merely the persisted fixed position.
+        for _ in 0..80 {
+            let (next, _) = drops.stage_gravity_ticks(&world, 1).unwrap();
+            drops = next;
+        }
+        assert_eq!(drops.entries[&id].position[1], 64 * 32 + 4);
+        assert!(drops.resting.contains(&id));
+
+        // Mining the supporting block AFTER the item has settled must wake
+        // it on the next tick. The remaining dirt at y=62 must catch it.
+        let mined = world.stage_mining_removal(0, 63, 0).unwrap().unwrap();
+        assert_ne!(world.get(0, 63, 0), 0);
+        assert_eq!(mined.get(0, 63, 0), 0);
+        let (woken, first_moves) = drops.stage_gravity_ticks(&mined, 1).unwrap();
+        assert!(!woken.resting.contains(&id));
+        assert!(
+            !first_moves.is_empty(),
+            "removing a supporting block must resume item motion"
+        );
+        assert!(woken.entries[&id].position[1] < drops.entries[&id].position[1]);
+        drops = woken;
         for _ in 0..80 {
             let (next, _) = drops.stage_gravity_ticks(&mined, 1).unwrap();
             drops = next;
         }
-        // The entity must rest on the new lower layer, without entering it.
-        assert_eq!(drops.entries[&added[0].id].position[1], 63 * 32 + 4);
+        // The entity must rest on the lower layer without tunnelling.
+        assert_eq!(drops.entries[&id].position[1], 63 * 32 + 4);
+        assert!(drops.resting.contains(&id));
         let bytes = drops.encoded().unwrap();
         let restored: GroundItems = serde_json::from_slice(&bytes).unwrap();
         restored.validate().unwrap();
-        assert_eq!(restored.entries[&added[0].id].position, drops.entries[&added[0].id].position);
-        assert_eq!(restored.entries[&added[0].id].stack, stack);
+        assert_eq!(restored.entries[&id].position, drops.entries[&id].position);
+        assert_eq!(restored.entries[&id].stack, stack);
     }
 
     #[test]
