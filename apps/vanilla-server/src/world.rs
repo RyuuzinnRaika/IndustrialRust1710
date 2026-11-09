@@ -5634,11 +5634,7 @@ mod tests {
         const BUDGET: usize = 32;
         for dx in 0..SIDE {
             for dz in 0..SIDE {
-                let id = if (dx + dz) % 2 == 0 {
-                    12 << 4
-                } else {
-                    13 << 4
-                };
+                let id = if (dx + dz) % 2 == 0 { 12 << 4 } else { 13 << 4 };
                 world.import_block(100 + dx, 68, 100 + dz, id).unwrap();
             }
         }
@@ -5674,11 +5670,7 @@ mod tests {
             for dz in 0..SIDE {
                 let x = 100 + dx;
                 let z = 100 + dz;
-                let id = if (dx + dz) % 2 == 0 {
-                    12 << 4
-                } else {
-                    13 << 4
-                };
+                let id = if (dx + dz) % 2 == 0 { 12 << 4 } else { 13 << 4 };
                 assert_eq!(reloaded.get(x, 64, z), id);
                 for y in 65..=68 {
                     assert_eq!(
