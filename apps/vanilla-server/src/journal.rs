@@ -352,10 +352,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ir1710-reg182-{}-{stamp}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ir1710-reg182-{}-{stamp}", std::process::id()));
         // The test *must* create a new root: never delete an older world.
         fs::create_dir(&root).unwrap();
         let world = root.join("flat.irw");
