@@ -1161,6 +1161,41 @@ fn death_xp_drop_amount(experience: &Experience, keep_inventory: bool) -> Option
     }
 }
 
+/// Commit the XP half of a Survival death with the real save file and the real
+/// orb store: clear the live account, persist the cleared account, then spawn
+/// and broadcast the death orb at the death site. With keepInventory the whole
+/// step is skipped, so neither the saved XP file nor the orb store is touched.
+/// The returned amount is the orb that was actually created: `None` means the
+/// rule kept the XP, or the orb store refused a zero-amount/oversized orb.
+/// A failed save propagates so the session aborts instead of continuing with an
+/// unpersisted account.
+fn commit_death_experience(
+    experience: &mut Experience,
+    experience_path: &Path,
+    mobs: &Mutex<Mobs>,
+    hub: &Hub,
+    death_position: PlayerPosition,
+    keep_inventory: bool,
+) -> io::Result<Option<u16>> {
+    let drop_amount = match death_xp_drop_amount(experience, keep_inventory) {
+        Some(amount) => amount,
+        None => return Ok(None),
+    };
+    *experience = Experience::default();
+    experience.save(experience_path)?;
+    let orb = mobs
+        .lock()
+        .map_err(|_| bad("mob mutex poisoned"))?
+        .spawn_xp(death_position, drop_amount);
+    match orb {
+        Some(event) => {
+            hub.broadcast(event);
+            Ok(Some(drop_amount))
+        }
+        None => Ok(None),
+    }
+}
+
 /// World-changing packets must not reach gameplay logic while a Survival
 /// player is on the death screen (including held-slot saves and GUI close
 /// input reclamation). Client Status (22) is intentionally allowed
@@ -6830,17 +6865,14 @@ fn play(
                     hazards = Hazards::new();
                     last_hazards_tick = now_tick;
                     // In vanilla, death loses XP and may leave up to 100 XP in orbs.
-                    if let Some(drop_amount) = death_xp_drop_amount(experience, keep_inventory) {
-                        *experience = Experience::default();
-                        experience.save(experience_path)?;
-                        if let Some(orb) = mobs
-                            .lock()
-                            .map_err(|_| bad("mob mutex poisoned"))?
-                            .spawn_xp(death_position, drop_amount)
-                        {
-                            hub.broadcast(orb);
-                        }
-                    }
+                    commit_death_experience(
+                        experience,
+                        experience_path,
+                        mobs,
+                        hub,
+                        death_position,
+                        keep_inventory,
+                    )?;
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = (respawn_dimension.protocol_id() as i32)
                         .to_be_bytes()
@@ -10757,7 +10789,7 @@ mod piston_action_wire_tests {
 
 #[cfg(test)]
 mod reg147_keep_inventory_xp_tests {
-    use super::{death_xp_drop_amount, Experience, GameRules};
+    use super::{commit_death_experience, death_xp_drop_amount, Experience, GameRules, Hub, Mobs};
 
     #[test]
     fn keep_inventory_retains_all_xp_and_emits_no_death_orb() {
@@ -10779,6 +10811,119 @@ mod reg147_keep_inventory_xp_tests {
             Some(100)
         );
         assert_eq!(death_xp_drop_amount(&Experience::default(), false), Some(0));
+    }
+
+    /// Scratch directory only: this never opens an existing world. The death
+    /// commit runs through the real XP save file and the real orb store, so a
+    /// reload after the death (reconnect or restart) is covered, not just the
+    /// in-memory decision.
+    fn scratch(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-reg147-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn death_commit_keeps_saved_xp_and_creates_no_orb_when_keep_inventory_is_on() {
+        let root = scratch("keep");
+        let xp_path = root.join("xp.json");
+        let death = PlayerPosition {
+            x: 10.5,
+            y: 40.0,
+            z: -3.5,
+        };
+        let hub = Hub::default();
+        let mobs = std::sync::Mutex::new(Mobs::default());
+        Experience { total: 250 }.save(&xp_path).unwrap();
+        let saved_before = std::fs::read(&xp_path).unwrap();
+
+        let mut kept = Experience { total: 250 };
+        let orb = commit_death_experience(&mut kept, &xp_path, &mobs, &hub, death, true).unwrap();
+
+        assert_eq!(orb, None, "keepInventory must not create a death orb");
+        assert_eq!(kept.total, 250, "live XP account must survive the death");
+        assert_eq!(
+            std::fs::read(&xp_path).unwrap(),
+            saved_before,
+            "keepInventory must not rewrite the saved XP account"
+        );
+        assert_eq!(Experience::load(&xp_path).unwrap().total, 250);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn death_commit_zeroes_saved_xp_and_only_spawns_real_orbs() {
+        let root = scratch("drop");
+        let xp_path = root.join("xp.json");
+        let death = PlayerPosition {
+            x: 10.5,
+            y: 40.0,
+            z: -3.5,
+        };
+        let hub = Hub::default();
+        let mobs = std::sync::Mutex::new(Mobs::default());
+
+        // A 0 XP death still clears and re-saves the account, but the orb store
+        // refuses a zero-amount orb, so no empty orb can be broadcast.
+        Experience { total: 250 }.save(&xp_path).unwrap();
+        let mut broke = Experience::default();
+        let orb = commit_death_experience(&mut broke, &xp_path, &mobs, &hub, death, false).unwrap();
+        assert_eq!(orb, None, "a 0 XP death must not create an orb");
+        assert_eq!(broke.total, 0);
+        assert_eq!(Experience::load(&xp_path).unwrap().total, 0);
+
+        // Earned XP: level 14 drops 98 XP (14 * 7, capped at 100). The saved
+        // account is zeroed before the orb spawns, so a reload cannot restore it.
+        Experience { total: 250 }.save(&xp_path).unwrap();
+        let mut earned = Experience { total: 250 };
+        let orb =
+            commit_death_experience(&mut earned, &xp_path, &mobs, &hub, death, false).unwrap();
+        assert_eq!(orb, Some(98));
+        assert_eq!(earned.total, 0);
+        assert_eq!(Experience::load(&xp_path).unwrap().total, 0);
+
+        // The orb payload carries the death site, not the respawn point, and a
+        // second XP orb is collectable from there.
+        let events = mobs.lock().unwrap().collect_xp(death, 1);
+        assert!(
+            events.is_some(),
+            "the death orb must be reachable at the death site"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn death_commit_fails_closed_when_the_xp_save_cannot_be_written() {
+        let root = scratch("fail");
+        let blocker = root.join("blocked");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let xp_path = blocker.join("xp.json");
+        let death = PlayerPosition {
+            x: 0.0,
+            y: 64.0,
+            z: 0.0,
+        };
+        let hub = Hub::default();
+        let mobs = std::sync::Mutex::new(Mobs::default());
+
+        let mut earned = Experience { total: 250 };
+        let outcome = commit_death_experience(&mut earned, &xp_path, &mobs, &hub, death, false);
+
+        assert!(outcome.is_err(), "the session must abort on XP save loss");
+        assert!(
+            !xp_path.exists(),
+            "a failed XP save must not leave a partial XP file"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
