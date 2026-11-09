@@ -77,8 +77,12 @@ fn packet(id: u32, body: &[u8]) -> Vec<u8> {
 
 fn connect_login(port: u16, name: &str) -> TcpStream {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_secs(8))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
     let mut handshake = Vec::new();
     write_varint(5, &mut handshake);
     write_string("localhost", &mut handshake).unwrap();
@@ -124,7 +128,10 @@ fn join(port: u16, name: &str) -> TcpStream {
 fn reject_corrupt_player(port: u16, name: &str) {
     let mut stream = connect_login(port, name);
     let (id, message) = receive(&mut stream);
-    assert_eq!(id, 0, "corrupt player must receive Login Disconnect, not Play");
+    assert_eq!(
+        id, 0,
+        "corrupt player must receive Login Disconnect, not Play"
+    );
     let mut cursor = Cursor::new(&message);
     let reason = cursor.read_string(256).unwrap();
     cursor.finish().unwrap();
@@ -161,7 +168,8 @@ fn stone_count(inventory: &Path) -> u32 {
     let saved: Value = serde_json::from_slice(&fs::read(inventory).unwrap()).unwrap();
     let slots = saved["slots"].as_array().expect("45 player slots");
     assert_eq!(slots.len(), 45);
-    slots.iter()
+    slots
+        .iter()
         .filter(|slot| slot["id"] == 1)
         .map(|slot| slot["count"].as_u64().unwrap() as u32)
         .sum()
@@ -184,10 +192,7 @@ fn reg183_corrupt_one_player_and_preserve_second_player_across_restart() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "ir1710-reg183-{}-{nanos}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("ir1710-reg183-{}-{nanos}", std::process::id()));
     fs::create_dir(&root).unwrap();
     let world = root.join("world/flat.irw");
     let whitelist = root.join("whitelist.json");
