@@ -344,6 +344,56 @@ mod tests {
         handle.join().unwrap();
     }
 
+    /// REG-190 / #826: a stopped server's persisted world clock must not
+    /// catch up elapsed wall time when restarted from the same snapshot.
+    #[test]
+    fn reg190_offline_restart_preserves_ticks_time_and_weather_without_catchup() {
+        let home = std::env::temp_dir().join(format!(
+            "ir-reg190-clock-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir(&home).unwrap(); // refuse to reuse/delete any existing world
+        let path = home.join("clock.bin");
+        let initial = ClockSnapshot {
+            ticks: 48_123,
+            time_offset: 4_000,
+            weather_override: 2,
+        };
+        let (clock, worker) = Clock::start_from(initial);
+        thread::sleep(Duration::from_millis(125));
+        clock.stop();
+        worker.join().unwrap();
+        let stopped_ticks = clock.ticks();
+        let stopped_daytime = clock.day_time();
+        assert!(stopped_ticks >= initial.ticks);
+        assert_eq!(clock.weather(), (true, false));
+        clock.save_ticks(&path).unwrap();
+
+        let saved = Clock::load_state(&path).unwrap();
+        assert_eq!(saved.ticks, stopped_ticks);
+        assert_eq!(saved.weather_override, 2);
+        // Simulate downtime: no server clock worker exists here.
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(Clock::load_state(&path).unwrap(), saved);
+
+        let (restarted, second_worker) = Clock::start_from(saved);
+        assert_eq!(restarted.ticks(), stopped_ticks);
+        assert_eq!(restarted.day_time(), stopped_daytime);
+        assert_eq!(restarted.weather(), (true, false));
+        thread::sleep(Duration::from_millis(125));
+        restarted.stop();
+        second_worker.join().unwrap();
+        assert!(restarted.ticks() > stopped_ticks);
+        assert!(restarted.ticks() - stopped_ticks <= 5);
+        assert_eq!(
+            restarted.day_time(),
+            (stopped_daytime + (restarted.ticks() - stopped_ticks) as i64) % 24_000
+        );
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&home).unwrap();
+    }
+
     #[test]
     fn clock_stall_deadlines_are_counted_without_replaying_ticks() {
         assert_eq!(missed_tick_deadlines(Duration::from_millis(49)), 0);

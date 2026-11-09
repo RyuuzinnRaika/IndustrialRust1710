@@ -390,6 +390,64 @@ mod tests {
             nbt: None,
         })
     }
+    /// REG-140 / #776: two simultaneous sessions must serialize access to
+    /// the same server-owned furnace output and cannot claim it twice.
+    #[test]
+    fn reg140_parallel_players_collect_furnace_output_only_once() {
+        use std::sync::{Arc, Barrier, Mutex};
+        use std::thread;
+
+        let pos = (1, 64, 1);
+        let output = stack(265, 8);
+        let initial = Furnace {
+            slots: [None, None, output],
+            ..Furnace::default()
+        };
+        let furnaces = Arc::new(Mutex::new(
+            Furnaces::default().staged_update(pos, initial).unwrap(),
+        ));
+        let sync = Arc::new(Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let furnaces = Arc::clone(&furnaces);
+            let sync = Arc::clone(&sync);
+            handles.push(thread::spawn(move || {
+                let mut inventory = crate::inventory::Inventory::default();
+                sync.wait(); // both sessions initiate a withdrawal concurrently
+                let mut guard = furnaces.lock().unwrap();
+                let previous = guard.get(pos);
+                let mut next = previous;
+                let result = inventory.furnace_click(&mut next, 2, 0, 0);
+                assert!(result.is_some());
+                let output_exhausted = previous.slots[2].is_some() && next.slots[2].is_none();
+                if next != previous {
+                    let staged = guard.staged_update(pos, next).unwrap();
+                    *guard = staged;
+                }
+                let taken = inventory
+                    .possessions()
+                    .iter()
+                    .map(|item| u32::from(item.count))
+                    .sum::<u32>();
+                // The runtime XP grant condition is tied to a real output
+                // transition, not merely a successful no-op Click Window ACK.
+                (taken, u32::from(output_exhausted))
+            }));
+        }
+        sync.wait();
+        let results: Vec<(u32, u32)> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().map(|r| r.0).sum::<u32>(), 8);
+        assert_eq!(results.iter().map(|r| r.1).sum::<u32>(), 1);
+        let final_guard = furnaces.lock().unwrap();
+        assert_eq!(final_guard.get(pos).slots[2], None);
+        let persisted = final_guard.encoded().unwrap();
+        let restored: Furnaces = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(restored.get(pos).slots[2], None);
+    }
+
     #[test]
     fn furnace_comparator_uses_slots_not_burn_progress() {
         let pos = (0, 64, -1);

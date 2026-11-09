@@ -5613,6 +5613,84 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    /// REG-193 / #829: a bounded queue must converge under simultaneous
+    /// sand/gravel updates without duplicating blocks or losing settled state.
+    /// This does not model an EntityFallingBlock packet or prove 20TPS at load.
+    #[test]
+    fn gravity_256_sand_gravel_columns_respect_budget_and_save_conservation() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-reg193-gravity-{}-{nanos}",
+            std::process::id()
+        ));
+        // Create-only test world: never delete a directory from an older run.
+        fs::create_dir(&root).unwrap();
+        let save = root.join("isolated.irw");
+        let mut world = World::new();
+        const SIDE: i32 = 16;
+        const BUDGET: usize = 32;
+        for dx in 0..SIDE {
+            for dz in 0..SIDE {
+                let id = if (dx + dz) % 2 == 0 { 12 << 4 } else { 13 << 4 };
+                world.import_block(100 + dx, 68, 100 + dz, id).unwrap();
+            }
+        }
+        assert_eq!(world.pending_gravity.len(), (SIDE * SIDE) as usize);
+        world.save(&save).unwrap();
+        let started = std::time::Instant::now();
+        let mut processed = 0usize;
+        let mut max_per_tick = 0usize;
+        let mut max_tick_ms = 0u128;
+        let mut iterations = 0usize;
+        // Four downward moves for each column and at most one queue
+        // dequeue per scheduled position. 64 ticks leaves ample headroom.
+        for _ in 0..64 {
+            iterations += 1;
+            let tick_started = std::time::Instant::now();
+            let moves = world.gravity_tick(&save, BUDGET).unwrap();
+            max_tick_ms = max_tick_ms.max(tick_started.elapsed().as_millis());
+            assert!(moves.len() <= BUDGET, "gravity budget exceeded");
+            processed += moves.len();
+            max_per_tick = max_per_tick.max(moves.len());
+            if world.pending_gravity.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            world.pending_gravity.is_empty(),
+            "gravity queue did not drain under the fixed tick budget"
+        );
+        assert_eq!(processed, (SIDE * SIDE * 4) as usize);
+        assert!(max_per_tick <= BUDGET);
+        let reloaded = World::load(&save).unwrap();
+        for dx in 0..SIDE {
+            for dz in 0..SIDE {
+                let x = 100 + dx;
+                let z = 100 + dz;
+                let id = if (dx + dz) % 2 == 0 { 12 << 4 } else { 13 << 4 };
+                assert_eq!(reloaded.get(x, 64, z), id);
+                for y in 65..=68 {
+                    assert_eq!(
+                        reloaded.get(x, y, z),
+                        0,
+                        "duplicate or unfinished falling block at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "REG-193 synthetic columns={} moves={processed} iterations={iterations} \
+             max_per_tick={max_per_tick} budget={BUDGET} max_tick_ms={max_tick_ms} \
+             elapsed_ms={}; real server TPS/Entity load NOT_RUN",
+            SIDE * SIDE,
+            started.elapsed().as_millis()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn sand_gravel_fall_one_cell_per_tick_and_restore_after_reload() {
         let path = std::env::temp_dir().join(format!(
@@ -5662,6 +5740,98 @@ mod tests {
         assert_eq!(world.get(0, 64, 0), 0);
         assert!(world.gravity_tick(&path, 64).unwrap().is_empty());
         fs::remove_file(path).unwrap();
+    }
+
+    /// REG-181 / #817: one world snapshot must contain both sides of an
+    /// adjacent-chunk edit across the transaction preparation and replay
+    /// failure windows. Test-only fault injection touches disposable IRW.
+    #[test]
+    fn reg181_adjacent_chunks_replay_same_world_generation_after_torn_save() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("ir1710-reg181-{}-{stamp}", std::process::id()));
+        fs::create_dir(&root).unwrap(); // exclusive create; never reuse user saves
+        let coordinates = [(15, 65, 0, 1u16 << 4), (16, 65, 0, 3u16 << 4)];
+
+        for phase in ["preparation", "prepared", "torn-target", "applied"] {
+            let dir = root.join(phase);
+            fs::create_dir(&dir).unwrap();
+            let path = dir.join("flat.irw");
+            let journal = dir.join("flat.pending-txn.json");
+            let old = World::new();
+            old.save_new(&path).unwrap();
+            let before = fs::read(&path).unwrap();
+
+            let mut staged = old.clone();
+            for &(x, y, z, block) in &coordinates {
+                staged.import_block(x, y, z, block).unwrap();
+            }
+            let new_bytes = staged.encoded().unwrap();
+            assert_ne!(new_bytes, before);
+            let checksum = new_bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+            });
+            let prepared = serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "files": [{
+                    "relative": "flat.irw",
+                    "contents": new_bytes,
+                    "checksum": checksum
+                }]
+            }))
+            .unwrap();
+
+            match phase {
+                "preparation" => {
+                    // Crash before publishing the durable journal: the old
+                    // valid pair must remain intact. A partial preparation
+                    // file must never be mistaken for a committed record.
+                    fs::write(journal.with_extension("journal.tmp"), b"partial").unwrap();
+                    crate::journal::recover(&journal).unwrap();
+                    assert_eq!(fs::read(&path).unwrap(), before);
+                    let loaded = World::load(&path).unwrap();
+                    assert_eq!(loaded.get(15, 65, 0), 0);
+                    assert_eq!(loaded.get(16, 65, 0), 0);
+                    continue;
+                }
+                "prepared" => {
+                    fs::write(&journal, &prepared).unwrap();
+                    assert_eq!(fs::read(&path).unwrap(), before);
+                }
+                "torn-target" => {
+                    // Model a process crash in the target application
+                    // phase, after the durable record was committed.
+                    fs::write(&journal, &prepared).unwrap();
+                    fs::write(&path, b"truncated IRW after crash").unwrap();
+                }
+                "applied" => {
+                    // Rename succeeded but journal unlink did not.
+                    fs::write(&journal, &prepared).unwrap();
+                    fs::write(&path, staged.encoded().unwrap()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            crate::journal::recover(&journal).unwrap();
+            assert!(!journal.exists());
+            assert_eq!(fs::read(&path).unwrap(), staged.encoded().unwrap());
+            let recovered = World::load(&path).unwrap();
+            for &(x, y, z, block) in &coordinates {
+                assert_eq!(
+                    recovered.get(x, y, z),
+                    block,
+                    "{phase}: cross-chunk generation is inconsistent at {x},{y},{z}"
+                );
+            }
+            // Re-running startup cannot create an extra block, lose an
+            // edit, or alter the already committed world bytes.
+            crate::journal::recover(&journal).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), staged.encoded().unwrap());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6337,6 +6507,114 @@ mod group_b_regression_tests {
         assert!(world.can_support(1, 65, 0, 115 << 4));
         assert!(!world.can_support(0, 65, 0, 115 << 4));
         assert!(!world.can_support(1, 65, 0, 83 << 4));
+    }
+
+    /// REG-161 / #797: sustained redstone source toggles must remain
+    /// bounded per authoritative 20TPS world update, then fully settle.
+    #[test]
+    fn reg161_high_frequency_clock_has_bounded_queue_and_can_be_stopped() {
+        let path = temp("reg161-redstone-clock");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        // One source and a 24-cell dust wire across a chunk boundary.
+        // Alternate at 20-tick intervals so the wake queue is repeatedly
+        // hit while previous signal propagation is still in progress.
+        for x in 1..=24 {
+            world.import_block(x, 64, 0, 55 << 4).unwrap();
+        }
+        for tick in 0..1200 {
+            if tick % 20 == 0 {
+                let powered = (tick / 20) % 2 == 0;
+                world
+                    .update_and_save(&path, 0, 64, 0, (69 << 4) | if powered { 13 } else { 5 })
+                    .unwrap();
+            }
+            let changed = world.block_tick(&path, 8).unwrap();
+            assert!(
+                changed.len() <= 64,
+                "unbounded block changes on tick {tick}"
+            );
+            assert!(
+                world.pending_circuit.len() <= 128,
+                "unbounded pending circuit on tick {tick}"
+            );
+            assert!(changed.iter().all(|&(x, y, z)| in_bounds(x, y, z)));
+        }
+        // Power off must eventually release the entire 24-cell line,
+        // including dust across x=15/16.
+        world
+            .update_and_save(&path, 0, 64, 0, (69 << 4) | 5)
+            .unwrap();
+        for _ in 0..100 {
+            world.block_tick(&path, 8).unwrap();
+        }
+        for x in 1..=24 {
+            assert_eq!(world.get(x, 64, 0), 55 << 4, "stuck dust x={x}");
+        }
+        assert!(world.pending_circuit.len() <= 128);
+        let restored = World::load(&path).unwrap();
+        for x in [1, 15, 16, 24] {
+            assert_eq!(restored.get(x, 64, 0), 55 << 4);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// REG-162 / #798: chunk boundaries at x=-16,0,16 must not change
+    /// the power-loss-per-dust rule (15,14,...,1,0).
+    #[test]
+    fn reg162_dust_strength_crosses_negative_and_positive_chunk_boundaries() {
+        let path = temp("reg162-chunk-dust");
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        // Both chains cross 16-block chunk borders. Keep the endpoints
+        // separated so neither source powers the other chain.
+        for source_x in [-18, 14] {
+            world
+                .update_and_save(&path, source_x, 64, 0, (69 << 4) | 13)
+                .unwrap();
+            for distance in 1..=17 {
+                world
+                    .update_and_save(&path, source_x + distance, 64, 0, 55 << 4)
+                    .unwrap();
+            }
+        }
+        for _ in 0..48 {
+            world.block_tick(&path, 32).unwrap();
+        }
+        for source_x in [-18, 14] {
+            for distance in 1..=17 {
+                let expected = 15u16.saturating_sub((distance - 1) as u16);
+                let actual = world.get(source_x + distance, 64, 0);
+                assert_eq!(
+                    actual,
+                    (55 << 4) | expected,
+                    "source={source_x} distance={distance}"
+                );
+            }
+        }
+        // Remove sources and verify both sides of each chunk seam decay.
+        for x in [-18, 14] {
+            world
+                .update_and_save(&path, x, 64, 0, (69 << 4) | 5)
+                .unwrap();
+        }
+        for _ in 0..64 {
+            world.block_tick(&path, 32).unwrap();
+        }
+        for source_x in [-18, 14] {
+            for distance in 1..=17 {
+                assert_eq!(
+                    world.get(source_x + distance, 64, 0),
+                    55 << 4,
+                    "stale power source={source_x} distance={distance}"
+                );
+            }
+        }
+        let restored = World::load(&path).unwrap();
+        for x in [-17, -16, -1, 15, 16, 31] {
+            assert_eq!(restored.get(x, 64, 0), 55 << 4);
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
