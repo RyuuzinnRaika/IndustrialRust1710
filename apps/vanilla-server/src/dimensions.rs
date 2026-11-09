@@ -1560,12 +1560,18 @@ mod tests {
 
     #[test]
     fn pending_dimension_save_recovers_all_three_worlds_before_loading() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "ir1710-dim-recovery-{}-{:?}",
+            "ir1710-dim-recovery-{}-{:?}-{stamp}",
             std::process::id(),
             std::thread::current().id()
         ));
-        let _ = fs::remove_dir_all(&root);
+        // This test must never delete a path left by another run or process.
+        // Allocate a fresh root, then clean up only the root created here.
+        fs::create_dir(&root).unwrap();
         let manager = DimensionManager::new(&root, 1234);
         drop(DimensionWorlds::load_all(manager.clone()).unwrap());
         let dims = [Dimension::Overworld, Dimension::Nether, Dimension::End];
