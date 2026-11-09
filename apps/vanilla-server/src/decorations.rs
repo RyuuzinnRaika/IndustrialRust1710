@@ -370,10 +370,10 @@ pub fn instrument(below: u16) -> u8 {
     // that were previously classified as the default harp.
     match below {
         5 | 17 | 25 | 47 | 53 | 58 | 85 | 125 | 126 | 134 | 135 | 136 | 162 | 163 | 164 => 1,
-        12 | 13 | 88 => 2, // sand, gravel, soul sand: snare
+        12 | 13 | 88 => 2,             // sand, gravel, soul sand: snare
         20 | 89 | 95 | 102 | 160 => 3, // glass, glowstone, panes: hat
-        1 | 4 | 7 | 14 | 15 | 16 | 21 | 24 | 45 | 48 | 49 | 56 | 73 | 74 | 87
-        | 98 | 112 | 129 | 153 | 155 => 4,
+        1 | 4 | 7 | 14 | 15 | 16 | 21 | 24 | 45 | 48 | 49 | 56 | 73 | 74 | 87 | 98 | 112 | 129
+        | 153 | 155 => 4,
         _ => 0, // dirt, air and other materials: harp/piano
     }
 }
@@ -442,25 +442,29 @@ mod tests {
             (0, 0), // air
             (2, 0), // grass/dirt material
             (3, 0),
-            (5, 1), // planks
-            (25, 1), // another note block
-            (58, 1), // crafting table
+            (5, 1),   // planks
+            (25, 1),  // another note block
+            (58, 1),  // crafting table
             (162, 1), // acacia log
-            (12, 2), // sand
-            (13, 2), // gravel
-            (88, 2), // soul sand
-            (20, 3), // glass
-            (89, 3), // glowstone
+            (12, 2),  // sand
+            (13, 2),  // gravel
+            (88, 2),  // soul sand
+            (20, 3),  // glass
+            (89, 3),  // glowstone
             (102, 3), // glass pane
             (160, 3), // stained glass pane
-            (1, 4), // stone
-            (45, 4), // brick block
-            (49, 4), // obsidian
-            (56, 4), // diamond ore
-            (73, 4), // redstone ore
-            (87, 4), // netherrack
+            (1, 4),   // stone
+            (45, 4),  // brick block
+            (49, 4),  // obsidian
+            (56, 4),  // diamond ore
+            (73, 4),  // redstone ore
+            (87, 4),  // netherrack
         ] {
-            assert_eq!(instrument(block), expected, "incorrect instrument for block {block}");
+            assert_eq!(
+                instrument(block),
+                expected,
+                "incorrect instrument for block {block}"
+            );
         }
     }
 
@@ -499,7 +503,10 @@ mod tests {
         assert_eq!(notes.next_note(&sidecar, position).unwrap(), 0);
         let restored = Decorations::load(&sidecar).unwrap();
         assert_eq!(restored.note(position), 0);
-        assert_eq!(note_action(position, instrument(25), restored.note(position))[10], 1);
+        assert_eq!(
+            note_action(position, instrument(25), restored.note(position))[10],
+            1
+        );
         fs::remove_dir_all(scratch).unwrap();
     }
 
