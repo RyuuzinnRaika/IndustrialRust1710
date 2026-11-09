@@ -1,11 +1,11 @@
-"""REG-195 verifier unit tests; do not launch or mutate a real server."""
+﻿"""REG-195 verifier unit tests; do not launch or mutate a real server."""
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
-import reg195_reconnect_resources as audit
+import verify_reg195_reconnect_resources as audit
 
 
 class TestReconnectResourcesVerifier(TestCase):
