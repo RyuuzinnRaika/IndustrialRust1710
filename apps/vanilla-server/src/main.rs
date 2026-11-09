@@ -7957,6 +7957,7 @@ fn start_clock_console(
     world_path: Arc<PathBuf>,
     access: ConsoleAccess,
     shutdown: Arc<AtomicBool>,
+    command_gate: Arc<Mutex<()>>,
 ) -> thread::JoinHandle<()> {
     let ConsoleGameData {
         rules,
@@ -7984,6 +7985,18 @@ fn start_clock_console(
             let Ok(line) = line else {
                 break;
             };
+            // A SIGTERM may arrive while a console command is modifying
+            // world state. Serialize the whole command with the final save.
+            let _command_guard = match command_gate.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    eprintln!("CONSOLE COMMAND GATE POISONED; refusing further writes");
+                    break;
+                }
+            };
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
             if line.trim().is_empty() {
                 continue;
             }
@@ -9199,6 +9212,14 @@ fn main() -> io::Result<()> {
     let path = Arc::new(world_path);
     let allow_path = Arc::new(whitelist_path);
     let shutdown = Arc::new(AtomicBool::new(false));
+    // POSIX signals only set the shared flag; no locks, I/O or allocations
+    // are performed in the signal handler. The main thread performs the same
+    // drain and final persistence used by /stop.
+    #[cfg(unix)]
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        signal_hook::flag::register(signal, Arc::clone(&shutdown))?;
+    }
+    let console_command_gate = Arc::new(Mutex::new(()));
     let console_thread = start_clock_console(
         Arc::clone(&hub),
         Arc::clone(&clock),
@@ -9221,6 +9242,7 @@ fn main() -> io::Result<()> {
             online_mode,
         },
         Arc::clone(&shutdown),
+        Arc::clone(&console_command_gate),
     );
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
@@ -10411,9 +10433,13 @@ fn main() -> io::Result<()> {
             }
         }));
     }
-    // No new sessions are admitted after /stop. Drain active sessions first:
-    // their disconnect paths persist position, inventory and player state.
+    // No new sessions are admitted after /stop or a POSIX termination signal.
+    // Wake live session workers, then drain their durable disconnect paths.
     drop(listener);
+    hub.broadcast(Event {
+        id: ADMIN_KICK_EVENT,
+        body: b"Server shutting down".to_vec(),
+    });
     for worker in client_threads {
         join_shutdown_worker(worker, "client", &mut shutdown_worker_failure);
     }
@@ -10427,15 +10453,18 @@ fn main() -> io::Result<()> {
     );
     clock.stop();
     join_shutdown_worker(clock_thread, "clock", &mut shutdown_worker_failure);
-    if shutdown_worker_failure.is_some() && !console_thread.is_finished() {
-        // Emergency shutdown may be triggered without another console line.
-        // A blocked stdin read cannot be interrupted portably. The thread
-        // checks shutdown before it can execute any more commands; allow the
-        // process to exit after flushing rather than deadlocking here.
-        drop(console_thread);
-    } else {
+    // A signal cannot interrupt a blocking stdin read. Do not wait for an
+    // idle console, but finish any command already in progress before saving.
+    // The gate is retained until the process exits, so no new command can
+    // mutate the world after the final checkpoint begins.
+    if console_thread.is_finished() {
         join_shutdown_worker(console_thread, "console", &mut shutdown_worker_failure);
+    } else {
+        drop(console_thread);
     }
+    let _console_command_guard = console_command_gate
+        .lock()
+        .map_err(|_| bad("console command gate poisoned during shutdown"))?;
     session_guard
         .lock()
         .map_err(|_| bad("session lock mutex poisoned"))?
