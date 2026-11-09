@@ -3270,7 +3270,10 @@ fn play(
                             if let Some(lines) = commands::player_help_page(page) {
                                 as_chat(
                                     s,
-                                    &format!("Commands page {page}/{}:", commands::player_help_page_count()),
+                                    &format!(
+                                        "Commands page {page}/{}:",
+                                        commands::player_help_page_count()
+                                    ),
                                 )?;
                                 for line in lines {
                                     as_chat(s, &line)?;
@@ -3290,7 +3293,10 @@ fn play(
                                 hub.broadcast(chat_event(&format!("* {name} {action}"))?);
                             }
                         }
-                        Ok(PublicCommand::Tell { target, message: body }) => {
+                        Ok(PublicCommand::Tell {
+                            target,
+                            message: body,
+                        }) => {
                             if !permissions.chat {
                                 as_chat(s, "Chat permission denied.")?;
                             } else if !hub.send_to_name(

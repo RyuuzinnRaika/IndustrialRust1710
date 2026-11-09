@@ -275,8 +275,11 @@ const COMMAND_GUIDE: &[CommandGuide] = &[
 const PLAYER_HELP_PAGE_SIZE: usize = 5;
 
 pub fn player_help_page_count() -> usize {
-    let entries = COMMAND_GUIDE.iter().filter(|guide| !guide.console_only).count();
-    (entries + PLAYER_HELP_PAGE_SIZE - 1) / PLAYER_HELP_PAGE_SIZE
+    let entries = COMMAND_GUIDE
+        .iter()
+        .filter(|guide| !guide.console_only)
+        .count();
+    entries.div_ceil(PLAYER_HELP_PAGE_SIZE)
 }
 
 /// Return only one bounded page of player help, not 30 chat packets at once.
@@ -381,7 +384,11 @@ mod command_guide_tests {
     fn guide_examples_match_canonical_command_and_names_are_unique() {
         let mut names = std::collections::BTreeSet::new();
         for guide in COMMAND_GUIDE {
-            assert!(names.insert(guide.name), "duplicate command: {}", guide.name);
+            assert!(
+                names.insert(guide.name),
+                "duplicate command: {}",
+                guide.name
+            );
             assert!(
                 guide.usage.starts_with(guide.name),
                 "usage must start with its command: {}",
