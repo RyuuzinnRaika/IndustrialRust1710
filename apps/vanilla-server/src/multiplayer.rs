@@ -252,9 +252,7 @@ impl Hub {
             .filter(|peer| peer.dimension == Dimension::Overworld)
             .map(|peer| peer.id)
             .collect();
-        if overworld.is_empty()
-            || overworld.iter().any(|id| !inner.sleeping.contains(id))
-        {
+        if overworld.is_empty() || overworld.iter().any(|id| !inner.sleeping.contains(id)) {
             return Ok(None);
         }
         for id in &overworld {
@@ -799,7 +797,10 @@ impl Hub {
         }
         let departing = current.clone();
         inner.sleeping.remove(&id);
-        let current = inner.players.get_mut(&id).expect("session still registered");
+        let current = inner
+            .players
+            .get_mut(&id)
+            .expect("session still registered");
         current.dimension = dimension;
         current.position = position;
         let arriving = current.clone();
@@ -924,10 +925,18 @@ mod tests {
     fn reg149_night_requires_every_overworld_player_and_resets_once() {
         let hub = Hub::default();
         let (alice, _a_rx, _) = hub
-            .add("SleepAlice".into(), "uuid-a".into(), PlayerPosition::default())
+            .add(
+                "SleepAlice".into(),
+                "uuid-a".into(),
+                PlayerPosition::default(),
+            )
             .unwrap();
         let (bob, _b_rx, _) = hub
-            .add("SleepBob".into(), "uuid-b".into(), PlayerPosition::default())
+            .add(
+                "SleepBob".into(),
+                "uuid-b".into(),
+                PlayerPosition::default(),
+            )
             .unwrap();
         assert_eq!(hub.complete_night_sleep().unwrap(), None);
         hub.enter_bed(alice).unwrap();
@@ -955,7 +964,11 @@ mod tests {
     fn reg149_netheriters_do_not_vote_in_overworld_sleep_quorum() {
         let hub = Hub::default();
         let (alice, _a_rx, _) = hub
-            .add("Overworld".into(), "uuid-over".into(), PlayerPosition::default())
+            .add(
+                "Overworld".into(),
+                "uuid-over".into(),
+                PlayerPosition::default(),
+            )
             .unwrap();
         let (_nether, _n_rx, _) = hub
             .add_in_dimension(
