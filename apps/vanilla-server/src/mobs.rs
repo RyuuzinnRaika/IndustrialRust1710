@@ -4237,10 +4237,7 @@ mod tests {
             y: 65.0,
             z: 0.5,
         };
-        let far = PlayerPosition {
-            x: 512.5,
-            ..at
-        };
+        let far = PlayerPosition { x: 512.5, ..at };
         let mut mobs = Mobs::default();
         let initial_id = mobs.next_id;
         let baseline_rss = reg194_linux_rss_kib();
