@@ -5613,6 +5613,84 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    /// REG-193 / #829: a bounded queue must converge under simultaneous
+    /// sand/gravel updates without duplicating blocks or losing settled state.
+    /// This does not model an EntityFallingBlock packet or prove 20TPS at load.
+    #[test]
+    fn gravity_256_sand_gravel_columns_respect_budget_and_save_conservation() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-reg193-gravity-{}-{nanos}",
+            std::process::id()
+        ));
+        // Create-only test world: never delete a directory from an older run.
+        fs::create_dir(&root).unwrap();
+        let save = root.join("isolated.irw");
+        let mut world = World::new();
+        const SIDE: i32 = 16;
+        const BUDGET: usize = 32;
+        for dx in 0..SIDE {
+            for dz in 0..SIDE {
+                let id = if (dx + dz) % 2 == 0 { 12 << 4 } else { 13 << 4 };
+                world.import_block(100 + dx, 68, 100 + dz, id).unwrap();
+            }
+        }
+        assert_eq!(world.pending_gravity.len(), (SIDE * SIDE) as usize);
+        world.save(&save).unwrap();
+        let started = std::time::Instant::now();
+        let mut processed = 0usize;
+        let mut max_per_tick = 0usize;
+        let mut max_tick_ms = 0u128;
+        let mut iterations = 0usize;
+        // Four downward moves for each column and at most one queue
+        // dequeue per scheduled position. 64 ticks leaves ample headroom.
+        for _ in 0..64 {
+            iterations += 1;
+            let tick_started = std::time::Instant::now();
+            let moves = world.gravity_tick(&save, BUDGET).unwrap();
+            max_tick_ms = max_tick_ms.max(tick_started.elapsed().as_millis());
+            assert!(moves.len() <= BUDGET, "gravity budget exceeded");
+            processed += moves.len();
+            max_per_tick = max_per_tick.max(moves.len());
+            if world.pending_gravity.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            world.pending_gravity.is_empty(),
+            "gravity queue did not drain under the fixed tick budget"
+        );
+        assert_eq!(processed, (SIDE * SIDE * 4) as usize);
+        assert!(max_per_tick <= BUDGET);
+        let reloaded = World::load(&save).unwrap();
+        for dx in 0..SIDE {
+            for dz in 0..SIDE {
+                let x = 100 + dx;
+                let z = 100 + dz;
+                let id = if (dx + dz) % 2 == 0 { 12 << 4 } else { 13 << 4 };
+                assert_eq!(reloaded.get(x, 64, z), id);
+                for y in 65..=68 {
+                    assert_eq!(
+                        reloaded.get(x, y, z),
+                        0,
+                        "duplicate or unfinished falling block at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "REG-193 synthetic columns={} moves={processed} iterations={iterations} \
+             max_per_tick={max_per_tick} budget={BUDGET} max_tick_ms={max_tick_ms} \
+             elapsed_ms={}; real server TPS/Entity load NOT_RUN",
+            SIDE * SIDE,
+            started.elapsed().as_millis()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn sand_gravel_fall_one_cell_per_tick_and_restore_after_reload() {
         let path = std::env::temp_dir().join(format!(
