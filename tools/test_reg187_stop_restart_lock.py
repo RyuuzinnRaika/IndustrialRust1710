@@ -1,10 +1,10 @@
-"""REG-187 helper tests (do not run actual Rust processes)."""
+﻿"""REG-187 helper tests (do not run actual Rust processes)."""
 import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
-import reg187_stop_restart_lock as race
+import verify_reg187_stop_restart_lock as race
 
 
 class SessionLockRaceVerifierTests(TestCase):
