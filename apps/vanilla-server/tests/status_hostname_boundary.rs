@@ -41,10 +41,8 @@ impl TestServer {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ir1710-reg122-{}-{stamp}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ir1710-reg122-{}-{stamp}", std::process::id()));
         // Create-only isolation: fail if this path already exists.
         fs::create_dir(&root).unwrap();
         let whitelist = root.join("whitelist.json");
@@ -87,7 +85,10 @@ impl TestServer {
                 server.process.try_wait().unwrap().is_none(),
                 "isolated vanilla-server exited before binding"
             );
-            assert!(Instant::now() < deadline, "vanilla-server startup timed out");
+            assert!(
+                Instant::now() < deadline,
+                "vanilla-server startup timed out"
+            );
             thread::sleep(Duration::from_millis(40));
         }
     }
