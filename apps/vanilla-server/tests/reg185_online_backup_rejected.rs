@@ -74,8 +74,12 @@ fn packet(id: u32, body: &[u8]) -> Vec<u8> {
 
 fn join(port: u16, name: &str) -> TcpStream {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_secs(8))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
     let mut handshake = Vec::new();
     write_varint(5, &mut handshake);
     write_string("localhost", &mut handshake).unwrap();
@@ -157,7 +161,10 @@ fn stop(server: &mut Server) {
             );
             break;
         }
-        assert!(Instant::now() < until, "live server failed to drain on /stop");
+        assert!(
+            Instant::now() < until,
+            "live server failed to drain on /stop"
+        );
         thread::sleep(Duration::from_millis(30));
     }
 }
@@ -168,10 +175,7 @@ fn reg185_backup_refuses_connected_players_then_copies_offline_snapshot() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "ir1710-reg185-{}-{nanos}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("ir1710-reg185-{}-{nanos}", std::process::id()));
     fs::create_dir(&root).unwrap(); // never reuse another world's directory
     let dir = root.join("world");
     let world = dir.join("flat.irw");
