@@ -5673,10 +5673,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ir1710-reg181-{}-{stamp}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ir1710-reg181-{}-{stamp}", std::process::id()));
         fs::create_dir(&root).unwrap(); // exclusive create; never reuse user saves
         let coordinates = [(15, 65, 0, 1u16 << 4), (16, 65, 0, 3u16 << 4)];
 
@@ -5695,12 +5693,9 @@ mod tests {
             }
             let new_bytes = staged.encoded().unwrap();
             assert_ne!(new_bytes, before);
-            let checksum = new_bytes.iter().fold(
-                0xcbf29ce484222325u64,
-                |hash, byte| {
-                    (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-                },
-            );
+            let checksum = new_bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+            });
             let prepared = serde_json::to_vec(&serde_json::json!({
                 "version": 1,
                 "files": [{
@@ -5716,8 +5711,7 @@ mod tests {
                     // Crash before publishing the durable journal: the old
                     // valid pair must remain intact. A partial preparation
                     // file must never be mistaken for a committed record.
-                    fs::write(journal.with_extension("journal.tmp"), b"partial")
-                        .unwrap();
+                    fs::write(journal.with_extension("journal.tmp"), b"partial").unwrap();
                     crate::journal::recover(&journal).unwrap();
                     assert_eq!(fs::read(&path).unwrap(), before);
                     let loaded = World::load(&path).unwrap();
