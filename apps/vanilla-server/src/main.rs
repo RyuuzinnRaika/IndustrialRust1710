@@ -10789,7 +10789,10 @@ mod piston_action_wire_tests {
 
 #[cfg(test)]
 mod reg147_keep_inventory_xp_tests {
-    use super::{commit_death_experience, death_xp_drop_amount, Experience, GameRules, Hub, Mobs};
+    use super::{
+        commit_death_experience, death_xp_drop_amount, Experience, GameRules, Hub, Mobs,
+        PlayerPosition,
+    };
 
     #[test]
     fn keep_inventory_retains_all_xp_and_emits_no_death_orb() {
