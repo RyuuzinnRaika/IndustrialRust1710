@@ -369,7 +369,13 @@ mod tests {
         // Exercise the same cleanup helper used after write_all/sync_all errors.
         // This specifically catches unlink-before-close on Windows.
         cleanup_failed_temporary_write(output, &temp);
-        assert!(!temp.exists(), "failed temp file survived cleanup");
+        assert!(
+            matches!(
+                fs::symlink_metadata(&temp),
+                Err(error) if error.kind() == io::ErrorKind::NotFound
+            ),
+            "failed temp file survived cleanup or could not be inspected"
+        );
         assert_eq!(fs::read(&target).unwrap(), b"original-world");
 
         fs::remove_file(&target).unwrap();
