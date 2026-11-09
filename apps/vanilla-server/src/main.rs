@@ -358,14 +358,20 @@ mod server_input_utf16_tests {
         let mut packet = Vec::new();
         write_string(&too_long, &mut packet).unwrap();
         let mut reader = Input(&packet);
-        assert_eq!(reader.string(16).unwrap_err().kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            reader.string(16).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
 
         // BMP code points, including a legacy formatting marker, consume
         // exactly one UTF-16 unit each and must remain compatible.
         let mut packet = Vec::new();
         write_string("§a世界", &mut packet).unwrap();
         assert_eq!(Input(&packet).string(4).unwrap(), "§a世界");
-        assert_eq!(Input(&packet).string(3).unwrap_err().kind(), ErrorKind::InvalidData);
+        assert_eq!(
+            Input(&packet).string(3).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
     }
 }
 
