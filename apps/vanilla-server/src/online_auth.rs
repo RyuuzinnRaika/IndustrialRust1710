@@ -302,7 +302,9 @@ mod tests {
         struct UntrustedFailure;
         impl Read for UntrustedFailure {
             fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-                Err(io::Error::other("accessToken=PRIVATE_TEST_TOKEN; rsa_private=SECRET"))
+                Err(io::Error::other(
+                    "accessToken=PRIVATE_TEST_TOKEN; rsa_private=SECRET",
+                ))
             }
         }
         let error = read_session_body(UntrustedFailure).unwrap_err();
