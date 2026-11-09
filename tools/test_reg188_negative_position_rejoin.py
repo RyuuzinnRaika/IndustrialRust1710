@@ -1,10 +1,10 @@
-"""REG-188 negative-coordinate verifier helper tests; no native server."""
+﻿"""REG-188 negative-coordinate verifier helper tests; no native server."""
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
-import reg188_negative_position_rejoin as audit
+import verify_reg188_negative_position_rejoin as audit
 
 
 class NegativeCoordinateVerifierTests(TestCase):
