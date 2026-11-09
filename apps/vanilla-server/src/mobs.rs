@@ -4225,6 +4225,97 @@ fn natural_spawn_location_ok(
 mod tests {
     use super::*;
 
+    /// REG-194 / #830: exercise entity creation, ordinary far-player
+    /// despawn, ID allocation and pool reclamation repeatedly without any
+    /// real world saves or external Minecraft clients. This is a synthetic
+    /// in-process regression, not a measurement of a populated live server.
+    #[test]
+    fn repeated_hostile_spawn_and_despawn_releases_all_entity_state() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let far = PlayerPosition {
+            x: 512.5,
+            ..at
+        };
+        let mut mobs = Mobs::default();
+        let initial_id = mobs.next_id;
+        let baseline_rss = reg194_linux_rss_kib();
+        let mut peak_entities = 0usize;
+        let mut peak_rss = baseline_rss;
+        const ROUNDS: usize = 512;
+        const PER_ROUND: usize = 32;
+        for round in 0..ROUNDS {
+            for index in 0..PER_ROUND {
+                mobs.insert(
+                    Kind::Creeper,
+                    PlayerPosition {
+                        x: at.x + (index % 8) as f64,
+                        z: at.z + (index / 8) as f64,
+                        ..at
+                    },
+                    false,
+                );
+            }
+            peak_entities = peak_entities.max(mobs.entities.len());
+            assert_eq!(
+                mobs.entities.len(),
+                PER_ROUND,
+                "unexpected entity accumulation before round {round}"
+            );
+            // A valid player more than 128 blocks away triggers immediate
+            // vanilla hostile despawn. Natural spawning is disabled in this
+            // isolated default Mobs instance, so no unrelated spawns occur.
+            let now = (round as u64 + 1) * 20;
+            mobs.tick(now, &world, &[far]);
+            assert!(
+                mobs.entities.is_empty(),
+                "retained hostile entities after round {round}"
+            );
+            assert!(mobs.arrows.is_empty());
+            assert!(mobs.orbs.is_empty());
+            if round % 32 == 31 {
+                if let Some(rss) = reg194_linux_rss_kib() {
+                    peak_rss = Some(peak_rss.unwrap_or(rss).max(rss));
+                }
+            }
+        }
+        assert_eq!(peak_entities, PER_ROUND);
+        assert_eq!(
+            mobs.next_id,
+            initial_id + (ROUNDS * PER_ROUND) as i32,
+            "EntityID allocator reused or skipped an ID during soak"
+        );
+        assert!(mobs.entities.is_empty());
+        eprintln!(
+            "REG-194 synthetic rounds={ROUNDS} created={} peak_entities={peak_entities} \
+             process_rss_baseline_kib={baseline_rss:?} process_rss_peak_kib={peak_rss:?} \
+             process_rss_end_kib={:?}; memory is observational, not a leak verdict",
+            ROUNDS * PER_ROUND,
+            reg194_linux_rss_kib()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reg194_linux_rss_kib() -> Option<u64> {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()?
+            .lines()
+            .find(|line| line.starts_with("VmRSS:"))?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn reg194_linux_rss_kib() -> Option<u64> {
+        None
+    }
+
     #[test]
     fn melee_knockback_is_away_from_attacker_and_respects_hit_immunity() {
         let mut mobs = Mobs::default();
