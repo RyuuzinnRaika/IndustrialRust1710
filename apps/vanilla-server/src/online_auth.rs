@@ -231,15 +231,22 @@ fn verify_has_joined(username: &str, hash: &str) -> io::Result<VerifiedProfile> 
     if response.status() != 200 {
         return Err(invalid("account not authenticated by session server"));
     }
-    let mut response_body = Vec::new();
-    response
-        .into_reader()
+    let response_body = read_session_body(response.into_reader())?;
+    parse_verified_profile(username, &response_body)
+}
+
+/// Bounded and deliberately redacted: an untrusted network/decoder error
+/// might otherwise contain an HTTP query, token, or raw response excerpt.
+fn read_session_body(reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut body = Vec::new();
+    reader
         .take(16_385)
-        .read_to_end(&mut response_body)?;
-    if response_body.len() > 16_384 {
+        .read_to_end(&mut body)
+        .map_err(|_| invalid("session response read failed"))?;
+    if body.len() > 16_384 {
         return Err(invalid("oversized session response"));
     }
-    parse_verified_profile(username, &response_body)
+    Ok(body)
 }
 
 // Session-server parsing is a separate, network-free authorization boundary.
@@ -290,6 +297,34 @@ mod tests {
         }
         assert_eq!(encrypted, plain);
     }
+    #[test]
+    fn failed_session_body_reader_never_reveals_underlying_secret_error() {
+        struct UntrustedFailure;
+        impl Read for UntrustedFailure {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other(
+                    "accessToken=PRIVATE_TEST_TOKEN; rsa_private=SECRET",
+                ))
+            }
+        }
+        let error = read_session_body(UntrustedFailure).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "session response read failed");
+        assert!(!error.to_string().contains("PRIVATE_TEST_TOKEN"));
+    }
+
+    #[test]
+    fn session_response_limit_is_checked_without_echoing_the_body() {
+        let oversized = std::io::Cursor::new(vec![b'X'; 16_385]);
+        let error = read_session_body(oversized).unwrap_err();
+        assert_eq!(error.to_string(), "oversized session response");
+        assert!(!error.to_string().contains("XXXXX"));
+        assert_eq!(
+            read_session_body(std::io::Cursor::new(b"{}")).unwrap(),
+            b"{}".to_vec()
+        );
+    }
+
     #[test]
     fn session_profile_accepts_only_matching_name_and_strict_uuid() {
         let bytes = br#"{"name":"Notch","id":"069a79f444e94726a5befca90e38aaf5"}"#;
