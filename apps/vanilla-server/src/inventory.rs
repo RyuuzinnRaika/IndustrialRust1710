@@ -3127,7 +3127,11 @@ mod tests {
                         }
                         _ => {
                             // Three-phase left/right drag. No outside drop.
-                            let start = if next(&mut state).is_multiple_of(2) { 0 } else { 4 };
+                            let start = if next(&mut state).is_multiple_of(2) {
+                                0
+                            } else {
+                                4
+                            };
                             inventory.chest_click_window(2, &mut chest, -999, start, 5);
                             let slots = (next(&mut state) % 4 + 1) as usize;
                             for _ in 0..slots {
