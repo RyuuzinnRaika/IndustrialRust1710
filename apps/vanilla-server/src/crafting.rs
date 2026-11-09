@@ -757,8 +757,7 @@ mod tests {
         }
         assert_eq!(all_latencies.len(), PLAYERS * BATCHES);
         all_latencies.sort_unstable();
-        let p95 = all_latencies
-            [(all_latencies.len() * 95).div_ceil(100).saturating_sub(1)];
+        let p95 = all_latencies[(all_latencies.len() * 95).div_ceil(100).saturating_sub(1)];
         let elapsed = started.elapsed().as_secs_f64();
         eprintln!(
             "REG-191 synthetic players={PLAYERS} batches_per_player={BATCHES} \
