@@ -3294,11 +3294,7 @@ mod tests {
         let mut bad = World::new();
         bad.primed_tnt.insert(
             10_000_001,
-            special::PrimedTnt::legacy(
-                10_000_001,
-                (0, 64, 0),
-                u64::from(u32::MAX) + 1,
-            ),
+            special::PrimedTnt::legacy(10_000_001, (0, 64, 0), u64::from(u32::MAX) + 1),
         );
         // write_to writes the IRW header before discovering invalid TNT fuse.
         let error = bad.save(&save).unwrap_err();
