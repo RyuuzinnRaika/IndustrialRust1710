@@ -5664,6 +5664,104 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    /// REG-181 / #817: one world snapshot must contain both sides of an
+    /// adjacent-chunk edit across the transaction preparation and replay
+    /// failure windows. Test-only fault injection touches disposable IRW.
+    #[test]
+    fn reg181_adjacent_chunks_replay_same_world_generation_after_torn_save() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-reg181-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap(); // exclusive create; never reuse user saves
+        let coordinates = [(15, 65, 0, 1u16 << 4), (16, 65, 0, 3u16 << 4)];
+
+        for phase in ["preparation", "prepared", "torn-target", "applied"] {
+            let dir = root.join(phase);
+            fs::create_dir(&dir).unwrap();
+            let path = dir.join("flat.irw");
+            let journal = dir.join("flat.pending-txn.json");
+            let old = World::new();
+            old.save_new(&path).unwrap();
+            let before = fs::read(&path).unwrap();
+
+            let mut staged = old.clone();
+            for &(x, y, z, block) in &coordinates {
+                staged.import_block(x, y, z, block).unwrap();
+            }
+            let new_bytes = staged.encoded().unwrap();
+            assert_ne!(new_bytes, before);
+            let checksum = new_bytes.iter().fold(
+                0xcbf29ce484222325u64,
+                |hash, byte| {
+                    (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+                },
+            );
+            let prepared = serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "files": [{
+                    "relative": "flat.irw",
+                    "contents": new_bytes,
+                    "checksum": checksum
+                }]
+            }))
+            .unwrap();
+
+            match phase {
+                "preparation" => {
+                    // Crash before publishing the durable journal: the old
+                    // valid pair must remain intact. A partial preparation
+                    // file must never be mistaken for a committed record.
+                    fs::write(journal.with_extension("journal.tmp"), b"partial")
+                        .unwrap();
+                    crate::journal::recover(&journal).unwrap();
+                    assert_eq!(fs::read(&path).unwrap(), before);
+                    let loaded = World::load(&path).unwrap();
+                    assert_eq!(loaded.get(15, 65, 0), 0);
+                    assert_eq!(loaded.get(16, 65, 0), 0);
+                    continue;
+                }
+                "prepared" => {
+                    fs::write(&journal, &prepared).unwrap();
+                    assert_eq!(fs::read(&path).unwrap(), before);
+                }
+                "torn-target" => {
+                    // Model a process crash in the target application
+                    // phase, after the durable record was committed.
+                    fs::write(&journal, &prepared).unwrap();
+                    fs::write(&path, b"truncated IRW after crash").unwrap();
+                }
+                "applied" => {
+                    // Rename succeeded but journal unlink did not.
+                    fs::write(&journal, &prepared).unwrap();
+                    fs::write(&path, staged.encoded().unwrap()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            crate::journal::recover(&journal).unwrap();
+            assert!(!journal.exists());
+            assert_eq!(fs::read(&path).unwrap(), staged.encoded().unwrap());
+            let recovered = World::load(&path).unwrap();
+            for &(x, y, z, block) in &coordinates {
+                assert_eq!(
+                    recovered.get(x, y, z),
+                    block,
+                    "{phase}: cross-chunk generation is inconsistent at {x},{y},{z}"
+                );
+            }
+            // Re-running startup cannot create an extra block, lose an
+            // edit, or alter the already committed world bytes.
+            crate::journal::recover(&journal).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), staged.encoded().unwrap());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn seeded_natural_world_roundtrip_isolated_from_irw1() {
         let path = std::env::temp_dir().join(format!("ir1710-natural-{}.irw", std::process::id()));
