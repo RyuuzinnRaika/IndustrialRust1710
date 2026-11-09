@@ -1,4 +1,4 @@
-//! Protocol 5 end-to-end tests written entirely in Rust.
+﻿//! Protocol 5 end-to-end tests written entirely in Rust.
 //! Launches the native IndustrialRust1710 binary, never Java or Python.
 use flate2::read::ZlibDecoder;
 use legacy_protocol::{read_frame, read_varint, write_string, write_varint, Cursor};
@@ -790,7 +790,7 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     assert!(String::from_utf8_lossy(&response).contains("RustTester"));
     send_fragments(&mut client, &frame(1, &mc_string("/help")), &[1, 2]);
     until_packet(&mut client, 2, |body| {
-        body.windows(9).any(|w| w == b"Commands:")
+        body.windows(14).any(|w| w == b"Commands page ") // paginated /help header from #524
     });
 
     // Dig a grass block. Placement is denied until the Creative action has
