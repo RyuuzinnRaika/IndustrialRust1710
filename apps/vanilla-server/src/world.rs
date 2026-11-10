@@ -6258,6 +6258,46 @@ mod tests {
     }
 
     #[test]
+    fn add024_boundary_torch_removal_restores_neighbor_chunk_light() {
+        let path = std::env::temp_dir().join(format!("ir1710-add024-{}.irw", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut w = World::new();
+        // Baselines with no light source anywhere. Index 64*256 in chunk
+        // (1, 0) is the seam cell (16, 64, 0), one block past the border.
+        let (base0, _) = w.light_arrays(0, 0);
+        let (base1, _) = w.light_arrays(1, 0);
+        assert_eq!(base1[64 * 256], 0);
+        // Place a torch on the last column of chunk 0: relight work must
+        // be queued for both chunks and light must cross the seam.
+        w.update_and_save(&path, 15, 64, 0, 50 << 4).unwrap();
+        let queued = w.drain_light_chunks(usize::MAX);
+        assert!(
+            queued.contains(&(0, 0)) && queued.contains(&(1, 0)),
+            "placement relight must cover both chunks: {queued:?}"
+        );
+        let (lit0, _) = w.light_arrays(0, 0);
+        let (lit1, _) = w.light_arrays(1, 0);
+        assert!(lit1[64 * 256] > 0, "torch light must cross into chunk 1");
+        assert!(lit0 != base0 && lit1 != base1);
+        // Break it: the removal must queue both chunks again and both
+        // BlockLight arrays must fall back to the exact baseline, so the
+        // two chunks agree at the seam with no stale light left behind.
+        w.update_and_save(&path, 15, 64, 0, 0).unwrap();
+        let queued = w.drain_light_chunks(usize::MAX);
+        assert!(
+            queued.contains(&(0, 0)) && queued.contains(&(1, 0)),
+            "removal relight must cover both chunks: {queued:?}"
+        );
+        assert_eq!(w.light_arrays(0, 0).0, base0);
+        assert_eq!(w.light_arrays(1, 0).0, base1);
+        // Re-place: the lit state is restored exactly (relight idempotent).
+        w.update_and_save(&path, 15, 64, 0, 50 << 4).unwrap();
+        assert_eq!(w.light_arrays(0, 0).0, lit0);
+        assert_eq!(w.light_arrays(1, 0).0, lit1);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn crops_hydrate_and_grow_saplings_become_trees_and_attachments_fall() {
         let path = std::env::temp_dir().join(format!("ir1710-ecology-{}.irw", std::process::id()));
         let _ = fs::remove_file(&path);
