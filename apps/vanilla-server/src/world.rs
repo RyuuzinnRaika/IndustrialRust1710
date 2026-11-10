@@ -1,4 +1,4 @@
-﻿//! Bounded, sparse, deterministic flat world streamed by chunk.
+//! Bounded, sparse, deterministic flat world streamed by chunk.
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod devices;
@@ -3405,6 +3405,65 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(!unrelated.join("flat.tmp").exists());
         assert!(!unrelated.join("flat.irw").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add076_restored_backup_rejects_link_swapped_world_file() {
+        // ADD-076 / #501: the save-side and load-side symlink cases were
+        // pinned by #728, but the restore composition was not: take a real
+        // backup, restore it to a fresh directory, then swap the restored
+        // world file for a symlink to an outside file. Loading the restored
+        // world must fail safely and the outside file must stay untouched.
+        use std::os::unix::fs::symlink;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-restore-link-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("world");
+        fs::create_dir(&source).unwrap();
+        World::new().save(&source.join("flat.irw")).unwrap();
+
+        // A genuine offline backup of the stopped world.
+        let mut session = crate::session_lock::WorldSessionLock::acquire(&source).unwrap();
+        let backup = root.join("backup");
+        crate::backup_world::create(&source, &backup, &mut session).unwrap();
+        drop(session);
+        assert!(backup.join("flat.irw").is_file());
+
+        // Restore = copy the backup tree into a fresh world directory.
+        let restored = root.join("restored");
+        fs::create_dir(&restored).unwrap();
+        for entry in fs::read_dir(&backup).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                fs::copy(entry.path(), restored.join(entry.file_name())).unwrap();
+            }
+        }
+        // The untouched restored copy loads normally.
+        World::load(&restored.join("flat.irw")).unwrap();
+
+        // Swap the restored world file for a link to an outside sentinel.
+        let outside = root.join("outside.irw");
+        let sentinel = b"restore must never read or replace these bytes";
+        fs::write(&outside, sentinel).unwrap();
+        fs::remove_file(restored.join("flat.irw")).unwrap();
+        symlink(&outside, restored.join("flat.irw")).unwrap();
+
+        let error = World::load(&restored.join("flat.irw")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&outside).unwrap(), sentinel);
+        let link_type = fs::symlink_metadata(restored.join("flat.irw"))
+            .unwrap()
+            .file_type();
+        assert!(link_type.is_symlink());
         fs::remove_dir_all(&root).unwrap();
     }
 
