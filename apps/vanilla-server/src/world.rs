@@ -6804,3 +6804,97 @@ mod weather_observation_limits_tests {
         assert_eq!(world.pending_weather_order[0], (1, 64, 0));
     }
 }
+
+#[cfg(test)]
+mod piston_chunk_quasi_regressions {
+    use super::*;
+
+    /// REG-164 / #800: Java 1.7.10 quasi-connectivity samples the
+    /// block above the piston, including power two blocks higher or
+    /// horizontally beside that upper position. Switching the power off
+    /// must retract the piston, and both phases must be durable.
+    #[test]
+    fn upper_power_sources_trigger_and_release_quasi_connected_pistons() {
+        for (index, source) in [(0, (0, 66, 0)), (1, (1, 65, 0))] {
+            // Exclusive creation protects both pre-existing data and parallel runs.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let scratch = std::env::temp_dir().join(format!(
+                "ir1710-reg164-qc-{}-{index}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&scratch).unwrap();
+            let path = scratch.join("isolated.irw");
+            let mut world = World::new();
+            world
+                .update_and_save(&path, 0, 64, 0, (33 << 4) | 5)
+                .unwrap();
+            world
+                .update_and_save(&path, source.0, source.1, source.2, 152 << 4)
+                .unwrap();
+            for _ in 0..4 {
+                world.block_tick(&path, 64).unwrap();
+            }
+            assert_eq!(world.get(0, 64, 0), (33 << 4) | 13);
+            assert_eq!(world.get(1, 64, 0) >> 4, 34);
+            assert_eq!(World::load(&path).unwrap().get(0, 64, 0) & 8, 8);
+
+            world
+                .update_and_save(&path, source.0, source.1, source.2, 0)
+                .unwrap();
+            for _ in 0..4 {
+                world.block_tick(&path, 64).unwrap();
+            }
+            assert_eq!(world.get(0, 64, 0), (33 << 4) | 5);
+            assert_eq!(world.get(1, 64, 0), 0);
+            assert_eq!(World::load(&path).unwrap().get(0, 64, 0) & 8, 0);
+            std::fs::remove_dir_all(scratch).unwrap();
+        }
+    }
+
+    /// ADD-026 / #450: piston writes across the positive chunk
+    /// boundary must atomically publish the base, head and destination.
+    #[test]
+    fn piston_push_across_chunk_border_survives_reload_without_duplication() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = std::env::temp_dir().join(format!(
+            "ir1710-add026-piston-border-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("isolated.irw");
+        let mut world = World::new();
+        world
+            .update_and_save(&path, 15, 64, 0, (33 << 4) | 5)
+            .unwrap();
+        world.update_and_save(&path, 16, 64, 0, 1 << 4).unwrap();
+        world
+            .update_and_save(&path, 14, 64, 0, (69 << 4) | 13)
+            .unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        for snapshot in [&world, &World::load(&path).unwrap()] {
+            assert_eq!(snapshot.get(15, 64, 0), (33 << 4) | 13);
+            assert_eq!(snapshot.get(16, 64, 0) >> 4, 34);
+            assert_eq!(snapshot.get(17, 64, 0), 1 << 4);
+        }
+
+        world.update_and_save(&path, 14, 64, 0, 0).unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        let restored = World::load(&path).unwrap();
+        for snapshot in [&world, &restored] {
+            assert_eq!(snapshot.get(15, 64, 0), (33 << 4) | 5);
+            assert_eq!(snapshot.get(16, 64, 0), 0);
+            assert_eq!(snapshot.get(17, 64, 0), 1 << 4);
+        }
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+}
