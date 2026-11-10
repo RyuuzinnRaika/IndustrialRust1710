@@ -97,6 +97,21 @@ class RestoreDrillTests(unittest.TestCase):
         run.assert_not_called()
 
     @patch.object(module.subprocess, "run")
+    def test_verifier_must_not_modify_restored_scratch_copy(self, run):
+        original = module.snapshot_hashes(self.backup)
+
+        def mutate_copy(argv, **_kwargs):
+            # The fixture is a legitimate child of the isolated destination.
+            restored_world = Path(argv[2]).parent
+            (restored_world / "players" / "user.dat").write_bytes(b"corrupted")
+            return subprocess.CompletedProcess(argv, 0)
+
+        run.side_effect = mutate_copy
+        with self.assertRaisesRegex(ValueError, "modified the isolated restored world"):
+            module.verify_restore_point(self.server, self.backup)
+        self.assertEqual(module.snapshot_hashes(self.backup), original)
+
+    @patch.object(module.subprocess, "run")
     def test_verifier_failure_propagates_and_source_remains(self, run):
         run.side_effect = subprocess.CalledProcessError(1, "bad-world")
         with self.assertRaises(subprocess.CalledProcessError):
