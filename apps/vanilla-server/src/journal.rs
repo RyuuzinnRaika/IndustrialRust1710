@@ -349,10 +349,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ir1710-reg181-{}-{stamp}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ir1710-reg181-{}-{stamp}", std::process::id()));
         // The fixture must not reuse or delete an existing world.
         fs::create_dir(&root).unwrap();
         fs::create_dir(root.join("players")).unwrap();
