@@ -6702,6 +6702,73 @@ mod group_b_regression_tests {
 }
 
 #[cfg(test)]
+mod reg111_117_chunk_coordinate_tests {
+    use super::*;
+
+    /// REG-111 / #747: signed world positions on all four quadrants must
+    /// land in the correct 1.7.10 full-column packet, across save/reload.
+    #[test]
+    fn negative_chunk_corners_reconstruct_the_same_packet_after_reload() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-reg111-quadrants-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        for x in [-16, -1, 0, 15, 16] {
+            for z in [-16, -1, 0, 15, 16] {
+                world
+                    .update_and_save(&path, x, 65, z, (35 << 4) | 3)
+                    .unwrap();
+            }
+        }
+        let restored = World::load(&path).unwrap();
+        for x in [-16, -1, 0, 15, 16] {
+            for z in [-16, -1, 0, 15, 16] {
+                assert_eq!(restored.get(x, 65, z), (35 << 4) | 3);
+            }
+        }
+        for cx in [-1, 0, 1] {
+            for cz in [-1, 0, 1] {
+                let live = world.chunk_data(cx, cz);
+                assert_eq!(world.chunk_read_snapshot(cx, cz).chunk_data(cx, cz), live);
+                assert_eq!(restored.chunk_read_snapshot(cx, cz).chunk_data(cx, cz), live);
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// REG-117 / #753: 1.7.10 Y coordinates are 0..=255 inclusive.
+    /// A rejected out-of-range edit must neither wrap to 0 nor modify disk.
+    #[test]
+    fn world_y_zero_and_255_roundtrip_while_out_of_range_edits_are_rejected() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-reg117-height-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        assert!(world.update_and_save(&path, -1, 0, 0, 1 << 4).unwrap());
+        assert!(world.update_and_save(&path, -1, 255, 0, 2 << 4).unwrap());
+        let original = std::fs::read(&path).unwrap();
+        for y in [-1, 256, i32::MIN, i32::MAX] {
+            assert!(!world.update_and_save(&path, -1, y, 0, 3 << 4).unwrap());
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(-1, 0, 0), 1 << 4);
+        assert_eq!(restored.get(-1, 255, 0), 2 << 4);
+        let (mask, _) = restored.chunk_data(-1, 0);
+        assert_ne!(mask & 1, 0, "Y=0 section missing");
+        assert_ne!(mask & (1 << 15), 0, "Y=255 section missing");
+        assert_eq!(world.chunk_data(-1, 0), restored.chunk_data(-1, 0));
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod reg116_cave_generation_order_tests {
     use super::*;
 
