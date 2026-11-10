@@ -176,3 +176,52 @@ fn reg184_second_process_cannot_rewrite_a_live_world_and_lock_is_released() {
 
     fs::remove_dir_all(&scratch).unwrap();
 }
+
+#[test]
+fn add065_abrupt_owner_death_releases_lock_without_trusting_a_stale_pid() {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let scratch = std::env::temp_dir().join(format!(
+        "ir1710-add065-crash-lock-{}-{stamp}",
+        std::process::id()
+    ));
+    // This test always creates and later deletes only its own scratch world.
+    fs::create_dir(&scratch).unwrap();
+    let world = scratch.join("isolated/flat.irw");
+    let lock_path = scratch.join("isolated/session.lock");
+    let whitelist = scratch.join("whitelist.json");
+    fs::write(&whitelist, r#"[{"name":"RustTester"}]"#).unwrap();
+    let exe = env!("CARGO_BIN_EXE_vanilla-server");
+
+    let initial_port = temporary_loopback_port();
+    let mut original = launch(exe, &world, &whitelist, initial_port);
+    wait_for_world(&mut original, &world, &lock_path, initial_port);
+    assert!(world.is_file());
+
+    // The server does not execute /stop. On Unix this is SIGKILL; on Windows
+    // Child::kill terminates it without the application's shutdown path.
+    original.0.kill().unwrap();
+    let exit = original.0.wait().unwrap();
+    assert!(!exit.success(), "forced termination must be distinguishable from /stop");
+    drop(original);
+    assert!(world.is_file(), "crash must not remove the existing world file");
+    assert_eq!(fs::metadata(&lock_path).unwrap().len(), 8);
+
+    // An orphaned vanilla timestamp is not an owner. The kernel releases
+    // the exclusive file lock when the killed process exits, without checking
+    // or trusting a possibly reused process ID.
+    let restart_port = temporary_loopback_port();
+    let mut restarted = launch(exe, &world, &whitelist, restart_port);
+    wait_for_world(&mut restarted, &world, &lock_path, restart_port);
+    let (status, stderr) = denied_second_start(exe, &world, &whitelist);
+    assert!(!status.success(), "new owner must still reject a competing writer");
+    assert!(
+        stderr.contains("world session lock is busy"),
+        "expected exclusive lock failure after crash/restart, got: {stderr}"
+    );
+    stop(&mut restarted);
+    drop(restarted);
+    fs::remove_dir_all(&scratch).unwrap();
+}
