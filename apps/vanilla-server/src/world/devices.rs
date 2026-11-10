@@ -1011,12 +1011,17 @@ mod redstone_regression_tests {
     /// an IRW restart; removing only one source must not relight it.
     #[test]
     fn multiple_inputs_keep_torch_inverted_through_restart() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-reg163-torch-restart-{}-{:?}.irw",
-            std::process::id(),
-            std::thread::current().id()
+        // Exclusive fixture directory: never delete or overwrite an existing world.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = std::env::temp_dir().join(format!(
+            "ir1710-reg163-{}-{nanos}",
+            std::process::id()
         ));
-        let _ = fs::remove_file(&path);
+        std::fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("isolated.irw");
         let mut world = World::new();
         world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
         world
@@ -1060,7 +1065,7 @@ mod redstone_regression_tests {
             second_restart.block_tick(&path, 64).unwrap();
         }
         assert_eq!(second_restart.get(0, 65, 0), (76 << 4) | 5);
-        fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 
     /// REG-161 / #797: expired inputs are processed in bounded batches.
