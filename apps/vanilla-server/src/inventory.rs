@@ -3629,8 +3629,17 @@ mod tests {
                 }
             }
             assert_eq!(next_inventory.cursor, None);
-            assert_eq!(next_chest.iter().flatten().map(|s| u16::from(s.count)).sum::<u16>()
-                + next_inventory.possessions().iter().map(|s| u16::from(s.count)).sum::<u16>(), 30);
+            let count_in_chest = next_chest
+                .iter()
+                .flatten()
+                .map(|stack| u16::from(stack.count))
+                .sum::<u16>();
+            let count_with_player = next_inventory
+                .possessions()
+                .iter()
+                .map(|stack| u16::from(stack.count))
+                .sum::<u16>();
+            assert_eq!(count_in_chest + count_with_player, 30);
 
             // Both snapshots remain stable across the exact native JSON
             // serialization used by the server's journal participants.
@@ -3652,14 +3661,19 @@ mod tests {
         }
         // Empty hotbar slot: transfer chest stack without minting a copy.
         chest[0] = Some(chest_item);
-        assert!(inventory.chest_click_window(1, &mut chest, 0, 0, 2).is_some());
+        assert!(inventory
+            .chest_click_window(1, &mut chest, 0, 0, 2)
+            .is_some());
         assert_eq!(chest[0], None);
         assert_eq!(inventory.slots[36], Some(chest_item));
 
         let snapshot = inventory.clone();
         let saved = chest;
         for (slot, key) in [(0, -1), (0, 9), (0, i8::MAX), (-999, 0), (63, 0)] {
-            assert_eq!(inventory.chest_click_window(1, &mut chest, slot, key, 2), None);
+            assert_eq!(
+                inventory.chest_click_window(1, &mut chest, slot, key, 2),
+                None
+            );
             assert_eq!(inventory, snapshot);
             assert_eq!(chest, saved);
         }
@@ -3679,7 +3693,10 @@ mod tests {
         };
         inventory.slots[36] = Some(stone);
         let original = inventory.clone();
-        assert_eq!(inventory.chest_click_window(3, &mut brewer, 0, 0, 2), None);
+        assert_eq!(
+            inventory.chest_click_window(3, &mut brewer, 0, 0, 2),
+            None
+        );
         assert_eq!(inventory, original);
         assert_eq!(brewer, [None; 4]);
     }
