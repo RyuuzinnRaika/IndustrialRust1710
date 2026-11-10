@@ -2124,10 +2124,8 @@ mod tests {
             damage: 0,
             nbt: None,
         };
-        let tagged = crate::item_nbt::from_value(&Value::Compound(HashMap::from([(
-            "Owner".to_string(),
-            Value::Int(7),
-        )]))).unwrap();
+        let nbt_value = Value::Compound(HashMap::from([("Owner".to_string(), Value::Int(7))]));
+        let tagged = crate::item_nbt::from_value(&nbt_value).unwrap();
         let mut inventory = Inventory::default();
         inventory.cursor = Some(stone);
         inventory.slots[9] = Some(Stack { count: 8, ..stone });
