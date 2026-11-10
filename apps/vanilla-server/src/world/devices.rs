@@ -657,12 +657,14 @@ impl World {
         // A large number of expired buttons/plates must not bypass the
         // caller's per-tick work budget. Filter by deadline before taking
         // the budget, or early unexpired entries would starve later releases.
-        for (&pos, &when) in self
+        let expired: Vec<_> = self
             .pending_buttons
             .iter()
             .filter(|(_, when)| self.fluid_phase >= **when)
             .take(budget)
-        {
+            .map(|(&pos, &when)| (pos, when))
+            .collect();
+        for (pos, when) in expired.iter().copied() {
             if self.fluid_phase >= when {
                 let (x, y, z) = pos;
                 let current = self.get(x, i32::from(y), z);
@@ -678,7 +680,10 @@ impl World {
                 }
             }
         }
-        if self.pending_devices.is_empty() {
+        // Expired input releases and scheduled devices share one scan budget.
+        // Otherwise a busy clock can scan up to 2*budget positions per tick.
+        let device_budget = budget.saturating_sub(expired.len());
+        if self.pending_devices.is_empty() || device_budget == 0 {
             return changes;
         }
         let len = self.pending_devices.len();
@@ -688,7 +693,7 @@ impl World {
             .iter()
             .cycle()
             .skip(start)
-            .take(budget.min(len))
+            .take(device_budget.min(len))
             .copied()
             .collect();
         for (x, y, z) in scheduled {
@@ -1066,6 +1071,37 @@ mod redstone_regression_tests {
         }
         assert_eq!(second_restart.get(0, 65, 0), (76 << 4) | 5);
         std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    /// REG-161 / #797: expire and device scans together must fit one
+    /// budget, even when a high-frequency circuit arms both queues.
+    #[test]
+    fn expired_release_and_live_device_share_one_tick_budget() {
+        let mut world = World::new();
+        world.fluid_phase = 20;
+        for x in 0..6 {
+            world.import_block(x, 64, 0, (77 << 4) | 8).unwrap();
+            world.pending_buttons.insert((x, 64, 0), 10);
+        }
+        for x in 20..26 {
+            world.import_block(x, 64, 0, 23 << 4).unwrap();
+            world.import_block(x, 65, 0, 152 << 4).unwrap();
+        }
+        let only_releases = world.device_changes(3);
+        assert_eq!(only_releases.len(), 3);
+        assert!(only_releases.keys().all(|&(x, _, _)| x < 6));
+        assert!(only_releases.values().all(|&v| v == 77 << 4));
+
+        // With only one due timer, two other device evaluations are allowed.
+        world.pending_buttons.retain(|&(x, _, _), _| x == 0);
+        let mixed = world.device_changes(3);
+        assert!(mixed.len() <= 3);
+        assert_eq!(mixed.get(&(0, 64, 0)), Some(&(77 << 4)));
+        assert_eq!(
+            mixed.keys().filter(|&&(x, _, _)| x >= 20).count(),
+            2
+        );
+        assert!(world.device_changes(0).is_empty());
     }
 
     /// REG-161 / #797: expired inputs are processed in bounded batches.
