@@ -204,9 +204,15 @@ fn add065_abrupt_owner_death_releases_lock_without_trusting_a_stale_pid() {
     // Child::kill terminates it without the application's shutdown path.
     original.0.kill().unwrap();
     let exit = original.0.wait().unwrap();
-    assert!(!exit.success(), "forced termination must be distinguishable from /stop");
+    assert!(
+        !exit.success(),
+        "forced termination must be distinguishable from /stop"
+    );
     drop(original);
-    assert!(world.is_file(), "crash must not remove the existing world file");
+    assert!(
+        world.is_file(),
+        "crash must not remove the existing world file"
+    );
     assert_eq!(fs::metadata(&lock_path).unwrap().len(), 8);
 
     // An orphaned vanilla timestamp is not an owner. The kernel releases
@@ -216,7 +222,10 @@ fn add065_abrupt_owner_death_releases_lock_without_trusting_a_stale_pid() {
     let mut restarted = launch(exe, &world, &whitelist, restart_port);
     wait_for_world(&mut restarted, &world, &lock_path, restart_port);
     let (status, stderr) = denied_second_start(exe, &world, &whitelist);
-    assert!(!status.success(), "new owner must still reject a competing writer");
+    assert!(
+        !status.success(),
+        "new owner must still reject a competing writer"
+    );
     assert!(
         stderr.contains("world session lock is busy"),
         "expected exclusive lock failure after crash/restart, got: {stderr}"
