@@ -5485,9 +5485,11 @@ mod tests {
         let first = mobs.tick(1, &world, &[player]);
         assert_eq!(mobs.entities[&id].fuse, 1);
         assert!(mobs.entities[&id].creeper_igniting);
+        let mut ignition_metadata = id.to_be_bytes().to_vec();
+        ignition_metadata.extend_from_slice(&[16, 1, 0x7f]);
         assert!(first
             .iter()
-            .any(|p| p.id == 0x1c && p.body == [id.to_be_bytes().as_slice(), &[16, 1, 0x7f]].concat()));
+            .any(|p| p.id == 0x1c && p.body == ignition_metadata));
 
         // A two-block high stone barrier fully breaks the line of sight.
         for y in 64..=66 {
@@ -5497,9 +5499,11 @@ mod tests {
         let hidden = mobs.tick(2, &world, &[player]);
         assert_eq!(mobs.entities[&id].fuse, 0);
         assert!(!mobs.entities[&id].creeper_igniting);
+        let mut defuse_metadata = id.to_be_bytes().to_vec();
+        defuse_metadata.extend_from_slice(&[16, 255, 0x7f]);
         assert!(hidden
             .iter()
-            .any(|p| p.id == 0x1c && p.body == [id.to_be_bytes().as_slice(), &[16, 255, 0x7f]].concat()));
+            .any(|p| p.id == 0x1c && p.body == defuse_metadata));
 
         for y in 64..=66 {
             world.import_block(1, y, 0, 0).unwrap();
