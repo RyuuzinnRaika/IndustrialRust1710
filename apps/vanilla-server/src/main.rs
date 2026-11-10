@@ -10219,7 +10219,7 @@ fn main() -> io::Result<()> {
                     Ok(players) => players,
                     Err(_) => return,
                 };
-                let world = match projectile_world.lock() {
+                let mut world = match projectile_world.lock() {
                     Ok(world) => world,
                     Err(_) => return,
                 };
@@ -10265,9 +10265,10 @@ fn main() -> io::Result<()> {
                     }
                     Err(_) => return,
                 };
-                let minecart_events = match projectile_carts.lock() {
+                let (minecart_events, detector_occupied) = match projectile_carts.lock() {
                     Ok(mut state) => {
                         let events = state.tick(&world, now);
+                        let occupied_detectors = state.occupied_detector_rails(&world);
                         if now.saturating_sub(last_cart_checkpoint) >= 20 {
                             // Persist at most once a second. A stationary
                             // registry does not incur a redundant disk write.
@@ -10290,10 +10291,25 @@ fn main() -> io::Result<()> {
                             }
                             last_cart_checkpoint = now;
                         }
-                        events
+                        (events, occupied_detectors)
                     }
                     Err(_) => return,
                 };
+                // Persist all detector changes before notifying clients.
+                // The world lock serializes these with player block edits.
+                let detector_updates = match world.reconcile_detector_rails(
+                    projectile_world_file.as_ref().as_path(),
+                    &detector_occupied,
+                ) {
+                    Ok(updates) => updates,
+                    Err(error) => {
+                        eprintln!("DETECTOR RAIL STORAGE ERROR: {error}");
+                        return;
+                    }
+                };
+                for (x, y, z) in detector_updates {
+                    projectile_hub.broadcast(block_change_event(&world, x, y, z));
+                }
                 let fishing_events = match projectile_fishing.lock() {
                     Ok(mut state) => state.tick(&world, now),
                     Err(_) => return,
