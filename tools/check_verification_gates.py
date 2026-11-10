@@ -45,6 +45,8 @@ def evaluate(report: object) -> dict:
             raise ValueError("PASS requires a successful exit code")
         if state == "NOT_RUN" and code is not None:
             raise ValueError("NOT_RUN must not have an exit code")
+        if state == "FAIL" and code == 0:
+            raise ValueError("FAIL must not have a successful exit code")
         found[name] = state
 
     def fold(names):
