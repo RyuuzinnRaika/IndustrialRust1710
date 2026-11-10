@@ -654,7 +654,15 @@ impl World {
     }
     pub(super) fn device_changes(&mut self, budget: usize) -> BTreeMap<Position, u16> {
         let mut changes = BTreeMap::new();
-        for (&pos, &when) in &self.pending_buttons {
+        // A large number of expired buttons/plates must not bypass the
+        // caller's per-tick work budget. Filter by deadline before taking
+        // the budget, or early unexpired entries would starve later releases.
+        for (&pos, &when) in self
+            .pending_buttons
+            .iter()
+            .filter(|(_, when)| self.fluid_phase >= **when)
+            .take(budget)
+        {
             if self.fluid_phase >= when {
                 let (x, y, z) = pos;
                 let current = self.get(x, i32::from(y), z);
@@ -998,6 +1006,31 @@ impl World {
 mod redstone_regression_tests {
     use super::*;
     use std::fs;
+
+    /// REG-161 / #797: expired inputs are processed in bounded batches.
+    /// Future deadlines must not starve already-expired inputs with larger
+    /// coordinates when the per-tick budget is small.
+    #[test]
+    fn expired_redstone_timers_obey_budget_and_skip_unexpired_entries() {
+        let mut world = World::new();
+        world.fluid_phase = 20;
+        for x in 0..24 {
+            world.import_block(x, 64, 0, (77 << 4) | 8).unwrap();
+            world
+                .pending_buttons
+                .insert((x, 64, 0), if x < 8 { 30 } else { 10 });
+        }
+
+        let staged = world.device_changes(3);
+        assert_eq!(staged.len(), 3, "the release budget must not be exceeded");
+        assert_eq!(
+            staged.keys().map(|&(x, _, _)| x).collect::<Vec<_>>(),
+            vec![8, 9, 10],
+            "future deadlines must not consume the release budget"
+        );
+        assert!(staged.values().all(|&block| block == 77 << 4));
+        assert!(world.device_changes(0).is_empty());
+    }
 
     #[test]
     fn pressure_plate_failed_save_does_not_leave_a_release_timer() {
