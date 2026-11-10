@@ -6702,6 +6702,22 @@ mod group_b_regression_tests {
 }
 
 #[cfg(test)]
+fn isolated_chunk_regression_world(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let scratch = std::env::temp_dir().join(format!(
+        "ir1710-chunk-regression-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    // Exclusive creation: never overwrite/delete a pre-existing world.
+    std::fs::create_dir(&scratch).unwrap();
+    let path = scratch.join("isolated.irw");
+    (scratch, path)
+}
+
+#[cfg(test)]
 mod reg111_117_chunk_coordinate_tests {
     use super::*;
 
@@ -6709,12 +6725,7 @@ mod reg111_117_chunk_coordinate_tests {
     /// land in the correct 1.7.10 full-column packet, across save/reload.
     #[test]
     fn negative_chunk_corners_reconstruct_the_same_packet_after_reload() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-reg111-quadrants-{}-{:?}.irw",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_file(&path);
+        let (scratch, path) = isolated_chunk_regression_world("quadrants");
         let mut world = World::new();
         for x in [-16, -1, 0, 15, 16] {
             for z in [-16, -1, 0, 15, 16] {
@@ -6736,19 +6747,14 @@ mod reg111_117_chunk_coordinate_tests {
                 assert_eq!(restored.chunk_read_snapshot(cx, cz).chunk_data(cx, cz), live);
             }
         }
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 
     /// REG-117 / #753: 1.7.10 Y coordinates are 0..=255 inclusive.
     /// A rejected out-of-range edit must neither wrap to 0 nor modify disk.
     #[test]
     fn world_y_zero_and_255_roundtrip_while_out_of_range_edits_are_rejected() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-reg117-height-{}-{:?}.irw",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_file(&path);
+        let (scratch, path) = isolated_chunk_regression_world("height");
         let mut world = World::new();
         assert!(world.update_and_save(&path, -1, 0, 0, 1 << 4).unwrap());
         assert!(world.update_and_save(&path, -1, 255, 0, 2 << 4).unwrap());
@@ -6764,7 +6770,7 @@ mod reg111_117_chunk_coordinate_tests {
         assert_ne!(mask & 1, 0, "Y=0 section missing");
         assert_ne!(mask & (1 << 15), 0, "Y=255 section missing");
         assert_eq!(world.chunk_data(-1, 0), restored.chunk_data(-1, 0));
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 }
 
@@ -6779,12 +6785,7 @@ mod reg116_cave_generation_order_tests {
     fn cave_boundaries_are_visit_order_and_restart_independent() {
         let seed = 42u64;
         let chunks = [(-2, -1), (-1, -1), (0, -1), (1, -1)];
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-reg116-caves-{}-{:?}.irw",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_file(&path);
+        let (scratch, path) = isolated_chunk_regression_world("caves");
         let world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
 
         // Query every column in the reverse order before taking a second
@@ -6831,7 +6832,7 @@ mod reg116_cave_generation_order_tests {
                 }
             }
         }
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 }
 
