@@ -225,26 +225,41 @@ fn invalid(message: &'static str) -> io::Error {
 fn publish_staged_world_save(
     staging: &Path,
     destination: &Path,
-    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    mut rename: impl FnMut(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
-    if let Err(error) = rename(staging, destination) {
-        let message = format!(
-            "replace world save {} from {}: {error}",
-            destination.display(),
-            staging.display()
-        );
-        if let Err(cleanup_error) = fs::remove_file(staging) {
-            return Err(io::Error::new(
-                error.kind(),
-                format!(
-                    "{message}; failed to remove own temporary file {}: {cleanup_error}",
+    // Briefly retry transient sharing/interrupt races while retaining the
+    // session save mutex. Never delete the published destination or retry
+    // arbitrary invalid-path and I/O errors indefinitely.
+    let mut retries = 0usize;
+    loop {
+        match rename(staging, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let transient = error.kind() == io::ErrorKind::Interrupted
+                    || (cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied);
+                if transient && retries < 2 {
+                    retries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    continue;
+                }
+                let message = format!(
+                    "replace world save {} from {}: {error}",
+                    destination.display(),
                     staging.display()
-                ),
-            ));
+                );
+                if let Err(cleanup_error) = fs::remove_file(staging) {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{message}; failed to remove own temporary file {}: {cleanup_error}",
+                            staging.display()
+                        ),
+                    ));
+                }
+                return Err(io::Error::new(error.kind(), message));
+            }
         }
-        return Err(io::Error::new(error.kind(), message));
     }
-    Ok(())
 }
 
 pub fn in_bounds(x: i32, y: i32, z: i32) -> bool {
@@ -3328,6 +3343,39 @@ mod tests {
         assert!(!root.join("outside.tmp").exists());
         assert!(!root.join("outside.importing").exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn transient_world_rename_interruption_retries_without_losing_staging() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-rename-retry-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let staging = root.join("save.tmp");
+        let destination = root.join("save.irw");
+        fs::write(&staging, b"durable staged world bytes").unwrap();
+        let mut attempts = 0;
+        publish_staged_world_save(&staging, &destination, |src, dst| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "injected temporary rename interruption",
+                ))
+            } else {
+                fs::rename(src, dst)
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert_eq!(fs::read(&destination).unwrap(), b"durable staged world bytes");
+        assert!(!staging.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
