@@ -3540,6 +3540,99 @@ mod tests {
     }
 
     #[test]
+    fn add030_self_oscillating_circuit_stays_bounded_and_settles() {
+        let path = std::env::temp_dir().join(format!("ir1710-add030-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        for x in -2..=26 {
+            for z in -2..=6 {
+                world.import_block(x, 63, z, 1 << 4).unwrap();
+            }
+        }
+        // Self-oscillating repeater ring: dust corners, repeaters
+        // mid-side facing clockwise. Seeded with a 4-tick lever pulse,
+        // the pulse circulates on its own through neighbor updates.
+        world.import_block(0, 64, 0, 55 << 4).unwrap();
+        world.import_block(1, 64, 0, (93 << 4) | 1).unwrap();
+        world.import_block(2, 64, 0, 55 << 4).unwrap();
+        world.import_block(2, 64, 1, (93 << 4) | 2).unwrap();
+        world.import_block(2, 64, 2, 55 << 4).unwrap();
+        world.import_block(1, 64, 2, (93 << 4) | 3).unwrap();
+        world.import_block(0, 64, 2, 55 << 4).unwrap();
+        world.import_block(0, 64, 1, 93 << 4).unwrap();
+        // An unrelated lever line far away: it must keep working
+        // while the oscillator runs.
+        world.import_block(20, 64, 0, (69 << 4) | 5).unwrap();
+        for x in 21..=24 {
+            world.import_block(x, 64, 0, 55 << 4).unwrap();
+        }
+        world.import_block(-1, 64, 0, (69 << 4) | 13).unwrap();
+        world.save(&path).unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        world.update_and_save(&path, -1, 64, 0, 0).unwrap();
+
+        let phase0 = world.fluid_phase;
+        let mut transitions = 0;
+        let mut prev = world.get(1, 64, 0) >> 4;
+        for tick in 0..280 {
+            if tick == 100 {
+                world
+                    .update_and_save(&path, 20, 64, 0, (69 << 4) | 13)
+                    .unwrap();
+            }
+            let changed = world.block_tick(&path, 8).unwrap();
+            assert!(
+                changed.len() <= 64,
+                "unbounded block changes on tick {tick}: {}",
+                changed.len()
+            );
+            assert!(
+                world.pending_circuit.len() <= 128,
+                "unbounded pending circuit on tick {tick}"
+            );
+            let now = world.get(1, 64, 0) >> 4;
+            if now != prev {
+                transitions += 1;
+                prev = now;
+            }
+        }
+        assert_eq!(
+            world.fluid_phase,
+            phase0 + 280,
+            "the world tick must advance on every call while a loop runs"
+        );
+        assert!(
+            transitions >= 8,
+            "the seeded pulse must keep circulating on its own, saw {transitions}"
+        );
+        assert_eq!(
+            world.get(24, 64, 0),
+            (55 << 4) | 12,
+            "unrelated line still propagates while the loop runs"
+        );
+
+        // Break the loop: the circuit must settle to a fixed state and
+        // persist it, instead of oscillating or jamming the queues.
+        world.update_and_save(&path, 2, 64, 2, 0).unwrap();
+        for _ in 0..200 {
+            world.block_tick(&path, 8).unwrap();
+        }
+        for &(x, z) in &[(1, 0), (2, 1), (1, 2), (0, 1)] {
+            assert_eq!(world.get(x, 64, z) >> 4, 93, "repeater stuck on at {x},{z}");
+        }
+        for &(x, z) in &[(0, 0), (2, 0), (0, 2)] {
+            assert_eq!(world.get(x, 64, z), 55 << 4, "dust stuck on at {x},{z}");
+        }
+        let reloaded = World::load(&path).unwrap();
+        for &(x, z) in &[(1, 0), (2, 1), (1, 2), (0, 1), (0, 0), (2, 0), (0, 2)] {
+            assert_eq!(reloaded.get(x, 64, z), world.get(x, 64, z));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn chunk_read_snapshot_matches_live_packets_with_edits_and_light_halo() {
         for mut world in [
             World::new(),
