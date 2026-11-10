@@ -29,6 +29,15 @@ class GateTests(unittest.TestCase):
         self.assertEqual(result["all"], "FAIL")
         self.assertEqual(result["client_e42"], "PASS")
 
+    def test_fail_with_zero_exit_is_rejected(self):
+        data = self.fixture("PASS")
+        data["checks"][0].update(status="FAIL", exit_code=0)
+        with self.assertRaisesRegex(ValueError, "FAIL must not"):
+            gates.evaluate(data)
+        # A process killed without a conventional exit code may still FAIL.
+        data["checks"][0]["exit_code"] = None
+        self.assertEqual(gates.evaluate(data)["automated"], "FAIL")
+
     def test_missing_check_and_client_are_not_run(self):
         data = self.fixture("PASS")
         data["checks"] = data["checks"][1:-1]

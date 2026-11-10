@@ -1,4 +1,4 @@
-﻿//! Bounded, sparse, deterministic flat world streamed by chunk.
+//! Bounded, sparse, deterministic flat world streamed by chunk.
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod devices;
@@ -94,6 +94,9 @@ pub struct World {
     fluid_phase: u64,
     // Set from Clock; the weather simulation has one authoritative owner.
     raining: bool,
+    // Thunder is the stronger 1.7.10 storm state; it implies rain in the
+    // Clock weather model and dims sky light further than plain rain.
+    thundering: bool,
     day_time: i64,
     primed_tnt: BTreeMap<i32, special::PrimedTnt>,
     // Durable overflow queue: a chain-lit block must not be lost on /stop.
@@ -351,6 +354,9 @@ impl World {
 
     pub fn set_raining(&mut self, raining: bool) {
         self.raining = raining;
+    }
+    pub fn set_thundering(&mut self, thundering: bool) {
+        self.thundering = thundering;
     }
     pub fn set_day_time(&mut self, value: i64) {
         self.day_time = value.rem_euclid(24_000);
@@ -3405,6 +3411,65 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(!unrelated.join("flat.tmp").exists());
         assert!(!unrelated.join("flat.irw").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add076_restored_backup_rejects_link_swapped_world_file() {
+        // ADD-076 / #501: the save-side and load-side symlink cases were
+        // pinned by #728, but the restore composition was not: take a real
+        // backup, restore it to a fresh directory, then swap the restored
+        // world file for a symlink to an outside file. Loading the restored
+        // world must fail safely and the outside file must stay untouched.
+        use std::os::unix::fs::symlink;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-restore-link-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("world");
+        fs::create_dir(&source).unwrap();
+        World::new().save(&source.join("flat.irw")).unwrap();
+
+        // A genuine offline backup of the stopped world.
+        let mut session = crate::session_lock::WorldSessionLock::acquire(&source).unwrap();
+        let backup = root.join("backup");
+        crate::backup_world::create(&source, &backup, &mut session).unwrap();
+        drop(session);
+        assert!(backup.join("flat.irw").is_file());
+
+        // Restore = copy the backup tree into a fresh world directory.
+        let restored = root.join("restored");
+        fs::create_dir(&restored).unwrap();
+        for entry in fs::read_dir(&backup).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                fs::copy(entry.path(), restored.join(entry.file_name())).unwrap();
+            }
+        }
+        // The untouched restored copy loads normally.
+        World::load(&restored.join("flat.irw")).unwrap();
+
+        // Swap the restored world file for a link to an outside sentinel.
+        let outside = root.join("outside.irw");
+        let sentinel = b"restore must never read or replace these bytes";
+        fs::write(&outside, sentinel).unwrap();
+        fs::remove_file(restored.join("flat.irw")).unwrap();
+        symlink(&outside, restored.join("flat.irw")).unwrap();
+
+        let error = World::load(&restored.join("flat.irw")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&outside).unwrap(), sentinel);
+        let link_type = fs::symlink_metadata(restored.join("flat.irw"))
+            .unwrap()
+            .file_type();
+        assert!(link_type.is_symlink());
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -6702,6 +6767,144 @@ mod group_b_regression_tests {
 }
 
 #[cfg(test)]
+fn isolated_chunk_regression_world(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let scratch = std::env::temp_dir().join(format!(
+        "ir1710-chunk-regression-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    // Exclusive creation: never overwrite/delete a pre-existing world.
+    std::fs::create_dir(&scratch).unwrap();
+    let path = scratch.join("isolated.irw");
+    (scratch, path)
+}
+
+#[cfg(test)]
+mod reg111_117_chunk_coordinate_tests {
+    use super::*;
+
+    /// REG-111 / #747: signed world positions on all four quadrants must
+    /// land in the correct 1.7.10 full-column packet, across save/reload.
+    #[test]
+    fn negative_chunk_corners_reconstruct_the_same_packet_after_reload() {
+        let (scratch, path) = isolated_chunk_regression_world("quadrants");
+        let mut world = World::new();
+        for x in [-16, -1, 0, 15, 16] {
+            for z in [-16, -1, 0, 15, 16] {
+                world
+                    .update_and_save(&path, x, 65, z, (35 << 4) | 3)
+                    .unwrap();
+            }
+        }
+        let restored = World::load(&path).unwrap();
+        for x in [-16, -1, 0, 15, 16] {
+            for z in [-16, -1, 0, 15, 16] {
+                assert_eq!(restored.get(x, 65, z), (35 << 4) | 3);
+            }
+        }
+        for cx in [-1, 0, 1] {
+            for cz in [-1, 0, 1] {
+                let live = world.chunk_data(cx, cz);
+                assert_eq!(world.chunk_read_snapshot(cx, cz).chunk_data(cx, cz), live);
+                assert_eq!(
+                    restored.chunk_read_snapshot(cx, cz).chunk_data(cx, cz),
+                    live
+                );
+            }
+        }
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    /// REG-117 / #753: 1.7.10 Y coordinates are 0..=255 inclusive.
+    /// A rejected out-of-range edit must neither wrap to 0 nor modify disk.
+    #[test]
+    fn world_y_zero_and_255_roundtrip_while_out_of_range_edits_are_rejected() {
+        let (scratch, path) = isolated_chunk_regression_world("height");
+        let mut world = World::new();
+        assert!(world.update_and_save(&path, -1, 0, 0, 1 << 4).unwrap());
+        assert!(world.update_and_save(&path, -1, 255, 0, 2 << 4).unwrap());
+        let original = std::fs::read(&path).unwrap();
+        for y in [-1, 256, i32::MIN, i32::MAX] {
+            assert!(!world.update_and_save(&path, -1, y, 0, 3 << 4).unwrap());
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(-1, 0, 0), 1 << 4);
+        assert_eq!(restored.get(-1, 255, 0), 2 << 4);
+        let (mask, _) = restored.chunk_data(-1, 0);
+        assert_ne!(mask & 1, 0, "Y=0 section missing");
+        assert_ne!(mask & (1 << 15), 0, "Y=255 section missing");
+        assert_eq!(world.chunk_data(-1, 0), restored.chunk_data(-1, 0));
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reg116_cave_generation_order_tests {
+    use super::*;
+
+    /// REG-116 / #752: the generated cave cross-section may not depend on
+    /// whether a player visits the east or west chunk first. Persisted IRW4
+    /// worlds must reproduce the same Protocol 5 full-column bytes.
+    #[test]
+    fn cave_boundaries_are_visit_order_and_restart_independent() {
+        let seed = 42u64;
+        let chunks = [(-2, -1), (-1, -1), (0, -1), (1, -1)];
+        let (scratch, path) = isolated_chunk_regression_world("caves");
+        let world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+
+        // Query every column in the reverse order before taking a second
+        // set of snapshots in the forward order.
+        let reversed: Vec<_> = chunks
+            .iter()
+            .rev()
+            .map(|&(cx, cz)| (cx, cz, world.chunk_read_snapshot(cx, cz).chunk_data(cx, cz)))
+            .collect();
+        let forward: Vec<_> = chunks
+            .iter()
+            .map(|&(cx, cz)| (cx, cz, world.chunk_read_snapshot(cx, cz).chunk_data(cx, cz)))
+            .collect();
+        for (cx, cz, expected) in &forward {
+            assert_eq!(
+                reversed
+                    .iter()
+                    .find(|(x, z, _)| x == cx && z == cz)
+                    .map(|(_, _, packet)| packet),
+                Some(expected),
+                "generated chunk ({cx},{cz}) changed with visit order"
+            );
+        }
+
+        world.save_new(&path).unwrap();
+        let restored = World::load(&path).unwrap();
+        for (cx, cz, expected) in forward {
+            assert_eq!(
+                restored.chunk_read_snapshot(cx, cz).chunk_data(cx, cz),
+                expected,
+                "generated chunk ({cx},{cz}) changed after restart"
+            );
+        }
+        // Sample both sides of negative and positive chunk seams at cave
+        // depths. This also detects a stale per-chunk generation cache.
+        for x in [-33, -32, -17, -16, -1, 0, 15, 16] {
+            for z in [-16, -15, -1] {
+                for y in [8, 16, 24, 32, 40, 48, 56, 64] {
+                    assert_eq!(
+                        world.get(x, y, z),
+                        restored.get(x, y, z),
+                        "cross-chunk cave seam at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod weather_observation_limits_tests {
     use super::*;
 
@@ -6737,5 +6940,99 @@ mod weather_observation_limits_tests {
         world.register_weather_column((0, 64, 0));
         assert_eq!(world.pending_weather_order.len(), 2);
         assert_eq!(world.pending_weather_order[0], (1, 64, 0));
+    }
+}
+
+#[cfg(test)]
+mod piston_chunk_quasi_regressions {
+    use super::*;
+
+    /// REG-164 / #800: Java 1.7.10 quasi-connectivity samples the
+    /// block above the piston, including power two blocks higher or
+    /// horizontally beside that upper position. Switching the power off
+    /// must retract the piston, and both phases must be durable.
+    #[test]
+    fn upper_power_sources_trigger_and_release_quasi_connected_pistons() {
+        for (index, source) in [(0, (0, 66, 0)), (1, (1, 65, 0))] {
+            // Exclusive creation protects both pre-existing data and parallel runs.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let scratch = std::env::temp_dir().join(format!(
+                "ir1710-reg164-qc-{}-{index}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&scratch).unwrap();
+            let path = scratch.join("isolated.irw");
+            let mut world = World::new();
+            world
+                .update_and_save(&path, 0, 64, 0, (33 << 4) | 5)
+                .unwrap();
+            world
+                .update_and_save(&path, source.0, source.1, source.2, 152 << 4)
+                .unwrap();
+            for _ in 0..4 {
+                world.block_tick(&path, 64).unwrap();
+            }
+            assert_eq!(world.get(0, 64, 0), (33 << 4) | 13);
+            assert_eq!(world.get(1, 64, 0) >> 4, 34);
+            assert_eq!(World::load(&path).unwrap().get(0, 64, 0) & 8, 8);
+
+            world
+                .update_and_save(&path, source.0, source.1, source.2, 0)
+                .unwrap();
+            for _ in 0..4 {
+                world.block_tick(&path, 64).unwrap();
+            }
+            assert_eq!(world.get(0, 64, 0), (33 << 4) | 5);
+            assert_eq!(world.get(1, 64, 0), 0);
+            assert_eq!(World::load(&path).unwrap().get(0, 64, 0) & 8, 0);
+            std::fs::remove_dir_all(scratch).unwrap();
+        }
+    }
+
+    /// ADD-026 / #450: piston writes across the positive chunk
+    /// boundary must atomically publish the base, head and destination.
+    #[test]
+    fn piston_push_across_chunk_border_survives_reload_without_duplication() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = std::env::temp_dir().join(format!(
+            "ir1710-add026-piston-border-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("isolated.irw");
+        let mut world = World::new();
+        world
+            .update_and_save(&path, 15, 64, 0, (33 << 4) | 5)
+            .unwrap();
+        world.update_and_save(&path, 16, 64, 0, 1 << 4).unwrap();
+        world
+            .update_and_save(&path, 14, 64, 0, (69 << 4) | 13)
+            .unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        for snapshot in [&world, &World::load(&path).unwrap()] {
+            assert_eq!(snapshot.get(15, 64, 0), (33 << 4) | 13);
+            assert_eq!(snapshot.get(16, 64, 0) >> 4, 34);
+            assert_eq!(snapshot.get(17, 64, 0), 1 << 4);
+        }
+
+        world.update_and_save(&path, 14, 64, 0, 0).unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        let restored = World::load(&path).unwrap();
+        for snapshot in [&world, &restored] {
+            assert_eq!(snapshot.get(15, 64, 0), (33 << 4) | 5);
+            assert_eq!(snapshot.get(16, 64, 0), 0);
+            assert_eq!(snapshot.get(17, 64, 0), 1 << 4);
+        }
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 }

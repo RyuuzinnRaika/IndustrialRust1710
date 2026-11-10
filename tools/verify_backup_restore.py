@@ -73,7 +73,11 @@ def verify_restore_point(server: Path, backup: Path, timeout: int = 120) -> int:
         # Make the server path absolute before changing its working directory.
         subprocess.run([str(server.resolve(strict=True)), "--verify-world", str(target)],
                        check=True, timeout=timeout, cwd=str(copy.parent))
-        # Detect source mutation even if it occurred while the native verifier ran.
+        # The verifier is required to be read-only. A successful exit code
+        # does not excuse accidental changes to the isolated restored copy.
+        if snapshot_hashes(copy) != before:
+            raise ValueError("native verifier modified the isolated restored world")
+        # Also detect source mutation even if it occurred during verification.
         if snapshot_hashes(backup) != before:
             raise ValueError("backup changed during offline world inspection")
     return len(before)

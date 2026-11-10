@@ -676,22 +676,25 @@ fn visible_decoration_events(
     chunks: &BTreeSet<(i32, i32)>,
 ) -> io::Result<Vec<Event>> {
     let (signs, pots) = {
-        let storage = decorations.lock().map_err(|_| bad("decorations lock poisoned"))?;
-        (storage.sign_packets_in(chunks)?, storage.pot_packets_in(chunks)?)
+        let storage = decorations
+            .lock()
+            .map_err(|_| bad("decorations lock poisoned"))?;
+        (
+            storage.sign_packets_in(chunks)?,
+            storage.pot_packets_in(chunks)?,
+        )
     };
     let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
     let mut events = Vec::with_capacity(signs.len() + pots.len());
     for body in signs {
-        if tile_packet_position(&body).is_some_and(|(x, y, z)| {
-            matches!(state.get(x, y, z) >> 4, 63 | 68)
-        }) {
+        if tile_packet_position(&body)
+            .is_some_and(|(x, y, z)| matches!(state.get(x, y, z) >> 4, 63 | 68))
+        {
             events.push(Event { id: 0x33, body });
         }
     }
     for body in pots {
-        if tile_packet_position(&body).is_some_and(|(x, y, z)| {
-            state.get(x, y, z) >> 4 == 140
-        }) {
+        if tile_packet_position(&body).is_some_and(|(x, y, z)| state.get(x, y, z) >> 4 == 140) {
             events.push(Event { id: 0x35, body });
         }
     }
@@ -9510,6 +9513,7 @@ fn main() -> io::Result<()> {
                 );
                 // Fire uses the same clock/weather source as client rain packets.
                 gravity_world.set_raining(weather.0);
+                gravity_world.set_thundering(weather.1);
                 gravity_world.set_day_time(furnace_clock.day_time());
                 for _ in 0..steps {
                     // A /stop request must not replay up to twenty expensive
@@ -12098,26 +12102,37 @@ mod reg113_tile_reentry_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ir1710-reg113-{}-{nanos}", std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ir1710-reg113-{}-{nanos}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let path = root.join("isolated.irw");
         let mut world = World::new();
         let sign = (-16, 64, -1);
         let pot = (16, 64, 0);
-        world.update_and_save(&path, sign.0, sign.1, sign.2, 63 << 4).unwrap();
-        world.update_and_save(&path, pot.0, pot.1, pot.2, 140 << 4).unwrap();
+        world
+            .update_and_save(&path, sign.0, sign.1, sign.2, 63 << 4)
+            .unwrap();
+        world
+            .update_and_save(&path, pot.0, pot.1, pot.2, 140 << 4)
+            .unwrap();
         let mut tile = Decorations::default();
         tile.set_sign(
             &root.join("decoration.json"),
             sign,
             ["Reentry".into(), "".into(), "".into(), "".into()],
-        ).unwrap();
-        tile = tile.stage_pot(
-            pot,
-            Some(Stack { id: 6, count: 1, damage: 0, nbt: None }),
-        ).unwrap();
+        )
+        .unwrap();
+        tile = tile
+            .stage_pot(
+                pot,
+                Some(Stack {
+                    id: 6,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                }),
+            )
+            .unwrap();
         let world = Mutex::new(world);
         let tile = Mutex::new(tile);
         let sign_view = BTreeSet::from([(-1, -1)]);
@@ -12131,18 +12146,99 @@ mod reg113_tile_reentry_tests {
         assert_eq!(potted[0].id, 0x35);
         assert_eq!(tile_packet_position(&potted[0].body), Some(pot));
         assert!(visible_decoration_events(&world, &tile, &BTreeSet::new())
-            .unwrap().is_empty());
+            .unwrap()
+            .is_empty());
         let again = visible_decoration_events(&world, &tile, &sign_view).unwrap();
         assert_eq!(again[0].body, first[0].body);
 
         // Sidecar still contains a sign, but world no longer has that tile.
-        world.lock().unwrap()
-            .update_and_save(&path, sign.0, sign.1, sign.2, 0).unwrap();
+        world
+            .lock()
+            .unwrap()
+            .update_and_save(&path, sign.0, sign.1, sign.2, 0)
+            .unwrap();
         assert!(visible_decoration_events(&world, &tile, &sign_view)
-            .unwrap().is_empty());
-        assert_eq!(visible_decoration_events(&world, &tile, &pot_view)
-            .unwrap().len(), 1);
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            visible_decoration_events(&world, &tile, &pot_view)
+                .unwrap()
+                .len(),
+            1
+        );
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reg114_concurrent_chunk_mining_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    /// REG-114 / #750: two sessions concurrently mine on opposite sides of
+    /// a chunk boundary. Both durable blocks and both clients' block-change
+    /// mailboxes must converge without losing either notification.
+    #[test]
+    fn simultaneous_neighbor_chunk_mining_persists_and_broadcasts_both_changes() {
+        for (case, pair) in [[15, 16], [-1, 0]].into_iter().enumerate() {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let scratch = std::env::temp_dir().join(format!(
+                "ir1710-reg114-{}-{case}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&scratch).unwrap();
+            let path = scratch.join("isolated.irw");
+            let mut initial = World::new();
+            for x in pair {
+                initial.update_and_save(&path, x, 64, 0, 1 << 4).unwrap();
+            }
+            let state = Mutex::new(initial);
+            let hub = Hub::default();
+            let (_, receiver_a, _) = hub
+                .add("MinerA".into(), "uuid-a".into(), PlayerPosition::default())
+                .unwrap();
+            let (_, receiver_b, _) = hub
+                .add("MinerB".into(), "uuid-b".into(), PlayerPosition::default())
+                .unwrap();
+            let barrier = Barrier::new(3);
+            std::thread::scope(|scope| {
+                for x in pair {
+                    let barrier = &barrier;
+                    let state = &state;
+                    let hub = &hub;
+                    let path = &path;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let mut world = state.lock().unwrap();
+                        assert!(world.update_and_save(path, x, 64, 0, 0).unwrap());
+                        hub.broadcast(block_change_event(&world, x, 64, 0));
+                    });
+                }
+                barrier.wait();
+            });
+
+            let persisted = World::load(&path).unwrap();
+            for x in pair {
+                assert_eq!(state.lock().unwrap().get(x, 64, 0), 0);
+                assert_eq!(persisted.get(x, 64, 0), 0);
+            }
+            for receiver in [&receiver_a, &receiver_b] {
+                let mut seen = BTreeSet::new();
+                while let Ok(event) = receiver.try_recv() {
+                    if event.id == 0x23 {
+                        assert_eq!(event.body[4], 64);
+                        assert_eq!(&event.body[5..9], &0i32.to_be_bytes());
+                        assert_eq!(&event.body[9..], &[0, 0]);
+                        seen.insert(i32::from_be_bytes(event.body[0..4].try_into().unwrap()));
+                    }
+                }
+                assert_eq!(seen, BTreeSet::from(pair));
+            }
+            std::fs::remove_dir_all(scratch).unwrap();
+        }
     }
 }
 

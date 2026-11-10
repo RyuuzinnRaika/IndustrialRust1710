@@ -7,6 +7,86 @@ use legacy_protocol::{
 use std::collections::VecDeque;
 use std::io::{self, Read};
 
+/// ADD-084 / #509: a versioned, synthetic and fully anonymized Protocol 5
+/// login-to-play fixture. No private username, session token, shared secret or
+/// Mojang authentication response is retained. Client/server direction and
+/// protocol phase are fixed alongside each complete length-prefixed frame.
+#[test]
+fn add084_anonymized_protocol5_login_to_play_trace_replays_in_order() {
+    const ZERO_UUID: &str = "00000000-0000-0000-0000-000000000000";
+    const HANDSHAKE: &[u8] = b"\x07\x00\x05\x01A\x63\xdd\x02";
+    const LOGIN_START: &[u8] = b"\x03\x00\x01A";
+    const LOGIN_SUCCESS: &[u8] = b"\x28\x02\x2400000000-0000-0000-0000-000000000000\x01A";
+    const JOIN_GAME: &[u8] = b"\x11\x01\x00\x00\x00\x01\x01\x00\x02\x08\x07default";
+    const KEEPALIVE: &[u8] = b"\x05\x00\x01\x02\x03\x04";
+
+    // (direction/state, immutable complete frame, Protocol 5 packet ID).
+    // An on-wire Login Start and clientbound Status may reuse packet IDs,
+    // so the phase is part of the replay contract, not inferred from ID.
+    let trace: [(&str, &[u8], i32); 6] = [
+        ("C->S Handshake", HANDSHAKE, 0),
+        ("C->S Login", LOGIN_START, 0),
+        ("S->C Login Success", LOGIN_SUCCESS, 2),
+        ("S->C Play Join Game", JOIN_GAME, 1),
+        ("S->C Play KeepAlive", KEEPALIVE, 0),
+        ("C->S Play KeepAlive", KEEPALIVE, 0),
+    ];
+    let mut observed = Vec::new();
+    for (phase, fixture, expected_id) in trace {
+        // Reject concatenated extra frames or any truncated fixture, rather
+        // than merely accepting a valid prefix of a malformed recording.
+        let mut stream = fixture;
+        let frame = read_frame(&mut stream).unwrap();
+        assert!(stream.is_empty(), "extra bytes after {phase}");
+        let (packet_id, mut fields) = packet_id_and_body(&frame).unwrap();
+        assert_eq!(packet_id, expected_id, "{phase}");
+
+        match phase {
+            "C->S Handshake" => {
+                assert_eq!(fields.read_varint().unwrap(), 5);
+                assert_eq!(fields.read_string(255).unwrap(), "A");
+                assert_eq!(fields.read_u16().unwrap(), 25565);
+                assert_eq!(fields.read_varint().unwrap(), 2);
+                fields.finish().unwrap();
+            }
+            "C->S Login" => {
+                assert_eq!(fields.read_string(16).unwrap(), "A");
+                fields.finish().unwrap();
+            }
+            "S->C Login Success" => {
+                assert_eq!(fields.read_string(40).unwrap(), ZERO_UUID);
+                assert_eq!(fields.read_string(16).unwrap(), "A");
+                fields.finish().unwrap();
+            }
+            "S->C Play Join Game" => {
+                // 1.7.10: i32 entity id, u8 gamemode, i8 dimension,
+                // u8 difficulty, u8 max players and legacy level type.
+                assert_eq!(&frame[1..], b"\x00\x00\x00\x01\x01\x00\x02\x08\x07default");
+            }
+            "S->C Play KeepAlive" | "C->S Play KeepAlive" => {
+                assert_eq!(&frame[1..], &[1, 2, 3, 4]);
+            }
+            _ => unreachable!(),
+        }
+
+        let mut rebuilt = Vec::new();
+        write_frame(&mut rebuilt, &frame).unwrap();
+        assert_eq!(rebuilt.as_slice(), fixture, "wire mismatch at {phase}");
+        observed.push(phase);
+    }
+    assert_eq!(
+        observed,
+        [
+            "C->S Handshake",
+            "C->S Login",
+            "S->C Login Success",
+            "S->C Play Join Game",
+            "S->C Play KeepAlive",
+            "C->S Play KeepAlive",
+        ]
+    );
+}
+
 #[test]
 fn handshake_protocol5_exact_wire_fixture() {
     let mut payload = Vec::new();
