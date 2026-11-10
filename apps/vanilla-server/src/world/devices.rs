@@ -197,6 +197,9 @@ impl World {
             // Other faces receive only its ordinary weak power; treating all
             // faces as strong would incorrectly energize adjacent conductors.
             55 if to == (x, y - 1, z) => (block & 15) as u8,
+            // Detector rails weakly power neighboring blocks and strongly
+            // power their solid support in Java Edition 1.7.10.
+            28 if block & 8 != 0 && to == (x, y - 1, z) => 15,
             152 => 15,
             76 if to == (x, y + 1, z) => 15,
             94 => {
@@ -309,6 +312,13 @@ impl World {
             // shape and the supporting block below. It does not power above.
             55 if to == (x, y - 1, z) || self.dust_points_into(from, to) => (block & 15) as u8,
             55 => 0,
+            28 if block & 8 != 0
+                && NEIGHBORS
+                    .iter()
+                    .any(|&(dx, dy, dz)| to == (x + dx, y + dy, z + dz)) =>
+            {
+                15
+            }
             69 | 77 | 143 => {
                 if block & 8 != 0 {
                     15
@@ -2705,6 +2715,79 @@ mod redstone_regression_tests {
             }
             fs::remove_dir_all(scratch).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod reg169_detector_signal_regressions {
+    use super::*;
+
+    /// REG-169 / #805: a nearby detector rail powers an aligned
+    /// booster rail and releases it when the detector turns off. Persist
+    /// both transitions and reconstruct the final state after restart.
+    #[test]
+    fn detector_signal_drives_adjacent_powered_rail_and_releases_on_unpower() {
+        // Exclusive fixture directory: never delete or overwrite an existing world.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch =
+            std::env::temp_dir().join(format!("ir1710-reg169-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("isolated.irw");
+        let mut world = World::new();
+        // Both rails run east-west. The detector's 0x8 active flag is
+        // normally driven by Minecarts::occupied_detector_rails (#927).
+        world
+            .update_and_save(&path, 0, 64, 0, (28 << 4) | 9)
+            .unwrap();
+        world
+            .update_and_save(&path, 1, 64, 0, (27 << 4) | 1)
+            .unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(1, 64, 0), (27 << 4) | 9);
+        assert_eq!(World::load(&path).unwrap().get(1, 64, 0), (27 << 4) | 9);
+
+        world
+            .update_and_save(&path, 0, 64, 0, (28 << 4) | 1)
+            .unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(1, 64, 0), (27 << 4) | 1);
+        let mut restored = World::load(&path).unwrap();
+        for _ in 0..4 {
+            restored.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(restored.get(1, 64, 0), (27 << 4) | 1);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    fn powered_detector_rail_weakly_powers_faces_and_strongly_powers_support() {
+        let mut world = World::new();
+        // Shape 1: east-west, metadata bit 3 marks the detector as active.
+        world.import_block(0, 64, 0, (28 << 4) | 9).unwrap();
+        for neighbor in [
+            (-1, 64, 0),
+            (1, 64, 0),
+            (0, 64, -1),
+            (0, 64, 1),
+            (0, 63, 0),
+            (0, 65, 0),
+        ] {
+            assert_eq!(world.signal_into((0, 64, 0), neighbor), 15);
+        }
+        assert_eq!(world.strong_signal_into((0, 64, 0), (0, 63, 0)), 15);
+        assert_eq!(world.strong_signal_into((0, 64, 0), (1, 64, 0)), 0);
+        assert_eq!(world.signal_into((0, 64, 0), (0, 64, 2)), 0);
+
+        world.import_block(0, 64, 0, (28 << 4) | 1).unwrap();
+        assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 0);
+        assert_eq!(world.strong_signal_into((0, 64, 0), (0, 63, 0)), 0);
     }
 }
 
