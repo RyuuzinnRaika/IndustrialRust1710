@@ -575,6 +575,49 @@ fn safe_spawn(world: &Mutex<World>, root_world_path: &Path) -> io::Result<Player
     let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
     world_spawn::player_spawn(root_world_path, &state)
 }
+
+/// Respawn position for a claimed bed at (x, y, z). Prefer standing
+/// on the bed itself (the historical behavior); when that cell is
+/// obstructed, take the first adjacent column — in a fixed order —
+/// whose feet and head cells are air over solid, non-fluid ground
+/// at bed level, as vanilla does before giving up to world spawn.
+/// `None` means every candidate is obstructed.
+fn bed_respawn_position(world: &World, x: i32, y: i32, z: i32) -> Option<PlayerPosition> {
+    if world::in_bounds(x, y + 1, z) && world.get(x, y + 1, z) == 0 {
+        return Some(PlayerPosition {
+            x: f64::from(x) + 0.5,
+            y: f64::from(y) + 1.0,
+            z: f64::from(z) + 0.5,
+        });
+    }
+    for (dx, dz) in [
+        (0, -1),
+        (0, 1),
+        (-1, 0),
+        (1, 0),
+        (-1, -1),
+        (1, -1),
+        (-1, 1),
+        (1, 1),
+    ] {
+        let (nx, nz) = (x + dx, z + dz);
+        if !world::in_bounds(nx, y, nz) || !world::in_bounds(nx, y + 1, nz) {
+            continue;
+        }
+        let ground = world.get(nx, y - 1, nz) >> 4;
+        if ground == 0 || matches!(ground, 8..=11) {
+            continue;
+        }
+        if world.get(nx, y, nz) == 0 && world.get(nx, y + 1, nz) == 0 {
+            return Some(PlayerPosition {
+                x: f64::from(nx) + 0.5,
+                y: f64::from(y),
+                z: f64::from(nz) + 0.5,
+            });
+        }
+    }
+    None
+}
 fn chunk_center(player: &PlayerPosition) -> (i32, i32) {
     (
         (player.x.floor() as i32).div_euclid(16),
@@ -1280,6 +1323,38 @@ mod dead_session_packet_tests {
         ] {
             assert!(blocked_while_dead(id), "packet {id} must be ignored");
         }
+    }
+
+    /// ADD-029 / #453: an obstructed bed falls back to an adjacent
+    /// safe column before world spawn is even considered.
+    #[test]
+    fn add029_bed_respawn_searches_adjacent_columns_when_obstructed() {
+        use crate::world::World;
+        let mut world = World::new();
+        // Ground slab at y=69, bed at (10, 70, 10).
+        for x in 8..=12 {
+            for z in 8..=12 {
+                world.import_block(x, 69, z, 1 << 4).unwrap();
+            }
+        }
+        world.import_block(10, 70, 10, 26 << 4).unwrap();
+        // Unobstructed: stand on the bed itself.
+        let pos = super::bed_respawn_position(&world, 10, 70, 10).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (10.5, 71.0, 10.5));
+        // Obstruct the cell above the bed: the first adjacent column
+        // in the fixed search order wins.
+        world.import_block(10, 71, 10, 1 << 4).unwrap();
+        let pos = super::bed_respawn_position(&world, 10, 70, 10).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (10.5, 70.0, 9.5));
+        // Obstruct every adjacent feet cell too: no bed-side respawn.
+        for x in 9..=11 {
+            for z in 9..=11 {
+                if (x, z) != (10, 10) {
+                    world.import_block(x, 70, z, 1 << 4).unwrap();
+                }
+            }
+        }
+        assert!(super::bed_respawn_position(&world, 10, 70, 10).is_none());
     }
 
     /// REG-146 / #782: the active chest's cursor is player-owned even
@@ -6904,15 +6979,8 @@ fn play(
                             let guard = respawn_world
                                 .lock()
                                 .map_err(|_| bad("world mutex poisoned"))?;
-                            if guard.get(x, y, z) >> 4 == 26
-                                && world::in_bounds(x, y + 1, z)
-                                && guard.get(x, y + 1, z) == 0
-                            {
-                                PlayerPosition {
-                                    x: x as f64 + 0.5,
-                                    y: y as f64 + 1.0,
-                                    z: z as f64 + 0.5,
-                                }
+                            if guard.get(x, y, z) >> 4 == 26 {
+                                bed_respawn_position(&guard, x, y, z).unwrap_or(fallback)
                             } else {
                                 fallback
                             }
