@@ -2561,12 +2561,17 @@ mod reg169_detector_signal_regressions {
     /// both transitions and reconstruct the final state after restart.
     #[test]
     fn detector_signal_drives_adjacent_powered_rail_and_releases_on_unpower() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-reg169-powered-neighbor-{}-{:?}.irw",
-            std::process::id(),
-            std::thread::current().id()
+        // Exclusive fixture directory: never delete or overwrite an existing world.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = std::env::temp_dir().join(format!(
+            "ir1710-reg169-{}-{nanos}",
+            std::process::id()
         ));
-        let _ = std::fs::remove_file(&path);
+        std::fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("isolated.irw");
         let mut world = World::new();
         // Both rails run east-west. The detector's 0x8 active flag is
         // normally driven by Minecarts::occupied_detector_rails (#927).
@@ -2597,7 +2602,7 @@ mod reg169_detector_signal_regressions {
             restored.block_tick(&path, 64).unwrap();
         }
         assert_eq!(restored.get(1, 64, 0), (27 << 4) | 1);
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 
     #[test]
