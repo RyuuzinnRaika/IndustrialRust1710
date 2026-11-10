@@ -23,7 +23,7 @@ fn add084_anonymized_protocol5_login_to_play_trace_replays_in_order() {
     // (direction/state, immutable complete frame, Protocol 5 packet ID).
     // An on-wire Login Start and clientbound Status may reuse packet IDs,
     // so the phase is part of the replay contract, not inferred from ID.
-    let trace: [(&str, &[u8], u32); 6] = [
+    let trace: [(&str, &[u8], i32); 6] = [
         ("C->S Handshake", HANDSHAKE, 0),
         ("C->S Login", LOGIN_START, 0),
         ("S->C Login Success", LOGIN_SUCCESS, 2),
