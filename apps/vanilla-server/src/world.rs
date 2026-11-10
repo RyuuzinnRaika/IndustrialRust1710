@@ -1,4 +1,4 @@
-﻿//! Bounded, sparse, deterministic flat world streamed by chunk.
+//! Bounded, sparse, deterministic flat world streamed by chunk.
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod devices;
@@ -6744,7 +6744,10 @@ mod reg111_117_chunk_coordinate_tests {
             for cz in [-1, 0, 1] {
                 let live = world.chunk_data(cx, cz);
                 assert_eq!(world.chunk_read_snapshot(cx, cz).chunk_data(cx, cz), live);
-                assert_eq!(restored.chunk_read_snapshot(cx, cz).chunk_data(cx, cz), live);
+                assert_eq!(
+                    restored.chunk_read_snapshot(cx, cz).chunk_data(cx, cz),
+                    live
+                );
             }
         }
         std::fs::remove_dir_all(scratch).unwrap();
