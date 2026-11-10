@@ -4,7 +4,7 @@ use legacy_protocol::{read_frame, read_varint, write_string, write_varint, Curso
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
