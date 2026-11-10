@@ -6773,12 +6773,16 @@ mod reg169_detector_occupancy_world_tests {
 
     #[test]
     fn two_occupied_detector_rails_release_only_after_last_cart_leaves() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-reg169-world-{}-{:?}.irw",
-            std::process::id(),
-            std::thread::current().id()
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = std::env::temp_dir().join(format!(
+            "ir1710-reg169-world-{}-{nanos}",
+            std::process::id()
         ));
-        let _ = std::fs::remove_file(&path);
+        std::fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("isolated.irw");
         let mut world = World::new();
         for x in [0, 2] {
             world.import_block(x, 64, 0, (28 << 4) | 1).unwrap();
@@ -6799,7 +6803,7 @@ mod reg169_detector_occupancy_world_tests {
             vec![(2, 64, 0)]
         );
         assert!(World::load(&path).unwrap().powered_detector_rails().is_empty());
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 }
 
