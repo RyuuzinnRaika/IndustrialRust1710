@@ -10,6 +10,35 @@ fn invalid(msg: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidInput, msg)
 }
 
+/// Resolve a prospective path without creating any missing directory.
+/// Canonicalize the nearest existing ancestor so symlinked parents cannot
+/// make a seemingly external backup directory alias a live world.
+fn prospective_directory(path: &Path) -> io::Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    loop {
+        match fs::symlink_metadata(ancestor) {
+            Ok(_) => break,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let component = ancestor
+                    .file_name()
+                    .ok_or_else(|| invalid("backup path has no resolvable parent"))?;
+                missing.push(component.to_os_string());
+                ancestor = ancestor
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let mut candidate = fs::canonicalize(ancestor)?;
+    for component in missing.iter().rev() {
+        candidate.push(component);
+    }
+    Ok(candidate)
+}
+
 /// World must be STOPPED. Create-only snapshot, independently validate it,
 /// then prune oldest backups bearing exactly the marker written by this tool.
 pub fn rotate(
@@ -28,13 +57,22 @@ pub fn rotate(
     if !fs::symlink_metadata(source)?.file_type().is_dir() {
         return Err(invalid("world directory must be real"));
     }
+    // Reject nesting and ancestor overlap BEFORE create_dir_all. Previously
+    // an invalid `world/missing/backups` path created directories *inside*
+    // the existing world and only then failed with "overlaps source".
+    let source = fs::canonicalize(source)?;
+    let prospective_root = prospective_directory(root)?;
+    if prospective_root.starts_with(&source) || source.starts_with(&prospective_root) {
+        return Err(invalid("backup root overlaps source"));
+    }
     if !root.exists() {
         fs::create_dir_all(root)?;
     }
     if !fs::symlink_metadata(root)?.file_type().is_dir() {
         return Err(invalid("backup root must be real"));
     }
-    let source = fs::canonicalize(source)?;
+    // A symlink parent or concurrent rename could change the resolved path
+    // between the preflight and creation; check the final identity too.
     let backup_root = fs::canonicalize(root)?;
     if backup_root.starts_with(&source) || source.starts_with(&backup_root) {
         return Err(invalid("backup root overlaps source"));
@@ -95,6 +133,36 @@ pub fn rotate(
 mod tests {
     use super::*;
     use crate::world::World;
+    #[test]
+    fn invalid_nested_backup_root_never_creates_directories_inside_world() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        // Create-only scratch root; never reuse a user world.
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-rotate-nested-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let world = root.join("world");
+        fs::create_dir(&world).unwrap();
+        let file = world.join("flat.irw");
+        World::new().save_new(&file).unwrap();
+        let original = fs::read(&file).unwrap();
+        let mut lock = WorldSessionLock::acquire(&world).unwrap();
+
+        let nested = world.join("never-created").join("backups");
+        let error = rotate(&file, &nested, 1, &mut lock).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(!world.join("never-created").exists());
+        assert_eq!(fs::read(&file).unwrap(), original);
+        lock.verify().unwrap();
+
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn rotation_validates_and_never_deletes_unmarked_directory() {
         let root = std::env::temp_dir().join(format!("j92-{}", std::process::id()));
