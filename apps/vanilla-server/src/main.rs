@@ -12059,6 +12059,78 @@ mod primed_tnt_protocol5_tests {
 }
 
 #[cfg(test)]
+mod reg114_concurrent_chunk_mining_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    /// REG-114 / #750: two sessions concurrently mine on opposite sides of
+    /// a chunk boundary. Both durable blocks and both clients' block-change
+    /// mailboxes must converge without losing either notification.
+    #[test]
+    fn simultaneous_neighbor_chunk_mining_persists_and_broadcasts_both_changes() {
+        for (case, pair) in [[15, 16], [-1, 0]].into_iter().enumerate() {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let scratch = std::env::temp_dir().join(format!(
+                "ir1710-reg114-{}-{case}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&scratch).unwrap();
+            let path = scratch.join("isolated.irw");
+            let mut initial = World::new();
+            for x in pair {
+                initial.update_and_save(&path, x, 64, 0, 1 << 4).unwrap();
+            }
+            let state = Mutex::new(initial);
+            let hub = Hub::default();
+            let (_, receiver_a, _) = hub
+                .add("MinerA".into(), "uuid-a".into(), PlayerPosition::default())
+                .unwrap();
+            let (_, receiver_b, _) = hub
+                .add("MinerB".into(), "uuid-b".into(), PlayerPosition::default())
+                .unwrap();
+            let barrier = Barrier::new(3);
+            std::thread::scope(|scope| {
+                for x in pair {
+                    let barrier = &barrier;
+                    let state = &state;
+                    let hub = &hub;
+                    let path = &path;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let mut world = state.lock().unwrap();
+                        assert!(world.update_and_save(path, x, 64, 0, 0).unwrap());
+                        hub.broadcast(block_change_event(&world, x, 64, 0));
+                    });
+                }
+                barrier.wait();
+            });
+
+            let persisted = World::load(&path).unwrap();
+            for x in pair {
+                assert_eq!(state.lock().unwrap().get(x, 64, 0), 0);
+                assert_eq!(persisted.get(x, 64, 0), 0);
+            }
+            for receiver in [&receiver_a, &receiver_b] {
+                let mut seen = BTreeSet::new();
+                while let Ok(event) = receiver.try_recv() {
+                    if event.id == 0x23 {
+                        assert_eq!(event.body[4], 64);
+                        assert_eq!(&event.body[5..9], &0i32.to_be_bytes());
+                        assert_eq!(&event.body[9..], &[0, 0]);
+                        seen.insert(i32::from_be_bytes(event.body[0..4].try_into().unwrap()));
+                    }
+                }
+                assert_eq!(seen, BTreeSet::from(pair));
+            }
+            std::fs::remove_dir_all(scratch).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
 mod protocol5_chunk_transition_regression_tests {
     use super::*;
 
