@@ -2111,6 +2111,78 @@ mod tests {
         assert!(inventory.encoded().is_ok());
     }
 
+    /// REG-132 / #768: server-owned chest collection caps at the legal stack
+    /// size and never merges a differently damaged or tagged ItemStack.
+    #[test]
+    fn reg132_chest_double_click_conserves_items_metadata_and_nbt() {
+        use fastnbt::Value;
+        use std::collections::HashMap;
+
+        let stone = Stack {
+            id: 1,
+            count: 60,
+            damage: 0,
+            nbt: None,
+        };
+        let tagged = crate::item_nbt::from_value(&Value::Compound(HashMap::from([(
+            "Owner".to_string(),
+            Value::Int(7),
+        )]))).unwrap();
+        let mut inventory = Inventory::default();
+        inventory.cursor = Some(stone);
+        inventory.slots[9] = Some(Stack { count: 8, ..stone });
+        let mut chest = [None; 27];
+        chest[0] = Some(Stack { count: 3, ..stone });
+        chest[1] = Some(Stack {
+            count: 4,
+            damage: 1,
+            ..stone
+        });
+        chest[2] = Some(Stack {
+            count: 2,
+            nbt: Some(tagged),
+            ..stone
+        });
+        chest[3] = Some(Stack { count: 3, ..stone });
+
+        let total = |inventory: &Inventory, chest: &[Option<Stack>; 27]| -> u32 {
+            inventory.slots[9..45]
+                .iter()
+                .chain(chest.iter())
+                .flatten()
+                .map(|stack| u32::from(stack.count))
+                .sum::<u32>()
+                + inventory.cursor.map_or(0, |stack| u32::from(stack.count))
+        };
+        let before = total(&inventory, &chest);
+        assert_eq!(before, 80);
+        assert_eq!(
+            inventory.chest_click_window(1, &mut chest, 0, 0, 6),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(inventory.cursor, Some(Stack { count: 64, ..stone }));
+        assert_eq!(chest[0], None);
+        assert_eq!(chest[1].unwrap().damage, 1);
+        assert_eq!(chest[2].unwrap().nbt, Some(tagged));
+        assert_eq!(chest[3], Some(Stack { count: 2, ..stone }));
+        assert_eq!(inventory.slots[9], Some(Stack { count: 8, ..stone }));
+        assert_eq!(total(&inventory, &chest), before);
+
+        let unchanged = inventory.clone();
+        let chest_before = chest;
+        assert_eq!(inventory.chest_click_window(1, &mut chest, 63, 0, 6), None);
+        assert_eq!(inventory, unchanged);
+        assert_eq!(chest, chest_before);
+        let saved = inventory.encoded().unwrap();
+        let restored: Inventory = serde_json::from_slice(&saved).unwrap();
+        let saved_chest = serde_json::to_vec(&chest).unwrap();
+        let restored_chest: [Option<Stack>; 27] =
+            serde_json::from_slice(&saved_chest).unwrap();
+        assert_eq!(restored, inventory);
+        assert_eq!(restored_chest, chest);
+        assert_eq!(total(&restored, &restored_chest), before);
+    }
+
     /// REG-135 / #771: a full 36-slot player inventory cannot swallow items
     /// from a chest. When one partial stack is available, only that capacity
     /// is consumed; the remainder stays in the server-owned chest.
