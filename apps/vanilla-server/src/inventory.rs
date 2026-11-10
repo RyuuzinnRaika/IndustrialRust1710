@@ -2079,8 +2079,10 @@ mod tests {
             damage: 0,
             nbt: None,
         };
-        let mut inventory = Inventory::default();
-        inventory.cursor = Some(wool);
+        let mut inventory = Inventory {
+            cursor: Some(wool),
+            ..Default::default()
+        };
         inventory.slots[9] = Some(Stack { count: 10, ..wool });
         inventory.slots[10] = Some(Stack {
             count: 3,
@@ -2126,8 +2128,10 @@ mod tests {
         };
         let nbt_value = Value::Compound(HashMap::from([("Owner".to_string(), Value::Int(7))]));
         let tagged = crate::item_nbt::from_value(&nbt_value).unwrap();
-        let mut inventory = Inventory::default();
-        inventory.cursor = Some(stone);
+        let mut inventory = Inventory {
+            cursor: Some(stone),
+            ..Default::default()
+        };
         inventory.slots[9] = Some(Stack { count: 8, ..stone });
         let mut chest = [None; 27];
         chest[0] = Some(Stack { count: 3, ..stone });
