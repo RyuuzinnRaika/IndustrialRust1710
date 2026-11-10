@@ -197,6 +197,9 @@ impl World {
             // Other faces receive only its ordinary weak power; treating all
             // faces as strong would incorrectly energize adjacent conductors.
             55 if to == (x, y - 1, z) => (block & 15) as u8,
+            // Detector rails weakly power neighboring blocks and strongly
+            // power their solid support in Java Edition 1.7.10.
+            28 if block & 8 != 0 && to == (x, y - 1, z) => 15,
             152 => 15,
             76 if to == (x, y + 1, z) => 15,
             94 => {
@@ -309,6 +312,13 @@ impl World {
             // shape and the supporting block below. It does not power above.
             55 if to == (x, y - 1, z) || self.dust_points_into(from, to) => (block & 15) as u8,
             55 => 0,
+            28 if block & 8 != 0
+                && NEIGHBORS
+                    .iter()
+                    .any(|&(dx, dy, dz)| to == (x + dx, y + dy, z + dz)) =>
+            {
+                15
+            }
             69 | 77 | 143 => {
                 if block & 8 != 0 {
                     15
@@ -2539,6 +2549,35 @@ mod redstone_regression_tests {
             }
             fs::remove_file(path).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod reg169_detector_signal_regressions {
+    use super::*;
+
+    #[test]
+    fn powered_detector_rail_weakly_powers_faces_and_strongly_powers_support() {
+        let mut world = World::new();
+        // Shape 1: east-west, metadata bit 3 marks the detector as active.
+        world.import_block(0, 64, 0, (28 << 4) | 9).unwrap();
+        for neighbor in [
+            (-1, 64, 0),
+            (1, 64, 0),
+            (0, 64, -1),
+            (0, 64, 1),
+            (0, 63, 0),
+            (0, 65, 0),
+        ] {
+            assert_eq!(world.signal_into((0, 64, 0), neighbor), 15);
+        }
+        assert_eq!(world.strong_signal_into((0, 64, 0), (0, 63, 0)), 15);
+        assert_eq!(world.strong_signal_into((0, 64, 0), (1, 64, 0)), 0);
+        assert_eq!(world.signal_into((0, 64, 0), (0, 64, 2)), 0);
+
+        world.import_block(0, 64, 0, (28 << 4) | 1).unwrap();
+        assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 0);
+        assert_eq!(world.strong_signal_into((0, 64, 0), (0, 63, 0)), 0);
     }
 }
 
