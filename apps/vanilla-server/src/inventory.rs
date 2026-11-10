@@ -2174,8 +2174,7 @@ mod tests {
         let saved = inventory.encoded().unwrap();
         let restored: Inventory = serde_json::from_slice(&saved).unwrap();
         let saved_chest = serde_json::to_vec(&chest).unwrap();
-        let restored_chest: [Option<Stack>; 27] =
-            serde_json::from_slice(&saved_chest).unwrap();
+        let restored_chest: [Option<Stack>; 27] = serde_json::from_slice(&saved_chest).unwrap();
         assert_eq!(restored, inventory);
         assert_eq!(restored_chest, chest);
         assert_eq!(total(&restored, &restored_chest), before);
