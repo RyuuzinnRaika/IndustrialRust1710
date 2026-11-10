@@ -50,6 +50,10 @@ def export_report(data: object) -> dict:
             raise ValueError("Invalid exit code")
         if status == "PASS" and code != 0:
             raise ValueError("PASS requires exit code 0")
+        if status == "NOT_RUN" and code is not None:
+            raise ValueError("NOT_RUN cannot have an exit code")
+        if status == "FAIL" and code == 0:
+            raise ValueError("FAIL cannot have exit code 0")
         tests = raw.get("failed_tests", [])
         if not isinstance(tests, list):
             raise ValueError("Invalid failed_tests")
@@ -98,8 +102,9 @@ def main() -> None:
     args = parser.parse_args()
     try:
         write_export(args.source, args.output)
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        parser.exit(2, f"Cannot export verification summary: {error}\n")
+    except (OSError, ValueError, json.JSONDecodeError):
+        # Raw OS/JSON exception text may contain local paths or report details.
+        parser.exit(2, "Cannot export verification summary (input/output invalid; inspect locally)\n")
 
 
 if __name__ == "__main__":
