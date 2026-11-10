@@ -2197,6 +2197,72 @@ impl World {
             .then_some(partner)
     }
 
+    /// The persisted active detector rails are a bounded sparse subset of
+    /// edited blocks; inspecting this set also clears stale power after a
+    /// crash/restart without a separate sidecar state format.
+    pub fn powered_detector_rails(&self) -> BTreeSet<(i32, i32, i32)> {
+        self.edits
+            .iter()
+            .filter_map(|(&(x, y, z), &block)| {
+                (block >> 4 == 28 && block & 8 != 0).then_some((x, i32::from(y), z))
+            })
+            .collect()
+    }
+
+    /// REG-169 / #805: apply minecart detector occupancy to the authoritative
+    /// World in a single durable snapshot. Cap edits per step to avoid a
+    /// malformed world with thousands of powered rails stalling 20TPS.
+    /// Remaining stale rails are retried on the next tick.
+    pub fn reconcile_detector_rails(
+        &mut self,
+        path: &Path,
+        occupied: &BTreeSet<(i32, i32, i32)>,
+    ) -> io::Result<Vec<(i32, i32, i32)>> {
+        const MAX_CHANGES: usize = 64;
+        let prior = self.powered_detector_rails();
+        let updates: Vec<_> = prior
+            .union(occupied)
+            .filter_map(|&(x, y, z)| {
+                if !in_bounds(x, y, z) {
+                    return None;
+                }
+                let old = self.get(x, y, z);
+                if old >> 4 != 28 {
+                    return None;
+                }
+                let next = if occupied.contains(&(x, y, z)) {
+                    old | 8
+                } else {
+                    old & !8
+                };
+                (old != next).then_some((x, y, z, next))
+            })
+            .take(MAX_CHANGES)
+            .collect();
+        if updates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut next_world = self.clone();
+        for &(x, y, z, next) in &updates {
+            let key = (x, y as u8, z);
+            if next == next_world.base_block(x, y as u8, z) {
+                next_world.edits.remove(&key);
+            } else {
+                next_world.edits.insert(key, next);
+            }
+            next_world.wake_block_updates(x, y, z);
+        }
+        if next_world.edits.len() > MAX_EDITS {
+            return Err(invalid("detector rail update exceeds world edit capacity"));
+        }
+        next_world.save(path)?;
+        *self = next_world;
+        Ok(updates
+            .into_iter()
+            .map(|(x, y, z, _)| (x, y, z))
+            .collect())
+    }
+
     /// Persist a small related block edit (such as the two bed halves) as
     /// one world snapshot, never exposing a half-built object to clients.
     pub fn update_many_and_save(
@@ -6697,6 +6763,42 @@ mod group_b_regression_tests {
         }
         assert_eq!(world.get(0, 65, 0), 0);
         assert_eq!(World::load(&path).unwrap().get(0, 65, 0), 0);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reg169_detector_occupancy_world_tests {
+    use super::*;
+
+    #[test]
+    fn two_occupied_detector_rails_release_only_after_last_cart_leaves() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-reg169-world-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        for x in [0, 2] {
+            world.import_block(x, 64, 0, (28 << 4) | 1).unwrap();
+        }
+        let both = BTreeSet::from([(0, 64, 0), (2, 64, 0)]);
+        assert_eq!(world.reconcile_detector_rails(&path, &both).unwrap().len(), 2);
+        let one = BTreeSet::from([(2, 64, 0)]);
+        assert_eq!(
+            world.reconcile_detector_rails(&path, &one).unwrap(),
+            vec![(0, 64, 0)]
+        );
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(0, 64, 0) & 8, 0);
+        assert_eq!(restored.get(2, 64, 0) & 8, 8);
+        // Restart with no carts: the persisted powered bit must be cleared.
+        assert_eq!(
+            world.reconcile_detector_rails(&path, &BTreeSet::new()).unwrap(),
+            vec![(2, 64, 0)]
+        );
+        assert!(World::load(&path).unwrap().powered_detector_rails().is_empty());
         std::fs::remove_file(path).unwrap();
     }
 }
