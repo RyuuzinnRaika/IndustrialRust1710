@@ -942,6 +942,29 @@ fn piston_placement_facing(yaw: f32, player: (f64, f64, f64), target: (i32, i32,
     horizontal_placement_facing(yaw)
 }
 
+/// End portal frames (120) face the player who placed them, using the
+/// legacy metadata convention 0=S, 1=W, 2=N, 3=E. The direction is the
+/// dominant horizontal axis from the placed cell toward the player, so
+/// a ring built from its center faces inward on every side — the only
+/// orientation `end_eye_changes` accepts when the last eye completes
+/// the portal. Before this, frames always landed with metadata 0 and
+/// no client-built ring could ever activate.
+fn end_frame_placement_facing(player: (f64, f64, f64), target: (i32, i32, i32)) -> u16 {
+    let dx = player.0 - (f64::from(target.0) + 0.5);
+    let dz = player.2 - (f64::from(target.2) + 0.5);
+    if dx.abs() > dz.abs() {
+        if dx > 0.0 {
+            3 // player is east of the frame: it faces east
+        } else {
+            1 // west
+        }
+    } else if dz > 0.0 {
+        0 // south
+    } else {
+        2 // north
+    }
+}
+
 /// Protocol 5 clicked-face -> 1.7.10 wall/floor torch metadata.
 /// Undersides cannot support vanilla or redstone torches.
 fn torch_attachment_metadata(face: i8) -> Option<u16> {
@@ -6026,6 +6049,8 @@ fn play(
                                 }
                             } else if matches!(block_id, 61 | 62) {
                                 horizontal_placement_facing(yaw)
+                            } else if block_id == 120 {
+                                end_frame_placement_facing(location, (nx, ny, nz))
                             } else if block_id == 63 {
                                 ((yaw.rem_euclid(360.0) * 16.0 / 360.0).round() as u16) & 15
                             } else if block_id == 68 {
