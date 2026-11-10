@@ -4,7 +4,7 @@ use legacy_protocol::{read_frame, read_varint, write_string, write_varint, Curso
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NEXT_SERVER_DIR_ID: AtomicU64 = AtomicU64::new(0);
-// Serializes ephemeral port reservation and child readiness across tests.
+// Serialize test-server startup so parallel tests do not overload readiness.
 static SERVER_START_LOCK: Mutex<()> = Mutex::new(());
 
 struct Server {
@@ -50,30 +50,29 @@ impl Server {
             .unwrap(),
         )
         .unwrap();
-        // A port selected with bind(:0) becomes free before the child binds.
-        // Do not let another test in this process reserve the same port.
+        // Let the server own its port from the initial bind. Reserving a
+        // listener with bind(:0), dropping it and then giving its port to the
+        // child allows unrelated processes to steal that port (TOCTOU).
         let launch_guard = SERVER_START_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
         let stderr_log = dir.join("server.stderr.log");
         let stderr_file = fs::File::create(&stderr_log).unwrap();
+        let stdout_file = stderr_file.try_clone().unwrap();
         let child = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
-            .args(["--bind", &format!("127.0.0.1:{port}")])
+            .args(["--bind", "127.0.0.1:0"])
             .arg("--whitelist")
             .arg(dir.join("whitelist.json"))
             .arg("--world")
             .arg(dir.join("security.irw"))
-            .stdout(Stdio::null())
+            .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
             .spawn()
             .unwrap();
         let mut server = Self {
             child,
             dir,
-            port,
+            port: 0,
             stderr_log,
         };
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -84,7 +83,21 @@ impl Server {
                     server.diagnostics()
                 );
             }
-            match TcpStream::connect(("127.0.0.1", port)) {
+            // The server prints the actual OS-assigned port only after its
+            // listener has bound successfully. Never infer it from a
+            // preflight socket that has already been closed.
+            let Some(port) = Self::parse_listening_port(&server.diagnostics()) else {
+                assert!(
+                    Instant::now() < deadline,
+                    "test server never reported its bound port\n{}",
+                    server.diagnostics()
+                );
+                thread::sleep(Duration::from_millis(40));
+                continue;
+            };
+            server.port = port;
+            let endpoint = SocketAddr::from(([127, 0, 0, 1], port));
+            match TcpStream::connect_timeout(&endpoint, Duration::from_millis(500)) {
                 Ok(socket) => match Self::probe_ready(port, socket) {
                     Ok(()) => break,
                     Err(error)
@@ -115,6 +128,14 @@ impl Server {
             .unwrap_or_else(|error| format!("could not read server stderr: {error}"))
     }
 
+    fn parse_listening_port(log: &str) -> Option<u16> {
+        const PREFIX: &str = "IndustrialRust1710: listening on 127.0.0.1:";
+        log.lines().find_map(|line| {
+            let port = line.strip_prefix(PREFIX)?.split_whitespace().next()?;
+            port.parse::<u16>().ok().filter(|port| *port != 0)
+        })
+    }
+
     // Retry only transport failures during startup. A malformed Status/Pong
     // must still fail immediately rather than masking a protocol regression.
     fn retryable_probe_error(error: &io::Error) -> bool {
@@ -133,8 +154,8 @@ impl Server {
     // TCP accept alone does not prove Protocol 5 readiness. Require a valid
     // Status Response and matching Ping/Pong before running login assertions.
     fn probe_ready(port: u16, mut socket: TcpStream) -> io::Result<()> {
-        socket.set_read_timeout(Some(Duration::from_secs(10)))?;
-        socket.set_write_timeout(Some(Duration::from_secs(10)))?;
+        socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+        socket.set_write_timeout(Some(Duration::from_secs(2)))?;
         socket.write_all(&handshake(port, "localhost", 1))?;
         socket.write_all(&frame(0, &[]))?;
 
@@ -272,6 +293,24 @@ fn server_temp_dirs_are_unique_when_clock_ticks_match() {
         .collect();
     let dirs: HashSet<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
     assert_eq!(dirs.len(), 32);
+}
+
+#[test]
+fn server_bound_port_parser_rejects_incomplete_or_untrusted_logs() {
+    let line = "IndustrialRust1710: listening on 127.0.0.1:42422 (1.7.10 vanilla, up to 8 players)";
+    assert_eq!(Server::parse_listening_port(line), Some(42422));
+    assert_eq!(
+        Server::parse_listening_port(&format!("warning before startup\n{line}\nmore logs")),
+        Some(42422)
+    );
+    for invalid in [
+        "",
+        "IndustrialRust1710: listening on 127.0.0.1:0 (invalid)",
+        "IndustrialRust1710: listening on 127.0.0.1:xyz (invalid)",
+        "IndustrialRust1710: listening on 0.0.0.0:42422 (wrong bind)",
+    ] {
+        assert_eq!(Server::parse_listening_port(invalid), None);
+    }
 }
 
 #[test]
