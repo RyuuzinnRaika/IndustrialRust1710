@@ -1021,10 +1021,8 @@ mod redstone_regression_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let scratch = std::env::temp_dir().join(format!(
-            "ir1710-reg163-{}-{nanos}",
-            std::process::id()
-        ));
+        let scratch =
+            std::env::temp_dir().join(format!("ir1710-reg163-{}-{nanos}", std::process::id()));
         std::fs::create_dir(&scratch).unwrap();
         let path = scratch.join("isolated.irw");
         let mut world = World::new();
@@ -1097,10 +1095,7 @@ mod redstone_regression_tests {
         let mixed = world.device_changes(3);
         assert!(mixed.len() <= 3);
         assert_eq!(mixed.get(&(0, 64, 0)), Some(&(77 << 4)));
-        assert_eq!(
-            mixed.keys().filter(|&&(x, _, _)| x >= 20).count(),
-            2
-        );
+        assert_eq!(mixed.keys().filter(|&&(x, _, _)| x >= 20).count(), 2);
         assert!(world.device_changes(0).is_empty());
     }
 
