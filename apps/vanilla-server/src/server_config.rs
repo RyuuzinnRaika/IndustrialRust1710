@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const MAX_PROPERTIES_BYTES: u64 = 64 * 1024;
 
@@ -23,6 +23,20 @@ pub fn offline_exposure_warning(bind: SocketAddr, online_mode: bool) -> Option<&
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
+}
+
+/// Prevent a user-controlled path from escaping its selected directory
+/// through an explicit '..' component before any lock or write is attempted.
+/// Safe relative paths and intentionally provided absolute paths remain valid.
+pub fn reject_parent_traversal(path: &Path) -> io::Result<()> {
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(invalid("unsafe path: empty or parent-directory traversal"));
+    }
+    Ok(())
 }
 
 fn invalid_property(key: &str, expected: &str) -> io::Error {
@@ -80,6 +94,7 @@ fn legacy_world_name(name: &str) -> io::Result<()> {
 
 /// Never let an IRW prototype start writing alongside real vanilla level.dat.
 pub fn verify_legacy_storage(world_file: &Path) -> io::Result<()> {
+    reject_parent_traversal(world_file)?;
     let parent = world_file
         .parent()
         .ok_or_else(|| invalid("world path has no parent"))?;
@@ -290,6 +305,31 @@ difficulty=1
 max-players=8
 gamemode=1
 ";
+
+    #[test]
+    fn world_paths_allow_normal_relative_and_absolute_paths_but_reject_parent_traversal() {
+        for safe in ["world/flat.irw", "./world/flat.irw", "world", "."] {
+            assert!(reject_parent_traversal(Path::new(safe)).is_ok(), "{safe}");
+        }
+        let absolute = std::env::temp_dir().join("ir1710-path-test/flat.irw");
+        assert!(reject_parent_traversal(&absolute).is_ok());
+        for unsafe_path in [
+            "",
+            "../outside/flat.irw",
+            "world/../outside.irw",
+            "world/nested/../../outside.irw",
+        ] {
+            let error = reject_parent_traversal(Path::new(unsafe_path)).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData, "{unsafe_path}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_parent_traversal_and_drive_prefixes_are_distinguished() {
+        assert!(reject_parent_traversal(Path::new(r"C:\Worlds\flat.irw")).is_ok());
+        assert!(reject_parent_traversal(Path::new(r"C:\Worlds\..\escape.irw")).is_err());
+    }
 
     #[test]
     fn offline_warning_matches_authentication_and_ipv4_ipv6_exposure() {
