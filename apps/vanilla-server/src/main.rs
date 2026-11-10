@@ -9304,8 +9304,11 @@ fn main() -> io::Result<()> {
     );
     // When stdout is redirected to a file by the TCP acceptance harness,
     // output may be block-buffered. Publish the bound port before clients
-    // probe readiness rather than letting them time out waiting for a log.
-    io::stdout().flush()?;
+    // probe readiness. A closed stdout must not prevent the game server from
+    // starting; diagnostics are best effort, not part of world state.
+    if let Err(error) = io::stdout().flush() {
+        eprintln!("warning: could not flush listener startup message: {error}");
+    }
     if let Some(message) = server_config::offline_exposure_warning(actual_bind, online_mode) {
         eprintln!("{message}");
     }
