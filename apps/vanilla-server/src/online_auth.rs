@@ -304,10 +304,10 @@ mod tests {
         assert!(verify_challenge_token(&next, &next).is_ok());
 
         for (challenge, returned) in [
-            (&next, &first[..]),             // replayed response from session A
-            (&first, &[][..]),               // absent response
-            (&first, &first[..3]),           // truncated token
-            (&first, &[0x12, 0x34, 0x56, 0x79][..]), // one changed byte
+            (&next, &first[..]),                           // replayed response from session A
+            (&first, &[][..]),                             // absent response
+            (&first, &first[..3]),                         // truncated token
+            (&first, &[0x12, 0x34, 0x56, 0x79][..]),       // one changed byte
             (&first, &[0x12, 0x34, 0x56, 0x78, 0x00][..]), // extra byte
         ] {
             let error = verify_challenge_token(challenge, returned).unwrap_err();
