@@ -123,6 +123,29 @@ fn reject_reason(port: u16, version: u32, username: Option<&str>) -> Value {
     json
 }
 
+fn join_until_position(port: u16, name: &str) -> TcpStream {
+    let mut socket = connect(port).expect("connect filler login");
+    send(&mut socket, 0, &handshake(port, 5, 2).unwrap()).unwrap();
+    let mut login_start = Vec::new();
+    write_string(name, &mut login_start).unwrap();
+    send(&mut socket, 0, &login_start).unwrap();
+    let (success_id, success) = receive(&mut socket).expect("filler Login Success");
+    assert_eq!(success_id, 2, "filler must receive Login Success");
+    let mut reader = Cursor::new(&success);
+    assert_eq!(reader.read_string(40).unwrap().len(), 36);
+    assert_eq!(reader.read_string(16).unwrap(), name);
+    reader.finish().unwrap();
+    // Drain the initial Play burst until Player Position & Look (0x08),
+    // which the server sends after Join Game, chunks and inventory.
+    for _ in 0..512 {
+        let (id, _) = receive(&mut socket).expect("initial Play packets");
+        if id == 0x08 {
+            return socket;
+        }
+    }
+    panic!("server never sent Player Position & Look for {name}");
+}
+
 impl Server {
     fn start() -> Self {
         let stamp = SystemTime::now()
@@ -134,7 +157,11 @@ impl Server {
             std::process::id()
         ));
         fs::create_dir(&root).expect("create-only isolated world");
-        fs::write(root.join("whitelist.json"), r#"[{"name":"RustTester"}]"#).unwrap();
+        fs::write(
+            root.join("whitelist.json"),
+            r#"[{"name":"RustTester"},{"name":"Full0"},{"name":"Full1"},{"name":"Full2"},{"name":"Full3"},{"name":"Full4"},{"name":"Full5"},{"name":"Full6"},{"name":"Full7"},{"name":"NinthGuest"}]"#,
+        )
+        .unwrap();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -219,5 +246,20 @@ fn reg124_login_rejection_reasons_are_json_and_never_admit_players() {
     reader.finish().unwrap();
     server.wait_online(1);
     drop(legitimate);
+    server.wait_online(0);
+
+    // Server-full rejection: fill all eight Hub slots with whitelisted
+    // players, then a ninth *whitelisted* login must be refused by the
+    // capacity gate with the exact 1.7.10 reason, serialized as JSON, and
+    // must not leave a residual session behind.
+    let mut fillers = Vec::new();
+    for index in 0..8 {
+        fillers.push(join_until_position(server.port, &format!("Full{index}")));
+    }
+    server.wait_online(8);
+    let full = reject_reason(server.port, 5, Some("NinthGuest"));
+    assert_eq!(full["text"], "Server is full.");
+    server.wait_online(8);
+    drop(fillers);
     server.wait_online(0);
 }
