@@ -4,6 +4,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+import sys
+from io import StringIO
 
 spec = importlib.util.spec_from_file_location(
     "export_verification_summary", Path(__file__).with_name("export_verification_summary.py")
@@ -75,6 +78,32 @@ class ExportSummaryTests(unittest.TestCase):
     def test_rejects_bad_report(self):
         with self.assertRaises(ValueError):
             module.export_report({"schema_version": 2, "checks": []})
+
+
+    def test_not_run_with_exit_code_and_fail_with_zero_are_rejected(self):
+        data = self.fixture()
+        data["checks"][0].update(status="NOT_RUN", exit_code=0)
+        with self.assertRaises(ValueError):
+            module.export_report(data)
+        data["checks"][0].update(status="FAIL", exit_code=0)
+        with self.assertRaises(ValueError):
+            module.export_report(data)
+        # A process terminated by a signal may have no conventional exit code.
+        data["checks"][0].update(status="FAIL", exit_code=None)
+        self.assertEqual(module.export_report(data)["checks"][0]["status"], "FAIL")
+
+    def test_cli_failure_never_echoes_sensitive_source_path(self):
+        with tempfile.TemporaryDirectory(prefix="sensitive-private-archive-") as tmp:
+            missing = Path(tmp) / "private-identifiable-report.json"
+            output = Path(tmp) / "safe.json"
+            stderr = StringIO()
+            with patch.object(sys, "argv", ["export_verification_summary.py", str(missing), "--output", str(output)]):
+                with patch.object(sys, "stderr", stderr):
+                    with self.assertRaises(SystemExit) as result:
+                        module.main()
+            self.assertEqual(result.exception.code, 2)
+            self.assertNotIn(str(missing), stderr.getvalue())
+            self.assertNotIn("sensitive-private-archive", stderr.getvalue())
 
 
 if __name__ == "__main__":
