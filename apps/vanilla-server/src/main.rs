@@ -7500,14 +7500,17 @@ fn handle(
     // A portal may have changed the active dimension since login. Never save
     // the shared Mob state against a stale admission world at disconnect.
     let disconnect_world = session_world(&world, dimension_worlds.as_deref(), session_dimension);
-    let mob_saved = {
+    // Treat Mob snapshot failure as a saved error, not an early return.
+    // Otherwise a poisoned world/Mob lock skips all independent player files
+    // and the boats, carts and fishing cleanup, even after join-transfer fails.
+    let mob_saved: io::Result<()> = (|| {
         let guard = disconnect_world
             .lock()
             .map_err(|_| bad("world mutex poisoned"))?;
         mobs.lock()
             .map_err(|_| bad("mob mutex poisoned"))?
             .save(&guard)
-    };
+    })();
     let player_saved = player_state.save_state_in_dimension(
         &player_file,
         player_vitals,
