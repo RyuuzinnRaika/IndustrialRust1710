@@ -4109,13 +4109,22 @@ fn play(
                                 let in_reach = world::in_bounds(x, y, z) && near(location, x, y, z);
                                 mining = if in_reach {
                                     let (submerged, grounded) = mining_environment(&w, player);
-                                    MiningProgress::start_with_environment_and_affinity(
+                                    let haste = active_effects
+                                        .iter()
+                                        .filter(|effect| {
+                                            effect.kind == 3 && effect.expires_at > now_tick
+                                        })
+                                        .map(|effect| effect.amplifier)
+                                        .max();
+                                    MiningProgress::start_with_environment_and_modifiers(
                                         target,
                                         w.get(x, y, z),
                                         inventory.held(),
                                         submerged,
                                         grounded,
                                         survival::helmet_has_aqua_affinity(inventory.mining_helmet()),
+                                        survival::tool_efficiency_level(inventory.held()),
+                                        haste,
                                     )
                                 } else {
                                     None
@@ -4139,14 +4148,23 @@ fn play(
                                 let mut w =
                                     world.lock().map_err(|_| bad("world mutex poisoned"))?;
                                 let (submerged, grounded) = mining_environment(&w, player);
+                                let haste = active_effects
+                                    .iter()
+                                    .filter(|effect| {
+                                        effect.kind == 3 && effect.expires_at > now_tick
+                                    })
+                                    .map(|effect| effect.amplifier)
+                                    .max();
                                 let result = attempt.and_then(|m| {
-                                    m.finish_with_environment_and_affinity(
+                                    m.finish_with_environment_and_modifiers(
                                         target,
                                         w.get(x, y, z),
                                         inventory.held(),
                                         submerged,
                                         grounded,
                                         survival::helmet_has_aqua_affinity(inventory.mining_helmet()),
+                                        survival::tool_efficiency_level(inventory.held()),
+                                        haste,
                                     )
                                 });
                                 if trace_mining && result.is_none() {
