@@ -3540,6 +3540,76 @@ mod tests {
     }
 
     #[test]
+    fn add027_blast_across_chunk_border_matches_saved_edits() {
+        let path = std::env::temp_dir().join(format!("ir1710-add027-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        // A stone slab spanning the four chunks around corner (16, 16),
+        // plus a control block far outside any blast radius. The world
+        // has its own terrain below the slab, so snapshot the whole
+        // blast bounding box before firing.
+        let mut slab = Vec::new();
+        for x in 12..=19 {
+            for z in 12..=19 {
+                world.import_block(x, 64, z, 1 << 4).unwrap();
+                slab.push((x, 64, z));
+            }
+        }
+        world.import_block(24, 64, 24, 1 << 4).unwrap();
+        world.save(&path).unwrap();
+        let mut before = std::collections::BTreeMap::new();
+        for x in 12..=18 {
+            for y in 61..=67 {
+                for z in 12..=18 {
+                    before.insert((x, y, z), world.get(x, y, z));
+                }
+            }
+        }
+
+        // Blast centered on the chunk corner cell (15, 64, 15).
+        let changed = world
+            .creeper_blast_and_save(&path, (15, 64, 15), 3.0)
+            .unwrap();
+        let changed_set: std::collections::BTreeSet<_> = changed.iter().copied().collect();
+        assert!(!changed_set.is_empty());
+        // The notified set must really span all four chunks.
+        assert!(changed_set.iter().any(|&(x, _, z)| x < 16 && z < 16));
+        assert!(changed_set.iter().any(|&(x, _, z)| x >= 16 && z < 16));
+        assert!(changed_set.iter().any(|&(x, _, z)| x < 16 && z >= 16));
+        assert!(changed_set.iter().any(|&(x, _, z)| x >= 16 && z >= 16));
+        // Only previously non-air cells may be notified.
+        for &cell in &changed_set {
+            assert_ne!(before[&cell], 0, "notified air cell {cell:?}");
+        }
+
+        // Live state and the persisted edits must agree exactly with
+        // the notification set: notified -> air, everything else as it
+        // was before, in memory and after reload.
+        let reloaded = World::load(&path).unwrap();
+        for (&cell, &previous) in &before {
+            let expected = if changed_set.contains(&cell) {
+                0
+            } else {
+                previous
+            };
+            assert_eq!(world.get(cell.0, cell.1, cell.2), expected, "live {cell:?}");
+            assert_eq!(
+                reloaded.get(cell.0, cell.1, cell.2),
+                expected,
+                "reloaded {cell:?}"
+            );
+        }
+        for &cell in &slab {
+            if !changed_set.contains(&cell) {
+                assert_eq!(reloaded.get(cell.0, cell.1, cell.2), 1 << 4);
+            }
+        }
+        assert_eq!(world.get(24, 64, 24), 1 << 4);
+        assert_eq!(reloaded.get(24, 64, 24), 1 << 4);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn add028_snow_and_ice_melt_at_block_light_12_and_persist() {
         let path =
             std::env::temp_dir().join(format!("ir1710-add028-melt-{}.irw", std::process::id()));
