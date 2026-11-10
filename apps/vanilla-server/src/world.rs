@@ -6595,6 +6595,50 @@ mod group_b_regression_tests {
     }
 
     #[test]
+    fn add023_pressed_button_release_survives_reload_exactly_once() {
+        fn press_and_count_releases(path: &std::path::Path, reload: bool) -> (usize, u16) {
+            let mut world = World::new();
+            world.update_and_save(path, 0, 64, 0, 1 << 4).unwrap();
+            world.update_and_save(path, 0, 65, 0, 77 << 4).unwrap();
+            world.interact_device(path, 0, 65, 0).unwrap();
+            assert_eq!(world.get(0, 65, 0), (77 << 4) | 8);
+            if reload {
+                // Simulate a restart (or a chunk leaving and returning):
+                // the world is rebuilt purely from the saved IRW state.
+                world = World::load(path).unwrap();
+                assert_eq!(world.get(0, 65, 0), (77 << 4) | 8);
+                assert!(
+                    world.pending_buttons.contains_key(&(0, 65, 0)),
+                    "the pending release must be re-armed on load, not lost"
+                );
+            }
+            let mut releases = 0;
+            for _ in 0..40 {
+                let changed = world.block_tick(path, 64).unwrap();
+                releases += changed.iter().filter(|&&c| c == (0, 65, 0)).count();
+            }
+            assert!(world.pending_buttons.is_empty());
+            (releases, world.get(0, 65, 0))
+        }
+        let control_path = temp("add023-control");
+        let _ = std::fs::remove_file(&control_path);
+        let (control_releases, control_final) = press_and_count_releases(&control_path, false);
+        assert_eq!(control_releases, 1);
+        assert_eq!(control_final, 77 << 4);
+
+        let path = temp("add023-reload");
+        let _ = std::fs::remove_file(&path);
+        let (releases, final_block) = press_and_count_releases(&path, true);
+        assert_eq!(releases, 1, "release must fire exactly once after reload");
+        assert_eq!(
+            final_block, control_final,
+            "reloaded run must end in the same state as the uninterrupted run"
+        );
+        std::fs::remove_file(control_path).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn falling_water_uses_legacy_level_eight_and_survives_reload() {
         let path = temp("flow-level8");
         let _ = std::fs::remove_file(&path);
