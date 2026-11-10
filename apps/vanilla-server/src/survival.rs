@@ -378,6 +378,7 @@ impl MiningProgress {
         Self::start_with_environment(target, block, held, false, true)
     }
 
+    #[cfg(test)]
     pub fn start_with_environment(
         target: (i32, i32, i32),
         block: u16,
@@ -437,6 +438,7 @@ impl MiningProgress {
 
     /// Apply the worse of the start/finish penalties, so entering water or
     /// jumping immediately before finishing never bypasses the server timer.
+    #[cfg(test)]
     pub fn finish_with_environment(
         self,
         target: (i32, i32, i32),
@@ -488,6 +490,7 @@ fn mining_elapsed_is_legal(elapsed: Duration, required: Duration) -> bool {
     elapsed.saturating_add(slack) >= required
 }
 
+#[cfg(test)]
 fn environment_penalty(head_submerged: bool, on_ground: bool) -> u32 {
     environment_penalty_with_affinity(head_submerged, on_ground, false)
 }
