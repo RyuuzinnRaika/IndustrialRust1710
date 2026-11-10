@@ -654,6 +654,11 @@ impl Inventory {
     pub fn held(&self) -> Option<Stack> {
         self.slots[36 + self.selected as usize]
     }
+    /// Helmet is protocol slot 5, independent of the selected hotbar tool.
+    /// Used for the server-owned Aqua Affinity mining-speed exception.
+    pub fn mining_helmet(&self) -> Option<Stack> {
+        self.slots[5]
+    }
     /// Target's session commits this staged inventory, never the command caller.
     pub fn command_enchant_held(&mut self, id: i16, level: i16) -> io::Result<bool> {
         let slot = self.held_slot() as usize;
