@@ -6702,6 +6702,73 @@ mod group_b_regression_tests {
 }
 
 #[cfg(test)]
+mod reg116_cave_generation_order_tests {
+    use super::*;
+
+    /// REG-116 / #752: the generated cave cross-section may not depend on
+    /// whether a player visits the east or west chunk first. Persisted IRW4
+    /// worlds must reproduce the same Protocol 5 full-column bytes.
+    #[test]
+    fn cave_boundaries_are_visit_order_and_restart_independent() {
+        let seed = 42u64;
+        let chunks = [(-2, -1), (-1, -1), (0, -1), (1, -1)];
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-reg116-caves-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+
+        // Query every column in the reverse order before taking a second
+        // set of snapshots in the forward order.
+        let reversed: Vec<_> = chunks
+            .iter()
+            .rev()
+            .map(|&(cx, cz)| (cx, cz, world.chunk_read_snapshot(cx, cz).chunk_data(cx, cz)))
+            .collect();
+        let forward: Vec<_> = chunks
+            .iter()
+            .map(|&(cx, cz)| (cx, cz, world.chunk_read_snapshot(cx, cz).chunk_data(cx, cz)))
+            .collect();
+        for (cx, cz, expected) in &forward {
+            assert_eq!(
+                reversed
+                    .iter()
+                    .find(|(x, z, _)| x == cx && z == cz)
+                    .map(|(_, _, packet)| packet),
+                Some(expected),
+                "generated chunk ({cx},{cz}) changed with visit order"
+            );
+        }
+
+        world.save_new(&path).unwrap();
+        let restored = World::load(&path).unwrap();
+        for (cx, cz, expected) in forward {
+            assert_eq!(
+                restored.chunk_read_snapshot(cx, cz).chunk_data(cx, cz),
+                expected,
+                "generated chunk ({cx},{cz}) changed after restart"
+            );
+        }
+        // Sample both sides of negative and positive chunk seams at cave
+        // depths. This also detects a stale per-chunk generation cache.
+        for x in [-33, -32, -17, -16, -1, 0, 15, 16] {
+            for z in [-16, -15, -1] {
+                for y in [8, 16, 24, 32, 40, 48, 56, 64] {
+                    assert_eq!(
+                        world.get(x, y, z),
+                        restored.get(x, y, z),
+                        "cross-chunk cave seam at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod weather_observation_limits_tests {
     use super::*;
 
