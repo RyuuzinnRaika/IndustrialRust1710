@@ -1007,6 +1007,62 @@ mod redstone_regression_tests {
     use super::*;
     use std::fs;
 
+    /// REG-163 / #799: simultaneous inputs hold a torch inverted through
+    /// an IRW restart; removing only one source must not relight it.
+    #[test]
+    fn multiple_inputs_keep_torch_inverted_through_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-reg163-torch-restart-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
+        world
+            .update_and_save(&path, 0, 65, 0, (76 << 4) | 5)
+            .unwrap();
+        for (x, meta) in [(-1, 10), (1, 9)] {
+            world
+                .update_and_save(&path, x, 64, 0, (69 << 4) | meta)
+                .unwrap();
+        }
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(0, 65, 0), (75 << 4) | 5);
+        let mut recovered = World::load(&path).unwrap();
+        for _ in 0..4 {
+            recovered.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(recovered.get(0, 65, 0), (75 << 4) | 5);
+
+        // One lever is turned off, but the other still strongly powers
+        // the same support block. The torch must remain off.
+        recovered
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 2)
+            .unwrap();
+        for _ in 0..4 {
+            recovered.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(recovered.get(0, 65, 0), (75 << 4) | 5);
+
+        // Releasing the final input permits the two-game-tick inversion.
+        recovered
+            .update_and_save(&path, 1, 64, 0, (69 << 4) | 1)
+            .unwrap();
+        for _ in 0..4 {
+            recovered.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(recovered.get(0, 65, 0), (76 << 4) | 5);
+        let mut second_restart = World::load(&path).unwrap();
+        for _ in 0..4 {
+            second_restart.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(second_restart.get(0, 65, 0), (76 << 4) | 5);
+        fs::remove_file(path).unwrap();
+    }
+
     /// REG-161 / #797: expired inputs are processed in bounded batches.
     /// Future deadlines must not starve already-expired inputs with larger
     /// coordinates when the per-tick budget is small.
