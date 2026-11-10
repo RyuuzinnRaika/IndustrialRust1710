@@ -956,7 +956,7 @@ impl Inventory {
         // Protocol 5 mode-6 click can drain matching inventory stacks even
         // when its source slot lies outside the advertised window.
         if mode == 6 && button == 0 {
-            if Self::slot_index(window, slot).is_none() {
+            if slot != 0 && Self::slot_index(window, slot).is_none() {
                 return false;
             }
             return self.collect_matching(window);
@@ -2103,6 +2103,11 @@ mod tests {
             assert!(!inventory.click_window(0, invalid_slot, 0, 6));
             assert_eq!(inventory, unchanged);
         }
+        // Slot zero is a legal result-slot click; preserve the prior behavior
+        // of collecting from the remaining inventory when it is the source.
+        assert!(inventory.click_window(0, 0, 0, 6));
+        assert_eq!(inventory.cursor, Some(Stack { count: 64, ..wool }));
+        assert_eq!(inventory.slots[9], Some(Stack { count: 2, ..wool }));
         assert!(inventory.encoded().is_ok());
     }
 
