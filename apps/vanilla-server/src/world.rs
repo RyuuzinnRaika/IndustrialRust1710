@@ -6767,6 +6767,144 @@ mod group_b_regression_tests {
 }
 
 #[cfg(test)]
+fn isolated_chunk_regression_world(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let scratch = std::env::temp_dir().join(format!(
+        "ir1710-chunk-regression-{label}-{}-{nanos}",
+        std::process::id()
+    ));
+    // Exclusive creation: never overwrite/delete a pre-existing world.
+    std::fs::create_dir(&scratch).unwrap();
+    let path = scratch.join("isolated.irw");
+    (scratch, path)
+}
+
+#[cfg(test)]
+mod reg111_117_chunk_coordinate_tests {
+    use super::*;
+
+    /// REG-111 / #747: signed world positions on all four quadrants must
+    /// land in the correct 1.7.10 full-column packet, across save/reload.
+    #[test]
+    fn negative_chunk_corners_reconstruct_the_same_packet_after_reload() {
+        let (scratch, path) = isolated_chunk_regression_world("quadrants");
+        let mut world = World::new();
+        for x in [-16, -1, 0, 15, 16] {
+            for z in [-16, -1, 0, 15, 16] {
+                world
+                    .update_and_save(&path, x, 65, z, (35 << 4) | 3)
+                    .unwrap();
+            }
+        }
+        let restored = World::load(&path).unwrap();
+        for x in [-16, -1, 0, 15, 16] {
+            for z in [-16, -1, 0, 15, 16] {
+                assert_eq!(restored.get(x, 65, z), (35 << 4) | 3);
+            }
+        }
+        for cx in [-1, 0, 1] {
+            for cz in [-1, 0, 1] {
+                let live = world.chunk_data(cx, cz);
+                assert_eq!(world.chunk_read_snapshot(cx, cz).chunk_data(cx, cz), live);
+                assert_eq!(
+                    restored.chunk_read_snapshot(cx, cz).chunk_data(cx, cz),
+                    live
+                );
+            }
+        }
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    /// REG-117 / #753: 1.7.10 Y coordinates are 0..=255 inclusive.
+    /// A rejected out-of-range edit must neither wrap to 0 nor modify disk.
+    #[test]
+    fn world_y_zero_and_255_roundtrip_while_out_of_range_edits_are_rejected() {
+        let (scratch, path) = isolated_chunk_regression_world("height");
+        let mut world = World::new();
+        assert!(world.update_and_save(&path, -1, 0, 0, 1 << 4).unwrap());
+        assert!(world.update_and_save(&path, -1, 255, 0, 2 << 4).unwrap());
+        let original = std::fs::read(&path).unwrap();
+        for y in [-1, 256, i32::MIN, i32::MAX] {
+            assert!(!world.update_and_save(&path, -1, y, 0, 3 << 4).unwrap());
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(-1, 0, 0), 1 << 4);
+        assert_eq!(restored.get(-1, 255, 0), 2 << 4);
+        let (mask, _) = restored.chunk_data(-1, 0);
+        assert_ne!(mask & 1, 0, "Y=0 section missing");
+        assert_ne!(mask & (1 << 15), 0, "Y=255 section missing");
+        assert_eq!(world.chunk_data(-1, 0), restored.chunk_data(-1, 0));
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reg116_cave_generation_order_tests {
+    use super::*;
+
+    /// REG-116 / #752: the generated cave cross-section may not depend on
+    /// whether a player visits the east or west chunk first. Persisted IRW4
+    /// worlds must reproduce the same Protocol 5 full-column bytes.
+    #[test]
+    fn cave_boundaries_are_visit_order_and_restart_independent() {
+        let seed = 42u64;
+        let chunks = [(-2, -1), (-1, -1), (0, -1), (1, -1)];
+        let (scratch, path) = isolated_chunk_regression_world("caves");
+        let world = World::expanded(seed, crate::dimensions::Dimension::Overworld);
+
+        // Query every column in the reverse order before taking a second
+        // set of snapshots in the forward order.
+        let reversed: Vec<_> = chunks
+            .iter()
+            .rev()
+            .map(|&(cx, cz)| (cx, cz, world.chunk_read_snapshot(cx, cz).chunk_data(cx, cz)))
+            .collect();
+        let forward: Vec<_> = chunks
+            .iter()
+            .map(|&(cx, cz)| (cx, cz, world.chunk_read_snapshot(cx, cz).chunk_data(cx, cz)))
+            .collect();
+        for (cx, cz, expected) in &forward {
+            assert_eq!(
+                reversed
+                    .iter()
+                    .find(|(x, z, _)| x == cx && z == cz)
+                    .map(|(_, _, packet)| packet),
+                Some(expected),
+                "generated chunk ({cx},{cz}) changed with visit order"
+            );
+        }
+
+        world.save_new(&path).unwrap();
+        let restored = World::load(&path).unwrap();
+        for (cx, cz, expected) in forward {
+            assert_eq!(
+                restored.chunk_read_snapshot(cx, cz).chunk_data(cx, cz),
+                expected,
+                "generated chunk ({cx},{cz}) changed after restart"
+            );
+        }
+        // Sample both sides of negative and positive chunk seams at cave
+        // depths. This also detects a stale per-chunk generation cache.
+        for x in [-33, -32, -17, -16, -1, 0, 15, 16] {
+            for z in [-16, -15, -1] {
+                for y in [8, 16, 24, 32, 40, 48, 56, 64] {
+                    assert_eq!(
+                        world.get(x, y, z),
+                        restored.get(x, y, z),
+                        "cross-chunk cave seam at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod weather_observation_limits_tests {
     use super::*;
 
