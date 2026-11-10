@@ -94,6 +94,9 @@ pub struct World {
     fluid_phase: u64,
     // Set from Clock; the weather simulation has one authoritative owner.
     raining: bool,
+    // Thunder is the stronger 1.7.10 storm state; it implies rain in the
+    // Clock weather model and dims sky light further than plain rain.
+    thundering: bool,
     day_time: i64,
     primed_tnt: BTreeMap<i32, special::PrimedTnt>,
     // Durable overflow queue: a chain-lit block must not be lost on /stop.
@@ -351,6 +354,9 @@ impl World {
 
     pub fn set_raining(&mut self, raining: bool) {
         self.raining = raining;
+    }
+    pub fn set_thundering(&mut self, thundering: bool) {
+        self.thundering = thundering;
     }
     pub fn set_day_time(&mut self, value: i64) {
         self.day_time = value.rem_euclid(24_000);
