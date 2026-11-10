@@ -6751,11 +6751,17 @@ mod piston_chunk_quasi_regressions {
     #[test]
     fn upper_power_sources_trigger_and_release_quasi_connected_pistons() {
         for (index, source) in [(0, (0, 66, 0)), (1, (1, 65, 0))] {
-            let path = std::env::temp_dir().join(format!(
-                "ir1710-reg164-qc-{}-{index}.irw",
+            // Exclusive creation protects both pre-existing data and parallel runs.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let scratch = std::env::temp_dir().join(format!(
+                "ir1710-reg164-qc-{}-{index}-{nanos}",
                 std::process::id()
             ));
-            let _ = std::fs::remove_file(&path);
+            std::fs::create_dir(&scratch).unwrap();
+            let path = scratch.join("isolated.irw");
             let mut world = World::new();
             world
                 .update_and_save(&path, 0, 64, 0, (33 << 4) | 5)
@@ -6779,7 +6785,7 @@ mod piston_chunk_quasi_regressions {
             assert_eq!(world.get(0, 64, 0), (33 << 4) | 5);
             assert_eq!(world.get(1, 64, 0), 0);
             assert_eq!(World::load(&path).unwrap().get(0, 64, 0) & 8, 0);
-            std::fs::remove_file(path).unwrap();
+            std::fs::remove_dir_all(scratch).unwrap();
         }
     }
 
@@ -6787,11 +6793,16 @@ mod piston_chunk_quasi_regressions {
     /// boundary must atomically publish the base, head and destination.
     #[test]
     fn piston_push_across_chunk_border_survives_reload_without_duplication() {
-        let path = std::env::temp_dir().join(format!(
-            "ir1710-add026-piston-border-{}.irw",
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = std::env::temp_dir().join(format!(
+            "ir1710-add026-piston-border-{}-{nanos}",
             std::process::id()
         ));
-        let _ = std::fs::remove_file(&path);
+        std::fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("isolated.irw");
         let mut world = World::new();
         world
             .update_and_save(&path, 15, 64, 0, (33 << 4) | 5)
@@ -6819,6 +6830,6 @@ mod piston_chunk_quasi_regressions {
             assert_eq!(snapshot.get(16, 64, 0), 0);
             assert_eq!(snapshot.get(17, 64, 0), 1 << 4);
         }
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 }
