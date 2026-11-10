@@ -300,16 +300,35 @@ pub fn additional_drop(block: u16, pos: (i32, i32, i32), tick: u64) -> Option<St
 /// 30 game ticks × hardness / speed if harvestable, otherwise 100 × hardness.
 /// Not all environmental penalties of vanilla 1.7.10 are modeled.
 pub fn mine_rule(block: u16, held: Option<Stack>) -> Option<(Duration, MineResult)> {
+    mine_rule_with_modifiers(block, held, 0, None)
+}
+
+/// Apply Efficiency before Haste, matching the 1.7.10 relative-hardness
+/// calculation. Efficiency adds (level² + 1) only when the tool harvests
+/// effectively; Haste multiplies the resulting speed by 1 + 0.2*(amp+1).
+fn mine_rule_with_modifiers(
+    block: u16,
+    held: Option<Stack>,
+    efficiency: u8,
+    haste_amplifier: Option<u8>,
+) -> Option<(Duration, MineResult)> {
     let spec = rule(block)?;
     let equipped = tool(held);
     let effective = equipped.is_some_and(|t| spec.kind == Some(t.kind));
     let can_harvest =
         !spec.requires_tool || (effective && equipped.is_some_and(|t| t.tier >= spec.tier));
-    let speed = if effective {
+    let mut speed = if effective {
         equipped.map_or(1.0, |t| t.speed)
     } else {
         1.0
     };
+    if effective && can_harvest && efficiency > 0 {
+        let level = f64::from(efficiency.min(127));
+        speed += level * level + 1.0;
+    }
+    if let Some(amplifier) = haste_amplifier {
+        speed *= 1.0 + 0.2 * (f64::from(amplifier) + 1.0);
+    }
     // Instant-break foliage must accept a C07 Start/Finish pair sent in
     // the same client tick; enforcing one 50ms tick made grass and flowers
     // intermittently reappear when the finish arrived immediately.
@@ -331,35 +350,56 @@ pub fn mine_rule(block: u16, held: Option<Stack>) -> Option<(Duration, MineResul
         },
     ))
 }
-/// Aqua Affinity (enchantment ID 6) is read only from an equipped helmet.
-/// 1.7.10 stores equipment enchantments under the NBT "ench" list.
-/// Malformed, absent or unrelated tags never grant a mining-speed bonus.
-pub fn helmet_has_aqua_affinity(helmet: Option<Stack>) -> bool {
-    let Some(helmet) = helmet else { return false };
-    if !matches!(helmet.id, 298 | 302 | 306 | 310 | 314) {
-        return false;
-    }
-    let Some(handle) = helmet.nbt else { return false };
+/// Read a bounded enchantment level from a validated, server-owned ItemStack.
+/// Unknown tags cannot grant a modifier; extreme Creative levels are capped
+/// to keep all timing arithmetic finite and deterministic.
+fn enchantment_level(held: Option<Stack>, enchantment_id: i32) -> u8 {
+    let Some(handle) = held.and_then(|stack| stack.nbt) else {
+        return 0;
+    };
     let Ok(fastnbt::Value::Compound(root)) = crate::item_nbt::value(handle) else {
-        return false;
+        return 0;
     };
     let Some(fastnbt::Value::List(enchantments)) = root.get("ench") else {
-        return false;
+        return 0;
     };
-    enchantments.iter().any(|entry| {
-        let fastnbt::Value::Compound(tag) = entry else { return false };
+    let mut highest = 0;
+    for entry in enchantments {
+        let fastnbt::Value::Compound(tag) = entry else {
+            continue;
+        };
         let id = match tag.get("id") {
             Some(fastnbt::Value::Short(value)) => i32::from(*value),
             Some(fastnbt::Value::Int(value)) => *value,
-            _ => return false,
+            _ => continue,
         };
         let level = match tag.get("lvl") {
             Some(fastnbt::Value::Short(value)) => i32::from(*value),
             Some(fastnbt::Value::Int(value)) => *value,
-            _ => return false,
+            _ => continue,
         };
-        id == 6 && level > 0
+        if id == enchantment_id && level > 0 {
+            highest = highest.max(level.min(127) as u8);
+        }
+    }
+    highest
+}
+
+/// Aqua Affinity (ID 6) only applies to a helmet occupying armor slot 5.
+pub fn helmet_has_aqua_affinity(helmet: Option<Stack>) -> bool {
+    helmet.is_some_and(|stack| {
+        matches!(stack.id, 298 | 302 | 306 | 310 | 314)
+            && enchantment_level(Some(stack), 6) > 0
     })
+}
+
+/// Efficiency (ID 32) affects the speed of the equipped harvesting tool.
+/// A sword, unrecognized item or invalid durability cannot claim the bonus.
+pub fn tool_efficiency_level(held: Option<Stack>) -> u8 {
+    if tool(held).is_none() {
+        return 0;
+    }
+    enchantment_level(held, 32)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -368,6 +408,9 @@ pub struct MiningProgress {
     started: Instant,
     block: u16,
     tool: Option<Stack>,
+    /// Minimum C07 elapsed time captured when the player began digging;
+    /// a newly acquired Haste effect must not retroactively speed a dig.
+    minimum: Duration,
     /// Combined classic underwater/head and airborne mining penalty.
     penalty: u32,
 }
@@ -396,6 +439,7 @@ impl MiningProgress {
         )
     }
 
+    #[cfg(test)]
     pub fn start_with_environment_and_affinity(
         target: (i32, i32, i32),
         block: u16,
@@ -404,21 +448,42 @@ impl MiningProgress {
         on_ground: bool,
         aqua_affinity: bool,
     ) -> Option<Self> {
-        mine_rule(block, held)?;
+        Self::start_with_environment_and_modifiers(
+            target,
+            block,
+            held,
+            head_submerged,
+            on_ground,
+            aqua_affinity,
+            0,
+            None,
+        )
+    }
+
+    pub fn start_with_environment_and_modifiers(
+        target: (i32, i32, i32),
+        block: u16,
+        held: Option<Stack>,
+        head_submerged: bool,
+        on_ground: bool,
+        aqua_affinity: bool,
+        efficiency: u8,
+        haste_amplifier: Option<u8>,
+    ) -> Option<Self> {
+        let (minimum, _) = mine_rule_with_modifiers(block, held, efficiency, haste_amplifier)?;
         Some(Self {
             target,
             started: Instant::now(),
             block,
             tool: held,
+            minimum,
             penalty: environment_penalty_with_affinity(head_submerged, on_ground, aqua_affinity),
         })
     }
     /// A Protocol 5 client sends only Start for blocks destroyed in its
     /// first mining tick. The shared finish path must commit these immediately.
     pub fn is_instant(&self) -> bool {
-        mine_rule(self.block, self.tool).is_some_and(|(duration, _)| {
-            duration.saturating_mul(self.penalty) <= Duration::from_millis(50)
-        })
+        self.minimum.saturating_mul(self.penalty) <= Duration::from_millis(50)
     }
 
     /// Consume the attempt exactly once. The held tool must remain unchanged
@@ -457,6 +522,7 @@ impl MiningProgress {
         )
     }
 
+    #[cfg(test)]
     pub fn finish_with_environment_and_affinity(
         self,
         target: (i32, i32, i32),
@@ -466,21 +532,46 @@ impl MiningProgress {
         on_ground: bool,
         aqua_affinity: bool,
     ) -> Option<MineResult> {
-        if self.target != target || self.block != current || self.tool != held {
-            return None;
-        }
-        let (minimum, result) = mine_rule(current, held)?;
-        let penalty = self.penalty.max(environment_penalty_with_affinity(
+        self.finish_with_environment_and_modifiers(
+            target,
+            current,
+            held,
             head_submerged,
             on_ground,
             aqua_affinity,
-        ));
-        // Vanilla reports completion in 20TPS client ticks, while start and
-        // finish are timestamped by independently scheduled server socket polls.
-        // Up to two ticks of phase/poll skew must not reject a legitimate finish.
-        // Preserve at least one full server tick for non-instant blocks so an
-        // immediate forged Finish cannot mine a short-duration block for free.
-        let required = minimum.saturating_mul(penalty);
+            0,
+            None,
+        )
+    }
+
+    pub fn finish_with_environment_and_modifiers(
+        self,
+        target: (i32, i32, i32),
+        current: u16,
+        held: Option<Stack>,
+        head_submerged: bool,
+        on_ground: bool,
+        aqua_affinity: bool,
+        efficiency: u8,
+        haste_amplifier: Option<u8>,
+    ) -> Option<MineResult> {
+        if self.target != target || self.block != current || self.tool != held {
+            return None;
+        }
+        let (at_finish, result) =
+            mine_rule_with_modifiers(current, held, efficiency, haste_amplifier)?;
+        // Equipment and potion changes never speed an in-flight dig. Compare
+        // actual required times, not only environment factors, because Haste
+        // and Efficiency also affect the base mining speed.
+        let required = self.minimum.saturating_mul(self.penalty).max(
+            at_finish.saturating_mul(environment_penalty_with_affinity(
+                head_submerged,
+                on_ground,
+                aqua_affinity,
+            )),
+        );
+        // Preserve the existing 20TPS packet-scheduling tolerance, but not
+        // enough to accept an immediate forged Finish on a non-instant block.
         mining_elapsed_is_legal(self.started.elapsed(), required).then_some(result)
     }
 }
@@ -1090,6 +1181,66 @@ mod tests {
         equipped_late.started = Instant::now() - enough;
         assert!(equipped_late.finish_with_environment_and_affinity(
             target, block, held, true, true, true,
+        ).is_none());
+    }
+
+    /// REG-143 / #779: Efficiency adds before Haste multiplies; changes
+    /// during an in-flight C07 dig cannot shorten its original minimum.
+    #[test]
+    fn reg143_efficiency_haste_compose_and_expires_without_fast_finish() {
+        use fastnbt::Value;
+        use std::collections::HashMap;
+
+        let enchantments = Value::Compound(HashMap::from([(
+            "ench".to_string(),
+            Value::List(vec![Value::Compound(HashMap::from([
+                ("id".to_string(), Value::Short(32)),
+                ("lvl".to_string(), Value::Short(2)),
+            ]))]),
+        )]));
+        let held = Some(Stack {
+            id: 257,
+            damage: 0,
+            count: 1,
+            nbt: Some(crate::item_nbt::from_value(&enchantments).unwrap()),
+        });
+        assert_eq!(tool_efficiency_level(held), 2);
+        assert_eq!(tool_efficiency_level(stack(257, 0)), 0);
+        assert_eq!(tool_efficiency_level(Some(Stack { id: 268, ..held.unwrap() })), 2);
+
+        let block = 1 << 4;
+        let base = mine_rule(block, held).unwrap().0;
+        let enchanted = mine_rule_with_modifiers(block, held, 2, None).unwrap().0;
+        let combined = mine_rule_with_modifiers(block, held, 2, Some(1)).unwrap().0;
+        assert!(base > enchanted && enchanted > combined);
+        assert_eq!(base, Duration::from_millis(400));
+        assert_eq!(enchanted, Duration::from_millis(250));
+        assert_eq!(combined, Duration::from_millis(150));
+
+        let at = (4, 63, 8);
+        let enough = combined + Duration::from_millis(10);
+        let mut stable = MiningProgress::start_with_environment_and_modifiers(
+            at, block, held, false, true, false, 2, Some(1),
+        ).unwrap();
+        stable.started = Instant::now() - enough;
+        assert!(stable.finish_with_environment_and_modifiers(
+            at, block, held, false, true, false, 2, Some(1),
+        ).is_some());
+
+        let mut lost_haste = MiningProgress::start_with_environment_and_modifiers(
+            at, block, held, false, true, false, 2, Some(1),
+        ).unwrap();
+        lost_haste.started = Instant::now() - enough;
+        assert!(lost_haste.finish_with_environment_and_modifiers(
+            at, block, held, false, true, false, 2, None,
+        ).is_none());
+
+        let mut gained_haste = MiningProgress::start_with_environment_and_modifiers(
+            at, block, held, false, true, false, 2, None,
+        ).unwrap();
+        gained_haste.started = Instant::now() - enough;
+        assert!(gained_haste.finish_with_environment_and_modifiers(
+            at, block, held, false, true, false, 2, Some(1),
         ).is_none());
     }
 
