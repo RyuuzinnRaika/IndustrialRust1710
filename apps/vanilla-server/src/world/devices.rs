@@ -2518,26 +2518,67 @@ mod redstone_regression_tests {
     #[test]
     fn piston_pushes_exactly_twelve_not_thirteen_solid_blocks() {
         for number in [12, 13] {
-            let path = std::env::temp_dir().join(format!(
-                "ir1710-piston-cap-{}-{number}.irw",
+            // Do not pre-delete a PID-named file: tests must never erase a
+            // pre-existing user world or collide with parallel test runs.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let scratch = std::env::temp_dir().join(format!(
+                "ir1710-add053-piston-cap-{}-{number}-{nanos}",
                 std::process::id()
             ));
-            let _ = fs::remove_file(&path);
+            fs::create_dir(&scratch).unwrap();
+            let path = scratch.join("isolated.irw");
+
             let mut w = World::new();
             w.update_and_save(&path, -2, 64, 0, (69 << 4) | 13).unwrap();
             w.update_and_save(&path, -1, 64, 0, (33 << 4) | 5).unwrap();
             for x in 0..number {
                 w.update_and_save(&path, x, 64, 0, 1 << 4).unwrap();
             }
-            w.block_tick(&path, 64).unwrap();
+            for _ in 0..4 {
+                w.block_tick(&path, 64).unwrap();
+            }
+            let saved = World::load(&path).unwrap();
             if number == 12 {
                 assert_eq!(w.get(-1, 64, 0), (33 << 4) | 13);
-                assert_eq!(w.get(12, 64, 0), 1 << 4);
+                assert_eq!(w.get(0, 64, 0) >> 4, 34);
+                // Every original stone moved by exactly one block; none
+                // vanished or appeared outside the intended write set.
+                for x in 1..=12 {
+                    assert_eq!(w.get(x, 64, 0), 1 << 4);
+                }
+                assert_eq!(w.get(13, 64, 0), 0);
             } else {
                 assert_eq!(w.get(-1, 64, 0), (33 << 4) | 5);
                 assert_eq!(w.get(13, 64, 0), 0);
+                for x in 0..13 {
+                    assert_eq!(w.get(x, 64, 0), 1 << 4);
+                }
             }
-            fs::remove_file(path).unwrap();
+            for x in -2..=13 {
+                assert_eq!(saved.get(x, 64, 0), w.get(x, 64, 0));
+            }
+
+            // Power removal must retract the base without losing the
+            // translated stones. An ordinary piston does not pull them.
+            w.update_and_save(&path, -2, 64, 0, (69 << 4) | 5).unwrap();
+            for _ in 0..6 {
+                w.block_tick(&path, 64).unwrap();
+            }
+            assert_eq!(w.get(-1, 64, 0), (33 << 4) | 5);
+            if number == 12 {
+                assert_eq!(w.get(0, 64, 0), 0);
+                for x in 1..=12 {
+                    assert_eq!(w.get(x, 64, 0), 1 << 4);
+                }
+            }
+            let final_world = World::load(&path).unwrap();
+            for x in -2..=13 {
+                assert_eq!(final_world.get(x, 64, 0), w.get(x, 64, 0));
+            }
+            fs::remove_dir_all(scratch).unwrap();
         }
     }
 }
