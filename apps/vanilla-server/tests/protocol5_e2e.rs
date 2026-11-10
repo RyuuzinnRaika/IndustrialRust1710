@@ -1,4 +1,4 @@
-//! Protocol 5 end-to-end tests written entirely in Rust.
+﻿//! Protocol 5 end-to-end tests written entirely in Rust.
 //! Launches the native IndustrialRust1710 binary, never Java or Python.
 use flate2::read::ZlibDecoder;
 use legacy_protocol::{read_frame, read_varint, write_string, write_varint, Cursor};
@@ -790,7 +790,7 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     assert!(String::from_utf8_lossy(&response).contains("RustTester"));
     send_fragments(&mut client, &frame(1, &mc_string("/help")), &[1, 2]);
     until_packet(&mut client, 2, |body| {
-        body.windows(9).any(|w| w == b"Commands:")
+        body.windows(14).any(|w| w == b"Commands page ") // paginated /help header from #524
     });
 
     // Dig a grass block. Placement is denied until the Creative action has
@@ -989,6 +989,80 @@ fn protocol5_server_list_ping_echoes_latency_token_after_status_response() {
         elapsed < Duration::from_secs(3),
         "Ping Response took {elapsed:?}"
     );
+}
+
+#[test]
+fn reg123_status_ping_keeps_signed_tokens_isolated_between_sessions() {
+    let server = NativeServer::start();
+
+    // Every payload is an opaque signed 64-bit token. Opening a new
+    // connection must not reuse the token from the previous Status session.
+    for token in [0_i64, 1, -1, i64::MIN, i64::MAX] {
+        let elapsed = server.status_ping(token);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "Status Ping for {token} took {elapsed:?}"
+        );
+    }
+
+    // Both connections must be able to finish Status before either sends
+    // Ping. This also catches a shared/global pending-token slot.
+    let mut clients = [server.client(), server.client()];
+    for client in &mut clients {
+        client.write_all(&handshake(server.port, 1)).unwrap();
+        client.write_all(&frame(0, &[])).unwrap();
+        let (id, response) = receive(client);
+        assert_eq!(id, 0);
+        let mut cursor = Cursor::new(&response);
+        let _: Value = serde_json::from_str(cursor.read_string(65536).unwrap()).unwrap();
+        cursor.finish().unwrap();
+    }
+
+    let first = i64::MIN + 0x12345;
+    let second = i64::MAX - 0x23456;
+    clients[0]
+        .write_all(&frame(1, &first.to_be_bytes()))
+        .unwrap();
+    clients[1]
+        .write_all(&frame(1, &second.to_be_bytes()))
+        .unwrap();
+
+    let (first_id, first_reply) = receive(&mut clients[0]);
+    let (second_id, second_reply) = receive(&mut clients[1]);
+    assert_eq!((first_id, first_reply), (1, first.to_be_bytes().to_vec()));
+    assert_eq!(
+        (second_id, second_reply),
+        (1, second.to_be_bytes().to_vec())
+    );
+
+    // Status Ping accepts exactly packet id 1 with an eight-byte body.
+    // Malformed lengths and wrong IDs must close the connection, not echo
+    // or influence a valid session's pending token.
+    for (packet_id, bad_payload) in [
+        (1_u32, vec![]),
+        (1, vec![0; 7]),
+        (1, vec![0; 9]),
+        (2, vec![0; 8]),
+    ] {
+        let mut bad_client = server.client();
+        bad_client.write_all(&handshake(server.port, 1)).unwrap();
+        bad_client.write_all(&frame(0, &[])).unwrap();
+        assert_eq!(receive(&mut bad_client).0, 0);
+        bad_client
+            .write_all(&frame(packet_id, &bad_payload))
+            .unwrap();
+        let error = read_frame(&mut bad_client).unwrap_err();
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ),
+            "invalid Status Ping {packet_id} with {} bytes: {error}",
+            bad_payload.len()
+        );
+    }
 }
 
 #[test]
