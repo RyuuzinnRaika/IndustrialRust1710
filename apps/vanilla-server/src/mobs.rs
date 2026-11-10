@@ -1116,18 +1116,29 @@ fn flying_step(
     }
 }
 
-/// Endermen are almost three blocks tall. A player-sized (1.8 block)
-/// collision check alone would teleport the head into a solid block, water
-/// or lava. Require a dry three-block column and a real supporting floor.
+/// Endermen occupy a 0.6 × 2.9 block AABB. A center-column check
+/// alone can teleport the head into a neighboring solid block or water when
+/// the body overlaps a block edge. Check every intersecting block in the
+/// complete hitbox, then require a supporting floor and ordinary collision.
 fn enderman_teleport_safe(world: &World, position: PlayerPosition) -> bool {
     if !position.is_valid() || !(1.0..=252.0).contains(&position.y) {
         return false;
     }
-    let x = position.x.floor() as i32;
-    let y = position.y.floor() as i32;
-    let z = position.z.floor() as i32;
-    (0..3).all(|dy| world.get(x, y + dy, z) >> 4 == 0)
-        && physics::supported(world, &position)
+    // The small epsilon makes an exactly touching AABB face non-overlapping.
+    const EPSILON: f64 = 1e-7;
+    let min_x = (position.x - 0.3).floor() as i32;
+    let max_x = (position.x + 0.3 - EPSILON).floor() as i32;
+    let min_y = position.y.floor() as i32;
+    let max_y = (position.y + 2.9 - EPSILON).floor() as i32;
+    let min_z = (position.z - 0.3).floor() as i32;
+    let max_z = (position.z + 0.3 - EPSILON).floor() as i32;
+    (min_x..=max_x).all(|x| {
+        (min_y..=max_y).all(|y| {
+            (min_z..=max_z).all(|z| {
+                crate::world::in_bounds(x, y, z) && world.get(x, y, z) >> 4 == 0
+            })
+        })
+    }) && physics::supported(world, &position)
         && !physics::collides(world, &position)
 }
 
@@ -8122,6 +8133,41 @@ mod tests {
         world.import_block(0, 64, 0, 0).unwrap();
         world.import_block(0, 63, 0, 0).unwrap();
         assert!(!enderman_teleport_safe(&world, standing));
+    }
+
+    /// REG-155 / #791: the Enderman's fractional X/Z position may overlap
+    /// an adjacent block even though its central three-block column is empty.
+    #[test]
+    fn reg155_enderman_teleport_rejects_partial_hitbox_water_and_head_collision() {
+        let mut world = World::new();
+        let edge = PlayerPosition {
+            x: 0.8,
+            y: 64.0,
+            z: 0.5,
+        };
+        assert!(enderman_teleport_safe(&world, edge));
+
+        // At X=0.8 the Enderman overlaps column X=1 by 0.1 blocks.
+        // A player-height collision test misses this head-level obstruction.
+        world.import_block(1, 66, 0, 1 << 4).unwrap();
+        assert!(!enderman_teleport_safe(&world, edge));
+        world.import_block(1, 66, 0, 0).unwrap();
+        assert!(enderman_teleport_safe(&world, edge));
+
+        // An adjacent source-water block must not become a valid landing.
+        world.import_block(1, 64, 0, 9 << 4).unwrap();
+        assert!(!enderman_teleport_safe(&world, edge));
+        world.import_block(1, 64, 0, 0).unwrap();
+        assert!(enderman_teleport_safe(&world, edge));
+
+        // Check the Z side independently so swapping axes cannot bypass it.
+        let edge_z = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.8,
+        };
+        world.import_block(0, 66, 1, 1 << 4).unwrap();
+        assert!(!enderman_teleport_safe(&world, edge_z));
     }
 
     #[test]
