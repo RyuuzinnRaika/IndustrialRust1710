@@ -338,6 +338,115 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// REG-182 / #818: when logout races a durable two-file redo, an
+    /// inventory debit may have been renamed before the player's NBT.
+    /// Recovery must finish the same generation and must not spend twice.
+    #[test]
+    fn reg182_interrupted_logout_inventory_and_player_nbt_replay_exactly_once() {
+        use crate::inventory::{Inventory, Stack};
+        use crate::player::PlayerPosition;
+        use crate::vitals::Vitals;
+        use crate::world::World;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("ir1710-reg182-{}-{stamp}", std::process::id()));
+        // The test *must* create a new root: never delete an older world.
+        fs::create_dir(&root).unwrap();
+        let world = root.join("flat.irw");
+        World::new().save_new(&world).unwrap();
+        let player = root.join("players/alex.dat");
+        let inventory = Inventory::location(&player);
+        let journal = root.join("flat.pending-txn.json");
+
+        let mut before = Inventory::default();
+        before
+            .creative_set(
+                36,
+                Some(Stack {
+                    id: 1,
+                    count: 8,
+                    damage: 0,
+                    nbt: None,
+                }),
+            )
+            .unwrap();
+        before.save(&inventory).unwrap();
+        let earlier = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        earlier.save_state(&player, Vitals::default()).unwrap();
+
+        // A real inventory operation consumed exactly one item, and a
+        // subsequent logout updated position in the *same* redo generation.
+        let mut after = before.clone();
+        assert!(after.consume_item(1));
+        let new_inv = after.encoded().unwrap();
+        let new_position = PlayerPosition {
+            x: -16.25,
+            y: 70.0,
+            z: -1.75,
+        };
+        let new_player = new_position
+            .encoded_state_in_dimension(Vitals::default(), 0)
+            .unwrap();
+        let record = Record {
+            version: VERSION,
+            files: vec![
+                Target {
+                    relative: relative(&root, &inventory).unwrap(),
+                    checksum: fingerprint(&new_inv),
+                    contents: new_inv.clone(),
+                },
+                Target {
+                    relative: relative(&root, &player).unwrap(),
+                    checksum: fingerprint(&new_player),
+                    contents: new_player.clone(),
+                },
+            ],
+        };
+        let prepared = serde_json::to_vec(&record).unwrap();
+        fs::write(&journal, &prepared).unwrap();
+        // Model a crash after inventory was atomically replaced, but
+        // before a player's saved NBT was replaced. A leftover .txn.tmp
+        // is also possible if the process died during the second rename.
+        fs::write(&inventory, &new_inv).unwrap();
+        fs::write(player.with_extension("txn.tmp"), b"interrupted").unwrap();
+        assert_eq!(PlayerPosition::load_state(&player).unwrap().0, earlier);
+
+        recover(&journal).unwrap();
+        assert!(!journal.exists());
+        assert!(!player.with_extension("txn.tmp").exists());
+        let loaded = Inventory::load(&inventory).unwrap();
+        let stone_count: u32 = loaded
+            .possessions()
+            .iter()
+            .filter(|stack| stack.id == 1)
+            .map(|stack| u32::from(stack.count))
+            .sum();
+        assert_eq!(stone_count, 7, "recovery must not duplicate or debit again");
+        assert_eq!(loaded, after);
+        assert_eq!(PlayerPosition::load_state(&player).unwrap().0, new_position);
+
+        // Repeated startup and even reintroducing the identical durable
+        // record cannot spend one more item or rewind the saved position.
+        let once_inv = fs::read(&inventory).unwrap();
+        let once_player = fs::read(&player).unwrap();
+        recover(&journal).unwrap();
+        fs::write(&journal, prepared).unwrap();
+        recover(&journal).unwrap();
+        assert_eq!(fs::read(&inventory).unwrap(), once_inv);
+        assert_eq!(fs::read(&player).unwrap(), once_player);
+        assert_eq!(Inventory::load(&inventory).unwrap(), after);
+        assert_eq!(PlayerPosition::load_state(&player).unwrap().0, new_position);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn player_nbt_journal_targets_are_identity_scoped_and_gzip_bounded() {
         assert!(is_player_state(Path::new("players/rusttester.dat")));

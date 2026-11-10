@@ -1155,10 +1155,65 @@ fn void_damage_tick(vitals: &mut Vitals, y: f64, now: u64, last: &mut u64) -> bo
 }
 
 fn sprint_action(current: bool, action: i32, food: i32) -> bool {
+    // Hunger can drop during a sprint (or due to status effects), without
+    // any corresponding client Stop Sprinting action. Invalidate that state
+    // immediately; eating must not silently rearm the old sprint flag.
+    if food <= 6 {
+        return false;
+    }
     match action {
-        3 => food > 6,
+        3 => true,
         4 => false,
         _ => current,
+    }
+}
+
+/// With keepInventory enabled, vanilla keeps both held items and earned XP;
+/// the respawn path must neither erase XP nor create a death XP orb.
+fn death_xp_drop_amount(experience: &Experience, keep_inventory: bool) -> Option<u16> {
+    if keep_inventory {
+        None
+    } else {
+        Some((u32::from(experience.level_and_fraction().0) * 7).min(100) as u16)
+    }
+}
+
+/// Commit the XP half of a Survival death with the real save file and the real
+/// orb store: clear the live account, persist the cleared account, then spawn
+/// and broadcast the death orb at the death site. With keepInventory the whole
+/// step is skipped, so neither the saved XP file nor the orb store is touched.
+/// The returned amount is the orb that was actually created: `None` means the
+/// rule kept the XP, or the orb store refused a zero-amount/oversized orb.
+/// A failed save propagates so the session aborts instead of continuing with an
+/// unpersisted account.
+fn commit_death_experience(
+    experience: &mut Experience,
+    experience_path: &Path,
+    mobs: &Mutex<Mobs>,
+    hub: &Hub,
+    death_position: PlayerPosition,
+    keep_inventory: bool,
+) -> io::Result<Option<u16>> {
+    let drop_amount = match death_xp_drop_amount(experience, keep_inventory) {
+        Some(amount) => amount,
+        None => return Ok(None),
+    };
+    *experience = Experience::default();
+    experience.save(experience_path)?;
+    // Void death clears XP without generating unreachable XP orbs.
+    if death_position.y < -64.0 {
+        return Ok(None);
+    }
+    let orb = mobs
+        .lock()
+        .map_err(|_| bad("mob mutex poisoned"))?
+        .spawn_xp(death_position, drop_amount);
+    match orb {
+        Some(event) => {
+            hub.broadcast(event);
+            Ok(Some(drop_amount))
+        }
+        None => Ok(None),
     }
 }
 
@@ -1184,6 +1239,52 @@ mod dead_session_packet_tests {
         ] {
             assert!(blocked_while_dead(id), "packet {id} must be ignored");
         }
+    }
+
+    /// REG-146 / #782: the active chest's cursor is player-owned even
+    /// while the chest window is open. Death drops it exactly once, while
+    /// delayed container clicks are blocked until respawn resets the GUI.
+    #[test]
+    fn reg146_open_chest_cursor_death_preserves_total_and_blocks_stale_clicks() {
+        use super::{Inventory, Stack};
+        let item = Stack {
+            id: 17,
+            count: 9,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inv = Inventory::default();
+        let mut chest = [None; 27];
+        chest[0] = Some(item);
+        assert!(inv.chest_click_window(1, &mut chest, 0, 0, 0).is_some());
+        assert_eq!(chest[0], None);
+        assert_eq!(inv.possessions(), vec![item]);
+
+        // C0E stale Click Window, C0D Close Window and C09 Held Item Change
+        // may arrive after lethal damage but before C16 respawn.
+        for id in [14, 13, 9, 7, 8, 23] {
+            assert!(super::blocked_while_dead(id));
+        }
+        assert!(!super::blocked_while_dead(22)); // respawn remains possible
+
+        let drops = inv.possessions();
+        inv.clear_possessions(); // production death-drop path, one pass
+        assert!(inv.possessions().is_empty());
+        assert_eq!(drops.iter().map(|s| u32::from(s.count)).sum::<u32>(), 9);
+        assert_eq!(
+            drops.iter().map(|s| u32::from(s.count)).sum::<u32>()
+                + chest
+                    .iter()
+                    .flatten()
+                    .map(|s| u32::from(s.count))
+                    .sum::<u32>(),
+            9
+        );
+        assert!(inv.possessions().is_empty()); // no second death drop
+        let saved = inv.encoded().unwrap();
+        let reloaded: Inventory = serde_json::from_slice(&saved).unwrap();
+        assert!(reloaded.possessions().is_empty());
+        assert_eq!(chest[0], None); // same storage cannot be dropped again
     }
 
     #[test]
@@ -1481,6 +1582,32 @@ fn play(
     let mut last_arrow_damage_tick: Option<u64> = None;
     let mut last_void_damage_tick = clock.ticks();
     loop {
+        // The Hub mutex atomically resolves the Overworld sleep quorum.
+        // One player sleeping never advances time while another stays awake.
+        // This also handles a sleeping player's peer disconnecting mid-night.
+        if survival
+            && *session_dimension == dimensions::Dimension::Overworld
+            && (12542..=23458).contains(&clock.day_time())
+        {
+            if let Some(waking) = hub.complete_night_sleep()? {
+                clock.skip_to_morning();
+                for sleeper_id in waking {
+                    let mut body = Vec::new();
+                    write_varint(sleeper_id as u32, &mut body);
+                    body.push(2); // Protocol 5 wake/leave bed animation
+                    hub.broadcast_in_dimension(
+                        dimensions::Dimension::Overworld,
+                        Event { id: 0x0b, body },
+                    );
+                }
+            }
+        }
+        // Food may have changed due to exhaustion, a potion, or a meal on
+        // the previous iteration. A stale sprint flag must not survive
+        // across the <=6 hunger threshold.
+        if survival {
+            sprinting = sprint_action(sprinting, 0, vitals.food);
+        }
         if pending_teleport
             .as_ref()
             .is_some_and(|gate| gate.timed_out(Instant::now()))
@@ -2686,6 +2813,7 @@ fn play(
             }
         }
         if survival && vitals.health <= 0.0 {
+            hub.leave_bed(entity_id);
             eating = None;
             let newly_dead = !death_recorded;
             let death_record = if newly_dead {
@@ -3303,10 +3431,22 @@ fn play(
                 if let Some(parsed) = commands::parse_public(&message) {
                     match parsed {
                         Err(usage) => as_chat(s, usage)?,
-                        Ok(PublicCommand::Help) => as_chat(
-                            s,
-                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /enchant, /testforblock, /seed, /spawnpoint, /setworldspawn, /gamerule, /difficulty, /time, /weather, /kick, /ban, /save.",
-                        )?,
+                        Ok(PublicCommand::Help(page)) => {
+                            if let Some(lines) = commands::player_help_page(page) {
+                                as_chat(
+                                    s,
+                                    &format!(
+                                        "Commands page {page}/{}:",
+                                        commands::player_help_page_count()
+                                    ),
+                                )?;
+                                for line in lines {
+                                    as_chat(s, &line)?;
+                                }
+                            } else {
+                                as_chat(s, "Usage: /help [page]")?;
+                            }
+                        }
                         Ok(PublicCommand::List) => as_chat(
                             s,
                             &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")),
@@ -3318,7 +3458,10 @@ fn play(
                                 hub.broadcast(chat_event(&format!("* {name} {action}"))?);
                             }
                         }
-                        Ok(PublicCommand::Tell { target, message: body }) => {
+                        Ok(PublicCommand::Tell {
+                            target,
+                            message: body,
+                        }) => {
                             if !permissions.chat {
                                 as_chat(s, "Chat permission denied.")?;
                             } else if !hub.send_to_name(
@@ -3556,6 +3699,11 @@ fn play(
                     } else {
                         vitals.travel(distance);
                     }
+                    // A movement packet can consume the last food point
+                    // above the sprint threshold. Drop the state before
+                    // any later food restore, even if no client stop event
+                    // arrived in the meantime.
+                    sprinting = sprint_action(sprinting, 0, vitals.food);
                     if vitals.food != old_food || vitals.saturation != old_saturation {
                         player.save_state_in_dimension(
                             player_path,
@@ -3898,6 +4046,9 @@ fn play(
                 input.finish()?;
                 if survival {
                     sprinting = sprint_action(sprinting, action, vitals.food);
+                    if action == 2 {
+                        hub.leave_bed(entity_id); // leave-bed Entity Action
+                    }
                 }
             }
             7 => {
@@ -5373,15 +5524,10 @@ fn play(
                         packet.push(y as u8);
                         packet.extend_from_slice(&z.to_be_bytes());
                         send(s, 0x0a, &packet)?;
-                        // A lone player may complete sleep immediately. More
-                        // players must use their own beds; never skip their night.
-                        if hub.positions()?.len() <= 1 {
-                            clock.skip_to_morning();
-                            let mut wake = Vec::new();
-                            write_varint(entity_id as u32, &mut wake);
-                            wake.push(2); // leave bed animation
-                            send(s, 0x0b, &wake)?;
-                        }
+                        // Each session votes only after successfully using a
+                        // valid bed. Time advances when *all* Overworld
+                        // sessions have voted, not merely on the first use.
+                        hub.enter_bed(entity_id)?;
                     } else if survival {
                         as_chat(s, "You can only sleep at night.")?;
                     }
@@ -6818,23 +6964,14 @@ fn play(
                     hazards = Hazards::new();
                     last_hazards_tick = now_tick;
                     // In vanilla, death loses XP and may leave up to 100 XP in orbs.
-                    if !keep_inventory {
-                        let drop_amount =
-                            (u32::from(experience.level_and_fraction().0) * 7).min(100) as u16;
-                        *experience = Experience::default();
-                        experience.save(experience_path)?;
-                        // Void XP entities would be spawned beneath the
-                        // accessible world and should not persist there.
-                        if death_position.y >= -64.0 {
-                            if let Some(orb) = mobs
-                                .lock()
-                                .map_err(|_| bad("mob mutex poisoned"))?
-                                .spawn_xp(death_position, drop_amount)
-                            {
-                                hub.broadcast(orb);
-                            }
-                        }
-                    }
+                    commit_death_experience(
+                        experience,
+                        experience_path,
+                        mobs,
+                        hub,
+                        death_position,
+                        keep_inventory,
+                    )?;
                     location = (origin.x, origin.y, origin.z);
                     let mut respawn = (respawn_dimension.protocol_id() as i32)
                         .to_be_bytes()
@@ -8010,7 +8147,9 @@ fn start_clock_console(
             }
             let result: io::Result<()> = match args.as_slice() {
                 ["/help"] | ["/?"] => {
-                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /seed /spawnpoint /setworldspawn /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    for line in commands::help_lines(commands::HelpAudience::Console) {
+                        println!("{line}");
+                    }
                     Ok(())
                 }
                 ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
@@ -8463,6 +8602,7 @@ fn main() -> io::Result<()> {
             return Err(bad("usage: --recover-level-dat STOPPED_WORLD_DIR"));
         }
         let world_directory = Path::new(&raw_args[1]);
+        server_config::reject_parent_traversal(world_directory)?;
         // Preflight is read-only. A corrupt backup or an existing level.dat
         // must not cause recovery to rewrite the world's session.lock.
         match std::fs::symlink_metadata(world_directory.join("level.dat")) {
@@ -8501,6 +8641,8 @@ fn main() -> io::Result<()> {
         if raw_args.len() != 3 || raw_args[0] != "--prepare-anvil-copy" {
             return Err(bad("usage: --prepare-anvil-copy SOURCE_DIR NEW_DEST_DIR"));
         }
+        server_config::reject_parent_traversal(Path::new(&raw_args[1]))?;
+        server_config::reject_parent_traversal(Path::new(&raw_args[2]))?;
         let stats = migration_staging::prepare_anvil_copy(
             Path::new(&raw_args[1]),
             Path::new(&raw_args[2]),
@@ -8604,6 +8746,7 @@ fn main() -> io::Result<()> {
                     .next()
                     .ok_or_else(|| bad("missing --world value"))?
                     .into();
+                server_config::reject_parent_traversal(&world_path)?;
                 explicit_world = true;
             }
             "--whitelist" => {
@@ -8747,6 +8890,21 @@ fn main() -> io::Result<()> {
             }
             _ => return Err(bad("unknown command-line argument")),
         }
+    }
+    // Validate all user-controlled storage paths before any offline backup,
+    // import/export, lock acquisition or world creation can write to disk.
+    server_config::reject_parent_traversal(&world_path)?;
+    for candidate in [
+        dimension_root.as_ref(),
+        anvil_import_path.as_ref(),
+        anvil_export_path.as_ref(),
+        backup_destination.as_ref(),
+        backup_rotation.as_ref().map(|(root, _)| root),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        server_config::reject_parent_traversal(candidate)?;
     }
     // Rotation must be a standalone offline command with an explicit world path.
     if backup_rotation.is_some()
@@ -10750,6 +10908,149 @@ mod piston_action_wire_tests {
 }
 
 #[cfg(test)]
+mod reg147_keep_inventory_xp_tests {
+    use super::{
+        commit_death_experience, death_xp_drop_amount, Experience, GameRules, Hub, Mobs,
+        PlayerPosition,
+    };
+
+    #[test]
+    fn keep_inventory_retains_all_xp_and_emits_no_death_orb() {
+        let mut rules = GameRules::default();
+        let earned = Experience { total: 1_000 };
+        assert_eq!(
+            death_xp_drop_amount(&earned, rules.keep_inventory()),
+            Some(100)
+        );
+        rules.set("keepInventory", true).unwrap();
+        assert_eq!(death_xp_drop_amount(&earned, rules.keep_inventory()), None);
+        let bytes = serde_json::to_vec(&earned).unwrap();
+        let restored: Experience = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored, earned);
+        assert_eq!(restored.total, 1_000);
+        rules.set("keepInventory", false).unwrap();
+        assert_eq!(
+            death_xp_drop_amount(&restored, rules.keep_inventory()),
+            Some(100)
+        );
+        assert_eq!(death_xp_drop_amount(&Experience::default(), false), Some(0));
+    }
+
+    /// Scratch directory only: this never opens an existing world. The death
+    /// commit runs through the real XP save file and the real orb store, so a
+    /// reload after the death (reconnect or restart) is covered, not just the
+    /// in-memory decision.
+    fn scratch(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-reg147-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn death_commit_keeps_saved_xp_and_creates_no_orb_when_keep_inventory_is_on() {
+        let root = scratch("keep");
+        let xp_path = root.join("xp.json");
+        let death = PlayerPosition {
+            x: 10.5,
+            y: 40.0,
+            z: -3.5,
+        };
+        let hub = Hub::default();
+        let mobs = std::sync::Mutex::new(Mobs::default());
+        Experience { total: 250 }.save(&xp_path).unwrap();
+        let saved_before = std::fs::read(&xp_path).unwrap();
+
+        let mut kept = Experience { total: 250 };
+        let orb = commit_death_experience(&mut kept, &xp_path, &mobs, &hub, death, true).unwrap();
+
+        assert_eq!(orb, None, "keepInventory must not create a death orb");
+        assert_eq!(kept.total, 250, "live XP account must survive the death");
+        assert_eq!(
+            std::fs::read(&xp_path).unwrap(),
+            saved_before,
+            "keepInventory must not rewrite the saved XP account"
+        );
+        assert_eq!(Experience::load(&xp_path).unwrap().total, 250);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn death_commit_zeroes_saved_xp_and_only_spawns_real_orbs() {
+        let root = scratch("drop");
+        let xp_path = root.join("xp.json");
+        let death = PlayerPosition {
+            x: 10.5,
+            y: 40.0,
+            z: -3.5,
+        };
+        let hub = Hub::default();
+        let mobs = std::sync::Mutex::new(Mobs::default());
+
+        // A 0 XP death still clears and re-saves the account, but the orb store
+        // refuses a zero-amount orb, so no empty orb can be broadcast.
+        Experience { total: 250 }.save(&xp_path).unwrap();
+        let mut broke = Experience::default();
+        let orb = commit_death_experience(&mut broke, &xp_path, &mobs, &hub, death, false).unwrap();
+        assert_eq!(orb, None, "a 0 XP death must not create an orb");
+        assert_eq!(broke.total, 0);
+        assert_eq!(Experience::load(&xp_path).unwrap().total, 0);
+
+        // Earned XP: level 14 drops 98 XP (14 * 7, capped at 100). The saved
+        // account is zeroed before the orb spawns, so a reload cannot restore it.
+        Experience { total: 250 }.save(&xp_path).unwrap();
+        let mut earned = Experience { total: 250 };
+        let orb =
+            commit_death_experience(&mut earned, &xp_path, &mobs, &hub, death, false).unwrap();
+        assert_eq!(orb, Some(98));
+        assert_eq!(earned.total, 0);
+        assert_eq!(Experience::load(&xp_path).unwrap().total, 0);
+
+        // The orb payload carries the death site, not the respawn point, and a
+        // second XP orb is collectable from there.
+        let events = mobs.lock().unwrap().collect_xp(death, 1);
+        assert!(
+            events.is_some(),
+            "the death orb must be reachable at the death site"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn death_commit_fails_closed_when_the_xp_save_cannot_be_written() {
+        let root = scratch("fail");
+        let blocker = root.join("blocked");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let xp_path = blocker.join("xp.json");
+        let death = PlayerPosition {
+            x: 0.0,
+            y: 64.0,
+            z: 0.0,
+        };
+        let hub = Hub::default();
+        let mobs = std::sync::Mutex::new(Mobs::default());
+
+        let mut earned = Experience { total: 250 };
+        let outcome = commit_death_experience(&mut earned, &xp_path, &mobs, &hub, death, false);
+
+        assert!(outcome.is_err(), "the session must abort on XP save loss");
+        assert!(
+            !xp_path.exists(),
+            "a failed XP save must not leave a partial XP file"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod reg150_void_death_tests {
     use super::{void_damage_tick, DeathCause, PlayerPosition, Vitals};
 
@@ -10776,7 +11077,7 @@ mod reg150_void_death_tests {
 
 #[cfg(test)]
 mod sprint_action_tests {
-    use super::sprint_action;
+    use super::{sprint_action, Stack, Vitals};
 
     #[test]
     fn protocol5_sprint_starts_only_with_food_above_six() {
@@ -10784,6 +11085,42 @@ mod sprint_action_tests {
         assert!(sprint_action(false, 3, 7));
         assert!(sprint_action(true, 0, 20));
         assert!(!sprint_action(true, 4, 20));
+        // Low food invalidates an already-active sprint, regardless of the
+        // last Entity Action sent by the client.
+        assert!(!sprint_action(true, 0, 6));
+        assert!(!sprint_action(true, 3, 6));
+    }
+
+    #[test]
+    fn reg144_hunger_crossing_clears_sprint_and_eating_requires_new_start() {
+        let mut vitals = Vitals {
+            food: 7,
+            saturation: 0.0,
+            exhaustion: 3.95,
+            ..Vitals::default()
+        };
+        let mut sprinting = sprint_action(false, 3, vitals.food);
+        assert!(sprinting);
+        assert!(vitals.travel_with_sprint(1.0, sprinting));
+        assert_eq!(vitals.food, 6);
+        sprinting = sprint_action(sprinting, 0, vitals.food);
+        assert!(!sprinting);
+        assert!(!sprint_action(sprinting, 3, vitals.food));
+        assert!(!vitals.travel_with_sprint(1.0, sprinting));
+
+        // Eating restores sufficient food but must not resurrect the
+        // previous sprint action without a new Start Sprinting packet.
+        let apple = Stack {
+            id: 260,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        assert!(vitals.eat(apple));
+        assert!(vitals.food > 6);
+        assert!(!sprint_action(sprinting, 0, vitals.food));
+        assert!(sprint_action(sprinting, 3, vitals.food));
+        assert!(!sprint_action(true, 4, vitals.food));
     }
 }
 

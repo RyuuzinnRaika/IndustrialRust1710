@@ -6,7 +6,7 @@ use crate::items_1710;
 use crate::player::PlayerPosition;
 use crate::world::VIEW_DISTANCE;
 use legacy_protocol::{write_string, write_varint};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
@@ -88,6 +88,9 @@ pub struct Peer {
 struct Inner {
     next_id: i32,
     players: BTreeMap<i32, Peer>,
+    // Server-owned overnight state. A client cannot alter this except by
+    // successfully interacting with an authoritative bed.
+    sleeping: BTreeSet<i32>,
 }
 #[derive(Default)]
 pub struct Hub(Mutex<Inner>);
@@ -216,6 +219,46 @@ impl Hub {
     }
     pub fn count(&self) -> io::Result<usize> {
         Ok(self.0.lock().map_err(|_| poisoned())?.players.len())
+    }
+
+    /// A validated bed use marks the owning Overworld session as asleep.
+    pub fn enter_bed(&self, id: i32) -> io::Result<()> {
+        let mut inner = self.0.lock().map_err(|_| poisoned())?;
+        if inner
+            .players
+            .get(&id)
+            .is_some_and(|peer| peer.dimension == Dimension::Overworld)
+        {
+            inner.sleeping.insert(id);
+        }
+        Ok(())
+    }
+
+    /// Invalidate a sleeping vote on Leave Bed, death, portal or disconnect.
+    pub fn leave_bed(&self, id: i32) {
+        if let Ok(mut inner) = self.0.lock() {
+            inner.sleeping.remove(&id);
+        }
+    }
+
+    /// Atomically consume the sleep votes only when every current Overworld
+    /// participant is in bed. Another session cannot skip the night twice;
+    /// Nether and End clients are excluded from the Overworld quorum.
+    pub fn complete_night_sleep(&self) -> io::Result<Option<Vec<i32>>> {
+        let mut inner = self.0.lock().map_err(|_| poisoned())?;
+        let overworld: Vec<i32> = inner
+            .players
+            .values()
+            .filter(|peer| peer.dimension == Dimension::Overworld)
+            .map(|peer| peer.id)
+            .collect();
+        if overworld.is_empty() || overworld.iter().any(|id| !inner.sleeping.contains(id)) {
+            return Ok(None);
+        }
+        for id in &overworld {
+            inner.sleeping.remove(id);
+        }
+        Ok(Some(overworld))
     }
     pub fn names(&self) -> io::Result<Vec<String>> {
         let inner = self.0.lock().map_err(|_| poisoned())?;
@@ -644,6 +687,7 @@ impl Hub {
     pub fn remove(&self, id: i32) {
         if let Ok(mut inner) = self.0.lock() {
             if let Some(gone) = inner.players.remove(&id) {
+                inner.sleeping.remove(&id);
                 let removed = list_entry(&gone.name, false).ok();
                 let entity = destroy(id);
                 for peer in inner.players.values() {
@@ -666,7 +710,11 @@ impl Hub {
     pub fn record_player_position(&self, id: i32, position: PlayerPosition) {
         if let Ok(mut inner) = self.0.lock() {
             if let Some(peer) = inner.players.get_mut(&id) {
+                let changed = peer.position != position;
                 peer.position = position;
+                if changed {
+                    inner.sleeping.remove(&id);
+                }
             }
         }
     }
@@ -677,6 +725,9 @@ impl Hub {
                 let old_position = peer.position;
                 peer.position = position;
                 let moved = peer.clone();
+                if old_position != position {
+                    inner.sleeping.remove(&id);
+                }
                 let packet = teleport(id, &position, yaw, pitch);
                 let appeared = spawn(&moved).ok();
                 let vanished = destroy(id);
@@ -745,6 +796,11 @@ impl Hub {
             ));
         }
         let departing = current.clone();
+        inner.sleeping.remove(&id);
+        let current = inner
+            .players
+            .get_mut(&id)
+            .expect("session still registered");
         current.dimension = dimension;
         current.position = position;
         let arriving = current.clone();
@@ -864,6 +920,67 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reg149_night_requires_every_overworld_player_and_resets_once() {
+        let hub = Hub::default();
+        let (alice, _a_rx, _) = hub
+            .add(
+                "SleepAlice".into(),
+                "uuid-a".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        let (bob, _b_rx, _) = hub
+            .add(
+                "SleepBob".into(),
+                "uuid-b".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        assert_eq!(hub.complete_night_sleep().unwrap(), None);
+        hub.enter_bed(alice).unwrap();
+        assert_eq!(hub.complete_night_sleep().unwrap(), None);
+        hub.enter_bed(bob).unwrap();
+        assert_eq!(hub.complete_night_sleep().unwrap(), Some(vec![alice, bob]));
+        assert_eq!(hub.complete_night_sleep().unwrap(), None); // no double skip
+
+        // A Leave Bed packet revokes only that player's vote.
+        hub.enter_bed(alice).unwrap();
+        hub.enter_bed(bob).unwrap();
+        hub.leave_bed(bob);
+        assert_eq!(hub.complete_night_sleep().unwrap(), None);
+        hub.enter_bed(bob).unwrap();
+        assert_eq!(hub.complete_night_sleep().unwrap(), Some(vec![alice, bob]));
+
+        // A disconnected non-sleeper no longer blocks the surviving sleeper.
+        hub.enter_bed(alice).unwrap();
+        hub.remove(bob);
+        assert_eq!(hub.complete_night_sleep().unwrap(), Some(vec![alice]));
+        assert_eq!(hub.complete_night_sleep().unwrap(), None);
+    }
+
+    #[test]
+    fn reg149_netheriters_do_not_vote_in_overworld_sleep_quorum() {
+        let hub = Hub::default();
+        let (alice, _a_rx, _) = hub
+            .add(
+                "Overworld".into(),
+                "uuid-over".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        let (_nether, _n_rx, _) = hub
+            .add_in_dimension(
+                "NetherUser".into(),
+                "uuid-nether".into(),
+                PlayerPosition::default(),
+                Dimension::Nether,
+            )
+            .unwrap();
+        hub.enter_bed(alice).unwrap();
+        assert_eq!(hub.complete_night_sleep().unwrap(), Some(vec![alice]));
+    }
     #[test]
     fn nonfinite_and_extreme_positions_never_enter_interest_range() {
         let origin = PlayerPosition::default();

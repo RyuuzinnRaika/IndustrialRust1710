@@ -39,6 +39,34 @@ class RestoreDrillTests(unittest.TestCase):
         self.assertEqual(module.snapshot_hashes(self.backup), original)
         self.assertTrue(run.call_args.kwargs["check"])
 
+
+    @patch.object(module.subprocess, "run")
+    def test_anvil_world_and_verifier_cwd_remain_inside_scratch(self, run):
+        (self.backup / "flat.irw").unlink()
+        (self.backup / "level.dat").write_bytes(b"anvil fixture")
+        before = module.snapshot_hashes(self.backup)
+        self.assertEqual(module.verify_restore_point(self.server, self.backup), 3)
+        argv = run.call_args.args[0]
+        cwd = Path(run.call_args.kwargs["cwd"])
+        target = Path(argv[2])
+        self.assertEqual(Path(argv[0]), self.server.resolve())
+        self.assertEqual(target, cwd / "world")
+        self.assertNotEqual(cwd, self.base)
+        self.assertFalse(cwd.exists(), "scratch working directory must be disposed")
+        self.assertEqual(module.snapshot_hashes(self.backup), before)
+
+    @patch.object(module.subprocess, "run")
+    def test_relative_server_binary_remains_resolvable_with_isolated_cwd(self, run):
+        import os
+        previous = Path.cwd()
+        try:
+            os.chdir(self.base)
+            self.assertEqual(module.verify_restore_point(Path("server"), Path("backup")), 3)
+            self.assertEqual(Path(run.call_args.args[0][0]), self.server.resolve())
+            self.assertNotEqual(Path(run.call_args.kwargs["cwd"]), self.base)
+        finally:
+            os.chdir(previous)
+
     @patch.object(module.subprocess, "run")
     def test_nonflat_irw_basename_is_verified_as_a_file(self, run):
         (self.backup / "flat.irw").rename(self.backup / "experiment.irw")
