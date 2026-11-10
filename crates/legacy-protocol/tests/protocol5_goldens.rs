@@ -16,10 +16,8 @@ fn add084_anonymized_protocol5_login_to_play_trace_replays_in_order() {
     const ZERO_UUID: &str = "00000000-0000-0000-0000-000000000000";
     const HANDSHAKE: &[u8] = b"\x07\x00\x05\x01A\x63\xdd\x02";
     const LOGIN_START: &[u8] = b"\x03\x00\x01A";
-    const LOGIN_SUCCESS: &[u8] =
-        b"\x28\x02\x2400000000-0000-0000-0000-000000000000\x01A";
-    const JOIN_GAME: &[u8] =
-        b"\x11\x01\x00\x00\x00\x01\x01\x00\x02\x08\x07default";
+    const LOGIN_SUCCESS: &[u8] = b"\x28\x02\x2400000000-0000-0000-0000-000000000000\x01A";
+    const JOIN_GAME: &[u8] = b"\x11\x01\x00\x00\x00\x01\x01\x00\x02\x08\x07default";
     const KEEPALIVE: &[u8] = b"\x05\x00\x01\x02\x03\x04";
 
     // (direction/state, immutable complete frame, Protocol 5 packet ID).
@@ -63,10 +61,7 @@ fn add084_anonymized_protocol5_login_to_play_trace_replays_in_order() {
             "S->C Play Join Game" => {
                 // 1.7.10: i32 entity id, u8 gamemode, i8 dimension,
                 // u8 difficulty, u8 max players and legacy level type.
-                assert_eq!(
-                    &frame[1..],
-                    b"\x00\x00\x00\x01\x01\x00\x02\x08\x07default"
-                );
+                assert_eq!(&frame[1..], b"\x00\x00\x00\x01\x01\x00\x02\x08\x07default");
             }
             "S->C Play KeepAlive" | "C->S Play KeepAlive" => {
                 assert_eq!(&frame[1..], &[1, 2, 3, 4]);
