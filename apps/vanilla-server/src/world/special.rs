@@ -651,7 +651,15 @@ impl World {
     pub(super) fn daylight_strength(&self) -> u16 {
         let angle = (self.day_time.rem_euclid(24_000) as f64 / 24_000.0) * std::f64::consts::TAU;
         let day = ((angle.sin() + 0.15) * 15.0).round().clamp(0.0, 15.0) as u16;
-        day.saturating_sub(if self.raining { 3 } else { 0 })
+        // 1.7.10 sky light at noon: clear 15, rain 12, thunder 10 (dark
+        // enough for hostile spawns). Thunder is the larger dimming.
+        day.saturating_sub(if self.thundering {
+            5
+        } else if self.raining {
+            3
+        } else {
+            0
+        })
     }
 
     /// Validate a facing hook against a contiguous, non-disarmed wire and
@@ -1029,6 +1037,67 @@ mod tests {
         }
         assert_eq!(restarted.get(0, 64, 0), (151 << 4) | 15);
         assert_eq!(World::load(&path).unwrap().get(0, 64, 0), (151 << 4) | 15);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn add060_daylight_recomputes_through_thunder_and_time_changes() {
+        // ADD-060 / #484: the reg168 matrix covered clear/rain; thunder is
+        // the remaining weather state in the completion criteria. In
+        // 1.7.10 a thunderstorm drops noon sky light to 10, below rain.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-add060-thunder-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("sensor.irw");
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 63, 0, 1 << 4).unwrap();
+        world.update_and_save(&path, 0, 64, 0, 151 << 4).unwrap();
+
+        for (time, rain, thunder, strength) in [
+            (6_000i64, false, false, 15u16),
+            (6_000, true, false, 12),
+            (6_000, true, true, 10),
+            (6_000, true, false, 12),
+            (6_000, false, false, 15),
+            (18_000, true, true, 0),
+            (3_000, true, true, 8),
+            (3_000, false, false, 13),
+        ] {
+            world.set_day_time(time);
+            world.set_raining(rain);
+            world.set_thundering(thunder);
+            for _ in 0..4 {
+                world.block_tick(&path, 64).unwrap();
+            }
+            assert_eq!(
+                world.get(0, 64, 0),
+                (151 << 4) | strength,
+                "unexpected daylight output at time={time}, rain={rain}, thunder={thunder}"
+            );
+            assert_eq!(
+                World::load(&path).unwrap().get(0, 64, 0),
+                (151 << 4) | strength,
+                "committed daylight state was not persisted"
+            );
+        }
+
+        // A restarted server recomputes the sensor from the live weather
+        // state instead of freezing the last committed output.
+        let mut restarted = World::load(&path).unwrap();
+        restarted.set_day_time(6_000);
+        restarted.set_raining(true);
+        restarted.set_thundering(true);
+        for _ in 0..4 {
+            restarted.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(restarted.get(0, 64, 0), (151 << 4) | 10);
 
         fs::remove_dir_all(root).unwrap();
     }

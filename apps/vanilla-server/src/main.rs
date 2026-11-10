@@ -9479,6 +9479,7 @@ fn main() -> io::Result<()> {
                 );
                 // Fire uses the same clock/weather source as client rain packets.
                 gravity_world.set_raining(weather.0);
+                gravity_world.set_thundering(weather.1);
                 gravity_world.set_day_time(furnace_clock.day_time());
                 for _ in 0..steps {
                     // A /stop request must not replay up to twenty expensive
