@@ -8,7 +8,7 @@ use crate::vehicles::attachment;
 use crate::world::World;
 use legacy_protocol::write_varint;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -603,6 +603,19 @@ impl Minecarts {
             ));
         }
         events
+    }
+
+    /// Observe occupancy after a physics tick. Multiple carts may occupy
+    /// the same detector rail; a set keeps it powered until the last departs.
+    pub fn occupied_detector_rails(&self, world: &World) -> BTreeSet<(i32, i32, i32)> {
+        self.carts
+            .values()
+            .filter_map(|cart| {
+                let (id, _, _, _, cell) =
+                    straight_track(world, cart.position, Some(cart.east_west))?;
+                (id == 28).then_some(cell)
+            })
+            .collect()
     }
 
     pub fn snapshot(&self, observer: PlayerPosition) -> Vec<Event> {
