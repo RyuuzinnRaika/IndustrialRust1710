@@ -658,11 +658,23 @@ fn send_chunk_batch(
 fn send_chunk(s: &mut Connection, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
     send(s, 0x21, &queue_chunk(world, cx, cz)?.finish()?)
 }
-fn send_visible_signs(
-    s: &mut Connection,
+/// Protocol 5 S33/S35 sign and flower-pot packets share a 10-byte
+/// signed block coordinate header. Only decode server-generated payloads.
+fn tile_packet_position(body: &[u8]) -> Option<(i32, i32, i32)> {
+    let x = i32::from_be_bytes(body.get(0..4)?.try_into().ok()?);
+    let y = i16::from_be_bytes(body.get(4..6)?.try_into().ok()?);
+    let z = i32::from_be_bytes(body.get(6..10)?.try_into().ok()?);
+    Some((x, i32::from(y), z))
+}
+
+/// Capture tile records, release the decorations lock, and check each against
+/// the authoritative World. Never replay orphan sign/pot packets after a
+/// chunk unload/reload, even when a legacy sidecar contains stale entries.
+fn visible_decoration_events(
+    world: &Mutex<World>,
     decorations: &Mutex<Decorations>,
     chunks: &BTreeSet<(i32, i32)>,
-) -> io::Result<()> {
+) -> io::Result<Vec<Event>> {
     let (signs, pots) = {
         let storage = decorations
             .lock()
@@ -672,14 +684,35 @@ fn send_visible_signs(
             storage.pot_packets_in(chunks)?,
         )
     };
+    let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+    let mut events = Vec::with_capacity(signs.len() + pots.len());
     for body in signs {
-        send(s, 0x33, &body)?;
+        if tile_packet_position(&body)
+            .is_some_and(|(x, y, z)| matches!(state.get(x, y, z) >> 4, 63 | 68))
+        {
+            events.push(Event { id: 0x33, body });
+        }
     }
     for body in pots {
-        send(s, 0x35, &body)?;
+        if tile_packet_position(&body).is_some_and(|(x, y, z)| state.get(x, y, z) >> 4 == 140) {
+            events.push(Event { id: 0x35, body });
+        }
+    }
+    Ok(events)
+}
+
+fn send_visible_signs(
+    s: &mut Connection,
+    world: &Mutex<World>,
+    decorations: &Mutex<Decorations>,
+    chunks: &BTreeSet<(i32, i32)>,
+) -> io::Result<()> {
+    for event in visible_decoration_events(world, decorations, chunks)? {
+        send(s, event.id, &event.body)?;
     }
     Ok(())
 }
+
 /// Keep hanging entities in sync with the client's chunk set. A chunk unload
 /// destroys client-side entities; they must be spawned again on re-entry.
 fn send_hanging_delta(
@@ -1928,7 +1961,7 @@ fn play(
                 let old_chunks = loaded_chunks.clone();
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
                 let entering = loaded_chunks.difference(&old_chunks).copied().collect();
-                send_visible_signs(s, decorations, &entering)?;
+                send_visible_signs(s, world, decorations, &entering)?;
                 send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                 send_player_position(s, player, yaw, pitch)?;
                 pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
@@ -1970,7 +2003,7 @@ fn play(
                         let old_chunks = loaded_chunks.clone();
                         sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
                         let entering = loaded_chunks.difference(&old_chunks).copied().collect();
-                        send_visible_signs(s, decorations, &entering)?;
+                        send_visible_signs(s, world, decorations, &entering)?;
                         send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                         send_player_position(s, player, yaw, pitch)?;
                         pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
@@ -3853,7 +3886,7 @@ fn play(
                     sync_chunks(s, world, &mut loaded_chunks, new_chunk_center)?;
                     if loaded_chunks != old_chunks {
                         let entering = loaded_chunks.difference(&old_chunks).copied().collect();
-                        send_visible_signs(s, decorations, &entering)?;
+                        send_visible_signs(s, world, decorations, &entering)?;
                         send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                     }
                 } else if position_changed {
@@ -3939,7 +3972,7 @@ fn play(
                             if loaded_chunks != old_chunks {
                                 let entering =
                                     loaded_chunks.difference(&old_chunks).copied().collect();
-                                send_visible_signs(s, decorations, &entering)?;
+                                send_visible_signs(s, world, decorations, &entering)?;
                                 send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                             }
                             // Keep this connection's detach and position
@@ -6933,7 +6966,7 @@ fn play(
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks and entities on respawn
                     sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
-                    send_visible_signs(s, decorations, &loaded_chunks)?;
+                    send_visible_signs(s, world, decorations, &loaded_chunks)?;
                     send_hanging_delta(s, hangings, &BTreeSet::new(), &loaded_chunks)?;
                     for mob in mobs
                         .lock()
@@ -7403,6 +7436,7 @@ fn handle(
     // Chunks do not embed tile entities: replay persisted sign text after joining.
     send_visible_signs(
         &mut s,
+        &world,
         &decorations,
         &view_chunks(chunk_center(&player_state)),
     )?;
@@ -12055,6 +12089,84 @@ mod primed_tnt_protocol5_tests {
         assert_eq!(encoded[0], 0x81); // entity ID starts as Protocol 5 VarInt
         assert_eq!(encoded[4], 50); // TNT object type
         assert_eq!(&encoded[5..9], &16i32.to_be_bytes());
+    }
+}
+
+#[cfg(test)]
+mod reg113_tile_reentry_tests {
+    use super::*;
+
+    #[test]
+    fn chunk_reentry_replays_only_live_sign_and_flower_pot_tiles() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("ir1710-reg113-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("isolated.irw");
+        let mut world = World::new();
+        let sign = (-16, 64, -1);
+        let pot = (16, 64, 0);
+        world
+            .update_and_save(&path, sign.0, sign.1, sign.2, 63 << 4)
+            .unwrap();
+        world
+            .update_and_save(&path, pot.0, pot.1, pot.2, 140 << 4)
+            .unwrap();
+        let mut tile = Decorations::default();
+        tile.set_sign(
+            &root.join("decoration.json"),
+            sign,
+            ["Reentry".into(), "".into(), "".into(), "".into()],
+        )
+        .unwrap();
+        tile = tile
+            .stage_pot(
+                pot,
+                Some(Stack {
+                    id: 6,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                }),
+            )
+            .unwrap();
+        let world = Mutex::new(world);
+        let tile = Mutex::new(tile);
+        let sign_view = BTreeSet::from([(-1, -1)]);
+        let pot_view = BTreeSet::from([(1, 0)]);
+        let first = visible_decoration_events(&world, &tile, &sign_view).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].id, 0x33);
+        assert_eq!(tile_packet_position(&first[0].body), Some(sign));
+        let potted = visible_decoration_events(&world, &tile, &pot_view).unwrap();
+        assert_eq!(potted.len(), 1);
+        assert_eq!(potted[0].id, 0x35);
+        assert_eq!(tile_packet_position(&potted[0].body), Some(pot));
+        assert!(visible_decoration_events(&world, &tile, &BTreeSet::new())
+            .unwrap()
+            .is_empty());
+        let again = visible_decoration_events(&world, &tile, &sign_view).unwrap();
+        assert_eq!(again[0].body, first[0].body);
+
+        // Sidecar still contains a sign, but world no longer has that tile.
+        world
+            .lock()
+            .unwrap()
+            .update_and_save(&path, sign.0, sign.1, sign.2, 0)
+            .unwrap();
+        assert!(visible_decoration_events(&world, &tile, &sign_view)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            visible_decoration_events(&world, &tile, &pot_view)
+                .unwrap()
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
