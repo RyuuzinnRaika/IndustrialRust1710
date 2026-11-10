@@ -639,6 +639,39 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[test]
+    fn detector_occupancy_tracks_two_carts_and_last_departure() {
+        let mut world = World::new();
+        for x in [0, 2] {
+            world.import_block(x, 65, 0, (28 << 4) | 1).unwrap();
+        }
+        let mut carts = Minecarts::default();
+        for x in [0.5, 2.5] {
+            assert!(carts
+                .place(
+                    &world,
+                    PlayerPosition {
+                        x,
+                        y: 65.5,
+                        z: 0.5,
+                    },
+                    0,
+                )
+                .is_some());
+        }
+        assert_eq!(
+            carts.occupied_detector_rails(&world),
+            BTreeSet::from([(0, 65, 0), (2, 65, 0)])
+        );
+        carts.carts.remove(&FIRST_ID);
+        assert_eq!(
+            carts.occupied_detector_rails(&world),
+            BTreeSet::from([(2, 65, 0)])
+        );
+        carts.carts.remove(&(FIRST_ID + 1));
+        assert!(carts.occupied_detector_rails(&world).is_empty());
+    }
+
     // Use a fresh directory per test, including when tests run in parallel or
     // a previous process left files behind. Never delete a shared PID path.
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
