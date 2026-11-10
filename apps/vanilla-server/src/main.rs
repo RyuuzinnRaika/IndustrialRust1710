@@ -12248,4 +12248,3 @@ mod command_world_settings_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
-
