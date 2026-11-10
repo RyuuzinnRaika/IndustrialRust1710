@@ -338,6 +338,92 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// REG-181 / #817 and ADD-064 / #489: adjacent chunks are one IRW
+    /// generation. An interruption after the first participant was installed
+    /// must replay the entire committed record, including inventory, exactly
+    /// once. This uses valid encoded IRW bytes rather than synthetic markers.
+    #[test]
+    fn reg181_adjacent_chunk_generation_survives_partial_redo_and_replay() {
+        use crate::world::World;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-reg181-{}-{stamp}",
+            std::process::id()
+        ));
+        // The fixture must not reuse or delete an existing world.
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("players")).unwrap();
+        let world_path = root.join("flat.irw");
+        let candidate_path = root.join("candidate.irw");
+        let inventory = root.join("players/alex.inventory.json");
+        let journal = root.join("flat.pending-txn.json");
+
+        World::new().save_new(&world_path).unwrap();
+        let initial_world = fs::read(&world_path).unwrap();
+        fs::write(&inventory, b"previous-inventory").unwrap();
+        let mut staged = World::load(&world_path).unwrap();
+        assert!(
+            staged
+                .update_many_and_save(
+                    &candidate_path,
+                    &[(15, 64, 0, 1u16 << 4), (16, 64, 0, 2u16 << 4)]
+                )
+                .unwrap(),
+            "edits straddling the chunk boundary must both be staged"
+        );
+        let committed_world = fs::read(&candidate_path).unwrap();
+        assert_ne!(committed_world, initial_world);
+        fs::remove_file(&candidate_path).unwrap();
+        let committed_inventory = b"committed-inventory".to_vec();
+
+        let record = Record {
+            version: VERSION,
+            files: vec![
+                Target {
+                    relative: relative(&root, &world_path).unwrap(),
+                    checksum: fingerprint(&committed_world),
+                    contents: committed_world.clone(),
+                },
+                Target {
+                    relative: relative(&root, &inventory).unwrap(),
+                    checksum: fingerprint(&committed_inventory),
+                    contents: committed_inventory.clone(),
+                },
+            ],
+        };
+        let durable_redo = serde_json::to_vec(&record).unwrap();
+        // Emulate a crash *after* the redo record is durable and the world
+        // rename completes, but *before* inventory publication/checkpoint.
+        fs::write(&journal, &durable_redo).unwrap();
+        fs::write(&world_path, &committed_world).unwrap();
+        fs::write(inventory.with_extension("txn.tmp"), b"interrupted").unwrap();
+        assert_eq!(fs::read(&inventory).unwrap(), b"previous-inventory");
+
+        recover(&journal).unwrap();
+        let recovered = World::load(&world_path).unwrap();
+        assert_eq!(recovered.get(15, 64, 0), 1u16 << 4);
+        assert_eq!(recovered.get(16, 64, 0), 2u16 << 4);
+        assert_eq!(fs::read(&world_path).unwrap(), committed_world);
+        assert_eq!(fs::read(&inventory).unwrap(), committed_inventory);
+        assert!(!inventory.with_extension("txn.tmp").exists());
+        assert!(!journal.exists());
+
+        // A second boot and replay of the identical durable record must
+        // never apply an edit twice or produce a new world generation.
+        recover(&journal).unwrap();
+        fs::write(&journal, durable_redo).unwrap();
+        recover(&journal).unwrap();
+        assert_eq!(fs::read(&world_path).unwrap(), committed_world);
+        assert_eq!(fs::read(&inventory).unwrap(), committed_inventory);
+        let final_world = World::load(&world_path).unwrap();
+        assert_eq!(final_world.get(15, 64, 0), 1u16 << 4);
+        assert_eq!(final_world.get(16, 64, 0), 2u16 << 4);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// REG-182 / #818: when logout races a durable two-file redo, an
     /// inventory debit may have been renamed before the player's NBT.
     /// Recovery must finish the same generation and must not spend twice.
