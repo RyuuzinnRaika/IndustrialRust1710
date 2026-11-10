@@ -2556,6 +2556,50 @@ mod redstone_regression_tests {
 mod reg169_detector_signal_regressions {
     use super::*;
 
+    /// REG-169 / #805: a nearby detector rail powers an aligned
+    /// booster rail and releases it when the detector turns off. Persist
+    /// both transitions and reconstruct the final state after restart.
+    #[test]
+    fn detector_signal_drives_adjacent_powered_rail_and_releases_on_unpower() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-reg169-powered-neighbor-{}-{:?}.irw",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        // Both rails run east-west. The detector's 0x8 active flag is
+        // normally driven by Minecarts::occupied_detector_rails (#927).
+        world
+            .update_and_save(&path, 0, 64, 0, (28 << 4) | 9)
+            .unwrap();
+        world
+            .update_and_save(&path, 1, 64, 0, (27 << 4) | 1)
+            .unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(1, 64, 0), (27 << 4) | 9);
+        assert_eq!(
+            World::load(&path).unwrap().get(1, 64, 0),
+            (27 << 4) | 9
+        );
+
+        world
+            .update_and_save(&path, 0, 64, 0, (28 << 4) | 1)
+            .unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(1, 64, 0), (27 << 4) | 1);
+        let mut restored = World::load(&path).unwrap();
+        for _ in 0..4 {
+            restored.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(restored.get(1, 64, 0), (27 << 4) | 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn powered_detector_rail_weakly_powers_faces_and_strongly_powers_support() {
         let mut world = World::new();
