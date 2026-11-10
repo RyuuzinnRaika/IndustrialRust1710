@@ -2566,10 +2566,8 @@ mod reg169_detector_signal_regressions {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let scratch = std::env::temp_dir().join(format!(
-            "ir1710-reg169-{}-{nanos}",
-            std::process::id()
-        ));
+        let scratch =
+            std::env::temp_dir().join(format!("ir1710-reg169-{}-{nanos}", std::process::id()));
         std::fs::create_dir(&scratch).unwrap();
         let path = scratch.join("isolated.irw");
         let mut world = World::new();
@@ -2585,10 +2583,7 @@ mod reg169_detector_signal_regressions {
             world.block_tick(&path, 64).unwrap();
         }
         assert_eq!(world.get(1, 64, 0), (27 << 4) | 9);
-        assert_eq!(
-            World::load(&path).unwrap().get(1, 64, 0),
-            (27 << 4) | 9
-        );
+        assert_eq!(World::load(&path).unwrap().get(1, 64, 0), (27 << 4) | 9);
 
         world
             .update_and_save(&path, 0, 64, 0, (28 << 4) | 1)
