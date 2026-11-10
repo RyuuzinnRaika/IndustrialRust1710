@@ -2104,13 +2104,18 @@ mod tests {
         let full_inventory = inventory.clone();
         let full_chest = chest;
         let before_full = total(&inventory, &chest);
-        assert_eq!(
-            inventory.chest_click_window(1, &mut chest, 0, 0, 1),
-            Some(ChestDirection::OutOfChest)
-        );
-        assert_eq!(inventory, full_inventory);
-        assert_eq!(chest, full_chest);
-        assert_eq!(total(&inventory, &chest), before_full);
+        // Two independent chest stacks must both remain untouched when
+        // every player inventory slot is occupied. A single-stack check can
+        // miss an unintended second transfer in repeated GUI operations.
+        for chest_slot in [0, 1] {
+            assert_eq!(
+                inventory.chest_click_window(1, &mut chest, chest_slot, 0, 1),
+                Some(ChestDirection::OutOfChest)
+            );
+            assert_eq!(inventory, full_inventory);
+            assert_eq!(chest, full_chest);
+            assert_eq!(total(&inventory, &chest), before_full);
+        }
 
         // Make exactly three spaces in a matching existing stack. A Shift
         // transfer must debit only three of the 32 diamonds in the chest.
