@@ -952,7 +952,13 @@ impl Inventory {
             return self.drag_click(window, slot, button);
         }
         self.drag = Drag::default();
-        if mode == 6 && button == 0 && slot >= 0 {
+        // Validate the clicked slot before collecting. Otherwise a forged
+        // Protocol 5 mode-6 click can drain matching inventory stacks even
+        // when its source slot lies outside the advertised window.
+        if mode == 6 && button == 0 {
+            if Self::slot_index(window, slot).is_none() {
+                return false;
+            }
             return self.collect_matching(window);
         }
         if slot == 0 {
@@ -2063,6 +2069,43 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+    /// REG-132 / #768: a Protocol 5 double-click must neither overflow
+    /// a stack nor accept a forged slot outside the active player window.
+    #[test]
+    fn reg132_double_click_caps_stack_and_rejects_invalid_source_slot() {
+        let wool = Stack {
+            id: 35,
+            count: 60,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inventory = Inventory::default();
+        inventory.cursor = Some(wool);
+        inventory.slots[9] = Some(Stack { count: 10, ..wool });
+        inventory.slots[10] = Some(Stack {
+            count: 3,
+            damage: 1,
+            ..wool
+        });
+        inventory.slots[11] = Some(Stack { count: 4, ..wool });
+
+        // A legitimate collection takes only four from the first stack.
+        assert!(inventory.click_window(0, 9, 0, 6));
+        assert_eq!(inventory.cursor, Some(Stack { count: 64, ..wool }));
+        assert_eq!(inventory.slots[9], Some(Stack { count: 6, ..wool }));
+        assert_eq!(inventory.slots[10].unwrap().count, 3);
+        assert_eq!(inventory.slots[11], Some(Stack { count: 4, ..wool }));
+
+        // A malformed source slot must not collect any remaining items.
+        inventory.cursor = Some(wool);
+        for invalid_slot in [-999, -1, 45, i16::MAX] {
+            let unchanged = inventory.clone();
+            assert!(!inventory.click_window(0, invalid_slot, 0, 6));
+            assert_eq!(inventory, unchanged);
+        }
+        assert!(inventory.encoded().is_ok());
+    }
+
     /// REG-135 / #771: a full 36-slot player inventory cannot swallow items
     /// from a chest. When one partial stack is available, only that capacity
     /// is consumed; the remainder stays in the server-owned chest.
