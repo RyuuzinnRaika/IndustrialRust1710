@@ -162,13 +162,10 @@ impl ServerIdentity {
             .rsa
             .decrypt(Pkcs1v15Encrypt, encrypted_token)
             .map_err(|_| invalid("RSA token decryption failed"))?;
-        // Do not ever enable online-mode with a missing or incorrect token.
-        let token_difference = returned_token.len() ^ challenge.len();
-        let mut difference = token_difference as u8;
-        for (i, expected) in challenge.iter().enumerate() {
-            difference |= expected ^ returned_token.get(i).copied().unwrap_or(0);
-        }
-        if difference != 0 || secret.len() != 16 {
+        // Each connection has a freshly generated challenge. A response from
+        // any earlier login (or a different connection) must never authenticate.
+        verify_challenge_token(&challenge, &returned_token)?;
+        if secret.len() != 16 {
             return Err(invalid("invalid encryption response"));
         }
         let key: [u8; 16] = secret.try_into().map_err(|_| invalid("invalid AES key"))?;
@@ -176,6 +173,21 @@ impl ServerIdentity {
         // The client switches to AES-CFB8 immediately after sending its reply.
         let server_hash = signed_server_hash(&key, &self.der);
         verify_has_joined(username, &server_hash)
+    }
+}
+
+/// Verify the decrypted 1.7.10 four-byte challenge for THIS connection.
+/// Compare all four positions even after a mismatch; reject both shortened
+/// and extended responses without revealing the expected bytes in diagnostics.
+fn verify_challenge_token(challenge: &[u8; 4], returned: &[u8]) -> io::Result<()> {
+    let mut mismatch = u8::from(returned.len() != challenge.len());
+    for (index, expected) in challenge.iter().enumerate() {
+        mismatch |= expected ^ returned.get(index).copied().unwrap_or(0);
+    }
+    if mismatch == 0 {
+        Ok(())
+    } else {
+        Err(invalid("invalid encryption response"))
     }
 }
 
@@ -281,6 +293,30 @@ fn parse_verified_profile(username: &str, body: &[u8]) -> io::Result<VerifiedPro
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn encryption_challenge_rejects_stale_cross_session_and_malformed_tokens() {
+        // A token is valid only for the connection that issued it. Even though
+        // both sessions use the same RSA public key, replaying A's response to
+        // B's independently generated challenge cannot pass verification.
+        let first = [0x12, 0x34, 0x56, 0x78];
+        let next = [0x87, 0x65, 0x43, 0x21];
+        assert!(verify_challenge_token(&first, &first).is_ok());
+        assert!(verify_challenge_token(&next, &next).is_ok());
+
+        for (challenge, returned) in [
+            (&next, &first[..]),                           // replayed response from session A
+            (&first, &[][..]),                             // absent response
+            (&first, &first[..3]),                         // truncated token
+            (&first, &[0x12, 0x34, 0x56, 0x79][..]),       // one changed byte
+            (&first, &[0x12, 0x34, 0x56, 0x78, 0x00][..]), // extra byte
+        ] {
+            let error = verify_challenge_token(challenge, returned).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(error.to_string(), "invalid encryption response");
+            assert!(!error.to_string().contains("12345678"));
+        }
+    }
+
     #[test]
     fn cfb8_round_trip_across_arbitrary_fragment_boundaries() {
         let key = [0x4b; 16];
