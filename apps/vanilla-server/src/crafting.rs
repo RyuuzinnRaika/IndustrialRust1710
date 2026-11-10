@@ -656,6 +656,121 @@ fn additional_result(grid: &[Option<Stack>], width: usize) -> Option<Stack> {
 
 #[cfg(test)]
 mod tests {
+    /// REG-191 / #827: eight independent server-owned crafting inventories
+    /// concurrently spend workbench ingredients. Each player keeps its own
+    /// cursor and crafting grid; no shared player input is trusted.
+    /// Measures throughput and P95 batch processing, not real server TPS.
+    #[test]
+    fn reg191_eight_concurrent_workbenches_preserve_ingredient_conservation() {
+        use crate::inventory::{Inventory, Stack};
+        use std::sync::{Arc, Barrier};
+        use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+        const PLAYERS: usize = 8;
+        const BATCHES: usize = 32;
+        const LOGS_PER_BATCH: u8 = 64;
+        const PLANKS_PER_LOG: u32 = 4;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-reg191-craft-{}-{stamp}",
+            std::process::id()
+        ));
+        // Exclusive create: do not reuse or delete a pre-existing test world.
+        std::fs::create_dir(&root).unwrap();
+        let gate = Arc::new(Barrier::new(PLAYERS));
+        let started = Instant::now();
+        let workers: Vec<_> = (0..PLAYERS)
+            .map(|player_index| {
+                let gate = Arc::clone(&gate);
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    let mut durations = Vec::with_capacity(BATCHES);
+                    gate.wait();
+                    for batch in 0..BATCHES {
+                        let began = Instant::now();
+                        let mut inventory = Inventory::default();
+                        let source = Stack {
+                            id: 17,
+                            count: LOGS_PER_BATCH,
+                            damage: 0,
+                            nbt: None,
+                        };
+                        // Set up a legitimate 3x3 crafting table through
+                        // the same inventory click API used by Protocol 5.
+                        assert!(inventory.creative_set(36, Some(source)).unwrap());
+                        assert!(inventory.click_window(0, 36, 0, 0));
+                        assert!(inventory.click_window(1, 1, 0, 0));
+                        assert_eq!(
+                            inventory.crafting_result(1),
+                            Some(Stack {
+                                id: 5,
+                                count: 4,
+                                damage: 0,
+                                nbt: None,
+                            })
+                        );
+                        // Shift crafting commits exactly 64 ingredient debits
+                        // and 256 planks to the *same* player's inventory.
+                        assert!(inventory.click_window(1, 0, 0, 1));
+                        let items = inventory.possessions();
+                        let logs_left: u32 = items
+                            .iter()
+                            .filter(|stack| stack.id == 17)
+                            .map(|stack| u32::from(stack.count))
+                            .sum();
+                        let planks: u32 = items
+                            .iter()
+                            .filter(|stack| stack.id == 5)
+                            .map(|stack| u32::from(stack.count))
+                            .sum();
+                        assert_eq!(
+                            logs_left, 0,
+                            "player={player_index} batch={batch}: leftover input"
+                        );
+                        assert_eq!(
+                            planks,
+                            u32::from(LOGS_PER_BATCH) * PLANKS_PER_LOG,
+                            "player={player_index} batch={batch}: duplicated/lost output"
+                        );
+                        assert_eq!(inventory.crafting_result(1), None);
+                        // Persist and reload one distinct file per player;
+                        // no shared world, filename or temp path is reused.
+                        if batch == BATCHES - 1 {
+                            let save = root.join(format!("player-{player_index}.json"));
+                            inventory.save(&save).unwrap();
+                            let recovered = Inventory::load(&save).unwrap();
+                            assert_eq!(recovered.possessions(), items);
+                            assert_eq!(recovered.crafting_result(1), None);
+                        }
+                        durations.push(began.elapsed().as_micros());
+                    }
+                    durations
+                })
+            })
+            .collect();
+        let mut all_latencies = Vec::with_capacity(PLAYERS * BATCHES);
+        for worker in workers {
+            all_latencies.extend(worker.join().expect("one crafting worker panicked"));
+        }
+        assert_eq!(all_latencies.len(), PLAYERS * BATCHES);
+        all_latencies.sort_unstable();
+        let p95 = all_latencies[(all_latencies.len() * 95).div_ceil(100).saturating_sub(1)];
+        let elapsed = started.elapsed().as_secs_f64();
+        eprintln!(
+            "REG-191 synthetic players={PLAYERS} batches_per_player={BATCHES} \
+             recipes={} workbench_batches={} wall_seconds={elapsed:.3} \
+             p95_batch_us={p95} workbench_batches_per_second={:.1}; \
+             native 20TPS / TCP GUI packet timing NOT_RUN",
+            PLAYERS * BATCHES * usize::from(LOGS_PER_BATCH),
+            PLAYERS * BATCHES,
+            (PLAYERS * BATCHES) as f64 / elapsed
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn s02_all_five_java_1710_materials_craft_all_five_tool_types() {
         // Java 1.7.10 has no copper/netherite tier. Every output must be

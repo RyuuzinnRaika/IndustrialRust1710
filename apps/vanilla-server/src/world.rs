@@ -1,4 +1,4 @@
-//! Bounded, sparse, deterministic flat world streamed by chunk.
+﻿//! Bounded, sparse, deterministic flat world streamed by chunk.
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod devices;
@@ -2648,6 +2648,7 @@ impl World {
     /// An interrupted import may leave the .importing staging file, but never
     /// replaces a source world or an existing target.
     pub fn save_new(&self, path: &Path) -> io::Result<()> {
+        crate::server_config::reject_parent_traversal(path)?;
         if path.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -2698,6 +2699,7 @@ impl World {
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
+        crate::server_config::reject_parent_traversal(path)?;
         // The immediate world parent must also be real: a symlink parent
         // otherwise makes even a regular world file refer outside this world.
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -3059,6 +3061,7 @@ impl World {
         Ok(bytes)
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        crate::server_config::reject_parent_traversal(path)?;
         // Keep the session mutex held across staging and publication, so
         // another Rust write on the same world cannot interleave with us.
         // Re-verify immediately before renaming the finished IRW snapshot.
@@ -3273,6 +3276,37 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traversal_world_paths_are_rejected_before_creating_or_changing_files() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-path-traversal-{}-{stamp}",
+            std::process::id()
+        ));
+        let nested = root.join("child");
+        fs::create_dir_all(&nested).unwrap();
+        let outside = root.join("outside.irw");
+        let original = b"unrelated, not an IRW file";
+        fs::write(&outside, original).unwrap();
+        // The path would resolve to a real, existing file if its '..'
+        // component were followed. No path operation may touch that file.
+        let traversing = nested.join("..").join("outside.irw");
+        for error in [
+            World::new().save(&traversing).unwrap_err(),
+            World::new().save_new(&traversing).unwrap_err(),
+            World::load(&traversing).expect_err("unsafe path must fail"),
+        ] {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        assert_eq!(fs::read(&outside).unwrap(), original.to_vec());
+        assert!(!root.join("outside.tmp").exists());
+        assert!(!root.join("outside.importing").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn world_save_serialization_failure_cleans_owned_staging_and_preserves_world() {
@@ -5670,6 +5704,84 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    /// REG-193 / #829: a bounded queue must converge under simultaneous
+    /// sand/gravel updates without duplicating blocks or losing settled state.
+    /// This does not model an EntityFallingBlock packet or prove 20TPS at load.
+    #[test]
+    fn gravity_256_sand_gravel_columns_respect_budget_and_save_conservation() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-reg193-gravity-{}-{nanos}",
+            std::process::id()
+        ));
+        // Create-only test world: never delete a directory from an older run.
+        fs::create_dir(&root).unwrap();
+        let save = root.join("isolated.irw");
+        let mut world = World::new();
+        const SIDE: i32 = 16;
+        const BUDGET: usize = 32;
+        for dx in 0..SIDE {
+            for dz in 0..SIDE {
+                let id = if (dx + dz) % 2 == 0 { 12 << 4 } else { 13 << 4 };
+                world.import_block(100 + dx, 68, 100 + dz, id).unwrap();
+            }
+        }
+        assert_eq!(world.pending_gravity.len(), (SIDE * SIDE) as usize);
+        world.save(&save).unwrap();
+        let started = std::time::Instant::now();
+        let mut processed = 0usize;
+        let mut max_per_tick = 0usize;
+        let mut max_tick_ms = 0u128;
+        let mut iterations = 0usize;
+        // Four downward moves for each column and at most one queue
+        // dequeue per scheduled position. 64 ticks leaves ample headroom.
+        for _ in 0..64 {
+            iterations += 1;
+            let tick_started = std::time::Instant::now();
+            let moves = world.gravity_tick(&save, BUDGET).unwrap();
+            max_tick_ms = max_tick_ms.max(tick_started.elapsed().as_millis());
+            assert!(moves.len() <= BUDGET, "gravity budget exceeded");
+            processed += moves.len();
+            max_per_tick = max_per_tick.max(moves.len());
+            if world.pending_gravity.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            world.pending_gravity.is_empty(),
+            "gravity queue did not drain under the fixed tick budget"
+        );
+        assert_eq!(processed, (SIDE * SIDE * 4) as usize);
+        assert!(max_per_tick <= BUDGET);
+        let reloaded = World::load(&save).unwrap();
+        for dx in 0..SIDE {
+            for dz in 0..SIDE {
+                let x = 100 + dx;
+                let z = 100 + dz;
+                let id = if (dx + dz) % 2 == 0 { 12 << 4 } else { 13 << 4 };
+                assert_eq!(reloaded.get(x, 64, z), id);
+                for y in 65..=68 {
+                    assert_eq!(
+                        reloaded.get(x, y, z),
+                        0,
+                        "duplicate or unfinished falling block at ({x},{y},{z})"
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "REG-193 synthetic columns={} moves={processed} iterations={iterations} \
+             max_per_tick={max_per_tick} budget={BUDGET} max_tick_ms={max_tick_ms} \
+             elapsed_ms={}; real server TPS/Entity load NOT_RUN",
+            SIDE * SIDE,
+            started.elapsed().as_millis()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn sand_gravel_fall_one_cell_per_tick_and_restore_after_reload() {
         let path = std::env::temp_dir().join(format!(
@@ -5719,6 +5831,98 @@ mod tests {
         assert_eq!(world.get(0, 64, 0), 0);
         assert!(world.gravity_tick(&path, 64).unwrap().is_empty());
         fs::remove_file(path).unwrap();
+    }
+
+    /// REG-181 / #817: one world snapshot must contain both sides of an
+    /// adjacent-chunk edit across the transaction preparation and replay
+    /// failure windows. Test-only fault injection touches disposable IRW.
+    #[test]
+    fn reg181_adjacent_chunks_replay_same_world_generation_after_torn_save() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("ir1710-reg181-{}-{stamp}", std::process::id()));
+        fs::create_dir(&root).unwrap(); // exclusive create; never reuse user saves
+        let coordinates = [(15, 65, 0, 1u16 << 4), (16, 65, 0, 3u16 << 4)];
+
+        for phase in ["preparation", "prepared", "torn-target", "applied"] {
+            let dir = root.join(phase);
+            fs::create_dir(&dir).unwrap();
+            let path = dir.join("flat.irw");
+            let journal = dir.join("flat.pending-txn.json");
+            let old = World::new();
+            old.save_new(&path).unwrap();
+            let before = fs::read(&path).unwrap();
+
+            let mut staged = old.clone();
+            for &(x, y, z, block) in &coordinates {
+                staged.import_block(x, y, z, block).unwrap();
+            }
+            let new_bytes = staged.encoded().unwrap();
+            assert_ne!(new_bytes, before);
+            let checksum = new_bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+            });
+            let prepared = serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "files": [{
+                    "relative": "flat.irw",
+                    "contents": new_bytes,
+                    "checksum": checksum
+                }]
+            }))
+            .unwrap();
+
+            match phase {
+                "preparation" => {
+                    // Crash before publishing the durable journal: the old
+                    // valid pair must remain intact. A partial preparation
+                    // file must never be mistaken for a committed record.
+                    fs::write(journal.with_extension("journal.tmp"), b"partial").unwrap();
+                    crate::journal::recover(&journal).unwrap();
+                    assert_eq!(fs::read(&path).unwrap(), before);
+                    let loaded = World::load(&path).unwrap();
+                    assert_eq!(loaded.get(15, 65, 0), 0);
+                    assert_eq!(loaded.get(16, 65, 0), 0);
+                    continue;
+                }
+                "prepared" => {
+                    fs::write(&journal, &prepared).unwrap();
+                    assert_eq!(fs::read(&path).unwrap(), before);
+                }
+                "torn-target" => {
+                    // Model a process crash in the target application
+                    // phase, after the durable record was committed.
+                    fs::write(&journal, &prepared).unwrap();
+                    fs::write(&path, b"truncated IRW after crash").unwrap();
+                }
+                "applied" => {
+                    // Rename succeeded but journal unlink did not.
+                    fs::write(&journal, &prepared).unwrap();
+                    fs::write(&path, staged.encoded().unwrap()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            crate::journal::recover(&journal).unwrap();
+            assert!(!journal.exists());
+            assert_eq!(fs::read(&path).unwrap(), staged.encoded().unwrap());
+            let recovered = World::load(&path).unwrap();
+            for &(x, y, z, block) in &coordinates {
+                assert_eq!(
+                    recovered.get(x, y, z),
+                    block,
+                    "{phase}: cross-chunk generation is inconsistent at {x},{y},{z}"
+                );
+            }
+            // Re-running startup cannot create an extra block, lose an
+            // edit, or alter the already committed world bytes.
+            crate::journal::recover(&journal).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), staged.encoded().unwrap());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
