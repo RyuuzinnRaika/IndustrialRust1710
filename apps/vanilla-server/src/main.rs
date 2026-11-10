@@ -12068,11 +12068,16 @@ mod reg114_concurrent_chunk_mining_tests {
     #[test]
     fn simultaneous_neighbor_chunk_mining_persists_and_broadcasts_both_changes() {
         for (case, pair) in [[15, 16], [-1, 0]].into_iter().enumerate() {
-            let path = std::env::temp_dir().join(format!(
-                "ir1710-reg114-{}-{case}.irw",
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let scratch = std::env::temp_dir().join(format!(
+                "ir1710-reg114-{}-{case}-{nanos}",
                 std::process::id()
             ));
-            let _ = std::fs::remove_file(&path);
+            std::fs::create_dir(&scratch).unwrap();
+            let path = scratch.join("isolated.irw");
             let mut initial = World::new();
             for x in pair {
                 initial.update_and_save(&path, x, 64, 0, 1 << 4).unwrap();
@@ -12119,7 +12124,7 @@ mod reg114_concurrent_chunk_mining_tests {
                 }
                 assert_eq!(seen, BTreeSet::from(pair));
             }
-            std::fs::remove_file(path).unwrap();
+            std::fs::remove_dir_all(scratch).unwrap();
         }
     }
 }
