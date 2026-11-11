@@ -197,7 +197,10 @@ fn wait_for_disconnect_log(path: &Path, player: &str, expected: usize) {
         let log = fs::read_to_string(path).unwrap_or_default();
         let observed = log.matches(&marker).count();
         if observed >= expected {
-            assert_eq!(observed, expected, "duplicate disconnect for {player}: {log}");
+            assert_eq!(
+                observed, expected,
+                "duplicate disconnect for {player}: {log}"
+            );
             return;
         }
         assert!(

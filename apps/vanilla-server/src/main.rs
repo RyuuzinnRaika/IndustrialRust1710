@@ -571,9 +571,72 @@ fn join(
     Ok(())
 }
 
+/// REG-120 / #756: collapse a burst of consecutive administrative
+/// teleports before sending any intermediate destination's chunk columns.
+/// Preserve the first non-admin event for the next iteration: a pearl
+/// teleport applies damage and must never be discarded or reordered.
+fn next_session_event(events: &SessionEvents, deferred: &mut Option<Event>) -> Option<Event> {
+    let mut event = deferred.take().or_else(|| events.try_recv().ok())?;
+    if event.id != ADMIN_TELEPORT_EVENT {
+        return Some(event);
+    }
+    while let Ok(next) = events.try_recv() {
+        if next.id == ADMIN_TELEPORT_EVENT {
+            event = next;
+        } else {
+            *deferred = Some(next);
+            break;
+        }
+    }
+    Some(event)
+}
+
 fn safe_spawn(world: &Mutex<World>, root_world_path: &Path) -> io::Result<PlayerPosition> {
     let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
     world_spawn::player_spawn(root_world_path, &state)
+}
+
+/// Respawn position for a claimed bed at (x, y, z). Prefer standing
+/// on the bed itself (the historical behavior); when that cell is
+/// obstructed, take the first adjacent column — in a fixed order —
+/// whose feet and head cells are air over solid, non-fluid ground
+/// at bed level, as vanilla does before giving up to world spawn.
+/// `None` means every candidate is obstructed.
+fn bed_respawn_position(world: &World, x: i32, y: i32, z: i32) -> Option<PlayerPosition> {
+    if world::in_bounds(x, y + 1, z) && world.get(x, y + 1, z) == 0 {
+        return Some(PlayerPosition {
+            x: f64::from(x) + 0.5,
+            y: f64::from(y) + 1.0,
+            z: f64::from(z) + 0.5,
+        });
+    }
+    for (dx, dz) in [
+        (0, -1),
+        (0, 1),
+        (-1, 0),
+        (1, 0),
+        (-1, -1),
+        (1, -1),
+        (-1, 1),
+        (1, 1),
+    ] {
+        let (nx, nz) = (x + dx, z + dz);
+        if !world::in_bounds(nx, y, nz) || !world::in_bounds(nx, y + 1, nz) {
+            continue;
+        }
+        let ground = world.get(nx, y - 1, nz) >> 4;
+        if ground == 0 || matches!(ground, 8..=11) {
+            continue;
+        }
+        if world.get(nx, y, nz) == 0 && world.get(nx, y + 1, nz) == 0 {
+            return Some(PlayerPosition {
+                x: f64::from(nx) + 0.5,
+                y: f64::from(y),
+                z: f64::from(nz) + 0.5,
+            });
+        }
+    }
+    None
 }
 fn chunk_center(player: &PlayerPosition) -> (i32, i32) {
     (
@@ -658,11 +721,23 @@ fn send_chunk_batch(
 fn send_chunk(s: &mut Connection, world: &Mutex<World>, cx: i32, cz: i32) -> io::Result<()> {
     send(s, 0x21, &queue_chunk(world, cx, cz)?.finish()?)
 }
-fn send_visible_signs(
-    s: &mut Connection,
+/// Protocol 5 S33/S35 sign and flower-pot packets share a 10-byte
+/// signed block coordinate header. Only decode server-generated payloads.
+fn tile_packet_position(body: &[u8]) -> Option<(i32, i32, i32)> {
+    let x = i32::from_be_bytes(body.get(0..4)?.try_into().ok()?);
+    let y = i16::from_be_bytes(body.get(4..6)?.try_into().ok()?);
+    let z = i32::from_be_bytes(body.get(6..10)?.try_into().ok()?);
+    Some((x, i32::from(y), z))
+}
+
+/// Capture tile records, release the decorations lock, and check each against
+/// the authoritative World. Never replay orphan sign/pot packets after a
+/// chunk unload/reload, even when a legacy sidecar contains stale entries.
+fn visible_decoration_events(
+    world: &Mutex<World>,
     decorations: &Mutex<Decorations>,
     chunks: &BTreeSet<(i32, i32)>,
-) -> io::Result<()> {
+) -> io::Result<Vec<Event>> {
     let (signs, pots) = {
         let storage = decorations
             .lock()
@@ -672,14 +747,35 @@ fn send_visible_signs(
             storage.pot_packets_in(chunks)?,
         )
     };
+    let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
+    let mut events = Vec::with_capacity(signs.len() + pots.len());
     for body in signs {
-        send(s, 0x33, &body)?;
+        if tile_packet_position(&body)
+            .is_some_and(|(x, y, z)| matches!(state.get(x, y, z) >> 4, 63 | 68))
+        {
+            events.push(Event { id: 0x33, body });
+        }
     }
     for body in pots {
-        send(s, 0x35, &body)?;
+        if tile_packet_position(&body).is_some_and(|(x, y, z)| state.get(x, y, z) >> 4 == 140) {
+            events.push(Event { id: 0x35, body });
+        }
+    }
+    Ok(events)
+}
+
+fn send_visible_signs(
+    s: &mut Connection,
+    world: &Mutex<World>,
+    decorations: &Mutex<Decorations>,
+    chunks: &BTreeSet<(i32, i32)>,
+) -> io::Result<()> {
+    for event in visible_decoration_events(world, decorations, chunks)? {
+        send(s, event.id, &event.body)?;
     }
     Ok(())
 }
+
 /// Keep hanging entities in sync with the client's chunk set. A chunk unload
 /// destroys client-side entities; they must be spawned again on re-entry.
 fn send_hanging_delta(
@@ -907,6 +1003,29 @@ fn piston_placement_facing(yaw: f32, player: (f64, f64, f64), target: (i32, i32,
         }
     }
     horizontal_placement_facing(yaw)
+}
+
+/// End portal frames (120) face the player who placed them, using the
+/// legacy metadata convention 0=S, 1=W, 2=N, 3=E. The direction is the
+/// dominant horizontal axis from the placed cell toward the player, so
+/// a ring built from its center faces inward on every side — the only
+/// orientation `end_eye_changes` accepts when the last eye completes
+/// the portal. Before this, frames always landed with metadata 0 and
+/// no client-built ring could ever activate.
+fn end_frame_placement_facing(player: (f64, f64, f64), target: (i32, i32, i32)) -> u16 {
+    let dx = player.0 - (f64::from(target.0) + 0.5);
+    let dz = player.2 - (f64::from(target.2) + 0.5);
+    if dx.abs() > dz.abs() {
+        if dx > 0.0 {
+            3 // player is east of the frame: it faces east
+        } else {
+            1 // west
+        }
+    } else if dz > 0.0 {
+        0 // south
+    } else {
+        2 // north
+    }
 }
 
 /// Protocol 5 clicked-face -> 1.7.10 wall/floor torch metadata.
@@ -1144,8 +1263,14 @@ fn tick_survival_vitals(vitals: &mut Vitals, steps: u64, difficulty: &AtomicU8) 
 }
 
 fn sprint_action(current: bool, action: i32, food: i32) -> bool {
+    // Hunger can drop during a sprint (or due to status effects), without
+    // any corresponding client Stop Sprinting action. Invalidate that state
+    // immediately; eating must not silently rearm the old sprint flag.
+    if food <= 6 {
+        return false;
+    }
     match action {
-        3 => food > 6,
+        3 => true,
         4 => false,
         _ => current,
     }
@@ -1218,6 +1343,38 @@ mod dead_session_packet_tests {
         ] {
             assert!(blocked_while_dead(id), "packet {id} must be ignored");
         }
+    }
+
+    /// ADD-029 / #453: an obstructed bed falls back to an adjacent
+    /// safe column before world spawn is even considered.
+    #[test]
+    fn add029_bed_respawn_searches_adjacent_columns_when_obstructed() {
+        use crate::world::World;
+        let mut world = World::new();
+        // Ground slab at y=69, bed at (10, 70, 10).
+        for x in 8..=12 {
+            for z in 8..=12 {
+                world.import_block(x, 69, z, 1 << 4).unwrap();
+            }
+        }
+        world.import_block(10, 70, 10, 26 << 4).unwrap();
+        // Unobstructed: stand on the bed itself.
+        let pos = super::bed_respawn_position(&world, 10, 70, 10).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (10.5, 71.0, 10.5));
+        // Obstruct the cell above the bed: the first adjacent column
+        // in the fixed search order wins.
+        world.import_block(10, 71, 10, 1 << 4).unwrap();
+        let pos = super::bed_respawn_position(&world, 10, 70, 10).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (10.5, 70.0, 9.5));
+        // Obstruct every adjacent feet cell too: no bed-side respawn.
+        for x in 9..=11 {
+            for z in 9..=11 {
+                if (x, z) != (10, 10) {
+                    world.import_block(x, 70, z, 1 << 4).unwrap();
+                }
+            }
+        }
+        assert!(super::bed_respawn_position(&world, 10, 70, 10).is_none());
     }
 
     /// REG-146 / #782: the active chest's cursor is player-owned even
@@ -1493,6 +1650,9 @@ fn play(
     let mut idle_gravity = IdleGravity::new(clock.ticks());
     let mut loaded_chunks = view_chunks(chunk_center(player));
     let mut pending_teleport: Option<TeleportGate> = None;
+    // The mailbox can contain a burst of /tp commands. Keep only the
+    // latest consecutive admin target without crossing unrelated events.
+    let mut deferred_session_event: Option<Event> = None;
     let mut pending_chunk_relights = BTreeSet::new();
     let mut last_chunk_relight = Instant::now() - Duration::from_millis(200);
     let mut yaw: f32 = 0.0;
@@ -1560,6 +1720,32 @@ fn play(
     let mut last_map_tick = clock.ticks();
     let mut last_arrow_damage_tick: Option<u64> = None;
     loop {
+        // The Hub mutex atomically resolves the Overworld sleep quorum.
+        // One player sleeping never advances time while another stays awake.
+        // This also handles a sleeping player's peer disconnecting mid-night.
+        if survival
+            && *session_dimension == dimensions::Dimension::Overworld
+            && (12542..=23458).contains(&clock.day_time())
+        {
+            if let Some(waking) = hub.complete_night_sleep()? {
+                clock.skip_to_morning();
+                for sleeper_id in waking {
+                    let mut body = Vec::new();
+                    write_varint(sleeper_id as u32, &mut body);
+                    body.push(2); // Protocol 5 wake/leave bed animation
+                    hub.broadcast_in_dimension(
+                        dimensions::Dimension::Overworld,
+                        Event { id: 0x0b, body },
+                    );
+                }
+            }
+        }
+        // Food may have changed due to exhaustion, a potion, or a meal on
+        // the previous iteration. A stale sprint flag must not survive
+        // across the <=6 hunger threshold.
+        if survival {
+            sprinting = sprint_action(sprinting, 0, vitals.food);
+        }
         if pending_teleport
             .as_ref()
             .is_some_and(|gate| gate.timed_out(Instant::now()))
@@ -1580,7 +1766,7 @@ fn play(
                 "outbound packet overflow or session removed",
             ));
         }
-        while let Ok(event) = events.try_recv() {
+        while let Some(event) = next_session_event(events, &mut deferred_session_event) {
             if event.id == ADMIN_SPAWNPOINT_EVENT {
                 if event.body.len() != 12 {
                     return Err(bad("invalid internal spawnpoint payload"));
@@ -1896,7 +2082,7 @@ fn play(
                 let old_chunks = loaded_chunks.clone();
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
                 let entering = loaded_chunks.difference(&old_chunks).copied().collect();
-                send_visible_signs(s, decorations, &entering)?;
+                send_visible_signs(s, world, decorations, &entering)?;
                 send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                 send_player_position(s, player, yaw, pitch)?;
                 pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
@@ -1938,7 +2124,7 @@ fn play(
                         let old_chunks = loaded_chunks.clone();
                         sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
                         let entering = loaded_chunks.difference(&old_chunks).copied().collect();
-                        send_visible_signs(s, decorations, &entering)?;
+                        send_visible_signs(s, world, decorations, &entering)?;
                         send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                         send_player_position(s, player, yaw, pitch)?;
                         pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
@@ -2750,6 +2936,7 @@ fn play(
             }
         }
         if survival && vitals.health <= 0.0 {
+            hub.leave_bed(entity_id);
             eating = None;
             let newly_dead = !death_recorded;
             let death_record = if newly_dead {
@@ -3357,10 +3544,22 @@ fn play(
                 if let Some(parsed) = commands::parse_public(&message) {
                     match parsed {
                         Err(usage) => as_chat(s, usage)?,
-                        Ok(PublicCommand::Help) => as_chat(
-                            s,
-                            "Commands: /help, /list, /me, /tell (/msg, /w). Verified OP: /tp, /gamemode, /give, /clear, /setblock, /effect, /summon, /enchant, /testforblock, /seed, /spawnpoint, /setworldspawn, /gamerule, /difficulty, /time, /weather, /kick, /ban, /save.",
-                        )?,
+                        Ok(PublicCommand::Help(page)) => {
+                            if let Some(lines) = commands::player_help_page(page) {
+                                as_chat(
+                                    s,
+                                    &format!(
+                                        "Commands page {page}/{}:",
+                                        commands::player_help_page_count()
+                                    ),
+                                )?;
+                                for line in lines {
+                                    as_chat(s, &line)?;
+                                }
+                            } else {
+                                as_chat(s, "Usage: /help [page]")?;
+                            }
+                        }
                         Ok(PublicCommand::List) => as_chat(
                             s,
                             &format!("Online ({}): {}", hub.count()?, hub.names()?.join(", ")),
@@ -3372,7 +3571,10 @@ fn play(
                                 hub.broadcast(chat_event(&format!("* {name} {action}"))?);
                             }
                         }
-                        Ok(PublicCommand::Tell { target, message: body }) => {
+                        Ok(PublicCommand::Tell {
+                            target,
+                            message: body,
+                        }) => {
                             if !permissions.chat {
                                 as_chat(s, "Chat permission denied.")?;
                             } else if !hub.send_to_name(
@@ -3610,6 +3812,11 @@ fn play(
                     } else {
                         vitals.travel(distance);
                     }
+                    // A movement packet can consume the last food point
+                    // above the sprint threshold. Drop the state before
+                    // any later food restore, even if no client stop event
+                    // arrived in the meantime.
+                    sprinting = sprint_action(sprinting, 0, vitals.food);
                     if vitals.food != old_food || vitals.saturation != old_saturation {
                         player.save_state_in_dimension(
                             player_path,
@@ -3800,7 +4007,7 @@ fn play(
                     sync_chunks(s, world, &mut loaded_chunks, new_chunk_center)?;
                     if loaded_chunks != old_chunks {
                         let entering = loaded_chunks.difference(&old_chunks).copied().collect();
-                        send_visible_signs(s, decorations, &entering)?;
+                        send_visible_signs(s, world, decorations, &entering)?;
                         send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                     }
                 } else if position_changed {
@@ -3886,7 +4093,7 @@ fn play(
                             if loaded_chunks != old_chunks {
                                 let entering =
                                     loaded_chunks.difference(&old_chunks).copied().collect();
-                                send_visible_signs(s, decorations, &entering)?;
+                                send_visible_signs(s, world, decorations, &entering)?;
                                 send_hanging_delta(s, hangings, &old_chunks, &loaded_chunks)?;
                             }
                             // Keep this connection's detach and position
@@ -3952,6 +4159,9 @@ fn play(
                 input.finish()?;
                 if survival {
                     sprinting = sprint_action(sprinting, action, vitals.food);
+                    if action == 2 {
+                        hub.leave_bed(entity_id); // leave-bed Entity Action
+                    }
                 }
             }
             7 => {
@@ -5427,15 +5637,10 @@ fn play(
                         packet.push(y as u8);
                         packet.extend_from_slice(&z.to_be_bytes());
                         send(s, 0x0a, &packet)?;
-                        // A lone player may complete sleep immediately. More
-                        // players must use their own beds; never skip their night.
-                        if hub.positions()?.len() <= 1 {
-                            clock.skip_to_morning();
-                            let mut wake = Vec::new();
-                            write_varint(entity_id as u32, &mut wake);
-                            wake.push(2); // leave bed animation
-                            send(s, 0x0b, &wake)?;
-                        }
+                        // Each session votes only after successfully using a
+                        // valid bed. Time advances when *all* Overworld
+                        // sessions have voted, not merely on the first use.
+                        hub.enter_bed(entity_id)?;
                     } else if survival {
                         as_chat(s, "You can only sleep at night.")?;
                     }
@@ -5942,6 +6147,8 @@ fn play(
                                 }
                             } else if matches!(block_id, 61 | 62) {
                                 horizontal_placement_facing(yaw)
+                            } else if block_id == 120 {
+                                end_frame_placement_facing(location, (nx, ny, nz))
                             } else if block_id == 63 {
                                 ((yaw.rem_euclid(360.0) * 16.0 / 360.0).round() as u16) & 15
                             } else if block_id == 68 {
@@ -6795,15 +7002,8 @@ fn play(
                             let guard = respawn_world
                                 .lock()
                                 .map_err(|_| bad("world mutex poisoned"))?;
-                            if guard.get(x, y, z) >> 4 == 26
-                                && world::in_bounds(x, y + 1, z)
-                                && guard.get(x, y + 1, z) == 0
-                            {
-                                PlayerPosition {
-                                    x: x as f64 + 0.5,
-                                    y: y as f64 + 1.0,
-                                    z: z as f64 + 0.5,
-                                }
+                            if guard.get(x, y, z) >> 4 == 26 {
+                                bed_respawn_position(&guard, x, y, z).unwrap_or(fallback)
                             } else {
                                 fallback
                             }
@@ -6882,7 +7082,7 @@ fn play(
                     send(s, 0x07, &respawn)?;
                     loaded_chunks.clear(); // the client forgets chunks and entities on respawn
                     sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
-                    send_visible_signs(s, decorations, &loaded_chunks)?;
+                    send_visible_signs(s, world, decorations, &loaded_chunks)?;
                     send_hanging_delta(s, hangings, &BTreeSet::new(), &loaded_chunks)?;
                     for mob in mobs
                         .lock()
@@ -7356,6 +7556,7 @@ fn handle(
         // Chunks do not embed tile entities: replay persisted sign text after joining.
         send_visible_signs(
             &mut s,
+            &world,
             &decorations,
             &view_chunks(chunk_center(&player_state)),
         )?;
@@ -8062,7 +8263,9 @@ fn start_clock_console(
             }
             let result: io::Result<()> = match args.as_slice() {
                 ["/help"] | ["/?"] => {
-                    println!("1.7.10: /help /list /say /me /tell /msg /w /give /clear /setblock /effect /summon /enchant /testforblock /seed /spawnpoint /setworldspawn /tp /teleport /gamemode /time /weather /difficulty /gamerule /scoreboard /save /op /deop /kick /ban /pardon /whitelist /permission /stop");
+                    for line in commands::help_lines(commands::HelpAudience::Console) {
+                        println!("{line}");
+                    }
                     Ok(())
                 }
                 ["/say", words @ ..] if !words.is_empty() => (|| -> io::Result<()> {
@@ -8515,6 +8718,7 @@ fn main() -> io::Result<()> {
             return Err(bad("usage: --recover-level-dat STOPPED_WORLD_DIR"));
         }
         let world_directory = Path::new(&raw_args[1]);
+        server_config::reject_parent_traversal(world_directory)?;
         // Preflight is read-only. A corrupt backup or an existing level.dat
         // must not cause recovery to rewrite the world's session.lock.
         match std::fs::symlink_metadata(world_directory.join("level.dat")) {
@@ -8553,6 +8757,8 @@ fn main() -> io::Result<()> {
         if raw_args.len() != 3 || raw_args[0] != "--prepare-anvil-copy" {
             return Err(bad("usage: --prepare-anvil-copy SOURCE_DIR NEW_DEST_DIR"));
         }
+        server_config::reject_parent_traversal(Path::new(&raw_args[1]))?;
+        server_config::reject_parent_traversal(Path::new(&raw_args[2]))?;
         let stats = migration_staging::prepare_anvil_copy(
             Path::new(&raw_args[1]),
             Path::new(&raw_args[2]),
@@ -8656,6 +8862,7 @@ fn main() -> io::Result<()> {
                     .next()
                     .ok_or_else(|| bad("missing --world value"))?
                     .into();
+                server_config::reject_parent_traversal(&world_path)?;
                 explicit_world = true;
             }
             "--whitelist" => {
@@ -8799,6 +9006,21 @@ fn main() -> io::Result<()> {
             }
             _ => return Err(bad("unknown command-line argument")),
         }
+    }
+    // Validate all user-controlled storage paths before any offline backup,
+    // import/export, lock acquisition or world creation can write to disk.
+    server_config::reject_parent_traversal(&world_path)?;
+    for candidate in [
+        dimension_root.as_ref(),
+        anvil_import_path.as_ref(),
+        anvil_export_path.as_ref(),
+        backup_destination.as_ref(),
+        backup_rotation.as_ref().map(|(root, _)| root),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        server_config::reject_parent_traversal(candidate)?;
     }
     // Rotation must be a standalone offline command with an explicit world path.
     if backup_rotation.is_some()
@@ -9421,6 +9643,7 @@ fn main() -> io::Result<()> {
                 );
                 // Fire uses the same clock/weather source as client rain packets.
                 gravity_world.set_raining(weather.0);
+                gravity_world.set_thundering(weather.1);
                 gravity_world.set_day_time(furnace_clock.day_time());
                 for _ in 0..steps {
                     // A /stop request must not replay up to twenty expensive
@@ -10946,7 +11169,7 @@ mod reg147_keep_inventory_xp_tests {
 
 #[cfg(test)]
 mod sprint_action_tests {
-    use super::sprint_action;
+    use super::{sprint_action, Stack, Vitals};
 
     #[test]
     fn protocol5_sprint_starts_only_with_food_above_six() {
@@ -10954,6 +11177,42 @@ mod sprint_action_tests {
         assert!(sprint_action(false, 3, 7));
         assert!(sprint_action(true, 0, 20));
         assert!(!sprint_action(true, 4, 20));
+        // Low food invalidates an already-active sprint, regardless of the
+        // last Entity Action sent by the client.
+        assert!(!sprint_action(true, 0, 6));
+        assert!(!sprint_action(true, 3, 6));
+    }
+
+    #[test]
+    fn reg144_hunger_crossing_clears_sprint_and_eating_requires_new_start() {
+        let mut vitals = Vitals {
+            food: 7,
+            saturation: 0.0,
+            exhaustion: 3.95,
+            ..Vitals::default()
+        };
+        let mut sprinting = sprint_action(false, 3, vitals.food);
+        assert!(sprinting);
+        assert!(vitals.travel_with_sprint(1.0, sprinting));
+        assert_eq!(vitals.food, 6);
+        sprinting = sprint_action(sprinting, 0, vitals.food);
+        assert!(!sprinting);
+        assert!(!sprint_action(sprinting, 3, vitals.food));
+        assert!(!vitals.travel_with_sprint(1.0, sprinting));
+
+        // Eating restores sufficient food but must not resurrect the
+        // previous sprint action without a new Start Sprinting packet.
+        let apple = Stack {
+            id: 260,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        assert!(vitals.eat(apple));
+        assert!(vitals.food > 6);
+        assert!(!sprint_action(sprinting, 0, vitals.food));
+        assert!(sprint_action(sprinting, 3, vitals.food));
+        assert!(!sprint_action(true, 4, vitals.food));
     }
 }
 
@@ -11964,6 +12223,156 @@ mod primed_tnt_protocol5_tests {
 }
 
 #[cfg(test)]
+mod reg113_tile_reentry_tests {
+    use super::*;
+
+    #[test]
+    fn chunk_reentry_replays_only_live_sign_and_flower_pot_tiles() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("ir1710-reg113-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("isolated.irw");
+        let mut world = World::new();
+        let sign = (-16, 64, -1);
+        let pot = (16, 64, 0);
+        world
+            .update_and_save(&path, sign.0, sign.1, sign.2, 63 << 4)
+            .unwrap();
+        world
+            .update_and_save(&path, pot.0, pot.1, pot.2, 140 << 4)
+            .unwrap();
+        let mut tile = Decorations::default();
+        tile.set_sign(
+            &root.join("decoration.json"),
+            sign,
+            ["Reentry".into(), "".into(), "".into(), "".into()],
+        )
+        .unwrap();
+        tile = tile
+            .stage_pot(
+                pot,
+                Some(Stack {
+                    id: 6,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                }),
+            )
+            .unwrap();
+        let world = Mutex::new(world);
+        let tile = Mutex::new(tile);
+        let sign_view = BTreeSet::from([(-1, -1)]);
+        let pot_view = BTreeSet::from([(1, 0)]);
+        let first = visible_decoration_events(&world, &tile, &sign_view).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].id, 0x33);
+        assert_eq!(tile_packet_position(&first[0].body), Some(sign));
+        let potted = visible_decoration_events(&world, &tile, &pot_view).unwrap();
+        assert_eq!(potted.len(), 1);
+        assert_eq!(potted[0].id, 0x35);
+        assert_eq!(tile_packet_position(&potted[0].body), Some(pot));
+        assert!(visible_decoration_events(&world, &tile, &BTreeSet::new())
+            .unwrap()
+            .is_empty());
+        let again = visible_decoration_events(&world, &tile, &sign_view).unwrap();
+        assert_eq!(again[0].body, first[0].body);
+
+        // Sidecar still contains a sign, but world no longer has that tile.
+        world
+            .lock()
+            .unwrap()
+            .update_and_save(&path, sign.0, sign.1, sign.2, 0)
+            .unwrap();
+        assert!(visible_decoration_events(&world, &tile, &sign_view)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            visible_decoration_events(&world, &tile, &pot_view)
+                .unwrap()
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reg114_concurrent_chunk_mining_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    /// REG-114 / #750: two sessions concurrently mine on opposite sides of
+    /// a chunk boundary. Both durable blocks and both clients' block-change
+    /// mailboxes must converge without losing either notification.
+    #[test]
+    fn simultaneous_neighbor_chunk_mining_persists_and_broadcasts_both_changes() {
+        for (case, pair) in [[15, 16], [-1, 0]].into_iter().enumerate() {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let scratch = std::env::temp_dir().join(format!(
+                "ir1710-reg114-{}-{case}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&scratch).unwrap();
+            let path = scratch.join("isolated.irw");
+            let mut initial = World::new();
+            for x in pair {
+                initial.update_and_save(&path, x, 64, 0, 1 << 4).unwrap();
+            }
+            let state = Mutex::new(initial);
+            let hub = Hub::default();
+            let (_, receiver_a, _) = hub
+                .add("MinerA".into(), "uuid-a".into(), PlayerPosition::default())
+                .unwrap();
+            let (_, receiver_b, _) = hub
+                .add("MinerB".into(), "uuid-b".into(), PlayerPosition::default())
+                .unwrap();
+            let barrier = Barrier::new(3);
+            std::thread::scope(|scope| {
+                for x in pair {
+                    let barrier = &barrier;
+                    let state = &state;
+                    let hub = &hub;
+                    let path = &path;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let mut world = state.lock().unwrap();
+                        assert!(world.update_and_save(path, x, 64, 0, 0).unwrap());
+                        hub.broadcast(block_change_event(&world, x, 64, 0));
+                    });
+                }
+                barrier.wait();
+            });
+
+            let persisted = World::load(&path).unwrap();
+            for x in pair {
+                assert_eq!(state.lock().unwrap().get(x, 64, 0), 0);
+                assert_eq!(persisted.get(x, 64, 0), 0);
+            }
+            for receiver in [&receiver_a, &receiver_b] {
+                let mut seen = BTreeSet::new();
+                while let Ok(event) = receiver.try_recv() {
+                    if event.id == 0x23 {
+                        assert_eq!(event.body[4], 64);
+                        assert_eq!(&event.body[5..9], &0i32.to_be_bytes());
+                        assert_eq!(&event.body[9..], &[0, 0]);
+                        seen.insert(i32::from_be_bytes(event.body[0..4].try_into().unwrap()));
+                    }
+                }
+                assert_eq!(seen, BTreeSet::from(pair));
+            }
+            std::fs::remove_dir_all(scratch).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
 mod protocol5_chunk_transition_regression_tests {
     use super::*;
 
@@ -12080,5 +12489,90 @@ mod command_world_settings_tests {
         assert_eq!(state.load(Ordering::Acquire), 3);
         assert_eq!(admin_state::read(&difficulty_path, 3).unwrap(), Some(3));
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reg120_coalesced_teleport_tests {
+    use super::*;
+
+    fn target(x: f64) -> PlayerPosition {
+        PlayerPosition { x, y: 65.0, z: 0.5 }
+    }
+
+    #[test]
+    fn repeated_admin_teleports_only_consume_final_queued_destination() {
+        let hub = Hub::default();
+        let (_, events, _) = hub
+            .add(
+                "Teleporter".into(),
+                "uuid".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        for x in [100.5, 200.5, 300.5] {
+            assert!(hub.request_admin_teleport("Teleporter", target(x)).unwrap());
+        }
+        let mut deferred = None;
+        let latest = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(latest.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(latest.body[0..8].try_into().unwrap()),
+            300.5
+        );
+        assert!(next_session_event(&events, &mut deferred).is_none());
+    }
+
+    #[test]
+    fn pearl_impact_and_gamemode_are_never_discarded_or_reordered() {
+        let hub = Hub::default();
+        let (_, events, _) = hub
+            .add(
+                "Teleporter".into(),
+                "uuid".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        for x in [100.5, 200.5] {
+            assert!(hub.request_admin_teleport("Teleporter", target(x)).unwrap());
+        }
+        assert!(hub
+            .request_pearl_teleport("Teleporter", target(300.5))
+            .unwrap());
+        assert!(hub
+            .request_admin_teleport("Teleporter", target(400.5))
+            .unwrap());
+        assert!(hub.request_admin_gamemode("Teleporter", 1).unwrap());
+        assert!(hub
+            .request_admin_teleport("Teleporter", target(500.5))
+            .unwrap());
+        let mut deferred = None;
+        let first = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(first.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(first.body[0..8].try_into().unwrap()),
+            200.5
+        );
+        let second = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(second.id, PEARL_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(second.body[0..8].try_into().unwrap()),
+            300.5
+        );
+        let third = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(third.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(third.body[0..8].try_into().unwrap()),
+            400.5
+        );
+        let fourth = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(fourth.id, ADMIN_GAMEMODE_EVENT);
+        let fifth = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(fifth.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(fifth.body[0..8].try_into().unwrap()),
+            500.5
+        );
+        assert!(next_session_event(&events, &mut deferred).is_none());
     }
 }
