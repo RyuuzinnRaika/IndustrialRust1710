@@ -571,9 +571,72 @@ fn join(
     Ok(())
 }
 
+/// REG-120 / #756: collapse a burst of consecutive administrative
+/// teleports before sending any intermediate destination's chunk columns.
+/// Preserve the first non-admin event for the next iteration: a pearl
+/// teleport applies damage and must never be discarded or reordered.
+fn next_session_event(events: &SessionEvents, deferred: &mut Option<Event>) -> Option<Event> {
+    let mut event = deferred.take().or_else(|| events.try_recv().ok())?;
+    if event.id != ADMIN_TELEPORT_EVENT {
+        return Some(event);
+    }
+    while let Ok(next) = events.try_recv() {
+        if next.id == ADMIN_TELEPORT_EVENT {
+            event = next;
+        } else {
+            *deferred = Some(next);
+            break;
+        }
+    }
+    Some(event)
+}
+
 fn safe_spawn(world: &Mutex<World>, root_world_path: &Path) -> io::Result<PlayerPosition> {
     let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
     world_spawn::player_spawn(root_world_path, &state)
+}
+
+/// Respawn position for a claimed bed at (x, y, z). Prefer standing
+/// on the bed itself (the historical behavior); when that cell is
+/// obstructed, take the first adjacent column — in a fixed order —
+/// whose feet and head cells are air over solid, non-fluid ground
+/// at bed level, as vanilla does before giving up to world spawn.
+/// `None` means every candidate is obstructed.
+fn bed_respawn_position(world: &World, x: i32, y: i32, z: i32) -> Option<PlayerPosition> {
+    if world::in_bounds(x, y + 1, z) && world.get(x, y + 1, z) == 0 {
+        return Some(PlayerPosition {
+            x: f64::from(x) + 0.5,
+            y: f64::from(y) + 1.0,
+            z: f64::from(z) + 0.5,
+        });
+    }
+    for (dx, dz) in [
+        (0, -1),
+        (0, 1),
+        (-1, 0),
+        (1, 0),
+        (-1, -1),
+        (1, -1),
+        (-1, 1),
+        (1, 1),
+    ] {
+        let (nx, nz) = (x + dx, z + dz);
+        if !world::in_bounds(nx, y, nz) || !world::in_bounds(nx, y + 1, nz) {
+            continue;
+        }
+        let ground = world.get(nx, y - 1, nz) >> 4;
+        if ground == 0 || matches!(ground, 8..=11) {
+            continue;
+        }
+        if world.get(nx, y, nz) == 0 && world.get(nx, y + 1, nz) == 0 {
+            return Some(PlayerPosition {
+                x: f64::from(nx) + 0.5,
+                y: f64::from(y),
+                z: f64::from(nz) + 0.5,
+            });
+        }
+    }
+    None
 }
 fn chunk_center(player: &PlayerPosition) -> (i32, i32) {
     (
@@ -1282,6 +1345,38 @@ mod dead_session_packet_tests {
         }
     }
 
+    /// ADD-029 / #453: an obstructed bed falls back to an adjacent
+    /// safe column before world spawn is even considered.
+    #[test]
+    fn add029_bed_respawn_searches_adjacent_columns_when_obstructed() {
+        use crate::world::World;
+        let mut world = World::new();
+        // Ground slab at y=69, bed at (10, 70, 10).
+        for x in 8..=12 {
+            for z in 8..=12 {
+                world.import_block(x, 69, z, 1 << 4).unwrap();
+            }
+        }
+        world.import_block(10, 70, 10, 26 << 4).unwrap();
+        // Unobstructed: stand on the bed itself.
+        let pos = super::bed_respawn_position(&world, 10, 70, 10).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (10.5, 71.0, 10.5));
+        // Obstruct the cell above the bed: the first adjacent column
+        // in the fixed search order wins.
+        world.import_block(10, 71, 10, 1 << 4).unwrap();
+        let pos = super::bed_respawn_position(&world, 10, 70, 10).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (10.5, 70.0, 9.5));
+        // Obstruct every adjacent feet cell too: no bed-side respawn.
+        for x in 9..=11 {
+            for z in 9..=11 {
+                if (x, z) != (10, 10) {
+                    world.import_block(x, 70, z, 1 << 4).unwrap();
+                }
+            }
+        }
+        assert!(super::bed_respawn_position(&world, 10, 70, 10).is_none());
+    }
+
     /// REG-146 / #782: the active chest's cursor is player-owned even
     /// while the chest window is open. Death drops it exactly once, while
     /// delayed container clicks are blocked until respawn resets the GUI.
@@ -1555,6 +1650,9 @@ fn play(
     let mut idle_gravity = IdleGravity::new(clock.ticks());
     let mut loaded_chunks = view_chunks(chunk_center(player));
     let mut pending_teleport: Option<TeleportGate> = None;
+    // The mailbox can contain a burst of /tp commands. Keep only the
+    // latest consecutive admin target without crossing unrelated events.
+    let mut deferred_session_event: Option<Event> = None;
     let mut pending_chunk_relights = BTreeSet::new();
     let mut last_chunk_relight = Instant::now() - Duration::from_millis(200);
     let mut yaw: f32 = 0.0;
@@ -1668,7 +1766,7 @@ fn play(
                 "outbound packet overflow or session removed",
             ));
         }
-        while let Ok(event) = events.try_recv() {
+        while let Some(event) = next_session_event(events, &mut deferred_session_event) {
             if event.id == ADMIN_SPAWNPOINT_EVENT {
                 if event.body.len() != 12 {
                     return Err(bad("invalid internal spawnpoint payload"));
@@ -6904,15 +7002,8 @@ fn play(
                             let guard = respawn_world
                                 .lock()
                                 .map_err(|_| bad("world mutex poisoned"))?;
-                            if guard.get(x, y, z) >> 4 == 26
-                                && world::in_bounds(x, y + 1, z)
-                                && guard.get(x, y + 1, z) == 0
-                            {
-                                PlayerPosition {
-                                    x: x as f64 + 0.5,
-                                    y: y as f64 + 1.0,
-                                    z: z as f64 + 0.5,
-                                }
+                            if guard.get(x, y, z) >> 4 == 26 {
+                                bed_respawn_position(&guard, x, y, z).unwrap_or(fallback)
                             } else {
                                 fallback
                             }
@@ -12384,5 +12475,90 @@ mod command_world_settings_tests {
         assert_eq!(state.load(Ordering::Acquire), 3);
         assert_eq!(admin_state::read(&difficulty_path, 3).unwrap(), Some(3));
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reg120_coalesced_teleport_tests {
+    use super::*;
+
+    fn target(x: f64) -> PlayerPosition {
+        PlayerPosition { x, y: 65.0, z: 0.5 }
+    }
+
+    #[test]
+    fn repeated_admin_teleports_only_consume_final_queued_destination() {
+        let hub = Hub::default();
+        let (_, events, _) = hub
+            .add(
+                "Teleporter".into(),
+                "uuid".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        for x in [100.5, 200.5, 300.5] {
+            assert!(hub.request_admin_teleport("Teleporter", target(x)).unwrap());
+        }
+        let mut deferred = None;
+        let latest = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(latest.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(latest.body[0..8].try_into().unwrap()),
+            300.5
+        );
+        assert!(next_session_event(&events, &mut deferred).is_none());
+    }
+
+    #[test]
+    fn pearl_impact_and_gamemode_are_never_discarded_or_reordered() {
+        let hub = Hub::default();
+        let (_, events, _) = hub
+            .add(
+                "Teleporter".into(),
+                "uuid".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        for x in [100.5, 200.5] {
+            assert!(hub.request_admin_teleport("Teleporter", target(x)).unwrap());
+        }
+        assert!(hub
+            .request_pearl_teleport("Teleporter", target(300.5))
+            .unwrap());
+        assert!(hub
+            .request_admin_teleport("Teleporter", target(400.5))
+            .unwrap());
+        assert!(hub.request_admin_gamemode("Teleporter", 1).unwrap());
+        assert!(hub
+            .request_admin_teleport("Teleporter", target(500.5))
+            .unwrap());
+        let mut deferred = None;
+        let first = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(first.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(first.body[0..8].try_into().unwrap()),
+            200.5
+        );
+        let second = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(second.id, PEARL_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(second.body[0..8].try_into().unwrap()),
+            300.5
+        );
+        let third = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(third.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(third.body[0..8].try_into().unwrap()),
+            400.5
+        );
+        let fourth = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(fourth.id, ADMIN_GAMEMODE_EVENT);
+        let fifth = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(fifth.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(fifth.body[0..8].try_into().unwrap()),
+            500.5
+        );
+        assert!(next_session_event(&events, &mut deferred).is_none());
     }
 }
