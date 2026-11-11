@@ -1441,13 +1441,32 @@ impl Inventory {
                     ChestDirection::IntoChest
                 })
             }
-            2 if !storage && (0..=8).contains(&button) => {
+            2 if (0..=8).contains(&button) => {
+                // Protocol 5 number-key mode swaps the hovered slot with the
+                // selected *hotbar* slot, even when hovering a chest slot.
+                // The caller journals both the chest and player snapshot when
+                // storage changes; refusing this path made 1-9 unresponsive.
                 let target = n + 27 + i16::from(button);
+                if slot == target {
+                    return Some(ChestDirection::InventoryOnly);
+                }
                 let a = self.chest_stack(chest, slot);
                 let b = self.chest_stack(chest, target);
+                // Brewing stands share this primitive but accept only their
+                // own legacy potion/ingredient/fuel slot-compatible items.
+                if n == 4
+                    && storage
+                    && b.is_some_and(|item| !crate::brewing::slot_accepts(slot, item))
+                {
+                    return None;
+                }
                 self.set_chest_stack(chest, slot, b);
                 self.set_chest_stack(chest, target, a);
-                Some(ChestDirection::InventoryOnly)
+                Some(if storage {
+                    ChestDirection::OutOfChest
+                } else {
+                    ChestDirection::InventoryOnly
+                })
             }
             _ => None,
         }
@@ -3687,12 +3706,120 @@ mod tests {
         );
         assert_eq!(chest[0], None);
         assert_eq!(sum(&inv, &chest), 12);
-        assert_eq!(inv.chest_click(&mut chest, 0, 1, 2), None); // cannot number swap chest
+        assert_eq!(
+            inv.chest_click(&mut chest, 0, 1, 2),
+            Some(ChestDirection::OutOfChest)
+        ); // 1.7.10 allows a number-key swap on a chest slot
         assert_eq!(inv.chest_click(&mut chest, -999, 0, 0), None); // no outside drop
         assert_eq!(inv.chest_click(&mut chest, 63, 0, 0), None);
         assert_eq!(inv.chest_window_items(2, &chest)[..3], [2, 0, 63]);
         assert_eq!(sum(&inv, &chest), 12);
     }
+    /// REG-131 / #767: number keys on a chest slot must swap it with the
+    /// matching hotbar slot. The screen shows all 36 player slots after n
+    /// container slots; the hotbar begins at n+27, not n+0.
+    #[test]
+    fn reg131_number_keys_swap_chest_and_hotbar_without_duplication() {
+        let mut inventory = Inventory::default();
+        let mut chest = [None; 27];
+        let chest_item = Stack {
+            id: 17,
+            count: 11,
+            damage: 2,
+            nbt: None,
+        };
+        let held_item = Stack {
+            id: 5,
+            count: 19,
+            damage: 1,
+            nbt: None,
+        };
+        for hotbar in 0..9u8 {
+            let mut next_inventory = inventory.clone();
+            next_inventory.slots[36 + hotbar as usize] = Some(held_item);
+            let mut next_chest = chest;
+            next_chest[4] = Some(chest_item);
+            let before_other_hotbar = next_inventory.slots.clone();
+            assert_eq!(
+                next_inventory.chest_click_window(1, &mut next_chest, 4, hotbar as i8, 2),
+                Some(ChestDirection::OutOfChest)
+            );
+            assert_eq!(next_chest[4], Some(held_item));
+            assert_eq!(next_inventory.slots[36 + hotbar as usize], Some(chest_item));
+            for (slot, before_slot) in before_other_hotbar.iter().enumerate().take(45) {
+                if slot != 36 + hotbar as usize {
+                    assert_eq!(next_inventory.slots[slot], *before_slot);
+                }
+            }
+            assert_eq!(next_inventory.cursor, None);
+            let count_in_chest = next_chest
+                .iter()
+                .flatten()
+                .map(|stack| u16::from(stack.count))
+                .sum::<u16>();
+            let count_with_player = next_inventory
+                .possessions()
+                .iter()
+                .map(|stack| u16::from(stack.count))
+                .sum::<u16>();
+            assert_eq!(count_in_chest + count_with_player, 30);
+
+            // Both snapshots remain stable across the exact native JSON
+            // serialization used by the server's journal participants.
+            let restored: Inventory =
+                serde_json::from_slice(&next_inventory.encoded().unwrap()).unwrap();
+            let saved_chest = serde_json::to_vec(&next_chest).unwrap();
+            let reloaded_chest: [Option<Stack>; 27] = serde_json::from_slice(&saved_chest).unwrap();
+            assert_eq!(restored, next_inventory);
+            assert_eq!(reloaded_chest, next_chest);
+
+            // Mode 2 with the hotbar itself as hovered source is a no-op.
+            let index = 27 + 27 + i16::from(hotbar);
+            assert_eq!(
+                next_inventory.chest_click_window(1, &mut next_chest, index, hotbar as i8, 2),
+                Some(ChestDirection::InventoryOnly)
+            );
+            assert_eq!(next_chest[4], Some(held_item));
+        }
+        // Empty hotbar slot: transfer chest stack without minting a copy.
+        chest[0] = Some(chest_item);
+        assert!(inventory
+            .chest_click_window(1, &mut chest, 0, 0, 2)
+            .is_some());
+        assert_eq!(chest[0], None);
+        assert_eq!(inventory.slots[36], Some(chest_item));
+
+        let snapshot = inventory.clone();
+        let saved = chest;
+        for (slot, key) in [(0, -1), (0, 9), (0, i8::MAX), (-999, 0), (63, 0)] {
+            assert_eq!(
+                inventory.chest_click_window(1, &mut chest, slot, key, 2),
+                None
+            );
+            assert_eq!(inventory, snapshot);
+            assert_eq!(chest, saved);
+        }
+    }
+
+    /// REG-131 / #767: unlike chests, brewing slots must reject a hotbar
+    /// item incompatible with their slot, leaving both inventories intact.
+    #[test]
+    fn reg131_brewing_number_key_rejects_invalid_ingredient_slot() {
+        let mut inventory = Inventory::default();
+        let mut brewer = [None; 4];
+        let stone = Stack {
+            id: 1,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        inventory.slots[36] = Some(stone);
+        let original = inventory.clone();
+        assert_eq!(inventory.chest_click_window(3, &mut brewer, 0, 0, 2), None);
+        assert_eq!(inventory, original);
+        assert_eq!(brewer, [None; 4]);
+    }
+
     /// REG-132 / #768: double-click collection must honor max stack size
     /// and the exact item metadata. Extra source items stay in place.
     #[test]
