@@ -790,7 +790,7 @@ fn native_1710_protocol5_whitelist_movement_multiplayer_and_save_roundtrip() {
     assert!(String::from_utf8_lossy(&response).contains("RustTester"));
     send_fragments(&mut client, &frame(1, &mc_string("/help")), &[1, 2]);
     until_packet(&mut client, 2, |body| {
-        body.windows(9).any(|w| w == b"Commands:")
+        body.windows(14).any(|w| w == b"Commands page ") // paginated /help header from #524
     });
 
     // Dig a grass block. Placement is denied until the Creative action has
@@ -1015,9 +1015,7 @@ fn survival_mined_block_drop_pickup_persists_without_duplication() {
     let spawn = until_packet(&mut client, 0x0e, |body| body.len() == 24 && body[5] == 2);
     let mut payload = spawn.as_slice();
     let entity_id = i32::try_from(read_varint(&mut payload).unwrap()).unwrap();
-    until_packet(&mut client, 0x23, |body| {
-        block_change_is(body, 63, 0)
-    });
+    until_packet(&mut client, 0x23, |body| block_change_is(body, 63, 0));
     let ground_file = server.directory.join("flat.drops.json");
     await_file(&ground_file);
     let on_ground: Value = serde_json::from_slice(&fs::read(&ground_file).unwrap()).unwrap();
@@ -1048,9 +1046,7 @@ fn survival_mined_block_drop_pickup_persists_without_duplication() {
                 assert!(!collected, "duplicate pickup event");
                 collected = true;
             }
-            0x13 if body.len() == 5 && body[0] == 1
-                && body[1..] == entity_id.to_be_bytes() =>
-            {
+            0x13 if body.len() == 5 && body[0] == 1 && body[1..] == entity_id.to_be_bytes() => {
                 assert!(!destroyed, "duplicate item destroy");
                 destroyed = true;
             }
@@ -1086,6 +1082,80 @@ fn survival_mined_block_drop_pickup_persists_without_duplication() {
     assert_eq!(at, [0.5, 64.0, 0.5]);
     drop(rejoined);
     server.wait_idle();
+}
+
+#[test]
+fn reg123_status_ping_keeps_signed_tokens_isolated_between_sessions() {
+    let server = NativeServer::start();
+
+    // Every payload is an opaque signed 64-bit token. Opening a new
+    // connection must not reuse the token from the previous Status session.
+    for token in [0_i64, 1, -1, i64::MIN, i64::MAX] {
+        let elapsed = server.status_ping(token);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "Status Ping for {token} took {elapsed:?}"
+        );
+    }
+
+    // Both connections must be able to finish Status before either sends
+    // Ping. This also catches a shared/global pending-token slot.
+    let mut clients = [server.client(), server.client()];
+    for client in &mut clients {
+        client.write_all(&handshake(server.port, 1)).unwrap();
+        client.write_all(&frame(0, &[])).unwrap();
+        let (id, response) = receive(client);
+        assert_eq!(id, 0);
+        let mut cursor = Cursor::new(&response);
+        let _: Value = serde_json::from_str(cursor.read_string(65536).unwrap()).unwrap();
+        cursor.finish().unwrap();
+    }
+
+    let first = i64::MIN + 0x12345;
+    let second = i64::MAX - 0x23456;
+    clients[0]
+        .write_all(&frame(1, &first.to_be_bytes()))
+        .unwrap();
+    clients[1]
+        .write_all(&frame(1, &second.to_be_bytes()))
+        .unwrap();
+
+    let (first_id, first_reply) = receive(&mut clients[0]);
+    let (second_id, second_reply) = receive(&mut clients[1]);
+    assert_eq!((first_id, first_reply), (1, first.to_be_bytes().to_vec()));
+    assert_eq!(
+        (second_id, second_reply),
+        (1, second.to_be_bytes().to_vec())
+    );
+
+    // Status Ping accepts exactly packet id 1 with an eight-byte body.
+    // Malformed lengths and wrong IDs must close the connection, not echo
+    // or influence a valid session's pending token.
+    for (packet_id, bad_payload) in [
+        (1_u32, vec![]),
+        (1, vec![0; 7]),
+        (1, vec![0; 9]),
+        (2, vec![0; 8]),
+    ] {
+        let mut bad_client = server.client();
+        bad_client.write_all(&handshake(server.port, 1)).unwrap();
+        bad_client.write_all(&frame(0, &[])).unwrap();
+        assert_eq!(receive(&mut bad_client).0, 0);
+        bad_client
+            .write_all(&frame(packet_id, &bad_payload))
+            .unwrap();
+        let error = read_frame(&mut bad_client).unwrap_err();
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ),
+            "invalid Status Ping {packet_id} with {} bytes: {error}",
+            bad_payload.len()
+        );
+    }
 }
 
 #[test]
@@ -1531,6 +1601,110 @@ fn native_open_window_packets_cover_other_interactive_gui_blocks() {
             p.len() == 11 && p[4] == 64 && p[9] == 0 && p[10] == 0
         });
     }
+}
+
+/// REG-131 / #767: the real Protocol 5 C0E transaction must swap a
+/// chest stack with the selected hotbar key and persist both files atomically.
+/// This uses a unique temporary world and the compiled Rust server binary.
+#[test]
+fn reg131_protocol5_chest_number_key_swaps_and_survives_reconnect() {
+    let server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+
+    let creative = |slot: i16, id: i16, count: u8| {
+        let mut payload = slot.to_be_bytes().to_vec();
+        payload.extend_from_slice(&id.to_be_bytes());
+        payload.push(count);
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        frame(0x10, &payload)
+    };
+    let click = |stream: &mut TcpStream, slot: i16, button: i8, mode: i8, action: i16| {
+        let mut payload = vec![1u8];
+        payload.extend_from_slice(&slot.to_be_bytes());
+        payload.push(button as u8);
+        payload.extend_from_slice(&action.to_be_bytes());
+        payload.push(mode as u8);
+        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        stream.write_all(&frame(0x0e, &payload)).unwrap();
+        let acknowledged = until_packet(stream, 0x32, |b| {
+            b.len() == 4 && b[0] == 1 && b[1..3] == action.to_be_bytes()
+        });
+        let items = until_packet(stream, 0x30, |b| b.starts_with(&[1, 0, 63]));
+        until_packet(stream, 0x2f, |b| b.starts_with(&[255, 255, 255]));
+        (acknowledged[3] == 1, items)
+    };
+
+    client.write_all(&creative(36, 54, 1)).unwrap();
+    until_packet(&mut client, 0x2f, |b| b.starts_with(&[0, 0, 36]));
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&54i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |b| {
+        b.len() >= 11 && b[4] == 64 && b[9] == 54
+    });
+
+    // Hotbar 0 has 3 planks; hotbar 1 has 2 logs. First move the logs
+    // into chest slot 0, then swap it with hotbar 0 using number key 1.
+    client.write_all(&creative(36, 5, 3)).unwrap();
+    until_packet(&mut client, 0x2f, |b| b.starts_with(&[0, 0, 36]));
+    client.write_all(&creative(37, 17, 2)).unwrap();
+    until_packet(&mut client, 0x2f, |b| b.starts_with(&[0, 0, 37]));
+
+    let mut open = 0i32.to_be_bytes().to_vec();
+    open.push(64);
+    open.extend_from_slice(&0i32.to_be_bytes());
+    open.push(1);
+    open.extend_from_slice(&(-1i16).to_be_bytes());
+    open.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &open)).unwrap();
+    let opened = until_packet(&mut client, 0x2d, |b| b.first() == Some(&1));
+    assert_open_window_protocol5(&opened, 1, 0, "Chest", 27);
+    until_packet(&mut client, 0x30, |b| b.starts_with(&[1, 0, 63]));
+    until_packet(&mut client, 0x2f, |b| b.starts_with(&[255, 255, 255]));
+
+    assert!(click(&mut client, 55, 0, 0, 1).0);
+    let (_, stocked) = click(&mut client, 0, 0, 0, 2);
+    assert_eq!(&stocked[3..10], &[0, 17, 2, 0, 0, 255, 255]);
+    let (accepted, swapped) = click(&mut client, 0, 0, 2, 3);
+    assert!(accepted, "C0E mode-2 chest-origin hotbar exchange rejected");
+    assert_eq!(&swapped[3..10], &[0, 5, 3, 0, 0, 255, 255]);
+
+    let inventory_path = server.directory.join("players/rusttester.inventory.json");
+    let chest_path = server.directory.join("flat.chests.json");
+    await_file(&inventory_path);
+    await_file(&chest_path);
+    let inv: Value = serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    let storage: Value = serde_json::from_slice(&fs::read(&chest_path).unwrap()).unwrap();
+    assert_eq!(inv["slots"][36]["id"], 17);
+    assert_eq!(inv["slots"][36]["count"], 2);
+    assert!(inv["slots"][37].is_null());
+    assert_eq!(storage["entries"]["0,64,0"][0]["id"], 5);
+    assert_eq!(storage["entries"]["0,64,0"][0]["count"], 3);
+
+    let (accepted_bad, _) = click(&mut client, 63, 0, 2, 4);
+    assert!(
+        !accepted_bad,
+        "slot just outside chest window must be refused"
+    );
+    client.write_all(&frame(13, &[1])).unwrap();
+    drop(client);
+    server.wait_idle();
+    let (rejoined, _, _) = server.join("RustTester");
+    drop(rejoined);
+    server.wait_idle();
+    let final_inventory: Value =
+        serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    let final_chest: Value = serde_json::from_slice(&fs::read(&chest_path).unwrap()).unwrap();
+    assert_eq!(final_inventory["slots"][36]["id"], 17);
+    assert_eq!(final_chest["entries"]["0,64,0"][0]["id"], 5);
 }
 
 #[test]
