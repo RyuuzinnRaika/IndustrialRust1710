@@ -194,6 +194,24 @@ impl World {
             _ => true,
         }
     }
+    /// Strongest block light reaching any face of a cell. Opaque
+    /// blocks store no propagated light in their own cell (the flood
+    /// fill never enters them), so a melt rule keyed on an opaque
+    /// block's own light_at() could never fire; sample the faces.
+    fn face_block_light(&self, x: i32, y: i32, z: i32) -> u8 {
+        [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ]
+        .iter()
+        .map(|&(dx, dy, dz)| self.light_at(x + dx, y + dy, z + dz).0)
+        .max()
+        .unwrap_or(0)
+    }
     pub(super) fn is_cold_biome(&self, x: i32, z: i32) -> bool {
         matches!(self.biome_at(x, z), 5 | 10 | 11 | 12 | 13 | 26 | 30 | 31)
     }
@@ -428,7 +446,7 @@ impl World {
                 78 if self.light_at(x, height, z).0 >= 12 => {
                     changes.insert((x, y, z), 0);
                 }
-                79 if self.light_at(x, height, z).0 >= 12 => {
+                79 if self.face_block_light(x, height, z) >= 12 => {
                     changes.insert((x, y, z), 9 << 4);
                 }
                 60 => {

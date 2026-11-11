@@ -3703,6 +3703,125 @@ mod tests {
     }
 
     #[test]
+    fn add028_snow_and_ice_melt_at_block_light_12_and_persist() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-add028-melt-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::new();
+        // Snow station: layer beside a floor torch (metadata 5; block
+        // light 13 at distance 1). Ice station: a walled cell with a
+        // torch standing on the ice (face light 14), so meltwater is
+        // contained and cannot wash the other stations. Two dark
+        // controls far from any light.
+        world.import_block(0, 63, 0, 1 << 4).unwrap();
+        world.import_block(0, 64, 0, 78 << 4).unwrap();
+        world.import_block(1, 63, 0, 1 << 4).unwrap();
+        world.import_block(1, 64, 0, (50 << 4) | 5).unwrap();
+        world.import_block(20, 63, 0, 1 << 4).unwrap();
+        world.import_block(20, 64, 0, 79 << 4).unwrap();
+        world.import_block(20, 65, 0, (50 << 4) | 5).unwrap();
+        for (x, z) in [(19, 0), (21, 0), (20, -1), (20, 1)] {
+            world.import_block(x, 64, z, 1 << 4).unwrap();
+        }
+        world.import_block(8, 63, 0, 1 << 4).unwrap();
+        world.import_block(8, 64, 0, 78 << 4).unwrap();
+        world.import_block(12, 63, 0, 1 << 4).unwrap();
+        world.import_block(12, 64, 0, 79 << 4).unwrap();
+        world.save(&path).unwrap();
+        // Reload so the load scan registers the snow/ice cells as
+        // ecology candidates, exactly as after a server restart.
+        let mut world = World::load(&path).unwrap();
+        assert_eq!(world.get(0, 64, 0), 78 << 4);
+        assert_eq!(world.get(20, 64, 0), 79 << 4);
+        // The load scan registered both cells; keep only the test
+        // cells so the budgeted iteration reaches them
+        // deterministically (the rule under test is the melt).
+        assert!(world.pending_ecology.contains(&(0, 64, 0)));
+        assert!(world.pending_ecology.contains(&(20, 64, 0)));
+        world
+            .pending_ecology
+            .retain(|pos| matches!(pos, (0, 64, 0) | (20, 64, 0) | (8, 64, 0) | (12, 64, 0)));
+        assert!(world.light_at(0, 64, 0).0 >= 12, "torch light reaches snow");
+        assert!(world.light_at(8, 64, 0).0 < 12, "control stays dark");
+        for _ in 0..200 {
+            world.block_tick(&path, 512).unwrap();
+        }
+        assert_eq!(world.get(0, 64, 0), 0, "snow melts at block light >= 12");
+        assert!(
+            matches!(world.get(20, 64, 0) >> 4, 8 | 9),
+            "ice melts to water, got {}",
+            world.get(20, 64, 0) >> 4
+        );
+        assert_eq!(world.get(8, 64, 0), 78 << 4, "dark control snow stays");
+        assert_eq!(world.get(12, 64, 0), 79 << 4, "dark control ice stays");
+        let reloaded = World::load(&path).unwrap();
+        assert_eq!(reloaded.get(0, 64, 0), 0);
+        assert!(matches!(reloaded.get(20, 64, 0) >> 4, 8 | 9));
+        assert_eq!(reloaded.get(8, 64, 0), 78 << 4);
+        assert_eq!(reloaded.get(12, 64, 0), 79 << 4);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn add028_rain_forms_snow_and_ice_in_cold_biomes() {
+        let path =
+            std::env::temp_dir().join(format!("ir1710-add028-form-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::expanded(42, crate::dimensions::Dimension::Overworld);
+        // In the expanded worldgen, cold-biome land columns carry a
+        // snow layer and open water is unfrozen at the surface. Find
+        // one of each.
+        let mut snow_col = None;
+        let mut water_col = None;
+        'scan: for x in -256..256 {
+            for z in -256..256 {
+                if !world.is_cold_biome(x, z) {
+                    continue;
+                }
+                for y in (40..=140).rev() {
+                    let cell = world.get(x, y, z);
+                    if cell == 0 {
+                        continue;
+                    }
+                    if cell >> 4 == 78 && snow_col.is_none() {
+                        snow_col = Some((x, y, z));
+                    } else if cell >> 4 == 9 && water_col.is_none() {
+                        water_col = Some((x, y, z));
+                    }
+                    break;
+                }
+                if snow_col.is_some() && water_col.is_some() {
+                    break 'scan;
+                }
+            }
+        }
+        let (sx, sy, sz) = snow_col.expect("a snow-covered cold column exists");
+        let (wx, wy, wz) = water_col.expect("an open-water cold column exists");
+        // Clear the snow layer: the solid top underneath becomes the
+        // weather column, and rain must lay a fresh layer on it.
+        world.import_block(sx, sy, sz, 0).unwrap();
+        let solid = world.get(sx, sy - 1, sz);
+        assert!(
+            matches!(solid >> 4, 1 | 2 | 3 | 4 | 5 | 12 | 13 | 24 | 80),
+            "cleared column exposes a snow-eligible top, got {}",
+            solid >> 4
+        );
+        world.observe_weather_chunk(sx.div_euclid(16), sz.div_euclid(16));
+        world.observe_weather_chunk(wx.div_euclid(16), wz.div_euclid(16));
+        world.set_raining(true);
+        world.save(&path).unwrap();
+        for _ in 0..80 {
+            world.block_tick(&path, 512).unwrap();
+        }
+        assert_eq!(world.get(sx, sy, sz), 78 << 4, "snow layer re-forms");
+        assert_eq!(world.get(wx, wy, wz), 79 << 4, "surface water freezes");
+        let reloaded = World::load(&path).unwrap();
+        assert_eq!(reloaded.get(sx, sy, sz), 78 << 4);
+        assert_eq!(reloaded.get(wx, wy, wz), 79 << 4);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn chunk_read_snapshot_matches_live_packets_with_edits_and_light_halo() {
         for mut world in [
             World::new(),
