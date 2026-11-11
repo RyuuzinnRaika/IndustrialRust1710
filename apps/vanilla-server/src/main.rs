@@ -571,6 +571,26 @@ fn join(
     Ok(())
 }
 
+/// REG-120 / #756: collapse a burst of consecutive administrative
+/// teleports before sending any intermediate destination's chunk columns.
+/// Preserve the first non-admin event for the next iteration: a pearl
+/// teleport applies damage and must never be discarded or reordered.
+fn next_session_event(events: &SessionEvents, deferred: &mut Option<Event>) -> Option<Event> {
+    let mut event = deferred.take().or_else(|| events.try_recv().ok())?;
+    if event.id != ADMIN_TELEPORT_EVENT {
+        return Some(event);
+    }
+    while let Ok(next) = events.try_recv() {
+        if next.id == ADMIN_TELEPORT_EVENT {
+            event = next;
+        } else {
+            *deferred = Some(next);
+            break;
+        }
+    }
+    Some(event)
+}
+
 fn safe_spawn(world: &Mutex<World>, root_world_path: &Path) -> io::Result<PlayerPosition> {
     let state = world.lock().map_err(|_| bad("world mutex poisoned"))?;
     world_spawn::player_spawn(root_world_path, &state)
@@ -1630,6 +1650,9 @@ fn play(
     let mut idle_gravity = IdleGravity::new(clock.ticks());
     let mut loaded_chunks = view_chunks(chunk_center(player));
     let mut pending_teleport: Option<TeleportGate> = None;
+    // The mailbox can contain a burst of /tp commands. Keep only the
+    // latest consecutive admin target without crossing unrelated events.
+    let mut deferred_session_event: Option<Event> = None;
     let mut pending_chunk_relights = BTreeSet::new();
     let mut last_chunk_relight = Instant::now() - Duration::from_millis(200);
     let mut yaw: f32 = 0.0;
@@ -1743,7 +1766,7 @@ fn play(
                 "outbound packet overflow or session removed",
             ));
         }
-        while let Ok(event) = events.try_recv() {
+        while let Some(event) = next_session_event(events, &mut deferred_session_event) {
             if event.id == ADMIN_SPAWNPOINT_EVENT {
                 if event.body.len() != 12 {
                     return Err(bad("invalid internal spawnpoint payload"));
@@ -12452,5 +12475,90 @@ mod command_world_settings_tests {
         assert_eq!(state.load(Ordering::Acquire), 3);
         assert_eq!(admin_state::read(&difficulty_path, 3).unwrap(), Some(3));
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reg120_coalesced_teleport_tests {
+    use super::*;
+
+    fn target(x: f64) -> PlayerPosition {
+        PlayerPosition { x, y: 65.0, z: 0.5 }
+    }
+
+    #[test]
+    fn repeated_admin_teleports_only_consume_final_queued_destination() {
+        let hub = Hub::default();
+        let (_, events, _) = hub
+            .add(
+                "Teleporter".into(),
+                "uuid".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        for x in [100.5, 200.5, 300.5] {
+            assert!(hub.request_admin_teleport("Teleporter", target(x)).unwrap());
+        }
+        let mut deferred = None;
+        let latest = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(latest.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(latest.body[0..8].try_into().unwrap()),
+            300.5
+        );
+        assert!(next_session_event(&events, &mut deferred).is_none());
+    }
+
+    #[test]
+    fn pearl_impact_and_gamemode_are_never_discarded_or_reordered() {
+        let hub = Hub::default();
+        let (_, events, _) = hub
+            .add(
+                "Teleporter".into(),
+                "uuid".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        for x in [100.5, 200.5] {
+            assert!(hub.request_admin_teleport("Teleporter", target(x)).unwrap());
+        }
+        assert!(hub
+            .request_pearl_teleport("Teleporter", target(300.5))
+            .unwrap());
+        assert!(hub
+            .request_admin_teleport("Teleporter", target(400.5))
+            .unwrap());
+        assert!(hub.request_admin_gamemode("Teleporter", 1).unwrap());
+        assert!(hub
+            .request_admin_teleport("Teleporter", target(500.5))
+            .unwrap());
+        let mut deferred = None;
+        let first = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(first.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(first.body[0..8].try_into().unwrap()),
+            200.5
+        );
+        let second = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(second.id, PEARL_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(second.body[0..8].try_into().unwrap()),
+            300.5
+        );
+        let third = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(third.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(third.body[0..8].try_into().unwrap()),
+            400.5
+        );
+        let fourth = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(fourth.id, ADMIN_GAMEMODE_EVENT);
+        let fifth = next_session_event(&events, &mut deferred).unwrap();
+        assert_eq!(fifth.id, ADMIN_TELEPORT_EVENT);
+        assert_eq!(
+            f64::from_be_bytes(fifth.body[0..8].try_into().unwrap()),
+            500.5
+        );
+        assert!(next_session_event(&events, &mut deferred).is_none());
     }
 }
