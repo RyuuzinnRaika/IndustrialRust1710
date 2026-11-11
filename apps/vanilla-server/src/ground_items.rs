@@ -746,6 +746,109 @@ mod tests {
         assert!(!empty.eligible_after.contains_key(&id));
     }
 
+    /// ADD-018 / #442: two sessions can race for the same ItemEntity, but
+    /// only one holds the shared ground lock during selection, journal commit
+    /// and publication. Verify both player snapshots and the world snapshot
+    /// after a fresh disk load, not only the in-memory entity counter.
+    #[test]
+    fn add018_concurrent_players_claim_ground_item_only_once() {
+        use crate::inventory::Inventory;
+        use crate::journal;
+        use std::sync::Mutex;
+
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-claim-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("players")).unwrap();
+        let ground_path = root.join("flat.drops.json");
+        let journal_path = root.join("flat.pending-txn.json");
+        let drop_stack = Stack {
+            id: 4,
+            count: 7,
+            damage: 0,
+            nbt: None,
+        };
+        let (mut state, spawned) = GroundItems::default()
+            .stage_put_many(&[drop_stack], (0, 64, 0))
+            .unwrap();
+        state.eligible_after.insert(
+            spawned[0].id,
+            Instant::now() - Duration::from_secs(1),
+        );
+        state.save(&ground_path).unwrap();
+        let shared = Mutex::new(state);
+        let credited = Mutex::new([0_u8; 2]);
+
+        std::thread::scope(|scope| {
+            for index in 0..2 {
+                let shared = &shared;
+                let credited = &credited;
+                let root = &root;
+                let ground_path = &ground_path;
+                let journal_path = &journal_path;
+                scope.spawn(move || {
+                    let inventory_path =
+                        root.join(format!("players/claim-{index}.inventory.json"));
+                    let mut inventory = Inventory::default();
+                    let mut ground = shared.lock().unwrap();
+                    if let Some((selected, (next_inventory, amount))) =
+                        ground.nearby_ready_with((0.5, 64.0, 0.5), |item| {
+                            let mut staged = inventory.clone();
+                            staged
+                                .receive_stack_partial(item.stack)
+                                .map(|(accepted, _)| (staged, accepted))
+                        })
+                    {
+                        let (next_ground, taken, remainder) = ground
+                            .stage_take_amount(selected.id, amount)
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(taken.stack.count, amount);
+                        assert!(remainder.is_none());
+                        journal::commit(
+                            journal_path,
+                            &[
+                                (ground_path, next_ground.encoded().unwrap()),
+                                (&inventory_path, next_inventory.encoded().unwrap()),
+                            ],
+                        )
+                        .unwrap();
+                        *ground = next_ground;
+                        inventory = next_inventory;
+                        credited.lock().unwrap()[index] = amount;
+                    }
+                    // Even a losing session writes its own empty inventory
+                    // so a later reload independently checks both players.
+                    inventory.save(&inventory_path).unwrap();
+                });
+            }
+        });
+        let credits = *credited.lock().unwrap();
+        assert_eq!(u16::from(credits[0]) + u16::from(credits[1]), 7);
+        assert!(credits[0] == 0 || credits[1] == 0);
+        assert_eq!(shared.lock().unwrap().items().count(), 0);
+        journal::recover(&journal_path).unwrap();
+        assert_eq!(GroundItems::load(&ground_path).unwrap().items().count(), 0);
+        let count_saved = (0..2)
+            .map(|index| {
+                let file = root.join(format!("players/claim-{index}.inventory.json"));
+                Inventory::load(&file)
+                    .unwrap()
+                    .possessions()
+                    .iter()
+                    .map(|item| u16::from(item.count))
+                    .sum::<u16>()
+            })
+            .sum::<u16>();
+        assert_eq!(count_saved, 7, "no duplication or loss after reload");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn inventory_and_ground_moves_use_one_recoverable_journal() {
         use crate::inventory::Inventory;
