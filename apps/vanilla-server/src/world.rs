@@ -1,4 +1,4 @@
-﻿//! Bounded, sparse, deterministic flat world streamed by chunk.
+//! Bounded, sparse, deterministic flat world streamed by chunk.
 //! IRW1 is temporary storage; this is NOT Anvil/NBT/Forge world storage.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 mod devices;
@@ -3197,7 +3197,7 @@ impl World {
         // A rename failure (including Windows sharing/access-denied errors)
         // leaves the prior world intact. Clear only the staging file owned by
         // this call so a later save can retry rather than hitting AlreadyExists.
-        publish_staged_world_save(&temp, path, fs::rename)
+        publish_staged_world_save(&temp, path, |src, dst| fs::rename(src, dst))
     }
     /// Copy only the generation identity and edits capable of affecting a
     /// Protocol 5 chunk (including its 15-block light-source halo).
