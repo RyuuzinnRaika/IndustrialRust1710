@@ -408,8 +408,9 @@ impl GroundItems {
         Ok(Some((candidate, collected, remainder)))
     }
 
-    /// Persist an already validated, staged drop batch in one file sync.
-    /// The caller only publishes spawn packets after this succeeds.
+    /// Legacy test-only helper for independent-file persistence fixtures.
+    /// Production drops use the multi-file journal transaction instead.
+    #[cfg(test)]
     pub fn commit_staged_put(
         &mut self,
         path: &Path,
