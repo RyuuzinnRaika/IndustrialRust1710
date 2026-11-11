@@ -7,9 +7,9 @@
 //! commits world edits, ground drops and tool durability together.
 //! Item physics (gravity, collision, liquids and merging) is not yet modeled.
 use crate::inventory::Stack;
+use crate::multiplayer::{self, Event};
 use crate::player::PlayerPosition;
 use crate::world::World;
-use crate::multiplayer::{self, Event};
 use crate::world::WORLD_LIMIT;
 use legacy_protocol::write_varint;
 use serde::{Deserialize, Serialize};
@@ -553,6 +553,10 @@ impl GroundItems {
 
     /// Persist an already validated, staged drop batch in one file sync.
     /// The caller only publishes spawn packets after this succeeds.
+    /// Production flows commit staged drops through the journal instead;
+    /// this direct helper remains for tests, like its only caller
+    /// (`put_many` below).
+    #[cfg(test)]
     pub fn commit_staged_put(
         &mut self,
         path: &Path,
@@ -1010,10 +1014,7 @@ mod tests {
                 assert_eq!(packet.id, 0x18);
                 assert_eq!(packet.body.len(), 18);
                 assert_eq!(&packet.body[..4], &id.to_be_bytes());
-                assert_eq!(
-                    &packet.body[8..12],
-                    &moved_item.position[1].to_be_bytes()
-                );
+                assert_eq!(&packet.body[8..12], &moved_item.position[1].to_be_bytes());
                 saw_movement = true;
             }
             last = next.entries[&id].position[1];
