@@ -3619,13 +3619,10 @@ mod tests {
                 Some(ChestDirection::OutOfChest)
             );
             assert_eq!(next_chest[4], Some(held_item));
-            assert_eq!(
-                next_inventory.slots[36 + hotbar as usize],
-                Some(chest_item)
-            );
-            for slot in 0..45 {
+            assert_eq!(next_inventory.slots[36 + hotbar as usize], Some(chest_item));
+            for (slot, before_slot) in before_other_hotbar.iter().enumerate().take(45) {
                 if slot != 36 + hotbar as usize {
-                    assert_eq!(next_inventory.slots[slot], before_other_hotbar[slot]);
+                    assert_eq!(next_inventory.slots[slot], *before_slot);
                 }
             }
             assert_eq!(next_inventory.cursor, None);
@@ -3646,8 +3643,7 @@ mod tests {
             let restored: Inventory =
                 serde_json::from_slice(&next_inventory.encoded().unwrap()).unwrap();
             let saved_chest = serde_json::to_vec(&next_chest).unwrap();
-            let reloaded_chest: [Option<Stack>; 27] =
-                serde_json::from_slice(&saved_chest).unwrap();
+            let reloaded_chest: [Option<Stack>; 27] = serde_json::from_slice(&saved_chest).unwrap();
             assert_eq!(restored, next_inventory);
             assert_eq!(reloaded_chest, next_chest);
 
@@ -3693,10 +3689,7 @@ mod tests {
         };
         inventory.slots[36] = Some(stone);
         let original = inventory.clone();
-        assert_eq!(
-            inventory.chest_click_window(3, &mut brewer, 0, 0, 2),
-            None
-        );
+        assert_eq!(inventory.chest_click_window(3, &mut brewer, 0, 0, 2), None);
         assert_eq!(inventory, original);
         assert_eq!(brewer, [None; 4]);
     }

@@ -1,4 +1,4 @@
-﻿//! Protocol 5 end-to-end tests written entirely in Rust.
+//! Protocol 5 end-to-end tests written entirely in Rust.
 //! Launches the native IndustrialRust1710 binary, never Java or Python.
 use flate2::read::ZlibDecoder;
 use legacy_protocol::{read_frame, read_varint, write_string, write_varint, Cursor};
@@ -1535,9 +1535,7 @@ fn reg131_protocol5_chest_number_key_swaps_and_survives_reconnect() {
         payload.extend_from_slice(&(-1i16).to_be_bytes());
         stream.write_all(&frame(0x0e, &payload)).unwrap();
         let acknowledged = until_packet(stream, 0x32, |b| {
-            b.len() == 4
-                && b[0] == 1
-                && b[1..3] == action.to_be_bytes()
+            b.len() == 4 && b[0] == 1 && b[1..3] == action.to_be_bytes()
         });
         let items = until_packet(stream, 0x30, |b| b.starts_with(&[1, 0, 63]));
         until_packet(stream, 0x2f, |b| b.starts_with(&[255, 255, 255]));
@@ -1599,7 +1597,10 @@ fn reg131_protocol5_chest_number_key_swaps_and_survives_reconnect() {
     assert_eq!(storage["entries"]["0,64,0"][0]["count"], 3);
 
     let (accepted_bad, _) = click(&mut client, 63, 0, 2, 4);
-    assert!(!accepted_bad, "slot just outside chest window must be refused");
+    assert!(
+        !accepted_bad,
+        "slot just outside chest window must be refused"
+    );
     client.write_all(&frame(13, &[1])).unwrap();
     drop(client);
     server.wait_idle();
