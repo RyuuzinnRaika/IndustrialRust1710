@@ -181,12 +181,31 @@ fn join(port: u16, name: &str) -> TcpStream {
         } else if id == 0 && bytes.len() == 4 {
             stream.write_all(&packet(0, &bytes)).unwrap();
         } else if id == 8 {
+            assert!(authenticated, "S08 before Login Success");
             return stream;
         } else if id == 0 && authenticated {
             panic!("player {name} was rejected unexpectedly");
         }
     }
     panic!("player {name} did not reach Protocol 5 Play");
+}
+
+fn wait_for_disconnect_log(path: &Path, player: &str, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let marker = format!("left: {player}");
+    loop {
+        let log = fs::read_to_string(path).unwrap_or_default();
+        let observed = log.matches(&marker).count();
+        if observed >= expected {
+            assert_eq!(observed, expected, "duplicate disconnect for {player}: {log}");
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected} disconnects for {player}; observed {observed}; log:\n{log}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn slots_of(inventory: &Path) -> Vec<Value> {
@@ -287,6 +306,9 @@ fn reg201_reset_during_join_transfer_persists_every_admitted_player() {
     // session must have logged its disconnect tail exactly once.
     for name in &names {
         drop(join(bound, name));
+        // Socket close is asynchronous on the server. Observe the second
+        // disconnect tail before shutdown so cleanup cannot race /stop.
+        wait_for_disconnect_log(&server.log, name, 2);
     }
     stop(&mut server);
     let log = fs::read_to_string(&server.log).unwrap_or_default();
