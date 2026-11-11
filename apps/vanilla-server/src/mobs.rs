@@ -1146,19 +1146,52 @@ fn flying_step(
     }
 }
 
-/// Endermen are almost three blocks tall. A player-sized (1.8 block)
-/// collision check alone would teleport the head into a solid block, water
-/// or lava. Require a dry three-block column and a real supporting floor.
+/// Endermen occupy a 0.6 × 2.9 block AABB. A center-column check
+/// alone can teleport the head into a neighboring solid block or water when
+/// the body overlaps a block edge. Check every intersecting block in the
+/// complete hitbox, then require a supporting floor and ordinary collision.
 fn enderman_teleport_safe(world: &World, position: PlayerPosition) -> bool {
     if !position.is_valid() || !(1.0..=252.0).contains(&position.y) {
         return false;
     }
-    let x = position.x.floor() as i32;
-    let y = position.y.floor() as i32;
-    let z = position.z.floor() as i32;
-    (0..3).all(|dy| world.get(x, y + dy, z) >> 4 == 0)
-        && physics::supported(world, &position)
+    // The small epsilon makes an exactly touching AABB face non-overlapping.
+    const EPSILON: f64 = 1e-7;
+    let min_x = (position.x - 0.3).floor() as i32;
+    let max_x = (position.x + 0.3 - EPSILON).floor() as i32;
+    let min_y = position.y.floor() as i32;
+    let max_y = (position.y + 2.9 - EPSILON).floor() as i32;
+    let min_z = (position.z - 0.3).floor() as i32;
+    let max_z = (position.z + 0.3 - EPSILON).floor() as i32;
+    (min_x..=max_x).all(|x| {
+        (min_y..=max_y).all(|y| {
+            (min_z..=max_z)
+                .all(|z| crate::world::in_bounds(x, y, z) && world.get(x, y, z) >> 4 == 0)
+        })
+    }) && physics::supported(world, &position)
         && !physics::collides(world, &position)
+}
+
+/// An Enderman has a wider/taller hitbox than the player's collision
+/// primitive. Inspect all intersecting source/flowing water blocks, including
+/// water touching the body edge rather than only the center column.
+fn enderman_touches_water(world: &World, position: PlayerPosition) -> bool {
+    if !position.is_valid() {
+        return false;
+    }
+    const EPSILON: f64 = 1e-7;
+    let min_x = (position.x - 0.3).floor() as i32;
+    let max_x = (position.x + 0.3 - EPSILON).floor() as i32;
+    let min_y = position.y.floor() as i32;
+    let max_y = (position.y + 2.9 - EPSILON).floor() as i32;
+    let min_z = (position.z - 0.3).floor() as i32;
+    let max_z = (position.z + 0.3 - EPSILON).floor() as i32;
+    (min_x..=max_x).any(|x| {
+        (min_y..=max_y).any(|y| {
+            (min_z..=max_z).any(|z| {
+                crate::world::in_bounds(x, y, z) && matches!(world.get(x, y, z) >> 4, 8 | 9)
+            })
+        })
+    })
 }
 
 fn sky_exposed(world: &World, p: PlayerPosition) -> bool {
@@ -3136,6 +3169,45 @@ impl Mobs {
                     }
                     events.push(mob.status(2));
                     events.push(mob.health_metadata());
+                }
+                // Water is dangerous even to a neutral, non-aggro Enderman.
+                // Handle it before the normal nearest-player/anger early exits:
+                // otherwise an Enderman can remain submerged indefinitely.
+                if mob.kind == Kind::Enderman && enderman_touches_water(world, mob.position) {
+                    // Throttle environmental damage to once per second in
+                    // the bounded 20TPS catch-up loop, and never make water
+                    // count as a player kill (no combat XP).
+                    if simulated_tick.is_multiple_of(20) {
+                        mob.health -= 1;
+                        if mob.health <= 0 {
+                            if let Some(drop) = mob.death_drop() {
+                                self.pending_drops.push(drop);
+                            }
+                            self.pending_drops.extend(mob.extra_death_drops());
+                            events.push(mob.status(3));
+                            dead.push(mob.id);
+                            continue;
+                        }
+                        events.push(mob.status(2));
+                        events.push(mob.health_metadata());
+                    }
+                    // At most eight deterministic attempts this simulated
+                    // tick; all candidates pass the full 0.6x2.9 AABB guard.
+                    for attempt in 0..8u64 {
+                        let salt = hash(simulated_tick ^ mob.id as u64 ^ (attempt << 24) ^ 0x5eead);
+                        let destination = PlayerPosition {
+                            x: mob.position.x + ((salt & 15) as f64 - 7.5),
+                            y: mob.position.y,
+                            z: mob.position.z + (((salt >> 8) & 15) as f64 - 7.5),
+                        };
+                        if enderman_teleport_safe(world, destination) {
+                            mob.position = destination;
+                            mob.waypoint = None;
+                            events.push(multiplayer::teleport(mob.id, &destination, 0.0, 0.0));
+                            break;
+                        }
+                    }
+                    continue;
                 }
                 if mob.knockback != [0.0; 3] {
                     // A knockback tick interrupts the attack's continuous
@@ -8252,6 +8324,94 @@ mod tests {
         world.import_block(0, 64, 0, 0).unwrap();
         world.import_block(0, 63, 0, 0).unwrap();
         assert!(!enderman_teleport_safe(&world, standing));
+    }
+
+    /// REG-155 / #791: the Enderman's fractional X/Z position may overlap
+    /// an adjacent block even though its central three-block column is empty.
+    #[test]
+    fn reg155_enderman_teleport_rejects_partial_hitbox_water_and_head_collision() {
+        let mut world = World::new();
+        let edge = PlayerPosition {
+            x: 0.8,
+            y: 64.0,
+            z: 0.5,
+        };
+        assert!(enderman_teleport_safe(&world, edge));
+
+        // At X=0.8 the Enderman overlaps column X=1 by 0.1 blocks.
+        // A player-height collision test misses this head-level obstruction.
+        world.import_block(1, 66, 0, 1 << 4).unwrap();
+        assert!(!enderman_teleport_safe(&world, edge));
+        world.import_block(1, 66, 0, 0).unwrap();
+        assert!(enderman_teleport_safe(&world, edge));
+
+        // An adjacent source-water block must not become a valid landing.
+        world.import_block(1, 64, 0, 9 << 4).unwrap();
+        assert!(!enderman_teleport_safe(&world, edge));
+        world.import_block(1, 64, 0, 0).unwrap();
+        assert!(enderman_teleport_safe(&world, edge));
+
+        // Check the Z side independently so swapping axes cannot bypass it.
+        let edge_z = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.8,
+        };
+        world.import_block(0, 66, 1, 1 << 4).unwrap();
+        assert!(!enderman_teleport_safe(&world, edge_z));
+    }
+
+    /// REG-155 / #791: neutral Endermen must attempt a safe teleport on
+    /// water contact, even without a target player or an active anger timer.
+    #[test]
+    fn reg155_neutral_enderman_escapes_water_and_broadcasts_teleport() {
+        let mut world = World::new();
+        let original = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        world.import_block(0, 64, 0, 9 << 4).unwrap();
+        let mut mobs = Mobs::default();
+        let id = mobs.next_id;
+        mobs.insert(Kind::Enderman, original, false);
+        assert!(enderman_touches_water(&world, original));
+        let packets = mobs.tick(1, &world, &[]);
+        let mob = mobs.entities.get(&id).unwrap();
+        assert_ne!(mob.position, original, "water must trigger an escape");
+        assert!(!enderman_touches_water(&world, mob.position));
+        assert!(enderman_teleport_safe(&world, mob.position));
+        assert!(packets
+            .iter()
+            .any(|packet| packet.id == 0x18 && packet.body.starts_with(&id.to_be_bytes())));
+    }
+
+    /// All adjacent teleport destinations underwater: bounded attempts,
+    /// no false teleport packet and damage at most once at tick 20.
+    #[test]
+    fn reg155_enderman_trapped_in_water_cannot_loop_or_teleport_into_liquid() {
+        let mut world = World::new();
+        for x in -9..=9 {
+            for z in -9..=9 {
+                world.import_block(x, 64, z, 8 << 4).unwrap();
+            }
+        }
+        let original = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        let id = mobs.next_id;
+        mobs.insert(Kind::Enderman, original, false);
+        let health = mobs.entities.get(&id).unwrap().health;
+        let packets = mobs.tick(20, &world, &[]);
+        assert_eq!(mobs.entities.get(&id).unwrap().position, original);
+        assert_eq!(mobs.entities.get(&id).unwrap().health, health - 1);
+        assert!(!packets.iter().any(|packet| packet.id == 0x18));
+        let later = mobs.tick(21, &world, &[]);
+        assert!(!later.iter().any(|packet| packet.id == 0x18));
+        assert_eq!(mobs.entities.get(&id).unwrap().health, health - 1);
     }
 
     #[test]
