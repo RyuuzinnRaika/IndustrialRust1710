@@ -186,6 +186,25 @@ fn wait_inventory(inventory: &Path, count: u32) {
     }
 }
 
+fn wait_playerdata(players: &Path, name: &str) {
+    // A player who joins and disconnects in the same instant has
+    // no mutated state to persist yet, so the fixture must wait
+    // until the server has materialized the saved profile before
+    // treating it as an existing account.
+    let dat = players.join(format!("{name}.dat"));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if dat.is_file() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "saved playerdata for {name} did not materialize"
+        );
+        thread::sleep(Duration::from_millis(40));
+    }
+}
+
 #[test]
 fn reg183_corrupt_one_player_and_preserve_second_player_across_restart() {
     let nanos = SystemTime::now()
@@ -203,6 +222,9 @@ fn reg183_corrupt_one_player_and_preserve_second_player_across_restart() {
     let mut initial = start(exe, &world, &whitelist, &root, "initial");
     let alpha = join(initial.port, "TwinAlpha");
     let beta = join(initial.port, "TwinBeta");
+    let players_dir = world.parent().unwrap().join("players");
+    wait_playerdata(&players_dir, "twinalpha");
+    wait_playerdata(&players_dir, "twinbeta");
     drop(alpha);
     drop(beta);
     stop(&mut initial);
