@@ -1,4 +1,4 @@
-﻿//! Protocol 5 end-to-end tests written entirely in Rust.
+//! Protocol 5 end-to-end tests written entirely in Rust.
 //! Launches the native IndustrialRust1710 binary, never Java or Python.
 use flate2::read::ZlibDecoder;
 use legacy_protocol::{read_frame, read_varint, write_string, write_varint, Cursor};
@@ -1508,6 +1508,110 @@ fn native_open_window_packets_cover_other_interactive_gui_blocks() {
             p.len() == 11 && p[4] == 64 && p[9] == 0 && p[10] == 0
         });
     }
+}
+
+/// REG-131 / #767: the real Protocol 5 C0E transaction must swap a
+/// chest stack with the selected hotbar key and persist both files atomically.
+/// This uses a unique temporary world and the compiled Rust server binary.
+#[test]
+fn reg131_protocol5_chest_number_key_swaps_and_survives_reconnect() {
+    let server = NativeServer::start();
+    let (mut client, _, _) = server.join("RustTester");
+
+    let creative = |slot: i16, id: i16, count: u8| {
+        let mut payload = slot.to_be_bytes().to_vec();
+        payload.extend_from_slice(&id.to_be_bytes());
+        payload.push(count);
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        frame(0x10, &payload)
+    };
+    let click = |stream: &mut TcpStream, slot: i16, button: i8, mode: i8, action: i16| {
+        let mut payload = vec![1u8];
+        payload.extend_from_slice(&slot.to_be_bytes());
+        payload.push(button as u8);
+        payload.extend_from_slice(&action.to_be_bytes());
+        payload.push(mode as u8);
+        payload.extend_from_slice(&(-1i16).to_be_bytes());
+        stream.write_all(&frame(0x0e, &payload)).unwrap();
+        let acknowledged = until_packet(stream, 0x32, |b| {
+            b.len() == 4 && b[0] == 1 && b[1..3] == action.to_be_bytes()
+        });
+        let items = until_packet(stream, 0x30, |b| b.starts_with(&[1, 0, 63]));
+        until_packet(stream, 0x2f, |b| b.starts_with(&[255, 255, 255]));
+        (acknowledged[3] == 1, items)
+    };
+
+    client.write_all(&creative(36, 54, 1)).unwrap();
+    until_packet(&mut client, 0x2f, |b| b.starts_with(&[0, 0, 36]));
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&54i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |b| {
+        b.len() >= 11 && b[4] == 64 && b[9] == 54
+    });
+
+    // Hotbar 0 has 3 planks; hotbar 1 has 2 logs. First move the logs
+    // into chest slot 0, then swap it with hotbar 0 using number key 1.
+    client.write_all(&creative(36, 5, 3)).unwrap();
+    until_packet(&mut client, 0x2f, |b| b.starts_with(&[0, 0, 36]));
+    client.write_all(&creative(37, 17, 2)).unwrap();
+    until_packet(&mut client, 0x2f, |b| b.starts_with(&[0, 0, 37]));
+
+    let mut open = 0i32.to_be_bytes().to_vec();
+    open.push(64);
+    open.extend_from_slice(&0i32.to_be_bytes());
+    open.push(1);
+    open.extend_from_slice(&(-1i16).to_be_bytes());
+    open.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &open)).unwrap();
+    let opened = until_packet(&mut client, 0x2d, |b| b.first() == Some(&1));
+    assert_open_window_protocol5(&opened, 1, 0, "Chest", 27);
+    until_packet(&mut client, 0x30, |b| b.starts_with(&[1, 0, 63]));
+    until_packet(&mut client, 0x2f, |b| b.starts_with(&[255, 255, 255]));
+
+    assert!(click(&mut client, 55, 0, 0, 1).0);
+    let (_, stocked) = click(&mut client, 0, 0, 0, 2);
+    assert_eq!(&stocked[3..10], &[0, 17, 2, 0, 0, 255, 255]);
+    let (accepted, swapped) = click(&mut client, 0, 0, 2, 3);
+    assert!(accepted, "C0E mode-2 chest-origin hotbar exchange rejected");
+    assert_eq!(&swapped[3..10], &[0, 5, 3, 0, 0, 255, 255]);
+
+    let inventory_path = server.directory.join("players/rusttester.inventory.json");
+    let chest_path = server.directory.join("flat.chests.json");
+    await_file(&inventory_path);
+    await_file(&chest_path);
+    let inv: Value = serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    let storage: Value = serde_json::from_slice(&fs::read(&chest_path).unwrap()).unwrap();
+    assert_eq!(inv["slots"][36]["id"], 17);
+    assert_eq!(inv["slots"][36]["count"], 2);
+    assert!(inv["slots"][37].is_null());
+    assert_eq!(storage["entries"]["0,64,0"][0]["id"], 5);
+    assert_eq!(storage["entries"]["0,64,0"][0]["count"], 3);
+
+    let (accepted_bad, _) = click(&mut client, 63, 0, 2, 4);
+    assert!(
+        !accepted_bad,
+        "slot just outside chest window must be refused"
+    );
+    client.write_all(&frame(13, &[1])).unwrap();
+    drop(client);
+    server.wait_idle();
+    let (rejoined, _, _) = server.join("RustTester");
+    drop(rejoined);
+    server.wait_idle();
+    let final_inventory: Value =
+        serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    let final_chest: Value = serde_json::from_slice(&fs::read(&chest_path).unwrap()).unwrap();
+    assert_eq!(final_inventory["slots"][36]["id"], 17);
+    assert_eq!(final_chest["entries"]["0,64,0"][0]["id"], 5);
 }
 
 #[test]
