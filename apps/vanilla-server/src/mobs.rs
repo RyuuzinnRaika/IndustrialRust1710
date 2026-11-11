@@ -230,6 +230,10 @@ struct Mob {
     far_from_player_ticks: u32,
     bite_tick: u64,
     fuse: u8,
+    /// Client fuse direction (DataWatcher byte 16). Rebuild from the actual
+    /// line of sight on the next tick after loading a Mob snapshot.
+    #[serde(skip)]
+    creeper_igniting: bool,
     breed_tick: u64,
     /// The 600-tick vanilla love window; absent in older snapshots.
     #[serde(default)]
@@ -307,6 +311,10 @@ impl Mob {
             body.push((2 << 5) | 16); // profession integer: farmer (0)
             body.extend_from_slice(&i32::from(self.profession).to_be_bytes());
         }
+        if self.kind == Kind::Creeper {
+            // Protocol 5 / 1.7.10: DataWatcher byte 16, -1 idle or 1 igniting.
+            body.extend_from_slice(&[16, if self.creeper_igniting { 1 } else { 255 }]);
+        }
         if self.kind == Kind::Sheep {
             body.push(16); // sheep colour + sheared bit (byte metadata)
             body.push(if self.sheared { 0x10 } else { 0 });
@@ -348,6 +356,28 @@ impl Mob {
         body.push(0x7f);
         Event { id: 0x1c, body }
     }
+    /// Update the server fuse timer once per simulated 20TPS tick.
+    /// Return the DataWatcher transition only on ignition/defusing, so the
+    /// 1.7.10 client renders the fuse without spamming metadata packets.
+    fn step_creeper_fuse(&mut self, ignite: bool) -> Option<Event> {
+        if self.kind != Kind::Creeper {
+            return None;
+        }
+        let previous = self.creeper_igniting;
+        self.creeper_igniting = ignite;
+        self.fuse = if ignite {
+            self.fuse.saturating_add(1).min(30)
+        } else {
+            self.fuse.saturating_sub(1)
+        };
+        if previous == ignite {
+            return None;
+        }
+        let mut body = self.id.to_be_bytes().to_vec();
+        body.extend_from_slice(&[16, if ignite { 1 } else { 255 }, 0x7f]);
+        Some(Event { id: 0x1c, body })
+    }
+
     fn status(self, value: u8) -> Event {
         let mut body = self.id.to_be_bytes().to_vec();
         body.push(value);
@@ -1446,6 +1476,7 @@ impl Mobs {
             far_from_player_ticks: 0,
             bite_tick: 0,
             fuse: 0,
+            creeper_igniting: false,
             breed_tick: 0,
             love_until: 0,
             baby,
@@ -3107,6 +3138,11 @@ impl Mobs {
                     events.push(mob.health_metadata());
                 }
                 if mob.knockback != [0.0; 3] {
+                    // A knockback tick interrupts the attack's continuous
+                    // line of sight; a partially ignited fuse must cool down.
+                    if let Some(packet) = mob.step_creeper_fuse(false) {
+                        events.push(packet);
+                    }
                     if let Some(position) = mob.tick_knockback(world) {
                         events.push(multiplayer::teleport(mob.id, &position, 0.0, 0.0));
                     }
@@ -3114,6 +3150,9 @@ impl Mobs {
                     continue;
                 }
                 if mob.rider.is_some() || mob.leash_holder.is_some() || mob.fence_anchor.is_some() {
+                    if let Some(packet) = mob.step_creeper_fuse(false) {
+                        events.push(packet);
+                    }
                     continue; // Mounted or leashed animals never wander independently.
                 }
                 let nearest_distance = distance_to_players(mob.position, players);
@@ -3201,7 +3240,14 @@ impl Mobs {
                     (Some(player), _) => village_target.unwrap_or(player),
                     (None, None) => match village_target {
                         Some(door) => door,
-                        None => continue,
+                        None => {
+                            // No reachable player: a lit creeper must unwind
+                            // its fuse instead of freezing mid-ignition.
+                            if let Some(packet) = mob.step_creeper_fuse(false) {
+                                events.push(packet);
+                            }
+                            continue;
+                        }
                     },
                 };
                 if matches!(mob.kind, Kind::Spider | Kind::CaveSpider)
@@ -3257,10 +3303,17 @@ impl Mobs {
                     }
                 }
                 if mob.kind == Kind::Creeper {
-                    if d < 3.0 {
-                        mob.fuse = mob.fuse.saturating_add(1);
+                    // Minecraft 1.7.10 starts the fuse within 3 blocks and
+                    // continues an existing fuse out to 7, but must always
+                    // break off when the target is hidden behind a wall.
+                    let within_fuse_range = if mob.creeper_igniting {
+                        d < 7.0
                     } else {
-                        mob.fuse = mob.fuse.saturating_sub(1);
+                        d < 3.0
+                    };
+                    let ignite = within_fuse_range && can_see(world, mob.position, target);
+                    if let Some(packet) = mob.step_creeper_fuse(ignite) {
+                        events.push(packet);
                     }
                     if mob.fuse >= 30 {
                         self.explosions.push(Explosion {
@@ -5410,6 +5463,83 @@ mod tests {
         assert_eq!(mobs.hurt_player(51, jumping, 20), 3);
         assert_eq!(mobs.hurt_player(51, jumping, 39), 0);
         assert_eq!(mobs.hurt_player(51, jumping, 40), 3);
+    }
+
+    /// REG-153 / #789: when a player ducks behind a full wall or
+    /// disconnects, a creeper already in the fuse animation cools down.
+    /// A new visible target starts it again without spawning phantom damage.
+    #[test]
+    fn reg153_creeper_fuse_defuses_on_lost_sight_and_reignites_on_reacquire() {
+        let mut world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let player = PlayerPosition { x: 2.5, ..at };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Creeper, at, false);
+        let id = mobs.next_id - 1;
+        assert!(can_see(&world, at, player));
+
+        let first = mobs.tick(1, &world, &[player]);
+        assert_eq!(mobs.entities[&id].fuse, 1);
+        assert!(mobs.entities[&id].creeper_igniting);
+        let mut ignition_metadata = id.to_be_bytes().to_vec();
+        ignition_metadata.extend_from_slice(&[16, 1, 0x7f]);
+        assert!(first
+            .iter()
+            .any(|p| p.id == 0x1c && p.body == ignition_metadata));
+
+        // A two-block high stone barrier fully breaks the line of sight.
+        for y in 64..=66 {
+            world.import_block(1, y, 0, 1 << 4).unwrap();
+        }
+        assert!(!can_see(&world, mobs.entities[&id].position, player));
+        let hidden = mobs.tick(2, &world, &[player]);
+        assert_eq!(mobs.entities[&id].fuse, 0);
+        assert!(!mobs.entities[&id].creeper_igniting);
+        let mut defuse_metadata = id.to_be_bytes().to_vec();
+        defuse_metadata.extend_from_slice(&[16, 255, 0x7f]);
+        assert!(hidden
+            .iter()
+            .any(|p| p.id == 0x1c && p.body == defuse_metadata));
+
+        for y in 64..=66 {
+            world.import_block(1, y, 0, 0).unwrap();
+        }
+        let reacquired = mobs.tick(3, &world, &[player]);
+        assert_eq!(mobs.entities[&id].fuse, 1);
+        assert!(reacquired.iter().any(|p| p.id == 0x1c));
+        let lost = mobs.tick(4, &world, &[]);
+        assert_eq!(mobs.entities[&id].fuse, 0);
+        assert!(!mobs.entities[&id].creeper_igniting);
+        assert!(lost.iter().any(|p| p.id == 0x1c));
+        assert!(mobs.take_explosions().is_empty());
+    }
+
+    /// REG-153 / #789: the fuse reaches 30 only after 30 simulated ticks
+    /// with a visible player. The entity is destroyed once and cannot
+    /// create an additional explosion during a later network poll.
+    #[test]
+    fn reg153_creeper_explodes_once_at_30_visible_ticks() {
+        let world = World::new();
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let player = PlayerPosition { x: 2.0, ..at };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Creeper, at, false);
+        let id = mobs.next_id - 1;
+        let mut explosion_count = 0usize;
+        for tick in 1..=35 {
+            mobs.tick(tick, &world, &[player]);
+            explosion_count += mobs.take_explosions().len();
+        }
+        assert_eq!(explosion_count, 1);
+        assert!(!mobs.entities.contains_key(&id));
     }
 
     #[test]
