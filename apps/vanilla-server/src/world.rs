@@ -3373,7 +3373,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(attempts, 3);
-        assert_eq!(fs::read(&destination).unwrap(), b"durable staged world bytes");
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"durable staged world bytes"
+        );
         assert!(!staging.exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -3399,7 +3402,10 @@ mod tests {
         // Model an OS rename denial without depending on antivirus timing or
         // Windows sharing semantics. The production path passes fs::rename.
         let error = publish_staged_world_save(&temp, &save, |_, _| {
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected rename denied"))
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected rename denied",
+            ))
         })
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
