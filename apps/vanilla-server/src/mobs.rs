@@ -1134,9 +1134,8 @@ fn enderman_teleport_safe(world: &World, position: PlayerPosition) -> bool {
     let max_z = (position.z + 0.3 - EPSILON).floor() as i32;
     (min_x..=max_x).all(|x| {
         (min_y..=max_y).all(|y| {
-            (min_z..=max_z).all(|z| {
-                crate::world::in_bounds(x, y, z) && world.get(x, y, z) >> 4 == 0
-            })
+            (min_z..=max_z)
+                .all(|z| crate::world::in_bounds(x, y, z) && world.get(x, y, z) >> 4 == 0)
         })
     }) && physics::supported(world, &position)
         && !physics::collides(world, &position)
@@ -1159,8 +1158,7 @@ fn enderman_touches_water(world: &World, position: PlayerPosition) -> bool {
     (min_x..=max_x).any(|x| {
         (min_y..=max_y).any(|y| {
             (min_z..=max_z).any(|z| {
-                crate::world::in_bounds(x, y, z)
-                    && matches!(world.get(x, y, z) >> 4, 8 | 9)
+                crate::world::in_bounds(x, y, z) && matches!(world.get(x, y, z) >> 4, 8 | 9)
             })
         })
     })
@@ -3144,9 +3142,7 @@ impl Mobs {
                 // Water is dangerous even to a neutral, non-aggro Enderman.
                 // Handle it before the normal nearest-player/anger early exits:
                 // otherwise an Enderman can remain submerged indefinitely.
-                if mob.kind == Kind::Enderman
-                    && enderman_touches_water(world, mob.position)
-                {
+                if mob.kind == Kind::Enderman && enderman_touches_water(world, mob.position) {
                     // Throttle environmental damage to once per second in
                     // the bounded 20TPS catch-up loop, and never make water
                     // count as a player kill (no combat XP).
@@ -3167,8 +3163,7 @@ impl Mobs {
                     // At most eight deterministic attempts this simulated
                     // tick; all candidates pass the full 0.6x2.9 AABB guard.
                     for attempt in 0..8u64 {
-                        let salt =
-                            hash(simulated_tick ^ mob.id as u64 ^ (attempt << 24) ^ 0x5eead);
+                        let salt = hash(simulated_tick ^ mob.id as u64 ^ (attempt << 24) ^ 0x5eead);
                         let destination = PlayerPosition {
                             x: mob.position.x + ((salt & 15) as f64 - 7.5),
                             y: mob.position.y,
@@ -3177,12 +3172,7 @@ impl Mobs {
                         if enderman_teleport_safe(world, destination) {
                             mob.position = destination;
                             mob.waypoint = None;
-                            events.push(multiplayer::teleport(
-                                mob.id,
-                                &destination,
-                                0.0,
-                                0.0,
-                            ));
+                            events.push(multiplayer::teleport(mob.id, &destination, 0.0, 0.0));
                             break;
                         }
                     }
@@ -8263,8 +8253,7 @@ mod tests {
         assert!(enderman_teleport_safe(&world, mob.position));
         assert!(packets
             .iter()
-            .any(|packet| packet.id == 0x18
-                && packet.body.starts_with(&id.to_be_bytes())));
+            .any(|packet| packet.id == 0x18 && packet.body.starts_with(&id.to_be_bytes())));
     }
 
     /// All adjacent teleport destinations underwater: bounded attempts,
