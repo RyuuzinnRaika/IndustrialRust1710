@@ -237,7 +237,7 @@ impl<'a> Input<'a> {
             return Err(bad("invalid string size"));
         }
         let s = std::str::from_utf8(self.take(size as usize)?).map_err(|_| bad("invalid utf8"))?;
-        if s.chars().count() > limit {
+        if s.encode_utf16().count() > limit {
             return Err(bad("too many characters"));
         }
         Ok(s.to_owned())
@@ -339,6 +339,42 @@ impl<'a> Input<'a> {
         }
     }
 }
+#[cfg(test)]
+mod server_input_utf16_tests {
+    use super::*;
+
+    #[test]
+    fn protocol5_server_input_uses_java_utf16_string_limits() {
+        // Java String.length counts UTF-16 code units. Eight supplementary
+        // characters have length 16, but nine have length 18, not nine.
+        let accepted = "😀".repeat(8);
+        let mut packet = Vec::new();
+        write_string(&accepted, &mut packet).unwrap();
+        let mut reader = Input(&packet);
+        assert_eq!(reader.string(16).unwrap(), accepted);
+        reader.finish().unwrap();
+
+        let too_long = "😀".repeat(9);
+        let mut packet = Vec::new();
+        write_string(&too_long, &mut packet).unwrap();
+        let mut reader = Input(&packet);
+        assert_eq!(
+            reader.string(16).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+
+        // BMP code points, including a legacy formatting marker, consume
+        // exactly one UTF-16 unit each and must remain compatible.
+        let mut packet = Vec::new();
+        write_string("§a世界", &mut packet).unwrap();
+        assert_eq!(Input(&packet).string(4).unwrap(), "§a世界");
+        assert_eq!(
+            Input(&packet).string(3).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+    }
+}
+
 /// Vanilla 1.7.10 sends a VarInt-length UTF-8 String in MC|ItemName.
 fn parse_anvil_name(payload: &[u8]) -> Option<String> {
     let mut input = Input(payload);
