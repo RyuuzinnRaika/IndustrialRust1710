@@ -436,6 +436,14 @@ fn reg191_eight_players_craft_with_measured_tps_and_item_conservation() {
                 assert!(items[0].is_none() && items[1].is_none() && items[4].is_none());
                 assert!(items[37].is_none(), "both planks must be consumed");
                 client.close_window(window);
+                // Human-scale pacing keeps the measured load window
+                // deterministic: Time Update arrives once per world second
+                // and the TPS assertions need at least six full seconds of
+                // concurrent crafting traffic. Without this pause a fast
+                // machine drains all crafts in under six seconds and the
+                // sample floor fails even though the server ticked at the
+                // full rate for the entire (too short) window.
+                thread::sleep(Duration::from_millis(250));
             }
         }));
     }
