@@ -195,13 +195,29 @@ fn login(port: u16, name: &str) -> Client {
 }
 
 /// Join and return (client, spawn position).
+///
+/// A reconnect can race the previous session's disconnect tail: while the
+/// tail is still saving, the hub admission of the old session is held and
+/// the server legitimately answers Login Disconnect ("That username is
+/// already connected."). A real 1.7.10 client simply tries the login
+/// screen again, so retry the whole login until the old session has fully
+/// left. A missing Position & Look across every attempt within the window
+/// still fails the test.
 fn join(port: u16, name: &str) -> (Client, (f64, f64, f64)) {
-    let mut client = login(port, name);
-    let pos = client
-        .until(Duration::from_secs(10), |id, _| id == 0x08)
-        .expect("join must deliver Position & Look");
-    client.collect(Duration::from_millis(500));
-    (client, (be_f64(&pos, 0), be_f64(&pos, 8), be_f64(&pos, 16)))
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let mut client = login(port, name);
+        if let Some(pos) = client.until(Duration::from_secs(10), |id, _| id == 0x08) {
+            client.collect(Duration::from_millis(500));
+            return (client, (be_f64(&pos, 0), be_f64(&pos, 8), be_f64(&pos, 16)));
+        }
+        drop(client);
+        assert!(
+            Instant::now() < deadline,
+            "join must deliver Position & Look"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn creative_set(client: &mut Client, slot: i16, id: i16, count: u8) {
