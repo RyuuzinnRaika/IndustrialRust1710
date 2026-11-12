@@ -221,6 +221,49 @@ pub struct GravityMove {
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
+/// Publish a fully synced staging image or report the rename failure after
+/// removing only the temporary file created by this save invocation. A failed
+/// rename must not strand `flat.tmp` and permanently block subsequent saves.
+/// Do not delete or rewrite the existing destination on a failure.
+fn publish_staged_world_save(
+    staging: &Path,
+    destination: &Path,
+    mut rename: impl FnMut(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    // Briefly retry transient sharing/interrupt races while retaining the
+    // session save mutex. Never delete the published destination or retry
+    // arbitrary invalid-path and I/O errors indefinitely.
+    let mut retries = 0usize;
+    loop {
+        match rename(staging, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let transient = error.kind() == io::ErrorKind::Interrupted
+                    || (cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied);
+                if transient && retries < 2 {
+                    retries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    continue;
+                }
+                let message = format!(
+                    "replace world save {} from {}: {error}",
+                    destination.display(),
+                    staging.display()
+                );
+                if let Err(cleanup_error) = fs::remove_file(staging) {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{message}; failed to remove own temporary file {}: {cleanup_error}",
+                            staging.display()
+                        ),
+                    ));
+                }
+                return Err(io::Error::new(error.kind(), message));
+            }
+        }
+    }
+}
 pub fn in_bounds(x: i32, y: i32, z: i32) -> bool {
     (-WORLD_LIMIT..WORLD_LIMIT).contains(&x)
         && (0..=255).contains(&y)
@@ -3156,17 +3199,10 @@ impl World {
             }
             return Err(error);
         }
-        // Keep the original on filesystems that disallow atomic replacement.
-        fs::rename(&temp, path).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "replace world save {} from {}: {error}",
-                    path.display(),
-                    temp.display()
-                ),
-            )
-        })
+        // A rename failure (including Windows sharing/access-denied errors)
+        // leaves the prior world intact. Clear only the staging file owned by
+        // this call so a later save can retry rather than hitting AlreadyExists.
+        publish_staged_world_save(&temp, path, |src, dst| fs::rename(src, dst))
     }
     /// Copy only the generation identity and edits capable of affecting a
     /// Protocol 5 chunk (including its 15-block light-source halo).
@@ -3312,6 +3348,82 @@ mod tests {
         assert!(!root.join("outside.tmp").exists());
         assert!(!root.join("outside.importing").exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn transient_world_rename_interruption_retries_without_losing_staging() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-rename-retry-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let staging = root.join("save.tmp");
+        let destination = root.join("save.irw");
+        fs::write(&staging, b"durable staged world bytes").unwrap();
+        let mut attempts = 0;
+        publish_staged_world_save(&staging, &destination, |src, dst| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "injected temporary rename interruption",
+                ))
+            } else {
+                fs::rename(src, dst)
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"durable staged world bytes"
+        );
+        assert!(!staging.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_world_rename_cleans_owned_temp_and_preserves_original_snapshot() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-world-rename-failed-{}-{stamp}",
+            std::process::id()
+        ));
+        // The original test world is fresh, never a pre-existing save.
+        fs::create_dir(&root).unwrap();
+        let save = root.join("flat.irw");
+        World::new().save(&save).unwrap();
+        let original = fs::read(&save).unwrap();
+        let temp = save.with_extension("tmp");
+        fs::write(&temp, b"complete staged new snapshot").unwrap();
+
+        // Model an OS rename denial without depending on antivirus timing or
+        // Windows sharing semantics. The production path passes fs::rename.
+        let error = publish_staged_world_save(&temp, &save, |_, _| {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected rename denied",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&save).unwrap(), original);
+        assert!(matches!(
+            fs::symlink_metadata(&temp),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        ));
+
+        // Subsequent saves must not fail due to the prior owned staging path.
+        World::new().save(&save).unwrap();
+        assert!(World::load(&save).is_ok());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
