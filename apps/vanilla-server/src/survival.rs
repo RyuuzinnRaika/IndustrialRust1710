@@ -339,7 +339,9 @@ pub fn helmet_has_aqua_affinity(helmet: Option<Stack>) -> bool {
     if !matches!(helmet.id, 298 | 302 | 306 | 310 | 314) {
         return false;
     }
-    let Some(handle) = helmet.nbt else { return false };
+    let Some(handle) = helmet.nbt else {
+        return false;
+    };
     let Ok(fastnbt::Value::Compound(root)) = crate::item_nbt::value(handle) else {
         return false;
     };
@@ -347,7 +349,9 @@ pub fn helmet_has_aqua_affinity(helmet: Option<Stack>) -> bool {
         return false;
     };
     enchantments.iter().any(|entry| {
-        let fastnbt::Value::Compound(tag) = entry else { return false };
+        let fastnbt::Value::Compound(tag) = entry else {
+            return false;
+        };
         let id = match tag.get("id") {
             Some(fastnbt::Value::Short(value)) => i32::from(*value),
             Some(fastnbt::Value::Int(value)) => *value,
@@ -502,7 +506,11 @@ fn environment_penalty_with_affinity(
 ) -> u32 {
     // Aqua Affinity removes only the underwater x5 speed penalty.
     // It never bypasses the x5 penalty for mining while airborne.
-    let water = if head_submerged && !aqua_affinity { 5 } else { 1 };
+    let water = if head_submerged && !aqua_affinity {
+        5
+    } else {
+        1
+    };
     let airborne = if on_ground { 1 } else { 5 };
     water * airborne
 }
@@ -1063,34 +1071,38 @@ mod tests {
         let enough = base.saturating_add(Duration::from_millis(10));
         let mut aqua = MiningProgress::start_with_environment_and_affinity(
             target, block, held, true, true, true,
-        ).unwrap();
+        )
+        .unwrap();
         aqua.started = Instant::now() - enough;
-        assert!(aqua.finish_with_environment_and_affinity(
-            target, block, held, true, true, true,
-        ).is_some());
+        assert!(aqua
+            .finish_with_environment_and_affinity(target, block, held, true, true, true,)
+            .is_some());
 
         let mut plain = MiningProgress::start_with_environment_and_affinity(
             target, block, held, true, true, false,
-        ).unwrap();
+        )
+        .unwrap();
         plain.started = Instant::now() - enough;
-        assert!(plain.finish_with_environment_and_affinity(
-            target, block, held, true, true, false,
-        ).is_none());
+        assert!(plain
+            .finish_with_environment_and_affinity(target, block, held, true, true, false,)
+            .is_none());
 
         let mut removed = MiningProgress::start_with_environment_and_affinity(
             target, block, held, true, true, true,
-        ).unwrap();
+        )
+        .unwrap();
         removed.started = Instant::now() - enough;
-        assert!(removed.finish_with_environment_and_affinity(
-            target, block, held, true, true, false,
-        ).is_none());
+        assert!(removed
+            .finish_with_environment_and_affinity(target, block, held, true, true, false,)
+            .is_none());
         let mut equipped_late = MiningProgress::start_with_environment_and_affinity(
             target, block, held, true, true, false,
-        ).unwrap();
+        )
+        .unwrap();
         equipped_late.started = Instant::now() - enough;
-        assert!(equipped_late.finish_with_environment_and_affinity(
-            target, block, held, true, true, true,
-        ).is_none());
+        assert!(equipped_late
+            .finish_with_environment_and_affinity(target, block, held, true, true, true,)
+            .is_none());
     }
 
     #[test]

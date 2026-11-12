@@ -4305,7 +4305,9 @@ fn play(
                                         inventory.held(),
                                         submerged,
                                         grounded,
-                                        survival::helmet_has_aqua_affinity(inventory.mining_helmet()),
+                                        survival::helmet_has_aqua_affinity(
+                                            inventory.mining_helmet(),
+                                        ),
                                     )
                                 } else {
                                     None
@@ -4336,7 +4338,9 @@ fn play(
                                         inventory.held(),
                                         submerged,
                                         grounded,
-                                        survival::helmet_has_aqua_affinity(inventory.mining_helmet()),
+                                        survival::helmet_has_aqua_affinity(
+                                            inventory.mining_helmet(),
+                                        ),
                                     )
                                 });
                                 if trace_mining && result.is_none() {
