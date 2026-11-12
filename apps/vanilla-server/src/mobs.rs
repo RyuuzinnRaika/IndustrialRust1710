@@ -1902,26 +1902,50 @@ impl Mobs {
         body.extend_from_slice(&(amount as i16).to_be_bytes());
         Some(Event { id: 0x11, body })
     }
-    pub fn collect_xp(
+    /// Grant XP durably before consuming its world orb. The caller holds the
+    /// shared Mob mutex during the commit closure; another player's session
+    /// cannot claim this same entity while its owner is being persisted.
+    /// On save failure there is no destroy packet or orb removal to replay.
+    pub fn collect_xp_committed(
         &mut self,
         player: PlayerPosition,
         collector: i32,
-    ) -> Option<(u32, Vec<Event>)> {
-        let (&id, &(_, amount, _)) = self.orbs.iter().find(|(_, (at, _, _))| {
+        commit: impl FnOnce(u32) -> io::Result<()>,
+    ) -> io::Result<Option<(u32, Vec<Event>)>> {
+        let Some((&id, &(_, amount, _))) = self.orbs.iter().find(|(_, (at, _, _))| {
             let d =
                 (at.x - player.x).powi(2) + (at.y - player.y).powi(2) + (at.z - player.z).powi(2);
             d <= 2.25
-        })?;
+        }) else {
+            return Ok(None);
+        };
+        let credited = u32::from(amount);
+        // No in-memory mutation or Protocol 5 events can precede the durable
+        // XP write. The only fallible step runs before the removal below.
+        commit(credited)?;
         self.orbs.remove(&id);
         // Protocol 5 S0D Collect Item reads two big-endian i32 entity IDs.
         // VarInts make this packet too short, disconnecting vanilla 1.7.10.
         let mut body = Vec::with_capacity(8);
         body.extend_from_slice(&id.to_be_bytes());
         body.extend_from_slice(&collector.to_be_bytes());
-        Some((
-            u32::from(amount),
+        Ok(Some((
+            credited,
             vec![Event { id: 0x0d, body }, multiplayer::destroy(id)],
-        ))
+        )))
+    }
+
+    /// Compatibility helper for in-process Mob tests only. Runtime pickups
+    /// must use collect_xp_committed with a durable player-XP write.
+    #[cfg(test)]
+    pub fn collect_xp(
+        &mut self,
+        player: PlayerPosition,
+        collector: i32,
+    ) -> Option<(u32, Vec<Event>)> {
+        self.collect_xp_committed(player, collector, |_| Ok(()))
+            .ok()
+            .flatten()
     }
     pub fn take_drops(&mut self) -> Vec<(Stack, (i32, i32, i32))> {
         std::mem::take(&mut self.pending_drops)
@@ -4349,6 +4373,103 @@ fn natural_spawn_location_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #665 / #230: failed XP persistence must not eat the world orb.
+    /// A subsequent attempt can still collect it exactly once.
+    #[test]
+    fn xp_pickup_save_failure_preserves_orb_and_retry_awards_once() {
+        use crate::experience::Experience;
+        let at = PlayerPosition {
+            x: 1.5,
+            y: 64.0,
+            z: -3.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.spawn_xp(at, 17).unwrap();
+        assert_eq!(mobs.orbs.len(), 1);
+        let root = std::env::temp_dir().join(format!(
+            "industrialrust-xp-claim-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let blocker = root.join("not-a-directory");
+        std::fs::write(&blocker, b"blocked").unwrap();
+        let invalid_path = blocker.join("xp.json");
+        let valid_path = root.join("xp.json");
+        let mut experience = Experience::default();
+
+        let failed = mobs.collect_xp_committed(at, 21, |amount| {
+            let mut next = experience;
+            assert!(next.grant(amount));
+            next.save(&invalid_path)?;
+            experience = next;
+            Ok(())
+        });
+        assert!(failed.is_err());
+        assert_eq!(experience.total, 0);
+        assert_eq!(mobs.orbs.len(), 1, "orb must remain after write failure");
+
+        let committed = mobs
+            .collect_xp_committed(at, 21, |amount| {
+                let mut next = experience;
+                assert!(next.grant(amount));
+                next.save(&valid_path)?;
+                experience = next;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.0, 17);
+        assert_eq!(committed.1.len(), 2);
+        assert!(mobs.orbs.is_empty());
+        assert_eq!(experience.total, 17);
+        assert_eq!(Experience::load(&valid_path).unwrap().total, 17);
+        assert!(mobs
+            .collect_xp_committed(at, 22, |_| panic!("duplicate award"))
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// #442: two independent sessions share a single Mob mutex. Even when
+    /// both are in pickup range, the same world XP entity is credited once.
+    #[test]
+    fn concurrent_xp_pickup_credits_one_player_only() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut state = Mobs::default();
+        state.spawn_xp(at, 13).unwrap();
+        let shared = Mutex::new(state);
+        let writes = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for collector in [101, 102] {
+                let shared = &shared;
+                let writes = &writes;
+                scope.spawn(move || {
+                    let mut mobs = shared.lock().unwrap();
+                    let _ = mobs
+                        .collect_xp_committed(at, collector, |amount| {
+                            assert_eq!(amount, 13);
+                            writes.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+            }
+        });
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert!(shared.lock().unwrap().orbs.is_empty());
+    }
 
     /// REG-194 / #830: exercise entity creation, ordinary far-player
     /// despawn, ID allocation and pool reclamation repeatedly without any
