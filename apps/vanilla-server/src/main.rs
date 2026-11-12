@@ -11316,7 +11316,12 @@ mod reg150_void_death_tests {
         for y in [-0.01, -40.0, -65.0, -127.5] {
             assert!(PlayerPosition { x: 0.5, y, z: 0.5 }.is_valid());
         }
-        assert!(!PlayerPosition { x: 0.5, y: -512.0, z: 0.5 }.is_valid());
+        assert!(!PlayerPosition {
+            x: 0.5,
+            y: -512.0,
+            z: 0.5
+        }
+        .is_valid());
         let mut vitals = Vitals::default();
         let mut last = 0;
         assert!(!void_damage_tick(&mut vitals, -64.0, 100, &mut last));
@@ -11328,7 +11333,9 @@ mod reg150_void_death_tests {
         assert_eq!(vitals.health, 0.0);
         assert!(!void_damage_tick(&mut vitals, -65.0, 60, &mut last));
         assert_eq!(DeathCause::Void.code(), "void");
-        assert!(DeathCause::Void.message("TestPlayer").contains("fell out of the world"));
+        assert!(DeathCause::Void
+            .message("TestPlayer")
+            .contains("fell out of the world"));
     }
 }
 
