@@ -425,6 +425,54 @@ impl Inventory {
         }
     }
 
+    /// Protocol 5 Click Window mode 4: button 0 (Q) drops exactly one,
+    /// button 1 (Ctrl+Q) drops the whole authoritative slot stack.
+    /// Callers must journal this debit together with the spawned item.
+    fn debit_gui_slot(slot: &mut Option<Stack>, button: i8) -> Option<Stack> {
+        let mut stack = (*slot)?;
+        let removed = match button {
+            0 => 1,
+            1 => stack.count,
+            _ => return None,
+        };
+        stack.count -= removed;
+        *slot = (stack.count > 0).then_some(stack);
+        Some(Stack {
+            count: removed,
+            ..stack
+        })
+    }
+
+    /// Window zero supports backpack, hotbar, equipment and crafting inputs,
+    /// but never the derived crafting output at slot zero.
+    pub fn drop_gui_inventory_slot(&mut self, slot: i16, button: i8) -> Option<Stack> {
+        if !(1..45).contains(&slot) {
+            return None;
+        }
+        self.drag = Drag::default();
+        Self::debit_gui_slot(&mut self.slots[slot as usize], button)
+    }
+
+    /// Chest window indexes both the external container and the player's
+    /// 36 inventory slots; the caller journals all changed storage together.
+    pub fn drop_gui_chest_slot(
+        &mut self,
+        chest: &mut [Option<Stack>],
+        slot: i16,
+        button: i8,
+    ) -> Option<Stack> {
+        let size = chest.len() as i16;
+        if !matches!(size, 27 | 54) || !(0..size + 36).contains(&slot) {
+            return None;
+        }
+        self.drag = Drag::default();
+        if slot < size {
+            Self::debit_gui_slot(&mut chest[slot as usize], button)
+        } else {
+            Self::debit_gui_slot(&mut self.slots[(slot - size + 9) as usize], button)
+        }
+    }
+
     pub fn drop_held(&mut self, whole_stack: bool) -> Option<Stack> {
         let slot = &mut self.slots[36 + self.selected as usize];
         let held = slot.take()?;
@@ -2341,6 +2389,63 @@ mod tests {
         assert!(inventory.cursor.is_none());
         assert_eq!(inventory.slots[37].unwrap().count, 7);
         assert_eq!(inventory.ender_chest[0], Some(stack));
+    }
+
+    #[test]
+    fn reg136_gui_q_ctrlq_debit_exactly_one_or_all_without_cursor_loss() {
+        let stone = Stack {
+            id: 1,
+            count: 5,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inventory = Inventory::default();
+        let mut chest = [None; 27];
+        chest[0] = Some(stone);
+        inventory.slots[9] = Some(Stack { count: 3, ..stone });
+        inventory.cursor = Some(Stack { count: 2, ..stone });
+        let mut dropped = Vec::new();
+
+        let removed = inventory.drop_gui_chest_slot(&mut chest, 0, 0).unwrap();
+        assert_eq!(removed.count, 1);
+        dropped.push(removed);
+        assert_eq!(chest[0], Some(Stack { count: 4, ..stone }));
+
+        let removed = inventory.drop_gui_chest_slot(&mut chest, 0, 1).unwrap();
+        assert_eq!(removed.count, 4);
+        dropped.push(removed);
+        assert_eq!(chest[0], None);
+        assert_eq!(inventory.drop_gui_chest_slot(&mut chest, 0, 1), None);
+
+        // In a 27-slot chest GUI the first player slot 27 maps to
+        // authoritative window-zero inventory slot 9.
+        let removed = inventory.drop_gui_chest_slot(&mut chest, 27, 0).unwrap();
+        assert_eq!(removed.count, 1);
+        dropped.push(removed);
+        assert_eq!(inventory.slots[9], Some(Stack { count: 2, ..stone }));
+        let removed = inventory.drop_gui_chest_slot(&mut chest, 27, 1).unwrap();
+        assert_eq!(removed.count, 2);
+        dropped.push(removed);
+        assert_eq!(inventory.slots[9], None);
+
+        // Inventory GUI Q and Ctrl+Q also use the mode-4 button semantics.
+        inventory.slots[36] = Some(Stack { count: 3, ..stone });
+        dropped.push(inventory.drop_gui_inventory_slot(36, 0).unwrap());
+        assert_eq!(inventory.slots[36], Some(Stack { count: 2, ..stone }));
+        dropped.push(inventory.drop_gui_inventory_slot(36, 1).unwrap());
+        assert_eq!(inventory.slots[36], None);
+        assert!(inventory.drop_gui_inventory_slot(0, 0).is_none());
+        assert!(inventory.drop_gui_inventory_slot(36, 2).is_none());
+
+        assert_eq!(inventory.cursor, Some(Stack { count: 2, ..stone }));
+        assert_eq!(
+            dropped.iter().map(|item| u32::from(item.count)).sum::<u32>()
+                + u32::from(inventory.cursor.unwrap().count),
+            13
+        );
+        let encoded = inventory.encoded().unwrap();
+        let reloaded: Inventory = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(reloaded, inventory);
     }
 
     #[test]
