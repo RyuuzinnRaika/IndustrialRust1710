@@ -21,3 +21,7 @@ rand = "0.8"
 aes = "0.8"
 sha1 = "0.10"
 ureq = "2.12"
+
+# Safe POSIX shutdown flag; Windows Ctrl+C requires separate acceptance testing.
+[target.'cfg(unix)'.dependencies]
+signal-hook = { version = "=0.3.18", default-features = false }
