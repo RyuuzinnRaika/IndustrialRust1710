@@ -331,6 +331,37 @@ pub fn mine_rule(block: u16, held: Option<Stack>) -> Option<(Duration, MineResul
         },
     ))
 }
+/// Aqua Affinity (enchantment ID 6) is read only from an equipped helmet.
+/// 1.7.10 stores equipment enchantments under the NBT "ench" list.
+/// Malformed, absent or unrelated tags never grant a mining-speed bonus.
+pub fn helmet_has_aqua_affinity(helmet: Option<Stack>) -> bool {
+    let Some(helmet) = helmet else { return false };
+    if !matches!(helmet.id, 298 | 302 | 306 | 310 | 314) {
+        return false;
+    }
+    let Some(handle) = helmet.nbt else { return false };
+    let Ok(fastnbt::Value::Compound(root)) = crate::item_nbt::value(handle) else {
+        return false;
+    };
+    let Some(fastnbt::Value::List(enchantments)) = root.get("ench") else {
+        return false;
+    };
+    enchantments.iter().any(|entry| {
+        let fastnbt::Value::Compound(tag) = entry else { return false };
+        let id = match tag.get("id") {
+            Some(fastnbt::Value::Short(value)) => i32::from(*value),
+            Some(fastnbt::Value::Int(value)) => *value,
+            _ => return false,
+        };
+        let level = match tag.get("lvl") {
+            Some(fastnbt::Value::Short(value)) => i32::from(*value),
+            Some(fastnbt::Value::Int(value)) => *value,
+            _ => return false,
+        };
+        id == 6 && level > 0
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct MiningProgress {
     target: (i32, i32, i32),
@@ -347,6 +378,7 @@ impl MiningProgress {
         Self::start_with_environment(target, block, held, false, true)
     }
 
+    #[cfg(test)]
     pub fn start_with_environment(
         target: (i32, i32, i32),
         block: u16,
@@ -354,13 +386,31 @@ impl MiningProgress {
         head_submerged: bool,
         on_ground: bool,
     ) -> Option<Self> {
+        Self::start_with_environment_and_affinity(
+            target,
+            block,
+            held,
+            head_submerged,
+            on_ground,
+            false,
+        )
+    }
+
+    pub fn start_with_environment_and_affinity(
+        target: (i32, i32, i32),
+        block: u16,
+        held: Option<Stack>,
+        head_submerged: bool,
+        on_ground: bool,
+        aqua_affinity: bool,
+    ) -> Option<Self> {
         mine_rule(block, held)?;
         Some(Self {
             target,
             started: Instant::now(),
             block,
             tool: held,
-            penalty: environment_penalty(head_submerged, on_ground),
+            penalty: environment_penalty_with_affinity(head_submerged, on_ground, aqua_affinity),
         })
     }
     /// A Protocol 5 client sends only Start for blocks destroyed in its
@@ -388,6 +438,7 @@ impl MiningProgress {
 
     /// Apply the worse of the start/finish penalties, so entering water or
     /// jumping immediately before finishing never bypasses the server timer.
+    #[cfg(test)]
     pub fn finish_with_environment(
         self,
         target: (i32, i32, i32),
@@ -396,13 +447,34 @@ impl MiningProgress {
         head_submerged: bool,
         on_ground: bool,
     ) -> Option<MineResult> {
+        self.finish_with_environment_and_affinity(
+            target,
+            current,
+            held,
+            head_submerged,
+            on_ground,
+            false,
+        )
+    }
+
+    pub fn finish_with_environment_and_affinity(
+        self,
+        target: (i32, i32, i32),
+        current: u16,
+        held: Option<Stack>,
+        head_submerged: bool,
+        on_ground: bool,
+        aqua_affinity: bool,
+    ) -> Option<MineResult> {
         if self.target != target || self.block != current || self.tool != held {
             return None;
         }
         let (minimum, result) = mine_rule(current, held)?;
-        let penalty = self
-            .penalty
-            .max(environment_penalty(head_submerged, on_ground));
+        let penalty = self.penalty.max(environment_penalty_with_affinity(
+            head_submerged,
+            on_ground,
+            aqua_affinity,
+        ));
         // Vanilla reports completion in 20TPS client ticks, while start and
         // finish are timestamped by independently scheduled server socket polls.
         // Up to two ticks of phase/poll skew must not reject a legitimate finish.
@@ -418,8 +490,19 @@ fn mining_elapsed_is_legal(elapsed: Duration, required: Duration) -> bool {
     elapsed.saturating_add(slack) >= required
 }
 
+#[cfg(test)]
 fn environment_penalty(head_submerged: bool, on_ground: bool) -> u32 {
-    let water = if head_submerged { 5 } else { 1 };
+    environment_penalty_with_affinity(head_submerged, on_ground, false)
+}
+
+fn environment_penalty_with_affinity(
+    head_submerged: bool,
+    on_ground: bool,
+    aqua_affinity: bool,
+) -> u32 {
+    // Aqua Affinity removes only the underwater x5 speed penalty.
+    // It never bypasses the x5 penalty for mining while airborne.
+    let water = if head_submerged && !aqua_affinity { 5 } else { 1 };
     let airborne = if on_ground { 1 } else { 5 };
     water * airborne
 }
@@ -939,6 +1022,77 @@ mod tests {
         assert_eq!(tool_max_uses(stack(285, 0).unwrap()), Some(32));
         assert_eq!(tool_max_uses(stack(274, 131).unwrap()), None);
     }
+    /// REG-142 / #778: only Aqua Affinity on a real helmet removes the
+    /// underwater penalty, never the airborne multiplier or the saved
+    /// start-of-dig penalty when equipment changes mid-attempt.
+    #[test]
+    fn reg142_aqua_affinity_helmet_speed_and_mid_dig_swap() {
+        use fastnbt::Value;
+        use std::collections::HashMap;
+
+        let enchanted = Value::Compound(HashMap::from([(
+            "ench".to_string(),
+            Value::List(vec![Value::Compound(HashMap::from([
+                ("id".to_string(), Value::Short(6)),
+                ("lvl".to_string(), Value::Short(1)),
+            ]))]),
+        )]));
+        let nbt = crate::item_nbt::from_value(&enchanted).unwrap();
+        let helmet = Stack {
+            id: 310,
+            count: 1,
+            damage: 0,
+            nbt: Some(nbt),
+        };
+        assert!(helmet_has_aqua_affinity(Some(helmet)));
+        assert!(!helmet_has_aqua_affinity(Some(Stack { id: 257, ..helmet })));
+        assert!(!helmet_has_aqua_affinity(None));
+        assert!(!helmet_has_aqua_affinity(Some(Stack {
+            nbt: None,
+            ..helmet
+        })));
+        assert_eq!(environment_penalty_with_affinity(true, true, true), 1);
+        assert_eq!(environment_penalty_with_affinity(true, false, true), 5);
+        assert_eq!(environment_penalty_with_affinity(true, true, false), 5);
+        assert_eq!(environment_penalty_with_affinity(true, false, false), 25);
+
+        let target = (0, 64, 0);
+        let block = 1 << 4;
+        let held = stack(257, 0);
+        let base = mine_rule(block, held).unwrap().0;
+        let enough = base.saturating_add(Duration::from_millis(10));
+        let mut aqua = MiningProgress::start_with_environment_and_affinity(
+            target, block, held, true, true, true,
+        ).unwrap();
+        aqua.started = Instant::now() - enough;
+        assert!(aqua.finish_with_environment_and_affinity(
+            target, block, held, true, true, true,
+        ).is_some());
+
+        let mut plain = MiningProgress::start_with_environment_and_affinity(
+            target, block, held, true, true, false,
+        ).unwrap();
+        plain.started = Instant::now() - enough;
+        assert!(plain.finish_with_environment_and_affinity(
+            target, block, held, true, true, false,
+        ).is_none());
+
+        let mut removed = MiningProgress::start_with_environment_and_affinity(
+            target, block, held, true, true, true,
+        ).unwrap();
+        removed.started = Instant::now() - enough;
+        assert!(removed.finish_with_environment_and_affinity(
+            target, block, held, true, true, false,
+        ).is_none());
+        let mut equipped_late = MiningProgress::start_with_environment_and_affinity(
+            target, block, held, true, true, false,
+        ).unwrap();
+        equipped_late.started = Instant::now() - enough;
+        assert!(equipped_late.finish_with_environment_and_affinity(
+            target, block, held, true, true, true,
+        ).is_none());
+    }
+
     #[test]
     fn submerged_and_airborne_mining_penalties_stack_and_cannot_be_skipped() {
         let target = (0, 64, 0);
