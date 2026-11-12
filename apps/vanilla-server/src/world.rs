@@ -3131,11 +3131,30 @@ impl World {
                     format!("create temporary world save {}: {error}", temp.display()),
                 )
             })?;
-        self.write_to(&mut f)?;
-        f.sync_all()?;
+        // A serialization/write/sync failure must not strand a half-written
+        // flat.tmp. Close the handle before cleanup: Windows otherwise refuses
+        // removal of a file that this process still has open.
+        let written = self.write_to(&mut f).and_then(|_| f.sync_all());
         drop(f);
-        if let Some(guard) = session_guard.as_mut() {
-            guard.verify()?;
+        let staged = written.and_then(|_| {
+            if let Some(guard) = session_guard.as_mut() {
+                guard.verify()?;
+            }
+            Ok(())
+        });
+        if let Err(error) = staged {
+            // create_new above means this invocation owns this staging file.
+            // Never remove a pre-existing path after an AlreadyExists error.
+            if let Err(cleanup_error) = fs::remove_file(&temp) {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "world save staging failed: {error}; failed to remove own temporary file {}: {cleanup_error}",
+                        temp.display()
+                    ),
+                ));
+            }
+            return Err(error);
         }
         // Keep the original on filesystems that disallow atomic replacement.
         fs::rename(&temp, path).map_err(|error| {
@@ -3293,6 +3312,44 @@ mod tests {
         assert!(!root.join("outside.tmp").exists());
         assert!(!root.join("outside.importing").exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn world_save_serialization_failure_cleans_owned_staging_and_preserves_world() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-world-save-failed-{}-{stamp}",
+            std::process::id()
+        ));
+        // Create-only directory: never reuse or remove an existing test world.
+        fs::create_dir(&root).unwrap();
+        let save = root.join("flat.irw");
+        let staging = save.with_extension("tmp");
+        World::new().save(&save).unwrap();
+        let original = fs::read(&save).unwrap();
+
+        let mut bad = World::new();
+        bad.primed_tnt.insert(
+            10_000_001,
+            special::PrimedTnt::legacy(10_000_001, (0, 64, 0), u64::from(u32::MAX) + 1),
+        );
+        // write_to writes the IRW header before discovering invalid TNT fuse.
+        let error = bad.save(&save).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&save).unwrap(), original);
+        assert!(matches!(
+            fs::symlink_metadata(&staging),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        ));
+
+        // A corrected world may retry without hitting AlreadyExists.
+        bad.primed_tnt.clear();
+        bad.save(&save).unwrap();
+        assert!(World::load(&save).is_ok());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
