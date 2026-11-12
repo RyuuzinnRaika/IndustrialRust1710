@@ -4299,12 +4299,15 @@ fn play(
                                 let in_reach = world::in_bounds(x, y, z) && near(location, x, y, z);
                                 mining = if in_reach {
                                     let (submerged, grounded) = mining_environment(&w, player);
-                                    MiningProgress::start_with_environment(
+                                    MiningProgress::start_with_environment_and_affinity(
                                         target,
                                         w.get(x, y, z),
                                         inventory.held(),
                                         submerged,
                                         grounded,
+                                        survival::helmet_has_aqua_affinity(
+                                            inventory.mining_helmet(),
+                                        ),
                                     )
                                 } else {
                                     None
@@ -4329,12 +4332,15 @@ fn play(
                                     world.lock().map_err(|_| bad("world mutex poisoned"))?;
                                 let (submerged, grounded) = mining_environment(&w, player);
                                 let result = attempt.and_then(|m| {
-                                    m.finish_with_environment(
+                                    m.finish_with_environment_and_affinity(
                                         target,
                                         w.get(x, y, z),
                                         inventory.held(),
                                         submerged,
                                         grounded,
+                                        survival::helmet_has_aqua_affinity(
+                                            inventory.mining_helmet(),
+                                        ),
                                     )
                                 });
                                 if trace_mining && result.is_none() {
