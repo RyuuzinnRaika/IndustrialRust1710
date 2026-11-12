@@ -2439,7 +2439,10 @@ mod tests {
 
         assert_eq!(inventory.cursor, Some(Stack { count: 2, ..stone }));
         assert_eq!(
-            dropped.iter().map(|item| u32::from(item.count)).sum::<u32>()
+            dropped
+                .iter()
+                .map(|item| u32::from(item.count))
+                .sum::<u32>()
                 + u32::from(inventory.cursor.unwrap().count),
             13
         );

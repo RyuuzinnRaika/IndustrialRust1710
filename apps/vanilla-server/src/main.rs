@@ -6410,9 +6410,8 @@ fn play(
                             let w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
                             w.get(pos.0, pos.1, pos.2) >> 4 == 54
                                 && near(location, pos.0, pos.1, pos.2)
-                                && active_chest_partner.is_none_or(|other| {
-                                    w.get(other.0, other.1, other.2) >> 4 == 54
-                                })
+                                && active_chest_partner
+                                    .is_none_or(|other| w.get(other.0, other.1, other.2) >> 4 == 54)
                         };
                         if still_open {
                             let guard = chests.lock().map_err(|_| bad("chest lock poisoned"))?;
@@ -6449,7 +6448,7 @@ fn play(
                             );
                             let (next_ground, spawned) = ground.stage_put_many(&[stack], at)?;
                             let mut writes = vec![
-                                (inventory_path, candidate.encoded()?),
+                                (inventory_path.as_path(), candidate.encoded()?),
                                 (ground_path, next_ground.encoded()?),
                             ];
                             if let Some(staged) = staged_chests.as_ref() {
