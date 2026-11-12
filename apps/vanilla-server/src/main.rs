@@ -2417,17 +2417,24 @@ fn play(
                 }
             }
         }
-        // XP orbs belong to the world and are collected by proximity, not by client inventory claims.
+        // XP orbs belong to the world and are collected by proximity, not
+        // client claims. Hold the shared Mob lock until the receiver's XP save
+        // succeeds; a failed disk write must leave the orb available for retry.
         if survival && vitals.health > 0.0 {
             let collected = mobs
                 .lock()
                 .map_err(|_| bad("mob mutex poisoned"))?
-                .collect_xp(*player, entity_id);
-            if let Some((amount, packets)) = collected {
-                if experience.grant(amount) {
-                    experience.save(experience_path)?;
-                    send(s, 0x1f, &experience.packet())?;
-                }
+                .collect_xp_committed(*player, entity_id, |amount| {
+                    let mut next = *experience;
+                    if !next.grant(amount) {
+                        return Err(bad("invalid XP orb grant"));
+                    }
+                    next.save(experience_path)?;
+                    *experience = next;
+                    Ok(())
+                })?;
+            if let Some((_, packets)) = collected {
+                send(s, 0x1f, &experience.packet())?;
                 for packet in packets {
                     hub.broadcast(packet);
                 }
