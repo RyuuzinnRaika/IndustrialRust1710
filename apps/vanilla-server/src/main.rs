@@ -114,7 +114,7 @@ use scoreboard::Scoreboard;
 use security_limits::{ChatLimiter, ConnectionLimiter};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, BufRead, ErrorKind};
+use std::io::{self, BufRead, ErrorKind, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -9607,6 +9607,13 @@ fn main() -> io::Result<()> {
         "IndustrialRust1710: listening on {} (1.7.10 vanilla, up to 8 players)",
         actual_bind
     );
+    // When stdout is redirected to a file by the TCP acceptance harness,
+    // output may be block-buffered. Publish the bound port before clients
+    // probe readiness. A closed stdout must not prevent the game server from
+    // starting; diagnostics are best effort, not part of world state.
+    if let Err(error) = io::stdout().flush() {
+        eprintln!("warning: could not flush listener startup message: {error}");
+    }
     if let Some(message) = server_config::offline_exposure_warning(actual_bind, online_mode) {
         eprintln!("{message}");
     }
