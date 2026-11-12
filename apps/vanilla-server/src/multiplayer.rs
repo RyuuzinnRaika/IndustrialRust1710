@@ -1480,6 +1480,81 @@ mod tests {
         assert!(hub.is_healthy(current_id));
     }
     #[test]
+    fn reg128_five_rapid_rejoins_emit_exactly_one_spawn_and_destroy_each() {
+        let hub = Hub::default();
+        let (observer_id, observer_rx, _) = hub
+            .add(
+                "Observer".into(),
+                "uuid-observer".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        let mut stale_id = None;
+
+        for attempt in 0..5 {
+            let name = if attempt % 2 == 0 {
+                "RustTester"
+            } else {
+                "rusttester"
+            };
+            let uuid = format!("session-{attempt}");
+            let (id, _session_rx, previous) = hub
+                .add(name.into(), uuid.clone(), PlayerPosition::default())
+                .unwrap();
+            assert_eq!(previous.len(), 1, "only the observer may remain");
+            assert_eq!(previous[0].id, observer_id);
+            if let Some(stale) = stale_id {
+                assert!(
+                    id > stale,
+                    "a rejoined player must receive a fresh entity ID"
+                );
+                hub.remove(stale); // A delayed old-session teardown is a no-op.
+            }
+            assert_eq!(hub.uuid_for_online_name("RUSTTESTER").unwrap(), Some(uuid));
+            assert!(matches!(
+                hub.add(
+                    "RUSTTESTER".into(),
+                    "duplicate".into(),
+                    PlayerPosition::default()
+                ),
+                Err(JoinError::Duplicate)
+            ));
+
+            let online = observer_rx.try_recv().unwrap();
+            let spawned = observer_rx.try_recv().unwrap();
+            assert_eq!(online.id, 0x38, "exactly one tab-list admission");
+            assert_eq!(online.body, list_entry(name, true).unwrap().body);
+            assert_eq!(spawned.id, 0x0c, "exactly one player entity spawn");
+            let mut encoded = spawned.body.as_slice();
+            assert_eq!(
+                legacy_protocol::read_varint(&mut encoded).unwrap(),
+                id as u32
+            );
+            assert!(
+                observer_rx.try_recv().is_err(),
+                "no phantom duplicate spawn"
+            );
+            assert_eq!(hub.count().unwrap(), 2);
+
+            hub.remove(id);
+            let destroyed = observer_rx.try_recv().unwrap();
+            let offline = observer_rx.try_recv().unwrap();
+            assert_eq!(destroyed.id, 0x13);
+            assert_eq!(destroyed.body, destroy(id).body);
+            assert_eq!(offline.id, 0x38);
+            assert_eq!(offline.body, list_entry(name, false).unwrap().body);
+            assert!(
+                observer_rx.try_recv().is_err(),
+                "no surviving ghost packets"
+            );
+            assert_eq!(hub.count().unwrap(), 1);
+            assert_eq!(hub.player_position("RustTester").unwrap(), None);
+            stale_id = Some(id);
+        }
+        assert_eq!(hub.names().unwrap(), vec!["Observer".to_owned()]);
+    }
+
+    #[test]
     fn movement_events_and_departure() {
         let hub = Hub::default();
         let (a, _a_rx, _) = hub

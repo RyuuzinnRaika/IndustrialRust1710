@@ -153,6 +153,15 @@ pub fn create(
         return Err(invalid("source must be a real world directory"));
     }
     let canonical_source = fs::canonicalize(source)?;
+    // A lock from another directory does not protect this source. In
+    // particular, never copy a live world B using the valid lock for A.
+    // Compare canonical directories before creating any backup staging.
+    if fs::canonicalize(session.world_dir())? != canonical_source {
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            "backup source is not the locked world directory",
+        ));
+    }
     let dest_name = destination
         .file_name()
         .ok_or_else(|| invalid("destination must be a directory name"))?;
@@ -242,6 +251,48 @@ mod tests {
         assert!(create(&world, &world.join("nested"), &mut session).is_err());
         assert_eq!(fs::read(world.join("flat.irw")).unwrap(), b"IRW1");
         drop(session);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_refuses_a_different_world_even_with_a_valid_session_lock() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        // Never reuse or remove a user world.
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-backup-lock-identity-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let world_a = root.join("world-a");
+        let world_b = root.join("world-b");
+        fs::create_dir(&world_a).unwrap();
+        fs::create_dir(&world_b).unwrap();
+        let mut lock_a = WorldSessionLock::acquire(&world_a).unwrap();
+        let mut lock_b = WorldSessionLock::acquire(&world_b).unwrap();
+        fs::write(world_b.join("flat.irw"), b"live-b-world").unwrap();
+
+        let destination = root.join("incorrect-backup");
+        let error = create(&world_b, &destination, &mut lock_a).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert!(
+            !destination.exists() && !root.join("incorrect-backup.incomplete").exists(),
+            "an unrelated lock must not publish or stage a snapshot"
+        );
+        assert_eq!(fs::read(world_b.join("flat.irw")).unwrap(), b"live-b-world");
+
+        // The proper lock for B still permits an offline copy. This proves
+        // that validation is tied to the source identity, not a blanket ban.
+        create(&world_b, &destination, &mut lock_b).unwrap();
+        assert_eq!(
+            fs::read(destination.join("flat.irw")).unwrap(),
+            b"live-b-world"
+        );
+
+        drop(lock_a);
+        drop(lock_b);
         fs::remove_dir_all(root).unwrap();
     }
 

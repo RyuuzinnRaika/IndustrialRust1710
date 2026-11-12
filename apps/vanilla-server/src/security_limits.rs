@@ -37,18 +37,26 @@ impl ConnectionLimiter {
         let ip = canonical(ip);
         let now = Instant::now();
         let mut buckets = self.buckets.lock().ok()?;
-        buckets.retain(|_, bucket| {
-            while bucket
-                .login_attempts
-                .front()
-                .is_some_and(|stamp| now.duration_since(*stamp) >= WINDOW)
-            {
-                bucket.login_attempts.pop_front();
-            }
-            bucket.active > 0 || !bucket.login_attempts.is_empty()
-        });
+        // Admission from an existing IP and admission below the global cap
+        // must not sweep every tracked address. A remote peer could otherwise
+        // force O(MAX_TRACKED_IPS) work for each short-lived TCP handshake.
+        // Its own expired login history is pruned by Permit::login_attempt().
         if !buckets.contains_key(&ip) && buckets.len() >= MAX_TRACKED_IPS {
-            return None;
+            // Reclaim inactive/expired entries only when a new address needs
+            // capacity. Active sockets are never evicted or over-admitted.
+            buckets.retain(|_, bucket| {
+                while bucket
+                    .login_attempts
+                    .front()
+                    .is_some_and(|stamp| now.saturating_duration_since(*stamp) >= WINDOW)
+                {
+                    bucket.login_attempts.pop_front();
+                }
+                bucket.active > 0 || !bucket.login_attempts.is_empty()
+            });
+            if buckets.len() >= MAX_TRACKED_IPS {
+                return None;
+            }
         }
         let bucket = buckets.entry(ip).or_default();
         if bucket.active >= MAX_ACTIVE_PER_IP {
@@ -169,6 +177,63 @@ mod tests {
             .acquire("192.0.2.43".parse().unwrap())
             .unwrap()
             .login_attempt());
+    }
+
+    #[test]
+    fn inactive_ip_cleanup_is_deferred_until_admission_capacity() {
+        use std::net::Ipv4Addr;
+
+        let limiter = Arc::new(ConnectionLimiter::default());
+        // A handshake that never enters Login does not spend a login token.
+        // Keeping these inactive entries until pressure is intentional: a
+        // status flood should not scan the entire IP map on each packet.
+        for i in 0..128u8 {
+            let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, i));
+            drop(limiter.acquire(ip).unwrap());
+        }
+        assert_eq!(limiter.buckets.lock().unwrap().len(), 128);
+        drop(limiter.acquire("192.0.2.0".parse().unwrap()).unwrap());
+        assert_eq!(limiter.buckets.lock().unwrap().len(), 128);
+    }
+
+    #[test]
+    fn capacity_cleanup_never_evicts_active_or_recent_login_slots() {
+        use std::net::Ipv4Addr;
+
+        let limiter = Arc::new(ConnectionLimiter::default());
+        let pinned: IpAddr = "198.18.0.0".parse().unwrap();
+        let active = limiter.acquire(pinned).unwrap();
+        assert!(active.login_attempt());
+        for i in 1..MAX_TRACKED_IPS {
+            let ip = IpAddr::V4(Ipv4Addr::new(198, 18, (i >> 8) as u8, i as u8));
+            let permit = limiter.acquire(ip).unwrap();
+            assert!(permit.login_attempt());
+            drop(permit);
+        }
+        assert_eq!(limiter.buckets.lock().unwrap().len(), MAX_TRACKED_IPS);
+        let newcomer: IpAddr = "203.0.113.7".parse().unwrap();
+        assert!(
+            limiter.acquire(newcomer).is_none(),
+            "all 4096 entries have valid live or rate-limit state"
+        );
+        // Expire only an inactive bucket without waiting one minute.
+        let stale: IpAddr = "198.18.0.1".parse().unwrap();
+        limiter
+            .buckets
+            .lock()
+            .unwrap()
+            .get_mut(&stale)
+            .unwrap()
+            .login_attempts
+            .clear();
+        let accepted = limiter.acquire(newcomer).unwrap();
+        assert!(accepted.login_attempt());
+        assert_eq!(limiter.buckets.lock().unwrap().len(), MAX_TRACKED_IPS);
+        assert!(
+            limiter.acquire(pinned).is_some(),
+            "the original active owner's slot must survive cleanup"
+        );
+        drop(active);
     }
 
     #[test]

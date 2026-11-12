@@ -952,7 +952,13 @@ impl Inventory {
             return self.drag_click(window, slot, button);
         }
         self.drag = Drag::default();
-        if mode == 6 && button == 0 && slot >= 0 {
+        // Validate the clicked slot before collecting. Otherwise a forged
+        // Protocol 5 mode-6 click can drain matching inventory stacks even
+        // when its source slot lies outside the advertised window.
+        if mode == 6 && button == 0 {
+            if slot != 0 && Self::slot_index(window, slot).is_none() {
+                return false;
+            }
             return self.collect_matching(window);
         }
         if slot == 0 {
@@ -1435,13 +1441,32 @@ impl Inventory {
                     ChestDirection::IntoChest
                 })
             }
-            2 if !storage && (0..=8).contains(&button) => {
+            2 if (0..=8).contains(&button) => {
+                // Protocol 5 number-key mode swaps the hovered slot with the
+                // selected *hotbar* slot, even when hovering a chest slot.
+                // The caller journals both the chest and player snapshot when
+                // storage changes; refusing this path made 1-9 unresponsive.
                 let target = n + 27 + i16::from(button);
+                if slot == target {
+                    return Some(ChestDirection::InventoryOnly);
+                }
                 let a = self.chest_stack(chest, slot);
                 let b = self.chest_stack(chest, target);
+                // Brewing stands share this primitive but accept only their
+                // own legacy potion/ingredient/fuel slot-compatible items.
+                if n == 4
+                    && storage
+                    && b.is_some_and(|item| !crate::brewing::slot_accepts(slot, item))
+                {
+                    return None;
+                }
                 self.set_chest_stack(chest, slot, b);
                 self.set_chest_stack(chest, target, a);
-                Some(ChestDirection::InventoryOnly)
+                Some(if storage {
+                    ChestDirection::OutOfChest
+                } else {
+                    ChestDirection::InventoryOnly
+                })
             }
             _ => None,
         }
@@ -2063,6 +2088,121 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+    /// REG-132 / #768: a Protocol 5 double-click must neither overflow
+    /// a stack nor accept a forged slot outside the active player window.
+    #[test]
+    fn reg132_double_click_caps_stack_and_rejects_invalid_source_slot() {
+        let wool = Stack {
+            id: 35,
+            count: 60,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inventory = Inventory {
+            cursor: Some(wool),
+            ..Default::default()
+        };
+        inventory.slots[9] = Some(Stack { count: 10, ..wool });
+        inventory.slots[10] = Some(Stack {
+            count: 3,
+            damage: 1,
+            ..wool
+        });
+        inventory.slots[11] = Some(Stack { count: 4, ..wool });
+
+        // A legitimate collection takes only four from the first stack.
+        assert!(inventory.click_window(0, 9, 0, 6));
+        assert_eq!(inventory.cursor, Some(Stack { count: 64, ..wool }));
+        assert_eq!(inventory.slots[9], Some(Stack { count: 6, ..wool }));
+        assert_eq!(inventory.slots[10].unwrap().count, 3);
+        assert_eq!(inventory.slots[11], Some(Stack { count: 4, ..wool }));
+
+        // A malformed source slot must not collect any remaining items.
+        inventory.cursor = Some(wool);
+        for invalid_slot in [-999, -1, 45, i16::MAX] {
+            let unchanged = inventory.clone();
+            assert!(!inventory.click_window(0, invalid_slot, 0, 6));
+            assert_eq!(inventory, unchanged);
+        }
+        // Slot zero is a legal result-slot click; preserve the prior behavior
+        // of collecting from the remaining inventory when it is the source.
+        assert!(inventory.click_window(0, 0, 0, 6));
+        assert_eq!(inventory.cursor, Some(Stack { count: 64, ..wool }));
+        assert_eq!(inventory.slots[9], Some(Stack { count: 2, ..wool }));
+        assert!(inventory.encoded().is_ok());
+    }
+
+    /// REG-132 / #768: server-owned chest collection caps at the legal stack
+    /// size and never merges a differently damaged or tagged ItemStack.
+    #[test]
+    fn reg132_chest_double_click_conserves_items_metadata_and_nbt() {
+        use fastnbt::Value;
+        use std::collections::HashMap;
+
+        let stone = Stack {
+            id: 1,
+            count: 60,
+            damage: 0,
+            nbt: None,
+        };
+        let nbt_value = Value::Compound(HashMap::from([("Owner".to_string(), Value::Int(7))]));
+        let tagged = crate::item_nbt::from_value(&nbt_value).unwrap();
+        let mut inventory = Inventory {
+            cursor: Some(stone),
+            ..Default::default()
+        };
+        inventory.slots[9] = Some(Stack { count: 8, ..stone });
+        let mut chest = [None; 27];
+        chest[0] = Some(Stack { count: 3, ..stone });
+        chest[1] = Some(Stack {
+            count: 4,
+            damage: 1,
+            ..stone
+        });
+        chest[2] = Some(Stack {
+            count: 2,
+            nbt: Some(tagged),
+            ..stone
+        });
+        chest[3] = Some(Stack { count: 3, ..stone });
+
+        let total = |inventory: &Inventory, chest: &[Option<Stack>; 27]| -> u32 {
+            inventory.slots[9..45]
+                .iter()
+                .chain(chest.iter())
+                .flatten()
+                .map(|stack| u32::from(stack.count))
+                .sum::<u32>()
+                + inventory.cursor.map_or(0, |stack| u32::from(stack.count))
+        };
+        let before = total(&inventory, &chest);
+        assert_eq!(before, 80);
+        assert_eq!(
+            inventory.chest_click_window(1, &mut chest, 0, 0, 6),
+            Some(ChestDirection::OutOfChest)
+        );
+        assert_eq!(inventory.cursor, Some(Stack { count: 64, ..stone }));
+        assert_eq!(chest[0], None);
+        assert_eq!(chest[1].unwrap().damage, 1);
+        assert_eq!(chest[2].unwrap().nbt, Some(tagged));
+        assert_eq!(chest[3], Some(Stack { count: 2, ..stone }));
+        assert_eq!(inventory.slots[9], Some(Stack { count: 8, ..stone }));
+        assert_eq!(total(&inventory, &chest), before);
+
+        let unchanged = inventory.clone();
+        let chest_before = chest;
+        assert_eq!(inventory.chest_click_window(1, &mut chest, 63, 0, 6), None);
+        assert_eq!(inventory, unchanged);
+        assert_eq!(chest, chest_before);
+        let saved = inventory.encoded().unwrap();
+        let restored: Inventory = serde_json::from_slice(&saved).unwrap();
+        let saved_chest = serde_json::to_vec(&chest).unwrap();
+        let restored_chest: [Option<Stack>; 27] = serde_json::from_slice(&saved_chest).unwrap();
+        assert_eq!(restored, inventory);
+        assert_eq!(restored_chest, chest);
+        assert_eq!(total(&restored, &restored_chest), before);
+    }
+
     /// REG-135 / #771: a full 36-slot player inventory cannot swallow items
     /// from a chest. When one partial stack is available, only that capacity
     /// is consumed; the remainder stays in the server-owned chest.
@@ -2104,13 +2244,18 @@ mod tests {
         let full_inventory = inventory.clone();
         let full_chest = chest;
         let before_full = total(&inventory, &chest);
-        assert_eq!(
-            inventory.chest_click_window(1, &mut chest, 0, 0, 1),
-            Some(ChestDirection::OutOfChest)
-        );
-        assert_eq!(inventory, full_inventory);
-        assert_eq!(chest, full_chest);
-        assert_eq!(total(&inventory, &chest), before_full);
+        // Two independent chest stacks must both remain untouched when
+        // every player inventory slot is occupied. A single-stack check can
+        // miss an unintended second transfer in repeated GUI operations.
+        for chest_slot in [0, 1] {
+            assert_eq!(
+                inventory.chest_click_window(1, &mut chest, chest_slot, 0, 1),
+                Some(ChestDirection::OutOfChest)
+            );
+            assert_eq!(inventory, full_inventory);
+            assert_eq!(chest, full_chest);
+            assert_eq!(total(&inventory, &chest), before_full);
+        }
 
         // Make exactly three spaces in a matching existing stack. A Shift
         // transfer must debit only three of the 32 diamonds in the chest.
@@ -3561,12 +3706,120 @@ mod tests {
         );
         assert_eq!(chest[0], None);
         assert_eq!(sum(&inv, &chest), 12);
-        assert_eq!(inv.chest_click(&mut chest, 0, 1, 2), None); // cannot number swap chest
+        assert_eq!(
+            inv.chest_click(&mut chest, 0, 1, 2),
+            Some(ChestDirection::OutOfChest)
+        ); // 1.7.10 allows a number-key swap on a chest slot
         assert_eq!(inv.chest_click(&mut chest, -999, 0, 0), None); // no outside drop
         assert_eq!(inv.chest_click(&mut chest, 63, 0, 0), None);
         assert_eq!(inv.chest_window_items(2, &chest)[..3], [2, 0, 63]);
         assert_eq!(sum(&inv, &chest), 12);
     }
+    /// REG-131 / #767: number keys on a chest slot must swap it with the
+    /// matching hotbar slot. The screen shows all 36 player slots after n
+    /// container slots; the hotbar begins at n+27, not n+0.
+    #[test]
+    fn reg131_number_keys_swap_chest_and_hotbar_without_duplication() {
+        let mut inventory = Inventory::default();
+        let mut chest = [None; 27];
+        let chest_item = Stack {
+            id: 17,
+            count: 11,
+            damage: 2,
+            nbt: None,
+        };
+        let held_item = Stack {
+            id: 5,
+            count: 19,
+            damage: 1,
+            nbt: None,
+        };
+        for hotbar in 0..9u8 {
+            let mut next_inventory = inventory.clone();
+            next_inventory.slots[36 + hotbar as usize] = Some(held_item);
+            let mut next_chest = chest;
+            next_chest[4] = Some(chest_item);
+            let before_other_hotbar = next_inventory.slots.clone();
+            assert_eq!(
+                next_inventory.chest_click_window(1, &mut next_chest, 4, hotbar as i8, 2),
+                Some(ChestDirection::OutOfChest)
+            );
+            assert_eq!(next_chest[4], Some(held_item));
+            assert_eq!(next_inventory.slots[36 + hotbar as usize], Some(chest_item));
+            for (slot, before_slot) in before_other_hotbar.iter().enumerate().take(45) {
+                if slot != 36 + hotbar as usize {
+                    assert_eq!(next_inventory.slots[slot], *before_slot);
+                }
+            }
+            assert_eq!(next_inventory.cursor, None);
+            let count_in_chest = next_chest
+                .iter()
+                .flatten()
+                .map(|stack| u16::from(stack.count))
+                .sum::<u16>();
+            let count_with_player = next_inventory
+                .possessions()
+                .iter()
+                .map(|stack| u16::from(stack.count))
+                .sum::<u16>();
+            assert_eq!(count_in_chest + count_with_player, 30);
+
+            // Both snapshots remain stable across the exact native JSON
+            // serialization used by the server's journal participants.
+            let restored: Inventory =
+                serde_json::from_slice(&next_inventory.encoded().unwrap()).unwrap();
+            let saved_chest = serde_json::to_vec(&next_chest).unwrap();
+            let reloaded_chest: [Option<Stack>; 27] = serde_json::from_slice(&saved_chest).unwrap();
+            assert_eq!(restored, next_inventory);
+            assert_eq!(reloaded_chest, next_chest);
+
+            // Mode 2 with the hotbar itself as hovered source is a no-op.
+            let index = 27 + 27 + i16::from(hotbar);
+            assert_eq!(
+                next_inventory.chest_click_window(1, &mut next_chest, index, hotbar as i8, 2),
+                Some(ChestDirection::InventoryOnly)
+            );
+            assert_eq!(next_chest[4], Some(held_item));
+        }
+        // Empty hotbar slot: transfer chest stack without minting a copy.
+        chest[0] = Some(chest_item);
+        assert!(inventory
+            .chest_click_window(1, &mut chest, 0, 0, 2)
+            .is_some());
+        assert_eq!(chest[0], None);
+        assert_eq!(inventory.slots[36], Some(chest_item));
+
+        let snapshot = inventory.clone();
+        let saved = chest;
+        for (slot, key) in [(0, -1), (0, 9), (0, i8::MAX), (-999, 0), (63, 0)] {
+            assert_eq!(
+                inventory.chest_click_window(1, &mut chest, slot, key, 2),
+                None
+            );
+            assert_eq!(inventory, snapshot);
+            assert_eq!(chest, saved);
+        }
+    }
+
+    /// REG-131 / #767: unlike chests, brewing slots must reject a hotbar
+    /// item incompatible with their slot, leaving both inventories intact.
+    #[test]
+    fn reg131_brewing_number_key_rejects_invalid_ingredient_slot() {
+        let mut inventory = Inventory::default();
+        let mut brewer = [None; 4];
+        let stone = Stack {
+            id: 1,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        inventory.slots[36] = Some(stone);
+        let original = inventory.clone();
+        assert_eq!(inventory.chest_click_window(3, &mut brewer, 0, 0, 2), None);
+        assert_eq!(inventory, original);
+        assert_eq!(brewer, [None; 4]);
+    }
+
     /// REG-132 / #768: double-click collection must honor max stack size
     /// and the exact item metadata. Extra source items stay in place.
     #[test]

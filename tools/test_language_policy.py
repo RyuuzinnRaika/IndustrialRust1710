@@ -29,6 +29,13 @@ JAVA_ORACLES = frozenset({
     "tools/GenLayerRiverOracle.java",
 })
 
+# Audited verification-only helpers with names outside the generic patterns.
+# Keep explicit entries narrow; do not allow arbitrary Python runtime/ops tools.
+VERIFICATION_HELPERS = frozenset({
+    "tools/benchmark_cargo_builds.py",
+    "tools/export_verification_summary.py",
+})
+
 VERIFICATION_PREFIXES = (
     "test_", "verify_", "check_", "validate_", "audit_", "repro_", "fixture_",
 )
@@ -37,7 +44,7 @@ VERIFICATION_SUFFIXES = ("_test.py", "_acceptance.py", "_benchmark.py")
 
 def is_permitted_non_rust_source(path: str) -> bool:
     """Allow Rust itself elsewhere; classify tracked Python/C#/Java source."""
-    if path in LEGACY_NON_RUST or path in JAVA_ORACLES:
+    if path in LEGACY_NON_RUST or path in JAVA_ORACLES or path in VERIFICATION_HELPERS:
         return True
     p = Path(path)
     if p.suffix == ".py":
@@ -82,6 +89,8 @@ class LanguagePolicyTest(unittest.TestCase):
             "tools/check_world_format.py",
             "tools/verify_save_fixture_report.py",
             "tools/GenLayerAddSnowOracle.java",
+            "tools/benchmark_cargo_builds.py",
+            "tools/export_verification_summary.py",
         ):
             with self.subTest(allowed=allowed):
                 self.assertTrue(is_permitted_non_rust_source(allowed))
@@ -93,6 +102,8 @@ class LanguagePolicyTest(unittest.TestCase):
             "tools/ServerGui2.cs",
             "scripts/deploy.py",
             "scripts/new_supervisor.py",
+            "tools/benchmark_live_server.py",
+            "tools/export_player_data.py",
         ):
             with self.subTest(prohibited=prohibited):
                 self.assertFalse(is_permitted_non_rust_source(prohibited))

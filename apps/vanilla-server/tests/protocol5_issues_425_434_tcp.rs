@@ -210,7 +210,17 @@ impl Server {
         let value: Value = serde_json::from_str(c.read_string(65536).unwrap()).unwrap();
         c.finish().unwrap();
         assert_eq!(value["version"]["protocol"], 5);
-        value["players"]["online"].as_u64().unwrap()
+        let online = value["players"]["online"].as_u64().unwrap();
+
+        // Finish the Status state before polling again. Abandoning the socket
+        // after JSON leaves the server waiting for Ping/EOF and can overlap
+        // with the per-IP admission budget during ADD011's parallel logins.
+        let token = 0x1234_5678_1020_3040i64.to_be_bytes();
+        s.write_all(&frame(1, &token)).unwrap();
+        let (pong_id, echoed) = receive(&mut s);
+        assert_eq!(pong_id, 1, "Status poll must finish with a Pong");
+        assert_eq!(echoed, token, "Status poll must echo its own Ping token");
+        online
     }
 
     fn login(&self, name: &str) -> TcpStream {

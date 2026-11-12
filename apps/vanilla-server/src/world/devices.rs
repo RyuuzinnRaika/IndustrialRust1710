@@ -197,6 +197,9 @@ impl World {
             // Other faces receive only its ordinary weak power; treating all
             // faces as strong would incorrectly energize adjacent conductors.
             55 if to == (x, y - 1, z) => (block & 15) as u8,
+            // Detector rails weakly power neighboring blocks and strongly
+            // power their solid support in Java Edition 1.7.10.
+            28 if block & 8 != 0 && to == (x, y - 1, z) => 15,
             152 => 15,
             76 if to == (x, y + 1, z) => 15,
             94 => {
@@ -309,6 +312,13 @@ impl World {
             // shape and the supporting block below. It does not power above.
             55 if to == (x, y - 1, z) || self.dust_points_into(from, to) => (block & 15) as u8,
             55 => 0,
+            28 if block & 8 != 0
+                && NEIGHBORS
+                    .iter()
+                    .any(|&(dx, dy, dz)| to == (x + dx, y + dy, z + dz)) =>
+            {
+                15
+            }
             69 | 77 | 143 => {
                 if block & 8 != 0 {
                     15
@@ -654,7 +664,17 @@ impl World {
     }
     pub(super) fn device_changes(&mut self, budget: usize) -> BTreeMap<Position, u16> {
         let mut changes = BTreeMap::new();
-        for (&pos, &when) in &self.pending_buttons {
+        // A large number of expired buttons/plates must not bypass the
+        // caller's per-tick work budget. Filter by deadline before taking
+        // the budget, or early unexpired entries would starve later releases.
+        let expired: Vec<_> = self
+            .pending_buttons
+            .iter()
+            .filter(|(_, when)| self.fluid_phase >= **when)
+            .take(budget)
+            .map(|(&pos, &when)| (pos, when))
+            .collect();
+        for (pos, when) in expired.iter().copied() {
             if self.fluid_phase >= when {
                 let (x, y, z) = pos;
                 let current = self.get(x, i32::from(y), z);
@@ -670,7 +690,10 @@ impl World {
                 }
             }
         }
-        if self.pending_devices.is_empty() {
+        // Expired input releases and scheduled devices share one scan budget.
+        // Otherwise a busy clock can scan up to 2*budget positions per tick.
+        let device_budget = budget.saturating_sub(expired.len());
+        if self.pending_devices.is_empty() || device_budget == 0 {
             return changes;
         }
         let len = self.pending_devices.len();
@@ -680,7 +703,7 @@ impl World {
             .iter()
             .cycle()
             .skip(start)
-            .take(budget.min(len))
+            .take(device_budget.min(len))
             .copied()
             .collect();
         for (x, y, z) in scheduled {
@@ -998,6 +1021,118 @@ impl World {
 mod redstone_regression_tests {
     use super::*;
     use std::fs;
+
+    /// REG-163 / #799: simultaneous inputs hold a torch inverted through
+    /// an IRW restart; removing only one source must not relight it.
+    #[test]
+    fn multiple_inputs_keep_torch_inverted_through_restart() {
+        // Exclusive fixture directory: never delete or overwrite an existing world.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch =
+            std::env::temp_dir().join(format!("ir1710-reg163-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("isolated.irw");
+        let mut world = World::new();
+        world.update_and_save(&path, 0, 64, 0, 1 << 4).unwrap();
+        world
+            .update_and_save(&path, 0, 65, 0, (76 << 4) | 5)
+            .unwrap();
+        for (x, meta) in [(-1, 10), (1, 9)] {
+            world
+                .update_and_save(&path, x, 64, 0, (69 << 4) | meta)
+                .unwrap();
+        }
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(0, 65, 0), (75 << 4) | 5);
+        let mut recovered = World::load(&path).unwrap();
+        for _ in 0..4 {
+            recovered.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(recovered.get(0, 65, 0), (75 << 4) | 5);
+
+        // One lever is turned off, but the other still strongly powers
+        // the same support block. The torch must remain off.
+        recovered
+            .update_and_save(&path, -1, 64, 0, (69 << 4) | 2)
+            .unwrap();
+        for _ in 0..4 {
+            recovered.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(recovered.get(0, 65, 0), (75 << 4) | 5);
+
+        // Releasing the final input permits the two-game-tick inversion.
+        recovered
+            .update_and_save(&path, 1, 64, 0, (69 << 4) | 1)
+            .unwrap();
+        for _ in 0..4 {
+            recovered.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(recovered.get(0, 65, 0), (76 << 4) | 5);
+        let mut second_restart = World::load(&path).unwrap();
+        for _ in 0..4 {
+            second_restart.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(second_restart.get(0, 65, 0), (76 << 4) | 5);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    /// REG-161 / #797: expire and device scans together must fit one
+    /// budget, even when a high-frequency circuit arms both queues.
+    #[test]
+    fn expired_release_and_live_device_share_one_tick_budget() {
+        let mut world = World::new();
+        world.fluid_phase = 20;
+        for x in 0..6 {
+            world.import_block(x, 64, 0, (77 << 4) | 8).unwrap();
+            world.pending_buttons.insert((x, 64, 0), 10);
+        }
+        for x in 20..26 {
+            world.import_block(x, 64, 0, 23 << 4).unwrap();
+            world.import_block(x, 65, 0, 152 << 4).unwrap();
+        }
+        let only_releases = world.device_changes(3);
+        assert_eq!(only_releases.len(), 3);
+        assert!(only_releases.keys().all(|&(x, _, _)| x < 6));
+        assert!(only_releases.values().all(|&v| v == 77 << 4));
+
+        // With only one due timer, two other device evaluations are allowed.
+        world.pending_buttons.retain(|&(x, _, _), _| x == 0);
+        let mixed = world.device_changes(3);
+        assert!(mixed.len() <= 3);
+        assert_eq!(mixed.get(&(0, 64, 0)), Some(&(77 << 4)));
+        assert_eq!(mixed.keys().filter(|&&(x, _, _)| x >= 20).count(), 2);
+        assert!(world.device_changes(0).is_empty());
+    }
+
+    /// REG-161 / #797: expired inputs are processed in bounded batches.
+    /// Future deadlines must not starve already-expired inputs with larger
+    /// coordinates when the per-tick budget is small.
+    #[test]
+    fn expired_redstone_timers_obey_budget_and_skip_unexpired_entries() {
+        let mut world = World::new();
+        world.fluid_phase = 20;
+        for x in 0..24 {
+            world.import_block(x, 64, 0, (77 << 4) | 8).unwrap();
+            world
+                .pending_buttons
+                .insert((x, 64, 0), if x < 8 { 30 } else { 10 });
+        }
+
+        let staged = world.device_changes(3);
+        assert_eq!(staged.len(), 3, "the release budget must not be exceeded");
+        assert_eq!(
+            staged.keys().map(|&(x, _, _)| x).collect::<Vec<_>>(),
+            vec![8, 9, 10],
+            "future deadlines must not consume the release budget"
+        );
+        assert!(staged.values().all(|&block| block == 77 << 4));
+        assert!(world.device_changes(0).is_empty());
+    }
 
     #[test]
     fn pressure_plate_failed_save_does_not_leave_a_release_timer() {
@@ -2518,27 +2653,141 @@ mod redstone_regression_tests {
     #[test]
     fn piston_pushes_exactly_twelve_not_thirteen_solid_blocks() {
         for number in [12, 13] {
-            let path = std::env::temp_dir().join(format!(
-                "ir1710-piston-cap-{}-{number}.irw",
+            // Do not pre-delete a PID-named file: tests must never erase a
+            // pre-existing user world or collide with parallel test runs.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let scratch = std::env::temp_dir().join(format!(
+                "ir1710-add053-piston-cap-{}-{number}-{nanos}",
                 std::process::id()
             ));
-            let _ = fs::remove_file(&path);
+            fs::create_dir(&scratch).unwrap();
+            let path = scratch.join("isolated.irw");
+
             let mut w = World::new();
             w.update_and_save(&path, -2, 64, 0, (69 << 4) | 13).unwrap();
             w.update_and_save(&path, -1, 64, 0, (33 << 4) | 5).unwrap();
             for x in 0..number {
                 w.update_and_save(&path, x, 64, 0, 1 << 4).unwrap();
             }
-            w.block_tick(&path, 64).unwrap();
+            for _ in 0..4 {
+                w.block_tick(&path, 64).unwrap();
+            }
+            let saved = World::load(&path).unwrap();
             if number == 12 {
                 assert_eq!(w.get(-1, 64, 0), (33 << 4) | 13);
-                assert_eq!(w.get(12, 64, 0), 1 << 4);
+                assert_eq!(w.get(0, 64, 0) >> 4, 34);
+                // Every original stone moved by exactly one block; none
+                // vanished or appeared outside the intended write set.
+                for x in 1..=12 {
+                    assert_eq!(w.get(x, 64, 0), 1 << 4);
+                }
+                assert_eq!(w.get(13, 64, 0), 0);
             } else {
                 assert_eq!(w.get(-1, 64, 0), (33 << 4) | 5);
                 assert_eq!(w.get(13, 64, 0), 0);
+                for x in 0..13 {
+                    assert_eq!(w.get(x, 64, 0), 1 << 4);
+                }
             }
-            fs::remove_file(path).unwrap();
+            for x in -2..=13 {
+                assert_eq!(saved.get(x, 64, 0), w.get(x, 64, 0));
+            }
+
+            // Power removal must retract the base without losing the
+            // translated stones. An ordinary piston does not pull them.
+            w.update_and_save(&path, -2, 64, 0, (69 << 4) | 5).unwrap();
+            for _ in 0..6 {
+                w.block_tick(&path, 64).unwrap();
+            }
+            assert_eq!(w.get(-1, 64, 0), (33 << 4) | 5);
+            if number == 12 {
+                assert_eq!(w.get(0, 64, 0), 0);
+                for x in 1..=12 {
+                    assert_eq!(w.get(x, 64, 0), 1 << 4);
+                }
+            }
+            let final_world = World::load(&path).unwrap();
+            for x in -2..=13 {
+                assert_eq!(final_world.get(x, 64, 0), w.get(x, 64, 0));
+            }
+            fs::remove_dir_all(scratch).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod reg169_detector_signal_regressions {
+    use super::*;
+
+    /// REG-169 / #805: a nearby detector rail powers an aligned
+    /// booster rail and releases it when the detector turns off. Persist
+    /// both transitions and reconstruct the final state after restart.
+    #[test]
+    fn detector_signal_drives_adjacent_powered_rail_and_releases_on_unpower() {
+        // Exclusive fixture directory: never delete or overwrite an existing world.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch =
+            std::env::temp_dir().join(format!("ir1710-reg169-{}-{nanos}", std::process::id()));
+        std::fs::create_dir(&scratch).unwrap();
+        let path = scratch.join("isolated.irw");
+        let mut world = World::new();
+        // Both rails run east-west. The detector's 0x8 active flag is
+        // normally driven by Minecarts::occupied_detector_rails (#927).
+        world
+            .update_and_save(&path, 0, 64, 0, (28 << 4) | 9)
+            .unwrap();
+        world
+            .update_and_save(&path, 1, 64, 0, (27 << 4) | 1)
+            .unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(1, 64, 0), (27 << 4) | 9);
+        assert_eq!(World::load(&path).unwrap().get(1, 64, 0), (27 << 4) | 9);
+
+        world
+            .update_and_save(&path, 0, 64, 0, (28 << 4) | 1)
+            .unwrap();
+        for _ in 0..4 {
+            world.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(world.get(1, 64, 0), (27 << 4) | 1);
+        let mut restored = World::load(&path).unwrap();
+        for _ in 0..4 {
+            restored.block_tick(&path, 64).unwrap();
+        }
+        assert_eq!(restored.get(1, 64, 0), (27 << 4) | 1);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    fn powered_detector_rail_weakly_powers_faces_and_strongly_powers_support() {
+        let mut world = World::new();
+        // Shape 1: east-west, metadata bit 3 marks the detector as active.
+        world.import_block(0, 64, 0, (28 << 4) | 9).unwrap();
+        for neighbor in [
+            (-1, 64, 0),
+            (1, 64, 0),
+            (0, 64, -1),
+            (0, 64, 1),
+            (0, 63, 0),
+            (0, 65, 0),
+        ] {
+            assert_eq!(world.signal_into((0, 64, 0), neighbor), 15);
+        }
+        assert_eq!(world.strong_signal_into((0, 64, 0), (0, 63, 0)), 15);
+        assert_eq!(world.strong_signal_into((0, 64, 0), (1, 64, 0)), 0);
+        assert_eq!(world.signal_into((0, 64, 0), (0, 64, 2)), 0);
+
+        world.import_block(0, 64, 0, (28 << 4) | 1).unwrap();
+        assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 0);
+        assert_eq!(world.strong_signal_into((0, 64, 0), (0, 63, 0)), 0);
     }
 }
 

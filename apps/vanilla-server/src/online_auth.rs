@@ -162,13 +162,10 @@ impl ServerIdentity {
             .rsa
             .decrypt(Pkcs1v15Encrypt, encrypted_token)
             .map_err(|_| invalid("RSA token decryption failed"))?;
-        // Do not ever enable online-mode with a missing or incorrect token.
-        let token_difference = returned_token.len() ^ challenge.len();
-        let mut difference = token_difference as u8;
-        for (i, expected) in challenge.iter().enumerate() {
-            difference |= expected ^ returned_token.get(i).copied().unwrap_or(0);
-        }
-        if difference != 0 || secret.len() != 16 {
+        // Each connection has a freshly generated challenge. A response from
+        // any earlier login (or a different connection) must never authenticate.
+        verify_challenge_token(&challenge, &returned_token)?;
+        if secret.len() != 16 {
             return Err(invalid("invalid encryption response"));
         }
         let key: [u8; 16] = secret.try_into().map_err(|_| invalid("invalid AES key"))?;
@@ -176,6 +173,21 @@ impl ServerIdentity {
         // The client switches to AES-CFB8 immediately after sending its reply.
         let server_hash = signed_server_hash(&key, &self.der);
         verify_has_joined(username, &server_hash)
+    }
+}
+
+/// Verify the decrypted 1.7.10 four-byte challenge for THIS connection.
+/// Compare all four positions even after a mismatch; reject both shortened
+/// and extended responses without revealing the expected bytes in diagnostics.
+fn verify_challenge_token(challenge: &[u8; 4], returned: &[u8]) -> io::Result<()> {
+    let mut mismatch = u8::from(returned.len() != challenge.len());
+    for (index, expected) in challenge.iter().enumerate() {
+        mismatch |= expected ^ returned.get(index).copied().unwrap_or(0);
+    }
+    if mismatch == 0 {
+        Ok(())
+    } else {
+        Err(invalid("invalid encryption response"))
     }
 }
 
@@ -231,15 +243,22 @@ fn verify_has_joined(username: &str, hash: &str) -> io::Result<VerifiedProfile> 
     if response.status() != 200 {
         return Err(invalid("account not authenticated by session server"));
     }
-    let mut response_body = Vec::new();
-    response
-        .into_reader()
+    let response_body = read_session_body(response.into_reader())?;
+    parse_verified_profile(username, &response_body)
+}
+
+/// Bounded and deliberately redacted: an untrusted network/decoder error
+/// might otherwise contain an HTTP query, token, or raw response excerpt.
+fn read_session_body(reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut body = Vec::new();
+    reader
         .take(16_385)
-        .read_to_end(&mut response_body)?;
-    if response_body.len() > 16_384 {
+        .read_to_end(&mut body)
+        .map_err(|_| invalid("session response read failed"))?;
+    if body.len() > 16_384 {
         return Err(invalid("oversized session response"));
     }
-    parse_verified_profile(username, &response_body)
+    Ok(body)
 }
 
 // Session-server parsing is a separate, network-free authorization boundary.
@@ -275,6 +294,30 @@ fn parse_verified_profile(username: &str, body: &[u8]) -> io::Result<VerifiedPro
 mod tests {
     use super::*;
     #[test]
+    fn encryption_challenge_rejects_stale_cross_session_and_malformed_tokens() {
+        // A token is valid only for the connection that issued it. Even though
+        // both sessions use the same RSA public key, replaying A's response to
+        // B's independently generated challenge cannot pass verification.
+        let first = [0x12, 0x34, 0x56, 0x78];
+        let next = [0x87, 0x65, 0x43, 0x21];
+        assert!(verify_challenge_token(&first, &first).is_ok());
+        assert!(verify_challenge_token(&next, &next).is_ok());
+
+        for (challenge, returned) in [
+            (&next, &first[..]),                           // replayed response from session A
+            (&first, &[][..]),                             // absent response
+            (&first, &first[..3]),                         // truncated token
+            (&first, &[0x12, 0x34, 0x56, 0x79][..]),       // one changed byte
+            (&first, &[0x12, 0x34, 0x56, 0x78, 0x00][..]), // extra byte
+        ] {
+            let error = verify_challenge_token(challenge, returned).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(error.to_string(), "invalid encryption response");
+            assert!(!error.to_string().contains("12345678"));
+        }
+    }
+
+    #[test]
     fn cfb8_round_trip_across_arbitrary_fragment_boundaries() {
         let key = [0x4b; 16];
         let plain: Vec<u8> = (0..5000).map(|v| (v % 251) as u8).collect();
@@ -290,6 +333,34 @@ mod tests {
         }
         assert_eq!(encrypted, plain);
     }
+    #[test]
+    fn failed_session_body_reader_never_reveals_underlying_secret_error() {
+        struct UntrustedFailure;
+        impl Read for UntrustedFailure {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other(
+                    "accessToken=PRIVATE_TEST_TOKEN; rsa_private=SECRET",
+                ))
+            }
+        }
+        let error = read_session_body(UntrustedFailure).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "session response read failed");
+        assert!(!error.to_string().contains("PRIVATE_TEST_TOKEN"));
+    }
+
+    #[test]
+    fn session_response_limit_is_checked_without_echoing_the_body() {
+        let oversized = std::io::Cursor::new(vec![b'X'; 16_385]);
+        let error = read_session_body(oversized).unwrap_err();
+        assert_eq!(error.to_string(), "oversized session response");
+        assert!(!error.to_string().contains("XXXXX"));
+        assert_eq!(
+            read_session_body(std::io::Cursor::new(b"{}")).unwrap(),
+            b"{}".to_vec()
+        );
+    }
+
     #[test]
     fn session_profile_accepts_only_matching_name_and_strict_uuid() {
         let bytes = br#"{"name":"Notch","id":"069a79f444e94726a5befca90e38aaf5"}"#;
