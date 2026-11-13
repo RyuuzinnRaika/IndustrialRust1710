@@ -420,6 +420,22 @@ fn until_packet(socket: &mut TcpStream, id: u32, matches: impl Fn(&[u8]) -> bool
     }
     panic!("expected packet {id:#x} at {caller} not received after {seen} packets");
 }
+/// Read one Play frame as (packet id, body), acknowledging KeepAlive. Used
+/// where a single action produces several packets whose relative order the
+/// test must not depend on.
+#[track_caller]
+fn pump(socket: &mut TcpStream) -> (u32, Vec<u8>) {
+    let packet = read_frame(&mut *socket).expect("play frame");
+    let mut raw = packet.as_slice();
+    let packet_id = read_varint(&mut raw).expect("valid Play packet ID");
+    let body = raw.to_vec();
+    if packet_id == 0 && body.len() == 4 {
+        socket
+            .write_all(&frame(0, &body))
+            .expect("reply to KeepAlive");
+    }
+    (packet_id, body)
+}
 fn await_file(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(6);
     while !path.is_file() {
@@ -1925,6 +1941,92 @@ fn survival_decorative_mining_drops_blocks_and_clears_tile_state() {
         drop(client);
         server.wait_idle();
     }
+}
+
+#[test]
+fn survival_unsupported_drop_falls_under_gravity_and_is_collected() {
+    // REG-151 / #856: a drop left above a freshly dug hole is unsupported
+    // and must fall under the 20TPS server-owned gravity, land on the new
+    // surface, be persisted in the ground sidecar before its packet is
+    // announced, and stay collectable afterwards.
+    let server = NativeServer::start_with_mode_and_items(true, &[(36, 273i16)]);
+    let (mut client, _, spawn) = server.join("RustTester");
+    assert_eq!(spawn, [0.5, 64.0, 0.5]);
+    send_position(&mut client, 4.5, 64.0, 0.5);
+
+    // Dig the grass at (0,63,0) with a diamond shovel. Its dirt drop
+    // spawns at 63.5 on top of the remaining dirt, so it rests.
+    let mut grass = vec![0u8];
+    grass.extend_from_slice(&0i32.to_be_bytes());
+    grass.push(63);
+    grass.extend_from_slice(&0i32.to_be_bytes());
+    grass.push(1);
+    let mut grass_done = grass.clone();
+    grass_done[0] = 2;
+    client.write_all(&frame(7, &grass)).unwrap();
+    thread::sleep(Duration::from_millis(1200));
+    client.write_all(&frame(7, &grass_done)).unwrap();
+    let mut saw_grass_air = false;
+    let mut saw_spawn_63 = false;
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while (!saw_grass_air || !saw_spawn_63) && Instant::now() < deadline {
+        let (pid, body) = pump(&mut client);
+        saw_grass_air |= pid == 0x23 && body.len() == 11 && body[4] == 63 && body[9] == 0;
+        saw_spawn_63 |= pid == 0x0e
+            && body.len() >= 24
+            && body[5] == 2
+            && i32::from_be_bytes(body[10..14].try_into().unwrap()) == 2032;
+    }
+    assert!(
+        saw_grass_air && saw_spawn_63,
+        "mined grass must clear the block (0x23) and spawn a drop at 63.5 (0x0e)"
+    );
+
+    // Dig the dirt under the drop: the drop loses its support at 62.5.
+    let mut soil = vec![0u8];
+    soil.extend_from_slice(&0i32.to_be_bytes());
+    soil.push(62);
+    soil.extend_from_slice(&0i32.to_be_bytes());
+    soil.push(1);
+    let mut soil_done = soil.clone();
+    soil_done[0] = 2;
+    client.write_all(&frame(7, &soil)).unwrap();
+    thread::sleep(Duration::from_millis(1200));
+    client.write_all(&frame(7, &soil_done)).unwrap();
+    let mut saw_soil_air = false;
+    let mut saw_land_62 = false;
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while (!saw_soil_air || !saw_land_62) && Instant::now() < deadline {
+        let (pid, body) = pump(&mut client);
+        saw_soil_air |= pid == 0x23 && body.len() == 11 && body[4] == 62 && body[9] == 0;
+        saw_land_62 |= pid == 0x28
+            && body.len() == 19
+            && i32::from_be_bytes(body[9..13].try_into().unwrap()) == 2000;
+    }
+    // The unsupported 63.5 drop falls to the new floor centre, 62.5 (2000).
+    assert!(
+        saw_soil_air && saw_land_62,
+        "clearing the support (0x23) must be followed by a gravity teleport to 62.5 (0x28)"
+    );
+
+    // The sidecar already holds both landed drops (the dug dirt rests in
+    // the same cell) at the persisted landing height.
+    let drops_path = server.directory.join("flat.drops.json");
+    await_file(&drops_path);
+    let ground: Value = serde_json::from_slice(&fs::read(&drops_path).unwrap()).unwrap();
+    let entities = ground["entries"].as_object().unwrap();
+    assert_eq!(entities.len(), 2, "both mined blocks became drops");
+    for entry in entities.values() {
+        assert_eq!(entry["stack"]["id"], 3, "grass and dirt drop as dirt");
+        assert_eq!(entry["position"][1].as_i64().unwrap(), 2000);
+    }
+
+    // Walking within pickup range collects an entity (delay has elapsed).
+    send_position(&mut client, 1.5, 64.0, 0.5);
+    until_packet(&mut client, 0x0d, |_| true);
+
+    drop(client);
+    server.wait_idle();
 }
 
 #[test]

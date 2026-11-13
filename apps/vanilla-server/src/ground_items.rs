@@ -1,14 +1,17 @@
 //! Bounded Minecraft 1.7.10 / Protocol 5 ground-item entities.
 //!
-//! Items persist separately from IRW1 in a capped JSON file. They do not
-//! simulate gravity, collisions, liquids or merging yet.
+//! Items persist separately from IRW1 in a capped JSON file. The 20TPS
+//! world worker drives a server-owned gravity step (REG-151 / #856):
+//! unsupported drops fall in the fixed-point /32 grid until they reach a
+//! solid support, and every landing is persisted before its packets are
+//! announced. Liquids and stack merging are not simulated yet.
 //! Ordering prioritizes preventing duplicate pickups: remove+persist the
 //! ground item before writing the receiver's inventory. A storage failure
 //! between these two commits can lose an item; a multi-file transaction is
 //! needed for full crash consistency.
 use crate::inventory::Stack;
 use crate::multiplayer::{self, Event};
-use crate::world::WORLD_LIMIT;
+use crate::world::{World, WORLD_LIMIT};
 use legacy_protocol::write_varint;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -21,6 +24,15 @@ const MAX_DROPS: usize = 512;
 const MAX_BYTES: u64 = 128 * 1024;
 const PICKUP_DELAY: Duration = Duration::from_millis(750);
 const VERSION: u8 = 1;
+/// Fall speed in 1/32-blocks per game tick. The step accelerates by one
+/// unit per tick up to the cap, mirroring vanilla's accelerating item
+/// fall without floating-point drift: every accepted step lands exactly on
+/// the same /32 grid the wire and sidecar formats already use, so a
+/// restart resumes an equivalent fall from the last persisted position.
+const FALL_ACCEL: i32 = 1;
+const FALL_TERMINAL: i32 = 62;
+/// Entity center height (in /32 units) above the block column floor.
+const FLOOR_OFFSET: i32 = 16;
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
@@ -114,6 +126,18 @@ impl GroundItem {
             multiplayer::destroy(self.id),
         ]
     }
+    /// 1.7.10 Entity Teleport for this dropped-item object: entity VarInt,
+    /// absolute fixed-point /32 coordinates (the same encoding this server
+    /// already uses for the spawn packet) and zero look angles.
+    fn teleport(&self) -> Event {
+        let mut body = Vec::with_capacity(14);
+        write_varint(self.id as u32, &mut body);
+        for coordinate in self.position {
+            body.extend_from_slice(&coordinate.to_be_bytes());
+        }
+        body.extend_from_slice(&[0, 0]); // yaw/pitch
+        Event { id: 0x28, body }
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -123,6 +147,11 @@ pub struct GroundItems {
     entries: BTreeMap<i32, GroundItem>,
     #[serde(skip)]
     eligible_after: BTreeMap<i32, Instant>,
+    /// Runtime fall speed per falling entity in 1/32-blocks per tick.
+    /// Never persisted: a restart re-derives the identical landing because
+    /// the persisted position stays inside the same block column.
+    #[serde(skip)]
+    falls: BTreeMap<i32, i32>,
 }
 impl Default for GroundItems {
     fn default() -> Self {
@@ -131,6 +160,7 @@ impl Default for GroundItems {
             next_id: 1_000_000_000,
             entries: BTreeMap::new(),
             eligible_after: BTreeMap::new(),
+            falls: BTreeMap::new(),
         }
     }
 }
@@ -424,6 +454,83 @@ impl GroundItems {
         }
         self.eligible_after.remove(&id);
         Ok(Some(item))
+    }
+
+    /// One server-owned 20TPS gravity step (REG-151 / #856). An entity is
+    /// supported when the block below its column is solid or its column
+    /// already sits at the world floor; supported entities never move.
+    /// Unsupported entities accelerate downward in the fixed-point /32
+    /// grid, and a landing is committed to the sidecar file before the
+    /// matching teleport packets are returned for broadcast. If that save
+    /// fails, neither memory nor packets advance, and the next tick simply
+    /// retries the identical step. Because every intermediate position is
+    /// derived from the persisted one by deterministic integration, a
+    /// restart mid-fall replays an equivalent fall into the same column:
+    /// entity ids, stacks and counts are never duplicated or lost.
+    pub fn advance(&mut self, world: &World, path: &Path) -> io::Result<Vec<Event>> {
+        let mut candidate = self.clone();
+        let mut packets = Vec::new();
+        let mut landed = false;
+        for (id, item) in candidate.entries.iter_mut() {
+            let x = item.position[0].div_euclid(32);
+            let y = item.position[1].div_euclid(32);
+            let z = item.position[2].div_euclid(32);
+            if y <= 0 || world.get(x, y - 1, z) != 0 {
+                candidate.falls.remove(id);
+                continue;
+            }
+            let speed = candidate
+                .falls
+                .get(id)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(FALL_ACCEL)
+                .min(FALL_TERMINAL);
+            // Step no more than one block cell per iteration so a terminal
+            // velocity fall can never tunnel through a one-block floor.
+            let mut y = item.position[1];
+            let mut remain = speed;
+            let mut settled = false;
+            while remain > 0 && !settled {
+                let cell = y.div_euclid(32);
+                let step = remain.min(31);
+                let next = (y - step).max(FLOOR_OFFSET);
+                let next_cell = next.div_euclid(32);
+                if next_cell < cell {
+                    if next_cell == 0 || world.get(x, next_cell - 1, z) != 0 {
+                        y = next_cell * 32 + FLOOR_OFFSET;
+                        settled = true;
+                    } else {
+                        y = next;
+                    }
+                } else {
+                    y = next;
+                }
+                if next == FLOOR_OFFSET {
+                    y = FLOOR_OFFSET;
+                    settled = true;
+                }
+                remain -= step;
+            }
+            if y != item.position[1] {
+                item.position[1] = y;
+                packets.push(item.teleport());
+            }
+            if settled {
+                candidate.falls.remove(id);
+                landed = true;
+            } else {
+                candidate.falls.insert(*id, speed);
+            }
+        }
+        if packets.is_empty() {
+            return Ok(packets);
+        }
+        if landed {
+            candidate.save(path)?;
+        }
+        *self = candidate;
+        Ok(packets)
     }
 }
 #[cfg(test)]
@@ -911,5 +1018,141 @@ mod tests {
             },
         };
         assert!(!item.valid());
+    }
+
+    fn gravity_world() -> World {
+        World::new()
+    }
+
+    fn gravity_dir(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-ground-gravity-{}-{name}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn gravity_stack() -> Stack {
+        Stack {
+            id: 17,
+            count: 3,
+            damage: 0,
+            nbt: None,
+        }
+    }
+
+    fn teleport_y(packet: &Event) -> i32 {
+        assert_eq!(packet.id, 0x28);
+        // VarInt id (>= 1e9 occupies 5 bytes) then absolute x, y, z i32.
+        assert_eq!(packet.body.len(), 19);
+        i32::from_be_bytes(packet.body[9..13].try_into().unwrap())
+    }
+
+    /// REG-151 / #856 (gravity part): a drop detached from its support
+    /// falls every 20TPS step and lands, with the landing persisted before
+    /// the landing packet is announced. A supported drop never moves.
+    #[test]
+    fn unsupported_drops_fall_and_land_with_teleport_packets() {
+        let world = gravity_world();
+        let path = gravity_dir("fall").join("drops.json");
+        let mut ground = GroundItems::default();
+        let item = ground.put(&path, gravity_stack(), (4, 70, 4)).unwrap();
+        assert_eq!(item.position, [4 * 32 + 16, 70 * 32 + 16, 4 * 32 + 16]);
+        // Flat terrain tops out at y=63, so a free entity rests at 64.5.
+        const REST_Y: i32 = 64 * 32 + 16;
+        let mut previous = item.position[1];
+        let mut teleports = 0;
+        for _ in 0..200 {
+            let packets = ground.advance(&world, &path).unwrap();
+            if packets.is_empty() {
+                break;
+            }
+            assert_eq!(packets.len(), 1, "one entity moves one step");
+            let y = teleport_y(&packets[0]);
+            assert!(y < previous, "falls strictly decrease Y: {y} !< {previous}");
+            previous = y;
+            teleports += 1;
+        }
+        assert!(
+            teleports > 3,
+            "a six-block fall takes several announced steps"
+        );
+        let entries: Vec<&GroundItem> = ground.items().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].position, [4 * 32 + 16, REST_Y, 4 * 32 + 16]);
+        assert_eq!(entries[0].id, item.id, "landing never re-ids an entity");
+        // The sidecar holds the landed position, and a further tick is a
+        // no-op: resting items emit neither motion nor storage writes.
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["entries"].as_object().unwrap().len(), 1);
+        let stored_y = persisted["entries"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()["position"][1]
+            .as_i64()
+            .unwrap();
+        assert_eq!(stored_y, i64::from(REST_Y));
+        assert!(ground.advance(&world, &path).unwrap().is_empty());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A drop whose support survived the tick, and a drop already sitting
+    /// on the column floor, must never move or rewrite the sidecar.
+    #[test]
+    fn supported_drops_never_move_under_gravity() {
+        let world = gravity_world();
+        let path = gravity_dir("rest").join("drops.json");
+        let mut ground = GroundItems::default();
+        // Grass at y=63 supports the drop at y=64.
+        ground.put(&path, gravity_stack(), (4, 64, 4)).unwrap();
+        // The world floor is a support too (bounded-world contract).
+        ground.put(&path, gravity_stack(), (9, 0, 9)).unwrap();
+        for _ in 0..5 {
+            assert!(ground.advance(&world, &path).unwrap().is_empty());
+        }
+        let ys: Vec<i32> = ground.items().map(|item| item.position[1]).collect();
+        assert_eq!(ys, vec![64 * 32 + 16, 16]);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A restart while airborne must replay an equivalent fall in the same
+    /// column: identical entity id, identical final height, no duplicates
+    /// and no losses.
+    #[test]
+    fn a_restart_mid_fall_resumes_the_same_column_without_duplication_or_loss() {
+        let world = gravity_world();
+        let path = gravity_dir("restart").join("drops.json");
+        let mut ground = GroundItems::default();
+        let spawned = ground.put(&path, gravity_stack(), (9, 100, 9)).unwrap();
+        let mut airborne = 0;
+        for _ in 0..3 {
+            if !ground.advance(&world, &path).unwrap().is_empty() {
+                airborne += 1;
+            }
+        }
+        assert_eq!(airborne, 3, "the first three steps must move");
+        // Mid-fall reload: only the spawn height is on disk so far.
+        let restored = GroundItems::load(&path).unwrap();
+        assert_eq!(restored.items().count(), 1);
+        let restored = restored.items().next().unwrap();
+        assert_eq!(restored.id, spawned.id);
+        assert_eq!(restored.position[1], 100 * 32 + 16);
+        let mut restored = GroundItems::load(&path).unwrap();
+        for _ in 0..200 {
+            if restored.advance(&world, &path).unwrap().is_empty() {
+                break;
+            }
+        }
+        let entries: Vec<&GroundItem> = restored.items().collect();
+        assert_eq!(entries.len(), 1, "a restart never duplicates a drop");
+        assert_eq!(entries[0].id, spawned.id);
+        assert_eq!(entries[0].stack, gravity_stack(), "the stack is intact");
+        assert_eq!(entries[0].position[1], 64 * 32 + 16, "same landing");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }
