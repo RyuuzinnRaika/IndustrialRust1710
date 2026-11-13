@@ -89,12 +89,31 @@ fn invalid(message: &'static str) -> io::Error {
 }
 
 impl PlayerPosition {
+    /// Persistence/teleport contract: a stored or commanded position must sit
+    /// inside the block column `[0, 256)`. Runtime void falls are governed by
+    /// `is_valid_for_movement`, not by this stricter on-disk contract.
     pub fn is_valid(&self) -> bool {
         let limit = f64::from(crate::world::WORLD_LIMIT);
         self.x.is_finite()
             && self.y.is_finite()
             && self.z.is_finite()
             && (0.0..256.0).contains(&self.y)
+            && (-limit..limit).contains(&self.x)
+            && (-limit..limit).contains(&self.z)
+    }
+
+    /// Movement contract for accepted Protocol 5 position reports. Unlike
+    /// `is_valid`, this tolerates a *bounded* fall below the world floor so a
+    /// Survival player can drop into the void and take server-owned void
+    /// damage rather than being frozen at Y=0 or disconnected mid-fall. Y at
+    /// or below -512 is still rejected outright: it is wire corruption, not a
+    /// survivable fall, and the session is closed on such a report.
+    pub fn is_valid_for_movement(&self) -> bool {
+        let limit = f64::from(crate::world::WORLD_LIMIT);
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.z.is_finite()
+            && (-512.0..256.0).contains(&self.y)
             && (-limit..limit).contains(&self.x)
             && (-limit..limit).contains(&self.z)
     }
@@ -252,11 +271,21 @@ impl PlayerPosition {
         if !vitals.valid() {
             return Err(invalid("invalid player health or food values"));
         }
-        if !self.is_valid() {
+        // A bounded void fall is a runtime movement state, never a stored
+        // one: a session that logs out below the world floor is persisted at
+        // Y=0 so every player .dat keeps the `is_valid` on-disk contract and
+        // a rejoin cannot seed an out-of-bounds position. The stored record
+        // (not the live mid-fall Y) must satisfy the persistence contract.
+        let stored = PlayerPosition {
+            x: self.x,
+            y: self.y.max(0.0),
+            z: self.z,
+        };
+        if !stored.is_valid() {
             return Err(invalid("invalid player position"));
         }
         let record = PlayerNbt {
-            pos: vec![self.x, self.y, self.z],
+            pos: vec![stored.x, stored.y, stored.z],
             motion: vec![0.0, 0.0, 0.0],
             rotation: vec![0.0, 0.0],
             dimension,
@@ -340,6 +369,58 @@ mod tests {
             z: 0.5
         })
         .is_valid());
+    }
+
+    /// REG-150 / #786: the bounded void floor is accepted only for movement.
+    /// The stricter `[0, 256)` persistence contract is unchanged, and a void
+    /// logout still writes an on-disk position inside that contract.
+    #[test]
+    fn reg150_void_floor_is_a_movement_state_never_a_stored_position() {
+        // A mid-fall report below the floor is legal for movement ...
+        let falling = PlayerPosition {
+            x: 0.5,
+            y: -1.0,
+            z: 0.5,
+        };
+        assert!(falling.is_valid_for_movement());
+        let deep = PlayerPosition {
+            x: 0.5,
+            y: -100.0,
+            z: 0.5,
+        };
+        assert!(deep.is_valid_for_movement());
+        // ... but a report below -512 is wire corruption and refused outright.
+        let corrupt = PlayerPosition {
+            x: 0.5,
+            y: -513.0,
+            z: 0.5,
+        };
+        assert!(!corrupt.is_valid_for_movement());
+        // The on-disk contract still rejects every negative Y.
+        assert!(!(PlayerPosition {
+            x: 0.5,
+            y: -0.5,
+            z: 0.5
+        })
+        .is_valid());
+
+        // A player that logs out inside the void is persisted at the floor,
+        // so the saved .dat can never seed an out-of-bounds rejoin position.
+        let file = std::env::temp_dir().join(format!("ir1710-reg150-{}.dat", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        PlayerPosition {
+            x: 12.5,
+            y: -100.0,
+            z: -3.25,
+        }
+        .save_state_in_dimension(&file, Vitals::default(), 0)
+        .unwrap();
+        let (restored, _, _) = PlayerPosition::load_state_with_dimension(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(restored.y, 0.0);
+        assert!(restored.is_valid());
+        assert_eq!(restored.x, 12.5);
+        assert_eq!(restored.z, -3.25);
     }
 
     #[test]

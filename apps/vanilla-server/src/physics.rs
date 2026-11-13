@@ -502,8 +502,11 @@ fn swept_path_clear(world: &World, previous: &PlayerPosition, next: &PlayerPosit
 }
 
 /// Sweep both horizontal and vertical segments to prevent endpoint tunnelling.
+/// The destination is checked against the *movement* bound, not the stricter
+/// persistence bound, so a bounded void fall (REG-150) is accepted while the
+/// terrain sweep still rejects tunnelling through solid columns.
 pub fn valid_movement(world: &World, previous: &PlayerPosition, next: &PlayerPosition) -> bool {
-    if !next.is_valid() || collides(world, next) {
+    if !next.is_valid_for_movement() || collides(world, next) {
         return false;
     }
     let dx = next.x - previous.x;

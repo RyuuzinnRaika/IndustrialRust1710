@@ -1886,9 +1886,12 @@ impl Mobs {
                 Event { id: 0x11, body }
             }))
     }
-    /// Spawn a server-owned XP orb. No immediate XP award occurs.
+    /// Spawn a server-owned XP orb. No immediate XP award occurs. An orb
+    /// requested outside the block column (a void death) is refused: like
+    /// vanilla, the drop simply disappears rather than persisting a fixed-
+    /// point entity below the world floor.
     pub fn spawn_xp(&mut self, at: PlayerPosition, amount: u16) -> Option<Event> {
-        if amount == 0 || self.orbs.len() >= 256 || self.next_id >= 1_000_000 {
+        if amount == 0 || !at.is_valid() || self.orbs.len() >= 256 || self.next_id >= 1_000_000 {
             return None;
         }
         let id = self.next_id;

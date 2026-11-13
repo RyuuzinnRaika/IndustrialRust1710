@@ -10,6 +10,7 @@ pub enum HazardCause {
     Lava,
     Fire,
     Burning,
+    Void,
 }
 
 /// A single tick may contain multiple independent environmental sources.
@@ -38,6 +39,7 @@ pub struct Hazards {
     fire_ticks: u16,
     last_fire_hit: u64,
     last_suffocation_hit: u64,
+    last_void_hit: u64,
 }
 impl Hazards {
     pub fn new() -> Self {
@@ -132,6 +134,15 @@ impl Hazards {
             self.last_suffocation_hit = tick;
             bypass += 1.0;
             cause = cause.combine(HazardAttribution::Single(HazardCause::Suffocation));
+        }
+        // Bounded void fall (REG-150 / #786). Below Y=-64 a player takes the
+        // 1.7.10 out-of-world damage: a fixed 4 HP every 10 ticks that armour
+        // cannot reduce. The floor at -512 is enforced earlier by the C04/C06
+        // movement validator, so this loop always runs on a finite Y.
+        if pos.y < -64.0 && tick.saturating_sub(self.last_void_hit) >= 10 {
+            self.last_void_hit = tick;
+            bypass += 4.0;
+            cause = cause.combine(HazardAttribution::Single(HazardCause::Void));
         }
         if matches!(feet, 10 | 11) {
             self.fire_ticks = self.fire_ticks.max(100);
@@ -229,5 +240,88 @@ mod tests {
             }
         }
         assert_eq!(cause, HazardAttribution::Single(HazardCause::Drowning));
+    }
+
+    /// REG-150 / #786: a Survival player below Y=-64 takes a bounded 4 HP
+    /// every 10 ticks that armour cannot reduce, dies within a fixed window,
+    /// and is attributed to the Void alone. A fall that has not reached the
+    /// void band takes no damage.
+    #[test]
+    fn void_fall_damage_is_bounded_ignores_armour_and_kills_in_fixed_time() {
+        let world = World::new();
+        let in_void = PlayerPosition {
+            x: 0.5,
+            y: -100.0,
+            z: 0.5,
+        };
+        // A full-health player dies within 50 void ticks (5 hits x 4 HP).
+        // Hits land at t=10,20,...,50 from a freshly-reset hazard tracker.
+        let mut hazard = Hazards::new();
+        let mut health = 20.0f32;
+        let mut ticks_to_death = 0;
+        for t in 1..=200 {
+            let (damage, cause) = hazard.tick_detailed(&world, in_void, t, &Inventory::default());
+            if damage > 0.0 {
+                assert_eq!(
+                    cause,
+                    HazardAttribution::Single(HazardCause::Void),
+                    "a fall below Y=-64 is void damage only"
+                );
+                assert_eq!(damage, 4.0, "each void hit is a fixed 4 HP");
+            } else {
+                assert_eq!(cause, HazardAttribution::None);
+            }
+            health -= damage;
+            if health <= 0.0 {
+                ticks_to_death = t;
+                break;
+            }
+        }
+        assert!(
+            ticks_to_death > 0,
+            "the void must be lethal in bounded time"
+        );
+        assert!(
+            (40..=60).contains(&ticks_to_death),
+            "void death took {ticks_to_death} ticks, expected ~50"
+        );
+
+        // Armour cannot blunt the out-of-world toll: same 4 HP per interval.
+        let mut armoured = Hazards::new();
+        let mut inventory = Inventory::default();
+        // Slots 5..8 are the armour belt; a full diamond set scores points.
+        for slot in [5i16, 6, 7, 8] {
+            inventory
+                .creative_set(
+                    slot,
+                    Some(crate::inventory::Stack {
+                        id: 314 + (slot - 5),
+                        count: 1,
+                        damage: 0,
+                        nbt: None,
+                    }),
+                )
+                .ok();
+        }
+        assert!(inventory.armor_points() > 0, "test armour must register");
+        let mut total = 0.0f32;
+        for t in 1..=100 {
+            total += armoured.tick(&world, in_void, t, &inventory);
+        }
+        // Ten 10-tick intervals of 4 HP regardless of the armour slot.
+        assert_eq!(total, 40.0);
+
+        // Above the void band the same fall is harmless.
+        let mut calm = Hazards::new();
+        for t in 1..=100 {
+            let above_void = PlayerPosition {
+                x: 0.5,
+                y: -32.0,
+                z: 0.5,
+            };
+            let (damage, cause) = calm.tick_detailed(&world, above_void, t, &Inventory::default());
+            assert_eq!(damage, 0.0, "Y=-32 is not the void yet");
+            assert_eq!(cause, HazardAttribution::None);
+        }
     }
 }
