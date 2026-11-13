@@ -9915,6 +9915,30 @@ fn main() -> io::Result<()> {
                                     furnace_hub.broadcast(packet);
                                 }
                             }
+                            // Ground item gravity (REG-151 / #856): drops
+                            // that lost their support in this committed
+                            // world tick fall under the same 20TPS clock.
+                            // Landings are persisted to the sidecar before
+                            // their teleport packets are announced; a save
+                            // failure leaves both memory and the file on
+                            // the previous tick's state for a retry.
+                            let ground_moves = {
+                                let mut ground = match leaf_drops.lock() {
+                                    Ok(value) => value,
+                                    Err(_) => return,
+                                };
+                                ground.advance(&gravity_world, &leaf_drops_file)
+                            };
+                            match ground_moves {
+                                Ok(packets) => {
+                                    for packet in packets {
+                                        furnace_hub.broadcast(packet);
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!("GROUND ITEM TICK STORAGE ERROR: {error}");
+                                }
+                            }
                             let piston_actions = gravity_world.drain_piston_actions();
                             for &action in &piston_actions {
                                 furnace_hub.broadcast(piston_action_event(action));
