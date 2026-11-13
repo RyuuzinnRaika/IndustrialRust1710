@@ -794,6 +794,73 @@ mod tests {
         assert!(GroundItems::load(&path).is_err());
         fs::remove_dir_all(root).unwrap();
     }
+    /// ADD-018 / #442: when two player sessions run their pickup transaction
+    /// concurrently against one shared, locked store, a single dropped Item
+    /// Entity must commit exactly once. The authoritative order (stage the
+    /// removal, then publish the in-memory snapshot) is taken under one
+    /// `Mutex<GroundItems>` guard, so the second session observes the already
+    /// removed entity and credits nothing. This races that exact pattern and
+    /// asserts the entity is credited once, removed once, and never duplicated.
+    #[test]
+    fn two_concurrent_pickups_commit_a_single_entity_exactly_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, Mutex};
+        let root = std::env::temp_dir().join(format!("ir1710-ground-race-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("drops.json");
+        let store = Arc::new(Mutex::new(GroundItems::default()));
+        let id = store
+            .lock()
+            .unwrap()
+            .put(
+                &path,
+                Stack {
+                    id: 3,
+                    count: 8,
+                    damage: 0,
+                    nbt: None,
+                },
+                (0, 63, 0),
+            )
+            .unwrap()
+            .id;
+
+        let barrier = Arc::new(Barrier::new(2));
+        let granted = Arc::new(AtomicUsize::new(0));
+        let commits = Arc::new(AtomicUsize::new(0));
+        let mut players = Vec::new();
+        for _ in 0..2 {
+            let store = Arc::clone(&store);
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            let granted = Arc::clone(&granted);
+            let commits = Arc::clone(&commits);
+            players.push(std::thread::spawn(move || {
+                barrier.wait();
+                let mut ground = store.lock().unwrap();
+                if let Some((staged, collected, _remainder)) =
+                    ground.stage_take_amount(id, 8).unwrap()
+                {
+                    staged.save(&path).unwrap();
+                    *ground = staged;
+                    granted.fetch_add(collected.stack.count as usize, Ordering::SeqCst);
+                    commits.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        for player in players {
+            player.join().unwrap();
+        }
+        // Exactly one session commits and receives the whole 8-item stack;
+        // the other sees the entity already gone and credits nothing.
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+        assert_eq!(granted.load(Ordering::SeqCst), 8);
+        // The entity is removed from both the live store and the snapshot.
+        assert_eq!(store.lock().unwrap().items().count(), 0);
+        assert_eq!(GroundItems::load(&path).unwrap().items().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn full_stack_drop_roundtrips_and_uses_protocol5_count() {
         let root = std::env::temp_dir().join(format!("ir1710-ground-stack-{}", std::process::id()));
