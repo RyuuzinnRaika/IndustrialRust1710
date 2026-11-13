@@ -197,6 +197,7 @@ pub enum DeathCause {
     MixedHazards,
     DispenserArrow,
     EnderPearl,
+    Void,
     Unknown,
 }
 
@@ -219,6 +220,7 @@ impl DeathCause {
             Self::MixedHazards => "mixed_environmental",
             Self::DispenserArrow => "dispenser_arrow",
             Self::EnderPearl => "ender_pearl",
+            Self::Void => "void",
             Self::Unknown => "unknown",
         }
     }
@@ -280,6 +282,7 @@ impl DeathCause {
             Self::MixedHazards => "died from multiple environmental hazards",
             Self::DispenserArrow => "was shot by a dispenser",
             Self::EnderPearl => "died after using an ender pearl",
+            Self::Void => "fell out of the world",
             Self::Unknown => "died",
         };
         format!("{name} {description}")

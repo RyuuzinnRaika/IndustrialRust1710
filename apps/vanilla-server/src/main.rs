@@ -2692,6 +2692,7 @@ fn play(
                     HazardAttribution::Single(HazardCause::Lava) => DeathCause::Lava,
                     HazardAttribution::Single(HazardCause::Fire) => DeathCause::Fire,
                     HazardAttribution::Single(HazardCause::Burning) => DeathCause::Burning,
+                    HazardAttribution::Single(HazardCause::Void) => DeathCause::Void,
                     HazardAttribution::Mixed => DeathCause::MixedHazards,
                     HazardAttribution::None => DeathCause::Unknown,
                 };
@@ -3727,13 +3728,15 @@ fn play(
                     || !y.is_finite()
                     || !stance.is_finite()
                     || !z.is_finite()
-                    || !(0.0..256.0).contains(&y)
+                    || !(-512.0..256.0).contains(&y)
                 {
                     return Err(bad("invalid player coordinates"));
                 }
                 let candidate = PlayerPosition { x, y, z };
-                if !candidate.is_valid() {
-                    // Sparse world positions are validated against the global world limit.
+                if !candidate.is_valid_for_movement() {
+                    // Sparse world positions are validated against the global
+                    // world limit. A bounded void fall is legal movement (see
+                    // REG-150); the hazard loop converts it into a real death.
                     send_player_position(s, player, yaw, pitch)?;
                     pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                     idle_gravity.observe_client(now_tick);
