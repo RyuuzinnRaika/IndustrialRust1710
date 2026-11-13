@@ -1995,29 +1995,40 @@ fn survival_unsupported_drop_falls_under_gravity_and_is_collected() {
     client.write_all(&frame(7, &soil_done)).unwrap();
     let mut saw_soil_air = false;
     let mut saw_land_62 = false;
+    let mut saw_merge_destroy = false;
     let deadline = Instant::now() + Duration::from_secs(25);
-    while (!saw_soil_air || !saw_land_62) && Instant::now() < deadline {
+    while (!saw_soil_air || !saw_land_62 || !saw_merge_destroy) && Instant::now() < deadline {
         let (pid, body) = pump(&mut client);
         saw_soil_air |= pid == 0x23 && body.len() == 11 && body[4] == 62 && body[9] == 0;
         saw_land_62 |= pid == 0x28
             && body.len() == 19
             && i32::from_be_bytes(body[9..13].try_into().unwrap()) == 2000;
+        // Destroy entity (0x13): the two identical resting dirt stacks merge.
+        saw_merge_destroy |= pid == 0x13 && body.len() == 5;
     }
     // The unsupported 63.5 drop falls to the new floor centre, 62.5 (2000).
     assert!(
         saw_soil_air && saw_land_62,
         "clearing the support (0x23) must be followed by a gravity teleport to 62.5 (0x28)"
     );
-
-    // The sidecar already holds both landed drops (the dug dirt rests in
-    // the same cell) at the persisted landing height.
+    // The sidecar already holds the two landed drops merged into one
+    // 2-dirt entity in the shared cell at the persisted landing height.
     let drops_path = server.directory.join("flat.drops.json");
     await_file(&drops_path);
     let ground: Value = serde_json::from_slice(&fs::read(&drops_path).unwrap()).unwrap();
     let entities = ground["entries"].as_object().unwrap();
-    assert_eq!(entities.len(), 2, "both mined blocks became drops");
+    assert_eq!(
+        entities.len(),
+        1,
+        "identical dirt drops in one cell merge into a single entity"
+    );
+    assert!(
+        saw_merge_destroy,
+        "the absorbed entity's destroy packet (0x13) is announced"
+    );
     for entry in entities.values() {
         assert_eq!(entry["stack"]["id"], 3, "grass and dirt drop as dirt");
+        assert_eq!(entry["stack"]["count"].as_i64().unwrap(), 2);
         assert_eq!(entry["position"][1].as_i64().unwrap(), 2000);
     }
 

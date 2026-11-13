@@ -1,10 +1,12 @@
 //! Bounded Minecraft 1.7.10 / Protocol 5 ground-item entities.
 //!
 //! Items persist separately from IRW1 in a capped JSON file. The 20TPS
-//! world worker drives a server-owned gravity step (REG-151 / #856):
-//! unsupported drops fall in the fixed-point /32 grid until they reach a
-//! solid support, and every landing is persisted before its packets are
-//! announced. Liquids and stack merging are not simulated yet.
+//! world worker drives a server-owned simulation step (REG-151/REG-152 /
+//! #856): unsupported drops fall in the fixed-point /32 grid until they
+//! reach a solid support, water floats a drop up to the fluid top, lava
+//! sinks it slowly without destroying it, and resting drops with the same
+//! stack in the same cell merge up to the item stack limit. Every landing
+//! or merge is persisted before its packets are announced.
 //! Ordering prioritizes preventing duplicate pickups: remove+persist the
 //! ground item before writing the receiver's inventory. A storage failure
 //! between these two commits can lose an item; a multi-file transaction is
@@ -22,7 +24,10 @@ use std::time::{Duration, Instant};
 
 const MAX_DROPS: usize = 512;
 const MAX_BYTES: u64 = 128 * 1024;
-const PICKUP_DELAY: Duration = Duration::from_millis(750);
+/// 1.7.10 pickup delays: block-break and other world-owned drops become
+/// collectable after 10 game ticks, Q / Ctrl+Q throws after 40 ticks.
+const BLOCK_PICKUP_DELAY: Duration = Duration::from_millis(500);
+const THROW_PICKUP_DELAY: Duration = Duration::from_millis(2000);
 const VERSION: u8 = 1;
 /// Fall speed in 1/32-blocks per game tick. The step accelerates by one
 /// unit per tick up to the cap, mirroring vanilla's accelerating item
@@ -33,6 +38,32 @@ const FALL_ACCEL: i32 = 1;
 const FALL_TERMINAL: i32 = 62;
 /// Entity center height (in /32 units) above the block column floor.
 const FLOOR_OFFSET: i32 = 16;
+/// Simplified fluid transport (simplified 1.7.10 parity, vertical only):
+/// a drop inside water rises one whole cell per tick toward the fluid
+/// top; a drop inside lava sinks two /32 units per tick and is never
+/// destroyed by the fluid itself.
+const WATER_RISE: i32 = 32;
+const LAVA_SINK: i32 = 2;
+
+/// What created a drop. Java 1.7.10 gives the Item entity different
+/// PickupDelay values depending on the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropSource {
+    /// Block break, mob loot, death drop, fishing and dropper output:
+    /// collectable after 10 game ticks.
+    BlockBreak,
+    /// C0B drop-held (actions 3/4) and window-click throws (C0E mode 4
+    /// and outside-window cursor drops): collectable after 40 game ticks.
+    PlayerThrow,
+}
+impl DropSource {
+    fn pickup_delay(self) -> Duration {
+        match self {
+            DropSource::BlockBreak => BLOCK_PICKUP_DELAY,
+            DropSource::PlayerThrow => THROW_PICKUP_DELAY,
+        }
+    }
+}
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, message)
@@ -84,6 +115,17 @@ impl GroundItem {
         }
         body.extend_from_slice(&[0, 0]); // pitch/yaw
         body.extend_from_slice(&0i32.to_be_bytes()); // no velocity
+        [
+            Event { id: 0x0e, body },
+            Event {
+                id: 0x1c,
+                body: self.metadata_body(),
+            },
+        ]
+    }
+    /// DataWatcher body carrying only the item slot (index 10). Clients
+    /// refresh a stack count from this without a full entity respawn.
+    fn metadata_body(&self) -> Vec<u8> {
         let mut metadata = self.id.to_be_bytes().to_vec();
         metadata.push((5 << 5) | 10); // item slot type 5, DataWatcher index 10
         metadata.extend_from_slice(&self.stack.id.to_be_bytes());
@@ -101,13 +143,14 @@ impl GroundItem {
             metadata.extend_from_slice(&(-1i16).to_be_bytes());
         }
         metadata.push(0x7f); // end of metadata
-        [
-            Event { id: 0x0e, body },
-            Event {
-                id: 0x1c,
-                body: metadata,
-            },
-        ]
+        metadata
+    }
+    /// Re-announce only the item slot after a stack merge changed a count.
+    fn metadata(&self) -> Event {
+        Event {
+            id: 0x1c,
+            body: self.metadata_body(),
+        }
     }
     pub fn in_pickup_range(&self, feet: (f64, f64, f64)) -> bool {
         let x = f64::from(self.position[0]) / 32.0 - feet.0;
@@ -197,7 +240,12 @@ impl GroundItems {
         let mut state: Self =
             serde_json::from_slice(&data).map_err(|_| invalid("invalid ground-item JSON"))?;
         state.validate()?;
-        let ready = Instant::now() + PICKUP_DELAY;
+        // The sidecar does not record a drop's source, so a restart cannot
+        // restore a player-throw's longer delay. Restored entities get the
+        // shorter block-break delay as a floor: never earlier than any live
+        // source would allow, and still long enough to close the pickup
+        // transaction window before a client has rendered the entity.
+        let ready = Instant::now() + BLOCK_PICKUP_DELAY;
         for id in state.entries.keys() {
             state.eligible_after.insert(*id, ready);
         }
@@ -252,6 +300,7 @@ impl GroundItems {
         path: &Path,
         stack: Stack,
         block: (i32, i32, i32),
+        source: DropSource,
     ) -> io::Result<GroundItem> {
         if self.is_full() || !stack.is_valid() {
             return Err(invalid("ground-item capacity or stack invalid"));
@@ -274,7 +323,7 @@ impl GroundItems {
             return Err(err);
         }
         self.eligible_after
-            .insert(id, Instant::now() + PICKUP_DELAY);
+            .insert(id, Instant::now() + source.pickup_delay());
         Ok(item)
     }
     /// Reserve capacity before clearing an inventory. The entire death-drop
@@ -290,6 +339,7 @@ impl GroundItems {
         &self,
         stacks: &[Stack],
         block: (i32, i32, i32),
+        source: DropSource,
     ) -> io::Result<(Self, Vec<GroundItem>)> {
         // Preserve the single-position API's validation even for an empty
         // batch; invalid positions must never be silently accepted.
@@ -299,7 +349,7 @@ impl GroundItems {
             .copied()
             .map(|stack| (stack, block))
             .collect::<Vec<_>>();
-        self.stage_put_at_positions(&positions)
+        self.stage_put_at_positions(&positions, source)
     }
 
     /// Stage a world-tick batch with distinct item positions. A tick may
@@ -310,6 +360,7 @@ impl GroundItems {
     pub fn stage_put_at_positions(
         &self,
         entries: &[(Stack, (i32, i32, i32))],
+        source: DropSource,
     ) -> io::Result<(Self, Vec<GroundItem>)> {
         if !self.has_capacity_for(entries.len())
             || entries.iter().any(|(stack, _)| !stack.is_valid())
@@ -318,7 +369,7 @@ impl GroundItems {
         }
         let mut candidate = self.clone();
         let mut inserted = Vec::with_capacity(entries.len());
-        let ready = Instant::now() + PICKUP_DELAY;
+        let ready = Instant::now() + source.pickup_delay();
         for &(stack, block) in entries {
             let position = drop_position(block)?;
             candidate.next_id += 1;
@@ -409,7 +460,7 @@ impl GroundItems {
         stacks: &[Stack],
         block: (i32, i32, i32),
     ) -> io::Result<Vec<GroundItem>> {
-        let staged = self.stage_put_many(stacks, block)?;
+        let staged = self.stage_put_many(stacks, block, DropSource::BlockBreak)?;
         self.commit_staged_put(path, staged)
     }
 
@@ -456,81 +507,192 @@ impl GroundItems {
         Ok(Some(item))
     }
 
-    /// One server-owned 20TPS gravity step (REG-151 / #856). An entity is
-    /// supported when the block below its column is solid or its column
-    /// already sits at the world floor; supported entities never move.
-    /// Unsupported entities accelerate downward in the fixed-point /32
-    /// grid, and a landing is committed to the sidecar file before the
-    /// matching teleport packets are returned for broadcast. If that save
-    /// fails, neither memory nor packets advance, and the next tick simply
-    /// retries the identical step. Because every intermediate position is
-    /// derived from the persisted one by deterministic integration, a
-    /// restart mid-fall replays an equivalent fall into the same column:
-    /// entity ids, stacks and counts are never duplicated or lost.
+    /// One server-owned 20TPS step (REG-151/REG-152 / #856): gravity,
+    /// fluid buoyancy and same-cell stack merging.
+    ///
+    /// Support comes only from solid terrain or the bounded world floor;
+    /// water floats an unsupported drop upward one cell per tick until it
+    /// rests on the fluid top, and lava sinks it slowly without ever
+    /// destroying the stack. Resting drops that share one cell and one
+    /// (id, damage, NBT) stack identity merge into the lowest entity id up
+    /// to that item's stack limit: absorbed entities emit their destroy
+    /// packet and every changed count re-announces its item slot. All
+    /// landings and merges are committed to the sidecar file before the
+    /// matching packets are returned; if the save fails, neither memory
+    /// nor packets advance, and the next tick simply retries the identical
+    /// step. Because every intermediate position is derived from the
+    /// persisted one by deterministic integration, a restart mid-fall
+    /// replays an equivalent move into the same column: entity ids,
+    /// stacks and counts are never duplicated or lost.
     pub fn advance(&mut self, world: &World, path: &Path) -> io::Result<Vec<Event>> {
         let mut candidate = self.clone();
         let mut packets = Vec::new();
-        let mut landed = false;
+        let mut persisted = false;
         for (id, item) in candidate.entries.iter_mut() {
             let x = item.position[0].div_euclid(32);
             let y = item.position[1].div_euclid(32);
             let z = item.position[2].div_euclid(32);
-            if y <= 0 || world.get(x, y - 1, z) != 0 {
+            let cell = world.get(x, y, z) >> 4;
+            let in_water = matches!(cell, 8 | 9);
+            let in_lava = matches!(cell, 10 | 11);
+            // Fluids never support an entity; only solid blocks or the
+            // bounded world floor do.
+            let supported_at = |world: &World, level: i32| -> bool {
+                level <= 0 || {
+                    let below = world.get(x, level - 1, z) >> 4;
+                    below != 0 && !matches!(below, 8..=11)
+                }
+            };
+            // Fluids never support an entity; only solid blocks or the
+            // bounded world floor do. A drop resting on solid ground even
+            // inside lava stays where it is; only water carries on rising.
+            if !in_water && supported_at(world, y) {
                 candidate.falls.remove(id);
                 continue;
             }
-            let speed = candidate
-                .falls
-                .get(id)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(FALL_ACCEL)
-                .min(FALL_TERMINAL);
-            // Step no more than one block cell per iteration so a terminal
-            // velocity fall can never tunnel through a one-block floor.
-            let mut y = item.position[1];
-            let mut remain = speed;
+            let next_y;
             let mut settled = false;
-            while remain > 0 && !settled {
-                let cell = y.div_euclid(32);
-                let step = remain.min(31);
-                let next = (y - step).max(FLOOR_OFFSET);
-                let next_cell = next.div_euclid(32);
-                if next_cell < cell {
-                    if next_cell == 0 || world.get(x, next_cell - 1, z) != 0 {
-                        y = next_cell * 32 + FLOOR_OFFSET;
-                        settled = true;
+            if in_water {
+                // Buoyancy: rise one cell while the water column continues;
+                // otherwise float on the fluid surface at that cell centre.
+                candidate.falls.remove(id);
+                if y < 255 && matches!(world.get(x, y + 1, z) >> 4, 8 | 9) {
+                    next_y = item.position[1] + WATER_RISE;
+                } else {
+                    next_y = y * 32 + FLOOR_OFFSET;
+                    settled = true; // resting on the fluid surface
+                }
+            } else {
+                // Falling (air) or sinking (lava); one cell per substep so
+                // a terminal-velocity fall can never tunnel a one-block floor.
+                let speed = if in_lava {
+                    LAVA_SINK
+                } else {
+                    candidate
+                        .falls
+                        .get(id)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(FALL_ACCEL)
+                        .min(FALL_TERMINAL)
+                };
+                let mut y = item.position[1];
+                let mut remain = speed;
+                while remain > 0 && !settled {
+                    let cell = y.div_euclid(32);
+                    let step = remain.min(31);
+                    remain -= step;
+                    let next = (y - step).max(FLOOR_OFFSET);
+                    let next_cell = next.div_euclid(32);
+                    if next_cell < cell {
+                        if supported_at(world, next_cell) {
+                            y = next_cell * 32 + FLOOR_OFFSET;
+                            settled = true;
+                        } else {
+                            y = next;
+                        }
                     } else {
                         y = next;
                     }
+                    if next == FLOOR_OFFSET {
+                        y = FLOOR_OFFSET;
+                        settled = true;
+                    }
+                }
+                next_y = y;
+                if settled {
+                    candidate.falls.remove(id);
                 } else {
-                    y = next;
+                    candidate.falls.insert(*id, speed);
                 }
-                if next == FLOOR_OFFSET {
-                    y = FLOOR_OFFSET;
-                    settled = true;
-                }
-                remain -= step;
             }
-            if y != item.position[1] {
-                item.position[1] = y;
+            if next_y != item.position[1] {
+                item.position[1] = next_y;
                 packets.push(item.teleport());
-            }
-            if settled {
+                if settled {
+                    persisted = true;
+                }
+            } else if settled {
+                // Already resting inside (or above) the fluid: nothing
+                // moved, so the sidecar already matches. Never rewrite it.
                 candidate.falls.remove(id);
-                landed = true;
-            } else {
-                candidate.falls.insert(*id, speed);
+            }
+        }
+        // 1.7.10 stack merging: resting entities that share a cell and a
+        // stack identity merge into the lowest entity id, up to the item
+        // stack limit. Deterministic order; absorbed ids emit destroy and
+        // every changed stack re-announces its item slot.
+        // Cell-and-identity key: two drops merge only when they rest in the
+        // exact same cell and share id, damage and NBT identity.
+        type MergeKey = (i32, i32, i32, i16, i16, Option<u64>);
+        let mut groups: BTreeMap<MergeKey, Vec<i32>> = BTreeMap::new();
+        for (id, item) in &candidate.entries {
+            if candidate.falls.contains_key(id) {
+                continue;
+            }
+            groups
+                .entry((
+                    item.position[0],
+                    item.position[1],
+                    item.position[2],
+                    item.stack.id,
+                    item.stack.damage,
+                    item.stack.nbt,
+                ))
+                .or_default()
+                .push(*id);
+        }
+        for (_stack_identity, mut ids) in groups {
+            if ids.len() < 2 {
+                continue;
+            }
+            ids.sort_unstable();
+            let cap = usize::from(candidate.entries[&ids[0]].stack.max_count());
+            let survivor = ids[0];
+            let mut total = usize::from(candidate.entries[&survivor].stack.count);
+            for absorbed in ids[1..].iter().copied() {
+                let taken =
+                    (cap - total).min(usize::from(candidate.entries[&absorbed].stack.count));
+                if taken == 0 {
+                    break;
+                }
+                total += taken;
+                let left = usize::from(candidate.entries[&absorbed].stack.count) - taken;
+                candidate.falls.remove(&absorbed);
+                if left == 0 {
+                    candidate.entries.remove(&absorbed);
+                    candidate.eligible_after.remove(&absorbed);
+                    packets.push(multiplayer::destroy(absorbed));
+                } else if let Some(entry) = candidate.entries.get_mut(&absorbed) {
+                    entry.stack.count = left as u8;
+                    packets.push(entry.metadata());
+                }
+                persisted = true;
+            }
+            if let Some(entry) = candidate.entries.get_mut(&survivor) {
+                if usize::from(entry.stack.count) != total {
+                    entry.stack.count = total as u8;
+                    packets.push(entry.metadata());
+                }
             }
         }
         if packets.is_empty() {
             return Ok(packets);
         }
-        if landed {
+        if persisted {
             candidate.save(path)?;
         }
         *self = candidate;
         Ok(packets)
+    }
+
+    /// Test-only: remaining pickup delay of a pooled entity. Production
+    /// pickup goes through [`GroundItems::nearby_ready_with`].
+    #[cfg(test)]
+    pub fn pickup_remaining(&self, id: i32) -> Option<Duration> {
+        self.eligible_after
+            .get(&id)
+            .map(|ready| ready.saturating_duration_since(Instant::now()))
     }
 }
 #[cfg(test)]
@@ -554,7 +716,9 @@ mod tests {
             (0, 256, 0),
             (0, 64, i32::MAX),
         ] {
-            assert!(initial.stage_put_many(&[item], location).is_err());
+            assert!(initial
+                .stage_put_many(&[item], location, DropSource::BlockBreak)
+                .is_err());
             assert!(initial.entries.is_empty());
             assert_eq!(initial.next_id, 1_000_000_000);
             let mut independent = initial.clone();
@@ -562,14 +726,17 @@ mod tests {
                 .put(
                     std::path::Path::new("invalid-drop-must-not-write.json"),
                     item,
-                    location
+                    location,
+                    DropSource::BlockBreak
                 )
                 .is_err());
             assert!(independent.entries.is_empty());
             assert_eq!(independent.next_id, 1_000_000_000);
         }
         for location in [(-WORLD_LIMIT, 0, WORLD_LIMIT - 1), (0, 255, 0)] {
-            let (candidate, new_items) = initial.stage_put_many(&[item], location).unwrap();
+            let (candidate, new_items) = initial
+                .stage_put_many(&[item], location, DropSource::BlockBreak)
+                .unwrap();
             assert_eq!(new_items.len(), 1);
             assert_eq!(candidate.entries.len(), 1);
             assert_eq!(new_items[0].position, drop_position(location).unwrap());
@@ -592,7 +759,9 @@ mod tests {
             nbt: None,
         };
         let entries = [(one, (-3, 64, 5)), (two, (9, 65, -8))];
-        let (staged, spawned) = ground.stage_put_at_positions(&entries).unwrap();
+        let (staged, spawned) = ground
+            .stage_put_at_positions(&entries, DropSource::BlockBreak)
+            .unwrap();
         assert_eq!(spawned.len(), 2);
         assert_eq!(spawned[0].position, drop_position(entries[0].1).unwrap());
         assert_eq!(spawned[1].position, drop_position(entries[1].1).unwrap());
@@ -600,10 +769,15 @@ mod tests {
         assert_eq!(ground.items().count(), 0);
         assert_eq!(staged.items().count(), 2);
         assert!(ground
-            .stage_put_at_positions(&[(one, (0, 64, 0)), (two, (WORLD_LIMIT, 64, 0))],)
+            .stage_put_at_positions(
+                &[(one, (0, 64, 0)), (two, (WORLD_LIMIT, 64, 0))],
+                DropSource::BlockBreak,
+            )
             .is_err());
         assert_eq!(ground.items().count(), 0);
-        assert!(ground.stage_put_many(&[], (WORLD_LIMIT, 64, 0)).is_err());
+        assert!(ground
+            .stage_put_many(&[], (WORLD_LIMIT, 64, 0), DropSource::BlockBreak)
+            .is_err());
     }
 
     #[test]
@@ -623,7 +797,7 @@ mod tests {
             nbt: None,
         };
         let (mut ground, spawned) = GroundItems::default()
-            .stage_put_many(&[apple, cobble], (0, 64, 0))
+            .stage_put_many(&[apple, cobble], (0, 64, 0), DropSource::BlockBreak)
             .unwrap();
         for item in &spawned {
             ground
@@ -691,6 +865,7 @@ mod tests {
                     nbt: None,
                 }],
                 (0, 64, 0),
+                DropSource::BlockBreak,
             )
             .unwrap();
         let id = added[0].id;
@@ -731,7 +906,9 @@ mod tests {
             damage: 0,
             nbt: None,
         };
-        let (initial, spawned) = original.stage_put_many(&[stack], (0, 65, 0)).unwrap();
+        let (initial, spawned) = original
+            .stage_put_many(&[stack], (0, 65, 0), DropSource::BlockBreak)
+            .unwrap();
         let id = spawned[0].id;
         assert!(initial.stage_take_amount(id, 0).is_err());
         assert!(initial.stage_take_amount(id, 6).is_err());
@@ -776,7 +953,9 @@ mod tests {
         source.save(&inventory_file).unwrap();
 
         let empty_ground = GroundItems::default();
-        let (staged_ground, spawned) = empty_ground.stage_put_many(&[stack], (0, 65, 0)).unwrap();
+        let (staged_ground, spawned) = empty_ground
+            .stage_put_many(&[stack], (0, 65, 0), DropSource::BlockBreak)
+            .unwrap();
         let mut debited = source.clone();
         debited.clear_possessions();
         journal::commit(
@@ -891,6 +1070,7 @@ mod tests {
                     nbt: None,
                 },
                 (0, 63, 0),
+                DropSource::BlockBreak,
             )
             .unwrap();
         assert_eq!(GroundItems::load(&path).unwrap().items().count(), 1);
@@ -929,6 +1109,7 @@ mod tests {
                     nbt: None,
                 },
                 (0, 63, 0),
+                DropSource::BlockBreak,
             )
             .unwrap()
             .id;
@@ -985,6 +1166,7 @@ mod tests {
                     nbt: None,
                 },
                 (1, 65, -1),
+                DropSource::BlockBreak,
             )
             .unwrap();
         assert_eq!(
@@ -1058,7 +1240,9 @@ mod tests {
         let world = gravity_world();
         let path = gravity_dir("fall").join("drops.json");
         let mut ground = GroundItems::default();
-        let item = ground.put(&path, gravity_stack(), (4, 70, 4)).unwrap();
+        let item = ground
+            .put(&path, gravity_stack(), (4, 70, 4), DropSource::BlockBreak)
+            .unwrap();
         assert_eq!(item.position, [4 * 32 + 16, 70 * 32 + 16, 4 * 32 + 16]);
         // Flat terrain tops out at y=63, so a free entity rests at 64.5.
         const REST_Y: i32 = 64 * 32 + 16;
@@ -1109,9 +1293,13 @@ mod tests {
         let path = gravity_dir("rest").join("drops.json");
         let mut ground = GroundItems::default();
         // Grass at y=63 supports the drop at y=64.
-        ground.put(&path, gravity_stack(), (4, 64, 4)).unwrap();
+        ground
+            .put(&path, gravity_stack(), (4, 64, 4), DropSource::BlockBreak)
+            .unwrap();
         // The world floor is a support too (bounded-world contract).
-        ground.put(&path, gravity_stack(), (9, 0, 9)).unwrap();
+        ground
+            .put(&path, gravity_stack(), (9, 0, 9), DropSource::BlockBreak)
+            .unwrap();
         for _ in 0..5 {
             assert!(ground.advance(&world, &path).unwrap().is_empty());
         }
@@ -1128,7 +1316,9 @@ mod tests {
         let world = gravity_world();
         let path = gravity_dir("restart").join("drops.json");
         let mut ground = GroundItems::default();
-        let spawned = ground.put(&path, gravity_stack(), (9, 100, 9)).unwrap();
+        let spawned = ground
+            .put(&path, gravity_stack(), (9, 100, 9), DropSource::BlockBreak)
+            .unwrap();
         let mut airborne = 0;
         for _ in 0..3 {
             if !ground.advance(&world, &path).unwrap().is_empty() {
@@ -1153,6 +1343,391 @@ mod tests {
         assert_eq!(entries[0].id, spawned.id);
         assert_eq!(entries[0].stack, gravity_stack(), "the stack is intact");
         assert_eq!(entries[0].position[1], 64 * 32 + 16, "same landing");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// REG-152 / #856 (fluids part): water carries an unsupported drop up
+    /// to the top fluid cell and lets it float; lava sinks a drop slowly
+    /// and NEVER destroys the stack. Fluids are never a support: an item
+    /// above a water column keeps falling into the water instead of
+    /// resting on the surface.
+    #[test]
+    fn water_floats_a_drop_to_the_fluid_top_and_lava_sinks_it_without_destroying_it() {
+        let world_file = gravity_dir("fluids").join("fluids.irw");
+        let mut world = World::new();
+        // A 3-block water column above the flat surface (grass at y=63).
+        for level in 64..=66 {
+            world
+                .update_and_save(&world_file, 5, level, 5, 8 << 4)
+                .unwrap();
+        }
+        // A 2-block lava column with solid ground under it.
+        world
+            .update_and_save(&world_file, 7, 65, 7, 10 << 4)
+            .unwrap();
+        world
+            .update_and_save(&world_file, 7, 64, 7, 10 << 4)
+            .unwrap();
+        let path = world_file.with_extension("drops.json");
+        let mut ground = GroundItems::default();
+        let floater = ground
+            .put(&path, gravity_stack(), (5, 64, 5), DropSource::BlockBreak)
+            .unwrap();
+        let sinker = ground
+            .put(&path, gravity_stack(), (7, 65, 7), DropSource::BlockBreak)
+            .unwrap();
+        // The lava drop sinks slowly: 32 /32-units need at least 16 ticks,
+        // so it must NOT have landed on the first two steps.
+        for _ in 0..2 {
+            let packets = ground.advance(&world, &path).unwrap();
+            assert!(!packets.is_empty(), "both drops move on early ticks");
+            for packet in &packets {
+                assert_eq!(packet.id, 0x28, "fluid motion uses teleports");
+            }
+        }
+        let sink_y = ground
+            .items()
+            .find(|item| item.id == sinker.id)
+            .unwrap()
+            .position[1];
+        assert!(
+            sink_y > 64 * 32 + 16,
+            "lava sinks slowly: {sink_y} still above the floor cell"
+        );
+        // Run to equilibrium.
+        for _ in 0..400 {
+            if ground.advance(&world, &path).unwrap().is_empty() {
+                break;
+            }
+        }
+        let final_items: std::collections::BTreeMap<i32, &GroundItem> =
+            ground.items().map(|item| (item.id, item)).collect();
+        // Water drop floats on the TOP fluid cell centre (66.5 → 2128).
+        assert_eq!(
+            final_items[&floater.id].position[1],
+            66 * 32 + FLOOR_OFFSET,
+            "a water drop rests at the fluid top"
+        );
+        // Lava drop rests inside the lowest lava cell (64.5), unharmed.
+        let rested = final_items[&sinker.id];
+        assert_eq!(rested.position[1], 64 * 32 + FLOOR_OFFSET);
+        assert_eq!(rested.stack, gravity_stack(), "lava never destroys drops");
+        assert_eq!(ground.items().count(), 2, "no fluid entity leakage");
+        let _ = fs::remove_dir_all(world_file.parent().unwrap());
+    }
+
+    /// A water surface is NOT a support: a drop above the column falls into
+    /// the water and ends afloat at the fluid top, not on the surface. A
+    /// distinct item id keeps it from merging with the other floater.
+    #[test]
+    fn a_drop_above_water_falls_in_and_floats_at_the_fluid_top() {
+        let world_file = gravity_dir("float").join("fluid.irw");
+        let mut world = World::new();
+        for level in 64..=66 {
+            world
+                .update_and_save(&world_file, 5, level, 5, 8 << 4)
+                .unwrap();
+        }
+        let path = world_file.with_extension("drops.json");
+        let mut ground = GroundItems::default();
+        let dropped = ground
+            .put(
+                &path,
+                Stack {
+                    id: 4,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                },
+                (5, 68, 5),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        // Immediately airborne (the cell is water, so it is unsupported).
+        ground.advance(&world, &path).unwrap();
+        let landed = ground.items().find(|item| item.id == dropped.id).unwrap();
+        assert!(
+            landed.position[1] < 68 * 32 + FLOOR_OFFSET,
+            "a water surface is not a support"
+        );
+        for _ in 0..400 {
+            if ground.advance(&world, &path).unwrap().is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            ground
+                .items()
+                .find(|item| item.id == dropped.id)
+                .unwrap()
+                .position[1],
+            66 * 32 + FLOOR_OFFSET,
+            "the surface drop ends afloat at the fluid top"
+        );
+        let _ = fs::remove_dir_all(world_file.parent().unwrap());
+    }
+
+    /// REG-152 / #856 (merging part): resting drops in the same cell with
+    /// an identical (id, damage, NBT) stack merge up to the stack limit.
+    /// A fully absorbed entity emits a destroy packet, every changed count
+    /// is re-announced, and the sidecar is persisted before the packets.
+    #[test]
+    fn resting_identical_stacks_merge_up_to_the_stack_limit() {
+        let world = gravity_world();
+        let path = gravity_dir("merge").join("drops.json");
+        let mut ground = GroundItems::default();
+        // 60 + 4 exactly fills one 64-stack: the higher entity is absorbed.
+        let survivor = ground
+            .put(
+                &path,
+                Stack {
+                    id: 3,
+                    count: 60,
+                    damage: 0,
+                    nbt: None,
+                },
+                (2, 64, 2),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        let absorbed = ground
+            .put(
+                &path,
+                Stack {
+                    id: 3,
+                    count: 4,
+                    damage: 0,
+                    nbt: None,
+                },
+                (2, 64, 2),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        // 40 + 50 exceeds one stack: both entities survive, split 64 + 16.
+        ground
+            .put(
+                &path,
+                Stack {
+                    id: 4,
+                    count: 40,
+                    damage: 0,
+                    nbt: None,
+                },
+                (3, 64, 3),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        ground
+            .put(
+                &path,
+                Stack {
+                    id: 4,
+                    count: 50,
+                    damage: 0,
+                    nbt: None,
+                },
+                (3, 64, 3),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        let packets = ground.advance(&world, &path).unwrap();
+        let destroys: Vec<&Event> = packets.iter().filter(|e| e.id == 0x13).collect();
+        assert_eq!(destroys.len(), 1, "only the fully absorbed entity dies");
+        assert_eq!(
+            i32::from_be_bytes(destroys[0].body[1..5].try_into().unwrap()),
+            absorbed.id,
+            "the higher id is absorbed"
+        );
+        assert_eq!(
+            packets.iter().filter(|e| e.id == 0x1c).count(),
+            3,
+            "survivor 64, split remainder 16 and split survivor 64 re-announce"
+        );
+        let items: Vec<&GroundItem> = ground.items().collect();
+        assert_eq!(items.len(), 3, "90 dirt cannot fit in one 64-stack");
+        let counts: Vec<u8> = items.iter().map(|item| item.stack.count).collect();
+        assert_eq!(
+            counts.iter().map(|count| *count as usize).sum::<usize>(),
+            154
+        );
+        assert_eq!(counts.iter().filter(|count| **count == 64).count(), 2);
+        assert!(
+            items
+                .iter()
+                .any(|item| item.id == survivor.id && item.stack.count == 64),
+            "the lowest id fills first"
+        );
+        assert!(!items.iter().any(|item| item.id == absorbed.id));
+        // The sidecar matches the merged state before clients saw packets.
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["entries"].as_object().unwrap().len(), 3);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Drops that merely share a cell must NOT merge across item type,
+    /// damage value, or NBT identity. Only the stack limit splits a merge
+    /// into two surviving entities.
+    #[test]
+    fn different_items_damage_or_nbt_never_merge() {
+        let world = gravity_world();
+        let path = gravity_dir("merge-identity").join("drops.json");
+        let mut ground = GroundItems::default();
+        ground
+            .put(
+                &path,
+                Stack {
+                    id: 3,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                },
+                (6, 64, 6),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        ground
+            .put(
+                &path,
+                Stack {
+                    id: 12,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                },
+                (6, 64, 6),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        ground
+            .put(
+                &path,
+                Stack {
+                    id: 276,
+                    count: 1,
+                    damage: 3,
+                    nbt: None,
+                },
+                (6, 64, 6),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        ground
+            .put(
+                &path,
+                Stack {
+                    id: 276,
+                    count: 1,
+                    damage: 3,
+                    nbt: None,
+                },
+                (6, 64, 6),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        // Different NBT identity: two written books must never merge.
+        let tag_a = fastnbt::Value::Compound(std::collections::HashMap::from([(
+            "t".to_string(),
+            fastnbt::Value::String("a".to_string()),
+        )]));
+        let tag_b = fastnbt::Value::Compound(std::collections::HashMap::from([(
+            "t".to_string(),
+            fastnbt::Value::String("b".to_string()),
+        )]));
+        let nbt_a = crate::item_nbt::from_value(&tag_a).unwrap();
+        let nbt_b = crate::item_nbt::from_value(&tag_b).unwrap();
+        ground
+            .put(
+                &path,
+                Stack {
+                    id: 340,
+                    count: 1,
+                    damage: 0,
+                    nbt: Some(nbt_a),
+                },
+                (6, 64, 6),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        ground
+            .put(
+                &path,
+                Stack {
+                    id: 340,
+                    count: 1,
+                    damage: 0,
+                    nbt: Some(nbt_b),
+                },
+                (6, 64, 6),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        let packets = ground.advance(&world, &path).unwrap();
+        assert!(
+            packets.is_empty(),
+            "no merges across identities: {packets:?}"
+        );
+        assert_eq!(ground.items().count(), 6);
+        // Identical enchanted swords (max stack 1) still never merge.
+        let mut swords = GroundItems::default();
+        swords
+            .put(
+                &path,
+                Stack {
+                    id: 276,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                },
+                (7, 64, 7),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        swords
+            .put(
+                &path,
+                Stack {
+                    id: 276,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                },
+                (7, 64, 7),
+                DropSource::BlockBreak,
+            )
+            .unwrap();
+        assert!(
+            swords.advance(&world, &path).unwrap().is_empty(),
+            "cap-1 items never merge"
+        );
+        assert_eq!(swords.items().count(), 2);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// REG-152 / #856 (pickup delay part): 1.7.10 PickupDelay depends on
+    /// the drop source. Block-break drops become collectable after 10
+    /// ticks; Q / Ctrl+Q throws after 40 ticks.
+    #[test]
+    fn pickup_delay_follows_the_drop_source() {
+        let path = gravity_dir("delay").join("drops.json");
+        let mut ground = GroundItems::default();
+        let mined = ground
+            .put(&path, gravity_stack(), (8, 64, 8), DropSource::BlockBreak)
+            .unwrap();
+        let thrown = ground
+            .put(&path, gravity_stack(), (8, 64, 9), DropSource::PlayerThrow)
+            .unwrap();
+        let mined_delay = ground.pickup_remaining(mined.id).unwrap();
+        let thrown_delay = ground.pickup_remaining(thrown.id).unwrap();
+        assert!(
+            mined_delay < Duration::from_millis(900),
+            "block breaks become collectable quickly: {mined_delay:?}"
+        );
+        assert!(
+            thrown_delay > Duration::from_millis(1_500),
+            "throws honour the 40-tick delay: {thrown_delay:?}"
+        );
+        assert!(thrown_delay > mined_delay, "sources are distinguished");
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }

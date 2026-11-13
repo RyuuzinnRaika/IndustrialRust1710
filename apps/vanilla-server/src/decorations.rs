@@ -585,8 +585,9 @@ mod tests {
             } else if id == 140 {
                 drops.push(plant);
             }
-            let (next_ground, spawned) =
-                GroundItems::default().stage_put_many(&drops, pos).unwrap();
+            let (next_ground, spawned) = GroundItems::default()
+                .stage_put_many(&drops, pos, crate::ground_items::DropSource::BlockBreak)
+                .unwrap();
             assert_eq!(spawned.len(), drops.len());
             // Both in-memory sources remain live and unchanged before commit.
             assert_eq!(world.get(pos.0, pos.1, pos.2) >> 4, id);

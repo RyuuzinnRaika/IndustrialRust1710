@@ -1978,7 +1978,10 @@ impl World {
                                 .iter()
                                 .map(|drop| (drop.stack, drop.pos))
                                 .collect::<Vec<_>>();
-                            let (staged, spawned) = pool.stage_put_at_positions(&positions)?;
+                            let (staged, spawned) = pool.stage_put_at_positions(
+                                &positions,
+                                crate::ground_items::DropSource::BlockBreak,
+                            )?;
                             changes.push((*ground_path, staged.encoded()?));
                             next_pool = Some((staged, spawned));
                         }
@@ -4632,7 +4635,11 @@ mod tests {
                 nbt: None,
             };
             let (next_ground, entities) = ground
-                .stage_put_many(&[block_drop, source], (0, 64, 0))
+                .stage_put_many(
+                    &[block_drop, source],
+                    (0, 64, 0),
+                    crate::ground_items::DropSource::BlockBreak,
+                )
                 .unwrap();
             assert_eq!(entities.len(), 2);
             let (storage_file, storage_bytes) = match id {
@@ -4800,7 +4807,11 @@ mod tests {
             let mut all_drops = vec![block_item];
             all_drops.extend(contents.iter().copied());
             let (staged_ground, _) = GroundItems::default()
-                .stage_put_many(&all_drops, (0, 64, 0))
+                .stage_put_many(
+                    &all_drops,
+                    (0, 64, 0),
+                    crate::ground_items::DropSource::BlockBreak,
+                )
                 .unwrap();
             crate::journal::commit(
                 &journal_path,
@@ -5778,7 +5789,7 @@ mod tests {
         // Ground item pool has 512 slots in this server.
         let filled = vec![(item, (0, 64, 0)); 512];
         let (mut ground, _) = GroundItems::default()
-            .stage_put_at_positions(&filled)
+            .stage_put_at_positions(&filled, crate::ground_items::DropSource::BlockBreak)
             .unwrap();
         assert!(!ground.has_capacity_for(1));
         let mut world = World::new();
@@ -5977,7 +5988,10 @@ mod tests {
             nbt: None,
         };
         let (mut ground, _) = GroundItems::default()
-            .stage_put_at_positions(&vec![(filler, (0, 64, 0)); 511])
+            .stage_put_at_positions(
+                &vec![(filler, (0, 64, 0)); 511],
+                crate::ground_items::DropSource::BlockBreak,
+            )
             .unwrap();
         let (changed, spawned) = w
             .block_tick_with_ground_and_decorations(

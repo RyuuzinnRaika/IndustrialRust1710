@@ -90,7 +90,7 @@ use experience::Experience;
 use fishing::Fishing;
 use furnaces::{Furnace, Furnaces, Position as FurnacePosition};
 use game_rules::GameRules;
-use ground_items::GroundItems;
+use ground_items::{DropSource, GroundItems};
 use hanging::Hangings;
 use hoppers::{Hoppers, Position as HopperPosition};
 use inventory::{Inventory, Stack};
@@ -2524,7 +2524,7 @@ fn play(
                     if ground.is_full() {
                         break;
                     }
-                    let item = ground.put(ground_path, stack, at)?;
+                    let item = ground.put(ground_path, stack, at, DropSource::BlockBreak)?;
                     for event in item.spawn() {
                         hub.broadcast(event);
                     }
@@ -3228,8 +3228,11 @@ fn play(
                                 if !ground.has_capacity_for(drops.len()) {
                                     continue;
                                 }
-                                let (staged_ground, spawned) =
-                                    ground.stage_put_many(&drops, removed.drop_position())?;
+                                let (staged_ground, spawned) = ground.stage_put_many(
+                                    &drops,
+                                    removed.drop_position(),
+                                    DropSource::BlockBreak,
+                                )?;
                                 journal::commit(
                                     &world_path.with_extension("pending-txn.json"),
                                     &[
@@ -3417,7 +3420,12 @@ fn play(
                                         player.y.floor() as i32,
                                         player.z.floor() as i32,
                                     );
-                                    let dropped = ground.put(ground_path, wool, at)?;
+                                    let dropped = ground.put(
+                                        ground_path,
+                                        wool,
+                                        at,
+                                        DropSource::BlockBreak,
+                                    )?;
                                     for packet in dropped.spawn() {
                                         hub.broadcast(packet);
                                     }
@@ -3469,6 +3477,7 @@ fn play(
                                             nbt: None,
                                         }],
                                         at,
+                                        DropSource::BlockBreak,
                                     )?;
                                     journal::commit(
                                         &journal_path,
@@ -3546,7 +3555,8 @@ fn play(
                                 .lock()
                                 .map_err(|_| bad("ground items mutex poisoned"))?;
                             if !ground.is_full() {
-                                let dropped = ground.put(ground_path, stack, at)?;
+                                let dropped =
+                                    ground.put(ground_path, stack, at, DropSource::BlockBreak)?;
                                 for packet in dropped.spawn() {
                                     hub.broadcast(packet);
                                 }
@@ -4286,7 +4296,12 @@ fn play(
                                     // duplication; failure between saves may lose items.
                                     candidate.save(inventory_path)?;
                                     *inventory = candidate;
-                                    let item = ground.put(ground_path, stack, target)?;
+                                    let item = ground.put(
+                                        ground_path,
+                                        stack,
+                                        target,
+                                        DropSource::PlayerThrow,
+                                    )?;
                                     send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
                                     for packet in item.spawn() {
                                         hub.broadcast(packet);
@@ -4525,8 +4540,12 @@ fn play(
                                             // Insufficient entity capacity refuses the whole
                                             // break and sends an authoritative S23 below.
                                             if ground.has_capacity_for(drops.len()) {
-                                                let (next_ground, spawned) =
-                                                    ground.stage_put_many(&drops, target)?;
+                                                let (next_ground, spawned) = ground
+                                                    .stage_put_many(
+                                                        &drops,
+                                                        target,
+                                                        DropSource::BlockBreak,
+                                                    )?;
                                                 if let Some(next_world) =
                                                     w.stage_mining_removal(x, y, z)?
                                                 {
@@ -4697,8 +4716,12 @@ fn play(
                                                 .lock()
                                                 .map_err(|_| bad("ground items lock poisoned"))?;
                                             if ground.has_capacity_for(drops.len()) {
-                                                let (staged_ground, spawned) =
-                                                    ground.stage_put_many(&drops, target)?;
+                                                let (staged_ground, spawned) = ground
+                                                    .stage_put_many(
+                                                        &drops,
+                                                        target,
+                                                        DropSource::BlockBreak,
+                                                    )?;
                                                 if let Some(staged_world) =
                                                     w.stage_mining_removal(x, y, z)?
                                                 {
@@ -4801,10 +4824,11 @@ fn play(
                                                 let staged_drops = if drop_stacks.is_empty() {
                                                     None
                                                 } else {
-                                                    Some(
-                                                        ground
-                                                            .stage_put_many(&drop_stacks, target)?,
-                                                    )
+                                                    Some(ground.stage_put_many(
+                                                        &drop_stacks,
+                                                        target,
+                                                        DropSource::BlockBreak,
+                                                    )?)
                                                 };
                                                 let mut candidate = inventory.clone();
                                                 let wore =
@@ -5125,8 +5149,11 @@ fn play(
                                                         player.y.floor() as i32,
                                                         player.z.floor() as i32,
                                                     );
-                                                    let (staged, dropped) =
-                                                        ground.stage_put_many(&[loot], at)?;
+                                                    let (staged, dropped) = ground.stage_put_many(
+                                                        &[loot],
+                                                        at,
+                                                        DropSource::BlockBreak,
+                                                    )?;
                                                     journal::commit(
                                                         &world_path
                                                             .with_extension("pending-txn.json"),
@@ -6524,7 +6551,8 @@ fn play(
                                 (location.2.floor() as i32)
                                     .clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
                             );
-                            let (next_ground, spawned) = ground.stage_put_many(&[stack], at)?;
+                            let (next_ground, spawned) =
+                                ground.stage_put_many(&[stack], at, DropSource::PlayerThrow)?;
                             let mut writes = vec![
                                 (inventory_path.as_path(), candidate.encoded()?),
                                 (ground_path, next_ground.encoded()?),
@@ -6576,7 +6604,8 @@ fn play(
                                 (location.2.floor() as i32)
                                     .clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
                             );
-                            let (next_ground, spawned) = ground.stage_put_many(&[stack], at)?;
+                            let (next_ground, spawned) =
+                                ground.stage_put_many(&[stack], at, DropSource::PlayerThrow)?;
                             journal::commit(
                                 &world_path.with_extension("pending-txn.json"),
                                 &[
@@ -7346,7 +7375,8 @@ fn commit_death_drops(
         (location.1.floor() as i32).clamp(0, 254),
         (location.2.floor() as i32).clamp(-world::WORLD_LIMIT, world::WORLD_LIMIT - 1),
     );
-    let (staged_ground, spawned) = ground.stage_put_many(&possessions, block)?;
+    let (staged_ground, spawned) =
+        ground.stage_put_many(&possessions, block, DropSource::BlockBreak)?;
     journal::commit(
         &world_path.with_extension("pending-txn.json"),
         &[
@@ -10297,14 +10327,17 @@ fn main() -> io::Result<()> {
                                 if ground.is_full() {
                                     continue;
                                 }
-                                let (next_ground, spawned) =
-                                    match ground.stage_put_many(&[stack], dest) {
-                                        Ok(result) => result,
-                                        Err(error) => {
-                                            eprintln!("DEVICE GROUND ITEM ERROR: {error}");
-                                            continue;
-                                        }
-                                    };
+                                let (next_ground, spawned) = match ground.stage_put_many(
+                                    &[stack],
+                                    dest,
+                                    DropSource::BlockBreak,
+                                ) {
+                                    Ok(result) => result,
+                                    Err(error) => {
+                                        eprintln!("DEVICE GROUND ITEM ERROR: {error}");
+                                        continue;
+                                    }
+                                };
                                 let device_bytes = match updated.encoded() {
                                     Ok(bytes) => bytes,
                                     Err(error) => {
