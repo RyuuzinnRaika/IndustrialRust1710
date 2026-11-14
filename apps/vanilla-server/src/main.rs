@@ -1298,6 +1298,17 @@ fn tick_survival_vitals(vitals: &mut Vitals, steps: u64, difficulty: &AtomicU8) 
     vitals.tick_with_difficulty(steps, difficulty.load(Ordering::Acquire))
 }
 
+/// Void begins below Y=-64 in Java 1.7.10. The server applies bounded
+/// periodic damage rather than rejecting negative-Y movement as spoofing.
+fn void_damage_tick(vitals: &mut Vitals, y: f64, now: u64, last: &mut u64) -> bool {
+    if vitals.health <= 0.0 || !y.is_finite() || y >= -64.0 || now.saturating_sub(*last) < 10 {
+        return false;
+    }
+    *last = now;
+    vitals.health = (vitals.health - 4.0).max(0.0);
+    true
+}
+
 fn sprint_action(current: bool, action: i32, food: i32) -> bool {
     // Hunger can drop during a sprint (or due to status effects), without
     // any corresponding client Stop Sprinting action. Invalidate that state
@@ -1344,6 +1355,10 @@ fn commit_death_experience(
     };
     *experience = Experience::default();
     experience.save(experience_path)?;
+    // Void death clears XP without generating unreachable XP orbs.
+    if death_position.y < -64.0 {
+        return Ok(None);
+    }
     let orb = mobs
         .lock()
         .map_err(|_| bad("mob mutex poisoned"))?
@@ -1767,6 +1782,7 @@ fn play(
     let mut last_plate_refresh_tick = clock.ticks();
     let mut last_map_tick = clock.ticks();
     let mut last_arrow_damage_tick: Option<u64> = None;
+    let mut last_void_damage_tick = clock.ticks();
     loop {
         // The Hub mutex atomically resolves the Overworld sleep quorum.
         // One player sleeping never advances time while another stays awake.
@@ -2387,6 +2403,21 @@ fn play(
             admission_check = Instant::now();
         }
         let now_tick = clock.ticks();
+        let before_void_health = vitals.health;
+        if survival && void_damage_tick(vitals, player.y, now_tick, &mut last_void_damage_tick) {
+            death_log::record_fatal(
+                &mut fatal_hit,
+                before_void_health,
+                vitals.health,
+                DeathCause::Void,
+            );
+            player.save_state_in_dimension(
+                player_path,
+                *vitals,
+                session_dimension.protocol_id() as i32,
+            )?;
+            send(s, 0x06, &health_packet(*vitals))?;
+        }
         let boat_mount = boats
             .lock()
             .map_err(|_| bad("boats mutex poisoned"))?
@@ -3047,15 +3078,25 @@ fn play(
                 }
             }
             if !keep_inventory {
-                commit_death_drops(
-                    inventory,
-                    inventory_path,
-                    ground_items,
-                    ground_path,
-                    world_path,
-                    hub,
-                    location,
-                )?;
+                if player.y < -64.0 {
+                    // Vanilla void deaths destroy possessions rather than
+                    // materializing unreachable item entities below bedrock.
+                    // Persist this one-file debit before publishing death.
+                    let mut cleared = inventory.clone();
+                    cleared.clear_possessions();
+                    cleared.save(inventory_path)?;
+                    *inventory = cleared;
+                } else {
+                    commit_death_drops(
+                        inventory,
+                        inventory_path,
+                        ground_items,
+                        ground_path,
+                        world_path,
+                        hub,
+                        location,
+                    )?;
+                }
             }
             if hardcore {
                 // Persist the dead state before ending the connection. Future
@@ -7158,15 +7199,22 @@ fn play(
                         .map_err(|_| bad("game rules mutex poisoned"))?
                         .keep_inventory();
                     if !keep_inventory {
-                        commit_death_drops(
-                            inventory,
-                            inventory_path,
-                            ground_items,
-                            ground_path,
-                            world_path,
-                            hub,
-                            location,
-                        )?;
+                        if player.y < -64.0 {
+                            let mut cleared = inventory.clone();
+                            cleared.clear_possessions();
+                            cleared.save(inventory_path)?;
+                            *inventory = cleared;
+                        } else {
+                            commit_death_drops(
+                                inventory,
+                                inventory_path,
+                                ground_items,
+                                ground_path,
+                                world_path,
+                                hub,
+                                location,
+                            )?;
+                        }
                     }
                     // Preserve the death site before changing the saved player
                     // position. XP orbs belong beside the dropped inventory,
@@ -11436,6 +11484,31 @@ mod reg147_keep_inventory_xp_tests {
             "a failed XP save must not leave a partial XP file"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reg150_void_death_tests {
+    use super::{void_damage_tick, DeathCause, PlayerPosition, Vitals};
+
+    #[test]
+    fn negative_y_is_valid_until_bounded_floor_and_void_damages_once_per_interval() {
+        for y in [-0.01, -40.0, -65.0, -127.5] {
+            assert!(PlayerPosition { x: 0.5, y, z: 0.5 }.is_valid());
+        }
+        assert!(!PlayerPosition { x: 0.5, y: -512.0, z: 0.5 }.is_valid());
+        let mut vitals = Vitals::default();
+        let mut last = 0;
+        assert!(!void_damage_tick(&mut vitals, -64.0, 100, &mut last));
+        assert!(!void_damage_tick(&mut vitals, -64.1, 9, &mut last));
+        for tick in [10, 20, 30, 40, 50] {
+            assert!(void_damage_tick(&mut vitals, -65.0, tick, &mut last));
+            assert!(!void_damage_tick(&mut vitals, -65.0, tick, &mut last));
+        }
+        assert_eq!(vitals.health, 0.0);
+        assert!(!void_damage_tick(&mut vitals, -65.0, 60, &mut last));
+        assert_eq!(DeathCause::Void.code(), "void");
+        assert!(DeathCause::Void.message("TestPlayer").contains("fell out of the world"));
     }
 }
 
