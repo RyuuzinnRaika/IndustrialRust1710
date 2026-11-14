@@ -1730,4 +1730,40 @@ mod tests {
         assert!(thrown_delay > mined_delay, "sources are distinguished");
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
+    /// REG-153 / #856: the world store holds at most MAX_DROPS entities.
+    /// A full store must refuse new single or batch drops without any
+    /// mutation, and collecting one entity must free exactly one slot.
+    #[test]
+    fn the_store_refuses_drops_beyond_the_entity_cap() {
+        let path = gravity_dir("cap").join("drops.json");
+        let mut ground = GroundItems::default();
+        for column in 0..MAX_DROPS as i32 {
+            ground
+                .put(
+                    &path,
+                    gravity_stack(),
+                    (column, 64, 0),
+                    DropSource::BlockBreak,
+                )
+                .unwrap();
+        }
+        assert_eq!(ground.entries.len(), MAX_DROPS);
+        assert!(!ground.has_capacity_for(1));
+        assert!(ground.has_capacity_for(0));
+        assert!(ground
+            .stage_put_many(&[gravity_stack()], (0, 64, 1), DropSource::BlockBreak)
+            .is_err());
+        assert!(ground
+            .stage_put_many(
+                &[gravity_stack(), gravity_stack()],
+                (1, 64, 1),
+                DropSource::BlockBreak
+            )
+            .is_err());
+        assert_eq!(ground.entries.len(), MAX_DROPS, "rejections do not mutate");
+        assert!(ground.take(&path, 1_000_000_001).unwrap().is_some());
+        assert!(ground.has_capacity_for(1));
+        assert!(!ground.has_capacity_for(2));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
 }
