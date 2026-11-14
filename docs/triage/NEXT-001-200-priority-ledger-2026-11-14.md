@@ -31,10 +31,11 @@ Scope: [NEXT Issue search](https://github.com/RyuuzinnRaika/IndustrialRust1710/i
 | NEXT-003 | [#1188](https://github.com/RyuuzinnRaika/IndustrialRust1710/pull/1188) | pre-admission identity lease | Draft / NOT_RUN |
 | NEXT-017 | [#1189](https://github.com/RyuuzinnRaika/IndustrialRust1710/pull/1189) | WriteZero transport regression | Draft / NOT_RUN |
 | NEXT-164 | [#1191](https://github.com/RyuuzinnRaika/IndustrialRust1710/pull/1191) | cleanup of failed prepared redo journal | Draft / NOT_RUN |
+| NEXT-193 | [#1193](https://github.com/RyuuzinnRaika/IndustrialRust1710/pull/1193) | copy-only corrupt-world boot integrity verifier | Draft; Python verifier unit tests 5 PASS; actual Rust server NOT_RUN |
 
 ## Batch progress (2026-11-14)
 
-- Five Draft PRs proposed: #1186–#1189, #1191. None passed Rust/vanilla-client validation here and none was merged.
+- Six Draft PRs proposed: #1186–#1189, #1191 and #1193. None passed Rust/vanilla-client validation here and none was merged. Python-only verifier unit tests for #1193 passed 5/5 on the working copy.
 - Closed as not_planned after source-based scope audit: [NEXT-163 #1146](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/1146) (no transaction IDs in journal v1), [NEXT-172 #1155](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/1155) (whitelist has no server-side save operation).
 - Clarified redo-vs-rollback acceptance criteria in [NEXT-162 #1145](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/1145). Static audits commented on NEXT-009, NEXT-011 and NEXT-021.
 - Remaining unverified cases must remain open. Closing 200 issues by fiat would be misleading and unsafe.
@@ -53,7 +54,7 @@ Scope: [NEXT Issue search](https://github.com/RyuuzinnRaika/IndustrialRust1710/i
 | 8 | W0 Data safety | P0 | [#1075 NEXT-092 複数ItemEntityを連続拾得した際の容量上限処理](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/1075) | Open · reproduce/compare existing code, then fix or document PASS |
 | 9 | W0 Data safety | P0 | [#1094 NEXT-111 破壊確定と工具耐久ゼロ到達が同Tickで発生](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/1094) | Open · reproduce/compare existing code, then fix or document PASS |
 | 10 | W0 Data safety | P0 | [#1155 NEXT-172 Whitelist保存失敗時にメモリだけ許可状態が変わらないこと](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/1155) | Closed · not_planned (whitelist is read-only; reload is fail-closed) |
-| 11 | W0 Data safety | P0 | [#1176 NEXT-193 破損ワールドでの起動失敗後に元データが不変か確認](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/1176) | Open · reproduce/compare existing code, then fix or document PASS |
+| 11 | W0 Data safety | P0 | [#1176 NEXT-193 破損ワールドでの起動失敗後に元データが不変か確認](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/1176) | Draft PR [#1193](https://github.com/RyuuzinnRaika/IndustrialRust1710/pull/1193); Python verifier tests 5 PASS / native Rust NOT_RUN |
 | 12 | W1 Protocol & auth | P0 | [#992 NEXT-009 Authentication成功後Play初期化失敗時の登録巻戻し](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/992) | Open · reproduce/compare existing code, then fix or document PASS |
 | 13 | W1 Protocol & auth | P0 | [#986 NEXT-003 認証待ち中の同一ユーザー名による二重ログイン競合](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/986) | Draft PR [#1188](https://github.com/RyuuzinnRaika/IndustrialRust1710/pull/1188) / NOT_RUN |
 | 14 | W1 Protocol & auth | P0 | [#985 NEXT-002 EncryptionResponse到着前のログインタイムアウト境界](https://github.com/RyuuzinnRaika/IndustrialRust1710/issues/985) | Draft PR [#1187](https://github.com/RyuuzinnRaika/IndustrialRust1710/pull/1187) / NOT_RUN |
