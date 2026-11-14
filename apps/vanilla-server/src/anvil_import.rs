@@ -93,6 +93,8 @@ fn snapshot_marker(source: &Path) -> io::Result<()> {
     let _ = crate::level_dat::read_level_file(&source.join("level.dat"))?;
     let level = bounded_read(&source.join("level.dat"), MAX_LEVEL_DAT)?;
     let bytes = bounded_decompress(GzDecoder::new(&level[..]), MAX_LEVEL_DAT)?;
+    // Iterative nesting/length bound before fastnbt's recursive decoder.
+    crate::legacy_nbt::bounded_nbt(&bytes)?;
     let root: SnapshotLevel = fastnbt::from_bytes(&bytes).map_err(wrap)?;
     if root.data.name != "IndustrialRust1710 Export"
         || root.data.generator != "flat"

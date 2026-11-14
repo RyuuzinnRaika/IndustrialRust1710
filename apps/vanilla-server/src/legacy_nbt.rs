@@ -16,6 +16,154 @@ fn nbt_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(ErrorKind::InvalidData, error.to_string())
 }
 
+/// Container depth fastnbt's recursive decoder is allowed to walk. NBT is
+/// untrusted; deep nesting must be rejected *before* the recursive decode so
+/// hostile input cannot overflow the stack (STATUS_STACK_OVERFLOW on Windows
+/// is an uncatchable process abort, not a catchable panic).
+const MAX_NBT_DEPTH: usize = 512;
+
+#[derive(Clone, Copy)]
+enum Frame {
+    Compound,
+    List { kind: u8, remaining: u32 },
+}
+
+/// Iterative (never recursive) NBT structure walk: rejects truncation,
+/// unknown tags, oversized declared lengths and nesting beyond
+/// `MAX_NBT_DEPTH`, and always terminates in time linear in the input.
+/// Callers feed only its output to fastnbt's recursive decoder.
+pub(crate) fn bounded_nbt(bytes: &[u8]) -> io::Result<()> {
+    fn take(bytes: &[u8], pos: &mut usize, n: usize) -> io::Result<()> {
+        let end = pos
+            .checked_add(n)
+            .ok_or_else(|| invalid("nbt length overflow"))?;
+        if end > bytes.len() {
+            return Err(invalid("truncated nbt"));
+        }
+        *pos = end;
+        Ok(())
+    }
+    fn byte(bytes: &[u8], pos: &mut usize) -> io::Result<u8> {
+        let value = *bytes
+            .get(*pos)
+            .ok_or_else(|| invalid("truncated nbt header"))?;
+        *pos += 1;
+        Ok(value)
+    }
+    fn u16v(bytes: &[u8], pos: &mut usize) -> io::Result<u16> {
+        take(bytes, pos, 2)?;
+        Ok(u16::from_be_bytes([bytes[*pos - 2], bytes[*pos - 1]]))
+    }
+    fn u32v(bytes: &[u8], pos: &mut usize) -> io::Result<u32> {
+        take(bytes, pos, 4)?;
+        Ok(u32::from_be_bytes([
+            bytes[*pos - 4],
+            bytes[*pos - 3],
+            bytes[*pos - 2],
+            bytes[*pos - 1],
+        ]))
+    }
+    let mut pos = 0usize;
+    // Root: a named compound, exactly like every 1.7.10 payload the server
+    // parses (chunk Level, playerdata, level.dat, written books, ItemStacks).
+    if byte(bytes, &mut pos)? != 10 {
+        return Err(invalid("nbt root must be a compound"));
+    }
+    let root_name = u16v(bytes, &mut pos)?;
+    take(bytes, &mut pos, root_name as usize)?;
+    let mut stack: Vec<Frame> = vec![Frame::Compound];
+    while let Some(top) = stack.last_mut() {
+        let kind = match top {
+            Frame::Compound => {
+                let kind = byte(bytes, &mut pos)?;
+                if kind == 0 {
+                    stack.pop(); // TAG_End closes the compound.
+                    continue;
+                }
+                let name = u16v(bytes, &mut pos)?;
+                take(bytes, &mut pos, name as usize)?;
+                kind
+            }
+            Frame::List { kind, remaining } => {
+                if *remaining == 0 {
+                    stack.pop();
+                    continue;
+                }
+                *remaining -= 1;
+                *kind
+            }
+        };
+        let child = match kind {
+            1 => {
+                take(bytes, &mut pos, 1)?;
+                None
+            }
+            2 => {
+                take(bytes, &mut pos, 2)?;
+                None
+            }
+            3 | 5 => {
+                take(bytes, &mut pos, 4)?;
+                None
+            }
+            4 | 6 => {
+                take(bytes, &mut pos, 8)?;
+                None
+            }
+            7 => {
+                let count = u32v(bytes, &mut pos)?;
+                take(bytes, &mut pos, count as usize)?;
+                None
+            }
+            8 => {
+                let count = u16v(bytes, &mut pos)?;
+                take(bytes, &mut pos, count as usize)?;
+                None
+            }
+            11 => {
+                let count = u32v(bytes, &mut pos)?;
+                take(
+                    bytes,
+                    &mut pos,
+                    count
+                        .checked_mul(4)
+                        .ok_or_else(|| invalid("nbt length overflow"))?
+                        as usize,
+                )?;
+                None
+            }
+            12 => {
+                let count = u32v(bytes, &mut pos)?;
+                take(
+                    bytes,
+                    &mut pos,
+                    count
+                        .checked_mul(8)
+                        .ok_or_else(|| invalid("nbt length overflow"))?
+                        as usize,
+                )?;
+                None
+            }
+            9 => Some(Frame::List {
+                kind: byte(bytes, &mut pos)?,
+                remaining: u32v(bytes, &mut pos)?,
+            }),
+            10 => Some(Frame::Compound),
+            _ => return Err(invalid("unknown nbt tag")),
+        };
+        if let Some(child) = child {
+            if stack.len() >= MAX_NBT_DEPTH {
+                return Err(invalid("nbt nesting limit"));
+            }
+            stack.push(child);
+        }
+    }
+    if pos != bytes.len() {
+        return Err(invalid("trailing nbt bytes"));
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ChunkRoot {
     #[serde(rename = "Level")]
@@ -91,6 +239,9 @@ pub(crate) fn parse_chunk(nbt: &[u8], cx: i32, cz: i32) -> io::Result<ChunkRoot>
     if nbt.len() > MAX_NBT_BYTES {
         return Err(invalid("legacy chunk NBT exceeds size bound"));
     }
+    // Iterative structural bound FIRST: fastnbt's decoder is recursive and
+    // deep nesting would abort the process instead of returning an error.
+    bounded_nbt(nbt)?;
     let parsed: ChunkRoot = fastnbt::from_bytes(nbt).map_err(nbt_error)?;
     if (parsed.level.x, parsed.level.z) != (cx, cz) {
         return Err(invalid("legacy chunk position mismatch"));
@@ -134,6 +285,70 @@ pub(crate) fn parse_chunk(nbt: &[u8], cx: i32, cz: i32) -> io::Result<ChunkRoot>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADD-085 / #510: minimized fuzz seeds for the anvil_nbt target.
+    /// fastnbt's decoder is recursive: deep nesting aborted the WHOLE
+    /// process (STATUS_STACK_OVERFLOW on Windows, not a catchable panic)
+    /// and hostile array lengths were only bounded by the machine. The
+    /// iterative `bounded_nbt` pre-scan must reject every seed cleanly and
+    /// the production entry `parse_chunk` must return `Err` for all of them.
+    #[test]
+    fn anvil_nbt_fuzz_corpus_is_rejected_without_process_abort() {
+        for (label, bytes) in [
+            (
+                "empty",
+                include_bytes!("../../../fuzz/corpus/anvil_nbt/empty").as_slice(),
+            ),
+            (
+                "truncated_root",
+                include_bytes!("../../../fuzz/corpus/anvil_nbt/truncated_root").as_slice(),
+            ),
+            (
+                "huge_long_array",
+                include_bytes!("../../../fuzz/corpus/anvil_nbt/huge_long_array").as_slice(),
+            ),
+            (
+                "negative_list_count",
+                include_bytes!("../../../fuzz/corpus/anvil_nbt/negative_list_count").as_slice(),
+            ),
+            (
+                "deep_nesting",
+                include_bytes!("../../../fuzz/corpus/anvil_nbt/deep_nesting").as_slice(),
+            ),
+        ] {
+            assert!(
+                bounded_nbt(bytes).is_err(),
+                "{label}: hostile seed accepted by the pre-scan"
+            );
+            assert!(
+                parse_chunk(bytes, 0, 0).is_err(),
+                "{label}: hostile seed accepted by parse_chunk"
+            );
+        }
+    }
+
+    /// Deterministic xorshift sweep over bounded inputs: every seed must
+    /// return Ok or a clean Err from BOTH the pre-scan and parse_chunk
+    /// without panicking (a panic fails the harness), and a valid minimal
+    /// document must still pass the pre-scan.
+    #[test]
+    fn random_nbt_sweep_never_panics_and_stays_bounded() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        for seed in 0..4096u32 {
+            let length = (seed % 512) as usize + 1;
+            let mut body = Vec::with_capacity(length);
+            for _ in 0..length {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                body.push(state as u8);
+            }
+            let _ = bounded_nbt(&body);
+            let _ = parse_chunk(&body, 0, 0);
+        }
+        // root compound "level" {} still parses through the pre-scan.
+        assert!(bounded_nbt(b"\x0A\x00\x05level\x00").is_ok());
+    }
 
     fn sample() -> ChunkRoot {
         let mut blocks = vec![0i8; 4096];
