@@ -332,8 +332,13 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
         .write(true)
         .create_new(true)
         .open(&prepare)?;
-    out.write_all(&serialized)?;
-    out.sync_all()?;
+    // An ENOSPC/write/sync failure must not leave a partially serialized
+    // journal preparation behind. Do not publish the redo record or modify
+    // any target until the complete prepare file is durably written.
+    if let Err(error) = out.write_all(&serialized).and_then(|_| out.sync_all()) {
+        cleanup_failed_temporary_write(out, &prepare);
+        return Err(error);
+    }
     drop(out);
     fs::rename(&prepare, journal)?;
     sync_directory(base)?;
@@ -343,6 +348,45 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    /// NEXT-164 / #1147: if preparation is refused, the old inventory must
+    /// remain byte-for-byte intact and the failed commit must be retryable.
+    /// A directory at the temporary-file path is a deterministic error that
+    /// does not require privileged filesystem quotas or real disk exhaustion.
+    #[test]
+    fn next164_failed_journal_preparation_does_not_mutate_target() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "ir1710-next164-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let journal = directory.join("world.journal");
+        let target = directory.join("test.inventory.json");
+        let original = br#"{"version":1,"items":[1]}"#;
+        let replacement = br#"{"version":1,"items":[2]}"#.to_vec();
+        fs::write(&target, original).unwrap();
+
+        let preparation = journal.with_extension("journal.tmp");
+        fs::create_dir(&preparation).unwrap();
+        assert!(
+            commit(&journal, &[(&target, replacement.clone())]).is_err(),
+            "preparation path is occupied by a directory"
+        );
+        assert_eq!(fs::read(&target).unwrap(), original);
+        assert!(!journal.exists(), "failed preparation must not publish redo");
+
+        fs::remove_dir(&preparation).unwrap();
+        commit(&journal, &[(&target, replacement.clone())]).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), replacement);
+        assert!(!preparation.exists());
+        assert!(!journal.exists());
+        fs::remove_dir_all(&directory).unwrap();
+    }
 
     /// REG-181 / #817 and ADD-064 / #489: adjacent chunks are one IRW
     /// generation. An interruption after the first participant was installed
