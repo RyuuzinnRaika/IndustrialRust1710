@@ -24,6 +24,8 @@ fn assert_open_window_protocol5(body: &[u8], window_id: u8, kind: u8, title: &st
     expected.extend_from_slice(&[slots, 1]);
     assert_eq!(body, expected, "invalid 1.7.10 Open Window payload");
 }
+/// One seeded inventory: per slot, (index, item id, count).
+type SeedStacks = Vec<(usize, i16, u8)>;
 struct NativeServer {
     _exclusive_test_run: std::sync::MutexGuard<'static, ()>,
     process: Child,
@@ -46,6 +48,20 @@ impl NativeServer {
         Self::start_with_seed(survival, items, true)
     }
     fn start_with_seed(survival: bool, items: &[(usize, i16)], cow: bool) -> Self {
+        let stacks: Vec<(&str, SeedStacks)> = if items.is_empty() {
+            Vec::new()
+        } else {
+            vec![(
+                "RustTester",
+                items.iter().map(|&(slot, id)| (slot, id, 1u8)).collect(),
+            )]
+        };
+        Self::start_with_stacks(survival, &stacks, cow)
+    }
+    /// Seed named players with explicit slot/id/count stacks. REG-153 uses
+    /// this for nearly-full inventories (partial pickup) and for giving both
+    /// competing players a defined starting state.
+    fn start_with_stacks(survival: bool, stacks: &[(&str, SeedStacks)], cow: bool) -> Self {
         let exclusive = SERVER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -68,35 +84,37 @@ impl NativeServer {
             serde_json::to_vec(&whitelist).unwrap(),
         )
         .unwrap();
-        if !items.is_empty() {
-            let mut slots = (0..45).map(|_| Value::Null).collect::<Vec<_>>();
-            for &(slot, id) in items {
-                slots[slot] = json!({"id": id, "count": 1, "damage": 0});
-            }
-            let inventory = json!({
-                "version": 1,
-                "selected": 0,
-                "slots": slots,
-                "cursor": null,
-                "workbench": [null, null, null, null, null, null, null, null, null],
-                "anvil_inputs": [null, null],
-                "enchant_input": null,
-                "ender_chest": [null, null, null, null, null, null, null, null, null,
-                    null, null, null, null, null, null, null, null, null,
-                    null, null, null, null, null, null, null, null, null],
-                "bed_spawn": null
-            });
+        if !stacks.is_empty() {
             fs::create_dir_all(directory.join("players")).unwrap();
-            let inventory_name = if survival {
-                "rusttester.survival.inventory.json"
-            } else {
-                "rusttester.inventory.json"
-            };
-            fs::write(
-                directory.join("players").join(inventory_name),
-                serde_json::to_vec(&inventory).unwrap(),
-            )
-            .unwrap();
+            for (who, seeded) in stacks {
+                let mut slots = (0..45).map(|_| Value::Null).collect::<Vec<_>>();
+                for &(slot, id, count) in seeded {
+                    slots[slot] = json!({"id": id, "count": count, "damage": 0});
+                }
+                let inventory = json!({
+                    "version": 1,
+                    "selected": 0,
+                    "slots": slots,
+                    "cursor": null,
+                    "workbench": [null, null, null, null, null, null, null, null, null],
+                    "anvil_inputs": [null, null],
+                    "enchant_input": null,
+                    "ender_chest": [null, null, null, null, null, null, null, null, null,
+                        null, null, null, null, null, null, null, null, null,
+                        null, null, null, null, null, null, null, null, null],
+                    "bed_spawn": null
+                });
+                let inventory_name = if survival {
+                    format!("{}.survival.inventory.json", who.to_ascii_lowercase())
+                } else {
+                    format!("{}.inventory.json", who.to_ascii_lowercase())
+                };
+                fs::write(
+                    directory.join("players").join(inventory_name),
+                    serde_json::to_vec(&inventory).unwrap(),
+                )
+                .unwrap();
+            }
         }
         if cow {
             let mobs = json!({
@@ -2037,6 +2055,261 @@ fn survival_unsupported_drop_falls_under_gravity_and_is_collected() {
     until_packet(&mut client, 0x0d, |_| true);
 
     drop(client);
+    server.wait_idle();
+}
+
+/// Send a Protocol 5 start-dig (action 0) and finished (action 2) pair for
+/// one block with a short break time in between.
+fn dig_block(socket: &mut TcpStream, x: i32, y: i32, z: i32) {
+    let mut dig = vec![0u8];
+    dig.extend_from_slice(&x.to_be_bytes());
+    dig.push(y as u8);
+    dig.extend_from_slice(&z.to_be_bytes());
+    dig.push(1); // face: top
+    socket.write_all(&frame(7, &dig)).unwrap();
+    thread::sleep(Duration::from_millis(1200));
+    dig[0] = 2; // finished digging
+    socket.write_all(&frame(7, &dig)).unwrap();
+}
+
+#[test]
+fn survival_partial_pickup_keeps_remainder_on_the_same_entity() {
+    // REG-153 / #856: a nearly-full inventory must accept only the items
+    // that fit, keep the merged ground entity alive with a DataWatcher
+    // count re-announcement (no 0x0d/0x13), and persist both the shrunk
+    // remainder and the grown inventory slot durably.
+    let mut seed = vec![(36usize, 273i16, 1u8), (37, 3, 63u8)];
+    seed.extend((38..45).map(|slot| (slot, 3i16, 64u8)));
+    seed.extend((9..36).map(|slot| (slot, 3i16, 64u8)));
+    let server = NativeServer::start_with_stacks(true, &[("RustTester", seed)], false);
+    let (mut client, _, spawn) = server.join("RustTester");
+    assert_eq!(spawn, [0.5, 64.0, 0.5]);
+    // Outside pickup range while the two drops merge in the (0,62,0) cell.
+    send_position(&mut client, 4.5, 64.0, 0.5);
+    dig_block(&mut client, 0, 63, 0);
+    dig_block(&mut client, 0, 62, 0);
+    let mut saw_land_62 = false;
+    let mut saw_merge_destroy = false;
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while (!saw_land_62 || !saw_merge_destroy) && Instant::now() < deadline {
+        let (pid, body) = pump(&mut client);
+        saw_land_62 |= pid == 0x28
+            && body.len() == 19
+            && i32::from_be_bytes(body[9..13].try_into().unwrap()) == 2000;
+        saw_merge_destroy |= pid == 0x13 && body.len() == 5;
+    }
+    assert!(
+        saw_land_62 && saw_merge_destroy,
+        "the two dirt drops must merge into one resting entity"
+    );
+
+    // One dirt fits slot 37 (63 -> 64). The surviving count-1 entity is
+    // re-announced by 0x1c metadata and must never be collected/destroyed.
+    send_position(&mut client, 1.5, 64.0, 0.5);
+    let mut saw_collect = false;
+    let mut saw_remainder_update = false;
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while !saw_remainder_update && Instant::now() < deadline {
+        let (pid, body) = pump(&mut client);
+        saw_collect |= pid == 0x0d;
+        saw_remainder_update |=
+            pid == 0x1c && body.len() == 13 && body[5..7] == [0, 3] && body[7] == 1;
+    }
+    assert!(
+        saw_remainder_update,
+        "a partial pickup re-announces the surviving stack via 0x1c"
+    );
+    assert!(
+        !saw_collect,
+        "a surviving ground entity is never announced as collected (0x0d)"
+    );
+
+    // Both sides of the transfer were journaled before the packet: the
+    // inventory holds a full 64-dirt slot and the sidecar one 1-dirt drop.
+    let inventory: Value = serde_json::from_slice(
+        &fs::read(
+            server
+                .directory
+                .join("players/rusttester.survival.inventory.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(inventory["slots"][37]["id"], 3);
+    assert_eq!(inventory["slots"][37]["count"].as_i64().unwrap(), 64);
+    let drops_path = server.directory.join("flat.drops.json");
+    await_file(&drops_path);
+    let ground: Value = serde_json::from_slice(&fs::read(&drops_path).unwrap()).unwrap();
+    let entities = ground["entries"].as_object().unwrap();
+    assert_eq!(entities.len(), 1, "the remainder stays one ground entity");
+    for entry in entities.values() {
+        assert_eq!(entry["stack"]["id"], 3);
+        assert_eq!(
+            entry["stack"]["count"].as_i64().unwrap(),
+            1,
+            "exactly the non-fitting item remains on the ground"
+        );
+        assert_eq!(entry["position"][1].as_i64().unwrap(), 2000);
+    }
+    drop(client);
+    server.wait_idle();
+}
+
+#[test]
+fn two_players_competing_for_one_drop_are_credited_exactly_once() {
+    // REG-153 / #856: both twins wait inside pickup range of one drop.
+    // Whichever session polls first must claim it; after a graceful /stop
+    // the dirt must be accounted for exactly once across both persisted
+    // inventories, and the sidecar must be empty.
+    let shovel = vec![(36usize, 273i16, 1u8)];
+    let mut server = NativeServer::start_with_stacks(
+        true,
+        &[("TwinAlpha", shovel.clone()), ("TwinBeta", shovel)],
+        false,
+    );
+    let (mut alpha, _, alpha_spawn) = server.join("TwinAlpha");
+    let (mut beta, _, beta_spawn) = server.join("TwinBeta");
+    assert_eq!(alpha_spawn, [0.5, 64.0, 0.5]);
+    assert_eq!(beta_spawn, [0.5, 64.0, 0.5]);
+
+    // TwinAlpha digs the grass under its feet: the single dirt drop lands
+    // inside both players' pickup ranges and both sessions compete for it.
+    dig_block(&mut alpha, 0, 63, 0);
+
+    // Let the pickup loop run to completion before shutting down: the
+    // sidecar empties once exactly one session has committed the transfer.
+    let drops_path = server.directory.join("flat.drops.json");
+    await_file(&drops_path);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let ground: Value = serde_json::from_slice(&fs::read(&drops_path).unwrap()).unwrap();
+        if ground["entries"].as_object().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "neither twin collected the contested drop"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Graceful shutdown flushes both sessions and the sidecar durably.
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/stop\n")
+        .unwrap();
+    until_packet(&mut alpha, 0x40, |_| true);
+    until_packet(&mut beta, 0x40, |_| true);
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let exit = loop {
+        if let Some(exit) = server.process.try_wait().unwrap() {
+            break exit;
+        }
+        assert!(Instant::now() < deadline, "/stop left workers running");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        exit.success(),
+        "server failed graceful two-client /stop: {exit}"
+    );
+
+    let mut credited = 0u64;
+    let mut holders = 0usize;
+    for name in ["twinalpha", "twinbeta"] {
+        let inventory: Value = serde_json::from_slice(
+            &fs::read(
+                server
+                    .directory
+                    .join(format!("players/{name}.survival.inventory.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let slots = inventory["slots"].as_array().unwrap();
+        let dirt = slots
+            .iter()
+            .filter(|slot| slot["id"].as_i64() == Some(3))
+            .map(|slot| slot["count"].as_u64().unwrap())
+            .sum::<u64>();
+        credited += dirt;
+        holders += usize::from(dirt > 0);
+    }
+    assert_eq!(credited, 1, "the drop is credited exactly once overall");
+    assert_eq!(holders, 1, "exactly one of the two players holds the dirt");
+    let ground: Value =
+        serde_json::from_slice(&fs::read(server.directory.join("flat.drops.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        ground["entries"].as_object().unwrap().len(),
+        0,
+        "the contested drop left the ground store"
+    );
+    drop(alpha);
+    drop(beta);
+}
+
+#[test]
+fn rejoin_resyncs_ground_items_and_allows_pickup() {
+    // REG-153 / #856: a drop that outlives a disconnect must be re-sent to
+    // the rejoining client under its original entity id, remain collectable,
+    // and leave the sidecar on pickup.
+    let server = NativeServer::start_with_mode_and_items(true, &[(36, 273i16)]);
+    let (mut client, _, _) = server.join("RustTester");
+    // Stay outside pickup range so the drop must survive the disconnect.
+    send_position(&mut client, 4.5, 64.0, 0.5);
+    dig_block(&mut client, 0, 63, 0);
+
+    let spawn_body = until_packet(&mut client, 0x0e, |body| {
+        body.len() >= 24
+            && body[5] == 2
+            && i32::from_be_bytes(body[10..14].try_into().unwrap()) == 2032
+    });
+    let drop_id = read_varint(&mut &spawn_body[..]).expect("dropped-item spawn id") as i32;
+
+    // Disconnect before anything can collect the drop.
+    drop(client);
+    thread::sleep(Duration::from_millis(400));
+    let drops_path = server.directory.join("flat.drops.json");
+    await_file(&drops_path);
+    let ground: Value = serde_json::from_slice(&fs::read(&drops_path).unwrap()).unwrap();
+    assert_eq!(
+        ground["entries"].as_object().unwrap().len(),
+        1,
+        "the drop survives the disconnect"
+    );
+
+    // The join sync re-streams the world-owned entity with the same id.
+    let (mut rejoined, _, _) = server.join("RustTester");
+    let respawned = until_packet(&mut rejoined, 0x0e, |body| {
+        body.len() >= 24
+            && body[5] == 2
+            && i32::from_be_bytes(body[10..14].try_into().unwrap()) == 2032
+    });
+    let respawned_id = read_varint(&mut &respawned[..]).expect("respawned ground id") as i32;
+    assert_eq!(
+        respawned_id, drop_id,
+        "the rejoin re-sends the same ground entity id"
+    );
+
+    // Walking into range collects it: 0x0d carries the original id and the
+    // committed sidecar becomes empty.
+    send_position(&mut rejoined, 1.5, 64.0, 0.5);
+    let collected = until_packet(&mut rejoined, 0x0d, |_| true);
+    assert_eq!(
+        i32::from_be_bytes(collected[0..4].try_into().unwrap()),
+        drop_id,
+        "the collected packet names the original entity"
+    );
+    let ground: Value = serde_json::from_slice(&fs::read(&drops_path).unwrap()).unwrap();
+    assert_eq!(
+        ground["entries"].as_object().unwrap().len(),
+        0,
+        "the sidecar empties after the pickup commits"
+    );
+    drop(rejoined);
     server.wait_idle();
 }
 
