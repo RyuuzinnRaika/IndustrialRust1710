@@ -337,4 +337,100 @@ mod tests {
         assert!(!dest.exists());
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// ADD-070 / #495: source immutability across failed migrations. An
+    /// incomplete input, an unwritable destination (capacity modelled by an
+    /// occupied target) and an interrupted publish (a leftover
+    /// `*.importing` staging file) must each abort while every snapshot byte
+    /// stays identical, and the migration must stay retryable once the
+    /// operator has cleared the cause.
+    #[test]
+    fn failed_migrations_keep_the_source_intact_and_retriable() {
+        fn fingerprint_tree(root: &Path) -> u64 {
+            let mut files = Vec::new();
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(dir) = stack.pop() {
+                for entry in fs::read_dir(&dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else {
+                        files.push(path);
+                    }
+                }
+            }
+            files.sort();
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for path in files {
+                for byte in path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_bytes()
+                {
+                    hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+                for byte in fs::read(&path).unwrap() {
+                    hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+            hash
+        }
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-anvil-import-immutable-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let snap = root.join("snapshot");
+        export(&World::new(), &snap).unwrap();
+        let baseline = fingerprint_tree(&snap);
+
+        // (1) Incomplete input: a region truncated mid-write aborts the
+        // migration and moves no snapshot byte. The baseline is taken
+        // *after* the injection so only importer-caused changes are caught.
+        let region = snap.join("region/r.0.0.mca");
+        let original = fs::read(&region).unwrap();
+        fs::write(&region, &original[..4096]).unwrap();
+        let hostile = fingerprint_tree(&snap);
+        let first = root.join("first.irw");
+        assert!(import(&snap, &first).is_err());
+        assert!(!first.exists());
+        assert_eq!(
+            fingerprint_tree(&snap),
+            hostile,
+            "the truncated input must stay exactly as delivered"
+        );
+        fs::write(&region, &original).unwrap();
+        assert!(import(&snap, &first).is_ok(), "repaired input must import");
+        // The importer publishes only the destination: even a successful
+        // migration leaves the snapshot fingerprint at its exported value.
+        assert_eq!(fingerprint_tree(&snap), baseline);
+
+        // (2) Capacity shortage modelled by an occupied destination: the
+        // import refuses the target without touching it or the snapshot.
+        let blocked = root.join("blocked.irw");
+        fs::write(&blocked, b"not-an-irw-file").unwrap();
+        assert!(import(&snap, &blocked).is_err());
+        assert_eq!(fs::read(&blocked).unwrap(), b"not-an-irw-file");
+        assert_eq!(fingerprint_tree(&snap), baseline);
+
+        // (3) Crash mid-migration: an interrupted save_new leaves exactly
+        // one *.importing staging file and never the final target. The next
+        // import must refuse to overwrite that staging file; after the
+        // operator clears it the retry completes and the world loads.
+        let third = root.join("third.irw");
+        let staging = third.with_extension("importing");
+        fs::write(&staging, b"partial-publish").unwrap();
+        assert!(import(&snap, &third).is_err());
+        assert!(staging.exists(), "an import must never overwrite staging");
+        assert!(!third.exists());
+        assert_eq!(fingerprint_tree(&snap), baseline);
+        fs::remove_file(&staging).unwrap();
+        assert!(import(&snap, &third).is_ok());
+        assert_eq!(World::load(&third).unwrap().get(1, 64, 1), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
