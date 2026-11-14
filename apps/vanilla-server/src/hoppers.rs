@@ -360,6 +360,105 @@ mod tests {
         assert!(!empty.comparator_inputs().contains_key(&(2, 64, -3)));
     }
 
+    fn total(slots: &[Option<Stack>]) -> u32 {
+        slots.iter().flatten().map(|s| u32::from(s.count)).sum()
+    }
+    /// ADD-037 / #461: full targets, partially-full targets and two
+    /// hoppers pulling from one storage must never mint or delete items,
+    /// and the summed counts must survive the hopper sidecar save.
+    #[test]
+    fn full_or_partial_targets_conserve_items_across_saves() {
+        let stone = Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        let cobble = Stack {
+            id: 4,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        // Fully occupied target with non-matching items: refused, no change.
+        let mut source = [
+            Some(Stack {
+                count: 32,
+                ..cobble
+            }),
+            None,
+            None,
+            None,
+            None,
+        ];
+        let mut full_target = [Some(stone); 27];
+        let source_before = source;
+        let target_before = full_target;
+        assert!(!move_one(&mut source, &mut full_target));
+        assert_eq!(source, source_before);
+        assert_eq!(full_target, target_before);
+
+        // Partially free matching slot: exactly one moves, totals conserved.
+        let mut partial_target = [Some(stone); 26];
+        partial_target[0] = Some(Stack {
+            count: 63,
+            ..cobble
+        });
+        let total_before = total(&source) + total(&partial_target);
+        assert!(move_one(&mut source, &mut partial_target));
+        assert_eq!(source[0].unwrap().count, 31);
+        assert_eq!(partial_target[0].unwrap().count, 64);
+        assert_eq!(total(&source) + total(&partial_target), total_before);
+
+        // Two hoppers pull from one chest until both are full: the summed
+        // count never drifts and the loop stops on a refused move.
+        let mut chest = vec![
+            Some(Stack {
+                count: 64,
+                ..cobble
+            });
+            27
+        ];
+        let mut hopper_a = [None; HOPPER_SLOTS];
+        let mut hopper_b = [None; HOPPER_SLOTS];
+        let chest_total = total(&chest);
+        let mut moves = 0u32;
+        while move_one(&mut chest, &mut hopper_a) || move_one(&mut chest, &mut hopper_b) {
+            moves += 1;
+            assert!(moves <= 27 * 64, "transfer loop must terminate");
+        }
+        assert_eq!(
+            moves,
+            2 * HOPPER_SLOTS as u32 * 64,
+            "both hoppers stack-fill exactly"
+        );
+        assert_eq!(
+            total(&chest) + total(&hopper_a) + total(&hopper_b),
+            chest_total,
+            "concurrent pulls conserve every item"
+        );
+
+        // The pull result persists through the sidecar: reload totals equal.
+        let dir = std::env::temp_dir().join(format!(
+            "ir1710-hoppers-conservation-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hoppers.json");
+        let mut hoppers = Hoppers::default();
+        let staged = hoppers.staged_update((4, 64, 4), hopper_a).unwrap();
+        hoppers
+            .commit_staged(&path, staged.staged_update((5, 64, 5), hopper_b).unwrap())
+            .unwrap();
+        let reloaded = Hoppers::load(&path).unwrap();
+        assert_eq!(
+            total(&reloaded.slots((4, 64, 4))) + total(&reloaded.slots((5, 64, 5))),
+            2 * HOPPER_SLOTS as u32 * 64,
+            "save round-trip keeps every transferred item"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
     #[test]
     fn transfer_one_respects_stack_boundaries_and_item_conservation() {
         let mut src = [Some(Stack {
