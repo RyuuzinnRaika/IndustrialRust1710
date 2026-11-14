@@ -459,6 +459,148 @@ mod tests {
         }
     }
 
+    /// ADD-078 / #503: authentication-failure logging must never leak key
+    /// material, session keys or auth tokens, including fault cases. The
+    /// session worker logs exactly `reason={error}` plus the disconnect
+    /// category and IO kind; drive every online-auth failure with a
+    /// recognizable canary at each sensitive value (challenge bytes,
+    /// hostile encrypted bodies, DER, server hash, session body) and assert
+    /// the final log line never contains any of them.
+    #[test]
+    fn authentication_failure_logs_never_leak_key_material_or_tokens() {
+        use crate::{disconnect_category, disconnect_log};
+        use std::net::TcpListener;
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        /// Formats the session worker's disconnect line verbatim.
+        fn worker_log_line(error: &io::Error) -> String {
+            let category = disconnect_category(error);
+            format!(
+                "client disconnected: category={category} io_kind={:?} reason={error}",
+                error.kind()
+            )
+        }
+        fn leaks(line: &str, secrets: &[String]) -> Option<String> {
+            secrets
+                .iter()
+                .find(|secret| !secret.is_empty() && line.contains(secret.as_str()))
+                .cloned()
+        }
+        let identity = ServerIdentity::generate().unwrap();
+        let der_hex = hex(&identity.der);
+        // Canary filler for hostile encrypted bodies and hostile bodies read
+        // back through the bounded session reader.
+        let canary = "deadbeef";
+        let filler: [u8; 128] = core::array::from_fn(|index| [0xDE, 0xAD, 0xBE, 0xEF][index % 4]);
+        let filler_hex = hex(&filler);
+
+        // Live login faults over a loopback connection: the returned error is
+        // exactly what the worker logs.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        for case in 0..2u8 {
+            let client = Connection::new(TcpStream::connect(address).unwrap());
+            let (server_socket, _) = listener.accept().unwrap();
+            let mut server = Connection::new(server_socket);
+            let (outcome, challenge_hex) = std::thread::scope(|scope| {
+                let reader = scope.spawn(move || {
+                    let mut client = client;
+                    let (id, request) = receive(&mut client).unwrap();
+                    assert_eq!(id, 0x01);
+                    // string "" | u16 der_len | der | u16 4 | challenge
+                    let der_len = u16::from_be_bytes([request[1], request[2]]) as usize;
+                    let challenge = request[3 + der_len + 2..3 + der_len + 6].to_vec();
+                    let mut hostile = Vec::new();
+                    match case {
+                        0 => {
+                            // Undecryptable RSA blobs stuffed with the canary.
+                            hostile.extend_from_slice(&128u16.to_be_bytes());
+                            hostile.extend_from_slice(&filler);
+                            hostile.extend_from_slice(&4u16.to_be_bytes());
+                            hostile.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+                        }
+                        _ => {
+                            // Announces 64 bytes, delivers 2, then canaries.
+                            hostile.extend_from_slice(&[0x00, 0x40, 0xDE, 0xAD]);
+                        }
+                    }
+                    send(&mut client, 0x01, &hostile).unwrap();
+                    hex(&challenge)
+                });
+                let outcome = identity.authenticate(&mut server, "RustTester");
+                (outcome, reader.join().unwrap())
+            });
+            let error = match outcome {
+                Ok(profile) => panic!(
+                    "hostile login case {case} verified {}:{}",
+                    profile.name, profile.uuid
+                ),
+                Err(error) => error,
+            };
+            let line = worker_log_line(&error);
+            assert!(disconnect_log::should_log(disconnect_category(&error)));
+            if let Some(leaked) = leaks(
+                &line,
+                &[
+                    challenge_hex.clone(),
+                    canary.into(),
+                    filler_hex.clone(),
+                    der_hex.clone(),
+                ],
+            ) {
+                panic!("case {case} logged a sensitive value ({leaked}): {line}");
+            }
+        }
+
+        // Session-server faults: the serverId hash is derived from the
+        // session key, the response body may echo tokens; neither may reach
+        // the log line.
+        let server_hash = signed_server_hash(&[0x33u8; 16], &identity.der);
+        let error = match verify_has_joined("RustTester", &server_hash) {
+            Ok(profile) => panic!("this host cannot own a Mojang session: {}", profile.uuid),
+            Err(error) => error,
+        };
+        let line = worker_log_line(&error);
+        assert!(
+            !line.contains(&server_hash),
+            "the server hash must never be logged: {line}"
+        );
+        // A malformed name never even reaches the URL, and its message is
+        // static (no hash, no name).
+        let error = match verify_has_joined("a", &server_hash) {
+            Ok(profile) => panic!("invalid name must never verify: {}", profile.uuid),
+            Err(error) => error,
+        };
+        let line = worker_log_line(&error);
+        assert!(
+            !line.contains(&server_hash) && !line.contains("sessionserver"),
+            "pre-network refusal must not echo the request: {line}"
+        );
+
+        // Reader and parser faults: canary bodies are refused with static
+        // messages only.
+        struct CanaryFailure;
+        impl Read for CanaryFailure {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other(
+                    "token=DEADBEEFAAAAtoken; secret=DEADBEEFBBBB",
+                ))
+            }
+        }
+        let error = read_session_body(CanaryFailure).unwrap_err();
+        let shouting = canary.to_ascii_uppercase();
+        assert!(!worker_log_line(&error).contains(&shouting));
+        let body = br#"{"name":"RustTester","id":"00112233445566778899aabbccddeeff"}"#;
+        let error = match parse_verified_profile("OtherUser", body) {
+            Ok(profile) => panic!("substituted name must never verify: {}", profile.uuid),
+            Err(error) => error,
+        };
+        assert!(!worker_log_line(&error).contains("0011223344556677"));
+        let error = verify_challenge_token(&[1, 2, 3, 4], &[0xDE, 0xAD, 0xBE, 0xEF]).unwrap_err();
+        assert!(!worker_log_line(&error).contains(canary));
+    }
+
     /// ADD-071 / #496: whitelist admission is name-only and the verified
     /// UUID comes from the session server alone. A whitelist file may carry
     /// a stale or attacker-forged `uuid` string; it is inert metadata that
