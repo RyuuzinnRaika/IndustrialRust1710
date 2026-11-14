@@ -6654,6 +6654,88 @@ mod tests {
         assert!(World::load(&path).is_err());
         fs::remove_file(&path).unwrap();
     }
+
+    /// ADD-087 / #512: one standardized fixture matrix for save corruption
+    /// verdicts. A valid IRW1 save is written by save_new (with two edits so
+    /// the record region is real), then three corrupted derivatives are read
+    /// back: a corrupted magic, a file truncated in the middle of the record
+    /// region, and an unknown magic. Every rejected fixture must (a) fail
+    /// closed with a deterministic verdict identical on a second load, and
+    /// (b) leave its bytes byte-for-byte untouched — a failed load may never
+    /// rewrite or truncate the save it just refused.
+    #[test]
+    fn corrupt_fixture_matrix_fails_closed_deterministically_without_writes() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "industrial-corrupt-matrix-{}-{stamp}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.irw");
+        let mut world = World::new();
+        assert!(world
+            .update_and_save(&source, 4, 65, 7, 16u16)
+            .expect("write stone edit"));
+        let valid_bytes = fs::read(&source).unwrap();
+        // IRW1 flat layout: magic(4) + count(4) + 11 bytes per edit record.
+        assert_eq!(valid_bytes.len(), 8 + 11, "unexpected fixture layout");
+
+        // Corrupt the first magic byte.
+        let mut bad_magic = valid_bytes.clone();
+        bad_magic[0] = b'X';
+        // Cut the file in the middle of the first record: the header still
+        // declares its edit count but the records run past the end of file.
+        let mut truncated = valid_bytes.clone();
+        truncated.truncate(8 + 6);
+        // Unknown IRW version byte.
+        let mut bad_version = valid_bytes.clone();
+        bad_version[..4].copy_from_slice(b"IRW9");
+
+        let cases: [(&str, Vec<u8>, bool); 4] = [
+            ("valid", valid_bytes, true),
+            ("bad-magic", bad_magic, false),
+            ("truncated", truncated, false),
+            ("bad-version", bad_version, false),
+        ];
+        let mut refused = Vec::new();
+        for (name, bytes, expect_ok) in cases {
+            let path = root.join(format!("{name}.irw"));
+            fs::write(&path, &bytes).unwrap();
+            let first = World::load(&path);
+            let second = World::load(&path);
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                bytes,
+                "{name}: load must never rewrite the save"
+            );
+            if expect_ok {
+                assert!(
+                    first.is_ok() && second.is_ok(),
+                    "{name}: valid save refused"
+                );
+            } else {
+                let first = match first {
+                    Ok(_) => panic!("{name}: corrupt save accepted"),
+                    Err(error) => error.to_string(),
+                };
+                let second = match second {
+                    Ok(_) => panic!("{name}: corrupt save accepted (reload)"),
+                    Err(error) => error.to_string(),
+                };
+                refused.push((name, first, second));
+            }
+        }
+        // Rejection is deterministic: identical verdict text on reload.
+        for (name, first, second) in refused {
+            assert_eq!(first, second, "{name}: verdict not deterministic");
+            assert!(!first.is_empty(), "{name}: empty rejection reason");
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
     #[test]
     fn sparse_edits_survive_cross_chunk_and_section_boundaries() {
         let path =
