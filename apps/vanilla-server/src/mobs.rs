@@ -4474,6 +4474,105 @@ mod tests {
         assert!(shared.lock().unwrap().orbs.is_empty());
     }
 
+    /// ADD-048 / #472: two players competing for the same world XP orbs,
+    /// plus one failing persistence attempt, must together gain exactly the
+    /// spawned orb total: nothing duplicated, nothing lost. The runtime
+    /// holds the shared Mob mutex across the durable XP commit, so a second
+    /// session can never claim an orb that another player is persisting.
+    #[test]
+    fn competing_xp_orb_contact_credits_the_spawned_total_exactly_once() {
+        use crate::experience::Experience;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Mutex;
+
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut state = Mobs::default();
+        let expected: u32 = [5u16, 7, 9]
+            .into_iter()
+            .map(|amount| {
+                state.spawn_xp(at, amount).unwrap();
+                u32::from(amount)
+            })
+            .sum();
+        assert_eq!(expected, 21);
+        let shared = Mutex::new(state);
+
+        // A failed durable XP write credits nobody and keeps every orb.
+        // The closure mirrors the runtime session: the player's XP object
+        // is only replaced after the simulated save succeeds.
+        let experience = Experience::default();
+        let outcome = shared
+            .lock()
+            .unwrap()
+            .collect_xp_committed(at, 101, |amount| {
+                let mut next = experience;
+                assert!(next.grant(amount));
+                // The simulated disk write fails here, exactly where the
+                // runtime calls Experience::save, so `experience` must
+                // stay untouched and the orb must not be consumed.
+                let _ = next;
+                Err(io::Error::other("simulated XP save failure"))
+            });
+        assert!(outcome.is_err(), "the simulated save failure must surface");
+        assert_eq!(experience.total, 0, "a refused commit must not credit XP");
+        assert_eq!(
+            shared.lock().unwrap().orbs.len(),
+            3,
+            "a failed save must not consume an orb"
+        );
+
+        // Two sessions then poll while both stand inside pickup range,
+        // exactly as the runtime pickup loop does under one shared Mob
+        // mutex. The combined XP of both players must equal the orb total.
+        let credited = AtomicU32::new(0);
+        let totals = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for collector in [101i32, 102] {
+                let shared = &shared;
+                let credited = &credited;
+                handles.push(scope.spawn(move || {
+                    let mut experience = Experience::default();
+                    loop {
+                        let outcome = shared
+                            .lock()
+                            .unwrap()
+                            .collect_xp_committed(at, collector, |amount| {
+                                assert!(experience.grant(amount));
+                                credited.fetch_add(amount, Ordering::SeqCst);
+                                Ok(())
+                            })
+                            .unwrap();
+                        if outcome.is_none() {
+                            break;
+                        }
+                    }
+                    experience.total
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .sum::<u32>()
+        });
+        assert_eq!(
+            totals, expected,
+            "both players combined gained exactly the spawned orb total"
+        );
+        assert_eq!(
+            credited.load(Ordering::SeqCst),
+            expected,
+            "every committed grant was counted once"
+        );
+        assert!(
+            shared.lock().unwrap().orbs.is_empty(),
+            "the last committed orb left the world"
+        );
+    }
+
     /// REG-194 / #830: exercise entity creation, ordinary far-player
     /// despawn, ID allocation and pool reclamation repeatedly without any
     /// real world saves or external Minecraft clients. This is a synthetic
