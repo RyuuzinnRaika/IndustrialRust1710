@@ -390,4 +390,78 @@ mod tests {
             "-7c9d5b0044c130109a5d7b5fb5c317c02b4e28c1"
         );
     }
+
+    /// ADD-071 / #496: whitelist admission is name-only and the verified
+    /// UUID comes from the session server alone. A whitelist file may carry
+    /// a stale or attacker-forged `uuid` string; it is inert metadata that
+    /// never grants admission and never reaches a save path. Display-name
+    /// case variants are the same *session-verified* account (Mojang name
+    /// semantics); a genuinely different account renamed to a lookalike
+    /// still fails the username cross-check.
+    #[test]
+    fn whitelist_uuid_never_authenticates_and_session_uuid_is_authoritative() {
+        use crate::player::PlayerPosition;
+        use crate::whitelist::Whitelist;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-add071-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let with_uuid = root.join("whitelist-uuid.json");
+        let without_uuid = root.join("whitelist-plain.json");
+        let forged = root.join("whitelist-forged.json");
+        std::fs::write(
+            &with_uuid,
+            br#"[{"name":"RustTester","uuid":"11111111-2222-3333-4444-555555555555"}]"#,
+        )
+        .unwrap();
+        std::fs::write(&without_uuid, br#"[{"name":"RustTester"}]"#).unwrap();
+        // Two entries claiming the same victim UUID: the field is inert
+        // metadata, so the file loads and admission depends on names only.
+        std::fs::write(
+            &forged,
+            br#"[{"name":"RustTester","uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5"},{"name":"Evelyn","uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5"}]"#,
+        )
+        .unwrap();
+        let a = Whitelist::load(&with_uuid).unwrap();
+        let b = Whitelist::load(&without_uuid).unwrap();
+        for name in ["RustTester", "rusttester", "RUSTTESTER"] {
+            assert!(a.allows(name), "{name} with metadata UUID");
+            assert!(b.allows(name), "{name} without UUID");
+        }
+        // A UUID never admits an unlisted name, not even the victim's own
+        // UUID copied into another entry.
+        assert!(!a.allows("Notch"));
+        assert!(!Whitelist::load(&forged).unwrap().allows("Notch"));
+
+        // The verified profile UUID comes from the session-server response
+        // and is the only input to the authenticated save path. A case
+        // variant of the claimed name is accepted because the session
+        // server confirmed this exact account.
+        let profile = parse_verified_profile(
+            "RustTester",
+            br#"{"name":"rusttester","id":"069a79f444e94726a5befca90e38aaf5"}"#,
+        )
+        .unwrap();
+        assert_eq!(profile.name, "rusttester");
+        assert_eq!(profile.uuid, "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        let world = std::path::Path::new("world/flat.irw");
+        assert_eq!(
+            PlayerPosition::authenticated_location(world, &profile.uuid).unwrap(),
+            std::path::Path::new("world/players/verified/069a79f4-44e9-4726-a5be-fca90e38aaf5.dat")
+        );
+        // A stale whitelist UUID can never steer that path (the whitelist
+        // exposes no UUID accessor at all), and a renamed attacker — a
+        // different account the session server returns under its own
+        // name — fails the cross-check even when the whitelisted victim
+        // shares the UUID inside the file.
+        assert!(parse_verified_profile(
+            "Evelyn",
+            br#"{"name":"EvilOne","id":"069a79f4-44e9-4726-a5be-fca90e38aaf5"}"#
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
