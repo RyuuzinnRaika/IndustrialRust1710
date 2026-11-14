@@ -575,6 +575,94 @@ mod tests {
         fs::remove_dir(&home).unwrap();
     }
 
+    /// ADD-063 / #488: fault injection at the fsync-then-rename boundary.
+    /// A process that dies after fsync'ing the temporary snapshot but
+    /// before its rename leaves one target installed, one target still
+    /// old, and a complete fsync'd *.txn.tmp. Recovery must converge on
+    /// exactly one whole generation (the committed new state) with no
+    /// old/new mixing. A crash before the journal itself is published
+    /// must leave the old generation valid and still accept a later
+    /// commit.
+    #[test]
+    fn interrupted_rename_after_temp_fsync_leaves_exactly_one_generation_valid() {
+        let home = std::env::temp_dir().join(format!(
+            "ir-journal-add063-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("players")).unwrap();
+        let inventory = home.join("players/alex.inventory.json");
+        let chest = home.join("world.chests.json");
+        let journal = home.join("world.pending-txn.json");
+        let new_inventory = b"inventory-new".to_vec();
+        let new_chest = b"chest-new".to_vec();
+        let record = Record {
+            version: VERSION,
+            files: vec![
+                Target {
+                    relative: relative(&home, &inventory).unwrap(),
+                    checksum: fingerprint(&new_inventory),
+                    contents: new_inventory.clone(),
+                },
+                Target {
+                    relative: relative(&home, &chest).unwrap(),
+                    checksum: fingerprint(&new_chest),
+                    contents: new_chest.clone(),
+                },
+            ],
+        };
+
+        // (1) Crash exactly after the second target's temporary file was
+        // written and fsync'd, before its rename: the durable journal,
+        // the installed first target and a complete fsync'd temp for the
+        // second all exist at once.
+        fs::write(&inventory, b"inventory-old").unwrap();
+        fs::write(&chest, b"chest-old").unwrap();
+        fs::write(&journal, serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::write(&inventory, &new_inventory).unwrap();
+        fs::write(chest.with_extension("txn.tmp"), &new_chest).unwrap();
+        assert_eq!(fs::read(&chest).unwrap(), b"chest-old");
+
+        recover(&journal).unwrap();
+        // Only the new generation is valid: both targets carry the
+        // committed bytes, the fsync'd temp is gone, and no old
+        // generation survives anywhere.
+        assert_eq!(fs::read(&inventory).unwrap(), new_inventory);
+        assert_eq!(fs::read(&chest).unwrap(), new_chest);
+        assert!(
+            !chest.with_extension("txn.tmp").exists(),
+            "the interrupted temporary file must not survive"
+        );
+        assert!(!journal.exists());
+
+        // (2) Crash before the journal itself is published: only the
+        // prepared *.journal.tmp is durable. Recovery is a no-op, the
+        // old generation stays valid, and the next commit still
+        // succeeds and atomically installs the new generation.
+        fs::write(&inventory, b"inventory-old").unwrap();
+        fs::write(&chest, b"chest-old").unwrap();
+        fs::write(journal.with_extension("journal.tmp"), b"partial").unwrap();
+        recover(&journal).unwrap();
+        assert_eq!(fs::read(&inventory).unwrap(), b"inventory-old");
+        assert_eq!(fs::read(&chest).unwrap(), b"chest-old");
+        commit(
+            &journal,
+            &[
+                (inventory.as_path(), new_inventory.clone()),
+                (chest.as_path(), new_chest.clone()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(fs::read(&inventory).unwrap(), new_inventory);
+        assert_eq!(fs::read(&chest).unwrap(), new_chest);
+        assert!(!journal.exists());
+        fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn player_nbt_journal_targets_are_identity_scoped_and_gzip_bounded() {
         assert!(is_player_state(Path::new("players/rusttester.dat")));
