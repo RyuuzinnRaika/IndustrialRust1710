@@ -187,4 +187,77 @@ mod tests {
         assert!(inspect_region(&region).is_err());
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// ADD-061 / #486: an Anvil region header whose location entries point
+    /// out of range (sector zero, a run running past EOF, or an in-range
+    /// offset whose sector count is zero) must abort the read *and* the
+    /// original file must be byte-identical afterwards. The inspector is
+    /// pure read: a rejected file stays re-inspectable once repaired.
+    #[test]
+    fn region_headers_outside_the_sector_range_abort_without_touching_the_file() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-region-range-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("snapshot");
+        anvil_export::export(&World::new(), &target).unwrap();
+        let region = target.join("region/r.0.0.mca");
+        let valid = fs::read(&region).unwrap();
+        let sectors = valid.len() / SECTOR_SIZE;
+
+        // (1) offset 0 with a non-zero sector count: sector 0 belongs to
+        // the header itself and must be refused.
+        let mut zero_offset = valid.clone();
+        zero_offset[0..4].copy_from_slice(&[0, 0, 0, 1]);
+        // (2) a run that would read past end-of-file: the last sector
+        // cannot hold two sectors.
+        let mut past_eof = valid.clone();
+        let past_offset = sectors - 1;
+        past_eof[0..3].copy_from_slice(&[
+            (past_offset >> 16) as u8,
+            (past_offset >> 8) as u8,
+            past_offset as u8,
+        ]);
+        past_eof[3] = 2;
+        // (3) an in-range offset whose sector count is zero.
+        let mut zero_count = valid.clone();
+        zero_count[0..3].copy_from_slice(&[0, 0, 2]);
+        zero_count[3] = 0;
+        // (4) a duplicate: chunk (0,1) re-claims chunk (0,0)'s exact run.
+        let mut duplicate = valid.clone();
+        duplicate[4..8].copy_from_slice(&valid[0..4]);
+
+        for (label, broken) in [
+            ("sector-zero", zero_offset),
+            ("past-eof", past_eof),
+            ("zero-count", zero_count),
+            ("duplicate-run", duplicate),
+        ] {
+            fs::write(&region, &broken).unwrap();
+            let error = inspect_region(&region).expect_err(&format!("{label} must abort the read"));
+            assert_eq!(error.kind(), ErrorKind::InvalidData, "{label}");
+            assert!(
+                inspect_region_bytes(&region, &broken).is_err(),
+                "{label} must also abort as an in-memory image"
+            );
+            assert_eq!(
+                fs::read(&region).expect("rejected file must still exist"),
+                broken,
+                "{label} must not modify the inspected file"
+            );
+        }
+
+        // The rejection leaves no persistent state: restoring the valid
+        // header makes the very same path inspectable again.
+        fs::write(&region, &valid).unwrap();
+        assert_eq!(
+            inspect_region(&region).unwrap(),
+            9,
+            "the repaired file inspects exactly as before"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
