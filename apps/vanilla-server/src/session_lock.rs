@@ -298,4 +298,115 @@ mod tests {
         drop(lock);
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// ADD-065 / #490: cross-process session.lock integrity. Ownership is
+    /// decided by the OS advisory lock alone and never by PID text (which
+    /// vanilla Java appends after the 8-byte timestamp), so a recycled PID
+    /// can never legitimise stealing a live owner's lock. A killed owner
+    /// (abnormal exit) has its lock reclaimed by the OS, and the next
+    /// server recovers by re-acquiring and rewriting a fresh 8-byte
+    /// marker.
+    #[test]
+    fn live_owner_cannot_be_robbed_and_abnormal_exit_recovers_the_lock() {
+        // Child mode: acquire the world directory named by the parent and
+        // hold the lock until the OS reclaims it when this process dies.
+        if let Some(shared) = std::env::var_os("IR1710_SESSION_LOCK_CHILD") {
+            let shared = std::path::Path::new(&shared);
+            let _guard = WorldSessionLock::acquire(shared).expect("child acquires the lock");
+            let _ = fs::write(shared.join("child-ready"), b"ready");
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+        /// Kills and reaps the holding child even when an assertion below
+        /// fails, so no orphan process can outlive the test.
+        struct ChildCleanup(std::process::Child);
+        impl Drop for ChildCleanup {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let world = std::env::temp_dir().join(format!(
+            "ir1710-session-reap-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&world);
+        fs::create_dir_all(&world).unwrap();
+        let lock = world.join("session.lock");
+        let ready = world.join("child-ready");
+        // A stale vanilla-style marker naming THIS process id: PID text is
+        // never ownership. A child process with a different pid must take
+        // it over purely through the OS lock.
+        let forged: Vec<u8> = 1_700_000_000_000i64
+            .to_be_bytes()
+            .into_iter()
+            .chain(std::process::id().to_string().into_bytes())
+            .collect();
+        fs::write(&lock, &forged).unwrap();
+
+        let mut child = ChildCleanup(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("session_lock::tests::live_owner_cannot_be_robbed_and_abnormal_exit_recovers_the_lock")
+                .env("IR1710_SESSION_LOCK_CHILD", &world)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+
+        // Wait (bounded) for the child to signal that it took the forged
+        // stale marker through the OS lock.
+        let mut took = false;
+        for _ in 0..400 {
+            if ready.exists() {
+                took = true;
+                break;
+            }
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "the child exited before acquiring the lock"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(took, "the child never acquired the session lock");
+        assert_eq!(fs::metadata(&lock).unwrap().len(), 8);
+
+        // While the owner process is alive the lock cannot be robbed: a
+        // re-acquire must fail even though the stale marker on disk once
+        // named a different (reusable) pid. On Windows even rewriting the
+        // marker through a second handle is rejected (ERROR_LOCK_VIOLATION);
+        // POSIX advisory locks stay silent there, but the PID text is never
+        // consulted either way, so re-acquisition fails on both platforms.
+        assert!(
+            WorldSessionLock::acquire(&world).is_err(),
+            "a live owner's lock must not be stealable by PID text"
+        );
+
+        // Abnormal exit: the OS reclaims the advisory lock and the next
+        // server recovers by re-acquiring with a fresh marker.
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        let mut recovered = None;
+        for _ in 0..200 {
+            if let Ok(guard) = WorldSessionLock::acquire(&world) {
+                recovered = Some(guard);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let mut guard = recovered.expect("recovery after an abnormal exit must re-acquire");
+        guard.verify().unwrap();
+        assert_eq!(guard.timestamp_for_test().unwrap(), guard.started_ms);
+        assert_eq!(
+            fs::metadata(&lock).unwrap().len(),
+            8,
+            "the recovered marker is a fresh vanilla 8-byte timestamp"
+        );
+        drop(guard);
+        let _ = fs::remove_dir_all(&world);
+    }
 }
