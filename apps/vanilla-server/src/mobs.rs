@@ -8947,6 +8947,84 @@ mod tests {
         assert_eq!(mobs.hurt_player(3, far, 10), 0);
     }
 
+    /// ADD-049 / #473: an explosion chain that overlaps the same Mob must
+    /// kill and loot it exactly once. Reprocessing a blast (a late TNT
+    /// notification or chunk re-send replaying the same event) must never
+    /// queue the same death's items a second time, and the durable store
+    /// must reflect exactly one death.
+    #[test]
+    fn chained_explosions_kill_and_loot_each_mob_exactly_once() {
+        let at = PlayerPosition {
+            x: 2.5,
+            y: 65.0,
+            z: 2.5,
+        };
+        let blast = |x: f64| Explosion {
+            position: PlayerPosition { x, ..at },
+            radius: 4.0,
+            origin: DamageOrigin::Explosion {
+                kind: "TNT",
+                source_id: None,
+            },
+        };
+        let root = std::env::temp_dir().join(format!(
+            "industrialrust-add049-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("mobs.json");
+        let world = World::new();
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        mobs.insert(Kind::Pig, at, false);
+        let id = mobs.next_id - 1;
+        let animal = mobs.entities.get_mut(&id).unwrap();
+        animal.saddled = true;
+        animal.health = 1;
+
+        // Two overlapping blasts of one chain in the same batch: the Mob
+        // dies under the first, so the second finds nothing left to kill.
+        let events = mobs.queue_explosion_hits(&world, &[blast(2.5), blast(3.0)], &[]);
+        assert_eq!(
+            events.iter().filter(|event| event.id == 0x13).count(),
+            1,
+            "the Mob is destroyed exactly once across the chain"
+        );
+        assert!(!mobs.entities.contains_key(&id));
+        assert!(
+            !events.iter().any(|event| event.id == 0x11),
+            "an explosion kill mints no XP orb events"
+        );
+        let first = mobs.take_drops();
+        assert!(!first.is_empty(), "the saddled pig drops its loot");
+        assert_eq!(
+            first.iter().filter(|(stack, _)| stack.id == 329).count(),
+            1,
+            "exactly one saddle for one death"
+        );
+
+        // A replayed blast after the death cannot re-kill the removed
+        // entity or requeue its loot; pending drops drain exactly once.
+        let replay = mobs.queue_explosion_hits(&world, &[blast(2.5)], &[]);
+        assert!(replay.is_empty(), "a replayed blast produces no events");
+        assert!(mobs.take_drops().is_empty(), "pending drops drain once");
+
+        // The durable store reflects one death: a reload keeps the Mob gone
+        // and never resurrects pending loot.
+        mobs.save(&world).unwrap();
+        let mut reloaded = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        assert!(
+            !reloaded.entities.contains_key(&id),
+            "the killed Mob stays dead across a reload"
+        );
+        assert!(
+            reloaded.take_drops().is_empty(),
+            "a reload cannot re-queue the committed death loot"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn xp_orb_pickup_uses_protocol5_fixed_width_entity_ids() {
         let pos = PlayerPosition::default();
