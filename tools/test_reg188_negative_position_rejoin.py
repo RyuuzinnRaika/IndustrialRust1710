@@ -35,6 +35,14 @@ class NegativeCoordinateVerifierTests(TestCase):
             ))
         self.assertFalse(audit.position_matches(None, -1, 65, -1))
 
+    def test_server_feet_undoes_the_s08_eye_offset(self):
+        # S08 Y is the client eye height (server feet + 1.62); the verifier
+        # must compare feet coordinates, exactly like read_position does in
+        # the Rust Protocol 5 suite.
+        self.assertAlmostEqual(audit.server_feet((0.5, 65.62, -16.5))[1], 64.0, places=9)
+        self.assertEqual(audit.server_feet((0.5, 65.62, -16.5))[0::2], (0.5, -16.5))
+        self.assertIsNone(audit.server_feet(None))
+
     def test_output_must_be_new(self):
         with TemporaryDirectory() as path:
             with self.assertRaises(FileExistsError):
