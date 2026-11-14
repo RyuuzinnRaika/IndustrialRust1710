@@ -8,9 +8,9 @@ use sha1::{Digest, Sha1};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::ops::{Deref, DerefMut};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::{receive, send, Input};
+use crate::{send, Input};
 
 fn invalid(reason: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, reason)
@@ -103,6 +103,63 @@ impl Write for Connection {
     }
 }
 
+// A socket read timeout only bounds each individual read(2). Without an
+// absolute deadline, a peer can hold a pending online login indefinitely by
+// trickling one encrypted-response byte just before each socket timeout.
+const ENCRYPTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct DeadlineReader<'a> {
+    connection: &'a mut Connection,
+    expires_at: Instant,
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let remaining = self.expires_at.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            self.connection.set_read_timeout(Some(remaining))?;
+            match self.connection.read(output) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    // Poll again only while some of the absolute budget remains.
+                }
+                other => return other,
+            }
+        }
+    }
+}
+
+/// Read one complete unencrypted EncryptionResponse within one total budget,
+/// including its VarInt prefix and packet body. Restore the previous socket
+/// timeout before enabling AES or starting the Mojang session lookup.
+fn receive_encryption_response(
+    connection: &mut Connection,
+    budget: Duration,
+) -> io::Result<(i32, Vec<u8>)> {
+    let previous_timeout = connection.read_timeout()?;
+    let result = (|| {
+        let mut reader = DeadlineReader {
+            connection,
+            expires_at: Instant::now() + budget,
+        };
+        let frame = legacy_protocol::read_frame(&mut reader)?;
+        let mut data = frame.as_slice();
+        let id = legacy_protocol::read_varint(&mut data)? as i32;
+        Ok((id, data.to_vec()))
+    })();
+    connection.set_read_timeout(previous_timeout)?;
+    result
+}
+
 pub struct VerifiedProfile {
     pub name: String,
     pub uuid: String,
@@ -138,7 +195,7 @@ impl ServerIdentity {
         request.extend_from_slice(&challenge);
         send(socket, 0x01, &request)?;
 
-        let (id, response) = receive(socket)?;
+        let (id, response) = receive_encryption_response(socket, ENCRYPTION_RESPONSE_TIMEOUT)?;
         if id != 0x01 {
             return Err(invalid("expected encryption response"));
         }
@@ -293,6 +350,65 @@ fn parse_verified_profile(username: &str, body: &[u8]) -> io::Result<VerifiedPro
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn encryption_response_deadline_limits_trickled_varint_prefix() {
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        let mut connection = Connection::new(accepted);
+        connection
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let writer = thread::spawn(move || {
+            // This first length byte is incomplete: a per-read timeout would
+            // reset when another byte eventually arrives.
+            sender.write_all(&[0x80]).unwrap();
+            thread::sleep(Duration::from_millis(180));
+        });
+        let started = Instant::now();
+        let error = receive_encryption_response(&mut connection, Duration::from_millis(70))
+            .expect_err("incomplete EncryptionResponse must expire");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "incomplete response exceeded its absolute deadline"
+        );
+        assert_eq!(
+            connection.read_timeout().unwrap(),
+            Some(Duration::from_secs(2)),
+            "socket timeout must be restored even after a read error"
+        );
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn encryption_response_deadline_accepts_complete_packet_and_restores_timeout() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        let mut connection = Connection::new(accepted);
+        connection
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut framed = Vec::new();
+        legacy_protocol::write_frame(&mut framed, &[0x01, 0xa5, 0x05]).unwrap();
+        sender.write_all(&framed).unwrap();
+
+        let (id, payload) =
+            receive_encryption_response(&mut connection, Duration::from_secs(1)).unwrap();
+        assert_eq!(id, 0x01);
+        assert_eq!(payload, [0xa5, 0x05]);
+        assert_eq!(
+            connection.read_timeout().unwrap(),
+            Some(Duration::from_secs(3))
+        );
+    }
+
     #[test]
     fn encryption_challenge_rejects_stale_cross_session_and_malformed_tokens() {
         // A token is valid only for the connection that issued it. Even though
