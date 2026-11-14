@@ -391,6 +391,74 @@ mod tests {
         );
     }
 
+    /// ADD-073 / #498: online-mode login fails closed. A hostile, empty or
+    /// truncated Encryption Response aborts verification on a live loopback
+    /// connection before the socket ever switches to AES, so the login
+    /// handler's `?` disconnects the client and NO Login Success (0x02) can
+    /// precede a verified profile. Session-server trouble is only ever an
+    /// error: an unverified name can never reach Play state.
+    #[test]
+    fn hostile_login_packets_fail_closed_before_login_success() {
+        use std::net::TcpListener;
+        let identity = ServerIdentity::generate().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        for case in 0..4u8 {
+            let client = Connection::new(TcpStream::connect(address).unwrap());
+            let (server_socket, _) = listener.accept().unwrap();
+            let mut server = Connection::new(server_socket);
+            // The client side answers the Encryption Request with a hostile
+            // response while authenticate() blocks in its receive.
+            let outcome = std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    let mut client = client;
+                    let (id, request) = receive(&mut client).unwrap();
+                    assert_eq!(
+                        id, 0x01,
+                        "online login must start with an Encryption Request"
+                    );
+                    assert!(
+                        !request.is_empty(),
+                        "the request carries the DER key and challenge"
+                    );
+                    let hostile: Vec<u8> = match case {
+                        0 => vec![0x02], // empty secret length
+                        1 => vec![0, 0], // zero-length encrypted secret
+                        2 => {
+                            // Plausible lengths, undecryptable garbage bodies.
+                            let mut bytes = vec![0u8; 2 + 128 + 2 + 4];
+                            for (index, byte) in bytes.iter_mut().enumerate() {
+                                *byte = (index as u8).wrapping_mul(31).wrapping_add(7);
+                            }
+                            bytes[1] = 128;
+                            bytes[2 + 128 + 1] = 4;
+                            bytes
+                        }
+                        _ => vec![0x00, 0x40, 0x10, 0x20], // announces 64 bytes, delivers 2
+                    };
+                    send(&mut client, 0x01, &hostile).unwrap();
+                });
+                identity.authenticate(&mut server, "RustTester")
+            });
+            let error = match outcome {
+                Ok(profile) => panic!(
+                    "hostile login case {case} verified {}:{}",
+                    profile.name, profile.uuid
+                ),
+                Err(error) => error,
+            };
+            // Hostile frames abort with an owned, redacted message (login is
+            // refused before Login Success); the exact class only matters
+            // for operators, never for admission.
+            assert!(!error.to_string().is_empty(), "case {case}");
+        }
+        // Session verification itself refuses malformed identities BEFORE any
+        // network access, so a bad name can never be promoted even offline.
+        for name in ["a", "Bad Name!", "AAAAAAAAAAAAAAAAAAAA"] {
+            assert!(verify_has_joined(name, "deadbeef").is_err(), "{name}");
+        }
+    }
+
     /// ADD-071 / #496: whitelist admission is name-only and the verified
     /// UUID comes from the session server alone. A whitelist file may carry
     /// a stale or attacker-forged `uuid` string; it is inert metadata that
