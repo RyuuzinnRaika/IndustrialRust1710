@@ -459,6 +459,151 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&dir);
     }
+    /// ADD-057 / #481: Minecraft Java 1.7.10 hoppers are not affected by
+    /// redstone power (the powered lock predates 1.5 and returned only in
+    /// 1.9), so a hopper receiving a signal must keep transferring. Every
+    /// transfer across a power edge — the cycle right before the signal
+    /// arrives and the cycle right after it leaves — still commits the
+    /// source removal, the destination insert and both sidecar saves in
+    /// one journal transaction, exactly once per cycle.
+    #[test]
+    fn power_edges_commit_each_hopper_transfer_exactly_once() {
+        use crate::chests::Chests;
+        use crate::furnaces::Furnaces;
+
+        let stone = Stack {
+            id: 1,
+            count: 64,
+            damage: 0,
+            nbt: None,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-hoppers-power-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let world_path = root.join("power-edge.irw");
+        let chest_path = Chests::location(&world_path);
+        let furnace_path = Furnaces::location(&world_path);
+        let hopper_path = Hoppers::location(&world_path);
+        let journal_path = world_path.with_extension("pending-txn.json");
+
+        // Chest below, down-facing hopper, chest above, and a redstone
+        // block on the +X side strongly powering the hopper's own cell.
+        // The block is placed and removed across the test to create the
+        // powered-edge ticks.
+        let mut world = World::new();
+        world
+            .update_and_save(&world_path, 0, 63, 0, 54 << 4)
+            .unwrap();
+        world
+            .update_and_save(&world_path, 0, 64, 0, 154 << 4)
+            .unwrap();
+        world
+            .update_and_save(&world_path, 0, 65, 0, 54 << 4)
+            .unwrap();
+        let powered = 152u16 << 4; // redstone block: always on, always strong
+        world
+            .update_and_save(&world_path, 1, 64, 0, powered)
+            .unwrap();
+        assert_eq!(world.signal_into((1, 64, 0), (0, 64, 0)), 15);
+
+        let mut hoppers = Hoppers::default();
+        hoppers.register(&hopper_path, (0, 64, 0)).unwrap();
+        let mut hopper_slots = [None; HOPPER_SLOTS];
+        hopper_slots[0] = Some(stone);
+        let staged = hoppers.staged_update((0, 64, 0), hopper_slots).unwrap();
+        hoppers.commit_staged(&hopper_path, staged).unwrap();
+        let mut chests = Chests::default();
+        let mut above_slots = [None; 27];
+        above_slots[0] = Some(Stack { count: 8, ..stone });
+        let staged = chests.staged_update((0, 65, 0), above_slots).unwrap();
+        chests.commit_staged(&chest_path, staged).unwrap();
+        let mut furnaces = Furnaces::default();
+
+        let total = |hoppers: &Hoppers, chests: &Chests| -> u32 {
+            let into = |slots: &[Option<Stack>]| -> u32 {
+                slots
+                    .iter()
+                    .flatten()
+                    .filter(|item| item.id == 1)
+                    .map(|item| u32::from(item.count))
+                    .sum::<u32>()
+            };
+            into(&hoppers.slots((0, 64, 0)))
+                + into(&chests.slots((0, 63, 0)))
+                + into(&chests.slots((0, 65, 0)))
+        };
+        assert_eq!(total(&hoppers, &chests), 72);
+
+        // Cycle while powered: 1.7.10 hoppers ignore power, so the push
+        // into the lower chest and the pull from the upper chest each
+        // commit exactly once in this single cycle.
+        let moved = hoppers
+            .advance(
+                &world,
+                &mut chests,
+                &chest_path,
+                &mut furnaces,
+                &furnace_path,
+                &hopper_path,
+                &journal_path,
+            )
+            .unwrap();
+        assert_eq!(moved, 2, "one powered hopper pushes once and pulls once");
+
+        // Then the signal leaves and returns across further cycles; the
+        // hopper is powered on even edges and unpowered on odd ones, yet
+        // every cycle still moves exactly one push + one pull, and the
+        // combined stone count never drifts.
+        for toggle in 0..4 {
+            let block = if toggle % 2 == 0 { 0 } else { powered };
+            world.update_and_save(&world_path, 1, 64, 0, block).unwrap();
+            let moved = hoppers
+                .advance(
+                    &world,
+                    &mut chests,
+                    &chest_path,
+                    &mut furnaces,
+                    &furnace_path,
+                    &hopper_path,
+                    &journal_path,
+                )
+                .unwrap();
+            assert_eq!(moved, 2, "power edge {toggle} moves one push + pull");
+            assert_eq!(total(&hoppers, &chests), 72, "edge {toggle}");
+        }
+
+        // The persisted sidecars match the in-memory exactly-once result:
+        // five cycles moved five stone down and five stone in.
+        let reloaded_hoppers = Hoppers::load(&hopper_path).unwrap();
+        let reloaded_chests = Chests::load(&chest_path).unwrap();
+        assert_eq!(total(&reloaded_hoppers, &reloaded_chests), 72);
+        assert_eq!(
+            reloaded_chests
+                .slots((0, 63, 0))
+                .iter()
+                .flatten()
+                .map(|item| u32::from(item.count))
+                .sum::<u32>(),
+            5,
+            "each push committed exactly once"
+        );
+        assert_eq!(
+            reloaded_chests
+                .slots((0, 65, 0))
+                .iter()
+                .flatten()
+                .map(|item| u32::from(item.count))
+                .sum::<u32>(),
+            3,
+            "the upper chest lost exactly its five pulled items"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn transfer_one_respects_stack_boundaries_and_item_conservation() {
         let mut src = [Some(Stack {
