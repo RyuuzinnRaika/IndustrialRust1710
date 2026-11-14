@@ -4519,6 +4519,54 @@ mod tests {
         );
     }
 
+    /// ADD-040 / #464: spamming enchantment result clicks must charge the XP
+    /// for exactly one offer, keep the enchanted item NBT stable across the
+    /// repeated clicks *and* a save reload, and never touch any lapis-like
+    /// resource (1.7.10 tables consume levels only).
+    #[test]
+    fn enchant_choice_spam_consumes_one_offer_and_keeps_nbt_stable() {
+        let mut inv = Inventory {
+            enchant_input: Some(Stack {
+                id: 256,
+                count: 1,
+                damage: 0,
+                nbt: None,
+            }),
+            ..Inventory::default()
+        };
+        let mut xp = crate::experience::Experience { total: 2000 };
+        let before = xp.total;
+        assert!(inv.enchant_choice(1, [1, 2, 30], 42, &mut xp, true));
+        let charged_once = before - xp.total;
+        assert!(charged_once > 0, "the accepted offer must charge XP");
+        assert!(
+            inv.enchant_input.unwrap().nbt.is_some(),
+            "the enchanted result carries Item NBT"
+        );
+        let snapshot = inv.clone();
+        let xp_after_first = xp.total;
+        for _ in 0..40 {
+            for choice in [0i8, 1, 2] {
+                assert!(
+                    !inv.enchant_choice(choice, [1, 2, 30], 42, &mut xp, true),
+                    "a repeat click on the enchanted result must be refused"
+                );
+            }
+        }
+        assert_eq!(
+            xp.total, xp_after_first,
+            "spam clicks must not charge XP twice"
+        );
+        assert_eq!(inv, snapshot, "spam clicks must not mutate the inventory");
+        let bytes = inv.encoded().unwrap();
+        let reloaded: Inventory = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            crate::item_nbt::wire(reloaded.enchant_input.unwrap().nbt.unwrap()),
+            crate::item_nbt::wire(inv.enchant_input.unwrap().nbt.unwrap()),
+            "the enchanted Item NBT survives a save reload intact"
+        );
+    }
+
     #[test]
     fn enchant_choice_debits_exact_xp_and_survives_save_reload() {
         let mut inv = Inventory {
