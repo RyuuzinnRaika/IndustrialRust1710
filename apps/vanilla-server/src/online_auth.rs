@@ -363,10 +363,14 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let writer = thread::spawn(move || {
-            // This first length byte is incomplete: a per-read timeout would
-            // reset when another byte eventually arrives.
-            sender.write_all(&[0x80]).unwrap();
-            thread::sleep(Duration::from_millis(180));
+            // Each fragment arrives well within a per-read 70 ms timeout,
+            // but the whole frame takes longer than the absolute 70 ms budget.
+            sender.write_all(&[0x84]).unwrap();
+            thread::sleep(Duration::from_millis(40));
+            sender.write_all(&[0x01]).unwrap(); // 132-byte frame length
+            thread::sleep(Duration::from_millis(40));
+            sender.write_all(&[0x01]).unwrap(); // Partial frame body
+            thread::sleep(Duration::from_millis(40));
         });
         let started = Instant::now();
         let error = receive_encryption_response(&mut connection, Duration::from_millis(70))
