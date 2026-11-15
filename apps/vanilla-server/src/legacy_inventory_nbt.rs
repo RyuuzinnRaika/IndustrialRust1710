@@ -119,6 +119,8 @@ pub(crate) fn inspect_player(path: &Path) -> io::Result<(usize, usize)> {
     if bytes.len() > MAX_PLAYER_NBT {
         return Err(invalid("playerdata decompression exceeds safety limit"));
     }
+    // Iterative nesting/length bound before fastnbt's recursive decoder.
+    crate::legacy_nbt::bounded_nbt(&bytes)?;
     let record: PlayerData = fastnbt::from_bytes(&bytes)
         .map_err(|_| invalid("invalid Minecraft 1.7.10 playerdata NBT"))?;
     record.validate()?;

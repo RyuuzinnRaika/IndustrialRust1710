@@ -7394,6 +7394,43 @@ fn commit_death_drops(
     Ok(())
 }
 
+/// Serializes authenticated identity across player-file I/O and gameplay.
+/// Hub::add_in_dimension runs too late to protect pre-admission player saves.
+#[derive(Default)]
+struct LoginIdentityRegistry {
+    names: Mutex<BTreeSet<String>>,
+}
+
+struct LoginIdentityLease {
+    registry: Arc<LoginIdentityRegistry>,
+    name: String,
+}
+
+impl LoginIdentityRegistry {
+    fn reserve(self: &Arc<Self>, name: &str) -> io::Result<Option<LoginIdentityLease>> {
+        let key = name.to_ascii_lowercase();
+        let mut names = self
+            .names
+            .lock()
+            .map_err(|_| bad("pending login registry poisoned"))?;
+        if !names.insert(key.clone()) {
+            return Ok(None);
+        }
+        Ok(Some(LoginIdentityLease {
+            registry: Arc::clone(self),
+            name: key,
+        }))
+    }
+}
+
+impl Drop for LoginIdentityLease {
+    fn drop(&mut self) {
+        if let Ok(mut names) = self.registry.names.lock() {
+            names.remove(&self.name);
+        }
+    }
+}
+
 struct PlayerAdmission {
     hub: Arc<Hub>,
     entity_id: i32,
@@ -7411,6 +7448,7 @@ impl Drop for ConnectionGuard {
 }
 struct ServerContext {
     hub: Arc<Hub>,
+    login_names: Arc<LoginIdentityRegistry>,
     world: Arc<Mutex<World>>,
     dimension_worlds: Option<Arc<dimensions::DimensionWorlds>>,
     path: Arc<PathBuf>,
@@ -7476,6 +7514,7 @@ fn handle(
 ) -> io::Result<()> {
     let ServerContext {
         hub,
+        login_names,
         world,
         dimension_worlds,
         path,
@@ -7605,6 +7644,15 @@ fn handle(
         login_disconnect(&mut s, "Login denied: whitelist or ban updated.")?;
         return Ok(());
     }
+    // Hold this lease until all player-data writes and Hub removal finish.
+    // Otherwise two verified sessions can rewrite one player before Hub.add.
+    let _login_identity_lease = match login_names.reserve(&name)? {
+        Some(lease) => lease,
+        None => {
+            login_disconnect(&mut s, "That username is already connecting or connected.")?;
+            return Ok(());
+        }
+    };
     let player_file = if online_mode {
         PlayerPosition::authenticated_location(&path, &uuid)?
     } else {
@@ -9690,6 +9738,7 @@ fn main() -> io::Result<()> {
         eprintln!("{message}");
     }
     let hub = Arc::new(Hub::default());
+    let login_names = Arc::new(LoginIdentityRegistry::default());
     let connections = Arc::new(AtomicUsize::new(0));
     let limiter = Arc::new(ConnectionLimiter::default());
     let path = Arc::new(world_path);
@@ -10863,6 +10912,7 @@ fn main() -> io::Result<()> {
         }
         let admission = ConnectionGuard(Arc::clone(&connections));
         let clients = Arc::clone(&hub);
+        let pending_names = Arc::clone(&login_names);
         let w = Arc::clone(&world);
         let active_dimensions = dimension_worlds.clone();
         let p = Arc::clone(&path);
@@ -10903,6 +10953,7 @@ fn main() -> io::Result<()> {
                 stream,
                 ServerContext {
                     hub: clients,
+                    login_names: pending_names,
                     world: w,
                     dimension_worlds: active_dimensions,
                     path: p,
@@ -12846,5 +12897,61 @@ mod reg120_coalesced_teleport_tests {
             500.5
         );
         assert!(next_session_event(&events, &mut deferred).is_none());
+    }
+}
+
+#[cfg(test)]
+mod next003_identity_lease_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    #[test]
+    fn duplicate_pending_name_is_case_insensitive_and_released_on_drop() {
+        let registry = Arc::new(LoginIdentityRegistry::default());
+        let first = registry.reserve("ExampleUser").unwrap().unwrap();
+        assert!(registry.reserve("exampleuser").unwrap().is_none());
+        assert!(registry.reserve("EXAMPLEUSER").unwrap().is_none());
+        assert!(registry.reserve("AnotherUser").unwrap().is_some());
+        drop(first);
+        assert!(registry.reserve("exampleuser").unwrap().is_some());
+    }
+
+    #[test]
+    fn concurrent_same_name_reservations_grant_exactly_one_lease() {
+        const CLIENTS: usize = 8;
+        let registry = Arc::new(LoginIdentityRegistry::default());
+        let start = Arc::new(Barrier::new(CLIENTS + 1));
+        let finish = Arc::new(Barrier::new(CLIENTS + 1));
+        let threads: Vec<_> = (0..CLIENTS)
+            .map(|index| {
+                let registry = Arc::clone(&registry);
+                let start = Arc::clone(&start);
+                let finish = Arc::clone(&finish);
+                std::thread::spawn(move || {
+                    start.wait();
+                    let name = if index % 2 == 0 {
+                        "ExampleUser"
+                    } else {
+                        "exampleuser"
+                    };
+                    let lease = registry.reserve(name).unwrap();
+                    let admitted = lease.is_some();
+                    // Keep the winning lease until all attempts complete.
+                    finish.wait();
+                    admitted
+                })
+            })
+            .collect();
+        start.wait();
+        finish.wait();
+        assert_eq!(
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .filter(|admitted| *admitted)
+                .count(),
+            1
+        );
+        assert!(registry.reserve("exampleuser").unwrap().is_some());
     }
 }
