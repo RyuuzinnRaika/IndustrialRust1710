@@ -294,6 +294,92 @@ mod tests {
     use super::*;
     use crate::anvil_export::export;
 
+    /// ADD-097 / #522: an Anvil snapshot declaring a version this reader
+    /// cannot certify (anything but the exact 1.7.10 DataVersion 19133)
+    /// must abort the import BEFORE publishing anything, must never
+    /// create or overwrite the target IRW (not even the `*.importing`
+    /// staging file), and must not move a single snapshot byte. The
+    /// IRW-side equivalent is `unsupported_world_versions_fail_closed_
+    /// without_touching_original_bytes` plus the corrupt-fixture matrix.
+    #[test]
+    fn unknown_anvil_version_refuses_import_without_publishing_or_writes() {
+        use crate::level_dat::{LevelData, LevelRoot};
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-anvil-import-version-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let snap = root.join("snapshot");
+        export(&World::new(), &snap).unwrap();
+
+        // Fault injection: rewrite the snapshot's OWN level.dat to declare
+        // a future Anvil DataVersion the reader has no compatibility proof
+        // for. Everything else in the snapshot stays byte-identical, so
+        // only the version gate can reject it.
+        let unsupported = LevelRoot {
+            data: LevelData {
+                format_version: 19_134,
+                name: "IndustrialRust1710 Export".into(),
+                seed: 0,
+                spawn_x: 0,
+                spawn_y: 64,
+                spawn_z: 0,
+                time: 0,
+                day_time: None,
+                game_type: None,
+                generator: Some("flat".into()),
+                raining: None,
+                thundering: None,
+                rain_time: None,
+                thunder_time: None,
+                game_rules: None,
+                extra: Default::default(),
+            },
+            extra: Default::default(),
+        };
+        let encoded = fastnbt::to_bytes(&unsupported).unwrap();
+        let gzipped = {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&encoded).unwrap();
+            encoder.finish().unwrap()
+        };
+        fs::write(snap.join("level.dat"), &gzipped).unwrap();
+        // Baseline fingerprint AFTER injection (#495 lesson) so only
+        // importer-caused changes are caught.
+        let level_before = fs::read(snap.join("level.dat")).unwrap();
+        let region_before = fs::read(snap.join("region/r.0.0.mca")).unwrap();
+
+        let dest = root.join("recovered.irw");
+        let error = match import(&snap, &dest) {
+            Ok(imported) => panic!("unsupported Anvil version imported {imported:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(
+            !dest.exists(),
+            "a refused import must not publish a target IRW"
+        );
+        assert!(
+            !root.join("recovered.importing").exists(),
+            "a refused import must not even leave a staging file"
+        );
+        assert_eq!(
+            fs::read(snap.join("level.dat")).unwrap(),
+            level_before,
+            "a refused import must not rewrite the snapshot level.dat"
+        );
+        assert_eq!(
+            fs::read(snap.join("region/r.0.0.mca")).unwrap(),
+            region_before,
+            "a refused import must not touch snapshot regions"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn roundtrip_and_no_overwrite() {
         let root = std::env::temp_dir().join(format!("ir1710-anvil-import-{}", std::process::id()));
