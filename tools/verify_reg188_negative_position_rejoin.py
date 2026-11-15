@@ -27,6 +27,18 @@ NEGATIVE = (-16.0, -1.0, -1000.0)
 ITEM_ID = 1
 ITEM_COUNT = 8
 PLAYER = "Positioner"
+# The native server's S08 spawn packet carries the *client* position, whose
+# Y is the player's eye height: server feet Y + 1.62 (see send_player_position
+# and read_position in the Rust suite). Synthetic clients must undo that
+# offset before comparing S08 against the feet coordinates they reported.
+CLIENT_EYE_OFFSET = 1.62
+
+
+def server_feet(position):
+    """Translate a raw S08 position into the server's authoritative feet Y."""
+    if position is None:
+        return None
+    return (position[0], position[1] - CLIENT_EYE_OFFSET, position[2])
 
 
 def inventory_count(path: Path, item_id: int) -> int:
@@ -124,16 +136,17 @@ def run(server: Path, output: Path) -> dict:
     child = None
     logfile = None
     client = None
+    y = None  # server feet height, captured on the first admission
     try:
         for i, coordinate in enumerate(NEGATIVE):
             port = reserve_loopback_port()
             child, logfile = start(server, output, port, output / f"write-{i}.log")
             try:
                 client = connect(port)
-                initial = client.position
+                initial = server_feet(client.position)
                 if i > 0:
                     expected_prior = NEGATIVE[i - 1]
-                    if not position_matches(initial, expected_prior, initial[1], expected_prior):
+                    if not position_matches(initial, expected_prior, y, expected_prior):
                         raise RuntimeError(
                             f"player prior position unexpectedly reset: {initial}"
                         )
@@ -145,7 +158,10 @@ def run(server: Path, output: Path) -> dict:
                 y = initial[1]
                 client.send(
                     4,
-                    struct.pack(">ddddB", coordinate, y, y + 1.62, coordinate, 1),
+                    struct.pack(
+                        ">ddddB", coordinate, y, y + CLIENT_EYE_OFFSET,
+                        coordinate, 1,
+                    ),
                 )
                 # Let the queued player packet finish chunk streaming; TCP
                 # preserves packet order, and /stop joins the saved session.
@@ -176,7 +192,7 @@ def run(server: Path, output: Path) -> dict:
             child, logfile = start(server, output, port, output / f"reload-{i}.log")
             try:
                 client = connect(port)
-                reloaded = client.position
+                reloaded = server_feet(client.position)
                 if not position_matches(reloaded, coordinate, y, coordinate):
                     raise RuntimeError(
                         f"coordinate {coordinate}: restart returned {reloaded} instead"
@@ -208,7 +224,7 @@ def run(server: Path, output: Path) -> dict:
                 logfile.close()
                 logfile = None
         verify = subprocess.run(
-            [str(server), "--verify-world", str(output)],
+            [str(server), "--verify-world", str(output / "isolated.irw")],
             cwd=output, capture_output=True, text=True, timeout=60,
         )
         if verify.returncode:

@@ -2058,6 +2058,34 @@ fn survival_unsupported_drop_falls_under_gravity_and_is_collected() {
     server.wait_idle();
 }
 
+/// Restart a fresh native server over the same isolated test directory.
+/// REG-188 uses this to prove a saved session reloads byte-identical.
+fn restart_in(directory: &Path) -> (Child, u16) {
+    let reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vanilla-server"));
+    let child = command
+        .args(["--bind", &format!("127.0.0.1:{port}")])
+        .arg("--whitelist")
+        .arg(directory.join("whitelist.json"))
+        .arg("--world")
+        .arg(directory.join("flat.irw"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "restarted server did not start");
+        thread::sleep(Duration::from_millis(50));
+    }
+    (child, port)
+}
 /// Send a Protocol 5 start-dig (action 0) and finished (action 2) pair for
 /// one block with a short break time in between.
 fn dig_block(socket: &mut TcpStream, x: i32, y: i32, z: i32) {
@@ -2070,6 +2098,99 @@ fn dig_block(socket: &mut TcpStream, x: i32, y: i32, z: i32) {
     thread::sleep(Duration::from_millis(1200));
     dig[0] = 2; // finished digging
     socket.write_all(&frame(7, &dig)).unwrap();
+}
+
+#[test]
+fn negative_position_survives_logout_restart_and_rejoin() {
+    // REG-188 / #824: a Creative session parked at negative X/Z must keep
+    // its exact position and inventory across a genuine /stop + restart.
+    // The native S08 eye-height offset (+1.62) is undone by read_position,
+    // so the assertion compares true server feet coordinates.
+    let mut server = NativeServer::start();
+    let (mut client, _, spawn) = server.join("Positioner");
+    assert_eq!(spawn, [0.5, 64.0, 0.5]);
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/give Positioner 1 8\n")
+        .unwrap();
+    let inventory_path = server.directory.join("players/positioner.inventory.json");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if fs::read(&inventory_path).is_ok_and(|raw| {
+            serde_json::from_slice::<Value>(&raw)
+                .map(|inv| {
+                    inv["slots"]
+                        .as_array()
+                        .map(|slots| {
+                            slots
+                                .iter()
+                                .filter(|s| s["id"].as_i64() == Some(1))
+                                .map(|s| s["count"].as_u64().unwrap_or(0))
+                                .sum::<u64>()
+                                == 8
+                        })
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "granted items never reached the inventory sidecar"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // Park at a deep negative corner, then log out cleanly.
+    send_position(&mut client, -16.0, 64.0, -16.0);
+    thread::sleep(Duration::from_millis(1200));
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/stop\n")
+        .unwrap();
+    until_packet(&mut client, 0x40, |_| true);
+    drop(client);
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        if let Some(exit) = server.process.try_wait().unwrap() {
+            assert!(exit.success(), "graceful /stop failed: {exit}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "/stop left workers running");
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // A genuine restart of the same isolated world restores the exact
+    // negative position and the untouched eight items.
+    let (child, port) = restart_in(&server.directory);
+    server.process = child;
+    server.port = port;
+    let (rejoined, _, restored) = server.join("Positioner");
+    assert!(
+        (restored[0] + 16.0).abs() < 1e-6 && (restored[2] + 16.0).abs() < 1e-6,
+        "restart lost the negative corner: {restored:?}"
+    );
+    assert!(
+        (restored[1] - 64.0).abs() < 1e-6,
+        "restart changed the saved feet height: {restored:?}"
+    );
+    let reloaded: Value = serde_json::from_slice(&fs::read(&inventory_path).unwrap()).unwrap();
+    let total = reloaded["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|slot| slot["id"].as_i64() == Some(1))
+        .map(|slot| slot["count"].as_u64().unwrap_or(0))
+        .sum::<u64>();
+    assert_eq!(total, 8, "restart changed the player's ItemStack count");
+    drop(rejoined);
 }
 
 #[test]

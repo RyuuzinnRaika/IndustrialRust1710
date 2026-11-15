@@ -222,6 +222,8 @@ impl PlayerPosition {
         if decompressed.len() as u64 > MAX_DECOMPRESSED_BYTES {
             return Err(invalid("NBT decompression limit exceeded"));
         }
+        // Iterative nesting/length bound before fastnbt's recursive decoder.
+        crate::legacy_nbt::bounded_nbt(&decompressed)?;
         let nbt: PositionNbt = fastnbt::from_bytes(&decompressed)
             .map_err(|_| invalid("invalid player NBT document"))?;
         if nbt.pos.len() != 3 {
