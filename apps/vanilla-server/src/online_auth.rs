@@ -510,4 +510,288 @@ mod tests {
             "-7c9d5b0044c130109a5d7b5fb5c317c02b4e28c1"
         );
     }
+
+    /// ADD-073 / #498: online-mode login fails closed. A hostile, empty or
+    /// truncated Encryption Response aborts verification on a live loopback
+    /// connection before the socket ever switches to AES, so the login
+    /// handler's `?` disconnects the client and NO Login Success (0x02) can
+    /// precede a verified profile. Session-server trouble is only ever an
+    /// error: an unverified name can never reach Play state.
+    #[test]
+    fn hostile_login_packets_fail_closed_before_login_success() {
+        use std::net::TcpListener;
+        let identity = ServerIdentity::generate().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        for case in 0..4u8 {
+            let client = Connection::new(TcpStream::connect(address).unwrap());
+            let (server_socket, _) = listener.accept().unwrap();
+            let mut server = Connection::new(server_socket);
+            // The client side answers the Encryption Request with a hostile
+            // response while authenticate() blocks in its receive.
+            let outcome = std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    let mut client = client;
+                    let (id, request) = receive(&mut client).unwrap();
+                    assert_eq!(
+                        id, 0x01,
+                        "online login must start with an Encryption Request"
+                    );
+                    assert!(
+                        !request.is_empty(),
+                        "the request carries the DER key and challenge"
+                    );
+                    let hostile: Vec<u8> = match case {
+                        0 => vec![0x02], // empty secret length
+                        1 => vec![0, 0], // zero-length encrypted secret
+                        2 => {
+                            // Plausible lengths, undecryptable garbage bodies.
+                            let mut bytes = vec![0u8; 2 + 128 + 2 + 4];
+                            for (index, byte) in bytes.iter_mut().enumerate() {
+                                *byte = (index as u8).wrapping_mul(31).wrapping_add(7);
+                            }
+                            bytes[1] = 128;
+                            bytes[2 + 128 + 1] = 4;
+                            bytes
+                        }
+                        _ => vec![0x00, 0x40, 0x10, 0x20], // announces 64 bytes, delivers 2
+                    };
+                    send(&mut client, 0x01, &hostile).unwrap();
+                });
+                identity.authenticate(&mut server, "RustTester")
+            });
+            let error = match outcome {
+                Ok(profile) => panic!(
+                    "hostile login case {case} verified {}:{}",
+                    profile.name, profile.uuid
+                ),
+                Err(error) => error,
+            };
+            // Hostile frames abort with an owned, redacted message (login is
+            // refused before Login Success); the exact class only matters
+            // for operators, never for admission.
+            assert!(!error.to_string().is_empty(), "case {case}");
+        }
+        // Session verification itself refuses malformed identities BEFORE any
+        // network access, so a bad name can never be promoted even offline.
+        for name in ["a", "Bad Name!", "AAAAAAAAAAAAAAAAAAAA"] {
+            assert!(verify_has_joined(name, "deadbeef").is_err(), "{name}");
+        }
+    }
+
+    /// ADD-078 / #503: authentication-failure logging must never leak key
+    /// material, session keys or auth tokens, including fault cases. The
+    /// session worker logs exactly `reason={error}` plus the disconnect
+    /// category and IO kind; drive every online-auth failure with a
+    /// recognizable canary at each sensitive value (challenge bytes,
+    /// hostile encrypted bodies, DER, server hash, session body) and assert
+    /// the final log line never contains any of them.
+    #[test]
+    fn authentication_failure_logs_never_leak_key_material_or_tokens() {
+        use crate::{disconnect_category, disconnect_log};
+        use std::net::TcpListener;
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        /// Formats the session worker's disconnect line verbatim.
+        fn worker_log_line(error: &io::Error) -> String {
+            let category = disconnect_category(error);
+            format!(
+                "client disconnected: category={category} io_kind={:?} reason={error}",
+                error.kind()
+            )
+        }
+        fn leaks(line: &str, secrets: &[String]) -> Option<String> {
+            secrets
+                .iter()
+                .find(|secret| !secret.is_empty() && line.contains(secret.as_str()))
+                .cloned()
+        }
+        let identity = ServerIdentity::generate().unwrap();
+        let der_hex = hex(&identity.der);
+        // Canary filler for hostile encrypted bodies and hostile bodies read
+        // back through the bounded session reader.
+        let canary = "deadbeef";
+        let filler: [u8; 128] = core::array::from_fn(|index| [0xDE, 0xAD, 0xBE, 0xEF][index % 4]);
+        let filler_hex = hex(&filler);
+
+        // Live login faults over a loopback connection: the returned error is
+        // exactly what the worker logs.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        for case in 0..2u8 {
+            let client = Connection::new(TcpStream::connect(address).unwrap());
+            let (server_socket, _) = listener.accept().unwrap();
+            let mut server = Connection::new(server_socket);
+            let (outcome, challenge_hex) = std::thread::scope(|scope| {
+                let reader = scope.spawn(move || {
+                    let mut client = client;
+                    let (id, request) = receive(&mut client).unwrap();
+                    assert_eq!(id, 0x01);
+                    // string "" | u16 der_len | der | u16 4 | challenge
+                    let der_len = u16::from_be_bytes([request[1], request[2]]) as usize;
+                    let challenge = request[3 + der_len + 2..3 + der_len + 6].to_vec();
+                    let mut hostile = Vec::new();
+                    match case {
+                        0 => {
+                            // Undecryptable RSA blobs stuffed with the canary.
+                            hostile.extend_from_slice(&128u16.to_be_bytes());
+                            hostile.extend_from_slice(&filler);
+                            hostile.extend_from_slice(&4u16.to_be_bytes());
+                            hostile.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+                        }
+                        _ => {
+                            // Announces 64 bytes, delivers 2, then canaries.
+                            hostile.extend_from_slice(&[0x00, 0x40, 0xDE, 0xAD]);
+                        }
+                    }
+                    send(&mut client, 0x01, &hostile).unwrap();
+                    hex(&challenge)
+                });
+                let outcome = identity.authenticate(&mut server, "RustTester");
+                (outcome, reader.join().unwrap())
+            });
+            let error = match outcome {
+                Ok(profile) => panic!(
+                    "hostile login case {case} verified {}:{}",
+                    profile.name, profile.uuid
+                ),
+                Err(error) => error,
+            };
+            let line = worker_log_line(&error);
+            assert!(disconnect_log::should_log(disconnect_category(&error)));
+            if let Some(leaked) = leaks(
+                &line,
+                &[
+                    challenge_hex.clone(),
+                    canary.into(),
+                    filler_hex.clone(),
+                    der_hex.clone(),
+                ],
+            ) {
+                panic!("case {case} logged a sensitive value ({leaked}): {line}");
+            }
+        }
+
+        // Session-server faults: the serverId hash is derived from the
+        // session key, the response body may echo tokens; neither may reach
+        // the log line.
+        let server_hash = signed_server_hash(&[0x33u8; 16], &identity.der);
+        let error = match verify_has_joined("RustTester", &server_hash) {
+            Ok(profile) => panic!("this host cannot own a Mojang session: {}", profile.uuid),
+            Err(error) => error,
+        };
+        let line = worker_log_line(&error);
+        assert!(
+            !line.contains(&server_hash),
+            "the server hash must never be logged: {line}"
+        );
+        // A malformed name never even reaches the URL, and its message is
+        // static (no hash, no name).
+        let error = match verify_has_joined("a", &server_hash) {
+            Ok(profile) => panic!("invalid name must never verify: {}", profile.uuid),
+            Err(error) => error,
+        };
+        let line = worker_log_line(&error);
+        assert!(
+            !line.contains(&server_hash) && !line.contains("sessionserver"),
+            "pre-network refusal must not echo the request: {line}"
+        );
+
+        // Reader and parser faults: canary bodies are refused with static
+        // messages only.
+        struct CanaryFailure;
+        impl Read for CanaryFailure {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other(
+                    "token=DEADBEEFAAAAtoken; secret=DEADBEEFBBBB",
+                ))
+            }
+        }
+        let error = read_session_body(CanaryFailure).unwrap_err();
+        let shouting = canary.to_ascii_uppercase();
+        assert!(!worker_log_line(&error).contains(&shouting));
+        let body = br#"{"name":"RustTester","id":"00112233445566778899aabbccddeeff"}"#;
+        let error = match parse_verified_profile("OtherUser", body) {
+            Ok(profile) => panic!("substituted name must never verify: {}", profile.uuid),
+            Err(error) => error,
+        };
+        assert!(!worker_log_line(&error).contains("0011223344556677"));
+        let error = verify_challenge_token(&[1, 2, 3, 4], &[0xDE, 0xAD, 0xBE, 0xEF]).unwrap_err();
+        assert!(!worker_log_line(&error).contains(canary));
+    }
+
+    /// ADD-071 / #496: whitelist admission is name-only and the verified
+    /// UUID comes from the session server alone. A whitelist file may carry
+    /// a stale or attacker-forged `uuid` string; it is inert metadata that
+    /// never grants admission and never reaches a save path. Display-name
+    /// case variants are the same *session-verified* account (Mojang name
+    /// semantics); a genuinely different account renamed to a lookalike
+    /// still fails the username cross-check.
+    #[test]
+    fn whitelist_uuid_never_authenticates_and_session_uuid_is_authoritative() {
+        use crate::player::PlayerPosition;
+        use crate::whitelist::Whitelist;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-add071-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let with_uuid = root.join("whitelist-uuid.json");
+        let without_uuid = root.join("whitelist-plain.json");
+        let forged = root.join("whitelist-forged.json");
+        std::fs::write(
+            &with_uuid,
+            br#"[{"name":"RustTester","uuid":"11111111-2222-3333-4444-555555555555"}]"#,
+        )
+        .unwrap();
+        std::fs::write(&without_uuid, br#"[{"name":"RustTester"}]"#).unwrap();
+        // Two entries claiming the same victim UUID: the field is inert
+        // metadata, so the file loads and admission depends on names only.
+        std::fs::write(
+            &forged,
+            br#"[{"name":"RustTester","uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5"},{"name":"Evelyn","uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5"}]"#,
+        )
+        .unwrap();
+        let a = Whitelist::load(&with_uuid).unwrap();
+        let b = Whitelist::load(&without_uuid).unwrap();
+        for name in ["RustTester", "rusttester", "RUSTTESTER"] {
+            assert!(a.allows(name), "{name} with metadata UUID");
+            assert!(b.allows(name), "{name} without UUID");
+        }
+        // A UUID never admits an unlisted name, not even the victim's own
+        // UUID copied into another entry.
+        assert!(!a.allows("Notch"));
+        assert!(!Whitelist::load(&forged).unwrap().allows("Notch"));
+
+        // The verified profile UUID comes from the session-server response
+        // and is the only input to the authenticated save path. A case
+        // variant of the claimed name is accepted because the session
+        // server confirmed this exact account.
+        let profile = parse_verified_profile(
+            "RustTester",
+            br#"{"name":"rusttester","id":"069a79f444e94726a5befca90e38aaf5"}"#,
+        )
+        .unwrap();
+        assert_eq!(profile.name, "rusttester");
+        assert_eq!(profile.uuid, "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        let world = std::path::Path::new("world/flat.irw");
+        assert_eq!(
+            PlayerPosition::authenticated_location(world, &profile.uuid).unwrap(),
+            std::path::Path::new("world/players/verified/069a79f4-44e9-4726-a5be-fca90e38aaf5.dat")
+        );
+        // A stale whitelist UUID can never steer that path (the whitelist
+        // exposes no UUID accessor at all), and a renamed attacker — a
+        // different account the session server returns under its own
+        // name — fails the cross-check even when the whitelisted victim
+        // shares the UUID inside the file.
+        assert!(parse_verified_profile(
+            "Evelyn",
+            br#"{"name":"EvilOne","id":"069a79f4-44e9-4726-a5be-fca90e38aaf5"}"#
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
