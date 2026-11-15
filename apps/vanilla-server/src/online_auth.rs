@@ -350,6 +350,8 @@ fn parse_verified_profile(username: &str, body: &[u8]) -> io::Result<VerifiedPro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::receive;
+
     #[test]
     fn encryption_response_deadline_limits_trickled_varint_prefix() {
         use std::net::TcpListener;
