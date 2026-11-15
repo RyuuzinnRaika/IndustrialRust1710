@@ -563,4 +563,59 @@ mod tests {
         assert!(Chests::load(&file).is_err());
         let _ = fs::remove_file(file);
     }
+
+    /// ADD-062 / #487: a known block entity (a Chest) holding a known
+    /// item (a diamond sword) carrying an unknown NBT compound must
+    /// preserve the unknown information byte-for-byte through the sidecar
+    /// save and reload. Handles are never persisted as integers: the save
+    /// embeds the original compressed NBT and re-interns it on load.
+    #[test]
+    fn a_chest_stack_with_unknown_nbt_survives_the_sidecar_roundtrip() {
+        let original = fastnbt::Value::Compound(std::collections::HashMap::from([
+            (
+                "IndustrialUnknown".to_owned(),
+                fastnbt::Value::String("stay".to_owned()),
+            ),
+            (
+                "nested".to_owned(),
+                fastnbt::Value::Compound(std::collections::HashMap::from([(
+                    "secret".to_owned(),
+                    fastnbt::Value::Short(42),
+                )])),
+            ),
+        ]));
+        let handle = crate::item_nbt::from_value(&original).unwrap();
+        let wire = crate::item_nbt::wire(handle).unwrap();
+
+        let file =
+            std::env::temp_dir().join(format!("ir1710-{}-nbt-chest.json", std::process::id()));
+        let _ = fs::remove_file(&file);
+        let pos = (3, 64, -2);
+        let mut chests = Chests::default();
+        let mut slots = [None; CHEST_SLOTS];
+        slots[0] = Some(Stack {
+            id: 276,
+            count: 1,
+            damage: 9,
+            nbt: Some(handle),
+        });
+        let staged = chests.staged_update(pos, slots).unwrap();
+        chests.commit_staged(&file, staged).unwrap();
+
+        let reloaded = Chests::load(&file).unwrap();
+        let got = reloaded.slots(pos)[0].unwrap();
+        assert_eq!((got.id, got.count, got.damage), (276, 1, 9));
+        let reinterned = got.nbt.expect("the reloaded stack keeps its NBT handle");
+        assert_eq!(
+            crate::item_nbt::wire(reinterned).unwrap(),
+            wire,
+            "the unknown NBT wire bytes are byte-identical across the reload"
+        );
+        assert_eq!(
+            crate::item_nbt::value(reinterned).unwrap(),
+            original,
+            "the decoded unknown tags are unchanged"
+        );
+        let _ = fs::remove_file(file);
+    }
 }

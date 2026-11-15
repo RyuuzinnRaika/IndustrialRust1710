@@ -269,4 +269,68 @@ mod tests {
         assert!(cache.get(Dimension::Overworld, 0, 0).is_err());
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// ADD-067 / #492: a high-ratio compression bomb — a few KiB of gzip or
+    /// zlib that inflates far past the 2 MiB chunk bound — must be stopped
+    /// by the bounded reader *before* parsing, so neither memory nor CPU is
+    /// consumed without limit. The region file on disk must survive the
+    /// rejected read byte-identical.
+    #[test]
+    fn gzip_and_zlib_chunk_bombs_stop_at_the_bound_and_keep_the_file() {
+        use flate2::write::{GzEncoder, ZlibEncoder};
+        use flate2::Compression;
+        use std::io::Write;
+
+        let root = setup("bomb");
+        let world = root.join("world");
+        let file = root.join("world/region/r.0.0.mca");
+        let original = fs::read(&file).unwrap();
+        let sectors = original.len() / SECTOR_BYTES;
+
+        // 3 MiB of zeros compresses to a fraction of a sector.
+        let gzip_bomb = {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&vec![0u8; 3 * 1024 * 1024]).unwrap();
+            encoder.finish().unwrap()
+        };
+        let zlib_bomb = {
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&vec![0u8; 3 * 1024 * 1024]).unwrap();
+            encoder.finish().unwrap()
+        };
+        assert!(gzip_bomb.len() < SECTOR_BYTES);
+        assert!(zlib_bomb.len() < SECTOR_BYTES);
+
+        for (kind, bomb) in [(1u8, &gzip_bomb), (2u8, &zlib_bomb)] {
+            let mut bytes = original.clone();
+            // Append one sector holding [length][compression][bomb][pad].
+            let mut sector = vec![0u8; SECTOR_BYTES];
+            let payload_len = (bomb.len() + 1) as u32;
+            sector[..4].copy_from_slice(&payload_len.to_be_bytes());
+            sector[4] = kind;
+            sector[5..5 + bomb.len()].copy_from_slice(bomb);
+            bytes.extend_from_slice(&sector);
+            // Point chunk (0,0) at the appended final sector.
+            let target = sectors;
+            bytes[0..3].copy_from_slice(&[(target >> 16) as u8, (target >> 8) as u8, target as u8]);
+            bytes[3] = 1;
+            fs::write(&file, &bytes).unwrap();
+
+            let mut cache = ReadOnlyChunkCache::open(&world, 2).unwrap();
+            let error = match cache.get(Dimension::Overworld, 0, 0) {
+                Ok(value) => panic!(
+                    "an inflation bomb must abort the read, got a chunk: {}",
+                    value.is_some()
+                ),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), ErrorKind::InvalidData, "compression {kind}");
+            assert_eq!(
+                fs::read(&file).expect("rejected region file must still exist"),
+                bytes,
+                "compression {kind} must not modify the source"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }

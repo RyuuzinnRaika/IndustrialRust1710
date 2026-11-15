@@ -463,6 +463,28 @@ impl DeathRecord<'_> {
 mod tests {
     use super::*;
 
+    /// Windows file systems can briefly reject deleting a file that an
+    /// external scanner (antivirus/indexer) still shares after close, which
+    /// surfaced as the intermittent "OS error 5" cleanup failure recorded
+    /// in #703. Test teardown tolerates the transient denial with a short
+    /// bounded retry instead of failing an otherwise green assertion.
+    fn remove_test_log(path: impl AsRef<Path>) {
+        let path = path.as_ref();
+        for attempt in 0..20 {
+            match fs::remove_file(path) {
+                Ok(()) => return,
+                Err(err) if err.kind() == ErrorKind::NotFound => return,
+                Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    if attempt == 19 {
+                        panic!("could not remove {}: {err}", path.display());
+                    }
+                }
+                Err(err) => panic!("could not remove {}: {err}", path.display()),
+            }
+        }
+    }
+
     #[test]
     fn fatal_cause_is_recorded_only_once_and_only_at_zero_health() {
         let mut pending = None;
@@ -535,7 +557,7 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["cause"], "fall");
         assert_eq!(entries[0]["player"], "Alex");
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -620,7 +642,7 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["timestamp_ms"], 100);
         assert_eq!(entries[1]["event"], "player_death");
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -640,7 +662,7 @@ mod tests {
             serde_json::from_str::<Value>(lines[1]).unwrap()["event"],
             "player_death"
         );
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -650,7 +672,7 @@ mod tests {
         fs::write(&path, &original).unwrap();
         assert!(sample_record().append(&world).is_err());
         assert_eq!(fs::read(&path).unwrap(), original);
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -676,7 +698,7 @@ mod tests {
             .collect();
         assert_eq!(entries.len(), 12);
         assert!(entries.iter().all(|event| event["player"] == "Alex"));
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -703,7 +725,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0]["event_id"], "same-event-001");
         assert_eq!(lines[1]["event_id"], "another-event-002");
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -722,7 +744,7 @@ mod tests {
         assert!(other.append_with_event_id(&world, "shared-id-001").is_err());
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
         assert!(other.append_with_event_id(&world, "invalid id").is_err());
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -791,7 +813,7 @@ mod tests {
             .append_with_event_id(&world, "same-projectile-id")
             .unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -803,7 +825,7 @@ mod tests {
             .append_with_event_id(&world, "new-event")
             .is_err());
         assert_eq!(fs::read(&path).unwrap(), contents.to_vec());
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -817,7 +839,7 @@ mod tests {
         fs::write(&path, &duplicates).unwrap();
         assert!(record.append_with_event_id(&world, "double-id").is_err());
         assert_eq!(fs::read(&path).unwrap(), duplicates);
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -836,7 +858,7 @@ mod tests {
             .unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
         assert_eq!(fs::read(&path).unwrap().last(), Some(&b'\n'));
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -845,7 +867,7 @@ mod tests {
         fs::write(&path, b"{\"other\":true}").unwrap();
         assert!(sample_record().append(&world).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"{\"other\":true}");
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]
@@ -938,7 +960,7 @@ mod tests {
         assert_eq!(value["projectile_type"], "Arrow");
         assert_eq!(value["death_message"], death.chat_message());
         assert!(value["block_position"].is_object());
-        fs::remove_file(path).unwrap();
+        remove_test_log(path);
     }
 
     #[test]

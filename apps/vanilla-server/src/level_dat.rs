@@ -97,6 +97,8 @@ pub(crate) fn parse_level(bytes: &[u8]) -> io::Result<LevelRoot> {
     if bytes.len() > MAX_DECOMPRESSED_BYTES {
         return Err(invalid("oversized level.dat NBT"));
     }
+    // Iterative nesting/length bound before fastnbt's recursive decoder.
+    crate::legacy_nbt::bounded_nbt(bytes)?;
     let root: LevelRoot =
         fastnbt::from_bytes(bytes).map_err(|_| invalid("invalid level.dat NBT"))?;
     root.validate()?;

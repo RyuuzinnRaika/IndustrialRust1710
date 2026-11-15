@@ -185,6 +185,8 @@ fn incoming(payload: &[u8], signing: bool) -> io::Result<(i16, Book)> {
     if raw.len() as u64 > MAX_NBT {
         return Err(invalid("book NBT inflated too large"));
     }
+    // Iterative nesting/length bound before fastnbt's recursive decoder.
+    crate::legacy_nbt::bounded_nbt(&raw)?;
     let book: Book = fastnbt::from_bytes(&raw).map_err(|_| invalid("invalid book NBT"))?;
     // The client can include an author field when signing, but authority is
     // solely the authenticated session name (in offline mode, not verified).
