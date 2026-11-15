@@ -4474,6 +4474,105 @@ mod tests {
         assert!(shared.lock().unwrap().orbs.is_empty());
     }
 
+    /// ADD-048 / #472: two players competing for the same world XP orbs,
+    /// plus one failing persistence attempt, must together gain exactly the
+    /// spawned orb total: nothing duplicated, nothing lost. The runtime
+    /// holds the shared Mob mutex across the durable XP commit, so a second
+    /// session can never claim an orb that another player is persisting.
+    #[test]
+    fn competing_xp_orb_contact_credits_the_spawned_total_exactly_once() {
+        use crate::experience::Experience;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Mutex;
+
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let mut state = Mobs::default();
+        let expected: u32 = [5u16, 7, 9]
+            .into_iter()
+            .map(|amount| {
+                state.spawn_xp(at, amount).unwrap();
+                u32::from(amount)
+            })
+            .sum();
+        assert_eq!(expected, 21);
+        let shared = Mutex::new(state);
+
+        // A failed durable XP write credits nobody and keeps every orb.
+        // The closure mirrors the runtime session: the player's XP object
+        // is only replaced after the simulated save succeeds.
+        let experience = Experience::default();
+        let outcome = shared
+            .lock()
+            .unwrap()
+            .collect_xp_committed(at, 101, |amount| {
+                let mut next = experience;
+                assert!(next.grant(amount));
+                // The simulated disk write fails here, exactly where the
+                // runtime calls Experience::save, so `experience` must
+                // stay untouched and the orb must not be consumed.
+                let _ = next;
+                Err(io::Error::other("simulated XP save failure"))
+            });
+        assert!(outcome.is_err(), "the simulated save failure must surface");
+        assert_eq!(experience.total, 0, "a refused commit must not credit XP");
+        assert_eq!(
+            shared.lock().unwrap().orbs.len(),
+            3,
+            "a failed save must not consume an orb"
+        );
+
+        // Two sessions then poll while both stand inside pickup range,
+        // exactly as the runtime pickup loop does under one shared Mob
+        // mutex. The combined XP of both players must equal the orb total.
+        let credited = AtomicU32::new(0);
+        let totals = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for collector in [101i32, 102] {
+                let shared = &shared;
+                let credited = &credited;
+                handles.push(scope.spawn(move || {
+                    let mut experience = Experience::default();
+                    loop {
+                        let outcome = shared
+                            .lock()
+                            .unwrap()
+                            .collect_xp_committed(at, collector, |amount| {
+                                assert!(experience.grant(amount));
+                                credited.fetch_add(amount, Ordering::SeqCst);
+                                Ok(())
+                            })
+                            .unwrap();
+                        if outcome.is_none() {
+                            break;
+                        }
+                    }
+                    experience.total
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .sum::<u32>()
+        });
+        assert_eq!(
+            totals, expected,
+            "both players combined gained exactly the spawned orb total"
+        );
+        assert_eq!(
+            credited.load(Ordering::SeqCst),
+            expected,
+            "every committed grant was counted once"
+        );
+        assert!(
+            shared.lock().unwrap().orbs.is_empty(),
+            "the last committed orb left the world"
+        );
+    }
+
     /// REG-194 / #830: exercise entity creation, ordinary far-player
     /// despawn, ID allocation and pool reclamation repeatedly without any
     /// real world saves or external Minecraft clients. This is a synthetic
@@ -8846,6 +8945,84 @@ mod tests {
         assert_eq!(mobs.hurt_player(1, nearby, 10), 0);
         assert_eq!(mobs.hurt_player(2, nearby, 10), 0);
         assert_eq!(mobs.hurt_player(3, far, 10), 0);
+    }
+
+    /// ADD-049 / #473: an explosion chain that overlaps the same Mob must
+    /// kill and loot it exactly once. Reprocessing a blast (a late TNT
+    /// notification or chunk re-send replaying the same event) must never
+    /// queue the same death's items a second time, and the durable store
+    /// must reflect exactly one death.
+    #[test]
+    fn chained_explosions_kill_and_loot_each_mob_exactly_once() {
+        let at = PlayerPosition {
+            x: 2.5,
+            y: 65.0,
+            z: 2.5,
+        };
+        let blast = |x: f64| Explosion {
+            position: PlayerPosition { x, ..at },
+            radius: 4.0,
+            origin: DamageOrigin::Explosion {
+                kind: "TNT",
+                source_id: None,
+            },
+        };
+        let root = std::env::temp_dir().join(format!(
+            "industrialrust-add049-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("mobs.json");
+        let world = World::new();
+        let mut mobs = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        mobs.insert(Kind::Pig, at, false);
+        let id = mobs.next_id - 1;
+        let animal = mobs.entities.get_mut(&id).unwrap();
+        animal.saddled = true;
+        animal.health = 1;
+
+        // Two overlapping blasts of one chain in the same batch: the Mob
+        // dies under the first, so the second finds nothing left to kill.
+        let events = mobs.queue_explosion_hits(&world, &[blast(2.5), blast(3.0)], &[]);
+        assert_eq!(
+            events.iter().filter(|event| event.id == 0x13).count(),
+            1,
+            "the Mob is destroyed exactly once across the chain"
+        );
+        assert!(!mobs.entities.contains_key(&id));
+        assert!(
+            !events.iter().any(|event| event.id == 0x11),
+            "an explosion kill mints no XP orb events"
+        );
+        let first = mobs.take_drops();
+        assert!(!first.is_empty(), "the saddled pig drops its loot");
+        assert_eq!(
+            first.iter().filter(|(stack, _)| stack.id == 329).count(),
+            1,
+            "exactly one saddle for one death"
+        );
+
+        // A replayed blast after the death cannot re-kill the removed
+        // entity or requeue its loot; pending drops drain exactly once.
+        let replay = mobs.queue_explosion_hits(&world, &[blast(2.5)], &[]);
+        assert!(replay.is_empty(), "a replayed blast produces no events");
+        assert!(mobs.take_drops().is_empty(), "pending drops drain once");
+
+        // The durable store reflects one death: a reload keeps the Mob gone
+        // and never resurrects pending loot.
+        mobs.save(&world).unwrap();
+        let mut reloaded = Mobs::load_or_new(&world, true, 2, &path).unwrap();
+        assert!(
+            !reloaded.entities.contains_key(&id),
+            "the killed Mob stays dead across a reload"
+        );
+        assert!(
+            reloaded.take_drops().is_empty(),
+            "a reload cannot re-queue the committed death loot"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -93,6 +93,8 @@ fn snapshot_marker(source: &Path) -> io::Result<()> {
     let _ = crate::level_dat::read_level_file(&source.join("level.dat"))?;
     let level = bounded_read(&source.join("level.dat"), MAX_LEVEL_DAT)?;
     let bytes = bounded_decompress(GzDecoder::new(&level[..]), MAX_LEVEL_DAT)?;
+    // Iterative nesting/length bound before fastnbt's recursive decoder.
+    crate::legacy_nbt::bounded_nbt(&bytes)?;
     let root: SnapshotLevel = fastnbt::from_bytes(&bytes).map_err(wrap)?;
     if root.data.name != "IndustrialRust1710 Export"
         || root.data.generator != "flat"
@@ -292,6 +294,92 @@ mod tests {
     use super::*;
     use crate::anvil_export::export;
 
+    /// ADD-097 / #522: an Anvil snapshot declaring a version this reader
+    /// cannot certify (anything but the exact 1.7.10 DataVersion 19133)
+    /// must abort the import BEFORE publishing anything, must never
+    /// create or overwrite the target IRW (not even the `*.importing`
+    /// staging file), and must not move a single snapshot byte. The
+    /// IRW-side equivalent is `unsupported_world_versions_fail_closed_
+    /// without_touching_original_bytes` plus the corrupt-fixture matrix.
+    #[test]
+    fn unknown_anvil_version_refuses_import_without_publishing_or_writes() {
+        use crate::level_dat::{LevelData, LevelRoot};
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-anvil-import-version-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let snap = root.join("snapshot");
+        export(&World::new(), &snap).unwrap();
+
+        // Fault injection: rewrite the snapshot's OWN level.dat to declare
+        // a future Anvil DataVersion the reader has no compatibility proof
+        // for. Everything else in the snapshot stays byte-identical, so
+        // only the version gate can reject it.
+        let unsupported = LevelRoot {
+            data: LevelData {
+                format_version: 19_134,
+                name: "IndustrialRust1710 Export".into(),
+                seed: 0,
+                spawn_x: 0,
+                spawn_y: 64,
+                spawn_z: 0,
+                time: 0,
+                day_time: None,
+                game_type: None,
+                generator: Some("flat".into()),
+                raining: None,
+                thundering: None,
+                rain_time: None,
+                thunder_time: None,
+                game_rules: None,
+                extra: Default::default(),
+            },
+            extra: Default::default(),
+        };
+        let encoded = fastnbt::to_bytes(&unsupported).unwrap();
+        let gzipped = {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&encoded).unwrap();
+            encoder.finish().unwrap()
+        };
+        fs::write(snap.join("level.dat"), &gzipped).unwrap();
+        // Baseline fingerprint AFTER injection (#495 lesson) so only
+        // importer-caused changes are caught.
+        let level_before = fs::read(snap.join("level.dat")).unwrap();
+        let region_before = fs::read(snap.join("region/r.0.0.mca")).unwrap();
+
+        let dest = root.join("recovered.irw");
+        let error = match import(&snap, &dest) {
+            Ok(imported) => panic!("unsupported Anvil version imported {imported:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(
+            !dest.exists(),
+            "a refused import must not publish a target IRW"
+        );
+        assert!(
+            !root.join("recovered.importing").exists(),
+            "a refused import must not even leave a staging file"
+        );
+        assert_eq!(
+            fs::read(snap.join("level.dat")).unwrap(),
+            level_before,
+            "a refused import must not rewrite the snapshot level.dat"
+        );
+        assert_eq!(
+            fs::read(snap.join("region/r.0.0.mca")).unwrap(),
+            region_before,
+            "a refused import must not touch snapshot regions"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn roundtrip_and_no_overwrite() {
         let root = std::env::temp_dir().join(format!("ir1710-anvil-import-{}", std::process::id()));
@@ -335,6 +423,102 @@ mod tests {
         let dest = root.join("recovered.irw");
         assert!(import(&snap, &dest).is_err());
         assert!(!dest.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// ADD-070 / #495: source immutability across failed migrations. An
+    /// incomplete input, an unwritable destination (capacity modelled by an
+    /// occupied target) and an interrupted publish (a leftover
+    /// `*.importing` staging file) must each abort while every snapshot byte
+    /// stays identical, and the migration must stay retryable once the
+    /// operator has cleared the cause.
+    #[test]
+    fn failed_migrations_keep_the_source_intact_and_retriable() {
+        fn fingerprint_tree(root: &Path) -> u64 {
+            let mut files = Vec::new();
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(dir) = stack.pop() {
+                for entry in fs::read_dir(&dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else {
+                        files.push(path);
+                    }
+                }
+            }
+            files.sort();
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for path in files {
+                for byte in path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_bytes()
+                {
+                    hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+                for byte in fs::read(&path).unwrap() {
+                    hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+            hash
+        }
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-anvil-import-immutable-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let snap = root.join("snapshot");
+        export(&World::new(), &snap).unwrap();
+        let baseline = fingerprint_tree(&snap);
+
+        // (1) Incomplete input: a region truncated mid-write aborts the
+        // migration and moves no snapshot byte. The baseline is taken
+        // *after* the injection so only importer-caused changes are caught.
+        let region = snap.join("region/r.0.0.mca");
+        let original = fs::read(&region).unwrap();
+        fs::write(&region, &original[..4096]).unwrap();
+        let hostile = fingerprint_tree(&snap);
+        let first = root.join("first.irw");
+        assert!(import(&snap, &first).is_err());
+        assert!(!first.exists());
+        assert_eq!(
+            fingerprint_tree(&snap),
+            hostile,
+            "the truncated input must stay exactly as delivered"
+        );
+        fs::write(&region, &original).unwrap();
+        assert!(import(&snap, &first).is_ok(), "repaired input must import");
+        // The importer publishes only the destination: even a successful
+        // migration leaves the snapshot fingerprint at its exported value.
+        assert_eq!(fingerprint_tree(&snap), baseline);
+
+        // (2) Capacity shortage modelled by an occupied destination: the
+        // import refuses the target without touching it or the snapshot.
+        let blocked = root.join("blocked.irw");
+        fs::write(&blocked, b"not-an-irw-file").unwrap();
+        assert!(import(&snap, &blocked).is_err());
+        assert_eq!(fs::read(&blocked).unwrap(), b"not-an-irw-file");
+        assert_eq!(fingerprint_tree(&snap), baseline);
+
+        // (3) Crash mid-migration: an interrupted save_new leaves exactly
+        // one *.importing staging file and never the final target. The next
+        // import must refuse to overwrite that staging file; after the
+        // operator clears it the retry completes and the world loads.
+        let third = root.join("third.irw");
+        let staging = third.with_extension("importing");
+        fs::write(&staging, b"partial-publish").unwrap();
+        assert!(import(&snap, &third).is_err());
+        assert!(staging.exists(), "an import must never overwrite staging");
+        assert!(!third.exists());
+        assert_eq!(fingerprint_tree(&snap), baseline);
+        fs::remove_file(&staging).unwrap();
+        assert!(import(&snap, &third).is_ok());
+        assert_eq!(World::load(&third).unwrap().get(1, 64, 1), 0);
         fs::remove_dir_all(root).unwrap();
     }
 }
