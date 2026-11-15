@@ -349,7 +349,6 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
 mod tests {
     use super::*;
 
-
     /// NEXT-164 / #1147: if preparation is refused, the old inventory must
     /// remain byte-for-byte intact and the failed commit must be retryable.
     /// A directory at the temporary-file path is a deterministic error that
@@ -360,10 +359,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "ir1710-next164-{}-{stamp}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("ir1710-next164-{}-{stamp}", std::process::id()));
         fs::create_dir(&directory).unwrap();
         let journal = directory.join("world.journal");
         let target = directory.join("test.inventory.json");
@@ -378,7 +375,10 @@ mod tests {
             "preparation path is occupied by a directory"
         );
         assert_eq!(fs::read(&target).unwrap(), original);
-        assert!(!journal.exists(), "failed preparation must not publish redo");
+        assert!(
+            !journal.exists(),
+            "failed preparation must not publish redo"
+        );
 
         fs::remove_dir(&preparation).unwrap();
         commit(&journal, &[(&target, replacement.clone())]).unwrap();
