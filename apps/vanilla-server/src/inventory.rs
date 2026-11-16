@@ -4814,6 +4814,100 @@ mod tests {
     }
 
     #[test]
+    fn reg139_renamed_enchanted_stack_moves_to_a_chest_and_survives_restart() {
+        use fastnbt::Value;
+
+        // A previously enchanted + repaired diamond sword: the ench list,
+        // RepairCost and Damage must all survive an anvil rename, a move
+        // into a different chest, and a full server restart.
+        let source = Value::Compound(std::collections::HashMap::from([
+            (
+                "ench".to_owned(),
+                Value::List(vec![Value::Compound(std::collections::HashMap::from([
+                    ("id".to_owned(), Value::Short(16)),
+                    ("lvl".to_owned(), Value::Short(5)),
+                ]))]),
+            ),
+            ("RepairCost".to_owned(), Value::Int(12)),
+        ]));
+        let sword = Stack {
+            id: 276,
+            count: 1,
+            damage: 100,
+            nbt: Some(crate::item_nbt::from_value(&source).unwrap()),
+        };
+        let mut inv = Inventory {
+            anvil_inputs: [Some(sword), None],
+            ..Inventory::default()
+        };
+        assert!(inv.set_anvil_name("Raika Blade".into()));
+        // 1.7.10 rename of a durable item: 7 levels plus the item's prior
+        // RepairCost (12) is charged into the anvil level cost.
+        assert_eq!(inv.anvil_preview().unwrap().levels, 19);
+        let mut xp = crate::experience::Experience { total: 2000 };
+        assert!(inv.anvil_click_window(2, 0, 0, &mut xp, true));
+        let renamed = inv.cursor.unwrap();
+        assert_eq!(renamed.damage, 100, "rename keeps the existing Damage");
+        let Value::Compound(root) = crate::item_nbt::value(renamed.nbt.unwrap()).unwrap() else {
+            panic!("renamed stack must keep its NBT");
+        };
+        assert!(
+            matches!(root.get("ench"), Some(Value::List(list)) if list.len() == 1),
+            "the enchantment list survives the rename"
+        );
+        assert_eq!(
+            root.get("RepairCost"),
+            Some(&Value::Int(2)),
+            "1.7.10 renames reset the prior-work tag to exactly 2"
+        );
+        let Some(Value::Compound(display)) = root.get("display") else {
+            panic!("rename must add display.Name");
+        };
+        assert_eq!(
+            display.get("Name"),
+            Some(&Value::String("Raika Blade".into()))
+        );
+
+        // Move the renamed blade into another chest and restart: the chest
+        // sidecar embeds the original compressed NBT bytes and re-interns
+        // them on load, never the process-local handle.
+        let file = std::env::temp_dir().join(format!(
+            "ir1710-{}-reg139-nbt-move.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&file);
+        let pos = (7, 64, -11);
+        let mut chests = crate::chests::Chests::default();
+        let mut slots = [None; crate::chests::CHEST_SLOTS];
+        slots[0] = Some(renamed);
+        let staged = chests.staged_update(pos, slots).unwrap();
+        chests.commit_staged(&file, staged).unwrap();
+        let reloaded = crate::chests::Chests::load(&file).unwrap();
+        let moved = reloaded.slots(pos)[0].unwrap();
+        let _ = std::fs::remove_file(&file);
+        assert_eq!((moved.id, moved.count, moved.damage), (276, 1, 100));
+        let Value::Compound(root) = crate::item_nbt::value(moved.nbt.unwrap()).unwrap() else {
+            panic!("chest reload must restore the NBT");
+        };
+        assert!(
+            matches!(root.get("ench"), Some(Value::List(list)) if list.len() == 1),
+            "ench survives the chest move and restart"
+        );
+        assert_eq!(
+            root.get("RepairCost"),
+            Some(&Value::Int(2)),
+            "the renamed prior-work tag survives unchanged"
+        );
+        let Some(Value::Compound(display)) = root.get("display") else {
+            panic!("display.Name survives");
+        };
+        assert_eq!(
+            display.get("Name"),
+            Some(&Value::String("Raika Blade".into()))
+        );
+    }
+
+    #[test]
     fn anvil_repair_debits_only_owned_inputs_and_xp() {
         let mut inv = Inventory::default();
         let mut xp = crate::experience::Experience { total: 34 };
