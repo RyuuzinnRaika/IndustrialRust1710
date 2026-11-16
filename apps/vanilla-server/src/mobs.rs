@@ -49,6 +49,7 @@ enum Kind {
     EnderDragon,
     #[allow(dead_code)] // Registered for the Protocol 5 species integration.
     Wither,
+    Wolf,
 }
 impl Kind {
     fn death_name(self) -> &'static str {
@@ -74,6 +75,7 @@ impl Kind {
             Self::IronGolem => "Iron Golem",
             Self::EnderDragon => "Ender Dragon",
             Self::Wither => "Wither",
+            Self::Wolf => "Wolf",
         }
     }
     fn protocol(self) -> u8 {
@@ -99,12 +101,19 @@ impl Kind {
             Self::IronGolem => 99,
             Self::EnderDragon => 63,
             Self::Wither => 64,
+            Self::Wolf => 95,
         }
     }
     fn passive(self) -> bool {
         matches!(
             self,
-            Self::Cow | Self::Pig | Self::Horse | Self::Sheep | Self::Chicken | Self::Villager
+            Self::Cow
+                | Self::Pig
+                | Self::Horse
+                | Self::Sheep
+                | Self::Chicken
+                | Self::Villager
+                | Self::Wolf
         )
     }
     /// Vanilla natural-spawn caps count animals and monsters, not villagers,
@@ -168,6 +177,7 @@ impl Kind {
             Self::Creeper => 20,
             Self::Skeleton => 20,
             Self::Zombie => 20,
+            Self::Wolf => 20,
         }
     }
     fn drop(self, size: u8) -> Option<Stack> {
@@ -193,7 +203,7 @@ impl Kind {
             Self::IronGolem => 265,
             // Vanilla 1.7.10 Wither boss always drops one Nether Star.
             Self::Wither => 399,
-            Self::Villager | Self::EnderDragon => return None,
+            Self::Villager | Self::EnderDragon | Self::Wolf => return None,
         };
         Some(Stack {
             id,
@@ -210,9 +220,31 @@ impl Kind {
             // or golden carrots; ordinary apples, wheat and sugar heal/tame.
             Self::Horse => matches!(held, 322 | 396),
             Self::Chicken => matches!(held, 295 | 361 | 362),
+            // Java 1.7.10 wolves enter love mode with any meat item, and the
+            // same meat heals a wounded tamed wolf (see `feed`). Porkchop
+            // 319/320, beef 363/364, chicken 365/366, rotten flesh 367.
+            Self::Wolf => matches!(held, 319 | 320 | 363 | 364 | 365 | 366 | 367),
             _ => false,
         }
     }
+}
+/// Serde codec for the 36-byte wolf owner UUID (serde lacks array N>32 impls).
+mod uuid36 {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(bytes: &[u8; 36], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(std::str::from_utf8(bytes).unwrap_or(""))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 36], D::Error> {
+        let text = String::deserialize(deserializer)?;
+        let mut out = [0u8; 36];
+        let source = text.as_bytes();
+        let len = source.len().min(36);
+        out[..len].copy_from_slice(&source[..len]);
+        Ok(out)
+    }
+}
+fn zero_uuid() -> [u8; 36] {
+    [0; 36]
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct Mob {
@@ -264,6 +296,23 @@ struct Mob {
     tamed: bool,
     #[serde(default)]
     tame_progress: u8,
+    /// 1.7.10 EntityWolf owner identity: the offline-mode player UUID string
+    /// (DataWatcher index 20) stored as its 36 ASCII bytes so Mob stays Copy.
+    /// `owner_bound` distinguishes "no owner" from the all-zero array, and
+    /// ownership persists across restarts through the JSON snapshot.
+    #[serde(default = "zero_uuid", with = "uuid36")]
+    owner: [u8; 36],
+    #[serde(default)]
+    owner_bound: bool,
+    /// DataWatcher byte 16 bit 0x10. A sitting wolf never wanders or follows.
+    #[serde(default)]
+    sitting: bool,
+    /// DataWatcher int 19 low byte: collar colour, synced to every tracker.
+    #[serde(default)]
+    collar: u8,
+    /// Transient attack command target; the owner re-issues it each swing.
+    #[serde(skip)]
+    attack_target: Option<i32>,
     #[serde(default)]
     fence_anchor: Option<[i32; 3]>,
     #[serde(skip)]
@@ -328,6 +377,11 @@ impl Mob {
             let flags: i32 = (if self.tamed { 2 } else { 0 }) | (if self.saddled { 4 } else { 0 });
             body.extend_from_slice(&flags.to_be_bytes());
         }
+        if self.kind == Kind::Wolf {
+            // Java 1.7.10 EntityDataWatcher: byte 16 (0x02 tamed, 0x10 sitting),
+            // int 19 (collar colour, +256 while tamed) and string 20 (owner UUID).
+            self.push_wolf_fields(&mut body);
+        }
         // All living mobs expose health as a float at DataWatcher index 6,
         // not only bosses. New joiners must observe the current shared HP.
         body.push((3 << 5) | 6);
@@ -355,6 +409,33 @@ impl Mob {
         body.extend_from_slice(&f32::from(self.health.max(0)).to_be_bytes());
         body.push(0x7f);
         Event { id: 0x1c, body }
+    }
+    /// Shared DataWatcher encoding for the three wolf fields, used by both
+    /// the spawn packet and later state updates so trackers never diverge.
+    fn push_wolf_fields(&self, body: &mut Vec<u8>) {
+        body.push(16); // byte: 0x02 tamed | 0x10 sitting
+        let flags = (u8::from(self.tamed) * 0x02) | (u8::from(self.sitting) * 0x10);
+        body.push(flags);
+        body.push((2 << 5) | 19); // int: collar colour + 0x100 while tamed
+        let collar = i32::from(self.collar) + if self.tamed { 256 } else { 0 };
+        body.extend_from_slice(&collar.to_be_bytes());
+        body.push((5 << 5) | 20); // string: owner UUID, empty while untamed
+        let owner = self.owner_uuid().unwrap_or("");
+        write_varint(owner.len() as u32, body);
+        body.extend_from_slice(owner.as_bytes());
+    }
+    fn wolf_state_update(&self) -> Event {
+        let mut body = self.id.to_be_bytes().to_vec();
+        self.push_wolf_fields(&mut body);
+        body.push(0x7f);
+        Event { id: 0x1c, body }
+    }
+    /// The bound owner's UUID string, or None while unowned. Only a canonical
+    /// 36-character ASCII UUID (as `offline_uuid` renders) can ever be bound.
+    fn owner_uuid(&self) -> Option<&str> {
+        self.owner_bound
+            .then(|| std::str::from_utf8(&self.owner).ok())
+            .flatten()
     }
     /// Update the server fuse timer once per simulated 20TPS tick.
     /// Return the DataWatcher transition only on ignition/defusing, so the
@@ -764,6 +845,12 @@ pub struct Mobs {
     storage: Option<PathBuf>,
     #[serde(skip)]
     last_saved: u64,
+    /// Latest observed position per tamed-wolf owner UUID. Runtime-only: the
+    /// session loop refreshes it from authenticated movement packets, and a
+    /// restart rebuilds it as players log back in (ownership itself persists
+    /// in each Mob's `owner` field).
+    #[serde(skip, default)]
+    owners: BTreeMap<String, PlayerPosition>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1531,6 +1618,11 @@ impl Mobs {
             saddled: false,
             tamed: false,
             tame_progress: 0,
+            owner: [0; 36],
+            owner_bound: false,
+            sitting: false,
+            collar: 14, // Java 1.7.10 default red collar, shown once tamed.
+            attack_target: None,
             fence_anchor: None,
             rider: None,
             leash_holder: None,
@@ -1563,6 +1655,7 @@ impl Mobs {
             "Sheep" => Kind::Sheep,
             "Chicken" => Kind::Chicken,
             "Horse" | "EntityHorse" => Kind::Horse,
+            "Wolf" => Kind::Wolf,
             "Villager" => Kind::Villager,
             "VillagerGolem" => Kind::IronGolem,
             "PigZombie" => Kind::ZombiePigman,
@@ -2288,6 +2381,65 @@ impl Mobs {
         mob.saddled = true;
         Some(mob.mount_metadata())
     }
+    /// Record the latest authenticated position for an owner UUID so tamed
+    /// wolves can follow and defend without the AI receiving player names.
+    pub fn note_owner(&mut self, owner_uuid: &str, position: PlayerPosition) {
+        if position.is_valid() {
+            self.owners.insert(owner_uuid.to_owned(), position);
+        }
+    }
+    pub fn can_tame(&self, id: i32) -> bool {
+        self.entities
+            .get(&id)
+            .is_some_and(|mob| mob.kind == Kind::Wolf && !mob.tamed && !mob.baby && mob.health > 0)
+    }
+    /// Java 1.7.10 wolf taming: a bone binds the wolf to the player's UUID.
+    /// The session layer debits the item; ownership, restored HP and the
+    /// synced collar/owner metadata are decided here.
+    pub fn tame(&mut self, id: i32, owner_uuid: &str) -> Option<Vec<Event>> {
+        let bytes = owner_uuid.as_bytes();
+        if bytes.len() != 36 || !owner_uuid.is_ascii() || !self.can_tame(id) {
+            return None;
+        }
+        let mob = self.entities.get_mut(&id)?;
+        mob.tamed = true;
+        mob.owner.copy_from_slice(bytes);
+        mob.owner_bound = true;
+        mob.health = 20; // 1.7.10 setTamed restores full wolf HP.
+        let snapshot = *mob;
+        let mut events = vec![snapshot.status(7)]; // taming hearts
+        events.push(snapshot.wolf_state_update());
+        events.push(snapshot.health_metadata());
+        Some(events)
+    }
+    /// Owner-only right-click: toggle the sitting flag and sync byte 16 to
+    /// every tracker. Non-owners (and untamed wolves) change nothing.
+    pub fn wolf_sit_toggle(&mut self, id: i32, owner_uuid: &str) -> Option<Event> {
+        let mob = self.entities.get_mut(&id)?;
+        if mob.kind != Kind::Wolf || !mob.tamed || mob.owner_uuid() != Some(owner_uuid) {
+            return None;
+        }
+        mob.sitting = !mob.sitting;
+        mob.waypoint = None;
+        mob.attack_target = None;
+        Some(mob.wolf_state_update())
+    }
+    /// The owner's melee swing commands every one of their wolves to attack
+    /// the same victim (1.7.10 wolves join their owner's fight).
+    pub fn order_wolves(&mut self, owner_uuid: &str, victim_id: i32) {
+        if owner_uuid.is_empty() || !self.entities.contains_key(&victim_id) {
+            return;
+        }
+        for mob in self.entities.values_mut() {
+            if mob.kind == Kind::Wolf
+                && mob.tamed
+                && !mob.sitting
+                && mob.owner_uuid() == Some(owner_uuid)
+            {
+                mob.attack_target = Some(victim_id);
+            }
+        }
+    }
     pub fn use_mount(&mut self, id: i32, rider: i32, player: PlayerPosition) -> Option<Vec<Event>> {
         if self.entities.values().any(|mob| mob.rider == Some(rider)) {
             return None;
@@ -2543,6 +2695,20 @@ impl Mobs {
     ) -> Option<Vec<Event>> {
         let first = *self.entities.get(&id)?;
         let food = held?.id;
+        if first.kind == Kind::Wolf
+            && first.tamed
+            && !first.baby
+            && first.health < 20
+            && first.kind.breeding_food(food)
+            && first.nearby(player, 3.0)
+        {
+            // 1.7.10 EntityWolf: a wounded tamed wolf eats the owner's meat
+            // for +4 HP instead of entering love mode.
+            let mob = self.entities.get_mut(&id)?;
+            mob.health = (mob.health + 4).min(20);
+            let snapshot = *mob;
+            return Some(vec![snapshot.status(10), snapshot.health_metadata()]);
+        }
         if !first.nearby(player, 3.0)
             || self.entities.len() >= MAX_LOADED_MOBS
             || self.next_id >= 1_000_000
@@ -2550,6 +2716,7 @@ impl Mobs {
             || first.baby
             || !first.kind.breeding_food(food)
             || (first.kind == Kind::Horse && !first.tamed)
+            || (first.kind == Kind::Wolf && !first.tamed)
             || (first.breed_tick != 0 && tick.saturating_sub(first.breed_tick) < 6000)
             || tick < first.love_until
         {
@@ -3144,6 +3311,22 @@ impl Mobs {
                 .filter(|mob| mob.kind == Kind::Villager)
                 .map(|mob| mob.position)
                 .collect();
+            // Wolf follow/defence needs owner positions and the commanded
+            // victim; copy them before the &mut entity iteration so no
+            // borrow of the live map outlives the loop.
+            let owners = self.owners.clone();
+            let has_commanded_wolf = self
+                .entities
+                .values()
+                .any(|mob| mob.kind == Kind::Wolf && mob.attack_target.is_some());
+            let attack_snapshot: BTreeMap<i32, PlayerPosition> = if has_commanded_wolf {
+                self.entities
+                    .iter()
+                    .map(|(id, mob)| (*id, mob.position))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            };
             for mob in self.entities.values_mut() {
                 if mob.baby {
                     mob.age_ticks = mob.age_ticks.saturating_add(1);
@@ -3290,6 +3473,53 @@ impl Mobs {
                     // Evaluate light at each simulated tick, not the final catch-up
                     // time: sunset can fall between the bounded steps.
                     mob.bright_spider = spider_bright_light(block, sky, simulated_daytime);
+                }
+                if mob.kind == Kind::Wolf && mob.tamed {
+                    // Java 1.7.10 EntityWolf: a sitting wolf holds position; a
+                    // commanded wolf chases the owner's victim; otherwise the
+                    // wolf follows its owner beyond the ordinary 12-block
+                    // animal scan. Owner coordinates come from authenticated
+                    // session packets, never from client claims.
+                    if mob.sitting {
+                        continue;
+                    }
+                    let commanded = mob
+                        .attack_target
+                        .and_then(|victim| attack_snapshot.get(&victim).copied());
+                    if mob.attack_target.is_some() && commanded.is_none() {
+                        mob.attack_target = None; // victim vanished; stand down
+                    }
+                    let owner_at = mob.owner_uuid().and_then(|uuid| owners.get(uuid).copied());
+                    let destination = match (commanded, owner_at) {
+                        (Some(victim), _) => victim,
+                        (None, Some(at)) if distance(mob.position, at) > 6.0 => at,
+                        (None, Some(_)) | (None, None) => continue,
+                    };
+                    let reach = if commanded.is_some() { 1.9 } else { 3.0 };
+                    if distance(mob.position, destination) <= reach {
+                        continue;
+                    }
+                    if simulated_tick.is_multiple_of(20) || mob.waypoint.is_none() {
+                        mob.waypoint = navigation::next_step(world, mob.position, destination, 64);
+                    }
+                    if mob
+                        .waypoint
+                        .is_some_and(|p| distance(p, mob.position) < 0.25)
+                    {
+                        mob.waypoint = None;
+                    }
+                    let waypoint = mob.waypoint.unwrap_or(PlayerPosition {
+                        y: mob.position.y,
+                        ..destination
+                    });
+                    if let Some(candidate) =
+                        navigation::advance_step(world, mob.position, waypoint, 0.3)
+                    {
+                        let (yaw, pitch) = facing_angles(mob.position, candidate);
+                        mob.position = candidate;
+                        events.push(multiplayer::teleport(mob.id, &candidate, yaw, pitch));
+                    }
+                    continue;
                 }
                 let nearest = players
                     .iter()
@@ -3607,6 +3837,47 @@ impl Mobs {
                             self.pending_drops.extend(enemy.extra_death_drops());
                             dead.push(victim);
                         }
+                    }
+                }
+            }
+            // A tamed wolf joins its owner's fight: the attack command set by
+            // `order_wolves` bites the victim at most twice per second while
+            // in melee reach, resolved after the iteration like golem strikes.
+            let commanded_bites: Vec<(i32, i32)> = self
+                .entities
+                .values()
+                .filter(|wolf| {
+                    wolf.kind == Kind::Wolf
+                        && wolf.tamed
+                        && !wolf.sitting
+                        && (wolf.bite_tick == 0 || now.saturating_sub(wolf.bite_tick) >= 10)
+                })
+                .filter_map(|wolf| {
+                    let victim = wolf.attack_target?;
+                    self.entities
+                        .get(&victim)
+                        .filter(|target| target.health > 0 && target.nearby(wolf.position, 2.5))
+                        .map(|_| (wolf.id, victim))
+                })
+                .collect();
+            for (wolf_id, victim) in commanded_bites {
+                let origin = self.entities[&wolf_id].position;
+                if let Some(wolf) = self.entities.get_mut(&wolf_id) {
+                    wolf.bite_tick = now;
+                }
+                if let Some(enemy) = self.entities.get_mut(&victim) {
+                    enemy.health -= 4;
+                    events.push(enemy.status(if enemy.health <= 0 { 3 } else { 2 }));
+                    if enemy.health > 0 {
+                        events.push(enemy.health_metadata());
+                        events.push(enemy.knockback_from(origin));
+                    }
+                    if enemy.health <= 0 {
+                        if let Some(drop) = enemy.death_drop() {
+                            self.pending_drops.push(drop);
+                        }
+                        self.pending_drops.extend(enemy.extra_death_drops());
+                        dead.push(victim);
                     }
                 }
             }
@@ -5428,6 +5699,228 @@ mod tests {
         let tied = mobs.tie_fence(1, [0, 64, 0]);
         assert_eq!(tied.len(), 2);
         assert_eq!(mobs.untie_fence([0, 64, 0]).len(), 2);
+    }
+
+    #[test]
+    fn wolf_tames_with_bone_binds_owner_uuid_and_owner_sits_it() {
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let at = PlayerPosition::default();
+        let wolf = mobs.next_id;
+        let spawn = mobs.insert(Kind::Wolf, at, false);
+        assert_eq!(spawn.id, 0x0f);
+        // The spawn packet writes the entity ID as a varint: 500_000 encodes
+        // in three bytes, so the wire type follows at body[3].
+        assert_eq!(spawn.body[3], 95, "Protocol 5 wolf wire type 95");
+        assert!(mobs.can_tame(wolf));
+        let owner = "0d5a1c2b-3333-4444-8888-555555555555";
+        let events = mobs.tame(wolf, owner).expect("a bone tames the wolf");
+        assert_eq!(events[0].id, 0x1a); // entity effect 7: taming hearts
+        assert_eq!(events[0].body[4], 7);
+        let metadata = events
+            .iter()
+            .find(|event| {
+                event.id == 0x1c && event.body[..4] == wolf.to_be_bytes() && event.body[4] == 16
+            })
+            .expect("wolf byte 16 / int 19 / string 20 update");
+        assert_eq!(metadata.body[5] & 0x02, 0x02, "tamed bit in byte 16");
+        assert_eq!(metadata.body[5] & 0x10, 0, "the wolf stands after taming");
+        assert!(metadata
+            .body
+            .windows(owner.len())
+            .any(|window| window == owner.as_bytes()));
+        let stored = &mobs.entities[&wolf];
+        assert!(stored.tamed);
+        assert_eq!(stored.owner_uuid(), Some(owner));
+        assert_eq!(stored.health, 20, "taming restores full 1.7.10 wolf HP");
+        // Sit is owner-only and toggles the synced 0x10 bit.
+        assert!(mobs.wolf_sit_toggle(wolf, "not-the-owner").is_none());
+        assert!(!mobs.entities[&wolf].sitting);
+        let sit = mobs.wolf_sit_toggle(wolf, owner).unwrap();
+        assert_eq!(sit.id, 0x1c);
+        assert_eq!(sit.body[5] & 0x10, 0x10);
+        assert!(mobs.entities[&wolf].sitting);
+        assert!(mobs.wolf_sit_toggle(wolf, owner).is_some());
+        assert!(!mobs.entities[&wolf].sitting);
+        // A tamed wolf cannot be re-bound to another owner.
+        assert!(mobs.tame(wolf, "someone-else").is_none());
+    }
+
+    #[test]
+    fn tamed_wolf_owner_health_and_collar_survive_snapshot_restart() {
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let wolf = mobs.next_id;
+        mobs.insert(Kind::Wolf, PlayerPosition::default(), false);
+        let owner = "aa11bb22-ccdd-3344-5566-778899001122";
+        mobs.tame(wolf, owner).unwrap();
+        mobs.entities.get_mut(&wolf).unwrap().health = 13; // wounded
+        mobs.entities.get_mut(&wolf).unwrap().collar = 5;
+        mobs.wolf_sit_toggle(wolf, owner).unwrap();
+        let restored: Mobs = serde_json::from_slice(&serde_json::to_vec(&mobs).unwrap()).unwrap();
+        let wolf = &restored.entities[&wolf];
+        assert_eq!(wolf.owner_uuid(), Some(owner), "帰属は再起動を跨ぐ");
+        assert_eq!(wolf.health, 13, "負傷状態は永続化する");
+        assert_eq!(wolf.collar, 5, "首輪の色は永続化する");
+        assert!(wolf.sitting, "座り状態は永続化する");
+    }
+
+    #[test]
+    fn tamed_wolf_follows_owner_until_sitting_and_ignores_despawn_culls() {
+        let mut world = World::new();
+        for x in 0..=12 {
+            world.import_block(x, 64, 0, 1u16 << 4).unwrap();
+        }
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let origin = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let wolf = mobs.next_id;
+        mobs.insert(Kind::Wolf, origin, false);
+        let owner = "11111111-2222-3333-4444-555555555555";
+        mobs.tame(wolf, owner).unwrap();
+        // The owner stands ten blocks east and no player enters the ordinary
+        // 12-block animal scan: the session registry still drives following.
+        mobs.note_owner(
+            owner,
+            PlayerPosition {
+                x: 10.5,
+                y: 65.0,
+                z: 0.5,
+            },
+        );
+        mobs.last_tick = 0;
+        let events = mobs.tick(1, &world, &[]);
+        assert!(
+            mobs.entities[&wolf].position.x > origin.x,
+            "walk towards owner"
+        );
+        assert!(events.iter().any(|event| event.id == 0x18));
+        // Sitting stops the follow completely.
+        mobs.wolf_sit_toggle(wolf, owner).unwrap();
+        let sat = mobs.entities[&wolf].position;
+        for t in 2..=41 {
+            mobs.last_tick = t - 1;
+            mobs.tick(t, &world, &[]);
+        }
+        assert_eq!(mobs.entities[&wolf].position, sat, "sitting holds position");
+        mobs.wolf_sit_toggle(wolf, owner).unwrap();
+        // Far from every online player for over 600 ticks: the tamed wolf is
+        // never distance-culled.
+        for t in 42..=700 {
+            mobs.last_tick = t - 1;
+            mobs.tick(
+                t,
+                &world,
+                &[PlayerPosition {
+                    x: 500.5,
+                    y: 65.0,
+                    z: 0.5,
+                }],
+            );
+        }
+        assert!(mobs.entities.contains_key(&wolf), "tamed wolf persists");
+        // And it keeps walking toward the registry position when un-sat.
+        assert!(mobs.entities[&wolf].position.x > sat.x);
+    }
+
+    #[test]
+    fn owner_punch_orders_tamed_wolves_to_bite_the_same_victim() {
+        let mut world = World::new();
+        for x in 0..=4 {
+            world.import_block(x, 64, 0, 1u16 << 4).unwrap();
+        }
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let origin = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let wolf = mobs.next_id;
+        mobs.insert(Kind::Wolf, origin, false);
+        let zombie = mobs.next_id;
+        mobs.insert(
+            Kind::Zombie,
+            PlayerPosition {
+                x: 3.5,
+                y: 65.0,
+                z: 0.5,
+            },
+            false,
+        );
+        let owner = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+        mobs.tame(wolf, owner).unwrap();
+        mobs.note_owner(owner, origin);
+        let sword = Some(Stack {
+            id: 267,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        });
+        assert!(mobs.player_attack(zombie, origin, sword, 1).is_some());
+        mobs.order_wolves(owner, zombie);
+        assert_eq!(mobs.entities[&wolf].attack_target, Some(zombie));
+        for t in 2..=60 {
+            mobs.last_tick = t - 1;
+            mobs.tick(t, &world, &[origin]);
+        }
+        assert_ne!(mobs.entities[&wolf].bite_tick, 0, "the wolf bit its victim");
+        let hurt = mobs
+            .entities
+            .get(&zombie)
+            .is_none_or(|zombie| zombie.health < 20);
+        assert!(hurt, "the ordered wolf damages the owner's victim");
+        // A command naming an absent entity is a no-op that cannot wedge the
+        // AI: the stale target clears on the next simulated tick.
+        mobs.entities.get_mut(&wolf).unwrap().attack_target = Some(999_999);
+        mobs.last_tick = 60;
+        mobs.tick(61, &world, &[origin]);
+        assert_eq!(
+            mobs.entities[&wolf].attack_target, None,
+            "a vanished victim clears the command"
+        );
+    }
+
+    #[test]
+    fn tamed_wolf_eats_meat_to_heal_and_wild_wolves_refuse_love() {
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let at = PlayerPosition::default();
+        let wolf = mobs.next_id;
+        mobs.insert(Kind::Wolf, at, false);
+        let owner = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+        mobs.tame(wolf, owner).unwrap();
+        mobs.entities.get_mut(&wolf).unwrap().health = 10;
+        let beef = Some(Stack {
+            id: 363,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        });
+        let events = mobs
+            .feed(wolf, at, beef, 100)
+            .expect("meat heals a wounded tamed wolf");
+        assert_eq!(mobs.entities[&wolf].health, 14, "+4 HP per 1.7.10 bite");
+        assert!(events.iter().any(|event| event.id == 0x1c));
+        // Untamed wolves never enter love mode from meat.
+        let wild = mobs.next_id;
+        mobs.insert(Kind::Wolf, at, false);
+        assert!(mobs.feed(wild, at, beef, 200).is_none());
+        assert_eq!(mobs.entities[&wild].love_until, 0);
     }
 
     #[test]
