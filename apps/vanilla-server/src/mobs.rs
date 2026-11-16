@@ -5770,6 +5770,76 @@ mod tests {
         assert!(mobs.can_saddle(horse, at));
     }
 
+    /// REG-109 / #745: mount -> dismount -> remount cycles must keep the
+    /// rider exactly on the mount's back, and neither a Shift-dismount nor
+    /// a disconnect may leave a ghost rider behind. A stale rider would
+    /// block every later mount (use_mount refuses while any mob claims the
+    /// rider) and re-broadcast a bogus attach packet on rejoin.
+    #[test]
+    fn mount_dismount_cycles_track_the_mount_and_leave_no_ghost_rider() {
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let at = PlayerPosition {
+            x: 12.25,
+            y: 64.0,
+            z: -7.5,
+        };
+        let pig = mobs.next_id;
+        mobs.insert(Kind::Pig, at, false);
+        mobs.saddle(pig, at).unwrap();
+        let attach = |entity: i32, mount: i32| {
+            [
+                entity.to_be_bytes().as_slice(),
+                mount.to_be_bytes().as_ref(),
+                &[0],
+            ]
+            .concat()
+        };
+
+        for cycle in 0..3 {
+            assert!(mobs.use_mount(pig, 2, at).is_some(), "cycle {cycle}");
+            assert!(mobs.is_riding(2));
+            // The session pins the player to this position every movement
+            // packet: the mount's exact x/z, 0.8 blocks above its feet.
+            assert_eq!(
+                mobs.rider_position(2),
+                Some(PlayerPosition {
+                    x: at.x,
+                    y: at.y + 0.8,
+                    z: at.z,
+                })
+            );
+            // The join snapshot re-broadcasts the live attach (0x1b).
+            let snapshots = mobs.tether_snapshots();
+            assert_eq!(snapshots.len(), 1);
+            assert_eq!(snapshots[0].id, 0x1b);
+            assert_eq!(snapshots[0].body, attach(2, pig));
+            // Shift-dismount: one detach and zero residue.
+            let detach = mobs.dismount(2).unwrap();
+            assert_eq!(detach.id, 0x1b);
+            assert_eq!(detach.body, attach(2, -1));
+            assert!(!mobs.is_riding(2));
+            assert_eq!(mobs.rider_position(2), None);
+            assert!(
+                mobs.tether_snapshots().is_empty(),
+                "no ghost rider survives cycle {cycle}"
+            );
+        }
+
+        // A disconnect while riding releases exactly like Shift: one detach
+        // packet, no ghost, and the next mount attempt succeeds.
+        assert!(mobs.use_mount(pig, 2, at).is_some());
+        let released = mobs.release_player(2);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].id, 0x1b);
+        assert_eq!(released[0].body, attach(2, -1));
+        assert!(!mobs.is_riding(2));
+        assert!(mobs.tether_snapshots().is_empty());
+        assert!(mobs.use_mount(pig, 2, at).is_some());
+    }
+
     #[test]
     fn leash_cannot_attach_to_hostile_or_duplicate_animal() {
         let mut mobs = Mobs {
