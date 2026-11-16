@@ -2512,9 +2512,19 @@ fn play(
             updates.extend(creatures.take_melee_animations());
             let hurt = if survival { incoming.amount } else { 0 };
             let drops = creatures.take_drops();
+            let button_presses = creatures.take_button_presses();
             drop(creatures);
             for (x, y, z) in grazed_blocks.into_iter().chain(broken_doors) {
                 hub.broadcast(block_change_event(&w, x, y, z));
+            }
+            // Arrows borrowed the mob sweep read-only; apply each wooden
+            // button they touched now that the session owns the world, and
+            // publish the press. The 1200-tick release runs through the
+            // same pending_buttons expiry path as a hand press.
+            for (x, y, z) in button_presses {
+                if w.press_button_by_arrow(world_path, x, y, z)? {
+                    hub.broadcast(block_change_event(&w, x, y, z));
+                }
             }
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
             for explosion in explosions {
