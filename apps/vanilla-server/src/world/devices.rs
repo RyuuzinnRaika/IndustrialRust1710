@@ -1015,6 +1015,36 @@ impl World {
         }
         Ok(changed)
     }
+
+    /// 1.7.10 arrows press wooden buttons (143) only; stone buttons (77)
+    /// ignore them. A hand press releases in 15–30 ticks, but a stuck
+    /// arrow holds the button until the projectile despawns (60 seconds),
+    /// so the release deadline is 1200 ticks rather than the 30-tick
+    /// wooden-hand value. Pressing an already-pressed button is a no-op:
+    /// it must neither re-save nor extend another source's deadline.
+    pub fn press_button_by_arrow(
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> io::Result<bool> {
+        if !in_bounds(x, y, z) {
+            return Ok(false);
+        }
+        let old = self.get(x, y, z);
+        if old >> 4 != 143 || old & 8 != 0 {
+            return Ok(false);
+        }
+        // Arm the release only after the pressed state is durable;
+        // update_and_save rolls the cell back on an I/O failure.
+        let changed = self.update_and_save(path, x, y, z, old | 8)?;
+        if changed {
+            self.pending_buttons
+                .insert((x, y as u8, z), self.fluid_phase + 1200);
+        }
+        Ok(changed)
+    }
 }
 
 #[cfg(test)]
@@ -1185,6 +1215,64 @@ mod redstone_regression_tests {
         assert_eq!(world.signal_into((0, 64, 0), (1, 64, 0)), 0);
         assert!(!world.pending_buttons.contains_key(&(0, 64, 0)));
         assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 70 << 4);
+        fs::remove_file(path).unwrap();
+    }
+
+    /// REG-165 / #801: in 1.7.10 an Arrow activates wooden buttons only —
+    /// stone buttons ignore projectiles — and an arrow-activated button
+    /// stays pressed until the arrow despawns: one minute (1200 ticks),
+    /// not the 30-tick hand press.
+    #[test]
+    fn arrow_presses_only_wooden_buttons_and_holds_one_minute() {
+        let path = std::env::temp_dir().join(format!(
+            "ir1710-b11-arrow-button-{}.irw",
+            std::process::id()
+        ));
+        let staging = path.with_extension("tmp");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&staging);
+        let mut world = World::new();
+        world.fluid_phase = 100;
+        world.import_block(0, 64, 0, 143 << 4).unwrap();
+        world.import_block(1, 64, 0, 77 << 4).unwrap();
+        world.import_block(2, 64, 0, 1 << 4).unwrap();
+
+        // Stone buttons, plain blocks and out-of-bounds cells reject.
+        assert!(!world.press_button_by_arrow(&path, 1, 64, 0).unwrap());
+        assert!(!world.press_button_by_arrow(&path, 2, 64, 0).unwrap());
+        assert!(!world.press_button_by_arrow(&path, 3, 256, 0).unwrap());
+        assert_eq!(world.get(1, 64, 0), 77 << 4);
+        assert_eq!(world.get(2, 64, 0), 1 << 4);
+        assert!(!world.pending_buttons.contains_key(&(1, 64, 0)));
+
+        // A failed press save must not arm a release timer either.
+        fs::create_dir(&staging).unwrap();
+        assert!(world.press_button_by_arrow(&path, 0, 64, 0).is_err());
+        assert_eq!(world.get(0, 64, 0), 143 << 4);
+        assert!(!world.pending_buttons.contains_key(&(0, 64, 0)));
+        fs::remove_dir(&staging).unwrap();
+
+        // The wooden button presses, powers its neighbours at 15 and holds
+        // for the vanilla arrow-despawn window.
+        assert!(world.press_button_by_arrow(&path, 0, 64, 0).unwrap());
+        assert_eq!(world.get(0, 64, 0), (143 << 4) | 8);
+        assert_eq!(world.signal_into((0, 64, 0), (0, 64, 1)), 15);
+        assert_eq!(world.pending_buttons.get(&(0, 64, 0)), Some(&1300));
+        // A second arrow touching the held button changes nothing: no
+        // re-save, no extended deadline.
+        assert!(!world.press_button_by_arrow(&path, 0, 64, 0).unwrap());
+        assert_eq!(world.pending_buttons.get(&(0, 64, 0)), Some(&1300));
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), (143 << 4) | 8);
+
+        // The generic expiry sweep releases the press residue-free: pull
+        // the deadline forward and one block_tick unwinds the state.
+        world.pending_buttons.insert((0, 64, 0), world.fluid_phase);
+        let changed = world.block_tick(&path, 64).unwrap();
+        assert!(changed.contains(&(0, 64, 0)));
+        assert_eq!(world.get(0, 64, 0), 143 << 4);
+        assert_eq!(world.signal_into((0, 64, 0), (0, 64, 1)), 0);
+        assert!(!world.pending_buttons.contains_key(&(0, 64, 0)));
+        assert_eq!(World::load(&path).unwrap().get(0, 64, 0), 143 << 4);
         fs::remove_file(path).unwrap();
     }
 

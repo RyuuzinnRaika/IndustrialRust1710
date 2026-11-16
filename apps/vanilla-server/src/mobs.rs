@@ -845,6 +845,11 @@ pub struct Mobs {
     last_player_damage_tick: BTreeMap<i32, u64>,
     #[serde(skip)]
     pending_drops: Vec<(Stack, (i32, i32, i32))>,
+    /// Wooden buttons touched by an Arrow projectile this tick. Arrow
+    /// simulation only borrows the world read-only, so the session loop
+    /// drains these and applies each press with World::press_button_by_arrow.
+    #[serde(skip)]
+    pending_button_presses: Vec<(i32, i32, i32)>,
     #[serde(skip)]
     pending_effects: Vec<(PlayerPosition, u8, u16, u64)>,
     // Melee effects are keyed by the authenticated player Entity ID, never
@@ -2086,6 +2091,12 @@ impl Mobs {
     }
     pub fn take_explosions(&mut self) -> Vec<Explosion> {
         std::mem::take(&mut self.explosions)
+    }
+    /// Drain the wooden buttons an Arrow touched this tick. The session
+    /// loop applies each press through World::press_button_by_arrow and
+    /// broadcasts the resulting block change.
+    pub fn take_button_presses(&mut self) -> Vec<(i32, i32, i32)> {
+        std::mem::take(&mut self.pending_button_presses)
     }
     /// An explosion damages every nearby participant once, with wall
     /// occlusion, and damages server-owned mobs before clients are notified.
@@ -4013,6 +4024,25 @@ impl Mobs {
                     ProjectileKind::BlazeFireball | ProjectileKind::WitherSkull => 0.15625,
                     ProjectileKind::WitchPotion => 0.125,
                 };
+                // Buttons carry no collision shape (physics::shapes), so a
+                // flying Arrow passes through the button's own cell on its
+                // way into the wall behind it. 1.7.10 lets an Arrow press a
+                // wooden button but never a stone one, so queue every 143
+                // cell this sample touches; the session loop drains these
+                // and applies World::press_button_by_arrow while the arrow
+                // keeps flying to its normal impact.
+                if arrow.kind == ProjectileKind::Arrow {
+                    let cell = (
+                        sample.x.floor() as i32,
+                        sample.y.floor() as i32,
+                        sample.z.floor() as i32,
+                    );
+                    if world.get(cell.0, cell.1, cell.2) >> 4 == 143
+                        && !self.pending_button_presses.contains(&cell)
+                    {
+                        self.pending_button_presses.push(cell);
+                    }
+                }
                 if !sample.is_valid() || physics::projectile_collides(world, &sample, half_size) {
                     if matches!(
                         arrow.kind,
@@ -8815,6 +8845,87 @@ mod tests {
         assert_eq!(mobs.orbs.len(), 1);
         assert_eq!(mobs.orbs.values().next().unwrap().1, 2);
         assert_eq!(events.iter().filter(|event| event.id == 0x11).count(), 1);
+    }
+
+    /// REG-165 / #801: a flying Arrow queues a press for every wooden
+    /// button cell it sweeps through — stone buttons and every other
+    /// projectile kind stay inert — while the arrow itself still impacts
+    /// the wall behind the button and is removed exactly as before.
+    #[test]
+    fn arrows_touch_wooden_buttons_but_never_stone_or_fireballs() {
+        let mut world = World::new();
+        for z in 0..3 {
+            world.import_block(4, 65, z, 1 << 4).unwrap();
+        }
+        world.import_block(3, 65, 0, 143 << 4).unwrap();
+        world.import_block(3, 65, 1, 77 << 4).unwrap();
+        world.import_block(3, 65, 2, 143 << 4).unwrap();
+        let mut mobs = Mobs::default();
+        // yaw -90 flies along +x; arrows spawn 1.3 blocks above `at`, so
+        // the whole flight stays inside y-cell 65.
+        assert!(mobs
+            .fire_arrow(
+                None,
+                PlayerPosition {
+                    x: 0.5,
+                    y: 63.8,
+                    z: 0.5
+                },
+                -90.0,
+                0.0,
+                2.0,
+                3
+            )
+            .is_some());
+        assert!(mobs
+            .fire_arrow(
+                None,
+                PlayerPosition {
+                    x: 0.5,
+                    y: 63.8,
+                    z: 1.5
+                },
+                -90.0,
+                0.0,
+                2.0,
+                3
+            )
+            .is_some());
+        let mut events = Vec::new();
+        // First tick: both arrows are still short of the button cells.
+        mobs.tick_arrows(&world, &[], 1, &mut events);
+        assert!(mobs.take_button_presses().is_empty());
+        // Second tick: both sweep through x=3. Only the wooden button is
+        // queued; the stone button beside it stays unreported. Both arrows
+        // then hit the wall and are removed, exactly as before this change.
+        mobs.tick_arrows(&world, &[], 2, &mut events);
+        assert_eq!(mobs.take_button_presses(), vec![(3, 65, 0)]);
+        assert!(mobs.arrows.is_empty());
+        assert!(mobs.take_button_presses().is_empty());
+        // A ghast fireball flies through the second wooden button and must
+        // not press it: only the Arrow kind activates buttons, and the
+        // fireball still dies against the wall with its explosion.
+        mobs.fire_special(
+            999,
+            PlayerPosition {
+                x: 0.5,
+                y: 63.8,
+                z: 2.5,
+            },
+            -90.0,
+            0.0,
+            ProjectileKind::GhastFireball,
+        )
+        .unwrap();
+        for tick in 3..12 {
+            mobs.tick_arrows(&world, &[], tick, &mut events);
+            assert!(
+                mobs.take_button_presses().is_empty(),
+                "fireballs never press buttons"
+            );
+        }
+        assert!(mobs.arrows.is_empty(), "the fireball hit the wall");
+        assert!(!mobs.take_explosions().is_empty());
     }
 
     #[test]
