@@ -9772,4 +9772,116 @@ mod protocol5_facing_regression_tests {
         assert_eq!(packets[1].body.len(), 5);
         assert_eq!(packets[0].body[4], packets[1].body[4]);
     }
+
+    #[test]
+    fn baby_zombies_fit_a_one_block_passage_and_adults_do_not() {
+        // REG-151 / #787: 1.7.10 gives the baby zombie 0.3x0.9 and the adult
+        // 0.6x1.8 (pinned by
+        // zombie_projectile_and_knockback_hitboxes_match_1710_spawn_dimensions).
+        // A one-block-high passage above the grass floor therefore fits the
+        // baby and never squeezes the adult into a solid ceiling; the same
+        // two-block corridor admits both.
+        let mut world = World::new();
+        world.import_block(0, 65, 0, 1 << 4).unwrap(); // one block above the floor
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let mut mobs = Mobs::default();
+        mobs.insert(Kind::Zombie, at, false);
+        mobs.insert(Kind::Zombie, at, true);
+        let adult = &mobs.entities[&0];
+        let baby = &mobs.entities[&1];
+        let (baby_half, baby_height) = projectile_hitbox(baby);
+        let (adult_half, adult_height) = projectile_hitbox(adult);
+        assert!(
+            !physics::collides_sized(&world, &at, baby_half, baby_height),
+            "baby zombie must fit the one-block passage"
+        );
+        assert!(
+            physics::collides_sized(&world, &at, adult_half, adult_height),
+            "adult zombie must not fit the one-block passage"
+        );
+        // Same column with a two-block corridor: both fit.
+        let mut taller = World::new();
+        taller.import_block(0, 66, 0, 1 << 4).unwrap();
+        assert!(!physics::collides_sized(
+            &taller,
+            &at,
+            baby_half,
+            baby_height
+        ));
+        assert!(!physics::collides_sized(
+            &taller,
+            &at,
+            adult_half,
+            adult_height
+        ));
+    }
+
+    #[test]
+    fn spider_climbs_a_three_block_wall_and_reaches_the_roof() {
+        // REG-154 / #790: when navigation is blocked by a wall, a spider
+        // crawls UP the wall face at 0.2 per tick, never inside a solid
+        // cell, and resumes ordinary routing once it clears the top edge.
+        let mut world = World::new();
+        for y in 64..=66 {
+            for z in -1..=1 {
+                world.import_block(3, y, z, 1 << 4).unwrap();
+            }
+        }
+        let mut mobs = Mobs::default();
+        mobs.insert(
+            Kind::Spider,
+            PlayerPosition {
+                x: 0.5,
+                y: 64.0,
+                z: 0.5,
+            },
+            false,
+        );
+        // Night (matches spider_sunset_catch_up_matches_split_simulation):
+        // spiders are aggressive after sunset. The target hides behind the
+        // three-block wall. Start one tick before the loop so each tick()
+        // advances exactly one simulated tick (no catch-up burst).
+        mobs.last_tick = 12_999;
+        let player = PlayerPosition {
+            x: 6.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let mut previous = PlayerPosition {
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+        };
+        let mut crossed = false;
+        for tick in 13_000..15_000u64 {
+            mobs.tick(tick, &world, &[player]);
+            let spider = mobs.entities.get(&0).copied().expect("spider present");
+            assert!(
+                !physics::collides(&world, &spider.position),
+                "spider inside wall at tick {tick}: {:?}",
+                spider.position
+            );
+            let dx = (spider.position.x - previous.x).abs();
+            let dy = (spider.position.y - previous.y).abs();
+            let dz = (spider.position.z - previous.z).abs();
+            assert!(
+                dx <= 0.21 && dy <= 0.21 && dz <= 0.21,
+                "spider moved too fast (teleport) at tick {tick}: {previous:?} -> {:?}",
+                spider.position
+            );
+            previous = spider.position;
+            if spider.position.x > 3.5 {
+                crossed = true;
+                break;
+            }
+        }
+        assert!(
+            crossed,
+            "spider never crossed the wall (last: {previous:?})"
+        );
+    }
 }
