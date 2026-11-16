@@ -2464,6 +2464,9 @@ fn play(
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
             creatures.set_natural_spawning(allow_natural_spawning);
+            // Tamed wolves follow the player this session authenticates; every
+            // active session refreshes its own owner UUID at packet rate.
+            creatures.note_owner(&offline_uuid(name), *player);
             // The 1.7.10 sky and /time commands follow the displayed
             // 0..23999 day clock, which is not the server uptime tick.
             let mut updates =
@@ -3340,6 +3343,33 @@ fn play(
                             continue;
                         }
                     }
+                    // Java 1.7.10 EntityWolf: a bone tames the wolf and binds
+                    // it to the player's offline UUID; the owner's interaction
+                    // then toggles sitting. Both work in Creative, the bone is
+                    // only debited in Survival from the real held slot.
+                    if creatures.can_tame(target_id)
+                        && inventory.held().is_some_and(|item| item.id == 352)
+                    {
+                        let mut candidate = inventory.clone();
+                        let can_pay = !survival || candidate.consume_held();
+                        if can_pay {
+                            if let Some(events) = creatures.tame(target_id, &offline_uuid(name)) {
+                                if survival {
+                                    candidate.save(inventory_path)?;
+                                    *inventory = candidate;
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                }
+                                for event in events {
+                                    hub.broadcast(event);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(event) = creatures.wolf_sit_toggle(target_id, &offline_uuid(name)) {
+                        hub.broadcast(event);
+                        continue;
+                    }
                     // Other animal interactions debit items or wear tools,
                     // and remain unavailable in Creative.
                     if !survival {
@@ -3521,6 +3551,11 @@ fn play(
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
                     let result =
                         creatures.player_attack(target_id, *player, inventory.held(), now_tick);
+                    if result.is_some() {
+                        // 1.7.10: tamed wolves join the fight against whatever
+                        // their owner just punched.
+                        creatures.order_wolves(&offline_uuid(name), target_id);
+                    }
                     drop(creatures);
                     if let Some(hit) = result {
                         if survival {
