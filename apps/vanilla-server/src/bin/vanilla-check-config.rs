@@ -35,7 +35,10 @@ fn check(path: &Path) -> io::Result<()> {
     println!("Difficulty: {}", config.difficulty);
     println!("Hardcore: {}", config.hardcore);
     println!("Online authentication: {}", config.online_mode);
-    println!("公開範囲・認証診断: {}", safety_diagnostic_ja(config.bind, config.online_mode));
+    println!(
+        "公開範囲・認証診断: {}",
+        safety_diagnostic_ja(config.bind, config.online_mode)
+    );
     println!("Level name: {}", config.level_name);
     let warning = server_config::offline_exposure_warning(config.bind, config.online_mode);
     if let Some(message) = warning {
@@ -79,7 +82,11 @@ mod tests {
             for online in [true, false] {
                 let message = safety_diagnostic_ja(bind, online);
                 assert!(message.contains("ループバック"), "{address}");
-                assert!(message.contains(if online { "online-mode=true" } else { "online-mode=false" }));
+                assert!(message.contains(if online {
+                    "online-mode=true"
+                } else {
+                    "online-mode=false"
+                }));
                 assert!(!message.contains("危険:"));
             }
         }
@@ -88,7 +95,11 @@ mod tests {
             for online in [true, false] {
                 let message = safety_diagnostic_ja(bind, online);
                 assert!(message.contains("外部インターフェース"), "{address}");
-                assert!(message.contains(if online { "online-mode=true" } else { "online-mode=false" }));
+                assert!(message.contains(if online {
+                    "online-mode=true"
+                } else {
+                    "online-mode=false"
+                }));
                 assert_eq!(message.contains("危険:"), !online);
             }
         }
