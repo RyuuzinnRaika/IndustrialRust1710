@@ -50,6 +50,7 @@ enum Kind {
     #[allow(dead_code)] // Registered for the Protocol 5 species integration.
     Wither,
     Wolf,
+    Ocelot,
 }
 impl Kind {
     fn death_name(self) -> &'static str {
@@ -76,6 +77,7 @@ impl Kind {
             Self::EnderDragon => "Ender Dragon",
             Self::Wither => "Wither",
             Self::Wolf => "Wolf",
+            Self::Ocelot => "Ocelot",
         }
     }
     fn protocol(self) -> u8 {
@@ -102,6 +104,7 @@ impl Kind {
             Self::EnderDragon => 63,
             Self::Wither => 64,
             Self::Wolf => 95,
+            Self::Ocelot => 98,
         }
     }
     fn passive(self) -> bool {
@@ -114,6 +117,7 @@ impl Kind {
                 | Self::Chicken
                 | Self::Villager
                 | Self::Wolf
+                | Self::Ocelot
         )
     }
     /// Vanilla natural-spawn caps count animals and monsters, not villagers,
@@ -178,6 +182,7 @@ impl Kind {
             Self::Skeleton => 20,
             Self::Zombie => 20,
             Self::Wolf => 20,
+            Self::Ocelot => 10,
         }
     }
     fn drop(self, size: u8) -> Option<Stack> {
@@ -203,7 +208,7 @@ impl Kind {
             Self::IronGolem => 265,
             // Vanilla 1.7.10 Wither boss always drops one Nether Star.
             Self::Wither => 399,
-            Self::Villager | Self::EnderDragon | Self::Wolf => return None,
+            Self::Villager | Self::EnderDragon | Self::Wolf | Self::Ocelot => return None,
         };
         Some(Stack {
             id,
@@ -224,6 +229,8 @@ impl Kind {
             // same meat heals a wounded tamed wolf (see `feed`). Porkchop
             // 319/320, beef 363/364, chicken 365/366, rotten flesh 367.
             Self::Wolf => matches!(held, 319 | 320 | 363 | 364 | 365 | 366 | 367),
+            // Java 1.7.10 ocelots enter love mode with raw or cooked fish.
+            Self::Ocelot => matches!(held, 349 | 350),
             _ => false,
         }
     }
@@ -382,6 +389,11 @@ impl Mob {
             // int 19 (collar colour, +256 while tamed) and string 20 (owner UUID).
             self.push_wolf_fields(&mut body);
         }
+        if self.kind == Kind::Ocelot {
+            // Java 1.7.10 EntityOcelot: byte 16 (0x02 sitting, 0x04 tamed)
+            // and string 19 (owner UUID).
+            self.push_ocelot_fields(&mut body);
+        }
         // All living mobs expose health as a float at DataWatcher index 6,
         // not only bosses. New joiners must observe the current shared HP.
         body.push((3 << 5) | 6);
@@ -436,6 +448,31 @@ impl Mob {
         self.owner_bound
             .then(|| std::str::from_utf8(&self.owner).ok())
             .flatten()
+    }
+    /// Java 1.7.10 EntityOcelot DataWatcher: byte 16 (0x02 sitting, 0x04
+    /// tamed) and string 19 (owner UUID). Note the sitting/tamed bits and the
+    /// owner index differ from the wolf, so trackers must not share encoders.
+    fn push_ocelot_fields(&self, body: &mut Vec<u8>) {
+        body.push(16);
+        let flags = (u8::from(self.tamed) * 0x04) | (u8::from(self.sitting) * 0x02);
+        body.push(flags);
+        body.push((5 << 5) | 19); // string: owner UUID, empty while wild
+        let owner = self.owner_uuid().unwrap_or("");
+        write_varint(owner.len() as u32, body);
+        body.extend_from_slice(owner.as_bytes());
+    }
+    fn ocelot_state_update(&self) -> Event {
+        let mut body = self.id.to_be_bytes().to_vec();
+        self.push_ocelot_fields(&mut body);
+        body.push(0x7f);
+        Event { id: 0x1c, body }
+    }
+    /// The DataWatcher update for whichever tamed pet kind this Mob is.
+    fn pet_state_update(&self) -> Event {
+        match self.kind {
+            Kind::Ocelot => self.ocelot_state_update(),
+            _ => self.wolf_state_update(),
+        }
     }
     /// Update the server fuse timer once per simulated 20TPS tick.
     /// Return the DataWatcher transition only on ignition/defusing, so the
@@ -1656,6 +1693,7 @@ impl Mobs {
             "Chicken" => Kind::Chicken,
             "Horse" | "EntityHorse" => Kind::Horse,
             "Wolf" => Kind::Wolf,
+            "Ocelot" => Kind::Ocelot,
             "Villager" => Kind::Villager,
             "VillagerGolem" => Kind::IronGolem,
             "PigZombie" => Kind::ZombiePigman,
@@ -2389,40 +2427,60 @@ impl Mobs {
         }
     }
     pub fn can_tame(&self, id: i32) -> bool {
-        self.entities
-            .get(&id)
-            .is_some_and(|mob| mob.kind == Kind::Wolf && !mob.tamed && !mob.baby && mob.health > 0)
+        self.entities.get(&id).is_some_and(|mob| {
+            matches!(mob.kind, Kind::Wolf | Kind::Ocelot)
+                && !mob.tamed
+                && !mob.baby
+                && mob.health > 0
+        })
     }
-    /// Java 1.7.10 wolf taming: a bone binds the wolf to the player's UUID.
-    /// The session layer debits the item; ownership, restored HP and the
-    /// synced collar/owner metadata are decided here.
+    /// Java 1.7.10 taming is species-specific: a bone tames a wolf, fish
+    /// tames an ocelot. Reject the wrong item so an ocelot cannot be bound by
+    /// a bone (and vice versa) before the session debits the held stack.
+    pub fn can_tame_with(&self, id: i32, held: i16) -> bool {
+        self.entities.get(&id).is_some_and(|mob| {
+            self.can_tame(id)
+                && match mob.kind {
+                    Kind::Wolf => held == 352,
+                    Kind::Ocelot => matches!(held, 349 | 350),
+                    _ => false,
+                }
+        })
+    }
+    /// Java 1.7.10 taming: bind the wolf/ocelot to the player's UUID, restore
+    /// full species HP and sync the species metadata. The session layer
+    /// debits the (already kind-validated) held item separately.
     pub fn tame(&mut self, id: i32, owner_uuid: &str) -> Option<Vec<Event>> {
         let bytes = owner_uuid.as_bytes();
         if bytes.len() != 36 || !owner_uuid.is_ascii() || !self.can_tame(id) {
             return None;
         }
         let mob = self.entities.get_mut(&id)?;
+        let full = mob.kind.health();
         mob.tamed = true;
         mob.owner.copy_from_slice(bytes);
         mob.owner_bound = true;
-        mob.health = 20; // 1.7.10 setTamed restores full wolf HP.
+        mob.health = full; // 1.7.10 setTamed restores full species HP.
         let snapshot = *mob;
         let mut events = vec![snapshot.status(7)]; // taming hearts
-        events.push(snapshot.wolf_state_update());
+        events.push(snapshot.pet_state_update());
         events.push(snapshot.health_metadata());
         Some(events)
     }
-    /// Owner-only right-click: toggle the sitting flag and sync byte 16 to
-    /// every tracker. Non-owners (and untamed wolves) change nothing.
-    pub fn wolf_sit_toggle(&mut self, id: i32, owner_uuid: &str) -> Option<Event> {
+    /// Owner-only right-click: toggle the sitting flag and sync the species
+    /// byte 16 to every tracker. Non-owners (and untamed pets) do nothing.
+    pub fn pet_sit_toggle(&mut self, id: i32, owner_uuid: &str) -> Option<Event> {
         let mob = self.entities.get_mut(&id)?;
-        if mob.kind != Kind::Wolf || !mob.tamed || mob.owner_uuid() != Some(owner_uuid) {
+        if !matches!(mob.kind, Kind::Wolf | Kind::Ocelot)
+            || !mob.tamed
+            || mob.owner_uuid() != Some(owner_uuid)
+        {
             return None;
         }
         mob.sitting = !mob.sitting;
         mob.waypoint = None;
         mob.attack_target = None;
-        Some(mob.wolf_state_update())
+        Some(mob.pet_state_update())
     }
     /// The owner's melee swing commands every one of their wolves to attack
     /// the same victim (1.7.10 wolves join their owner's fight).
@@ -3474,12 +3532,12 @@ impl Mobs {
                     // time: sunset can fall between the bounded steps.
                     mob.bright_spider = spider_bright_light(block, sky, simulated_daytime);
                 }
-                if mob.kind == Kind::Wolf && mob.tamed {
-                    // Java 1.7.10 EntityWolf: a sitting wolf holds position; a
-                    // commanded wolf chases the owner's victim; otherwise the
-                    // wolf follows its owner beyond the ordinary 12-block
-                    // animal scan. Owner coordinates come from authenticated
-                    // session packets, never from client claims.
+                if matches!(mob.kind, Kind::Wolf | Kind::Ocelot) && mob.tamed {
+                    // Java 1.7.10 EntityTameablePet: a sitting pet holds
+                    // position; a commanded wolf chases the owner's victim;
+                    // otherwise the pet follows its owner beyond the ordinary
+                    // 12-block animal scan. Owner coordinates come from
+                    // authenticated session packets, never from client claims.
                     if mob.sitting {
                         continue;
                     }
@@ -5736,13 +5794,13 @@ mod tests {
         assert_eq!(stored.owner_uuid(), Some(owner));
         assert_eq!(stored.health, 20, "taming restores full 1.7.10 wolf HP");
         // Sit is owner-only and toggles the synced 0x10 bit.
-        assert!(mobs.wolf_sit_toggle(wolf, "not-the-owner").is_none());
+        assert!(mobs.pet_sit_toggle(wolf, "not-the-owner").is_none());
         assert!(!mobs.entities[&wolf].sitting);
-        let sit = mobs.wolf_sit_toggle(wolf, owner).unwrap();
+        let sit = mobs.pet_sit_toggle(wolf, owner).unwrap();
         assert_eq!(sit.id, 0x1c);
         assert_eq!(sit.body[5] & 0x10, 0x10);
         assert!(mobs.entities[&wolf].sitting);
-        assert!(mobs.wolf_sit_toggle(wolf, owner).is_some());
+        assert!(mobs.pet_sit_toggle(wolf, owner).is_some());
         assert!(!mobs.entities[&wolf].sitting);
         // A tamed wolf cannot be re-bound to another owner.
         assert!(mobs.tame(wolf, "someone-else").is_none());
@@ -5760,7 +5818,7 @@ mod tests {
         mobs.tame(wolf, owner).unwrap();
         mobs.entities.get_mut(&wolf).unwrap().health = 13; // wounded
         mobs.entities.get_mut(&wolf).unwrap().collar = 5;
-        mobs.wolf_sit_toggle(wolf, owner).unwrap();
+        mobs.pet_sit_toggle(wolf, owner).unwrap();
         let restored: Mobs = serde_json::from_slice(&serde_json::to_vec(&mobs).unwrap()).unwrap();
         let wolf = &restored.entities[&wolf];
         assert_eq!(wolf.owner_uuid(), Some(owner), "帰属は再起動を跨ぐ");
@@ -5806,14 +5864,14 @@ mod tests {
         );
         assert!(events.iter().any(|event| event.id == 0x18));
         // Sitting stops the follow completely.
-        mobs.wolf_sit_toggle(wolf, owner).unwrap();
+        mobs.pet_sit_toggle(wolf, owner).unwrap();
         let sat = mobs.entities[&wolf].position;
         for t in 2..=41 {
             mobs.last_tick = t - 1;
             mobs.tick(t, &world, &[]);
         }
         assert_eq!(mobs.entities[&wolf].position, sat, "sitting holds position");
-        mobs.wolf_sit_toggle(wolf, owner).unwrap();
+        mobs.pet_sit_toggle(wolf, owner).unwrap();
         // Far from every online player for over 600 ticks: the tamed wolf is
         // never distance-culled.
         for t in 42..=700 {
@@ -5829,7 +5887,7 @@ mod tests {
             );
         }
         assert!(mobs.entities.contains_key(&wolf), "tamed wolf persists");
-        // And it keeps walking toward the registry position when un-sat.
+        // And it keeps walking toward the registry position when not sitting.
         assert!(mobs.entities[&wolf].position.x > sat.x);
     }
 
@@ -5921,6 +5979,116 @@ mod tests {
         mobs.insert(Kind::Wolf, at, false);
         assert!(mobs.feed(wild, at, beef, 200).is_none());
         assert_eq!(mobs.entities[&wild].love_until, 0);
+    }
+
+    #[test]
+    fn ocelot_tames_with_fish_binds_owner_uuid_and_sits_on_command() {
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let at = PlayerPosition::default();
+        let ocelot = mobs.next_id;
+        let spawn = mobs.insert(Kind::Ocelot, at, false);
+        // Spawn writes the entity ID as a varint: 500_000 is three bytes, so
+        // the Protocol 5 ocelot wire type follows at body[3].
+        assert_eq!(spawn.body[3], 98, "Protocol 5 ocelot wire type 98");
+        assert!(mobs.can_tame(ocelot));
+        // Species-specific taming item: a bone cannot bind an ocelot.
+        assert!(!mobs.can_tame_with(ocelot, 352));
+        assert!(mobs.can_tame_with(ocelot, 349));
+        let owner = "22222222-3333-4444-5555-666666666666";
+        let events = mobs.tame(ocelot, owner).expect("fish tames the ocelot");
+        assert_eq!(events[0].id, 0x1a); // entity effect 7: taming hearts
+        let md = events
+            .iter()
+            .find(|event| {
+                event.id == 0x1c && event.body[..4] == ocelot.to_be_bytes() && event.body[4] == 16
+            })
+            .expect("ocelot byte 16 / string 19 update");
+        assert_eq!(md.body[5] & 0x04, 0x04, "tamed bit 0x04 in ocelot byte 16");
+        assert_eq!(md.body[5] & 0x02, 0, "not sitting right after taming");
+        assert!(md
+            .body
+            .windows(owner.len())
+            .any(|window| window == owner.as_bytes()));
+        let stored = &mobs.entities[&ocelot];
+        assert_eq!(stored.owner_uuid(), Some(owner));
+        assert_eq!(stored.health, 10, "1.7.10 ocelot full HP is 10");
+        // Sitting is owner-only, then syncs the 0x02 bit to all trackers.
+        assert!(mobs
+            .pet_sit_toggle(ocelot, "00000000-0000-4000-8000-000000000000")
+            .is_none());
+        let sit = mobs.pet_sit_toggle(ocelot, owner).unwrap();
+        assert_eq!(sit.id, 0x1c);
+        assert_eq!(sit.body[5] & 0x02, 0x02, "sitting bit set");
+        assert_eq!(sit.body[5] & 0x04, 0x04, "still tamed while sitting");
+        assert!(mobs.entities[&ocelot].sitting);
+    }
+
+    #[test]
+    fn tamed_ocelot_owner_and_posture_survive_snapshot_restart() {
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let ocelot = mobs.next_id;
+        mobs.insert(Kind::Ocelot, PlayerPosition::default(), false);
+        let owner = "77777777-8888-9999-aaaa-bbbbbbbbbbbb";
+        mobs.tame(ocelot, owner).unwrap();
+        mobs.entities.get_mut(&ocelot).unwrap().health = 6;
+        mobs.pet_sit_toggle(ocelot, owner).unwrap();
+        let restored: Mobs = serde_json::from_slice(&serde_json::to_vec(&mobs).unwrap()).unwrap();
+        let cat = &restored.entities[&ocelot];
+        assert_eq!(cat.owner_uuid(), Some(owner), "帰属は再起動を跨ぐ");
+        assert!(cat.sitting, "座り状態は永続化する");
+        assert_eq!(cat.health, 6, "負傷状態は永続化する");
+    }
+
+    #[test]
+    fn tamed_ocelot_follows_owner_until_sitting() {
+        let mut world = World::new();
+        for x in 0..=12 {
+            world.import_block(x, 64, 0, 1u16 << 4).unwrap();
+        }
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let origin = PlayerPosition {
+            x: 0.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let ocelot = mobs.next_id;
+        mobs.insert(Kind::Ocelot, origin, false);
+        let owner = "cccccccc-dddd-eeee-ffff-000000000000";
+        mobs.tame(ocelot, owner).unwrap();
+        mobs.note_owner(
+            owner,
+            PlayerPosition {
+                x: 10.5,
+                y: 65.0,
+                z: 0.5,
+            },
+        );
+        mobs.last_tick = 0;
+        let events = mobs.tick(1, &world, &[]);
+        assert!(
+            mobs.entities[&ocelot].position.x > origin.x,
+            "the cat walks toward its owner"
+        );
+        assert!(events.iter().any(|event| event.id == 0x18));
+        mobs.pet_sit_toggle(ocelot, owner).unwrap();
+        let sat = mobs.entities[&ocelot].position;
+        for t in 2..=41 {
+            mobs.last_tick = t - 1;
+            mobs.tick(t, &world, &[]);
+        }
+        assert_eq!(
+            mobs.entities[&ocelot].position, sat,
+            "sitting cat holds position"
+        );
     }
 
     #[test]
