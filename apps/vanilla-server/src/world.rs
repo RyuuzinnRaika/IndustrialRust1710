@@ -279,6 +279,7 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 10 // flowing lava
             | 6 // saplings
             | 31 | 32 | 37 | 38 // tall grass, dead bush and flowers
+            | 30 // cobweb: no collision, sinks entities and resets fall distance
             | 18 // leaves
             | 59 // wheat
             | 60 // farmland (via hoe)

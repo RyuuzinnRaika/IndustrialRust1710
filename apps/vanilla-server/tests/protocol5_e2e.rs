@@ -4216,3 +4216,74 @@ fn protocol5_replay_zombie_attack_reports_status_health_velocity() {
         log.summary()
     );
 }
+
+#[test]
+fn survival_cobweb_fall_resets_fall_damage_like_legacy() {
+    // REG-154 / #744: a cobweb (legacy block 30) has no collision, is
+    // not a floor, and — exactly like 1.7.10 BlockWeb — a fall that ends
+    // inside a web must never accumulate fall damage. The control fall
+    // (26 blocks onto bare ground) is lethal in the death/respawn test
+    // above; the identical descent that lands INSIDE the web must leave
+    // health untouched and produce no correction.
+    let server = NativeServer::start_with_mode_and_items(true, &[(36, 30_i16)]);
+    let (mut client, _, spawn) = server.join("RustTester");
+    assert_eq!(spawn, [0.5, 64.0, 0.5]);
+
+    // Stand clear, then C08-place the seeded cobweb on the grass at
+    // (0,63,0) face 1, which fills (0,64,0) — the spawn column.
+    send_position(&mut client, 4.5, 64.0, 0.5);
+    let mut place = 0i32.to_be_bytes().to_vec();
+    place.push(63);
+    place.extend_from_slice(&0i32.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&30i16.to_be_bytes());
+    place.push(1);
+    place.extend_from_slice(&0i16.to_be_bytes());
+    place.extend_from_slice(&(-1i16).to_be_bytes());
+    place.extend_from_slice(&[8, 8, 8]);
+    client.write_all(&frame(8, &place)).unwrap();
+    until_packet(&mut client, 0x23, |p| block_change_is(p, 64, 30));
+
+    // Walk back onto the web (no correction: webs never collide), then
+    // descend 26 blocks the way a web-slowed client reports it: a long
+    // air claim, a web-sinking claim, then the floor.
+    send_position(&mut client, 0.5, 64.0, 0.5);
+    send_position(&mut client, 0.5, 90.0, 0.5);
+    send_position(&mut client, 0.5, 66.0, 0.5);
+    send_position(&mut client, 0.5, 64.2, 0.5); // feet cell (0,64,0): in web
+    send_position(&mut client, 0.5, 64.0, 0.5); // lands with the tracker reset
+
+    // Neither a damage/health packet nor a position correction may
+    // follow: the web reset the fall distance like 1.7.10 does.
+    client
+        .set_read_timeout(Some(Duration::from_millis(400)))
+        .ok();
+    let deadline = Instant::now() + Duration::from_millis(1200);
+    while Instant::now() < deadline {
+        match read_frame(&mut client) {
+            Ok(packet) => {
+                let mut raw = packet.as_slice();
+                let pid = read_varint(&mut raw).expect("packet id");
+                let body = raw.to_vec();
+                if pid == 0 && body.len() == 4 {
+                    client.write_all(&frame(0, &body)).unwrap();
+                }
+                assert!(
+                    pid != 0x06 || f32::from_be_bytes(body[..4].try_into().unwrap()) >= 20.0,
+                    "cobweb landing must not damage the player: {:?}",
+                    body
+                );
+                assert!(pid != 0x08, "web descent must not be corrected: {body:?}");
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(error) => panic!("socket error: {error}"),
+        }
+    }
+    drop(client);
+    server.wait_idle();
+}

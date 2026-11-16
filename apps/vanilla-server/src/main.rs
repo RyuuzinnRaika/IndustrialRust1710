@@ -2587,6 +2587,7 @@ fn play(
             let wet = simulated.as_ref().is_some_and(|candidate| {
                 physics::in_water(&gravity_world, candidate)
                     || physics::on_ladder(&gravity_world, candidate)
+                    || physics::in_cobweb(&gravity_world, candidate)
             });
             drop(gravity_world);
             if let Some(candidate) = simulated {
@@ -3845,7 +3846,8 @@ fn play(
                     }
                     let landed = physics::supported(&collision_world, &candidate);
                     let safe_fall = physics::in_water(&collision_world, &candidate)
-                        || physics::on_ladder(&collision_world, &candidate);
+                        || physics::on_ladder(&collision_world, &candidate)
+                        || physics::in_cobweb(&collision_world, &candidate);
                     drop(collision_world);
                     let damage = if safe_fall {
                         fall.reset(y);
