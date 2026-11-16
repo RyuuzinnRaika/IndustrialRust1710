@@ -3343,12 +3343,14 @@ fn play(
                             continue;
                         }
                     }
-                    // Java 1.7.10 EntityWolf: a bone tames the wolf and binds
-                    // it to the player's offline UUID; the owner's interaction
-                    // then toggles sitting. Both work in Creative, the bone is
-                    // only debited in Survival from the real held slot.
-                    if creatures.can_tame(target_id)
-                        && inventory.held().is_some_and(|item| item.id == 352)
+                    // Java 1.7.10 EntityWolf/EntityOcelot: a bone tames a wolf
+                    // and fish tames an ocelot, binding it to the player's
+                    // offline UUID; the owner's interaction then toggles
+                    // sitting. Both work in Creative; the item is only debited
+                    // in Survival from the real held slot.
+                    if inventory
+                        .held()
+                        .is_some_and(|item| creatures.can_tame_with(target_id, item.id))
                     {
                         let mut candidate = inventory.clone();
                         let can_pay = !survival || candidate.consume_held();
@@ -3366,7 +3368,7 @@ fn play(
                             }
                         }
                     }
-                    if let Some(event) = creatures.wolf_sit_toggle(target_id, &offline_uuid(name)) {
+                    if let Some(event) = creatures.pet_sit_toggle(target_id, &offline_uuid(name)) {
                         hub.broadcast(event);
                         continue;
                     }
