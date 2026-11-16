@@ -275,6 +275,19 @@ pub fn import(source: &Path, destination: &Path) -> io::Result<(usize, usize)> {
         return Err(invalid("Anvil snapshot contains no region files"));
     }
     regions.sort_by_key(|(x, z, _)| (*x, *z));
+    // Different region filenames can decode to the same coordinates
+    // (for example, r.0.0.mca and r.00.0.mca). Reject both before
+    // changing even the in-memory world: otherwise the second file can
+    // silently overwrite chunks from the first.
+    for pair in regions.windows(2) {
+        let (x, z, _) = &pair[0];
+        if (*x, *z) == (pair[1].0, pair[1].1) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate Anvil region coordinates ({x}, {z})"),
+            ));
+        }
+    }
     let mut world = World::new();
     let mut chunks = 0usize;
     for (x, z, file) in regions {
@@ -406,6 +419,49 @@ mod tests {
         assert_eq!(fs::read(&src).unwrap(), source_bytes);
         assert!(import(&snap, &target).is_err());
         assert_eq!(fs::read(&target).unwrap(), source_bytes);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// NEXT-166 / #1149: distinct, parseable region filenames can refer
+    /// to the same 32x32 chunk-coordinate range. Reject such aliases before
+    /// importing any data, without publishing even a staging destination.
+    #[test]
+    fn duplicate_anvil_region_coordinates_abort_without_mutating_source() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-anvil-duplicate-region-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let snap = root.join("snapshot");
+        export(&World::new(), &snap).unwrap();
+        let original = snap.join("region/r.0.0.mca");
+        let alias = snap.join("region/r.00.0.mca");
+        fs::copy(&original, &alias).unwrap();
+        let original_bytes = fs::read(&original).unwrap();
+        let alias_bytes = fs::read(&alias).unwrap();
+        let level_bytes = fs::read(snap.join("level.dat")).unwrap();
+        let destination = root.join("recovered.irw");
+
+        let err = import(&snap, &destination).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        assert!(
+            err.to_string().contains("duplicate Anvil region coordinates (0, 0)"),
+            "{err}"
+        );
+        assert!(!destination.exists());
+        assert!(!destination.with_extension("importing").exists());
+        assert_eq!(fs::read(&original).unwrap(), original_bytes);
+        assert_eq!(fs::read(&alias).unwrap(), alias_bytes);
+        assert_eq!(fs::read(snap.join("level.dat")).unwrap(), level_bytes);
+
+        // The same input becomes importable after the duplicate alias is
+        // removed. The canonical source and its other regions stay intact.
+        fs::remove_file(alias).unwrap();
+        assert!(import(&snap, &destination).is_ok());
+        assert!(destination.exists());
+        assert_eq!(fs::read(&original).unwrap(), original_bytes);
         fs::remove_dir_all(root).unwrap();
     }
 
