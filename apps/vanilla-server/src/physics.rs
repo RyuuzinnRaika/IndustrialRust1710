@@ -481,6 +481,16 @@ pub fn on_ladder(world: &World, position: &PlayerPosition) -> bool {
     matches!(world.get(x, position.y.floor() as i32, z) >> 4, 65)
         || matches!(world.get(x, (position.y + 1.0).floor() as i32, z) >> 4, 65)
 }
+/// Cobwebs (legacy block 30) have no collision box, but a body or feet
+/// cell holding a web sinks the player at a crawl and resets fall
+/// distance, exactly like 1.7.10 BlockWeb#onEntityAdded.
+pub fn in_cobweb(world: &World, position: &PlayerPosition) -> bool {
+    let x = position.x.floor() as i32;
+    let z = position.z.floor() as i32;
+    [position.y, position.y + 1.0]
+        .iter()
+        .any(|height| matches!(world.get(x, height.floor() as i32, z) >> 4, 30))
+}
 fn swept_path_clear(world: &World, previous: &PlayerPosition, next: &PlayerPosition) -> bool {
     let dx = next.x - previous.x;
     let dy = next.y - previous.y;
@@ -721,6 +731,12 @@ impl IdleGravity {
                 self.vertical_velocity = ((self.vertical_velocity - 0.02) * 0.8).max(-0.08);
             } else if on_ladder(world, &next) {
                 self.vertical_velocity = (self.vertical_velocity - 0.08).max(-0.15);
+            } else if in_cobweb(world, &next) {
+                // 1.7.10 BlockWeb: the entity sinks at ~0.05 blocks per
+                // tick and its fall distance is reset by the caller's
+                // safe-descent check, so a web never produces damage.
+                self.vertical_velocity =
+                    ((self.vertical_velocity - GRAVITY_ACCELERATION) * AIR_DRAG).max(-0.05);
             } else {
                 self.vertical_velocity = ((self.vertical_velocity - GRAVITY_ACCELERATION)
                     * AIR_DRAG)
@@ -1001,6 +1017,80 @@ mod tests {
         assert_eq!(current.y, 64.0);
         assert_eq!(total_damage, 3);
         assert_eq!(gravity.advance(&world, &current, 81), None);
+    }
+
+    #[test]
+    fn cobweb_sinks_the_player_without_fall_damage() {
+        // REG-154 / #744: a cobweb column has no collision, is not a
+        // floor, and the caller's safe-descent check keeps resetting the
+        // fall tracker while any body cell holds a web, so a long fall
+        // that ends inside a web never damages the player and never
+        // accelerates past the legacy 0.05 block/tick sink.
+        let mut world = World::new();
+        for y in 64..=70 {
+            world.import_block(0, y, 0, 30 << 4).unwrap();
+        }
+        let mid = at(0.5, 66.0, 0.5);
+        assert!(in_cobweb(&world, &mid));
+        assert!(!collides(&world, &mid), "a cobweb never blocks");
+        assert!(!supported(&world, &mid), "a cobweb is not ground");
+        let mut gravity = IdleGravity::new(0);
+        let mut fall = FallTracker::new(70.0);
+        let mut current = at(0.5, 70.0, 0.5);
+        // The first call absorbs the idle catch-up window (up to
+        // MAX_CATCH_UP_STEPS); afterwards every tick sinks one step.
+        if let Some(next) = gravity.advance(&world, &current, 7) {
+            current = next;
+        }
+        let mut total_damage = 0;
+        for tick in 8..80 {
+            if let Some(next) = gravity.advance(&world, &current, tick) {
+                let step = current.y - next.y;
+                assert!(step <= 0.05 + 1e-9, "web sink exceeded 0.05: {step}");
+                if in_cobweb(&world, &next) {
+                    fall.reset(next.y);
+                }
+                total_damage += u32::from(fall.update(next.y, supported(&world, &next)));
+                current = next;
+            }
+        }
+        assert_eq!(total_damage, 0);
+        assert!(
+            current.y > 64.0,
+            "the web sink must crawl, not fall: {current:?}"
+        );
+    }
+
+    #[test]
+    fn ladder_slide_sinks_at_legacy_speed_without_fall_damage() {
+        // REG-155 / #741: a ladder column is never a floor, and the
+        // idle slide is clamped to the legacy ladder speed, so the
+        // server never rubber-bands or damages a legitimate slide.
+        let mut world = World::new();
+        for y in 64..=70 {
+            world.import_block(0, y, 0, 65 << 4).unwrap();
+        }
+        let mid = at(0.5, 66.0, 0.5);
+        assert!(on_ladder(&world, &mid));
+        assert!(!collides(&world, &mid), "a ladder never blocks");
+        assert!(!supported(&world, &mid), "a ladder is not ground");
+        let mut gravity = IdleGravity::new(0);
+        let mut current = mid;
+        // First call absorbs the idle catch-up window; afterwards one
+        // legacy-clamped step per tick slides down to the real floor.
+        if let Some(next) = gravity.advance(&world, &current, 7) {
+            current = next;
+        }
+        for tick in 8..80 {
+            if let Some(next) = gravity.advance(&world, &current, tick) {
+                let step = current.y - next.y;
+                assert!(step <= 0.15 + 1e-9, "ladder slide clamp exceeded: {step}");
+                assert!(!collides(&world, &next));
+                current = next;
+            }
+        }
+        // 2 blocks of legacy slide reach the real floor and stop.
+        assert_eq!(current.y, 64.0);
     }
 
     #[test]
