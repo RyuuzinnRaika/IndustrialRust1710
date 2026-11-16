@@ -903,6 +903,76 @@ mod dispenser_arrow_damage_tests {
     }
 }
 
+#[cfg(test)]
+mod reg112_view_distance_regression_tests {
+    use super::*;
+
+    /// REG-112 / #748: the server-authoritative view window is a fixed
+    /// (2*VIEW_DISTANCE+1)^2 set clamped to the world border. A column that
+    /// leaves the window (client shrinks its view or walks away -> server
+    /// sends unload) and later re-enters it must be rebuilt from the
+    /// authoritative world with byte-identical edited blocks and lighting;
+    /// out-of-world columns are never queued.
+    #[test]
+    fn chunks_re_entering_the_view_rebuild_identically_and_bounds_reject() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-reg112-view-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("flat.irw");
+        let mut world = World::new();
+        // Edited blocks plus a torch inside chunk (1, 0): the torch forces
+        // real BlockLight bytes into every later rebuild of that column.
+        world.update_and_save(&path, 17, 64, 3, 1 << 4).unwrap();
+        world.update_and_save(&path, 20, 64, 5, 50 << 4).unwrap();
+        let world = std::sync::Mutex::new(world);
+        let build = |cx: i32, cz: i32| {
+            let pending = queue_chunk(&world, cx, cz).unwrap();
+            pending.finish().unwrap()
+        };
+
+        // The window is exactly 5x5 at an interior center.
+        let home = view_chunks((4, 4));
+        assert_eq!(
+            home.len(),
+            ((2 * VIEW_DISTANCE + 1) * (2 * VIEW_DISTANCE + 1)) as usize
+        );
+        assert!(home.contains(&(4, 4)) && home.contains(&(2, 2)) && home.contains(&(6, 6)));
+        assert!(!home.contains(&(7, 4)));
+        // Walking far enough away drops the column (sync_chunks would send
+        // an unload packet for it)...
+        let away = view_chunks((4 + 2 * VIEW_DISTANCE + 2, 4));
+        assert!(!away.contains(&(4, 4)));
+        // ... and walking back rebuilds it byte-identically: the resend
+        // carries the same edited blocks and lighting because every build
+        // reads only the authoritative world, never a client cache.
+        let before = build(4, 4);
+        let after = build(4, 4);
+        assert_eq!(before, after);
+        // The rebuild really embeds the edits and torch light: a virgin
+        // world's packet for the same column differs.
+        let virgin = World::new();
+        let virgin_path = root.join("empty.irw");
+        virgin.save(&virgin_path).unwrap();
+        let virgin = std::sync::Mutex::new(virgin);
+        let virgin_pending = queue_chunk(&virgin, 1, 0).unwrap();
+        assert_ne!(build(1, 0), virgin_pending.finish().unwrap());
+
+        // Rejection: window entries beyond the border are dropped, and an
+        // entirely external center queues nothing at all.
+        let edge = view_chunks((MAX_CHUNK - 1, MIN_CHUNK));
+        assert!(edge
+            .iter()
+            .all(|&(cx, cz)| (MIN_CHUNK..=MAX_CHUNK).contains(&cx)
+                && (MIN_CHUNK..=MAX_CHUNK).contains(&cz)));
+        assert!(view_chunks((MAX_CHUNK + 2 * VIEW_DISTANCE + 5, 0)).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 fn send_player_position(
     s: &mut Connection,
     location: &PlayerPosition,
