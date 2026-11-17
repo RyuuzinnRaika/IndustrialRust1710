@@ -1554,6 +1554,112 @@ mod tests {
         assert_eq!(hub.names().unwrap(), vec!["Observer".to_owned()]);
     }
 
+    /// NEXT-013 / #996: once a DestroyEntity for one id is queued, a later
+    /// respawn of that same id must be queued after it in every observer's
+    /// stream. Fanout happens under the hub lock and each session drains one
+    /// FIFO channel, so a literal destroy-then-respawn pair must arrive in
+    /// issue order for every observer (an inverted pair leaves one client
+    /// holding a ghost entity or losing the respawn).
+    #[test]
+    fn next013_same_id_destroy_then_respawn_keeps_order_for_every_observer() {
+        let hub = Hub::default();
+        let (_a, a_rx, _) = hub
+            .add("ObsA".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        let (_b, b_rx, _) = hub
+            .add("ObsB".into(), "uuid-b".into(), PlayerPosition::default())
+            .unwrap();
+        while a_rx.try_recv().is_ok() {}
+        while b_rx.try_recv().is_ok() {}
+
+        hub.broadcast(destroy(77));
+        hub.broadcast(Event {
+            id: 0x0e,
+            body: vec![77, 77, 77, 77],
+        });
+
+        for rx in [&a_rx, &b_rx] {
+            let first = rx.try_recv().expect("destroy queued");
+            assert_eq!(first.id, 0x13);
+            assert_eq!(first.body, destroy(77).body);
+            let second = rx.try_recv().expect("respawn queued");
+            assert_eq!(second.id, 0x0e, "respawn must follow its DestroyEntity");
+            assert_eq!(second.body, vec![77, 77, 77, 77]);
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    /// NEXT-013 / #996: concurrent producers must not make two observers see
+    /// two different global orders. Every fanout is atomic under the hub
+    /// lock; if that ever regressed (e.g. iterating sessions outside the
+    /// lock), observer A could see destroy(77) before respawn(77) while
+    /// observer B saw the reverse — exactly the same-entity contradiction
+    /// this pins out. Producer-local FIFO order (destroy before its own
+    /// respawn, sequence numbers ascending) must also survive.
+    #[test]
+    fn next013_concurrent_producers_keep_one_agreed_order_in_every_stream() {
+        use std::thread;
+        const CYCLES: u8 = 60; // 2 producers * 2 events * 60 < QUEUE_CAPACITY
+        let hub = Hub::default();
+        let (_a, a_rx, _) = hub
+            .add("ObsA".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        let (_b, b_rx, _) = hub
+            .add("ObsB".into(), "uuid-b".into(), PlayerPosition::default())
+            .unwrap();
+        while a_rx.try_recv().is_ok() {}
+        while b_rx.try_recv().is_ok() {}
+
+        thread::scope(|scope| {
+            for producer in [1u8, 2u8] {
+                let hub = &hub;
+                scope.spawn(move || {
+                    for seq in 0..CYCLES {
+                        hub.broadcast(Event {
+                            id: 0x13,
+                            body: vec![producer, seq, 0, 0, 0, 77],
+                        });
+                        hub.broadcast(Event {
+                            id: 0x0e,
+                            body: vec![producer, seq, 0, 0, 0, 77],
+                        });
+                    }
+                });
+            }
+        });
+
+        let drain = |rx: &SessionEvents| -> Vec<(u32, Vec<u8>)> {
+            let mut out = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                out.push((event.id, event.body));
+            }
+            out
+        };
+        let stream_a = drain(&a_rx);
+        let stream_b = drain(&b_rx);
+        assert_eq!(stream_a.len(), 4 * CYCLES as usize);
+        assert_eq!(stream_b.len(), 4 * CYCLES as usize);
+        assert_eq!(
+            stream_a, stream_b,
+            "two observers saw different global orders for the same entity notifications"
+        );
+        for producer in [1u8, 2u8] {
+            let own: Vec<&(u32, Vec<u8>)> = stream_a
+                .iter()
+                .filter(|(_, body)| body[0] == producer)
+                .collect();
+            assert_eq!(own.len(), 2 * CYCLES as usize);
+            for (index, (id, body)) in own.into_iter().enumerate() {
+                assert_eq!(body[1], (index / 2) as u8, "producer sequence reordered");
+                let expected_id = if index % 2 == 0 { 0x13 } else { 0x0e };
+                assert_eq!(
+                    *id, expected_id,
+                    "destroy/respawn pair inverted for producer {producer}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn movement_events_and_departure() {
         let hub = Hub::default();
