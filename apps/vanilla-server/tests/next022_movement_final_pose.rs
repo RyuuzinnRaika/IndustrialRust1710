@@ -3,9 +3,13 @@
 //! Uses the native Rust server, two Creative sessions, and disposable data.
 //! Unmodified Minecraft 1.7.10 client acceptance remains untested here.
 
-use legacy_protocol::{read_frame, read_varint, write_frame, write_string, write_varint};
+#[path = "support/packet_client.rs"]
+mod packet_client;
+
+use legacy_protocol::{write_frame, write_string, write_varint};
+use packet_client::BufferedClient;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -86,8 +90,8 @@ impl Server {
         }
     }
 
-    fn join(&self, name: &str) -> (TcpStream, i32, [f64; 3]) {
-        let mut socket = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+    fn join(&self, name: &str) -> (BufferedClient, i32, [f64; 3]) {
+        let mut socket = BufferedClient::new(TcpStream::connect(("127.0.0.1", self.port)).unwrap());
         socket.set_nodelay(true).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_millis(250)))
@@ -167,23 +171,8 @@ fn packet(id: u32, body: &[u8]) -> Vec<u8> {
     framed
 }
 
-fn pump(socket: &mut TcpStream) -> Option<(u32, Vec<u8>)> {
-    match read_frame(socket) {
-        Ok(frame) => {
-            let mut body = frame.as_slice();
-            let id = read_varint(&mut body).unwrap();
-            Some((id, body.to_vec()))
-        }
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) =>
-        {
-            None
-        }
-        Err(error) => panic!("unexpected connection error: {error}"),
-    }
+fn pump(socket: &mut BufferedClient) -> Option<(u32, Vec<u8>)> {
+    socket.poll_packet().expect("read Protocol 5 packet")
 }
 
 fn position(id: u32, xyz: [f64; 3], yaw: f32, pitch: f32) -> Vec<u8> {
@@ -206,7 +195,7 @@ fn look(yaw: f32, pitch: f32) -> Vec<u8> {
     packet(5, &body)
 }
 
-fn processing_barrier(mover: &mut TcpStream, marker: &str, expect_correction: bool) {
+fn processing_barrier(mover: &mut BufferedClient, marker: &str, expect_correction: bool) {
     // Chat follows the burst on the same stream. Its echo proves that the
     // owning session processed every movement sample, without sending an
     // extra movement packet that could itself flush a stale fanout cache.
@@ -242,7 +231,7 @@ fn processing_barrier(mover: &mut TcpStream, marker: &str, expect_correction: bo
     }
 }
 
-fn await_pose(observer: &mut TcpStream, entity: i32, xyz: [f64; 3], angles: [u8; 2]) {
+fn await_pose(observer: &mut BufferedClient, entity: i32, xyz: [f64; 3], angles: [u8; 2]) {
     let expected = xyz.map(|value| (value * 32.0).floor() as i32);
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut last = None;
