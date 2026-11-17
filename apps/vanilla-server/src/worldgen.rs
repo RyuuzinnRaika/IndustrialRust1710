@@ -2061,4 +2061,188 @@ mod tests {
         }
         std::fs::remove_file(path).unwrap();
     }
+
+    /// REG-174 / #810: trunks and crowns are evaluated per coordinate from a
+    /// ±2 neighbourhood, so a tree standing on a chunk border must never be
+    /// cut or doubled no matter which chunk is generated first. Pin the exact
+    /// trunk/crown column of a border tree, prove forward-vs-reverse column
+    /// builds for both chunks match, and keep a sapling-grown tree (edits)
+    /// separate from natural generation: growing one must not move or clone
+    /// the natural border tree.
+    #[test]
+    fn reg174_border_trees_survive_reverse_generation_and_never_double() {
+        let seed = 42u64;
+        // Find a supplementary trunk close enough to an x border that its
+        // crown reaches the neighbouring chunk, with its full column intact
+        // (no village or dungeon overwrite).
+        let mut border: Option<(i32, i32, i32, u16, u16, i32)> = None;
+        'trees: for tz in -160..320 {
+            for tx in -160..320 {
+                let Some((trunk, leaves)) = supplementary_tree(seed, tx, tz) else {
+                    continue;
+                };
+                let edge = tx.rem_euclid(16);
+                let side = if edge <= 2 {
+                    -1
+                } else if edge >= 13 {
+                    1
+                } else {
+                    continue;
+                };
+                let root = height(seed, tx, tz);
+                let clean = (1..=5)
+                    .all(|dy| block(seed, Dimension::Overworld, tx, root + dy, tz) == b(trunk))
+                    && (6..=7).all(|dy| {
+                        block(seed, Dimension::Overworld, tx, root + dy, tz) == state(leaves, 4)
+                    })
+                    && block(seed, Dimension::Overworld, tx, root + 8, tz) == AIR;
+                if clean {
+                    border = Some((tx, tz, root, trunk, leaves, side));
+                    break 'trees;
+                }
+            }
+        }
+        let (tx, tz, root, trunk, leaves, side) =
+            border.expect("seed 42 has an intact supplementary tree on a chunk border");
+        // One trunk column, exactly five logs: nothing above, no second trunk.
+        for dy in 1..=5 {
+            assert_eq!(
+                block(seed, Dimension::Overworld, tx, root + dy, tz),
+                b(trunk)
+            );
+        }
+        assert_eq!(block(seed, Dimension::Overworld, tx, root + 8, tz), AIR);
+        // The crown reaches into the neighbouring chunk uncut.
+        let mut neighbour_crown = 0;
+        for dz in -2..=2 {
+            for dy in 4..=6 {
+                if block(seed, Dimension::Overworld, tx + side, root + dy, tz + dz)
+                    == state(leaves, 4)
+                {
+                    neighbour_crown += 1;
+                }
+            }
+        }
+        assert!(
+            neighbour_crown > 0,
+            "border tree at ({tx},{tz}) lost its crown in the neighbouring chunk"
+        );
+
+        // Reverse generation: building the two chunks' columns trunk-chunk
+        // first in ascending order, then crown-chunk first in descending
+        // order, must hash every identical column to identical bytes.
+        let column_hash = |x: i32, z: i32| -> u64 {
+            let column = OverworldColumn::new(seed, x, z);
+            let mut value: u64 = 0xcbf2_9ce4_8422_2325;
+            for y in 0..256 {
+                value ^= u64::from(column.block_at(y));
+                value = value.wrapping_mul(0x100_0000_01b3);
+            }
+            value
+        };
+        let trunk_chunk = tx.div_euclid(16);
+        let crown_chunk = (tx + side).div_euclid(16);
+        let cz = tz.div_euclid(16);
+        let mut forward = std::collections::BTreeMap::new();
+        for cx in [trunk_chunk, crown_chunk] {
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    forward.insert(
+                        (cx * 16 + lx, cz * 16 + lz),
+                        column_hash(cx * 16 + lx, cz * 16 + lz),
+                    );
+                }
+            }
+        }
+        let mut reverse = std::collections::BTreeMap::new();
+        for cx in [crown_chunk, trunk_chunk] {
+            for lz in (0..16).rev() {
+                for lx in (0..16).rev() {
+                    reverse.insert(
+                        (cx * 16 + lx, cz * 16 + lz),
+                        column_hash(cx * 16 + lx, cz * 16 + lz),
+                    );
+                }
+            }
+        }
+        assert_eq!(forward, reverse, "column bytes depend on generation order");
+
+        // Sapling-grown trees are edits and live on a separate path from
+        // natural generation; growing one next to the border tree must leave
+        // the natural tree untouched and survive reload as an edit.
+        use crate::world::World;
+        let path = std::env::temp_dir().join(format!("ir1710-reg174-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::expanded(seed, Dimension::Overworld);
+        world.save_new(&path).unwrap();
+        let natural_trunk: Vec<u16> = (1..=5).map(|dy| world.get(tx, root + dy, tz)).collect();
+        // Find a plantable, headroom-clear spot two chunk columns away.
+        let mut spot = None;
+        let (lo, hi) = if side == 1 {
+            (tx + 8, tx + 24)
+        } else {
+            (tx - 24, tx - 8)
+        };
+        'spots: for sx in lo..hi {
+            for sz in tz - 12..tz + 12 {
+                let Some(top) = world.surface_height_at(sx, sz) else {
+                    continue;
+                };
+                if !matches!(world.get(sx, top, sz) >> 4, 2 | 3 | 12) {
+                    continue;
+                }
+                let clear = world.get(sx, top + 1, sz) == 0
+                    && (1..=5).all(|dy| {
+                        let radius = if dy >= 3 { 2 } else { 0 };
+                        (-radius..=radius).all(|dx| {
+                            (-radius..=radius).all(|dz| world.get(sx + dx, top + dy, sz + dz) == 0)
+                        })
+                    });
+                if clear {
+                    spot = Some((sx, top, sz));
+                    break 'spots;
+                }
+            }
+        }
+        let (sx, top, sz) = spot.expect("seed 42 offers a headroom-clear grass spot");
+        world
+            .update_and_save(&path, sx, top + 1, sz, 6 << 4)
+            .unwrap();
+        for _ in 0..1500 {
+            world.block_tick(&path, 64).unwrap();
+            if world.get(sx, top + 1, sz) >> 4 == 17 {
+                break;
+            }
+        }
+        assert_eq!(
+            world.get(sx, top + 1, sz) >> 4,
+            17,
+            "the planted sapling never grew into a tree at ({sx},{},{}); ground={}",
+            top,
+            sz,
+            world.get(sx, top, sz)
+        );
+        // grow_tree builds four logs at y..y+3 and the crown from y+3 up.
+        assert_eq!(world.get(sx, top + 4, sz) >> 4, 17);
+        // The natural border tree is byte-identical next door.
+        for dy in 1..=5 {
+            assert_eq!(
+                world.get(tx, root + dy, tz),
+                natural_trunk[(dy - 1) as usize]
+            );
+        }
+        let restored = World::load(&path).unwrap();
+        // After a reload the sapling tree is still there (stored as edits,
+        // never regenerated from base terrain) and the natural tree column
+        // still matches the pure point generator.
+        assert_eq!(restored.get(sx, top + 1, sz) >> 4, 17);
+        for dy in 1..=4 {
+            assert_eq!(restored.get(sx, top + dy, sz) >> 4, 17);
+            assert_eq!(
+                restored.get(tx, root + dy, tz),
+                block(seed, Dimension::Overworld, tx, root + dy, tz)
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 }
