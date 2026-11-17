@@ -781,6 +781,108 @@ fn native_1710_aborted_spawn_generation_never_reaches_next_login() {
     server.wait_idle();
 }
 
+/// NEXT-016 / #999: send_chunk_batch submits SESSION_BATCH_LIMIT (8) encodes
+/// per wave and drains them in wire order, so one 25-chunk spawn crosses the
+/// batch boundary three times. Every frame must stay self-contained: its own
+/// RFC 1950 zlib stream, declared size exactly matching the frame, and an
+/// independent decode. The raw join stream is captured and every chunk frame
+/// checked — including the boundary frames right after wire indices 8, 16
+/// and 24 — then a second login repeats the validation after the shared
+/// encoder pipeline served one session to completion.
+#[test]
+fn native_1710_batch_boundary_chunk_frames_are_independent_zlib_streams() {
+    fn capture_join_chunks(socket: &mut TcpStream) -> Vec<Vec<u8>> {
+        let (pid, body) = receive(socket);
+        assert_eq!(pid, 2, "login denied: {body:?}");
+        let mut chunks = Vec::new();
+        let mut joined = false;
+        for _ in 0..MAX_PACKETS {
+            let (pid, payload) = receive(socket);
+            if pid == 1 {
+                joined = true;
+            } else if pid == 0x21 {
+                assert!(joined, "chunk frame arrived before Join Game");
+                chunks.push(payload);
+            } else if pid == 8 {
+                break;
+            }
+        }
+        chunks
+    }
+
+    let server = NativeServer::start();
+    let mut socket = server.connect("ChunkScout");
+    let chunks = capture_join_chunks(&mut socket);
+    // 25 chunks = three full waves of 8 submits plus a final wave of 1, so
+    // the wire crosses the batch boundary after frames 8, 16 and 24.
+    assert_eq!(chunks.len(), 25, "initial viewport must be 5x5 chunks");
+
+    let mut coords = Vec::new();
+    for (index, payload) in chunks.iter().enumerate() {
+        assert!(payload.len() > 17, "chunk frame {index} is truncated");
+        let declared = i32::from_be_bytes(payload[13..17].try_into().unwrap());
+        assert!(declared > 0, "frame {index}: empty compressed payload");
+        assert_eq!(
+            17 + declared as usize,
+            payload.len(),
+            "frame {index}: trailing bytes after the zlib payload"
+        );
+
+        // A frame that restarted compression must open with a valid RFC 1950
+        // header; continuation bytes from a stream that leaked across the
+        // batch boundary would fail here or break the previous frame decode.
+        let cmf = payload[17];
+        let flg = payload[18];
+        assert_eq!(cmf & 0x0f, 8, "frame {index}: payload is not deflate");
+        assert_eq!(
+            u16::from_be_bytes([cmf, flg]) % 31,
+            0,
+            "frame {index}: zlib header check failed"
+        );
+        assert_eq!(flg & 0x20, 0, "frame {index}: unexpected preset dictionary");
+
+        let sections = u16::from_be_bytes(payload[9..11].try_into().unwrap());
+        let mut decoded = Vec::new();
+        ZlibDecoder::new(&payload[17..])
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(
+            decoded.len(),
+            sections.count_ones() as usize * 10_240 + 256,
+            "frame {index}: independent decode size mismatch"
+        );
+        coords.push((
+            i32::from_be_bytes(payload[0..4].try_into().unwrap()),
+            i32::from_be_bytes(payload[4..8].try_into().unwrap()),
+        ));
+    }
+
+    // Deterministic viewport for the loading screen: the player's own column
+    // first, every frame inside the 5x5 window centred on it, none twice.
+    assert_eq!(coords[0], (0, 0), "player column must be the first frame");
+    let unique: std::collections::BTreeSet<(i32, i32)> = coords.into_iter().collect();
+    assert_eq!(unique.len(), 25, "duplicate chunk coordinates on the wire");
+    for (x, z) in &unique {
+        assert!(
+            (-2..=2).contains(x) && (-2..=2).contains(z),
+            "frame outside the centred viewport: ({x}, {z})"
+        );
+    }
+    drop(socket);
+    server.wait_idle();
+
+    // A second session through the same shared encoder pipeline: its spawn
+    // passes the same strict per-frame validation inside join().
+    let (mut second, _, position) = server.join("ChunkScout");
+    assert_eq!(position, [0.5, 64.0, 0.5]);
+    second.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    until_packet(&mut second, 2, |body| {
+        body.windows(10).any(|window| window == b"Online (1)")
+    });
+    drop(second);
+    server.wait_idle();
+}
+
 #[test]
 fn native_1710_minecart_checkpoint_keeps_survival_session_and_movement_alive() {
     let server = NativeServer::start_with_mode(true);
