@@ -56,6 +56,7 @@ mod navigation;
 mod online_auth;
 mod physics;
 mod player;
+mod save_replace;
 mod scoreboard;
 mod security_limits;
 mod server_config;

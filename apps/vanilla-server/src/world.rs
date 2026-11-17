@@ -221,6 +221,10 @@ pub struct GravityMove {
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
+#[cfg(all(test, windows))]
+#[path = "world/save_sharing_tests.rs"]
+mod save_sharing_tests;
+
 /// Publish a fully synced staging image or report the rename failure after
 /// removing only the temporary file created by this save invocation. A failed
 /// rename must not strand `flat.tmp` and permanently block subsequent saves.
@@ -228,41 +232,27 @@ fn invalid(message: &'static str) -> io::Error {
 fn publish_staged_world_save(
     staging: &Path,
     destination: &Path,
-    mut rename: impl FnMut(&Path, &Path) -> io::Result<()>,
+    rename: impl FnMut(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
-    // Briefly retry transient sharing/interrupt races while retaining the
-    // session save mutex. Never delete the published destination or retry
-    // arbitrary invalid-path and I/O errors indefinitely.
-    let mut retries = 0usize;
-    loop {
-        match rename(staging, destination) {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                let transient = error.kind() == io::ErrorKind::Interrupted
-                    || (cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied);
-                if transient && retries < 2 {
-                    retries += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    continue;
-                }
-                let message = format!(
-                    "replace world save {} from {}: {error}",
-                    destination.display(),
+    // Retain the session save mutex while retrying a brief sharing denial.
+    if let Err(error) = crate::save_replace::rename_with_retry(staging, destination, rename) {
+        let message = format!(
+            "replace world save {} from {}: {error}",
+            destination.display(),
+            staging.display()
+        );
+        if let Err(cleanup_error) = fs::remove_file(staging) {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{message}; failed to remove own temporary file {}: {cleanup_error}",
                     staging.display()
-                );
-                if let Err(cleanup_error) = fs::remove_file(staging) {
-                    return Err(io::Error::new(
-                        error.kind(),
-                        format!(
-                            "{message}; failed to remove own temporary file {}: {cleanup_error}",
-                            staging.display()
-                        ),
-                    ));
-                }
-                return Err(io::Error::new(error.kind(), message));
-            }
+                ),
+            ));
         }
+        return Err(io::Error::new(error.kind(), message));
     }
+    Ok(())
 }
 pub fn in_bounds(x: i32, y: i32, z: i32) -> bool {
     (-WORLD_LIMIT..WORLD_LIMIT).contains(&x)

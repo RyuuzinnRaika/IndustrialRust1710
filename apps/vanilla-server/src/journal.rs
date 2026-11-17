@@ -11,6 +11,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 const VERSION: u8 = 1;
+#[cfg(all(test, windows))]
+#[path = "journal_sharing_tests.rs"]
+mod sharing_tests;
 // JSON stores payload bytes as integer arrays (up to four characters per
 // byte); keep an explicit on-disk limit for bounded participants.
 const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
@@ -207,7 +210,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         return Err(err);
     }
     drop(output);
-    fs::rename(&temp, path)?;
+    crate::save_replace::rename_with_retry(&temp, path, |source, destination| {
+        fs::rename(source, destination)
+    })?;
     Ok(())
 }
 fn sync_directory(dir: &Path) -> io::Result<()> {
@@ -340,7 +345,9 @@ pub fn commit(journal: &Path, changes: &[(&Path, Vec<u8>)]) -> io::Result<()> {
         return Err(error);
     }
     drop(out);
-    fs::rename(&prepare, journal)?;
+    crate::save_replace::rename_with_retry(&prepare, journal, |source, destination| {
+        fs::rename(source, destination)
+    })?;
     sync_directory(base)?;
     apply(journal, &record)
 }
