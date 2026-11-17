@@ -1830,6 +1830,9 @@ fn play(
     let mut last_movement_trace = Instant::now() - Duration::from_secs(2);
     let mut last_look_trace = Instant::now() - Duration::from_secs(2);
     let mut last_movement_broadcast = Instant::now() - Duration::from_millis(50);
+    // Keep the final accepted pose when packet fanout is throttled. Snapshot
+    // the angles too: a rejected C06 can change the parsing locals below.
+    let mut pending_movement_broadcast: Option<(PlayerPosition, f32, f32)> = None;
     let started = Instant::now();
     let mut ping_time = started;
     let mut pong_time = started;
@@ -2259,6 +2262,7 @@ fn play(
                 }
                 hub.move_player(entity_id, *player, yaw, pitch);
                 last_movement_broadcast = Instant::now();
+                pending_movement_broadcast = None;
                 continue;
             }
             if event.id == PISTON_PUSH_EVENT {
@@ -2298,6 +2302,7 @@ fn play(
                         pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                         hub.move_player(entity_id, *player, yaw, pitch);
                         last_movement_broadcast = Instant::now();
+                        pending_movement_broadcast = None;
                     }
                 }
                 continue;
@@ -2527,6 +2532,8 @@ fn play(
                 idle_gravity.observe_client(now_tick);
                 sync_chunks(s, world, &mut loaded_chunks, chunk_center(player))?;
                 hub.move_player(entity_id, mounted, yaw, pitch);
+                last_movement_broadcast = Instant::now();
+                pending_movement_broadcast = None;
             }
         }
         if now_tick > last_map_tick && now_tick.is_multiple_of(4) {
@@ -2775,8 +2782,10 @@ fn play(
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, *player, yaw, pitch);
                     last_movement_broadcast = Instant::now();
+                    pending_movement_broadcast = None;
                 } else {
                     hub.record_player_position(entity_id, *player);
+                    pending_movement_broadcast = Some((*player, yaw, pitch));
                 }
             }
         }
@@ -3234,6 +3243,17 @@ fn play(
                 );
             }
             return Err(bad("keepalive timeout"));
+        }
+        // A quiet client still reaches this point after each receive timeout.
+        // Flush its last accepted pose without waiting for another movement
+        // packet, while preserving the normal 50 ms fanout interval.
+        if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
+            if let Some((position, accepted_yaw, accepted_pitch)) =
+                pending_movement_broadcast.take()
+            {
+                hub.move_player(entity_id, position, accepted_yaw, accepted_pitch);
+                last_movement_broadcast = Instant::now();
+            }
         }
         let data = match packet_reader.poll(s) {
             Ok(Some(packet)) => packet,
@@ -4222,6 +4242,7 @@ fn play(
                                     pending_teleport =
                                         Some(TeleportGate::new(*player, Instant::now()));
                                     last_movement_broadcast = Instant::now();
+                                    pending_movement_broadcast = None;
                                     continue;
                                 }
                             }
@@ -4230,6 +4251,7 @@ fn play(
                         }
                     }
                 }
+                pending_movement_broadcast = Some((candidate, yaw, pitch));
                 let new_chunk_center = chunk_center(&candidate);
                 if new_chunk_center != previous_chunk_center {
                     // Publish authoritative position BEFORE expensive chunk
@@ -4237,6 +4259,7 @@ fn play(
                     // session. Otherwise a creeper may hit a stale Hub point.
                     hub.move_player(entity_id, candidate, yaw, pitch);
                     last_movement_broadcast = Instant::now();
+                    pending_movement_broadcast = None;
                     let old_chunks = loaded_chunks.clone();
                     sync_chunks(s, world, &mut loaded_chunks, new_chunk_center)?;
                     if loaded_chunks != old_chunks {
@@ -4251,12 +4274,14 @@ fn play(
                     if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                         hub.move_player(entity_id, candidate, yaw, pitch);
                         last_movement_broadcast = Instant::now();
+                        pending_movement_broadcast = None;
                     } else {
                         hub.record_player_position(entity_id, candidate);
                     }
                 } else if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, candidate, yaw, pitch);
                     last_movement_broadcast = Instant::now();
+                    pending_movement_broadcast = None;
                 }
             }
             5 => {
@@ -4272,9 +4297,11 @@ fn play(
                     last_look_trace = Instant::now();
                 }
                 observe_position_packet_for_gravity(id, &mut idle_gravity, now_tick);
+                pending_movement_broadcast = Some((*player, yaw, pitch));
                 if last_movement_broadcast.elapsed() >= Duration::from_millis(50) {
                     hub.move_player(entity_id, *player, yaw, pitch);
                     last_movement_broadcast = Instant::now();
+                    pending_movement_broadcast = None;
                 }
             }
             12 => {
@@ -4338,6 +4365,8 @@ fn play(
                             send_player_position(s, player, yaw, pitch)?;
                             pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                             hub.move_player(entity_id, position, yaw, pitch);
+                            last_movement_broadcast = Instant::now();
+                            pending_movement_broadcast = None;
                         }
                         Some((event, None)) => {
                             // The client predicts Shift-dismount. Reattach it
@@ -7460,6 +7489,8 @@ fn play(
                     send_player_position(s, player, yaw, pitch)?;
                     pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                     hub.move_player(entity_id, *player, yaw, pitch);
+                    last_movement_broadcast = Instant::now();
+                    pending_movement_broadcast = None;
                 }
             }
             23 => {
