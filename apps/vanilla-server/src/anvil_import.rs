@@ -447,7 +447,8 @@ mod tests {
         let err = import(&snap, &destination).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
         assert!(
-            err.to_string().contains("duplicate Anvil region coordinates (0, 0)"),
+            err.to_string()
+                .contains("duplicate Anvil region coordinates (0, 0)"),
             "{err}"
         );
         assert!(!destination.exists());
