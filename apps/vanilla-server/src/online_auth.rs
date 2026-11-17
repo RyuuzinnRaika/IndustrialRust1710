@@ -796,4 +796,45 @@ mod tests {
         .is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    /// NEXT-008 / #991: a session server that returns the 32-hex id in any
+    /// letter case must canonicalise to exactly one dashed UUID and one
+    /// verified save path, so a pure text-representation difference can never
+    /// split (or shadow) an account's player data.
+    #[test]
+    fn next008_session_id_case_variants_map_to_one_verified_identity() {
+        use crate::player::PlayerPosition;
+        let lower = br#"{"name":"RustTester","id":"069a79f444e94726a5befca90e38aaf5"}"#;
+        let upper = br#"{"name":"RustTester","id":"069A79F444E94726A5BEFCA90E38AAF5"}"#;
+        let mixed = br#"{"name":"RustTester","id":"069A79f444e94726A5BEfca90E38aAF5"}"#;
+        let reference = parse_verified_profile("RustTester", lower).unwrap();
+        assert_eq!(reference.uuid, "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        for body in [upper, mixed] {
+            let same = parse_verified_profile("RustTester", body).unwrap();
+            assert_eq!(
+                same.uuid, reference.uuid,
+                "hex-case variant must canonicalise to one dashed UUID"
+            );
+            assert_eq!(same.name, reference.name);
+        }
+        // The verified save path is therefore identical for every case form,
+        // including the 36-char dashed spellings callers may already hold.
+        let world = std::path::Path::new("world/flat.irw");
+        let canonical = PlayerPosition::authenticated_location(world, &reference.uuid).unwrap();
+        for spelling in [
+            "069A79F4-44E9-4726-A5BE-FCA90E38AAF5",
+            "069a79F4-44E9-4726-a5be-Fca90e38aaf5",
+            "069a79f4-44e9-4726-a5be-fca90e38aaf5",
+        ] {
+            assert_eq!(
+                PlayerPosition::authenticated_location(world, spelling).unwrap(),
+                canonical,
+                "dashed-UUID letter case must not fork the verified file"
+            );
+        }
+        assert_eq!(
+            canonical,
+            std::path::Path::new("world/players/verified/069a79f4-44e9-4726-a5be-fca90e38aaf5.dat")
+        );
+    }
 }
