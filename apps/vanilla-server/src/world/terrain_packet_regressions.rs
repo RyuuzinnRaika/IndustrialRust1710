@@ -116,6 +116,87 @@ fn irw4_save_and_reload_preserve_seed_and_negative_coordinate_terrain() {
     std::fs::remove_file(path).unwrap();
 }
 
+/// REG-171 / #807: seeds 0, -1 and -42 must produce identical wire terrain
+/// no matter in which order the same 16 chunks are visited, including the
+/// negative chunk quadrants. The IRW4 generator is a pure per-coordinate
+/// function; this pins that no hidden visit-order or per-instance state ever
+/// leaks into a packet, and cross-checks decoded cells against the
+/// independent point generator at negative chunk corners.
+#[test]
+fn reg171_zero_and_negative_seeds_ignore_chunk_visit_order() {
+    let mut origin_fingerprints = Vec::new();
+    // -1 and -42 are the i64 seeds a user supplies on the command line,
+    // reinterpreted as the stored u64 value.
+    for seed in [0_u64, (-1_i64) as u64, (-42_i64) as u64] {
+        // Sixteen chunks straddling the origin: all four chunk quadrants.
+        let mut order = Vec::new();
+        for cz in -2..2 {
+            for cx in -2..2 {
+                order.push((cx, cz));
+            }
+        }
+        let forward_world = World::expanded(seed, Dimension::Overworld);
+        let reverse_world = World::expanded(seed, Dimension::Overworld);
+        let mut packets = std::collections::BTreeMap::new();
+        for chunk in &order {
+            let packet = forward_world.chunk_data(chunk.0, chunk.1);
+            assert_eq!(
+                packet.0, 0x01ff,
+                "seed {seed} chunk {chunk:?} lost sections"
+            );
+            packets.insert(*chunk, packet);
+        }
+        // A second instance visited in the opposite order must match byte
+        // for byte, so neither generation order nor instance state matters.
+        for chunk in order.iter().rev() {
+            let (mask, bytes) = reverse_world.chunk_data(chunk.0, chunk.1);
+            let (expected_mask, expected_bytes) = &packets[chunk];
+            assert_eq!(
+                &mask, expected_mask,
+                "seed {seed} chunk {chunk:?} mask drift"
+            );
+            assert_eq!(
+                &bytes, expected_bytes,
+                "seed {seed} chunk {chunk:?} depends on visit order"
+            );
+        }
+        // Point oracle: decoded wire cells agree with the independent
+        // coordinate generator across negative chunk corners.
+        for (chunk_x, chunk_z) in [(-2, -2), (-1, -1), (0, 0), (1, 1)] {
+            let (mask, bytes) = &packets[&(chunk_x, chunk_z)];
+            for (x, z) in [(0usize, 0usize), (15, 15), (8, 3)] {
+                let world_x = chunk_x * 16 + x as i32;
+                let world_z = chunk_z * 16 + z as i32;
+                for y in [0usize, 24, 64, 90, 127] {
+                    assert_eq!(
+                        protocol5_block(*mask, bytes, x, y, z),
+                        crate::worldgen::block(
+                            seed,
+                            Dimension::Overworld,
+                            world_x,
+                            y as i32,
+                            world_z
+                        ),
+                        "seed {seed} oracle mismatch at ({world_x}, {y}, {world_z})"
+                    );
+                }
+            }
+        }
+        // FNV-1a over the origin chunk keeps the seed-aliasing check cheap.
+        let mut fingerprint: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in &packets[&(0, 0)].1 {
+            fingerprint ^= u64::from(*byte);
+            fingerprint = fingerprint.wrapping_mul(0x100_0000_01b3);
+        }
+        origin_fingerprints.push(fingerprint);
+    }
+    // seed=0 is a real seed, and -1/-42 must not alias it or each other.
+    let [a, b, c]: [u64; 3] = origin_fingerprints.try_into().unwrap();
+    assert_ne!(a, b, "seed 0 and seed -1 generated the same origin chunk");
+    assert_ne!(a, c, "seed 0 and seed -42 generated the same origin chunk");
+    assert_ne!(b, c, "seed -1 and seed -42 generated the same origin chunk");
+}
+
 #[test]
 fn irw4_seed_42_near_spawn_is_not_superflat() {
     // The Windows no-argument launcher selects IRW4 Overworld seed 42.

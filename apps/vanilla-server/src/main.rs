@@ -343,6 +343,40 @@ impl<'a> Input<'a> {
 mod server_input_utf16_tests {
     use super::*;
 
+    /// NEXT-098 / #1081: Protocol 5 encodes item count in a single byte.
+    /// Negative signed-byte values (0x80..0xff) are never valid stacks,
+    /// even when the rest of the Creative packet is well-formed.
+    #[test]
+    fn next098_negative_creative_count_and_discard_slot_never_change_inventory() {
+        let valid = Stack {
+            id: 264, // diamond; a legitimate, stackable item
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inventory = Inventory::default();
+        let before = inventory.clone();
+        for slot in [-1i16, i16::MIN] {
+            assert!(!inventory.creative_set(slot, Some(valid)).unwrap());
+            assert_eq!(inventory, before, "discard slot {slot}");
+        }
+
+        for count in [0x80u8, 0xffu8] {
+            let mut wire = 264i16.to_be_bytes().to_vec();
+            wire.push(count);
+            wire.extend_from_slice(&0i16.to_be_bytes()); // metadata
+            wire.extend_from_slice(&(-1i16).to_be_bytes()); // no NBT
+            let mut input = Input(&wire);
+            assert_eq!(
+                input.creative_slot().unwrap(),
+                None,
+                "negative signed-byte count {count:#04x} must be rejected"
+            );
+            input.finish().unwrap();
+            assert_eq!(inventory, before);
+        }
+    }
+
     #[test]
     fn protocol5_server_input_uses_java_utf16_string_limits() {
         // Java String.length counts UTF-16 code units. Eight supplementary
@@ -903,6 +937,76 @@ mod dispenser_arrow_damage_tests {
     }
 }
 
+#[cfg(test)]
+mod reg112_view_distance_regression_tests {
+    use super::*;
+
+    /// REG-112 / #748: the server-authoritative view window is a fixed
+    /// (2*VIEW_DISTANCE+1)^2 set clamped to the world border. A column that
+    /// leaves the window (client shrinks its view or walks away -> server
+    /// sends unload) and later re-enters it must be rebuilt from the
+    /// authoritative world with byte-identical edited blocks and lighting;
+    /// out-of-world columns are never queued.
+    #[test]
+    fn chunks_re_entering_the_view_rebuild_identically_and_bounds_reject() {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-reg112-view-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("flat.irw");
+        let mut world = World::new();
+        // Edited blocks plus a torch inside chunk (1, 0): the torch forces
+        // real BlockLight bytes into every later rebuild of that column.
+        world.update_and_save(&path, 17, 64, 3, 1 << 4).unwrap();
+        world.update_and_save(&path, 20, 64, 5, 50 << 4).unwrap();
+        let world = std::sync::Mutex::new(world);
+        let build = |cx: i32, cz: i32| {
+            let pending = queue_chunk(&world, cx, cz).unwrap();
+            pending.finish().unwrap()
+        };
+
+        // The window is exactly 5x5 at an interior center.
+        let home = view_chunks((4, 4));
+        assert_eq!(
+            home.len(),
+            ((2 * VIEW_DISTANCE + 1) * (2 * VIEW_DISTANCE + 1)) as usize
+        );
+        assert!(home.contains(&(4, 4)) && home.contains(&(2, 2)) && home.contains(&(6, 6)));
+        assert!(!home.contains(&(7, 4)));
+        // Walking far enough away drops the column (sync_chunks would send
+        // an unload packet for it)...
+        let away = view_chunks((4 + 2 * VIEW_DISTANCE + 2, 4));
+        assert!(!away.contains(&(4, 4)));
+        // ... and walking back rebuilds it byte-identically: the resend
+        // carries the same edited blocks and lighting because every build
+        // reads only the authoritative world, never a client cache.
+        let before = build(4, 4);
+        let after = build(4, 4);
+        assert_eq!(before, after);
+        // The rebuild really embeds the edits and torch light: a virgin
+        // world's packet for the same column differs.
+        let virgin = World::new();
+        let virgin_path = root.join("empty.irw");
+        virgin.save(&virgin_path).unwrap();
+        let virgin = std::sync::Mutex::new(virgin);
+        let virgin_pending = queue_chunk(&virgin, 1, 0).unwrap();
+        assert_ne!(build(1, 0), virgin_pending.finish().unwrap());
+
+        // Rejection: window entries beyond the border are dropped, and an
+        // entirely external center queues nothing at all.
+        let edge = view_chunks((MAX_CHUNK - 1, MIN_CHUNK));
+        assert!(edge
+            .iter()
+            .all(|&(cx, cz)| (MIN_CHUNK..=MAX_CHUNK).contains(&cx)
+                && (MIN_CHUNK..=MAX_CHUNK).contains(&cz)));
+        assert!(view_chunks((MAX_CHUNK + 2 * VIEW_DISTANCE + 5, 0)).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 fn send_player_position(
     s: &mut Connection,
     location: &PlayerPosition,
@@ -1287,6 +1391,22 @@ fn commit_food_consumption(
     *inventory = staged_inventory;
     *vitals = staged_vitals;
     Ok(())
+}
+
+/// Finish the pending 32-tick meal exactly once. The 1.7.10 client sends
+/// one Use Item packet at the START of eating; the server owns the duration
+/// and must debit and apply the food on the 32nd tick, never earlier and
+/// never twice. Cancelling (release, damage interruption, dimension or
+/// game-mode change) simply clears the slot, so an interrupted meal consumes
+/// nothing and a completed meal applies once.
+fn finish_pending_meal(eating: &mut Option<(u64, Stack)>, now: u64) -> Option<Stack> {
+    let (began, stack) = eating.take()?;
+    if now.saturating_sub(began) >= 32 {
+        Some(stack)
+    } else {
+        *eating = Some((began, stack));
+        None
+    }
 }
 
 /// Protocol 5 Entity Action 3/4 starts and stops sprinting. Other actions
@@ -2464,6 +2584,9 @@ fn play(
             let mut w = world.lock().map_err(|_| bad("world mutex poisoned"))?;
             let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
             creatures.set_natural_spawning(allow_natural_spawning);
+            // Tamed wolves follow the player this session authenticates; every
+            // active session refreshes its own owner UUID at packet rate.
+            creatures.note_owner(&offline_uuid(name), *player);
             // The 1.7.10 sky and /time commands follow the displayed
             // 0..23999 day clock, which is not the server uptime tick.
             let mut updates =
@@ -2493,9 +2616,19 @@ fn play(
             updates.extend(creatures.take_melee_animations());
             let hurt = if survival { incoming.amount } else { 0 };
             let drops = creatures.take_drops();
+            let button_presses = creatures.take_button_presses();
             drop(creatures);
             for (x, y, z) in grazed_blocks.into_iter().chain(broken_doors) {
                 hub.broadcast(block_change_event(&w, x, y, z));
+            }
+            // Arrows borrowed the mob sweep read-only; apply each wooden
+            // button they touched now that the session owns the world, and
+            // publish the press. The 1200-tick release runs through the
+            // same pending_buttons expiry path as a hand press.
+            for (x, y, z) in button_presses {
+                if w.press_button_by_arrow(world_path, x, y, z)? {
+                    hub.broadcast(block_change_event(&w, x, y, z));
+                }
             }
             let damage = f32::from(hurt) * (25.0 - f32::from(inventory.armor_points())) / 25.0;
             for explosion in explosions {
@@ -2819,33 +2952,110 @@ fn play(
         }
         // Food and drink consumption both finish after 32 server ticks.
         if survival && vitals.health > 0.0 {
-            if let Some((began, stack)) = eating {
-                if now_tick.saturating_sub(began) >= 32 {
-                    eating = None;
-                    if inventory.held() == Some(stack) && stack.id == 373 {
-                        if let Some((kind, amplifier, duration)) = brewing::effect(stack) {
-                            let mut remaining = inventory.clone();
-                            if remaining.consume_held()
-                                && remaining
+            let completed = finish_pending_meal(&mut eating, now_tick);
+            if let Some(stack) = completed {
+                if inventory.held() == Some(stack) && stack.id == 373 {
+                    if let Some((kind, amplifier, duration)) = brewing::effect(stack) {
+                        let mut remaining = inventory.clone();
+                        if remaining.consume_held()
+                            && remaining
+                                .receive_stack(Stack {
+                                    id: 374,
+                                    count: 1,
+                                    damage: 0,
+                                    nbt: None,
+                                })
+                                .is_some()
+                        {
+                            // Instant healing/harming and the bottle debit must
+                            // survive a crash together. Timed effects remain a
+                            // separate follow-up requiring persisted effect state.
+                            let mut after = *vitals;
+                            if kind == 6 {
+                                after.health =
+                                    (after.health + 4.0 * f32::from(amplifier + 1)).min(20.0);
+                            } else if kind == 7 {
+                                after.health =
+                                    (after.health - 6.0 * f32::from(amplifier + 1)).max(0.0);
+                            }
+                            commit_food_consumption(
+                                FoodSave {
+                                    world_path,
+                                    player_path,
+                                    inventory_path,
+                                    player,
+                                    dimension: session_dimension.protocol_id() as i32,
+                                },
+                                inventory,
+                                vitals,
+                                remaining,
+                                after,
+                            )?;
+                            if kind != 6 && kind != 7 {
+                                active_effects.retain(|effect| effect.kind != kind);
+                                active_effects.push(ActiveEffect {
+                                    kind,
+                                    amplifier,
+                                    expires_at: now_tick + u64::from(duration),
+                                    next_periodic: now_tick
+                                        .saturating_add(periodic_effect_interval(kind, amplifier)),
+                                });
+                            }
+                            send(s, 0x30, &inventory.window_items())?;
+                            send(s, 0x06, &health_packet(*vitals))?;
+                            send(
+                                s,
+                                0x1d,
+                                &potion_effect_packet(entity_id, kind, amplifier, duration),
+                            )?;
+                        }
+                    }
+                } else if inventory.held() == Some(stack) && stack.id == 335 {
+                    // In 1.7.10 drinking milk clears all effects even when
+                    // the player is at full hunger. Charge the milk and
+                    // return one empty bucket before removing any effects.
+                    let mut remaining = inventory.clone();
+                    if remaining.consume_held()
+                        && remaining
+                            .receive_stack(Stack {
+                                id: 325,
+                                count: 1,
+                                damage: 0,
+                                nbt: None,
+                            })
+                            .is_some()
+                    {
+                        remaining.save(inventory_path)?;
+                        *inventory = remaining;
+                        for effect in active_effects.drain(..) {
+                            let mut removed = entity_id.to_be_bytes().to_vec();
+                            removed.push(effect.kind);
+                            send(s, 0x1e, &removed)?;
+                        }
+                        send(s, 0x30, &inventory.window_items())?;
+                        send(s, 0x2f, &inventory.cursor_packet())?;
+                    }
+                } else if inventory.held() == Some(stack) && vitals.can_eat(stack) {
+                    let mut remaining = inventory.clone();
+                    if remaining.consume_held() {
+                        let mut after = *vitals;
+                        if after.eat(stack) {
+                            // Mushroom stew is a nonstackable bowl meal in
+                            // Java 1.7.10. Reserve the returned bowl in the
+                            // same staged inventory BEFORE persisting the
+                            // debit, otherwise a full bag could erase it.
+                            let container_returned = stack.id != 282
+                                || remaining
                                     .receive_stack(Stack {
-                                        id: 374,
+                                        id: 281,
                                         count: 1,
                                         damage: 0,
                                         nbt: None,
                                     })
-                                    .is_some()
-                            {
-                                // Instant healing/harming and the bottle debit must
-                                // survive a crash together. Timed effects remain a
-                                // separate follow-up requiring persisted effect state.
-                                let mut after = *vitals;
-                                if kind == 6 {
-                                    after.health =
-                                        (after.health + 4.0 * f32::from(amplifier + 1)).min(20.0);
-                                } else if kind == 7 {
-                                    after.health =
-                                        (after.health - 6.0 * f32::from(amplifier + 1)).max(0.0);
-                                }
+                                    .is_some();
+                            if container_returned {
+                                // Food debit, returned bowl and Health/Food NBT
+                                // must commit in one durable redo generation.
                                 commit_food_consumption(
                                     FoodSave {
                                         world_path,
@@ -2859,133 +3069,53 @@ fn play(
                                     remaining,
                                     after,
                                 )?;
-                                if kind != 6 && kind != 7 {
-                                    active_effects.retain(|effect| effect.kind != kind);
-                                    active_effects.push(ActiveEffect {
-                                        kind,
-                                        amplifier,
-                                        expires_at: now_tick + u64::from(duration),
-                                        next_periodic: now_tick.saturating_add(
-                                            periodic_effect_interval(kind, amplifier),
-                                        ),
-                                    });
-                                }
-                                send(s, 0x30, &inventory.window_items())?;
-                                send(s, 0x06, &health_packet(*vitals))?;
-                                send(
-                                    s,
-                                    0x1d,
-                                    &potion_effect_packet(entity_id, kind, amplifier, duration),
-                                )?;
-                            }
-                        }
-                    } else if inventory.held() == Some(stack) && stack.id == 335 {
-                        // In 1.7.10 drinking milk clears all effects even when
-                        // the player is at full hunger. Charge the milk and
-                        // return one empty bucket before removing any effects.
-                        let mut remaining = inventory.clone();
-                        if remaining.consume_held()
-                            && remaining
-                                .receive_stack(Stack {
-                                    id: 325,
-                                    count: 1,
-                                    damage: 0,
-                                    nbt: None,
-                                })
-                                .is_some()
-                        {
-                            remaining.save(inventory_path)?;
-                            *inventory = remaining;
-                            for effect in active_effects.drain(..) {
-                                let mut removed = entity_id.to_be_bytes().to_vec();
-                                removed.push(effect.kind);
-                                send(s, 0x1e, &removed)?;
-                            }
-                            send(s, 0x30, &inventory.window_items())?;
-                            send(s, 0x2f, &inventory.cursor_packet())?;
-                        }
-                    } else if inventory.held() == Some(stack) && vitals.can_eat(stack) {
-                        let mut remaining = inventory.clone();
-                        if remaining.consume_held() {
-                            let mut after = *vitals;
-                            if after.eat(stack) {
-                                // Mushroom stew is a nonstackable bowl meal in
-                                // Java 1.7.10. Reserve the returned bowl in the
-                                // same staged inventory BEFORE persisting the
-                                // debit, otherwise a full bag could erase it.
-                                let container_returned = stack.id != 282
-                                    || remaining
-                                        .receive_stack(Stack {
-                                            id: 281,
-                                            count: 1,
-                                            damage: 0,
-                                            nbt: None,
-                                        })
-                                        .is_some();
-                                if container_returned {
-                                    // Food debit, returned bowl and Health/Food NBT
-                                    // must commit in one durable redo generation.
-                                    commit_food_consumption(
-                                        FoodSave {
-                                            world_path,
-                                            player_path,
-                                            inventory_path,
-                                            player,
-                                            dimension: session_dimension.protocol_id() as i32,
-                                        },
-                                        inventory,
-                                        vitals,
-                                        remaining,
-                                        after,
-                                    )?;
-                                    for effect in vitals::food_side_effects(
-                                        stack,
-                                        food_effect_roll(now_tick, entity_id),
-                                    ) {
-                                        let expires_at = now_tick
-                                            .saturating_add(u64::from(effect.duration_ticks));
-                                        // Weaker/shorter food effects cannot erase an
-                                        // existing stronger or longer potion effect.
-                                        let replace = active_effects
-                                            .iter()
-                                            .find(|old| old.kind == effect.kind)
-                                            .is_none_or(|old| {
-                                                effect.amplifier > old.amplifier
-                                                    || (effect.amplifier == old.amplifier
-                                                        && expires_at > old.expires_at)
-                                            });
-                                        if replace {
-                                            active_effects.retain(|old| old.kind != effect.kind);
-                                            active_effects.push(ActiveEffect {
-                                                kind: effect.kind,
-                                                amplifier: effect.amplifier,
-                                                expires_at,
-                                                next_periodic: now_tick.saturating_add(
-                                                    periodic_effect_interval(
-                                                        effect.kind,
-                                                        effect.amplifier,
-                                                    ),
-                                                ),
-                                            });
-                                            send(
-                                                s,
-                                                0x1d,
-                                                &potion_effect_packet(
-                                                    entity_id,
+                                for effect in vitals::food_side_effects(
+                                    stack,
+                                    food_effect_roll(now_tick, entity_id),
+                                ) {
+                                    let expires_at =
+                                        now_tick.saturating_add(u64::from(effect.duration_ticks));
+                                    // Weaker/shorter food effects cannot erase an
+                                    // existing stronger or longer potion effect.
+                                    let replace = active_effects
+                                        .iter()
+                                        .find(|old| old.kind == effect.kind)
+                                        .is_none_or(|old| {
+                                            effect.amplifier > old.amplifier
+                                                || (effect.amplifier == old.amplifier
+                                                    && expires_at > old.expires_at)
+                                        });
+                                    if replace {
+                                        active_effects.retain(|old| old.kind != effect.kind);
+                                        active_effects.push(ActiveEffect {
+                                            kind: effect.kind,
+                                            amplifier: effect.amplifier,
+                                            expires_at,
+                                            next_periodic: now_tick.saturating_add(
+                                                periodic_effect_interval(
                                                     effect.kind,
                                                     effect.amplifier,
-                                                    effect.duration_ticks,
                                                 ),
-                                            )?;
-                                        }
+                                            ),
+                                        });
+                                        send(
+                                            s,
+                                            0x1d,
+                                            &potion_effect_packet(
+                                                entity_id,
+                                                effect.kind,
+                                                effect.amplifier,
+                                                effect.duration_ticks,
+                                            ),
+                                        )?;
                                     }
-                                    if stack.id == 282 {
-                                        send(s, 0x30, &inventory.window_items())?;
-                                    } else {
-                                        send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
-                                    }
-                                    send(s, 0x06, &health_packet(*vitals))?;
                                 }
+                                if stack.id == 282 {
+                                    send(s, 0x30, &inventory.window_items())?;
+                                } else {
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                }
+                                send(s, 0x06, &health_packet(*vitals))?;
                             }
                         }
                     }
@@ -3340,6 +3470,35 @@ fn play(
                             continue;
                         }
                     }
+                    // Java 1.7.10 EntityWolf/EntityOcelot: a bone tames a wolf
+                    // and fish tames an ocelot, binding it to the player's
+                    // offline UUID; the owner's interaction then toggles
+                    // sitting. Both work in Creative; the item is only debited
+                    // in Survival from the real held slot.
+                    if inventory
+                        .held()
+                        .is_some_and(|item| creatures.can_tame_with(target_id, item.id))
+                    {
+                        let mut candidate = inventory.clone();
+                        let can_pay = !survival || candidate.consume_held();
+                        if can_pay {
+                            if let Some(events) = creatures.tame(target_id, &offline_uuid(name)) {
+                                if survival {
+                                    candidate.save(inventory_path)?;
+                                    *inventory = candidate;
+                                    send(s, 0x2f, &inventory.set_slot(inventory.held_slot())?)?;
+                                }
+                                for event in events {
+                                    hub.broadcast(event);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(event) = creatures.pet_sit_toggle(target_id, &offline_uuid(name)) {
+                        hub.broadcast(event);
+                        continue;
+                    }
                     // Other animal interactions debit items or wear tools,
                     // and remain unavailable in Creative.
                     if !survival {
@@ -3521,6 +3680,11 @@ fn play(
                     let mut creatures = mobs.lock().map_err(|_| bad("mob mutex poisoned"))?;
                     let result =
                         creatures.player_attack(target_id, *player, inventory.held(), now_tick);
+                    if result.is_some() {
+                        // 1.7.10: tamed wolves join the fight against whatever
+                        // their owner just punched.
+                        creatures.order_wolves(&offline_uuid(name), target_id);
+                    }
                     drop(creatures);
                     if let Some(hit) = result {
                         if survival {
@@ -12414,6 +12578,65 @@ mod live_survival_difficulty_tests {
 #[cfg(test)]
 mod survival_food_journal_tests {
     use super::*;
+
+    #[test]
+    fn reg145_meal_finishes_exactly_once_after_32_ticks() {
+        let apple = Stack {
+            id: 260,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut eating: Option<(u64, Stack)> = Some((100, apple));
+        // Mid-meal nothing finishes, so nothing can be debited: a mob hit at
+        // any of these ticks leaves the held stack and hunger untouched.
+        for now in 100..132 {
+            assert_eq!(finish_pending_meal(&mut eating, now), None);
+            assert_eq!(eating, Some((100, apple)), "the meal stays pending");
+        }
+        // 1.7.10 ItemFood use duration: the meal finishes on the 32nd tick
+        // and only ever once, whatever the tick loop or packets do next.
+        assert_eq!(finish_pending_meal(&mut eating, 132), Some(apple));
+        assert_eq!(eating, None, "the slot is consumed");
+        for now in 132..200 {
+            assert_eq!(finish_pending_meal(&mut eating, now), None);
+        }
+    }
+
+    #[test]
+    fn reg145_cancelled_meals_never_finish_and_dead_players_never_eat() {
+        let steak = Stack {
+            id: 364,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        // Release Use Item, death, respawn, dimension and game-mode changes
+        // all clear the slot; a cancelled meal can never complete later.
+        for cancel_at in [401, 415, 431] {
+            let mut eating: Option<(u64, Stack)> = Some((400, steak));
+            finish_pending_meal(&mut eating, cancel_at); // still pending
+            eating = None; // the session cancel path
+            assert_eq!(finish_pending_meal(&mut eating, cancel_at + 64), None);
+        }
+        // A fatal hit blocks the whole 32-tick gate (health > 0.0), and the
+        // Vitals layer independently refuses food for a dead player, so the
+        // same meal can never be applied across death and respawn.
+        let mut dead = Vitals {
+            health: 0.0,
+            food: 5,
+            ..Vitals::default()
+        };
+        assert!(!dead.eat(steak), "a dead player never gains nutrition");
+        assert_eq!(dead.food, 5);
+        // Surviving a mid-meal hit keeps the vanilla meal: damage does not
+        // cancel it, and it still completes exactly once at tick 32.
+        let mut eating: Option<(u64, Stack)> = Some((1_000, steak));
+        assert_eq!(finish_pending_meal(&mut eating, 1_010), None);
+        assert_eq!(finish_pending_meal(&mut eating, 1_031), None);
+        assert_eq!(finish_pending_meal(&mut eating, 1_032), Some(steak));
+        assert_eq!(finish_pending_meal(&mut eating, 1_064), None);
+    }
 
     #[test]
     fn eating_commits_inventory_and_vitals_together_with_dimension() {

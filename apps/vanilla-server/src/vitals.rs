@@ -400,6 +400,54 @@ mod tests {
             nbt: None,
         }
     }
+    /// NEXT-116 / #1099: the C08 use-item handler checks can_eat()
+    /// *before* starting the 32-tick eating timer. Ordinary foods must
+    /// never begin consumption at full hunger, even when health is low.
+    /// Golden apples are intentionally covered by the separate test below.
+    #[test]
+    fn full_hunger_rejects_ordinary_food_before_consumption() {
+        for (id, damage) in [
+            (260, 0), // apple
+            (282, 0), // mushroom stew
+            (297, 0), // bread
+            (319, 0), // raw pork
+            (320, 0), // cooked pork
+            (349, 3), // pufferfish
+            (350, 1), // cooked salmon
+            (357, 0), // cookie
+            (360, 0), // melon
+            (363, 0), // raw beef
+            (364, 0), // steak
+            (365, 0), // raw chicken
+            (366, 0), // cooked chicken
+            (367, 0), // rotten flesh
+            (375, 0), // spider eye
+            (391, 0), // carrot
+            (392, 0), // potato
+            (393, 0), // baked potato
+            (394, 0), // poisonous potato
+            (396, 0), // golden carrot
+            (400, 0), // pumpkin pie
+        ] {
+            let food = Stack {
+                id,
+                count: 1,
+                damage,
+                nbt: None,
+            };
+            let mut vitals = Vitals {
+                health: 10.0,
+                food: 20,
+                saturation: 0.0,
+                ..Vitals::default()
+            };
+            let before = vitals;
+            assert!(!vitals.can_eat(food), "item {id}:{damage}");
+            assert!(!vitals.eat(food), "item {id}:{damage}");
+            assert_eq!(vitals, before, "item {id}:{damage}");
+        }
+    }
+
     #[test]
     fn golden_apple_variants_are_edible_at_full_hunger() {
         for damage in [0, 1] {

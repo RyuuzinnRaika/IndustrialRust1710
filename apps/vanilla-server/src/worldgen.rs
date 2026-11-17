@@ -1968,4 +1968,386 @@ mod tests {
             dungeon_loot(seed, cx + 2, cy + 1, cz)
         );
     }
+
+    /// REG-172 / #808: ravines are one candidate per 128x128 region and must
+    /// be evaluated against neighbouring regions so cliffs never terminate at
+    /// a seam. Pin corridor continuity across a 128-block region seam and an
+    /// ordinary 16-block chunk seam for a fixed seed, with a roof above the
+    /// band, and pin that liquid bucket edits inside the canyon survive
+    /// save/reload while both seam-adjacent chunk packets restore byte-for-byte.
+    #[test]
+    fn reg172_ravines_cross_region_and_chunk_seams_without_breaks() {
+        let seed = 42u64;
+        // The ravine band is y 20..=51 and its geometry ignores y inside the
+        // band, so sample the middle row and check the roof above it.
+        let pair = |x0: i32, x1: i32, z: i32| ravine(seed, x0, 36, z) && ravine(seed, x1, 36, z);
+        let full = |x0: i32, x1: i32, z: i32| {
+            pair(x0, x1, z)
+                && cave(seed, x0, 36, z)
+                && cave(seed, x1, 36, z)
+                && block(seed, Dimension::Overworld, x0, 36, z) == AIR
+                && block(seed, Dimension::Overworld, x1, 36, z) == AIR
+                && block(seed, Dimension::Overworld, x0, 52, z) != AIR
+                && block(seed, Dimension::Overworld, x1, 52, z) != AIR
+        };
+        let mut region = None;
+        let mut chunk = None;
+        'scan: for k in -8..=16 {
+            let seam = k * 16;
+            for z in -400..800 {
+                if full(seam - 1, seam, z) {
+                    if seam % 128 == 0 {
+                        region.get_or_insert((seam, z));
+                    } else {
+                        chunk.get_or_insert((seam, z));
+                    }
+                }
+                if region.is_some() && chunk.is_some() {
+                    break 'scan;
+                }
+            }
+        }
+        let (rseam, rz) =
+            region.expect("seed 42 must carve a ravine across a 128-block region seam");
+        let (cseam, cz) = chunk.expect("seed 42 must carve a ravine across an ordinary chunk seam");
+        // Vertical band continuity at the region seam: not one slice missing.
+        for y in 20..=51 {
+            assert!(
+                ravine(seed, rseam - 1, y, rz) && ravine(seed, rseam, y, rz),
+                "ravine broke at region seam x={rseam} y={y} z={rz}"
+            );
+            assert_eq!(block(seed, Dimension::Overworld, rseam - 1, y, rz), AIR);
+            assert_eq!(block(seed, Dimension::Overworld, rseam, y, rz), AIR);
+        }
+        // Same for the plain chunk seam.
+        for y in 20..=51 {
+            assert!(
+                ravine(seed, cseam - 1, y, cz) && ravine(seed, cseam, y, cz),
+                "ravine broke at chunk seam x={cseam} y={y} z={cz}"
+            );
+        }
+
+        use crate::world::World;
+        let path = std::env::temp_dir().join(format!("ir1710-reg172-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::expanded(seed, Dimension::Overworld);
+        world.save_new(&path).unwrap();
+        assert_eq!(world.get(rseam - 1, 36, rz), 0);
+        assert_eq!(world.get(rseam, 36, rz), 0);
+        // One liquid bucket on each side of the region seam inside the canyon.
+        world
+            .update_and_save(&path, rseam - 1, 36, rz, 10 << 4)
+            .unwrap();
+        world.update_and_save(&path, rseam, 36, rz, 9 << 4).unwrap();
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(rseam - 1, 36, rz), 10 << 4);
+        assert_eq!(restored.get(rseam, 36, rz), 9 << 4);
+        // The untouched corridor keeps flowing across the seam after reload.
+        for y in 20..=51 {
+            if y == 36 {
+                continue;
+            }
+            assert_eq!(restored.get(rseam - 1, y, rz), 0);
+            assert_eq!(restored.get(rseam, y, rz), 0);
+        }
+        // Both seam-adjacent chunk packets restore byte-for-byte from disk.
+        for cx in [(rseam - 1).div_euclid(16), rseam.div_euclid(16)] {
+            assert_eq!(
+                restored.chunk_data(cx, rz.div_euclid(16)),
+                world.chunk_data(cx, rz.div_euclid(16)),
+                "seam chunk ({cx}, {}) drifted across save/reload",
+                rz.div_euclid(16)
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// REG-174 / #810: trunks and crowns are evaluated per coordinate from a
+    /// ±2 neighbourhood, so a tree standing on a chunk border must never be
+    /// cut or doubled no matter which chunk is generated first. Pin the exact
+    /// trunk/crown column of a border tree, prove forward-vs-reverse column
+    /// builds for both chunks match, and keep a sapling-grown tree (edits)
+    /// separate from natural generation: growing one must not move or clone
+    /// the natural border tree.
+    #[test]
+    fn reg174_border_trees_survive_reverse_generation_and_never_double() {
+        let seed = 42u64;
+        // Find a supplementary trunk close enough to an x border that its
+        // crown reaches the neighbouring chunk, with its full column intact
+        // (no village or dungeon overwrite).
+        let mut border: Option<(i32, i32, i32, u16, u16, i32)> = None;
+        'trees: for tz in -160..320 {
+            for tx in -160..320 {
+                let Some((trunk, leaves)) = supplementary_tree(seed, tx, tz) else {
+                    continue;
+                };
+                let edge = tx.rem_euclid(16);
+                let side = if edge <= 2 {
+                    -1
+                } else if edge >= 13 {
+                    1
+                } else {
+                    continue;
+                };
+                let root = height(seed, tx, tz);
+                let clean = (1..=5)
+                    .all(|dy| block(seed, Dimension::Overworld, tx, root + dy, tz) == b(trunk))
+                    && (6..=7).all(|dy| {
+                        block(seed, Dimension::Overworld, tx, root + dy, tz) == state(leaves, 4)
+                    })
+                    && block(seed, Dimension::Overworld, tx, root + 8, tz) == AIR;
+                if clean {
+                    border = Some((tx, tz, root, trunk, leaves, side));
+                    break 'trees;
+                }
+            }
+        }
+        let (tx, tz, root, trunk, leaves, side) =
+            border.expect("seed 42 has an intact supplementary tree on a chunk border");
+        // One trunk column, exactly five logs: nothing above, no second trunk.
+        for dy in 1..=5 {
+            assert_eq!(
+                block(seed, Dimension::Overworld, tx, root + dy, tz),
+                b(trunk)
+            );
+        }
+        assert_eq!(block(seed, Dimension::Overworld, tx, root + 8, tz), AIR);
+        // The crown reaches into the neighbouring chunk uncut.
+        let mut neighbour_crown = 0;
+        for dz in -2..=2 {
+            for dy in 4..=6 {
+                if block(seed, Dimension::Overworld, tx + side, root + dy, tz + dz)
+                    == state(leaves, 4)
+                {
+                    neighbour_crown += 1;
+                }
+            }
+        }
+        assert!(
+            neighbour_crown > 0,
+            "border tree at ({tx},{tz}) lost its crown in the neighbouring chunk"
+        );
+
+        // Reverse generation: building the two chunks' columns trunk-chunk
+        // first in ascending order, then crown-chunk first in descending
+        // order, must hash every identical column to identical bytes.
+        let column_hash = |x: i32, z: i32| -> u64 {
+            let column = OverworldColumn::new(seed, x, z);
+            let mut value: u64 = 0xcbf2_9ce4_8422_2325;
+            for y in 0..256 {
+                value ^= u64::from(column.block_at(y));
+                value = value.wrapping_mul(0x100_0000_01b3);
+            }
+            value
+        };
+        let trunk_chunk = tx.div_euclid(16);
+        let crown_chunk = (tx + side).div_euclid(16);
+        let cz = tz.div_euclid(16);
+        let mut forward = std::collections::BTreeMap::new();
+        for cx in [trunk_chunk, crown_chunk] {
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    forward.insert(
+                        (cx * 16 + lx, cz * 16 + lz),
+                        column_hash(cx * 16 + lx, cz * 16 + lz),
+                    );
+                }
+            }
+        }
+        let mut reverse = std::collections::BTreeMap::new();
+        for cx in [crown_chunk, trunk_chunk] {
+            for lz in (0..16).rev() {
+                for lx in (0..16).rev() {
+                    reverse.insert(
+                        (cx * 16 + lx, cz * 16 + lz),
+                        column_hash(cx * 16 + lx, cz * 16 + lz),
+                    );
+                }
+            }
+        }
+        assert_eq!(forward, reverse, "column bytes depend on generation order");
+
+        // Sapling-grown trees are edits and live on a separate path from
+        // natural generation; growing one next to the border tree must leave
+        // the natural tree untouched and survive reload as an edit.
+        use crate::world::World;
+        let path = std::env::temp_dir().join(format!("ir1710-reg174-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::expanded(seed, Dimension::Overworld);
+        world.save_new(&path).unwrap();
+        let natural_trunk: Vec<u16> = (1..=5).map(|dy| world.get(tx, root + dy, tz)).collect();
+        // Find a plantable, headroom-clear spot two chunk columns away.
+        let mut spot = None;
+        let (lo, hi) = if side == 1 {
+            (tx + 8, tx + 24)
+        } else {
+            (tx - 24, tx - 8)
+        };
+        'spots: for sx in lo..hi {
+            for sz in tz - 12..tz + 12 {
+                let Some(top) = world.surface_height_at(sx, sz) else {
+                    continue;
+                };
+                if !matches!(world.get(sx, top, sz) >> 4, 2 | 3 | 12) {
+                    continue;
+                }
+                let clear = world.get(sx, top + 1, sz) == 0
+                    && (1..=5).all(|dy| {
+                        let radius = if dy >= 3 { 2 } else { 0 };
+                        (-radius..=radius).all(|dx| {
+                            (-radius..=radius).all(|dz| world.get(sx + dx, top + dy, sz + dz) == 0)
+                        })
+                    });
+                if clear {
+                    spot = Some((sx, top, sz));
+                    break 'spots;
+                }
+            }
+        }
+        let (sx, top, sz) = spot.expect("seed 42 offers a headroom-clear grass spot");
+        world
+            .update_and_save(&path, sx, top + 1, sz, 6 << 4)
+            .unwrap();
+        for _ in 0..1500 {
+            world.block_tick(&path, 64).unwrap();
+            if world.get(sx, top + 1, sz) >> 4 == 17 {
+                break;
+            }
+        }
+        assert_eq!(
+            world.get(sx, top + 1, sz) >> 4,
+            17,
+            "the planted sapling never grew into a tree at ({sx},{},{}); ground={}",
+            top,
+            sz,
+            world.get(sx, top, sz)
+        );
+        // grow_tree builds four logs at y..y+3 and the crown from y+3 up.
+        assert_eq!(world.get(sx, top + 4, sz) >> 4, 17);
+        // The natural border tree is byte-identical next door.
+        for dy in 1..=5 {
+            assert_eq!(
+                world.get(tx, root + dy, tz),
+                natural_trunk[(dy - 1) as usize]
+            );
+        }
+        let restored = World::load(&path).unwrap();
+        // After a reload the sapling tree is still there (stored as edits,
+        // never regenerated from base terrain) and the natural tree column
+        // still matches the pure point generator.
+        assert_eq!(restored.get(sx, top + 1, sz) >> 4, 17);
+        for dy in 1..=4 {
+            assert_eq!(restored.get(sx, top + dy, sz) >> 4, 17);
+            assert_eq!(
+                restored.get(tx, root + dy, tz),
+                block(seed, Dimension::Overworld, tx, root + dy, tz)
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// REG-175 / #811: a village footprint spans several chunks by design, so
+    /// loading it from split, order-different chunk batches must never lose
+    /// roads, houses, doors or the well, and must never roll back existing
+    /// player edits. Pin center-first vs edge-first packet builds, a
+    /// save/reload round trip, live door resolution and one road-cell edit
+    /// that survives every rebuild.
+    #[test]
+    fn reg175_village_split_chunk_orders_reload_without_loss() {
+        let seed = 42u64;
+        let mut center = None;
+        'cells: for gx in -4..=4 {
+            for gz in -4..=4 {
+                if let Some(found) = village_center(seed, gx * 192 + 48, gz * 192 + 48) {
+                    center = Some(found);
+                    break 'cells;
+                }
+            }
+        }
+        let (cx, base, cz) = center.expect("seed 42 generates villages");
+        use crate::world::World;
+        let path = std::env::temp_dir().join(format!("ir1710-reg175-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::expanded(seed, Dimension::Overworld);
+        world.save_new(&path).unwrap();
+        // Collect every chunk touched by the ±31x ±26 village footprint and
+        // order them from the centre chunk outward.
+        let mut chunks = std::collections::BTreeSet::new();
+        for x in cx - 31..=cx + 31 {
+            for z in cz - 26..=cz + 26 {
+                chunks.insert((x.div_euclid(16), z.div_euclid(16)));
+            }
+        }
+        let chunks: Vec<(i32, i32)> = chunks.into_iter().collect::<Vec<_>>();
+        assert!(
+            chunks.len() >= 9,
+            "the village must straddle several chunks, got {}",
+            chunks.len()
+        );
+        let center_chunk = (cx.div_euclid(16), cz.div_euclid(16));
+        let mut ordered = chunks.clone();
+        ordered.sort_by_key(|c| {
+            (c.0 - center_chunk.0)
+                .abs()
+                .max((c.1 - center_chunk.1).abs())
+        });
+        let mut center_first = std::collections::BTreeMap::new();
+        for c in &ordered {
+            center_first.insert(*c, world.chunk_data(c.0, c.1));
+        }
+        // A second instance loaded edge-first must produce identical packets.
+        let edge_world = World::expanded(seed, Dimension::Overworld);
+        for c in ordered.iter().rev() {
+            let packet = edge_world.chunk_data(c.0, c.1);
+            assert_eq!(
+                packet, center_first[c],
+                "chunk {c:?} of the village changed with the split load order"
+            );
+        }
+        // Structure content is really there: both generated doors stand with
+        // a valid lower/upper half pair, the well holds water, the farm has
+        // wheat and the road is gravel.
+        let doors = village_house_doors(seed, cx, cz).expect("doors inside footprint");
+        for [dx, dy, dz] in doors {
+            assert_eq!(world.get(dx, dy, dz) >> 4, 64);
+            assert_eq!(world.get(dx, dy + 1, dz) >> 4, 64);
+        }
+        assert_eq!(world.get(cx, base + 1, cz) >> 4, 9);
+        assert_eq!(world.get(cx + 12, base + 1, cz - 15) >> 4, 59);
+        assert_eq!(world.get(cx + 12, base, cz - 15), state(60, 7));
+        assert_eq!(world.get(cx + 27, base, cz) >> 4, 13);
+        let live = world
+            .live_village_house_doors(cx, cz)
+            .expect("live village resolves");
+        assert_eq!(live, [Some(doors[0]), Some(doors[1])]);
+
+        // An existing player edit inside the footprint must survive the same
+        // save/reload/rebuild cycle untouched.
+        world
+            .update_and_save(&path, cx + 27, base, cz, 1 << 4)
+            .unwrap();
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(cx + 27, base, cz), 1 << 4);
+        for c in &chunks {
+            assert_eq!(
+                restored.chunk_data(c.0, c.1),
+                world.chunk_data(c.0, c.1),
+                "reloaded chunk {c:?} lost edits or structures"
+            );
+        }
+        // Structures around the edit still match the pure point generator,
+        // and the doors remain live village goals after the reload.
+        for [dx, dy, dz] in doors {
+            assert_eq!(
+                restored.get(dx, dy, dz),
+                block(seed, Dimension::Overworld, dx, dy, dz)
+            );
+        }
+        assert_eq!(restored.get(cx, base + 1, cz) >> 4, 9);
+        let live = restored
+            .live_village_house_doors(cx, cz)
+            .expect("reloaded village still resolves");
+        assert_eq!(live, [Some(doors[0]), Some(doors[1])]);
+        std::fs::remove_file(path).unwrap();
+    }
 }
