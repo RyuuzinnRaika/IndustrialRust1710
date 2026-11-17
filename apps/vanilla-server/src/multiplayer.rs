@@ -1263,6 +1263,78 @@ mod tests {
         }
         assert!(!hub.is_healthy(id));
     }
+
+    /// NEXT-018 / #1001: one session stuck in chunk congestion must never
+    /// delay notifications for the others. Fanout uses a non-blocking
+    /// try_send per recipient and every session owns its FIFO mailbox, so
+    /// a full queue only marks that recipient unhealthy — later
+    /// notifications must still reach healthy observers immediately, in
+    /// issue order, with the hub itself unaffected.
+    #[test]
+    fn next018_congested_session_never_delays_fanout_for_others() {
+        let hub = Hub::default();
+        let (slow_id, slow_rx, _) = hub
+            .add(
+                "SlowConsumer".into(),
+                "uuid-slow".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        let (healthy_id, healthy_rx, _) = hub
+            .add(
+                "Healthy".into(),
+                "uuid-healthy".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        while slow_rx.try_recv().is_ok() {}
+        while healthy_rx.try_recv().is_ok() {}
+
+        // Fill both bounded queues to capacity, then let only the healthy
+        // session drain — the slow one now sits exactly at its limit.
+        for _ in 0..QUEUE_CAPACITY {
+            hub.broadcast(Event {
+                id: 0x21,
+                body: vec![1],
+            });
+        }
+        while healthy_rx.try_recv().is_ok() {}
+        assert!(hub.is_healthy(slow_id));
+        assert!(hub.is_healthy(healthy_id));
+        // One more event: the slow queue overflows and only that recipient
+        // is flagged; delivery to the healthy observer still succeeds.
+        hub.broadcast(Event {
+            id: 0x02,
+            body: vec![0],
+        });
+        assert!(!hub.is_healthy(slow_id));
+        assert!(hub.is_healthy(healthy_id));
+        let overflow_event = healthy_rx
+            .try_recv()
+            .expect("the overflowing recipient must not block delivery");
+        assert_eq!(overflow_event.id, 0x02);
+        assert_eq!(overflow_event.body, vec![0]);
+
+        // Notifications issued while the slow queue stays jammed must
+        // arrive for the healthy observer immediately and in issue order.
+        for seq in 0..3u8 {
+            hub.broadcast(Event {
+                id: 0x02,
+                body: vec![seq],
+            });
+        }
+        for seq in 0..3u8 {
+            let event = healthy_rx
+                .try_recv()
+                .expect("notification must arrive while another session is congested");
+            assert_eq!(event.id, 0x02);
+            assert_eq!(event.body, vec![seq]);
+        }
+        // The congested session is flagged for an explicit disconnect —
+        // never silently desynced, and never a blocker for anyone else.
+        assert!(!hub.is_healthy(slow_id));
+        assert!(hub.is_healthy(healthy_id));
+    }
     #[test]
     fn golden_protocol5_player_entity_bytes() {
         // Independently fixed Protocol 5 S0C, S13, S18 and S38 fixtures.
