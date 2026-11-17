@@ -15,10 +15,14 @@
 //!
 //! Real 1.7.10 client acceptance: NOT_RUN (headless host; the window
 //! packets and the persisted file are checked directly).
-use legacy_protocol::{read_frame, read_varint, write_string, write_varint};
+#[path = "support/packet_client.rs"]
+mod packet_client;
+
+use legacy_protocol::{write_string, write_varint};
+use packet_client::BufferedClient;
 use serde_json::Value;
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -79,8 +83,8 @@ impl Server {
         Server { child, root, port }
     }
 
-    fn join(&self, name: &str) -> TcpStream {
-        let mut socket = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+    fn join(&self, name: &str) -> BufferedClient {
+        let mut socket = BufferedClient::new(TcpStream::connect(("127.0.0.1", self.port)).unwrap());
         socket
             .set_read_timeout(Some(Duration::from_millis(250)))
             .unwrap();
@@ -128,25 +132,13 @@ fn frame(id: u32, data: &[u8]) -> Vec<u8> {
     message
 }
 
-fn pump(socket: &mut TcpStream) -> Option<(u32, Vec<u8>)> {
-    match read_frame(socket) {
-        Ok(packet) => {
-            let mut raw = packet.as_slice();
-            let id = read_varint(&mut raw).expect("packet id");
-            Some((id, raw.to_vec()))
-        }
-        Err(error)
-            if error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut =>
-        {
-            None
-        }
-        Err(error) => panic!("unexpected socket error: {error}"),
-    }
+fn pump(socket: &mut BufferedClient) -> Option<(u32, Vec<u8>)> {
+    socket.poll_packet().expect("read Protocol 5 packet")
 }
 
 /// C10 Creative Inventory Action: slot, blockId i16, count u8,
 /// damage i16, itemName MC string (-1 = none).
-fn creative_set(socket: &mut TcpStream, slot: i16, id: i16, count: u8) {
+fn creative_set(socket: &mut BufferedClient, slot: i16, id: i16, count: u8) {
     let mut p = slot.to_be_bytes().to_vec();
     p.extend_from_slice(&id.to_be_bytes());
     p.push(count);
@@ -186,7 +178,7 @@ fn creative_set(socket: &mut TcpStream, slot: i16, id: i16, count: u8) {
 
 /// Normal left click (0x0E mode 0); waits for the transaction result (0x32)
 /// and the following Window Items (0x30) snapshot.
-fn left_click(socket: &mut TcpStream, window: u8, slot: i16, action: i16) {
+fn left_click(socket: &mut BufferedClient, window: u8, slot: i16, action: i16) {
     let mut p = vec![window];
     p.extend_from_slice(&slot.to_be_bytes());
     p.push(0); // left button
