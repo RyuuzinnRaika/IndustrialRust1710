@@ -272,4 +272,28 @@ mod tests {
     fn rejects_unbounded_raw_chunk_jobs() {
         assert!(submit(0, 0, 0, vec![0; MAX_RAW_CHUNK_BYTES + 1]).is_err());
     }
+
+    /// NEXT-019 / #1002: when a session vanishes mid-encode, its completion
+    /// must die with the dropped receiver, and a reconnected session's job
+    /// on the same shared pipeline must be completely unaffected.
+    #[test]
+    fn next019_dropped_receiver_discards_completion_and_later_jobs_are_unaffected() {
+        let raw = vec![7u8; 20_736];
+        // The owning session disappears before ever polling or finishing:
+        // the worker's reply lands on a dead channel and is swallowed.
+        let orphan = submit(3, 4, 0x18, raw.clone()).unwrap();
+        drop(orphan);
+        // The "reconnected" session submits its own job on the same
+        // workers; its reply must arrive intact and decode exactly.
+        let fresh = submit(3, 4, 0x18, raw.clone()).unwrap().finish().unwrap();
+        assert_eq!(&fresh[..4], &3i32.to_be_bytes());
+        assert_eq!(&fresh[4..8], &4i32.to_be_bytes());
+        let size = i32::from_be_bytes(fresh[13..17].try_into().unwrap()) as usize;
+        assert_eq!(fresh.len(), 17 + size);
+        let mut decoded = Vec::new();
+        ZlibDecoder::new(&fresh[17..])
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, raw);
+    }
 }

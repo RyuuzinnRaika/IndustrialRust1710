@@ -1335,6 +1335,46 @@ mod tests {
         assert!(!hub.is_healthy(slow_id));
         assert!(hub.is_healthy(healthy_id));
     }
+    /// NEXT-019 / #1002: when a session ends with events still queued in
+    /// its mailbox, and the same name reconnects, none of the pre-existing
+    /// (or offline-period) events may surface in the fresh session. The
+    /// mailbox is session-owned, the EntityID is never reused, and fanout
+    /// only targets ids present in the hub at issue time.
+    #[test]
+    fn next019_reconnected_session_never_receives_events_queued_for_the_old_one() {
+        let hub = Hub::default();
+        let (old_id, old_rx, _) = hub
+            .add("Ghost".into(), "uuid-old".into(), PlayerPosition::default())
+            .unwrap();
+        while old_rx.try_recv().is_ok() {}
+        // A notification is queued for the old session, then that session
+        // ends with the event still unread inside its owned mailbox.
+        hub.broadcast(Event {
+            id: 0x02,
+            body: vec![b'O'],
+        });
+        drop(old_rx);
+        hub.remove(old_id);
+        // Another broadcast issued while the name is offline.
+        hub.broadcast(Event {
+            id: 0x02,
+            body: vec![b'X'],
+        });
+
+        let (new_id, new_rx, previous) = hub
+            .add("Ghost".into(), "uuid-new".into(), PlayerPosition::default())
+            .unwrap();
+        assert_ne!(new_id, old_id, "the reconnect gets a fresh EntityID");
+        assert!(previous.is_empty(), "no other peers exist");
+        // Whatever the fresh mailbox holds (presence bookkeeping), the two
+        // stale payloads can never be inside it.
+        for _ in 0..32 {
+            let Ok(event) = new_rx.try_recv() else { break };
+            assert_ne!(event.body, vec![b'O'], "old session's queued event leaked");
+            assert_ne!(event.body, vec![b'X'], "offline-period event leaked");
+        }
+    }
+
     #[test]
     fn golden_protocol5_player_entity_bytes() {
         // Independently fixed Protocol 5 S0C, S13, S18 and S38 fixtures.
