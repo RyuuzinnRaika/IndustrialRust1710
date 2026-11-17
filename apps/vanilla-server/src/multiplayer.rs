@@ -127,6 +127,7 @@ fn enqueue(peer: &Peer, packet: &Event) {
         Err(TrySendError::Full(_)) => {
             // Drop the whole session rather than silently losing a state update.
             // The session thread checks this flag every poll and disconnects.
+            crate::packet_stats::GLOBAL.rejected(crate::packet_stats::Reject::QueueOverflow);
             if !peer.overloaded.swap(true, Ordering::Release) {
                 eprintln!("outgoing packet queue full; disconnecting {}", peer.name);
             }
