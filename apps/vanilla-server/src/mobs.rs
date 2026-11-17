@@ -9372,6 +9372,94 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// REG-179 / #815: Nether species routing limits Blazes to the nether
+    /// fortress substrate (nether brick 112), and every spawn must clear the
+    /// body-collision test first. Pin over a generated fortress region that
+    /// mobs never materialise inside solid or liquid cells, that ground
+    /// dwellers stand on real ground, that every Blaze stands on fortress
+    /// brick (corridor floor y=54 or bridge slab y=58), and that the
+    /// fortress floors actually participate in natural spawning.
+    #[test]
+    fn reg179_nether_spawns_never_spawn_inside_blocks_and_blazes_stay_on_brick() {
+        let world = World::expanded(42, crate::dimensions::Dimension::Nether);
+        // Cell (0, 0) fortress: floor 112 at y=54, slab 112 at y=58, three
+        // open corridor rows y 55..=57, x 75..=116, z 94..=98.
+        assert_eq!(world.get(96, 54, 96) >> 4, 112);
+        assert_eq!(world.get(96, 55, 96), 0);
+        assert_eq!(world.get(96, 57, 96), 0);
+        assert_eq!(world.get(96, 58, 96) >> 4, 112);
+        // Anchor west of the corridor: the long-axis rolls (24..=120 blocks)
+        // reach into the corridor while the lateral axis (|offset| <= 32)
+        // can straddle its five-block depth.
+        let player = PlayerPosition {
+            x: 60.5,
+            y: 55.0,
+            z: 96.5,
+        };
+        let mut mobs = Mobs::new_with_difficulty(&world, true, 2);
+        let mut lighting = world.lighting_sampler();
+        let mut events = Vec::new();
+        let mut total = 0_u64;
+        let mut blazes = 0_u64;
+        let mut fortress_floor = 0_u64;
+        for cycle in 1..=600_u64 {
+            mobs.spawn_natural(cycle * 20, &world, &mut lighting, &[player], &mut events);
+            events.clear();
+            for mob in mobs.entities.values() {
+                total += 1;
+                let x = mob.position.x.floor() as i32;
+                let y = mob.position.y.floor() as i32;
+                let z = mob.position.z.floor() as i32;
+                // "Never spawn inside the wrong block": both body cells of
+                // every species must be pure air, not even a liquid.
+                assert_eq!(
+                    world.get(x, y, z),
+                    0,
+                    "{:?} body cell ({x},{y},{z}) is not air",
+                    mob.kind
+                );
+                assert_eq!(
+                    world.get(x, y + 1, z),
+                    0,
+                    "{:?} head cell ({x},{},{z}) is not air",
+                    mob.kind,
+                    y + 1
+                );
+                if mob.kind == Kind::Blaze {
+                    blazes += 1;
+                    assert_eq!(
+                        world.get(x, y - 1, z) >> 4,
+                        112,
+                        "Blaze spawned off the fortress substrate at ({x},{y},{z})"
+                    );
+                } else if !matches!(
+                    mob.kind,
+                    Kind::Ghast | Kind::Wither | Kind::EnderDragon | Kind::Blaze
+                ) {
+                    assert_ne!(
+                        world.get(x, y - 1, z) >> 4,
+                        0,
+                        "{:?} is floating at ({x},{y},{z})",
+                        mob.kind
+                    );
+                }
+                if world.get(x, y - 1, z) >> 4 == 112 {
+                    fortress_floor += 1;
+                }
+            }
+            mobs.entities.clear();
+        }
+        assert!(total > 0, "the Nether spawn loop produced nothing");
+        assert!(
+            fortress_floor > 0,
+            "no natural spawn ever stood on the fortress brick floors"
+        );
+        assert!(
+            blazes > 0,
+            "the fortress corridor never routed a single Blaze over {total} spawns"
+        );
+    }
+
     #[test]
     fn enderman_teleport_rejects_low_ceiling_liquid_and_missing_floor() {
         let mut world = World::new();
