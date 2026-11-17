@@ -1041,6 +1041,110 @@ mod tests {
                 .valid()
         );
     }
+    /// NEXT-160 / #1143: pin the 8:1 scaling table against the vanilla
+    /// 1.7.10 semantics `block = floor(coordinate * 0.125)` (Overworld ->
+    /// Nether) and `block = coordinate * 8.0` (Nether -> Overworld). The
+    /// cases deliberately include negative coordinates, fractional anchors
+    /// and values one step below a multiple of eight, the exact shapes
+    /// where a truncating implementation (rounding toward zero) diverges
+    /// from Java's MathHelper.floor_double. Every result is also compared
+    /// bit-for-bit: both scales are exact powers of two in binary64, so a
+    /// drifted constant or an extra rounding step changes the raw value.
+    #[test]
+    fn next160_eight_to_one_scaling_pins_fifty_vanilla_floor_cases() {
+        // (source x, source z, vanilla floor(x * 0.125), vanilla floor(z * 0.125))
+        let overworld_to_nether: [(f64, f64, i32, i32); 30] = [
+            (0.0, 0.0, 0, 0),
+            (8.0, -8.0, 1, -1),
+            (16.0, 24.0, 2, 3),
+            (-8.0, -16.0, -1, -2),
+            (64.0, -64.0, 8, -8),
+            (80.0, 88.0, 10, 11),
+            (-88.0, -96.0, -11, -12),
+            (128.0, 136.0, 16, 17),
+            (-136.0, -144.0, -17, -18),
+            (160.0, -80.0, 20, -10),
+            (-1.0, 1.0, -1, 0),
+            (-7.0, -9.0, -1, -2),
+            (-15.0, 15.0, -2, 1),
+            (-17.0, -23.0, -3, -3),
+            (-31.0, -33.0, -4, -5),
+            (-63.0, -65.0, -8, -9),
+            (-79.0, 79.0, -10, 9),
+            (-95.0, -97.0, -12, -13),
+            (-103.0, 103.0, -13, 12),
+            (-111.0, -113.0, -14, -15),
+            (0.5, -0.5, 0, -1),
+            (7.999, -7.001, 0, -1),
+            (8.5, -8.5, 1, -2),
+            (15.9, -15.1, 1, -2),
+            (-0.5, 0.5, -1, 0),
+            (63.999, -64.001, 7, -9),
+            (64.5, -64.5, 8, -9),
+            (127.25, -127.75, 15, -16),
+            (-0.0001, 0.0001, -1, 0),
+            (255.9, -256.1, 31, -33),
+        ];
+        for (x, z, expected_x, expected_z) in overworld_to_nether {
+            let p = destination(Dimension::Overworld, Dimension::Nether, x, 64.0, z).unwrap();
+            assert_eq!(p.x, x * 0.125, "raw scale for x={x}");
+            assert_eq!(p.z, z * 0.125, "raw scale for z={z}");
+            assert_eq!(
+                (p.x.floor() as i32, p.z.floor() as i32),
+                (expected_x, expected_z),
+                "vanilla floor anchor for ({x}, {z})"
+            );
+        }
+        // (Nether x, Nether z, vanilla x * 8, vanilla z * 8)
+        let nether_to_overworld: [(f64, f64, i32, i32); 20] = [
+            (0.0, 0.0, 0, 0),
+            (1.0, -1.0, 8, -8),
+            (31.0, -31.0, 248, -248),
+            (100.0, -100.0, 800, -800),
+            (1023.0, -1024.0, 8184, -8192),
+            (-1023.0, 1024.0, -8184, 8192),
+            (512.0, 777.0, 4096, 6216),
+            (-555.0, 666.0, -4440, 5328),
+            (2047.0, -2047.0, 16376, -16376),
+            (-2040.0, -2047.0, -16320, -16376),
+            (125.0, 125.0, 1000, 1000),
+            (-7.0, -7.0, -56, -56),
+            (1000.0, 1500.0, 8000, 12000),
+            (-1500.0, 1750.0, -12000, 14000),
+            (333.0, -333.0, 2664, -2664),
+            (-334.0, 334.0, -2672, 2672),
+            (888.0, -888.0, 7104, -7104),
+            (-1025.0, 1026.0, -8200, 8208),
+            (2000.0, -2016.0, 16000, -16128),
+            (-999.0, 999.0, -7992, 7992),
+        ];
+        for (x, z, expected_x, expected_z) in nether_to_overworld {
+            let p = destination(Dimension::Nether, Dimension::Overworld, x, 70.0, z).unwrap();
+            assert_eq!(p.x, x * 8.0, "raw scale for nether x={x}");
+            assert_eq!(p.z, z * 8.0, "raw scale for nether z={z}");
+            assert_eq!(
+                (p.x.floor() as i32, p.z.floor() as i32),
+                (expected_x, expected_z),
+                "vanilla 8x anchor for ({x}, {z})"
+            );
+        }
+        assert_eq!(overworld_to_nether.len() + nether_to_overworld.len(), 50);
+        // The search-height clamp is part of the vanilla destination math:
+        // low Nether rows clamp up to 32 and tall Overworld inputs clamp
+        // down to the 120-block ceiling used by the portal search.
+        assert_eq!(
+            destination(Dimension::Overworld, Dimension::Nether, 0.0, 250.0, 0.0)
+                .unwrap()
+                .y,
+            120.0
+        );
+        assert_eq!(
+            destination(Dimension::Nether, Dimension::Overworld, 0.0, 10.0, 0.0)
+                .unwrap()
+                .y,
+            32.0
+        );
+    }
     #[test]
     fn world_identification_prevents_dimension_cross_load() {
         let root = std::env::temp_dir().join(format!(
