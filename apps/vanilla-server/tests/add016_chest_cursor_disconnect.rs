@@ -7,7 +7,7 @@
 //! Real-client verification with an unmodified 1.7.10 client: NOT_RUN.
 
 use serde_json::Value;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -72,9 +72,11 @@ struct Client {
     stream: TcpStream,
     buffer: Vec<u8>,
     backlog: Vec<(i32, Vec<u8>)>,
+    awaiting_login: bool,
 }
 
 impl Client {
+    #[track_caller]
     fn connect(port: u16) -> Client {
         let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream
@@ -84,27 +86,51 @@ impl Client {
             stream,
             buffer: Vec::new(),
             backlog: Vec::new(),
+            awaiting_login: false,
         }
     }
 
+    #[track_caller]
     fn send(&mut self, bytes: &[u8]) {
         self.stream.write_all(bytes).unwrap();
     }
 
+    #[track_caller]
     fn poll(&mut self) {
         let mut chunk = [0u8; 65536];
         match self.stream.read(&mut chunk) {
-            Ok(n) if n > 0 => self.buffer.extend_from_slice(&chunk[..n]),
-            _ => {}
+            Ok(0) => panic!(
+                "server closed test connection (awaiting_login={}, buffered_bytes={})",
+                self.awaiting_login,
+                self.buffer.len()
+            ),
+            Ok(n) => self.buffer.extend_from_slice(&chunk[..n]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) => {}
+            Err(error) => panic!("reading test connection failed: {error}"),
         }
         loop {
             match try_parse_frame(&self.buffer) {
                 Some((id, payload, used)) => {
                     self.buffer.drain(..used);
+                    if self.awaiting_login {
+                        match id {
+                            0x00 => panic!("LoginDisconnect: {}", packet_string(&payload)),
+                            0x02 => self.awaiting_login = false,
+                            _ => {}
+                        }
+                    } else if id == 0x40 {
+                        panic!("PlayDisconnect: {}", packet_string(&payload));
+                    }
                     if id == 0x00 && payload.len() == 4 {
                         // KeepAlive echo.
                         let echo = frame(0x00, &payload);
-                        let _ = self.stream.write_all(&echo);
+                        self.stream.write_all(&echo).unwrap();
                     }
                     self.backlog.push((id, payload));
                 }
@@ -114,6 +140,7 @@ impl Client {
     }
 
     /// Wait for a packet matching `pred`, consuming the backlog.
+    #[track_caller]
     fn until(
         &mut self,
         timeout: Duration,
@@ -149,7 +176,36 @@ fn be_f64(data: &[u8], at: usize) -> f64 {
     f64::from_be_bytes(data[at..at + 8].try_into().unwrap())
 }
 
-fn spawn_server(tag: &str) -> (Child, std::path::PathBuf, u16) {
+fn packet_string(payload: &[u8]) -> &str {
+    let (length, prefix) = read_varint(payload).expect("packet must contain a string length");
+    let length = usize::try_from(length).expect("packet string length must be nonnegative");
+    assert_eq!(payload.len() - prefix, length, "packet string length");
+    std::str::from_utf8(&payload[prefix..]).expect("packet string must be UTF-8")
+}
+
+struct TestServer {
+    child: Child,
+    directory: std::path::PathBuf,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+        if std::thread::panicking() {
+            eprintln!(
+                "retaining failed ADD-016 fixture and server-stderr.log: {}",
+                self.directory.display()
+            );
+        } else {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+}
+
+fn spawn_server(tag: &str) -> (TestServer, std::path::PathBuf, u16) {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -168,7 +224,14 @@ fn spawn_server(tag: &str) -> (Child, std::path::PathBuf, u16) {
         .stderr(Stdio::from(stderr))
         .spawn()
         .unwrap();
-    (child, dir, port)
+    (
+        TestServer {
+            child,
+            directory: dir.clone(),
+        },
+        dir,
+        port,
+    )
 }
 
 fn wait_port(port: u16) {
@@ -182,18 +245,62 @@ fn wait_port(port: u16) {
     panic!("server did not open port {port}");
 }
 
-fn login(port: u16, name: &str) -> Client {
-    let mut client = Client::connect(port);
+fn handshake(port: u16, next_state: i32) -> Vec<u8> {
     let mut handshake = varint(5);
     handshake.extend_from_slice(&mc_string("127.0.0.1"));
     handshake.extend_from_slice(&port.to_be_bytes());
-    handshake.extend_from_slice(&varint(2));
-    client.send(&frame(0, &handshake));
+    handshake.extend_from_slice(&varint(next_state));
+    frame(0, &handshake)
+}
+
+#[track_caller]
+fn login(port: u16, name: &str) -> Client {
+    let mut client = Client::connect(port);
+    client.awaiting_login = true;
+    client.send(&handshake(port, 2));
     client.send(&frame(0, &mc_string(name)));
     client
 }
 
+fn online_players(port: u16) -> u64 {
+    let mut status = Client::connect(port);
+    status.send(&handshake(port, 1));
+    status.send(&frame(0, &[]));
+    let response = status
+        .until(Duration::from_secs(5), |id, _| id == 0)
+        .expect("status must return population");
+    let status_json: Value = serde_json::from_str(packet_string(&response)).unwrap();
+    let online = status_json["players"]["online"]
+        .as_u64()
+        .expect("status must report a nonnegative player count");
+    // Finish the probe so it cannot retain a pending-login slot while the
+    // same player identity is being admitted again.
+    let token = 16i64.to_be_bytes();
+    status.send(&frame(1, &token));
+    status
+        .until(Duration::from_secs(5), |id, payload| {
+            id == 1 && payload == token
+        })
+        .expect("status Ping must echo its token");
+    online
+}
+
+fn wait_logged_out(port: u16) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if online_players(port) == 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "previous player admission was not released"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// Join and return (client, spawn position).
+#[track_caller]
 fn join(port: u16, name: &str) -> (Client, (f64, f64, f64)) {
     let mut client = login(port, name);
     let pos = client
@@ -382,6 +489,9 @@ fn add016_cursor_items_survive_disconnect_with_chest_open() {
         .unwrap_or(0);
     assert_eq!(chest_total, 0, "chest must not retain a copy");
 
+    // The cursor was already durable at click time; its presence on disk
+    // does not establish that asynchronous logout/admission cleanup ended.
+    wait_logged_out(port);
     // Reconnect: the same totals must still hold on disk and in game.
     let (mut client2, _) = join(port, "Keeper016");
     let after = read_json(&inventory_path).expect("inventory must exist after rejoin");
@@ -404,17 +514,16 @@ fn add016_cursor_items_survive_disconnect_with_chest_open() {
 
     // Clean shutdown.
     {
-        let mut stdin = server.stdin.take().unwrap();
+        let mut stdin = server.child.stdin.take().unwrap();
         stdin.write_all(b"/stop\n").unwrap();
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if let Some(status) = server.try_wait().unwrap() {
+        if let Some(status) = server.child.try_wait().unwrap() {
             assert!(status.success(), "server must stop cleanly: {status}");
             break;
         }
         assert!(Instant::now() < deadline, "server did not stop in time");
         std::thread::sleep(Duration::from_millis(100));
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
