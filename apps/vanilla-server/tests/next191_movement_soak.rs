@@ -16,9 +16,13 @@
 //!   * clean /stop persists the final position (no poisoned state after
 //!     the soak);
 //!   * the correction count is printed for the issue trail.
-use legacy_protocol::{read_frame, read_varint, write_string, write_varint};
+#[path = "support/packet_client.rs"]
+mod packet_client;
+
+use legacy_protocol::{write_string, write_varint};
+use packet_client::BufferedClient;
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -83,8 +87,8 @@ impl Server {
         Server { child, root, port }
     }
 
-    fn connect(&self, name: &str) -> TcpStream {
-        let mut socket = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+    fn connect(&self, name: &str) -> BufferedClient {
+        let mut socket = BufferedClient::new(TcpStream::connect(("127.0.0.1", self.port)).unwrap());
         socket
             .set_read_timeout(Some(Duration::from_millis(250)))
             .unwrap();
@@ -119,20 +123,8 @@ fn frame(id: u32, data: &[u8]) -> Vec<u8> {
     message
 }
 
-fn pump(socket: &mut TcpStream) -> Option<(u32, Vec<u8>)> {
-    match read_frame(socket) {
-        Ok(packet) => {
-            let mut raw = packet.as_slice();
-            let id = read_varint(&mut raw).expect("packet id");
-            Some((id, raw.to_vec()))
-        }
-        Err(error)
-            if error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut =>
-        {
-            None
-        }
-        Err(error) => panic!("unexpected socket error: {error}"),
-    }
+fn pump(socket: &mut BufferedClient) -> Option<(u32, Vec<u8>)> {
+    socket.poll_packet().expect("read Protocol 5 packet")
 }
 
 fn read_position(body: &[u8]) -> [f64; 3] {

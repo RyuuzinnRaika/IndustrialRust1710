@@ -17,7 +17,11 @@
 //!
 //! Real 1.7.10 client acceptance: NOT_RUN (headless host; the packets are
 //! protocol-level and verified directly on the wire).
-use legacy_protocol::{read_frame, read_varint, write_string, write_varint};
+#[path = "support/packet_client.rs"]
+mod packet_client;
+
+use legacy_protocol::{write_string, write_varint};
+use packet_client::BufferedClient;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -85,8 +89,8 @@ impl Server {
         Server { child, root, port }
     }
 
-    fn connect(&self, name: &str) -> TcpStream {
-        let mut socket = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+    fn connect(&self, name: &str) -> BufferedClient {
+        let mut socket = BufferedClient::new(TcpStream::connect(("127.0.0.1", self.port)).unwrap());
         socket
             .set_read_timeout(Some(Duration::from_millis(250)))
             .unwrap();
@@ -122,25 +126,17 @@ fn frame(id: u32, data: &[u8]) -> Vec<u8> {
 }
 
 /// Read one frame, treating a read timeout as "no packet right now".
-fn pump(socket: &mut TcpStream) -> Option<(u32, Vec<u8>)> {
-    match read_frame(socket) {
-        Ok(packet) => {
-            let mut raw = packet.as_slice();
-            let id = read_varint(&mut raw).expect("packet id");
-            Some((id, raw.to_vec()))
-        }
-        Err(error)
-            if error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut =>
-        {
-            None
-        }
+#[track_caller]
+fn pump(socket: &mut BufferedClient) -> Option<(u32, Vec<u8>)> {
+    match socket.poll_packet() {
+        Ok(packet) => packet,
         Err(error) => panic!("unexpected socket error: {error}"),
     }
 }
 
 /// Drain the join burst (echoing KeepAlive) until S08; return entity id and
 /// authoritative position from the join sequence.
-fn await_join(socket: &mut TcpStream, who: &str) -> (i32, [f64; 3]) {
+fn await_join(socket: &mut BufferedClient, who: &str) -> (i32, [f64; 3]) {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut entity_id = None;
     loop {
@@ -180,6 +176,54 @@ fn position_packet(x: f64, feet_y: f64, z: f64) -> Vec<u8> {
 
 fn chat_packet(message: &str) -> Vec<u8> {
     frame(1, &mc_string(message))
+}
+
+#[test]
+fn next012_packet_reader_retains_partial_frame_across_timeout() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let payload = vec![0; 32 * 1024];
+    let message = frame(0x21, &payload);
+    let (prefix_written, prefix_ready) = std::sync::mpsc::sync_channel(1);
+    let (release_tail, tail_released) = std::sync::mpsc::sync_channel(1);
+    let (finish, finished) = std::sync::mpsc::sync_channel(1);
+    let peer = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_nodelay(true).unwrap();
+        // The complete length and ID arrive, followed by only part of the
+        // body. The remainder cannot arrive until both polls below finish.
+        stream.write_all(&message[..32]).unwrap();
+        prefix_written.send(()).unwrap();
+        if tail_released.recv_timeout(Duration::from_secs(5)).is_ok() {
+            stream.write_all(&message[32..]).unwrap();
+            // Keep EOF from obscuring the framing assertion on either side.
+            let _ = finished.recv_timeout(Duration::from_secs(5));
+        }
+    });
+    let mut client = BufferedClient::new(TcpStream::connect(address).unwrap());
+    client
+        .set_read_timeout(Some(Duration::from_millis(30)))
+        .unwrap();
+    prefix_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(pump(&mut client).is_none());
+    // A resumable reader may first report an incomplete read. With the peer
+    // still gated, this next poll necessarily crosses a receive timeout too.
+    assert!(pump(&mut client).is_none());
+    release_tail.send(()).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let packet = loop {
+        assert!(
+            Instant::now() < deadline,
+            "fragmented frame never completed"
+        );
+        if let Some(packet) = pump(&mut client) {
+            break packet;
+        }
+    };
+    assert_eq!(packet, (0x21, payload));
+    finish.send(()).unwrap();
+    peer.join().unwrap();
 }
 
 #[test]
