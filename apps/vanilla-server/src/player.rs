@@ -350,6 +350,22 @@ mod tests {
         assert_ne!(verified, PlayerPosition::location(world, "Operator"));
         assert!(PlayerPosition::authenticated_location(world, "../danger").is_err());
     }
+
+    /// NEXT-007 / #990: the offline PlayerData path folds the login name to
+    /// ascii lowercase, so every case spelling of one account shares exactly
+    /// one save file and nothing forks by text case.
+    #[test]
+    fn next007_name_case_variants_share_one_offline_save_path() {
+        let world = Path::new("world/flat.irw");
+        let canonical = PlayerPosition::location(world, "next007tester");
+        for spelling in ["Next007Tester", "NEXT007TESTER", "nExT007tEstEr"] {
+            assert_eq!(
+                PlayerPosition::location(world, spelling),
+                canonical,
+                "case variant {spelling:?} must not fork the offline save"
+            );
+        }
+    }
     #[test]
     fn rejects_invalid_locations() {
         assert!(PlayerPosition::default().is_valid());
