@@ -957,6 +957,58 @@ fn native_1710_packet_stats_report_is_anonymous_and_per_type() {
     }
 }
 
+/// NEXT-018 / #1001: chunk congestion must never serialise the server.
+/// Six logins spawn concurrently with sockets nobody ever reads (150
+/// chunk encodes race the shared bounded compression queue and their
+/// session threads block on the unread sockets), while two active
+/// sessions keep talking: a chat line must reach the other active
+/// player far inside the notification deadline and commands must keep
+/// being answered — every connection survives the storm.
+#[test]
+fn native_1710_chunk_congestion_never_starves_active_sessions() {
+    let server = NativeServer::start();
+    let (mut alice, _, _) = server.join("TwinAlpha");
+    let (mut carol, _, _) = server.join("TwinBeta");
+
+    // Six more spawns, then never read a single frame from them.
+    let stalled: Vec<_> = (0..6)
+        .map(|index| server.connect(&format!("Load{index}")))
+        .collect();
+
+    // Chat issued in the middle of the spawn storm must reach the other
+    // active session on a notification-grade deadline, not a 25 s one.
+    let started = Instant::now();
+    alice
+        .write_all(&frame(1, &mc_string("congestion probe")))
+        .unwrap();
+    until_packet(&mut carol, 2, |body| {
+        body.windows(10).any(|window| window == b"congestion")
+    });
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "chat took {:?} to fan out during the chunk storm",
+        started.elapsed()
+    );
+
+    // Both active connections survive and stay responsive throughout.
+    alice.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    until_packet(&mut alice, 2, |body| {
+        body.windows(8).any(|window| window == b"Online (")
+    });
+
+    // Releasing the stalled sockets drains the server cleanly.
+    drop(stalled);
+    alice
+        .write_all(&frame(1, &mc_string("after drain")))
+        .unwrap();
+    until_packet(&mut carol, 2, |body| {
+        body.windows(11).any(|window| window == b"after drain")
+    });
+    drop(alice);
+    drop(carol);
+    server.wait_idle();
+}
+
 #[test]
 fn native_1710_minecart_checkpoint_keeps_survival_session_and_movement_alive() {
     let server = NativeServer::start_with_mode(true);
