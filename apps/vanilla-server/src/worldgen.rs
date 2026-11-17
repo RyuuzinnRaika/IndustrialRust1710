@@ -1968,4 +1968,97 @@ mod tests {
             dungeon_loot(seed, cx + 2, cy + 1, cz)
         );
     }
+
+    /// REG-172 / #808: ravines are one candidate per 128x128 region and must
+    /// be evaluated against neighbouring regions so cliffs never terminate at
+    /// a seam. Pin corridor continuity across a 128-block region seam and an
+    /// ordinary 16-block chunk seam for a fixed seed, with a roof above the
+    /// band, and pin that liquid bucket edits inside the canyon survive
+    /// save/reload while both seam-adjacent chunk packets restore byte-for-byte.
+    #[test]
+    fn reg172_ravines_cross_region_and_chunk_seams_without_breaks() {
+        let seed = 42u64;
+        // The ravine band is y 20..=51 and its geometry ignores y inside the
+        // band, so sample the middle row and check the roof above it.
+        let pair = |x0: i32, x1: i32, z: i32| ravine(seed, x0, 36, z) && ravine(seed, x1, 36, z);
+        let full = |x0: i32, x1: i32, z: i32| {
+            pair(x0, x1, z)
+                && cave(seed, x0, 36, z)
+                && cave(seed, x1, 36, z)
+                && block(seed, Dimension::Overworld, x0, 36, z) == AIR
+                && block(seed, Dimension::Overworld, x1, 36, z) == AIR
+                && block(seed, Dimension::Overworld, x0, 52, z) != AIR
+                && block(seed, Dimension::Overworld, x1, 52, z) != AIR
+        };
+        let mut region = None;
+        let mut chunk = None;
+        'scan: for k in -8..=16 {
+            let seam = k * 16;
+            for z in -400..800 {
+                if full(seam - 1, seam, z) {
+                    if seam % 128 == 0 {
+                        region.get_or_insert((seam, z));
+                    } else {
+                        chunk.get_or_insert((seam, z));
+                    }
+                }
+                if region.is_some() && chunk.is_some() {
+                    break 'scan;
+                }
+            }
+        }
+        let (rseam, rz) =
+            region.expect("seed 42 must carve a ravine across a 128-block region seam");
+        let (cseam, cz) = chunk.expect("seed 42 must carve a ravine across an ordinary chunk seam");
+        // Vertical band continuity at the region seam: not one slice missing.
+        for y in 20..=51 {
+            assert!(
+                ravine(seed, rseam - 1, y, rz) && ravine(seed, rseam, y, rz),
+                "ravine broke at region seam x={rseam} y={y} z={rz}"
+            );
+            assert_eq!(block(seed, Dimension::Overworld, rseam - 1, y, rz), AIR);
+            assert_eq!(block(seed, Dimension::Overworld, rseam, y, rz), AIR);
+        }
+        // Same for the plain chunk seam.
+        for y in 20..=51 {
+            assert!(
+                ravine(seed, cseam - 1, y, cz) && ravine(seed, cseam, y, cz),
+                "ravine broke at chunk seam x={cseam} y={y} z={cz}"
+            );
+        }
+
+        use crate::world::World;
+        let path = std::env::temp_dir().join(format!("ir1710-reg172-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::expanded(seed, Dimension::Overworld);
+        world.save_new(&path).unwrap();
+        assert_eq!(world.get(rseam - 1, 36, rz), 0);
+        assert_eq!(world.get(rseam, 36, rz), 0);
+        // One liquid bucket on each side of the region seam inside the canyon.
+        world
+            .update_and_save(&path, rseam - 1, 36, rz, 10 << 4)
+            .unwrap();
+        world.update_and_save(&path, rseam, 36, rz, 9 << 4).unwrap();
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(rseam - 1, 36, rz), 10 << 4);
+        assert_eq!(restored.get(rseam, 36, rz), 9 << 4);
+        // The untouched corridor keeps flowing across the seam after reload.
+        for y in 20..=51 {
+            if y == 36 {
+                continue;
+            }
+            assert_eq!(restored.get(rseam - 1, y, rz), 0);
+            assert_eq!(restored.get(rseam, y, rz), 0);
+        }
+        // Both seam-adjacent chunk packets restore byte-for-byte from disk.
+        for cx in [(rseam - 1).div_euclid(16), rseam.div_euclid(16)] {
+            assert_eq!(
+                restored.chunk_data(cx, rz.div_euclid(16)),
+                world.chunk_data(cx, rz.div_euclid(16)),
+                "seam chunk ({cx}, {}) drifted across save/reload",
+                rz.div_euclid(16)
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 }
