@@ -54,6 +54,7 @@ mod multiplayer;
 mod native_tile_export;
 mod navigation;
 mod online_auth;
+mod packet_stats;
 mod physics;
 mod player;
 mod save_replace;
@@ -423,16 +424,40 @@ fn parse_anvil_name(payload: &[u8]) -> Option<String> {
 }
 
 fn receive(s: &mut Connection) -> io::Result<(i32, Vec<u8>)> {
-    let data = read_frame(s)?;
+    let data = match read_frame(s) {
+        Ok(data) => data,
+        Err(error) => {
+            if error.kind() == ErrorKind::InvalidData {
+                packet_stats::GLOBAL.rejected(packet_stats::Reject::MalformedFrame);
+            }
+            return Err(error);
+        }
+    };
     let mut r = Input(&data);
-    let id = r.varint()?;
+    let id = match r.varint() {
+        Ok(id) => id,
+        Err(error) => {
+            if error.kind() == ErrorKind::InvalidData {
+                packet_stats::GLOBAL.rejected(packet_stats::Reject::MalformedFrame);
+            }
+            return Err(error);
+        }
+    };
+    packet_stats::GLOBAL.record(
+        packet_stats::Direction::Inbound,
+        i64::from(id),
+        packet_stats::frame_wire_len(data.len()),
+    );
     Ok((id, r.0.to_vec()))
 }
 fn send(s: &mut Connection, id: u32, body: &[u8]) -> io::Result<()> {
     let mut packet = Vec::with_capacity(5 + body.len());
     write_varint(id, &mut packet);
     packet.extend_from_slice(body);
-    write_frame(s, &packet)
+    let wire_bytes = packet_stats::frame_wire_len(packet.len());
+    write_frame(s, &packet)?;
+    packet_stats::GLOBAL.record(packet_stats::Direction::Outbound, i64::from(id), wire_bytes);
+    Ok(())
 }
 fn as_chat(s: &mut Connection, message: &str) -> io::Result<()> {
     let mut bytes = Vec::new();
@@ -445,6 +470,7 @@ fn chat_event(message: &str) -> io::Result<Event> {
     Ok(Event { id: 0x02, body })
 }
 fn login_disconnect(s: &mut Connection, reason: &str) -> io::Result<()> {
+    packet_stats::GLOBAL.rejected(packet_stats::Reject::Login);
     let mut payload = Vec::new();
     write_string(&json!({"text":reason}).to_string(), &mut payload)?;
     send(s, 0x00, &payload)
@@ -3260,10 +3286,28 @@ fn play(
             Ok(Some(packet)) => packet,
             Ok(None) => continue,
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(()),
-            Err(e) => return Err(e),
+            Err(e) => {
+                if e.kind() == ErrorKind::InvalidData {
+                    packet_stats::GLOBAL.rejected(packet_stats::Reject::MalformedFrame);
+                }
+                return Err(e);
+            }
         };
         let mut input = Input(&data);
-        let id = input.varint()?;
+        let id = match input.varint() {
+            Ok(id) => id,
+            Err(error) => {
+                if error.kind() == ErrorKind::InvalidData {
+                    packet_stats::GLOBAL.rejected(packet_stats::Reject::MalformedFrame);
+                }
+                return Err(error);
+            }
+        };
+        packet_stats::GLOBAL.record(
+            packet_stats::Direction::Inbound,
+            i64::from(id),
+            packet_stats::frame_wire_len(data.len()),
+        );
         if trace_keepalive {
             last_client_packet_at = Instant::now();
             last_client_packet_id = Some(id);
@@ -3781,6 +3825,7 @@ fn play(
                 let message = input.string(100)?;
                 input.finish()?;
                 if let Err(disconnect) = chat_limiter.check(&message) {
+                    packet_stats::GLOBAL.rejected(packet_stats::Reject::Chat);
                     if disconnect {
                         let mut reason = Vec::new();
                         write_string(
@@ -9986,6 +10031,10 @@ fn main() -> io::Result<()> {
     // Furnace simulation is driven by the same monotonic 20Hz clock as the
     // server world. It runs without connected players; it never replays
     // wall-clock downtime after the process was stopped.
+    // NEXT-020: the anonymous per-packet-type traffic profile is flushed at
+    // shutdown beside the tick-metrics sidecar (counters only, no personal
+    // information ever enters it).
+    packet_stats::set_report_path(path.with_extension("packets.jsonl"));
     let furnace_worker = Arc::clone(&furnaces);
     let furnace_file = Arc::clone(&furnace_path);
     let furnace_clock = Arc::clone(&clock);
@@ -11098,14 +11147,17 @@ fn main() -> io::Result<()> {
         // Rate limit before accessing disk so repeated banned connections cannot
         // turn into an unlimited JSON parsing workload.
         let Some(ip_permit) = limiter.acquire(peer_ip) else {
+            packet_stats::GLOBAL.rejected(packet_stats::Reject::Admission);
             continue;
         };
         // Corrupt or missing BAN databases fail closed before thread creation.
         if administration.ip_banned(peer_ip).unwrap_or(true) {
+            packet_stats::GLOBAL.rejected(packet_stats::Reject::Admission);
             continue;
         }
         if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             connections.fetch_sub(1, Ordering::AcqRel);
+            packet_stats::GLOBAL.rejected(packet_stats::Reject::Admission);
             continue;
         }
         let admission = ConnectionGuard(Arc::clone(&connections));
@@ -11347,6 +11399,11 @@ fn main() -> io::Result<()> {
         return Err(io::Error::other(format!(
             "shutdown saved state, but worker panicked: {worker}"
         )));
+    }
+    // Sessions and workers are quiescent: persist the final anonymous
+    // per-packet-type traffic profile (NEXT-020) before announcing success.
+    if let Err(error) = packet_stats::write_report() {
+        eprintln!("PACKET STATS WRITE ERROR: {error}");
     }
     println!("Server safely stopped; player sessions, workers and persistent state flushed.");
     Ok(())

@@ -75,6 +75,7 @@ impl NativeServer {
         let whitelist = json!([
             {"name":"RustTester"}, {"name":"Positioner"},
             {"name":"TwinAlpha"}, {"name":"TwinBeta"}, {"name":"ChunkScout"},
+            {"name":"StatScout"},
             {"name":"Load0"}, {"name":"Load1"}, {"name":"Load2"}, {"name":"Load3"},
             {"name":"Load4"}, {"name":"Load5"}, {"name":"Load6"}, {"name":"Load7"},
             {"name":"Load8"}
@@ -881,6 +882,79 @@ fn native_1710_batch_boundary_chunk_frames_are_independent_zlib_streams() {
     });
     drop(second);
     server.wait_idle();
+}
+
+/// NEXT-020 / #1003: the server must persist a cumulative traffic profile
+/// keyed only by direction and 1.7.10 packet id, plus fixed reject
+/// categories. A real join with a canary chat line and one rejected login
+/// run through the actual choke points; after a genuine /stop the
+/// flat.packets.jsonl sidecar must show the observed chunk/chat/login ids
+/// and the login reject count — while the raw report text contains neither
+/// the canary name, the chat text, nor the peer address.
+#[test]
+fn native_1710_packet_stats_report_is_anonymous_and_per_type() {
+    let mut server = NativeServer::start();
+    let (mut client, _, _) = server.join("StatScout");
+    client
+        .write_all(&frame(1, &mc_string("hello PacketCanary")))
+        .unwrap();
+    until_packet(&mut client, 2, |body| {
+        body.windows(12).any(|window| window == b"PacketCanary")
+    });
+    drop(client);
+    server.wait_idle();
+
+    // A malformed name receives an explicit Login Disconnect and counts as
+    // one rejected login.
+    let mut rejected = server.connect("ab");
+    assert_eq!(receive(&mut rejected).0, 0, "invalid name must be rejected");
+    drop(rejected);
+    server.wait_idle();
+
+    server
+        .process
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/stop\n")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let exit = loop {
+        if let Some(exit) = server.process.try_wait().unwrap() {
+            break exit;
+        }
+        assert!(Instant::now() < deadline, "/stop left workers running");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(exit.success(), "graceful /stop failed: {exit}");
+
+    let path = server.directory.join("flat.packets.jsonl");
+    let raw = fs::read_to_string(&path).expect("packet stats sidecar missing");
+    let row: Value = serde_json::from_str(raw.trim_end()).expect("packet stats row is JSON");
+    assert_eq!(row["kind"], "packet_stats");
+    assert_eq!(row["schema_version"], 1);
+    // Map Chunk was the bulk of this session's spawn.
+    assert!(row["packets"]["33"]["outbound"]["frames"].as_u64().unwrap() >= 25);
+    // The chat line and the two login starts are counted under their ids.
+    assert!(row["packets"]["1"]["inbound"]["frames"].as_u64().unwrap() >= 1);
+    assert!(row["packets"]["0"]["inbound"]["frames"].as_u64().unwrap() >= 3);
+    assert!(row["packets"]["0"]["outbound"]["frames"].as_u64().unwrap() >= 1);
+    assert!(row["rejects"]["login"].as_u64().unwrap() >= 1);
+    assert_eq!(row["rejects"]["queue_overflow"], 0);
+
+    // Anonymity: the report is counters only, byte-for-byte.
+    for forbidden in [
+        "StatScout",
+        "stat scout",
+        "PacketCanary",
+        "hello",
+        "127.0.0.1",
+    ] {
+        assert!(
+            !raw.contains(forbidden),
+            "packet stats report leaked personal data {forbidden:?}"
+        );
+    }
 }
 
 #[test]
