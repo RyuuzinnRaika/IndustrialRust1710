@@ -215,6 +215,7 @@ impl NativeServer {
         }
         server
     }
+    #[track_caller]
     fn client(&self) -> TcpStream {
         let addr = SocketAddr::from(([127, 0, 0, 1], self.port));
         let socket = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).unwrap();
@@ -227,6 +228,7 @@ impl NativeServer {
         socket.set_nodelay(true).unwrap();
         socket
     }
+    #[track_caller]
     fn status(&self) -> Value {
         let mut socket = self.client();
         socket.write_all(&handshake(self.port, 1)).unwrap();
@@ -238,6 +240,7 @@ impl NativeServer {
         cursor.finish().unwrap();
         status
     }
+    #[track_caller]
     fn status_ping(&self, token: i64) -> Duration {
         let mut socket = self.client();
         socket.write_all(&handshake(self.port, 1)).unwrap();
@@ -257,6 +260,7 @@ impl NativeServer {
         assert_eq!(echoed, payload, "Ping Response must echo the exact token");
         elapsed
     }
+    #[track_caller]
     fn wait_idle(&self) {
         let deadline = Instant::now() + Duration::from_secs(9);
         while self.status()["players"]["online"].as_u64() != Some(0) {
@@ -264,12 +268,14 @@ impl NativeServer {
             thread::sleep(Duration::from_millis(40));
         }
     }
+    #[track_caller]
     fn connect(&self, name: &str) -> TcpStream {
         let mut socket = self.client();
         socket.write_all(&handshake(self.port, 2)).unwrap();
         socket.write_all(&frame(0, &mc_string(name))).unwrap();
         socket
     }
+    #[track_caller]
     fn join(&self, name: &str) -> (TcpStream, i32, [f64; 3]) {
         let mut socket = self.connect(name);
         let (pid, body) = receive(&mut socket);
@@ -341,6 +347,23 @@ impl NativeServer {
 impl Drop for NativeServer {
     fn drop(&mut self) {
         let failed = thread::panicking();
+        if failed {
+            eprintln!(
+                "retaining failed native server fixture: {}; stderr: {}",
+                self.directory.display(),
+                self.stderr_path.display()
+            );
+            // The client can observe EOF/reset just before the server logs
+            // its failure. Give that report a bounded opportunity to arrive
+            // before hard-killing the child, without requesting extra saves.
+            let deadline = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < deadline {
+                if !matches!(self.process.try_wait(), Ok(None)) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
         let exit_status = if failed {
             self.process.try_wait().ok().flatten()
         } else {
@@ -349,13 +372,15 @@ impl Drop for NativeServer {
         self.stop();
         if failed {
             // libtest prints captured diagnostics only for failing cases.
-            // Include a bounded stderr tail before deleting the temp world.
+            // Keep the disposable world and full log for later inspection,
+            // while printing only a bounded stderr tail here.
             let stderr = fs::read(&self.stderr_path).unwrap_or_default();
             let tail = stderr.len().saturating_sub(16 * 1024);
             eprintln!(
                 "native server exit before cleanup: {exit_status:?}; stderr tail:\n{}",
                 String::from_utf8_lossy(&stderr[tail..])
             );
+            return;
         }
         let _ = fs::remove_dir_all(&self.directory);
         let _ = fs::remove_file(&self.stderr_path);
@@ -385,6 +410,7 @@ fn handshake(port: u16, state: u32) -> Vec<u8> {
     payload.extend_from_slice(&vi(state));
     frame(0, &payload)
 }
+#[track_caller]
 fn receive(socket: &mut TcpStream) -> (u32, Vec<u8>) {
     let packet = read_frame(socket).expect("read Protocol 5 frame");
     let mut raw = packet.as_slice();
@@ -465,6 +491,7 @@ fn await_file(path: &Path) {
         thread::sleep(Duration::from_millis(40));
     }
 }
+#[track_caller]
 fn send_position(s: &mut TcpStream, x: f64, y: f64, z: f64) {
     let mut data = Vec::new();
     // Vanilla Minecraft 1.7.10 C04PacketPlayerPosition: X, feet Y, stance, Z.
@@ -476,6 +503,7 @@ fn send_position(s: &mut TcpStream, x: f64, y: f64, z: f64) {
     s.write_all(&frame(4, &data)).unwrap();
 }
 
+#[track_caller]
 fn send_position_and_look(s: &mut TcpStream, x: f64, y: f64, z: f64) {
     let mut data = Vec::new();
     // Vanilla 1.7.10 C06PacketPlayerPosLook: X, feet Y, stance, Z, yaw, pitch, onGround.
@@ -487,6 +515,7 @@ fn send_position_and_look(s: &mut TcpStream, x: f64, y: f64, z: f64) {
     data.push(1);
     s.write_all(&frame(6, &data)).unwrap();
 }
+#[track_caller]
 fn send_fragments(s: &mut TcpStream, packet: &[u8], pieces: &[usize]) {
     let mut index = 0;
     for &count in pieces {
