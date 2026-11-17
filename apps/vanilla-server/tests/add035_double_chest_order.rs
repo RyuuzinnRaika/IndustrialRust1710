@@ -188,7 +188,29 @@ fn packet_string(payload: &[u8]) -> &str {
     std::str::from_utf8(&payload[prefix..]).expect("packet string must be UTF-8")
 }
 
-fn spawn_server(tag: &str) -> (Child, std::path::PathBuf, u16) {
+struct TestServer {
+    child: Child,
+    directory: std::path::PathBuf,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+        if std::thread::panicking() {
+            eprintln!(
+                "retaining failed ADD-035 fixture and server-stderr.log: {}",
+                self.directory.display()
+            );
+        } else {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+}
+
+fn spawn_server(tag: &str) -> (TestServer, std::path::PathBuf, u16) {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -207,7 +229,14 @@ fn spawn_server(tag: &str) -> (Child, std::path::PathBuf, u16) {
         .stderr(Stdio::from(stderr))
         .spawn()
         .unwrap();
-    (child, dir, port)
+    (
+        TestServer {
+            child,
+            directory: dir.clone(),
+        },
+        dir,
+        port,
+    )
 }
 
 fn wait_port(port: u16) {
@@ -462,12 +491,12 @@ fn add035_double_chest_order_survives_reconnect_and_half_loss() {
     // clean stop, the chest store must key the cobble under the west
     // half's coordinates and the stone under the east half's.
     {
-        let mut stdin = server.stdin.take().unwrap();
+        let mut stdin = server.child.stdin.take().unwrap();
         stdin.write_all(b"/stop\n").unwrap();
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if let Some(status) = server.try_wait().unwrap() {
+        if let Some(status) = server.child.try_wait().unwrap() {
             assert!(status.success(), "server must stop cleanly: {status}");
             break;
         }
@@ -482,5 +511,4 @@ fn add035_double_chest_order_survives_reconnect_and_half_loss() {
     assert_eq!(west[0]["count"].as_i64(), Some(10));
     assert_eq!(east[0]["id"].as_i64(), Some(1));
     assert_eq!(east[0]["count"].as_i64(), Some(7));
-    let _ = std::fs::remove_dir_all(&dir);
 }
