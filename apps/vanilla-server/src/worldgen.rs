@@ -2245,4 +2245,109 @@ mod tests {
         }
         std::fs::remove_file(path).unwrap();
     }
+
+    /// REG-175 / #811: a village footprint spans several chunks by design, so
+    /// loading it from split, order-different chunk batches must never lose
+    /// roads, houses, doors or the well, and must never roll back existing
+    /// player edits. Pin center-first vs edge-first packet builds, a
+    /// save/reload round trip, live door resolution and one road-cell edit
+    /// that survives every rebuild.
+    #[test]
+    fn reg175_village_split_chunk_orders_reload_without_loss() {
+        let seed = 42u64;
+        let mut center = None;
+        'cells: for gx in -4..=4 {
+            for gz in -4..=4 {
+                if let Some(found) = village_center(seed, gx * 192 + 48, gz * 192 + 48) {
+                    center = Some(found);
+                    break 'cells;
+                }
+            }
+        }
+        let (cx, base, cz) = center.expect("seed 42 generates villages");
+        use crate::world::World;
+        let path = std::env::temp_dir().join(format!("ir1710-reg175-{}.irw", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut world = World::expanded(seed, Dimension::Overworld);
+        world.save_new(&path).unwrap();
+        // Collect every chunk touched by the ±31x ±26 village footprint and
+        // order them from the centre chunk outward.
+        let mut chunks = std::collections::BTreeSet::new();
+        for x in cx - 31..=cx + 31 {
+            for z in cz - 26..=cz + 26 {
+                chunks.insert((x.div_euclid(16), z.div_euclid(16)));
+            }
+        }
+        let chunks: Vec<(i32, i32)> = chunks.into_iter().collect::<Vec<_>>();
+        assert!(
+            chunks.len() >= 9,
+            "the village must straddle several chunks, got {}",
+            chunks.len()
+        );
+        let center_chunk = (cx.div_euclid(16), cz.div_euclid(16));
+        let mut ordered = chunks.clone();
+        ordered.sort_by_key(|c| {
+            (c.0 - center_chunk.0)
+                .abs()
+                .max((c.1 - center_chunk.1).abs())
+        });
+        let mut center_first = std::collections::BTreeMap::new();
+        for c in &ordered {
+            center_first.insert(*c, world.chunk_data(c.0, c.1));
+        }
+        // A second instance loaded edge-first must produce identical packets.
+        let edge_world = World::expanded(seed, Dimension::Overworld);
+        for c in ordered.iter().rev() {
+            let packet = edge_world.chunk_data(c.0, c.1);
+            assert_eq!(
+                packet, center_first[c],
+                "chunk {c:?} of the village changed with the split load order"
+            );
+        }
+        // Structure content is really there: both generated doors stand with
+        // a valid lower/upper half pair, the well holds water, the farm has
+        // wheat and the road is gravel.
+        let doors = village_house_doors(seed, cx, cz).expect("doors inside footprint");
+        for [dx, dy, dz] in doors {
+            assert_eq!(world.get(dx, dy, dz) >> 4, 64);
+            assert_eq!(world.get(dx, dy + 1, dz) >> 4, 64);
+        }
+        assert_eq!(world.get(cx, base + 1, cz) >> 4, 9);
+        assert_eq!(world.get(cx + 12, base + 1, cz - 15) >> 4, 59);
+        assert_eq!(world.get(cx + 12, base, cz - 15), state(60, 7));
+        assert_eq!(world.get(cx + 27, base, cz) >> 4, 13);
+        let live = world
+            .live_village_house_doors(cx, cz)
+            .expect("live village resolves");
+        assert_eq!(live, [Some(doors[0]), Some(doors[1])]);
+
+        // An existing player edit inside the footprint must survive the same
+        // save/reload/rebuild cycle untouched.
+        world
+            .update_and_save(&path, cx + 27, base, cz, 1 << 4)
+            .unwrap();
+        let restored = World::load(&path).unwrap();
+        assert_eq!(restored.get(cx + 27, base, cz), 1 << 4);
+        for c in &chunks {
+            assert_eq!(
+                restored.chunk_data(c.0, c.1),
+                world.chunk_data(c.0, c.1),
+                "reloaded chunk {c:?} lost edits or structures"
+            );
+        }
+        // Structures around the edit still match the pure point generator,
+        // and the doors remain live village goals after the reload.
+        for [dx, dy, dz] in doors {
+            assert_eq!(
+                restored.get(dx, dy, dz),
+                block(seed, Dimension::Overworld, dx, dy, dz)
+            );
+        }
+        assert_eq!(restored.get(cx, base + 1, cz) >> 4, 9);
+        let live = restored
+            .live_village_house_doors(cx, cz)
+            .expect("reloaded village still resolves");
+        assert_eq!(live, [Some(doors[0]), Some(doors[1])]);
+        std::fs::remove_file(path).unwrap();
+    }
 }
