@@ -343,6 +343,40 @@ impl<'a> Input<'a> {
 mod server_input_utf16_tests {
     use super::*;
 
+    /// NEXT-098 / #1081: Protocol 5 encodes item count in a single byte.
+    /// Negative signed-byte values (0x80..0xff) are never valid stacks,
+    /// even when the rest of the Creative packet is well-formed.
+    #[test]
+    fn next098_negative_creative_count_and_discard_slot_never_change_inventory() {
+        let valid = Stack {
+            id: 264, // diamond; a legitimate, stackable item
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let mut inventory = Inventory::default();
+        let before = inventory.clone();
+        for slot in [-1i16, i16::MIN] {
+            assert!(!inventory.creative_set(slot, Some(valid)).unwrap());
+            assert_eq!(inventory, before, "discard slot {slot}");
+        }
+
+        for count in [0x80u8, 0xffu8] {
+            let mut wire = 264i16.to_be_bytes().to_vec();
+            wire.push(count);
+            wire.extend_from_slice(&0i16.to_be_bytes()); // metadata
+            wire.extend_from_slice(&(-1i16).to_be_bytes()); // no NBT
+            let mut input = Input(&wire);
+            assert_eq!(
+                input.creative_slot().unwrap(),
+                None,
+                "negative signed-byte count {count:#04x} must be rejected"
+            );
+            input.finish().unwrap();
+            assert_eq!(inventory, before);
+        }
+    }
+
     #[test]
     fn protocol5_server_input_uses_java_utf16_string_limits() {
         // Java String.length counts UTF-16 code units. Eight supplementary
