@@ -727,6 +727,60 @@ fn console_gamemode_changes_live_protocol5_and_keeps_inventories_isolated() {
     server.wait_idle();
 }
 
+/// NEXT-010 / #993: disconnects during initial spawn determination must let
+/// the in-flight chunk encodings die with that session's socket. Three
+/// different mid-spawn aborts are performed (drop before any Play frame,
+/// drop right after Join Game, close inside the chunk stream), and a
+/// following login must still receive exactly one clean 25-chunk spawn
+/// through the strict frame/zlib validator. Any byte of an old login's
+/// generation leaking into the new stream would break the frame boundaries,
+/// the chunk count, or the spawn ordering there.
+#[test]
+fn native_1710_aborted_spawn_generation_never_reaches_next_login() {
+    let server = NativeServer::start();
+
+    // Round 1: leave right after Handshake + LoginStart, before the client
+    // reads any of the server's initial spawn output.
+    drop(server.connect("Positioner"));
+    server.wait_idle();
+
+    // Round 2: read Login Success and Join Game, then drop mid-stream while
+    // the encoder batch for this login is still running.
+    let mut socket = server.connect("Positioner");
+    assert_eq!(receive(&mut socket).0, 2, "login denied in round 2");
+    assert_eq!(receive(&mut socket).0, 1, "missing Join Game in round 2");
+    drop(socket);
+    server.wait_idle();
+
+    // Round 3: abort deep inside the chunk stream: half-read frames are
+    // already buffered in the kernel socket, so the server takes its write
+    // failure (and the peer's FIN) between chunk frames.
+    let mut socket = server.connect("Positioner");
+    assert_eq!(receive(&mut socket).0, 2, "login denied in round 3");
+    let mut chunks = 0;
+    while chunks < 3 {
+        let (pid, _) = receive(&mut socket);
+        if pid == 0x21 {
+            chunks += 1;
+        }
+    }
+    let _ = socket.shutdown(std::net::Shutdown::Write);
+    drop(socket);
+    server.wait_idle();
+
+    // The clean login sees only its own generation: the strict join helper
+    // validates Join Game, exactly 25 zlib-decoded chunks, Window Items,
+    // the hotbar selection and the terminating position packet.
+    let (mut client, _, position) = server.join("Positioner");
+    assert_eq!(position, [0.5, 64.0, 0.5]);
+    client.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    until_packet(&mut client, 2, |body| {
+        body.windows(10).any(|window| window == b"Online (1)")
+    });
+    drop(client);
+    server.wait_idle();
+}
+
 #[test]
 fn native_1710_minecart_checkpoint_keeps_survival_session_and_movement_alive() {
     let server = NativeServer::start_with_mode(true);
