@@ -28,7 +28,7 @@ def _reject_reparse_point(metadata):
     # Windows junctions can look like ordinary directories to lstat and os.walk.
     # Reject all reparse points, including types other than junctions and links.
     if getattr(metadata, "st_file_attributes", 0) & 0x400:
-        raise ValueError("backup contains a Windows reparse point")
+        raise ValueError("backup contains a symlink or Windows reparse point")
 
 
 def snapshot_hashes(root: Path) -> dict[str, str]:
@@ -112,11 +112,12 @@ def verify_restore_point(server: Path, backup: Path, timeout: int = 120, *, nati
     _reject_reparse_point(marker_metadata)
     if not stat.S_ISREG(marker_metadata.st_mode) or marker.read_bytes() != MARKER:
         raise ValueError("backup ownership marker is missing or invalid")
+    # Scan before format detection, which otherwise follows level.dat links.
+    before = snapshot_hashes(backup)
     anvil = (backup / "level.dat").is_file()
     irw_files = sorted(backup.glob("*.irw"))
     if (anvil and irw_files) or (not anvil and len(irw_files) != 1):
         raise ValueError("expected one IRW save or one Anvil level.dat, not mixed/ambiguous data")
-    before = snapshot_hashes(backup)
     with _safe_scratch_directory(backup) as scratch:
         copy = Path(scratch) / "world"
         # Preserve links, *never dereference* them; the next scan rejects any.

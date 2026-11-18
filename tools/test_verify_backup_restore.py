@@ -2,6 +2,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -189,6 +190,44 @@ class RestoreDrillTests(unittest.TestCase):
                         module.verify_restore_point(self.server, self.backup)
                     copytree.assert_not_called()
                     native.assert_not_called()
+
+    def test_windows_symlink_keeps_the_existing_link_diagnostic(self):
+        target = self.backup / "players" / "user.dat"
+        real_lstat = Path.lstat
+
+        def lstat_with_windows_symlink(path, *args, **kwargs):
+            metadata = real_lstat(path, *args, **kwargs)
+            if path == target:
+                return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777,
+                                       st_size=metadata.st_size, st_file_attributes=0x400)
+            return metadata
+
+        with patch.object(Path, "lstat", new=lstat_with_windows_symlink):
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                module.verify_restore_point(self.server, self.backup)
+
+    def test_level_dat_reparse_point_is_rejected_before_format_detection(self):
+        target = self.backup / "level.dat"
+        target.write_bytes(b"synthetic")
+        real_lstat = Path.lstat
+        real_is_file = Path.is_file
+
+        def lstat_with_reparse(path, *args, **kwargs):
+            metadata = real_lstat(path, *args, **kwargs)
+            if path == target:
+                return SimpleNamespace(st_mode=metadata.st_mode, st_size=metadata.st_size,
+                                       st_file_attributes=0x400)
+            return metadata
+
+        def guard_is_file(path):
+            if path == target:
+                raise AssertionError("format detection followed a reparse point")
+            return real_is_file(path)
+
+        with patch.object(Path, "lstat", new=lstat_with_reparse), \
+             patch.object(Path, "is_file", new=guard_is_file):
+            with self.assertRaisesRegex(ValueError, "reparse"):
+                module.verify_restore_point(self.server, self.backup)
 
     @unittest.skipUnless(os.name == "nt", "Windows junction test")
     def test_windows_junction_is_rejected_without_reading_target(self):
