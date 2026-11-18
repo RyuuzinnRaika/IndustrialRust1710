@@ -35,6 +35,10 @@ impl Server {
     }
 
     fn launch() -> Self {
+        Self::launch_with_console(false)
+    }
+
+    fn launch_with_console(pipe_stdin: bool) -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -61,16 +65,19 @@ impl Server {
         let stderr_log = dir.join("server.stderr.log");
         let stderr_file = fs::File::create(&stderr_log).unwrap();
         let stdout_file = stderr_file.try_clone().unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vanilla-server"));
+        command
             .args(["--bind", "127.0.0.1:0"])
             .arg("--whitelist")
             .arg(dir.join("whitelist.json"))
             .arg("--world")
             .arg(dir.join("security.irw"))
             .stdout(Stdio::from(stdout_file))
-            .stderr(Stdio::from(stderr_file))
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::from(stderr_file));
+        if pipe_stdin {
+            command.stdin(Stdio::piped());
+        }
+        let child = command.spawn().unwrap();
         let mut server = Self {
             child,
             dir,
@@ -1075,6 +1082,106 @@ fn next198_status_request_seed_is_valid_in_status_but_rejected_in_play() {
     server.wait_online(1);
     drop(valid);
     server.wait_online(0);
+}
+
+#[test]
+fn next198_status_after_response_counts_invalid_frames_but_not_idle() {
+    // Each process sees one invalid frame or a silent idle control, never
+    // both. Shutdown flushes the server's existing malformed-frame counter.
+    // An idle WouldBlock mapped to "bad status ping" cannot increase it.
+    // Attribution assumes no third party sends malformed traffic to the
+    // fresh loopback listener while this test owns its ephemeral port.
+    let cases: &[(&str, Option<&[u8]>)] = &[
+        (
+            "zero_length",
+            Some(include_bytes!(
+                "../../../fuzz/corpus/protocol5_frames/zero_length"
+            )),
+        ),
+        (
+            "excess_varint",
+            Some(include_bytes!(
+                "../../../fuzz/corpus/protocol5_frames/excess_varint"
+            )),
+        ),
+        (
+            "invalid_fifth_byte",
+            Some(include_bytes!(
+                "../../../fuzz/corpus/protocol5_frames/invalid_fifth_byte"
+            )),
+        ),
+        (
+            "oversize_frame_header",
+            Some(include_bytes!(
+                "../../../fuzz/corpus/protocol5_frames/oversize_frame_header"
+            )),
+        ),
+        ("idle", None),
+    ];
+    for &(label, invalid) in cases {
+        let mut server = Server::launch_with_console(true);
+        let mut status = server.connect();
+        status
+            .write_all(&handshake(server.port, "localhost", 1))
+            .unwrap();
+        status.write_all(&frame(0, &[])).unwrap();
+        let mut reader = BufferedFrameReader::new();
+        let (id, body) = next198_receive_until(
+            &mut status,
+            &mut reader,
+            Instant::now() + Duration::from_secs(5),
+            label,
+        );
+        assert_eq!(id, 0, "{label}: expected Status response");
+        let mut cursor = Cursor::new(&body);
+        let response: Value = serde_json::from_str(cursor.read_string(65536).unwrap()).unwrap();
+        cursor.finish().unwrap();
+        assert_eq!(response["version"]["protocol"], 5);
+        if let Some(invalid) = invalid {
+            status.write_all(invalid).unwrap();
+        }
+        next198_must_close(status, label);
+        assert!(
+            server.child.try_wait().unwrap().is_none(),
+            "{label}: server exited"
+        );
+        server
+            .child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"/stop\n")
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(25);
+        let exit = loop {
+            if let Some(exit) = server.child.try_wait().unwrap() {
+                break exit;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{label}: graceful stop timed out"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert!(exit.success(), "{label}: graceful stop failed: {exit}");
+        let path = server.dir.join("security.packets.jsonl");
+        let raw = fs::read_to_string(path).expect("packet stats missing");
+        let row: Value = serde_json::from_str(raw.trim_end()).expect("invalid packet stats JSON");
+        let count = row["rejects"]["malformed_frame"]
+            .as_u64()
+            .expect("malformed-frame count missing");
+        assert_eq!(
+            count,
+            if invalid.is_some() { 1 } else { 0 },
+            "{label}: incorrect malformed-frame count"
+        );
+        let log = next198_read_log(&server);
+        assert!(
+            !log.contains("panicked at"),
+            "{label}: worker panicked\n{log}"
+        );
+        eprintln!("status_after_response/{label}: malformed_frame={count}");
+    }
 }
 
 #[test]
