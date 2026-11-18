@@ -8,10 +8,54 @@
 //! Real-client verification with an unmodified 1.7.10 client: NOT_RUN.
 
 use serde_json::Value;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+struct OwnedServer(Child);
+
+impl Deref for OwnedServer {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl DerefMut for OwnedServer {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for OwnedServer {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            if let Err(error) = self.0.kill() {
+                eprintln!("could not stop owned test server: {error}");
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match self.0.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Ok(None) => {
+                        eprintln!("owned test server did not exit after stop attempt");
+                        break;
+                    }
+                    Err(error) => {
+                        eprintln!("could not reap owned test server: {error}");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
 
 fn varint(value: i32) -> Vec<u8> {
     let mut out = Vec::new();
@@ -96,7 +140,14 @@ impl Client {
         let mut chunk = [0u8; 65536];
         match self.stream.read(&mut chunk) {
             Ok(n) if n > 0 => self.buffer.extend_from_slice(&chunk[..n]),
-            _ => {}
+            Ok(0) => panic!("server closed connection before the expected packet"),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
+                ) => {}
+            Err(error) => panic!("unexpected socket read failure: {error}"),
+            _ => unreachable!(),
         }
         loop {
             match try_parse_frame(&self.buffer) {
@@ -150,15 +201,22 @@ fn be_f64(data: &[u8], at: usize) -> f64 {
     f64::from_be_bytes(data[at..at + 8].try_into().unwrap())
 }
 
-fn spawn_server(tag: &str) -> (Child, std::path::PathBuf, u16) {
+fn spawn_server(tag: &str) -> (OwnedServer, PathBuf, u16) {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let dir = std::env::temp_dir().join(format!("ir1710-add029-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "ir1710-add029-{tag}-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
     std::fs::write(dir.join("whitelist.json"), r#"[{"name":"Keeper029"}]"#).unwrap();
     let stderr = std::fs::File::create(dir.join("server-stderr.log")).unwrap();
+    let stdout = std::fs::File::create(dir.join("server-stdout.log")).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_vanilla-server"))
         .args(["--bind", &format!("127.0.0.1:{port}"), "--world"])
         .arg(dir.join("flat.irw"))
@@ -166,11 +224,11 @@ fn spawn_server(tag: &str) -> (Child, std::path::PathBuf, u16) {
         .arg(dir.join("whitelist.json"))
         .arg("--survival")
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn()
         .unwrap();
-    (child, dir, port)
+    (OwnedServer(child), dir, port)
 }
 
 fn wait_port(port: u16) {
@@ -241,6 +299,102 @@ fn send_position(client: &mut Client, x: f64, feet_y: f64, z: f64) {
 
 fn held_change(client: &mut Client, hotbar_index: i16) {
     client.send(&frame(0x09, &hotbar_index.to_be_bytes()));
+}
+
+/// Put the player outside the cells being obstructed, acknowledge the S08,
+/// and prove that the session has processed the ACK before continuing.
+fn move_to_safe_location(client: &mut Client, server: &mut Child) {
+    // Drain old responses before requesting the new teleport so an earlier
+    // S08 at the same coordinates cannot satisfy the new request.
+    client.send(&frame(0x01, &mc_string("/list")));
+    client
+        .until(Duration::from_secs(10), |id, p| {
+            id == 0x02 && p.windows(10).any(|window| window == b"Online (1)")
+        })
+        .expect("session must process packets before teleport");
+    client.backlog.retain(|(id, _)| *id != 0x08);
+    console(server, "/tp Keeper029 2.5 64 2.5");
+    let position = client
+        .until(Duration::from_secs(15), |id, p| {
+            id == 0x08
+                && p.len() >= 24
+                && (be_f64(p, 0) - 2.5).abs() < 1e-6
+                && (be_f64(p, 8) - (64.0 + f64::from(1.62_f32))).abs() < 1e-6
+                && (be_f64(p, 16) - 2.5).abs() < 1e-6
+        })
+        .expect("safe-position teleport must arrive");
+    send_position(
+        client,
+        be_f64(&position, 0),
+        be_f64(&position, 8) - f64::from(1.62_f32),
+        be_f64(&position, 16),
+    );
+    // Equivalent command, but not a repeated chat message for ChatLimiter.
+    client.send(&frame(0x01, &mc_string("/list ")));
+    client
+        .until(Duration::from_secs(10), |id, p| {
+            id == 0x02 && p.windows(10).any(|window| window == b"Online (1)")
+        })
+        .expect("session must process the teleport acknowledgement");
+}
+
+fn wait_for_stone(client: &mut Client, x: i32, y: u8, z: i32) {
+    client
+        .until(Duration::from_secs(10), |id, p| {
+            id == 0x23
+                && p.len() >= 11
+                && i32::from_be_bytes(p[..4].try_into().unwrap()) == x
+                && p[4] == y
+                && i32::from_be_bytes(p[5..9].try_into().unwrap()) == z
+                && read_varint(&p[9..])
+                    .is_some_and(|(block, used)| block == 1 && p.len() >= 10 + used)
+        })
+        .unwrap_or_else(|| panic!("stone update at ({x}, {y}, {z}) not observed"));
+}
+
+fn wait_for_fall_deaths(log: &Path, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let contents = std::fs::read_to_string(log).expect("server stdout must be readable");
+        let deaths: Vec<_> = contents
+            .lines()
+            .filter(|line| line.starts_with("[death] player=Keeper029 "))
+            .collect();
+        if deaths.len() >= expected {
+            assert_eq!(deaths.len(), expected, "unexpected extra death: {deaths:?}");
+            assert!(
+                deaths.iter().all(|line| line.contains(" cause=fall ")),
+                "the test requires actual fall deaths: {deaths:?}"
+            );
+            eprintln!("verified fall death {expected}: {}", deaths[expected - 1]);
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing fall death record {expected}: {contents}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn remove_owned_fixture(dir: &Path) {
+    let temp = std::env::temp_dir().canonicalize().unwrap();
+    let resolved = dir.canonicalize().unwrap();
+    assert_eq!(
+        resolved.parent(),
+        Some(temp.as_path()),
+        "fixture must be a direct child of TEMP"
+    );
+    assert!(resolved
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("ir1710-add029-bed-respawn-")));
+    std::fs::remove_dir_all(&resolved).unwrap();
+    match std::fs::symlink_metadata(&resolved) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Ok(_) => panic!("fixture remains after removal"),
+        Err(error) => panic!("could not verify fixture removal: {error}"),
+    }
 }
 
 /// Kill the player with a long fall at (x, z): two position
@@ -319,10 +473,13 @@ fn add029_obstructed_bed_respawns_adjacent_then_world_spawn() {
     client.collect(Duration::from_secs(2));
 
     // Obstruct the standing cell above the bed foot: respawn must
-    // move to an adjacent ground-level cell, not to world spawn.
+    // move to an adjacent ground-level cell, not to world spawn. First
+    // leave the cell, so this stone cannot suffocate the test player.
+    move_to_safe_location(&mut client, &mut server);
     console(&mut server, "/setblock 0 65 0 stone");
-    client.collect(Duration::from_millis(500));
+    wait_for_stone(&mut client, 0, 65, 0);
     die_by_falling(&mut client, &mut server, 2.5, 2.5);
+    wait_for_fall_deaths(&dir.join("server-stdout.log"), 1);
     let (rx, ry, rz) = respawn(&mut client);
     // Position & Look carries feet + 1.62 in this protocol: the
     // world-spawn join value (65.62) is ground level, while standing
@@ -336,11 +493,10 @@ fn add029_obstructed_bed_respawns_adjacent_then_world_spawn() {
         (-1..=1).contains(&cx) && (-1..=1).contains(&cz) && (cx, cz) != (0, 0),
         "respawn must be beside the bed, got cell ({cx}, {cz})"
     );
+    eprintln!("verified adjacent bed respawn: ({rx}, {ry}, {rz})");
 
-    // Step out of the bed's neighborhood first: the obstruction
-    // ring is about to fill the cell the player is standing in.
-    send_position(&mut client, 2.5, 64.0, 2.5);
-    client.collect(Duration::from_millis(500));
+    // Step out and acknowledge the new position before filling the ring.
+    move_to_safe_location(&mut client, &mut server);
 
     // Obstruct every adjacent feet cell as well: only then may the
     // world-spawn fallback engage.
@@ -351,13 +507,21 @@ fn add029_obstructed_bed_respawns_adjacent_then_world_spawn() {
             }
         }
     }
-    client.collect(Duration::from_millis(500));
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            if (dx, dz) != (0, 0) {
+                wait_for_stone(&mut client, dx, 64, dz);
+            }
+        }
+    }
     die_by_falling(&mut client, &mut server, 2.5, 2.5);
+    wait_for_fall_deaths(&dir.join("server-stdout.log"), 2);
     let (rx, ry, rz) = respawn(&mut client);
     assert!(
         (rx - world_spawn.0).abs() < 1.5 && (rz - world_spawn.2).abs() < 1.5 && ry > 64.5,
         "fully obstructed bed must fall back to world spawn, got ({rx}, {ry}, {rz}) vs {world_spawn:?}"
     );
+    eprintln!("verified obstructed-bed world spawn: ({rx}, {ry}, {rz})");
 
     drop(client);
     console(&mut server, "/stop");
@@ -370,5 +534,5 @@ fn add029_obstructed_bed_respawns_adjacent_then_world_spawn() {
         assert!(Instant::now() < deadline, "server did not stop in time");
         std::thread::sleep(Duration::from_millis(100));
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_owned_fixture(&dir);
 }
