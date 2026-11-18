@@ -1,6 +1,8 @@
 //! TCP-level acceptance tests for ADD-001..010 (Protocol 5).
 //! Unit tests cover byte decoding / bounded NBT; these drive a real server.
-use legacy_protocol::{read_frame, read_varint, write_string, write_varint, Cursor};
+use legacy_protocol::{
+    read_frame, read_varint, write_string, write_varint, BufferedFrameReader, Cursor,
+};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -783,14 +785,91 @@ fn malformed_and_fragmented_protocol5_connections_are_isolated() {
     server.wait_online(0);
 }
 
+fn next198_must_close(mut socket: TcpStream, label: &str) {
+    // A single blocking read must not outlive the overall deadline.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut buf = [0; 65536];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "{label}: connection did not close");
+        socket
+            .set_read_timeout(Some(remaining.min(Duration::from_millis(200))))
+            .unwrap();
+        match socket.read(&mut buf) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                return
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) => {}
+            Err(error) => panic!("{label}: unexpected socket error: {error}"),
+        }
+    }
+}
+
+fn next198_read_log(server: &Server) -> String {
+    fs::read_to_string(&server.stderr_log).expect("failed to read test server diagnostics")
+}
+
+fn next198_receive_until(
+    socket: &mut TcpStream,
+    reader: &mut BufferedFrameReader,
+    deadline: Instant,
+    label: &str,
+) -> (u32, Vec<u8>) {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "{label}: frame deadline exceeded");
+        socket
+            .set_read_timeout(Some(remaining.min(Duration::from_millis(200))))
+            .unwrap();
+        match reader.poll(socket) {
+            Ok(Some(frame)) => {
+                let mut input = frame.as_slice();
+                let id = read_varint(&mut input).expect("invalid server packet ID");
+                return (id, input.to_vec());
+            }
+            Ok(None) => {}
+            Err(error) => panic!("{label}: server frame read failed: {error}"),
+        }
+    }
+}
+
+fn next198_wait_for_reject(server: &Server, before: &str, reason: &str, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let log = next198_read_log(server);
+        let appended = log
+            .strip_prefix(before)
+            .expect("server diagnostic log was replaced");
+        if appended
+            .lines()
+            .any(|line| line.contains("category=invalid_packet_or_state") && line.contains(reason))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label}: expected reject {reason:?} missing\n{appended}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn next198_wait_for_play_processing(socket: &mut TcpStream, label: &str) {
-    socket
-        .set_read_timeout(Some(Duration::from_secs(15)))
-        .unwrap();
+    let mut reader = BufferedFrameReader::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        assert!(Instant::now() < deadline, "{label}: Join incomplete");
-        if receive(socket).0 == 0x08 {
+        if next198_receive_until(socket, &mut reader, deadline, label).0 == 0x08 {
             break;
         }
     }
@@ -800,8 +879,7 @@ fn next198_wait_for_play_processing(socket: &mut TcpStream, label: &str) {
     socket.write_all(&frame(1, &mc_string("/list"))).unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        assert!(Instant::now() < deadline, "{label}: Play barrier timed out");
-        let (id, body) = receive(socket);
+        let (id, body) = next198_receive_until(socket, &mut reader, deadline, label);
         if id == 0x02 && body.windows(10).any(|window| window == b"Online (1)") {
             break;
         }
@@ -813,33 +891,33 @@ fn next198_existing_malformed_frame_seeds_are_isolated_in_each_protocol_state() 
     // These are existing hand-authored decoder regression seeds, not inputs
     // claimed to be found by a coverage-guided fuzzing campaign. Replay the
     // exact bytes at each session boundary through the actual server.
-    let seeds: &[(&str, &[u8], bool)] = &[
+    let seeds: &[(&str, &[u8], Option<&str>)] = &[
         (
             "zero_length",
             include_bytes!("../../../fuzz/corpus/protocol5_frames/zero_length"),
-            false,
+            Some("invalid frame size"),
         ),
         (
             "excess_varint",
             include_bytes!("../../../fuzz/corpus/protocol5_frames/excess_varint"),
-            false,
+            Some("invalid fifth VarInt byte"),
         ),
         (
             "invalid_fifth_byte",
             include_bytes!("../../../fuzz/corpus/protocol5_frames/invalid_fifth_byte"),
-            false,
+            Some("invalid fifth VarInt byte"),
         ),
         (
             "oversize_frame_header",
             include_bytes!("../../../fuzz/corpus/protocol5_frames/oversize_frame_header"),
-            false,
+            Some("invalid frame size"),
         ),
         // This seed needs EOF, otherwise it is a legal partial frame and the
         // server must wait for the remainder.
         (
             "truncated_frame",
             include_bytes!("../../../fuzz/corpus/protocol5_frames/truncated_frame"),
-            true,
+            None,
         ),
     ];
     assert_eq!(seeds[0].1, &[0x00]);
@@ -847,7 +925,6 @@ fn next198_existing_malformed_frame_seeds_are_isolated_in_each_protocol_state() 
     assert_eq!(seeds[2].1, &[0x80, 0x80, 0x80, 0x80, 0x10]);
     assert_eq!(seeds[3].1, &[0xff, 0xff, 0xff, 0xff, 0x0f]);
     assert_eq!(seeds[4].1, &[0x81, 0x01, 0x01]);
-    let mut server = Server::launch();
     for state in [
         "handshake",
         "status",
@@ -855,7 +932,20 @@ fn next198_existing_malformed_frame_seeds_are_isolated_in_each_protocol_state() 
         "login",
         "play",
     ] {
-        for &(label, bytes, needs_eof) in seeds {
+        // Each server sees four logged invalid frames, below the per-process
+        // diagnostic budget. The fifth case observes EOF only.
+        let mut server = Server::launch();
+        assert_eq!(server.status_online(), 0);
+        let valid = server.login("RustTester");
+        server.wait_online(1);
+        drop(valid);
+        server.wait_online(0);
+        let control_log = next198_read_log(&server);
+        assert!(
+            !control_log.contains("category=invalid_packet_or_state"),
+            "{state}: valid baseline produced an invalid-packet diagnostic\n{control_log}"
+        );
+        for &(label, bytes, reason) in seeds {
             let started = Instant::now();
             let mut socket = match state {
                 "play" => {
@@ -873,16 +963,36 @@ fn next198_existing_malformed_frame_seeds_are_isolated_in_each_protocol_state() 
                     }
                     if state == "status_after_response" {
                         socket.write_all(&frame(0, &[])).unwrap();
-                        assert_eq!(receive(&mut socket).0, 0, "{state}/{label}");
+                        let mut reader = BufferedFrameReader::new();
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        assert_eq!(
+                            next198_receive_until(&mut socket, &mut reader, deadline, label).0,
+                            0,
+                            "{state}/{label}"
+                        );
                     }
                     socket
                 }
             };
+            let before = next198_read_log(&server);
             socket.write_all(bytes).unwrap();
-            if needs_eof {
+            if reason.is_none() {
                 socket.shutdown(Shutdown::Write).unwrap();
             }
-            must_close(socket);
+            next198_must_close(socket, label);
+            if let Some(reason) = reason {
+                // status() maps all non-EOF/non-timeout ping failures to its
+                // own diagnostic instead of preserving the decoder message.
+                let expected = if state == "status_after_response" {
+                    "bad status ping"
+                } else {
+                    reason
+                };
+                next198_wait_for_reject(&server, &before, expected, label);
+                eprintln!("{state}/{label}: invalid diagnostic {expected:?} observed");
+            } else {
+                eprintln!("{state}/{label}: close after write-half EOF observed (no reject reason asserted)");
+            }
             if state == "play" {
                 server.wait_online(0);
             }
@@ -895,7 +1005,7 @@ fn next198_existing_malformed_frame_seeds_are_isolated_in_each_protocol_state() 
                 server.child.try_wait().unwrap().is_none(),
                 "{state}/{label}: server exited"
             );
-            let log = server.diagnostics();
+            let log = next198_read_log(&server);
             assert!(
                 !log.contains("panicked at"),
                 "{state}/{label}: worker panicked\n{log}"
@@ -904,13 +1014,12 @@ fn next198_existing_malformed_frame_seeds_are_isolated_in_each_protocol_state() 
                 eprintln!("{state}/{label}: elapsed {:?}", started.elapsed());
             }
         }
+        // Admission still works after every state-specific sweep.
+        let valid = server.login("RustTester");
+        server.wait_online(1);
+        drop(valid);
+        server.wait_online(0);
     }
-    // A successful login after the invalid input sweep checks liveness and
-    // admission in addition to absence of a recorded Rust panic.
-    let valid = server.login("RustTester");
-    server.wait_online(1);
-    drop(valid);
-    server.wait_online(0);
 }
 
 #[test]
@@ -926,7 +1035,13 @@ fn next198_status_request_seed_is_valid_in_status_but_rejected_in_play() {
         .write_all(&handshake(server.port, "localhost", 1))
         .unwrap();
     status.write_all(request).unwrap();
-    let (id, payload) = receive(&mut status);
+    let mut status_reader = BufferedFrameReader::new();
+    let (id, payload) = next198_receive_until(
+        &mut status,
+        &mut status_reader,
+        Instant::now() + Duration::from_secs(5),
+        "Status response",
+    );
     assert_eq!(id, 0);
     let mut cursor = Cursor::new(&payload);
     let response: Value = serde_json::from_str(cursor.read_string(65536).unwrap()).unwrap();
@@ -934,17 +1049,27 @@ fn next198_status_request_seed_is_valid_in_status_but_rejected_in_play() {
     assert_eq!(response["version"]["protocol"], 5);
     let token = 0x1234_5678_1020_3040i64.to_be_bytes();
     status.write_all(&frame(1, &token)).unwrap();
-    assert_eq!(receive(&mut status), (1, token.to_vec()));
+    assert_eq!(
+        next198_receive_until(
+            &mut status,
+            &mut status_reader,
+            Instant::now() + Duration::from_secs(5),
+            "Status pong"
+        ),
+        (1, token.to_vec())
+    );
     drop(status);
 
     let mut play = server.login("RustTester");
     next198_wait_for_play_processing(&mut play, "status seed in Play");
+    let before = next198_read_log(&server);
     play.write_all(request).unwrap();
-    must_close(play);
+    next198_must_close(play, "status seed in Play");
+    next198_wait_for_reject(&server, &before, "short packet", "status seed in Play");
     server.wait_online(0);
     assert_eq!(server.status_online(), 0);
     assert!(server.child.try_wait().unwrap().is_none(), "server exited");
-    let log = server.diagnostics();
+    let log = next198_read_log(&server);
     assert!(!log.contains("panicked at"), "worker panicked\n{log}");
     let valid = server.login("RustTester");
     server.wait_online(1);
