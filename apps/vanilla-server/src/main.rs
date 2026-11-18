@@ -11761,6 +11761,33 @@ mod sprint_action_tests {
         assert!(!sprint_action(true, 3, 6));
     }
 
+    /// NEXT-025 / #1008: a horse jump-charge is carried by Entity Action
+    /// payloads the sprint parser must never read as sprint commands. Stop
+    /// sneak (1) and leave-bed (2) — the actions a 1.7.10 client emits when
+    /// the rider quits mid-charge — preserve the sprint flag exactly, so
+    /// stale riding input cannot start or stop an on-foot sprint.
+    #[test]
+    fn next025_jump_charge_actions_never_toggle_sprint() {
+        assert!(sprint_action(true, 1, 20));
+        assert!(sprint_action(true, 2, 20));
+        assert!(!sprint_action(false, 1, 20));
+        assert!(!sprint_action(false, 2, 20));
+        // Mid-charge dismount sequence: nothing ever starts a sprint.
+        let mut sprinting = false;
+        for charge in [1, 1, 2] {
+            sprinting = sprint_action(sprinting, charge, 20);
+        }
+        assert!(!sprinting);
+        // A sprint that predates the ride survives every charge action and
+        // is ended only by the explicit stop (or hunger).
+        let mut sprinting = sprint_action(false, 3, 20);
+        for charge in [1, 2, 1, 1] {
+            sprinting = sprint_action(sprinting, charge, 20);
+        }
+        assert!(sprinting);
+        assert!(!sprint_action(sprinting, 4, 20));
+    }
+
     #[test]
     fn reg144_hunger_crossing_clears_sprint_and_eating_requires_new_start() {
         let mut vitals = Vitals {
