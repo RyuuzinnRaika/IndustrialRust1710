@@ -19,6 +19,14 @@ This project does not vendor Pumpkin's GPLv3 NBT source in the current source tr
 - Purpose: read and write Java Anvil region container format; source is not copied into this repository.
 - Redistribution requires preserving applicable MIT copyright/license notices and reviewing transitive dependencies.
 
+## sha2
+
+- Project: https://github.com/RustCrypto/hashes
+- Dependency: `sha2 = "=0.10.9"`
+- License: **MIT OR Apache-2.0** (license choice by applicable terms).
+- Purpose: SHA-256 snapshots for offline restore verification. Cargo resolves the external package; its source is not copied into this repository.
+- Redistributors must preserve applicable copyright/license notices and review the resolved dependency tree.
+
 ## Other dependencies
 
 Rust/Cargo transitive and direct dependencies (including serde, flate2 and md5) retain their own licenses. Before distribution, generate a locked dependency audit (`cargo metadata --format-version 1` or `cargo license`) and review all entries.
