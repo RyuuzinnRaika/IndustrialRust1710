@@ -784,6 +784,181 @@ fn malformed_and_fragmented_protocol5_connections_are_isolated() {
 }
 
 #[test]
+fn next198_existing_malformed_frame_seeds_are_isolated_in_each_protocol_state() {
+    // These are existing hand-authored decoder regression seeds, not inputs
+    // claimed to be found by a coverage-guided fuzzing campaign. Replay the
+    // exact bytes at each session boundary through the actual server.
+    let seeds: &[(&str, &[u8], bool)] = &[
+        (
+            "zero_length",
+            include_bytes!("../../../fuzz/corpus/protocol5_frames/zero_length"),
+            false,
+        ),
+        (
+            "excess_varint",
+            include_bytes!("../../../fuzz/corpus/protocol5_frames/excess_varint"),
+            false,
+        ),
+        (
+            "invalid_fifth_byte",
+            include_bytes!("../../../fuzz/corpus/protocol5_frames/invalid_fifth_byte"),
+            false,
+        ),
+        (
+            "oversize_frame_header",
+            include_bytes!("../../../fuzz/corpus/protocol5_frames/oversize_frame_header"),
+            false,
+        ),
+        // This seed needs EOF, otherwise it is a legal partial frame and the
+        // server must wait for the remainder.
+        (
+            "truncated_frame",
+            include_bytes!("../../../fuzz/corpus/protocol5_frames/truncated_frame"),
+            true,
+        ),
+    ];
+    assert_eq!(seeds[0].1, &[0x00]);
+    assert_eq!(seeds[1].1, &[0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
+    assert_eq!(seeds[2].1, &[0x80, 0x80, 0x80, 0x80, 0x10]);
+    assert_eq!(seeds[3].1, &[0xff, 0xff, 0xff, 0xff, 0x0f]);
+    assert_eq!(seeds[4].1, &[0x81, 0x01, 0x01]);
+    let mut server = Server::launch();
+    for state in [
+        "handshake",
+        "status",
+        "status_after_response",
+        "login",
+        "play",
+    ] {
+        for &(label, bytes, needs_eof) in seeds {
+            let mut socket = match state {
+                "play" => {
+                    let mut socket = server.login("RustTester");
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(15)))
+                        .unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(30);
+                    loop {
+                        assert!(
+                            Instant::now() < deadline,
+                            "{state}/{label}: Join incomplete"
+                        );
+                        if receive(&mut socket).0 == 0x08 {
+                            break;
+                        }
+                    }
+                    socket
+                }
+                _ => {
+                    let mut socket = server.connect();
+                    if state != "handshake" {
+                        let next = if state == "login" { 2 } else { 1 };
+                        socket
+                            .write_all(&handshake(server.port, "localhost", next))
+                            .unwrap();
+                    }
+                    if state == "status_after_response" {
+                        socket.write_all(&frame(0, &[])).unwrap();
+                        assert_eq!(receive(&mut socket).0, 0, "{state}/{label}");
+                    }
+                    socket
+                }
+            };
+            socket.write_all(bytes).unwrap();
+            if needs_eof {
+                socket.shutdown(Shutdown::Write).unwrap();
+            }
+            must_close(socket);
+            if state == "play" {
+                server.wait_online(0);
+            }
+            assert_eq!(
+                server.status_online(),
+                0,
+                "{state}/{label}: server unavailable"
+            );
+            assert!(
+                server.child.try_wait().unwrap().is_none(),
+                "{state}/{label}: server exited"
+            );
+            let log = server.diagnostics();
+            assert!(
+                !log.contains("panicked at"),
+                "{state}/{label}: worker panicked\n{log}"
+            );
+        }
+    }
+    // A successful login after the invalid input sweep checks liveness and
+    // admission in addition to absence of a recorded Rust panic.
+    let valid = server.login("RustTester");
+    server.wait_online(1);
+    drop(valid);
+    server.wait_online(0);
+}
+
+#[test]
+fn next198_status_request_seed_is_valid_in_status_but_rejected_in_play() {
+    // This exact two-byte seed is a complete valid Status Request, but in Play
+    // the same packet id is KeepAlive and lacks its required four-byte body.
+    // It is an existing hand-authored seed, not a fuzzer-discovered crash.
+    let request = include_bytes!("../../../fuzz/corpus/protocol5_frames/valid_status_request");
+    assert_eq!(request, &[0x01, 0x00]);
+    let mut server = Server::launch();
+    let mut status = server.connect();
+    status
+        .write_all(&handshake(server.port, "localhost", 1))
+        .unwrap();
+    status.write_all(request).unwrap();
+    let (id, payload) = receive(&mut status);
+    assert_eq!(id, 0);
+    let mut cursor = Cursor::new(&payload);
+    let response: Value = serde_json::from_str(cursor.read_string(65536).unwrap()).unwrap();
+    cursor.finish().unwrap();
+    assert_eq!(response["version"]["protocol"], 5);
+    let token = 0x1234_5678_1020_3040i64.to_be_bytes();
+    status.write_all(&frame(1, &token)).unwrap();
+    assert_eq!(receive(&mut status), (1, token.to_vec()));
+    drop(status);
+
+    let mut play = server.login("RustTester");
+    play.set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "Join did not finish");
+        if receive(&mut play).0 == 0x08 {
+            break;
+        }
+    }
+    // A valid Play KeepAlive followed by a command-response barrier proves
+    // the session processes Play packets before the malformed seed is sent.
+    play.write_all(&frame(0, &0i32.to_be_bytes())).unwrap();
+    play.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "Play processing barrier timed out"
+        );
+        let (id, body) = receive(&mut play);
+        if id == 0x02 && body.windows(10).any(|window| window == b"Online (1)") {
+            break;
+        }
+    }
+    play.write_all(request).unwrap();
+    must_close(play);
+    server.wait_online(0);
+    assert_eq!(server.status_online(), 0);
+    assert!(server.child.try_wait().unwrap().is_none(), "server exited");
+    let log = server.diagnostics();
+    assert!(!log.contains("panicked at"), "worker panicked\n{log}");
+    let valid = server.login("RustTester");
+    server.wait_online(1);
+    drop(valid);
+    server.wait_online(0);
+}
+
+#[test]
 fn vanilla_1710_terrain_loading_keepalives_preserve_challenge_validation() {
     let server = Server::launch();
     let mut socket = server.login("RustTester");
