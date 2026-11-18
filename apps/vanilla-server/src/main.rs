@@ -467,6 +467,22 @@ impl std::error::Error for FrameWriteFailure {
     }
 }
 
+struct FrameWriter<'a, W> {
+    inner: &'a mut W,
+    attempted: bool,
+}
+
+impl<W: Write> Write for FrameWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.attempted = true;
+        self.inner.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 #[derive(Debug)]
 struct JoinInitializationFailure(io::Error);
 
@@ -492,6 +508,10 @@ fn send(s: &mut impl Write, id: u32, body: &[u8]) -> io::Result<()> {
     write_varint(id, &mut packet);
     packet.extend_from_slice(body);
     let wire_bytes = packet_stats::frame_wire_len(packet.len());
+    let mut writer = FrameWriter {
+        inner: s,
+        attempted: false,
+    };
     #[cfg(test)]
     let result = {
         let inject = if id == 0x21 {
@@ -503,8 +523,8 @@ fn send(s: &mut impl Write, id: u32, body: &[u8]) -> io::Result<()> {
             (|| -> io::Result<()> {
                 let mut length = Vec::new();
                 write_varint(packet.len() as u32, &mut length);
-                s.write_all(&length)?;
-                s.write_all(&packet[..1])?;
+                writer.write_all(&length)?;
+                writer.write_all(&packet[..1])?;
                 let _ = notify.try_send(());
                 Err(io::Error::new(
                     ErrorKind::TimedOut,
@@ -512,12 +532,18 @@ fn send(s: &mut impl Write, id: u32, body: &[u8]) -> io::Result<()> {
                 ))
             })()
         } else {
-            write_frame(s, &packet)
+            write_frame(&mut writer, &packet)
         }
     };
     #[cfg(not(test))]
-    let result = write_frame(s, &packet);
-    result.map_err(|error| io::Error::new(error.kind(), FrameWriteFailure(error)))?;
+    let result = write_frame(&mut writer, &packet);
+    result.map_err(|error| {
+        if writer.attempted {
+            io::Error::new(error.kind(), FrameWriteFailure(error))
+        } else {
+            error
+        }
+    })?;
     packet_stats::GLOBAL.record(packet_stats::Direction::Outbound, i64::from(id), wire_bytes);
     Ok(())
 }
@@ -12456,7 +12482,12 @@ mod initial_join_disconnect_tests {
     #[test]
     fn partial_frame_write_timeout_does_not_append_disconnect() {
         for partial_call in [1, 2] {
-            for kind in [ErrorKind::TimedOut, ErrorKind::WouldBlock, ErrorKind::Other] {
+            for kind in [
+                ErrorKind::TimedOut,
+                ErrorKind::WouldBlock,
+                ErrorKind::Other,
+                ErrorKind::InvalidData,
+            ] {
                 let mut writer = PartialTimeoutWriter {
                     bytes: Vec::new(),
                     calls: 0,
@@ -12551,6 +12582,73 @@ mod initial_join_disconnect_tests {
         assert_eq!(error.kind(), ErrorKind::TimedOut);
         assert_eq!(writer.bytes, partial);
         assert_eq!(writer.calls, 3);
+    }
+
+    #[test]
+    fn write_zero_does_not_append_disconnect() {
+        struct ZeroWriter(usize);
+
+        impl Write for ZeroWriter {
+            fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+                self.0 += 1;
+                Ok(0)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = ZeroWriter(0);
+        let error = send(&mut writer, 0x21, &[0]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::WriteZero);
+        assert_eq!(writer.0, 1);
+        let error = reject_failed_join(&mut writer, error);
+        assert_eq!(error.kind(), ErrorKind::WriteZero);
+        assert_eq!(writer.0, 1, "no write may follow a failed frame write");
+    }
+
+    #[test]
+    fn oversize_frame_rejection_still_sends_disconnect_without_prior_write() {
+        struct CountingWriter {
+            bytes: Vec<u8>,
+            calls: usize,
+        }
+
+        impl Write for CountingWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.calls += 1;
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = CountingWriter {
+            bytes: Vec::new(),
+            calls: 0,
+        };
+        // One-byte packet ID makes the frame one byte larger than the limit.
+        let body = vec![0; legacy_protocol::MAX_FRAME_BYTES];
+        let error = send(&mut writer, 0x21, &body).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(writer.calls, 0, "validation must occur before any write");
+        assert!(writer.bytes.is_empty());
+
+        let error = reject_failed_join(&mut writer, error);
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(writer.calls > 0, "expected a Play Disconnect write");
+        let mut wire = writer.bytes.as_slice();
+        let packet = read_frame(&mut wire).unwrap();
+        assert!(wire.is_empty(), "unexpected bytes after Play Disconnect");
+        let (packet_id, mut body) = legacy_protocol::packet_id_and_body(&packet).unwrap();
+        assert_eq!(packet_id, 0x40);
+        let reason = body.read_string(512).unwrap();
+        assert!(reason.contains("World loading failed"));
+        body.finish().unwrap();
     }
 
     #[test]
