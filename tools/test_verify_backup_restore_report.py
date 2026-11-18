@@ -150,7 +150,7 @@ class BackupReportTests(unittest.TestCase):
     def _run_real_child_drill(self, mode, child_status):
         before = report.verifier.snapshot_hashes(self.backup)
         result = subprocess.run(
-            [sys.executable, "-c", _DRILL_CLI, str(Path(report.__file__).parent),
+            [sys.executable, "-I", "-c", _DRILL_CLI, str(Path(report.__file__).parent),
              str(self.server), str(self.backup), mode, str(child_status)],
             capture_output=True, text=True, timeout=45, check=False,
         )
