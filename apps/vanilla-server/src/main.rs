@@ -32,6 +32,8 @@ mod hoppers;
 mod inventory;
 mod item_nbt;
 mod items_1710;
+#[cfg(test)]
+mod join_partial_socket_tests;
 mod journal;
 #[allow(dead_code)] // E46: opt-in block-to-Anvil projection; live save switch gated.
 mod legacy_chunk_patch;
@@ -480,13 +482,42 @@ impl std::error::Error for JoinInitializationFailure {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_PARTIAL_S21: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<()>>> = const { std::cell::RefCell::new(None) };
+}
+
 fn send(s: &mut impl Write, id: u32, body: &[u8]) -> io::Result<()> {
     let mut packet = Vec::with_capacity(5 + body.len());
     write_varint(id, &mut packet);
     packet.extend_from_slice(body);
     let wire_bytes = packet_stats::frame_wire_len(packet.len());
-    write_frame(s, &packet)
-        .map_err(|error| io::Error::new(error.kind(), FrameWriteFailure(error)))?;
+    #[cfg(test)]
+    let result = {
+        let inject = if id == 0x21 {
+            TEST_PARTIAL_S21.with(|slot| slot.borrow_mut().take())
+        } else {
+            None
+        };
+        if let Some(notify) = inject {
+            (|| -> io::Result<()> {
+                let mut length = Vec::new();
+                write_varint(packet.len() as u32, &mut length);
+                s.write_all(&length)?;
+                s.write_all(&packet[..1])?;
+                let _ = notify.try_send(());
+                Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "injected after partial S21",
+                ))
+            })()
+        } else {
+            write_frame(s, &packet)
+        }
+    };
+    #[cfg(not(test))]
+    let result = write_frame(s, &packet);
+    result.map_err(|error| io::Error::new(error.kind(), FrameWriteFailure(error)))?;
     packet_stats::GLOBAL.record(packet_stats::Direction::Outbound, i64::from(id), wire_bytes);
     Ok(())
 }
