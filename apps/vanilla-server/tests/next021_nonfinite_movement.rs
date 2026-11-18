@@ -16,13 +16,53 @@
 //! Real 1.7.10 client acceptance: NOT_RUN (headless host; these are wire
 //! packets an unmodified client never sends, and the test distinguishes
 //! them from simulated behaviour by asserting the server's wire replies).
-use legacy_protocol::{read_frame, read_varint, write_string, write_varint};
+use legacy_protocol::{read_varint, write_string, write_varint, BufferedFrameReader};
 use std::fs;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+struct BufferedClient {
+    socket: TcpStream,
+    reader: BufferedFrameReader,
+}
+
+impl BufferedClient {
+    fn new(socket: TcpStream) -> Self {
+        Self {
+            socket,
+            reader: BufferedFrameReader::new(),
+        }
+    }
+
+    fn poll_packet(&mut self) -> std::io::Result<Option<(u32, Vec<u8>)>> {
+        let Some(frame) = self.poll_frame()? else {
+            return Ok(None);
+        };
+        let mut body = frame.as_slice();
+        let id = read_varint(&mut body)?;
+        Ok(Some((id, body.to_vec())))
+    }
+
+    fn poll_frame(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+        self.reader.poll(&mut self.socket)
+    }
+}
+
+impl std::ops::Deref for BufferedClient {
+    type Target = TcpStream;
+    fn deref(&self) -> &Self::Target {
+        &self.socket
+    }
+}
+
+impl std::ops::DerefMut for BufferedClient {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.socket
+    }
+}
 
 struct Server {
     child: Child,
@@ -83,8 +123,8 @@ impl Server {
         Server { child, root, port }
     }
 
-    fn connect(&self, name: &str) -> TcpStream {
-        let mut socket = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+    fn connect(&self, name: &str) -> BufferedClient {
+        let mut socket = BufferedClient::new(TcpStream::connect(("127.0.0.1", self.port)).unwrap());
         socket
             .set_read_timeout(Some(Duration::from_millis(250)))
             .unwrap();
@@ -119,11 +159,21 @@ fn frame(id: u32, data: &[u8]) -> Vec<u8> {
     message
 }
 
-fn pump(socket: &mut TcpStream) -> (u32, Vec<u8>) {
-    let packet = read_frame(socket).expect("play frame");
-    let mut raw = packet.as_slice();
-    let id = read_varint(&mut raw).expect("packet id");
-    (id, raw.to_vec())
+fn pump(socket: &mut BufferedClient, deadline: Instant) -> (u32, Vec<u8>) {
+    loop {
+        let now = Instant::now();
+        assert!(now < deadline, "timed out waiting for play frame");
+        let wait = deadline
+            .duration_since(now)
+            .min(Duration::from_millis(250))
+            .max(Duration::from_millis(1));
+        socket.set_read_timeout(Some(wait)).unwrap();
+        match socket.poll_packet() {
+            Ok(Some(packet)) => return packet,
+            Ok(None) => continue,
+            Err(error) => panic!("play frame: {error}"),
+        }
+    }
 }
 
 fn read_position(packet: &[u8]) -> [f64; 3] {
@@ -146,11 +196,11 @@ fn position_packet(x: f64, feet_y: f64, z: f64) -> Vec<u8> {
 }
 
 /// Drain the join burst until the first S08, echoing KeepAlive like a client.
-fn await_position(socket: &mut TcpStream, who: &str) -> Vec<u8> {
+fn await_position(socket: &mut BufferedClient, who: &str) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         assert!(Instant::now() < deadline, "{who}: no S08 after join");
-        let (id, body) = pump(socket);
+        let (id, body) = pump(socket, deadline);
         if id == 0x00 && body.len() == 4 {
             let _ = socket.write_all(&frame(0, &body));
         }
@@ -161,23 +211,188 @@ fn await_position(socket: &mut TcpStream, who: &str) -> Vec<u8> {
 }
 
 /// The server must close this connection (EOF) without adopting a position.
-fn expect_close(socket: &mut TcpStream, who: &str) {
-    let mut chunk = [0u8; 8192];
-    let deadline = Instant::now() + Duration::from_secs(10);
+fn expect_close(socket: &mut BufferedClient, who: &str) {
+    let closed = is_closed_before(socket, Instant::now() + Duration::from_secs(10))
+        .unwrap_or_else(|error| panic!("{who}: unexpected socket error {error}"));
+    assert!(closed, "{who}: server never closed the socket");
+}
+
+fn is_closed_before(socket: &mut BufferedClient, deadline: Instant) -> std::io::Result<bool> {
     loop {
-        match socket.read(&mut chunk) {
-            Ok(0) => return,
-            Ok(_) => {}
-            Err(error)
-                if error.kind() == ErrorKind::WouldBlock || error.kind() == ErrorKind::TimedOut => {
-            }
-            Err(error) => panic!("{who}: unexpected socket error {error}"),
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(false);
         }
-        assert!(
-            Instant::now() < deadline,
-            "{who}: server never closed the socket"
-        );
+        let wait = deadline
+            .duration_since(now)
+            .min(Duration::from_millis(250))
+            .max(Duration::from_millis(1));
+        socket.set_read_timeout(Some(wait))?;
+        // Do not decode packet IDs here: an incomplete packet-id VarInt can
+        // return UnexpectedEof even while the TCP connection remains open.
+        match socket.poll_frame() {
+            Ok(Some(_)) | Ok(None) => {}
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(true),
+            Err(error) => return Err(error),
+        }
     }
+}
+
+#[test]
+fn fragmented_frame_survives_timeout_in_prefix_and_body() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let mut socket =
+        BufferedClient::new(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+    socket
+        .set_read_timeout(Some(Duration::from_millis(350)))
+        .unwrap();
+    let (mut writer, _) = listener.accept().unwrap();
+    let payload = vec![42; 300];
+    let wire = frame(2, &payload);
+    assert_ne!(wire[0] & 0x80, 0, "fixture needs a multi-byte prefix");
+    let (advance_tx, advance_rx) = std::sync::mpsc::channel();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let sender = thread::spawn(move || {
+        writer.write_all(&wire[..1]).unwrap();
+        ready_tx.send(()).unwrap();
+        advance_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        writer.write_all(&wire[1..40]).unwrap();
+        ready_tx.send(()).unwrap();
+        advance_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        writer.write_all(&wire[40..]).unwrap();
+    });
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        socket.poll_packet().unwrap().is_none(),
+        "partial prefix must survive timeout"
+    );
+    assert!(
+        socket.poll_packet().unwrap().is_none(),
+        "partial prefix must survive timeout"
+    );
+    advance_tx.send(()).unwrap();
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        socket.poll_packet().unwrap().is_none(),
+        "partial body must survive timeout"
+    );
+    assert!(
+        socket.poll_packet().unwrap().is_none(),
+        "partial body must survive timeout"
+    );
+    advance_tx.send(()).unwrap();
+    let (id, received) = pump(&mut socket, Instant::now() + Duration::from_secs(5));
+    assert_eq!(id, 2);
+    assert_eq!(received, payload);
+    sender.join().unwrap();
+}
+
+#[test]
+fn reader_retains_prefix_and_body_across_explicit_timeout_errors() {
+    use std::collections::VecDeque;
+    use std::io::Read;
+    struct Scripted {
+        steps: VecDeque<Result<Vec<u8>, ErrorKind>>,
+        timeouts: usize,
+    }
+    impl Read for Scripted {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            match self.steps.pop_front().expect("unexpected extra read") {
+                Ok(bytes) => {
+                    out[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+                Err(kind) => {
+                    if kind == ErrorKind::TimedOut {
+                        self.timeouts += 1;
+                    }
+                    Err(kind.into())
+                }
+            }
+        }
+    }
+    let payload = [42; 300];
+    let wire = frame(2, &payload);
+    let mut source = Scripted {
+        steps: VecDeque::from([
+            Ok(wire[..1].to_vec()),
+            Err(ErrorKind::TimedOut),
+            Ok(wire[1..40].to_vec()),
+            Err(ErrorKind::TimedOut),
+            Ok(wire[40..].to_vec()),
+        ]),
+        timeouts: 0,
+    };
+    let mut reader = BufferedFrameReader::new();
+    assert!(reader.poll(&mut source).unwrap().is_none());
+    assert!(reader.poll(&mut source).unwrap().is_none());
+    assert_eq!(source.timeouts, 1);
+    assert!(reader.poll(&mut source).unwrap().is_none());
+    assert!(reader.poll(&mut source).unwrap().is_none());
+    assert_eq!(source.timeouts, 2);
+    let packet = reader.poll(&mut source).unwrap().unwrap();
+    let mut body = packet.as_slice();
+    assert_eq!(read_varint(&mut body).unwrap(), 2);
+    assert_eq!(body, payload);
+    assert!(source.steps.is_empty());
+}
+
+#[test]
+fn incomplete_packet_id_does_not_count_as_socket_closure() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let mut socket =
+        BufferedClient::new(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.write_all(&[1, 0x80]).unwrap();
+    assert!(!is_closed_before(&mut socket, Instant::now() + Duration::from_millis(500)).unwrap());
+    drop(peer);
+    assert!(is_closed_before(&mut socket, Instant::now() + Duration::from_secs(5)).unwrap());
+}
+
+#[test]
+fn continuing_partial_bytes_do_not_extend_total_deadline() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let mut socket =
+        BufferedClient::new(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+    let (mut writer, _) = listener.accept().unwrap();
+    let wire = frame(2, &[42; 300]);
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sent_by_writer = sent.clone();
+    let sender = thread::spawn(move || {
+        for byte in wire {
+            if stop_rx.try_recv().is_ok() || writer.write_all(&[byte]).is_err() {
+                break;
+            }
+            sent_by_writer.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            thread::sleep(Duration::from_millis(30));
+        }
+    });
+    let start = Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pump(&mut socket, start + Duration::from_millis(500));
+    }));
+    let elapsed = start.elapsed();
+    stop_tx.send(()).unwrap();
+    sender.join().unwrap();
+    let error = result.expect_err("incomplete frame must expire at the deadline");
+    let message = error
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| error.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(
+        message.contains("timed out waiting for play frame"),
+        "unexpected failure: {message}"
+    );
+    assert!(
+        sent.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+        "sender must make progress before deadline"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "partial progress extended deadline: {elapsed:?}"
+    );
 }
 
 #[test]
@@ -229,7 +444,7 @@ fn next021_nonfinite_positions_close_only_their_connection_and_never_poison_stat
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut listed = false;
     while Instant::now() < deadline && !listed {
-        let (id, body) = pump(&mut keeper);
+        let (id, body) = pump(&mut keeper, deadline);
         listed = id == 0x02 && String::from_utf8_lossy(&body).contains("Online (1)");
     }
     assert!(listed, "keeper session lost after hostile packets");
@@ -255,7 +470,7 @@ fn next021_huge_finite_position_gets_finite_teleport_correction_not_adoption() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let corrected = loop {
         assert!(Instant::now() < deadline, "no S08 correction for 1e18");
-        let (id, body) = pump(&mut client);
+        let (id, body) = pump(&mut client, deadline);
         if id == 0x08 && body.len() >= 24 {
             break read_position(&body);
         }
@@ -283,7 +498,7 @@ fn next021_huge_finite_position_gets_finite_teleport_correction_not_adoption() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut listed = false;
     while Instant::now() < deadline && !listed {
-        let (id, body) = pump(&mut client);
+        let (id, body) = pump(&mut client, deadline);
         listed = id == 0x02 && String::from_utf8_lossy(&body).contains("Online (1)");
     }
     assert!(listed, "session did not resume after teleport correction");
