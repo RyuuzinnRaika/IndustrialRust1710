@@ -24,19 +24,31 @@ MAX_FILES = 100_000
 MAX_BYTES = 32 * 1024 * 1024 * 1024
 
 
+def _reject_reparse_point(metadata):
+    # Windows junctions can look like ordinary directories to lstat and os.walk.
+    # Reject all reparse points, including types other than junctions and links.
+    if getattr(metadata, "st_file_attributes", 0) & 0x400:
+        raise ValueError("backup contains a Windows reparse point")
+
+
 def snapshot_hashes(root: Path) -> dict[str, str]:
     """Return a bounded content manifest; reject links and special files."""
-    if not stat.S_ISDIR(root.lstat().st_mode):
+    root_metadata = root.lstat()
+    _reject_reparse_point(root_metadata)
+    if not stat.S_ISDIR(root_metadata.st_mode):
         raise ValueError("backup root must be a real directory")
     files: dict[str, str] = {}
     size = 0
     for current, directories, names in os.walk(root, followlinks=False):
         for directory in directories:
-            if not stat.S_ISDIR((Path(current) / directory).lstat().st_mode):
+            metadata = (Path(current) / directory).lstat()
+            _reject_reparse_point(metadata)
+            if not stat.S_ISDIR(metadata.st_mode):
                 raise ValueError("backup contains a symlink or special directory")
         for name in names:
             path = Path(current) / name
             metadata = path.lstat()
+            _reject_reparse_point(metadata)
             if not stat.S_ISREG(metadata.st_mode):
                 raise ValueError("backup contains a symlink or special file")
             size += metadata.st_size
@@ -91,10 +103,14 @@ def verify_restore_point(server: Path, backup: Path, timeout: int = 120, *, nati
     """Verify a create-only backup on scratch storage without publishing a world."""
     if not stat.S_ISREG(server.lstat().st_mode):
         raise ValueError("server executable must be a regular file")
-    if not stat.S_ISDIR(backup.lstat().st_mode):
+    backup_metadata = backup.lstat()
+    _reject_reparse_point(backup_metadata)
+    if not stat.S_ISDIR(backup_metadata.st_mode):
         raise ValueError("backup must be a real directory")
     marker = backup / ".industrial1710-backup"
-    if not stat.S_ISREG(marker.lstat().st_mode) or marker.read_bytes() != MARKER:
+    marker_metadata = marker.lstat()
+    _reject_reparse_point(marker_metadata)
+    if not stat.S_ISREG(marker_metadata.st_mode) or marker.read_bytes() != MARKER:
         raise ValueError("backup ownership marker is missing or invalid")
     anvil = (backup / "level.dat").is_file()
     irw_files = sorted(backup.glob("*.irw"))
