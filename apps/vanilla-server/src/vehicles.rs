@@ -421,6 +421,117 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// NEXT-029 / #1012: driving a boat into the shore — slowly or at full
+    /// throttle — must never tunnel into land, teleport the hull, break the
+    /// boat or drop anything. Each 20 Hz step re-samples the cell directly
+    /// under the hull; the first step that would leave the water column is
+    /// rejected, so the reported positions stay within one bounded physics
+    /// hop of each other and the hull parks at the last water cell. The tick
+    /// only ever publishes teleports (id 0x18), never a destroy (0x13) or an
+    /// item spawn, and the boat is still intact afterwards. Breaking it drops
+    /// exactly once: a second break finds no boat and is silent.
+    fn next029_dock_holds_at_shore_without_break_or_teleport(speed: f32, start: f64) {
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-boat-n029-{}-{}-{}",
+            std::process::id(),
+            speed,
+            start
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let world_path = root.join("flat.irw");
+        let mut world = World::new();
+        // A four-cell water channel; the shore (dry air) begins at x = 4.
+        for x in 0..=3 {
+            world
+                .update_and_save(&world_path, x, 64, 0, 8 << 4)
+                .unwrap();
+        }
+        assert_eq!(world.get(4, 64, 0) >> 4, 0, "shore cell must be dry");
+
+        let at = PlayerPosition {
+            x: start,
+            y: 64.45,
+            z: 0.5,
+        };
+        let mut boats = Boats::default();
+        let spawn = boats.place(&world, at, 0).unwrap();
+        let mut body = spawn.body.as_slice();
+        let id = i32::try_from(legacy_protocol::read_varint(&mut body).unwrap()).unwrap();
+        assert!(boats.mount(id, 5, at).is_some());
+
+        // Heading 270° drives the hull toward +x, straight at the shore.
+        boats.control(5, 0.0, speed, 270.0);
+        let mut previous = at;
+        for tick in 1..=120 {
+            let events = boats.tick(&world, tick);
+            for (pos, event) in &events {
+                assert_eq!(
+                    event.id, 0x18,
+                    "docking must never emit a destroy/drop event: {event:?}"
+                );
+                // No unnatural jump: every report is one bounded step away.
+                let hop = (pos.x - previous.x).hypot(pos.z - previous.z);
+                assert!(
+                    hop <= 0.36,
+                    "hull teleported by {hop}: {previous:?} -> {pos:?}"
+                );
+                previous = *pos;
+                let cell = (
+                    pos.x.floor() as i32,
+                    (pos.y - 0.25).floor() as i32,
+                    pos.z.floor() as i32,
+                );
+                assert!(
+                    matches!(world.get(cell.0, cell.1, cell.2) >> 4, 8 | 9),
+                    "hull left the water column during docking at {pos:?}"
+                );
+            }
+        }
+
+        // It reached the shore and parked inside the last water cell — never
+        // inside the dry one — and full throttle keeps it pinned there.
+        let docked = previous;
+        assert!(
+            docked.x >= 3.5 && docked.x < 4.0,
+            "expected to dock at the shore edge, got {docked:?}"
+        );
+        for tick in 121..=135 {
+            for (pos, _) in &boats.tick(&world, tick) {
+                assert!(
+                    pos.x < 4.0 && (pos.x - docked.x).abs() < 1e-9,
+                    "docked boat slid or teleported to {pos:?} at tick {tick}"
+                );
+            }
+        }
+
+        // Docking never damaged the boat: the rider is still seated.
+        assert_eq!(boats.boat_for(5), Some(id), "docking broke the boat");
+
+        // Breaking the parked boat yields one detach + one destroy; the very
+        // next break finds nothing, so no second drop can follow.
+        let (events, drop_at) = boats.break_boat(id, docked).unwrap();
+        assert_eq!(drop_at, docked);
+        assert!(events.iter().any(|e| e.id == 0x1b), "rider detach missing");
+        assert!(events.iter().any(|e| e.id == 0x13), "destroy event missing");
+        assert!(
+            boats.break_boat(id, docked).is_none(),
+            "duplicate break must be silent"
+        );
+        assert_eq!(boats.boat_for(5), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn next029_full_speed_dock_never_breaks_teleports_or_drops() {
+        next029_dock_holds_at_shore_without_break_or_teleport(1.0, 0.5);
+    }
+
+    #[test]
+    fn next029_low_speed_dock_never_breaks_teleports_or_drops() {
+        next029_dock_holds_at_shore_without_break_or_teleport(0.2, 3.0);
+    }
+
     #[test]
     fn boat_snapshot_restores_entity_without_session_rider() {
         let root = std::env::temp_dir().join(format!("ir1710-boat-save-{}", std::process::id()));
