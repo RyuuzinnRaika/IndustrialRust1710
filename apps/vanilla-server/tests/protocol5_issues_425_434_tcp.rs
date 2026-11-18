@@ -783,6 +783,31 @@ fn malformed_and_fragmented_protocol5_connections_are_isolated() {
     server.wait_online(0);
 }
 
+fn next198_wait_for_play_processing(socket: &mut TcpStream, label: &str) {
+    socket
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "{label}: Join incomplete");
+        if receive(socket).0 == 0x08 {
+            break;
+        }
+    }
+    // Confirm that the Play dispatcher processes valid packets after Join;
+    // seeing S08 alone does not establish that it is accepting Play input.
+    socket.write_all(&frame(0, &0i32.to_be_bytes())).unwrap();
+    socket.write_all(&frame(1, &mc_string("/list"))).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(Instant::now() < deadline, "{label}: Play barrier timed out");
+        let (id, body) = receive(socket);
+        if id == 0x02 && body.windows(10).any(|window| window == b"Online (1)") {
+            break;
+        }
+    }
+}
+
 #[test]
 fn next198_existing_malformed_frame_seeds_are_isolated_in_each_protocol_state() {
     // These are existing hand-authored decoder regression seeds, not inputs
@@ -831,22 +856,11 @@ fn next198_existing_malformed_frame_seeds_are_isolated_in_each_protocol_state() 
         "play",
     ] {
         for &(label, bytes, needs_eof) in seeds {
+            let started = Instant::now();
             let mut socket = match state {
                 "play" => {
                     let mut socket = server.login("RustTester");
-                    socket
-                        .set_read_timeout(Some(Duration::from_secs(15)))
-                        .unwrap();
-                    let deadline = Instant::now() + Duration::from_secs(30);
-                    loop {
-                        assert!(
-                            Instant::now() < deadline,
-                            "{state}/{label}: Join incomplete"
-                        );
-                        if receive(&mut socket).0 == 0x08 {
-                            break;
-                        }
-                    }
+                    next198_wait_for_play_processing(&mut socket, label);
                     socket
                 }
                 _ => {
@@ -886,6 +900,9 @@ fn next198_existing_malformed_frame_seeds_are_isolated_in_each_protocol_state() 
                 !log.contains("panicked at"),
                 "{state}/{label}: worker panicked\n{log}"
             );
+            if state == "play" {
+                eprintln!("{state}/{label}: elapsed {:?}", started.elapsed());
+            }
         }
     }
     // A successful login after the invalid input sweep checks liveness and
@@ -921,30 +938,7 @@ fn next198_status_request_seed_is_valid_in_status_but_rejected_in_play() {
     drop(status);
 
     let mut play = server.login("RustTester");
-    play.set_read_timeout(Some(Duration::from_secs(15)))
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        assert!(Instant::now() < deadline, "Join did not finish");
-        if receive(&mut play).0 == 0x08 {
-            break;
-        }
-    }
-    // A valid Play KeepAlive followed by a command-response barrier proves
-    // the session processes Play packets before the malformed seed is sent.
-    play.write_all(&frame(0, &0i32.to_be_bytes())).unwrap();
-    play.write_all(&frame(1, &mc_string("/list"))).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "Play processing barrier timed out"
-        );
-        let (id, body) = receive(&mut play);
-        if id == 0x02 && body.windows(10).any(|window| window == b"Online (1)") {
-            break;
-        }
-    }
+    next198_wait_for_play_processing(&mut play, "status seed in Play");
     play.write_all(request).unwrap();
     must_close(play);
     server.wait_online(0);
