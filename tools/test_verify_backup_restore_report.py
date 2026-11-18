@@ -4,11 +4,57 @@ from io import StringIO
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import verify_backup_restore_report as report
+
+
+# The report runs in one real process and its verifier runs in another.  The
+# adapter replaces only the native executable, preserving all subprocess.run
+# options and operating-system stdout/stderr inheritance.
+_DRILL_CLI = r"""
+from pathlib import Path
+import subprocess
+import sys
+from unittest.mock import patch
+
+tools, server_text, backup_text, mode, child_status = sys.argv[1:]
+sys.path.insert(0, tools)
+import verify_backup_restore as verifier
+import verify_backup_restore_report as report
+
+server = Path(server_text)
+backup = Path(backup_text)
+real_run = subprocess.run
+
+def run_fixture(argv, **kwargs):
+    target = Path(argv[2])
+    scratch = Path(kwargs["cwd"])
+    assert argv[:2] == [str(server.resolve(strict=True)), "--verify-world"]
+    assert kwargs["check"] is True
+    assert kwargs["timeout"] == 30
+    assert target == scratch / "world" / "flat.irw"
+    assert target.is_file() and scratch.resolve() != backup.parent.resolve()
+    assert not scratch.resolve().is_relative_to(backup.resolve())
+    print("ISOLATED_SCRATCH=" + str(scratch), file=sys.stderr, flush=True)
+    child = (
+        "import sys; print('NATIVE-STDOUT'); "
+        "print('NATIVE-STDERR', file=sys.stderr); sys.exit(int(sys.argv[1]))"
+    )
+    return real_run([sys.executable, "-c", child, child_status], **kwargs)
+
+with patch.object(verifier.subprocess, "run", side_effect=run_fixture):
+    arguments = ["--server", str(server), "--backup", str(backup), "--timeout", "30"]
+    if mode == "report":
+        result = report.main(arguments)
+    else:
+        sys.argv = ["verify_backup_restore.py", *arguments]
+        result = verifier.main()
+    raise SystemExit(result)
+"""
 
 
 class BackupReportTests(unittest.TestCase):
@@ -42,7 +88,7 @@ class BackupReportTests(unittest.TestCase):
         self.assertEqual(report.verifier.snapshot_hashes(self.backup), before)
         self.assertTrue(value["source_bytes_unchanged"])
         command = run.call_args.args[0]
-        self.assertEqual(command[:2], [str(self.server), "--verify-world"])
+        self.assertEqual(command[:2], [str(self.server.resolve(strict=True)), "--verify-world"])
         self.assertNotEqual(Path(command[2]), self.backup / "flat.irw")
         self.assertFalse(Path(command[2]).exists(), "scratch tree must be disposed")
 
@@ -58,8 +104,8 @@ class BackupReportTests(unittest.TestCase):
     def test_backup_change_after_restore_is_rejected(self, run):
         original = report.verifier.verify_restore_point
 
-        def tamper(server, backup, timeout):
-            count = original(server, backup, timeout)
+        def tamper(server, backup, timeout, **kwargs):
+            count = original(server, backup, timeout, **kwargs)
             (backup / "flat.irw").write_bytes(b"IRW5-CHANGED")
             return count
 
@@ -100,6 +146,41 @@ class BackupReportTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertIn("RESTORE_REPORT_FAILED", error.getvalue())
         run.assert_not_called()
+
+    def _run_real_child_drill(self, mode, child_status):
+        before = report.verifier.snapshot_hashes(self.backup)
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", _DRILL_CLI, str(Path(report.__file__).parent),
+             str(self.server), str(self.backup), mode, str(child_status)],
+            capture_output=True, text=True, timeout=45, check=False,
+        )
+        self.assertEqual(report.verifier.snapshot_hashes(self.backup), before)
+        scratch_lines = [line for line in result.stderr.splitlines()
+                         if line.startswith("ISOLATED_SCRATCH=")]
+        self.assertEqual(len(scratch_lines), 1, result.stderr)
+        scratch = Path(scratch_lines[0].split("=", 1)[1])
+        self.assertFalse(scratch.exists(), "scratch tree must be disposed")
+        self.assertIn("NATIVE-STDERR", result.stderr)
+        return result
+
+    def test_report_cli_stdout_is_json_with_real_child_output(self):
+        result = self._run_real_child_drill("report", 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        value = json.loads(result.stdout)
+        self.assertEqual(value["status"], "PASS")
+        self.assertEqual(value["file_count"], 3)
+
+    def test_report_cli_preserves_real_child_failure_diagnostics(self):
+        result = self._run_real_child_drill("report", 9)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("RESTORE_REPORT_FAILED", result.stderr)
+
+    def test_standalone_cli_keeps_real_child_stdout(self):
+        result = self._run_real_child_drill("standalone", 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NATIVE-STDOUT", result.stdout)
+        self.assertIn("Restore drill PASS", result.stdout)
 
 
 if __name__ == "__main__":

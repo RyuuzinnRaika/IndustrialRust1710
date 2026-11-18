@@ -22,7 +22,7 @@ def report_restore_point(server: Path, backup: Path, timeout: int = 120) -> dict
     # A pre/post snapshot prevents a report about bytes other than those
     # supplied to the existing verifier, without writing into the backup.
     initial = verifier.snapshot_hashes(backup)
-    file_count = verifier.verify_restore_point(server, backup, timeout)
+    file_count = verifier.verify_restore_point(server, backup, timeout, native_stdout=subprocess.DEVNULL)
     if len(initial) != file_count:
         raise ValueError("backup file count changed during restore drill")
     if verifier.snapshot_hashes(backup) != initial:

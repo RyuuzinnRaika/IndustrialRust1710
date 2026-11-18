@@ -33,7 +33,7 @@ class RestoreDrillTests(unittest.TestCase):
         self.assertEqual(module.verify_restore_point(self.server, self.backup), 3)
         run.assert_called_once()
         argv = run.call_args.args[0]
-        self.assertEqual(argv[:2], [str(self.server), "--verify-world"])
+        self.assertEqual(argv[:2], [str(self.server.resolve(strict=True)), "--verify-world"])
         self.assertNotEqual(Path(argv[2]), self.backup)
         self.assertFalse(Path(argv[2]).exists())
         self.assertEqual(module.snapshot_hashes(self.backup), original)
