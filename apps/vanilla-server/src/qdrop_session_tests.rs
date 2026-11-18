@@ -2,8 +2,155 @@
 use super::*;
 use std::fs;
 use std::net::Shutdown;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const CHILD_MARKER: &str = "INDUSTRIALRUST_QDROP_TEST_CHILD";
+const SESSION_TEST: &str =
+    "qdrop_session_tests::sequential_q_and_ctrl_q_packets_persist_before_and_after_merge";
+const CHILD_COMPLETE: &str = "QDROP_CONTROLLED_SESSION_COMPLETE";
+const STALL_READY: &str = "QDROP_STALL_WORKER_READY";
+
+#[derive(Debug, PartialEq, Eq)]
+enum ChildMode {
+    Session,
+    Stall,
+}
+
+// A marker inherited by a normal test invocation is insufficient to bypass
+// supervision. The subprocess must also carry its matching non-test filter.
+fn child_mode(marker: Option<&str>, args: &[String]) -> Option<ChildMode> {
+    let marker = marker?;
+    if !args
+        .windows(2)
+        .any(|args| args[0] == "--skip" && args[1] == marker)
+    {
+        return None;
+    }
+    if marker.starts_with("qdrop-private-session-") {
+        Some(ChildMode::Session)
+    } else if marker.starts_with("qdrop-private-stall-") {
+        Some(ChildMode::Stall)
+    } else {
+        None
+    }
+}
+
+struct SupervisedChild(Option<Child>);
+
+impl Drop for SupervisedChild {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) | Err(_) => thread::sleep(Duration::from_millis(20)),
+                }
+            }
+            let _ = writeln!(
+                io::stderr().lock(),
+                "qdrop child termination was not confirmed"
+            );
+        }
+    }
+}
+
+struct ChildOutcome {
+    status: ExitStatus,
+    timed_out: bool,
+    killed_by_supervisor: bool,
+    output_dir: PathBuf,
+}
+
+fn exit_observed_before_deadline(observed: Instant, deadline: Instant) -> bool {
+    observed < deadline
+}
+
+fn supervise_child(mode: &str, timeout: Duration) -> io::Result<ChildOutcome> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos();
+    let temp = fs::canonicalize(std::env::temp_dir())?;
+    let output_dir = temp.join(format!(
+        "ir1710-qdrop-supervisor-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&output_dir)?;
+    eprintln!(
+        "qdrop supervisor artifacts: {}",
+        output_dir.file_name().unwrap().to_string_lossy()
+    );
+    let stdout = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_dir.join("stdout.log"))?;
+    let stderr = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output_dir.join("stderr.log"))?;
+    let marker = format!("qdrop-private-{mode}-{}-{nonce}", std::process::id());
+    // This is an observation deadline, not a guarantee about OS scheduling.
+    // An exit first observed at or after it cannot prove timely completion.
+    let deadline = Instant::now() + timeout;
+    let child = Command::new(std::env::current_exe()?)
+        .args(["--exact", SESSION_TEST, "--nocapture", "--skip", &marker])
+        .env(CHILD_MARKER, &marker)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()?;
+    let mut guard = SupervisedChild(Some(child));
+    loop {
+        let status = guard.0.as_mut().unwrap().try_wait()?;
+        let observed = Instant::now();
+        if let Some(status) = status {
+            guard.0.take();
+            return Ok(ChildOutcome {
+                status,
+                timed_out: !exit_observed_before_deadline(observed, deadline),
+                killed_by_supervisor: false,
+                output_dir,
+            });
+        }
+        if !exit_observed_before_deadline(observed, deadline) {
+            let child = guard.0.as_mut().unwrap();
+            if let Err(error) = child.kill() {
+                if let Some(status) = child.try_wait()? {
+                    guard.0.take();
+                    return Ok(ChildOutcome {
+                        status,
+                        timed_out: true,
+                        killed_by_supervisor: false,
+                        output_dir,
+                    });
+                }
+                return Err(error);
+            }
+            let reap_deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < reap_deadline {
+                if let Some(status) = guard.0.as_mut().unwrap().try_wait()? {
+                    guard.0.take();
+                    return Ok(ChildOutcome {
+                        status,
+                        timed_out: true,
+                        killed_by_supervisor: true,
+                        output_dir,
+                    });
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                "killed qdrop child did not exit",
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
 
 // A panic must not detach a live session into the next test. Fixtures remain
 // available for diagnosis on both success and failure.
@@ -153,6 +300,106 @@ fn observe_drop(stream: &mut TcpStream, slot: &[u8], count: u8, prior: Option<i3
 
 #[test]
 fn sequential_q_and_ctrl_q_packets_persist_before_and_after_merge() {
+    let args: Vec<String> = std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let marker = std::env::var(CHILD_MARKER).ok();
+    match child_mode(marker.as_deref(), &args) {
+        Some(ChildMode::Session) => {
+            run_controlled_session();
+            eprintln!("{CHILD_COMPLETE}");
+        }
+        Some(ChildMode::Stall) => {
+            let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+            let _worker = thread::spawn(move || {
+                let _ = ready_tx.send(());
+                loop {
+                    thread::park();
+                }
+            });
+            ready_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("stall worker did not start");
+            let mut stderr = io::stderr().lock();
+            writeln!(stderr, "{STALL_READY}").unwrap();
+            stderr.flush().unwrap();
+            drop(stderr);
+            loop {
+                thread::park();
+            }
+        }
+        None => {
+            let result = supervise_child("session", Duration::from_secs(120))
+                .expect("could not supervise qdrop session child");
+            assert!(
+                !result.timed_out,
+                "qdrop session child exceeded its deadline"
+            );
+            assert!(
+                result.status.success(),
+                "qdrop session child failed: {}",
+                result.status
+            );
+            let stderr = fs::read_to_string(result.output_dir.join("stderr.log")).unwrap();
+            assert!(
+                stderr.contains(CHILD_COMPLETE),
+                "child exited without completing the session"
+            );
+        }
+    }
+}
+
+#[test]
+fn session_supervisor_kills_and_reaps_a_stalled_child() {
+    let result = supervise_child("stall", Duration::from_secs(5))
+        .expect("could not supervise synthetic stalled child");
+    assert!(
+        result.timed_out,
+        "stalled child exited without reaching the deadline"
+    );
+    assert!(
+        result.killed_by_supervisor,
+        "stalled child exited before the supervisor could kill it"
+    );
+    assert!(
+        !result.status.success(),
+        "killed child unexpectedly succeeded"
+    );
+    let stderr = fs::read_to_string(result.output_dir.join("stderr.log")).unwrap();
+    assert!(
+        stderr.contains(STALL_READY),
+        "stalled worker was not observed before termination"
+    );
+}
+
+#[test]
+fn child_exit_must_be_observed_before_deadline() {
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(10);
+    assert!(exit_observed_before_deadline(start, deadline));
+    assert!(!exit_observed_before_deadline(deadline, deadline));
+    assert!(!exit_observed_before_deadline(
+        deadline + Duration::from_nanos(1),
+        deadline
+    ));
+}
+
+#[test]
+fn inherited_marker_alone_does_not_bypass_supervision() {
+    let marker = "qdrop-private-session-123";
+    assert_eq!(child_mode(Some(marker), &[]), None);
+    assert_eq!(
+        child_mode(Some(marker), &["--skip".into(), "unrelated".into()]),
+        None
+    );
+    assert_eq!(child_mode(None, &["--skip".into(), marker.into()]), None);
+    assert_eq!(
+        child_mode(Some(marker), &["--skip".into(), marker.into()]),
+        Some(ChildMode::Session)
+    );
+}
+
+fn run_controlled_session() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
