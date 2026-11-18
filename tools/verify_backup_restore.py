@@ -46,7 +46,7 @@ def snapshot_hashes(root: Path) -> dict[str, str]:
     return files
 
 
-def verify_restore_point(server: Path, backup: Path, timeout: int = 120) -> int:
+def verify_restore_point(server: Path, backup: Path, timeout: int = 120, *, native_stdout=None) -> int:
     """Verify a create-only backup on scratch storage without publishing a world."""
     if not stat.S_ISREG(server.lstat().st_mode):
         raise ValueError("server executable must be a regular file")
@@ -72,7 +72,7 @@ def verify_restore_point(server: Path, backup: Path, timeout: int = 120) -> int:
         # operator's current directory (which may contain a live world).
         # Make the server path absolute before changing its working directory.
         subprocess.run([str(server.resolve(strict=True)), "--verify-world", str(target)],
-                       check=True, timeout=timeout, cwd=str(copy.parent))
+                       check=True, timeout=timeout, cwd=str(copy.parent), stdout=native_stdout)
         # The verifier is required to be read-only. A successful exit code
         # does not excuse accidental changes to the isolated restored copy.
         if snapshot_hashes(copy) != before:
