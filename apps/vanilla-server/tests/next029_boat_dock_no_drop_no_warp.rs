@@ -12,10 +12,11 @@
 #[path = "support/packet_client.rs"]
 mod packet_client;
 
+use flate2::read::ZlibDecoder;
 use legacy_protocol::{write_frame, write_string, write_varint};
 use packet_client::BufferedClient;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -27,6 +28,71 @@ struct Server {
     root: PathBuf,
     log: PathBuf,
     port: u16,
+}
+
+fn seed_next029_world(path: &std::path::Path) -> std::io::Result<()> {
+    let mut data = Vec::new();
+    data.extend_from_slice(b"IRW1");
+    data.extend_from_slice(&10u32.to_be_bytes());
+    // Four temporary barriers keep the spawn dry before the client joins.
+    let records: [(i32, u8, i32, u16); 10] = [
+        (-1, 64, 0, 0x0010),
+        (0, 64, -1, 0x0010),
+        (0, 64, 1, 0x0010),
+        (1, 64, 0, 0x0010),
+        (2, 64, 0, 0x0080),
+        (3, 64, 0, 0x0080),
+        (4, 64, 0, 0x0080),
+        (5, 64, 0, 0x0080),
+        (6, 64, 0, 0x0080),
+        (7, 64, 0, 0x0010),
+    ];
+    for (x, y, z, packed) in records {
+        data.extend_from_slice(&x.to_be_bytes());
+        data.push(y);
+        data.extend_from_slice(&z.to_be_bytes());
+        data.extend_from_slice(&packed.to_be_bytes());
+    }
+    fs::write(path, data)
+}
+
+fn next029_fixture_chunk_is_valid(body: &[u8]) -> bool {
+    if body.len() < 17 || body[..8] != [0; 8] || body[8] != 1 {
+        return false;
+    }
+    let primary_mask = u16::from_be_bytes([body[9], body[10]]);
+    let add_mask = u16::from_be_bytes([body[11], body[12]]);
+    let compressed_len = i32::from_be_bytes([body[13], body[14], body[15], body[16]]);
+    if primary_mask & (1 << 4) == 0
+        || add_mask != 0
+        || compressed_len <= 0
+        || compressed_len as usize != body.len() - 17
+    {
+        return false;
+    }
+    let sections = primary_mask.count_ones() as usize;
+    let section_index = (primary_mask & 0x000f).count_ones() as usize;
+    let expected_len = sections * 10240 + 256;
+    let mut decoded = Vec::new();
+    let mut decoder = ZlibDecoder::new(&body[17..]).take(expected_len as u64 + 1);
+    if decoder.read_to_end(&mut decoded).is_err() || decoded.len() != expected_len {
+        return false;
+    }
+    // For y=64 and z=0, the local block index is x.
+    for x in 2..=7 {
+        let id = decoded[section_index * 4096 + x];
+        let expected_id = if x == 7 { 1 } else { 8 };
+        let metadata = decoded[sections * 4096 + section_index * 2048 + x / 2];
+        let nibble = if x % 2 == 0 {
+            metadata & 0x0f
+        } else {
+            metadata >> 4
+        };
+        if id != expected_id || nibble != 0 {
+            return false;
+        }
+    }
+    true
 }
 
 impl Drop for Server {
@@ -52,6 +118,7 @@ impl Server {
             std::process::id()
         ));
         fs::create_dir(&root).unwrap();
+        seed_next029_world(&root.join("flat.irw")).unwrap();
         fs::write(root.join("whitelist.json"), r#"[{"name":"DockRam"}]"#).unwrap();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -122,6 +189,7 @@ impl Server {
         socket.write_all(&packet(0, &start)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(25);
         let mut entity = None;
+        let mut fixture_checked = false;
         loop {
             assert!(Instant::now() < deadline, "{name}: join timed out");
             let Some((id, body)) = pump(&mut socket) else {
@@ -133,7 +201,18 @@ impl Server {
                     entity = Some(i32::from_be_bytes(body[..4].try_into().unwrap()));
                     assert_eq!(body[4] & 7, 0, "test session must be Survival");
                 }
+                0x21 if body.len() >= 8 && body[..8] == [0; 8] => {
+                    assert!(
+                        next029_fixture_chunk_is_valid(&body),
+                        "invalid water-channel fixture chunk"
+                    );
+                    fixture_checked = true;
+                }
                 0x08 if body.len() == 33 => {
+                    assert!(
+                        fixture_checked,
+                        "fixture chunk must arrive before initial position"
+                    );
                     let position = [
                         f64::from_be_bytes(body[..8].try_into().unwrap()),
                         f64::from_be_bytes(body[8..16].try_into().unwrap()) - f64::from(1.62_f32),
@@ -332,18 +411,6 @@ fn place_block(client: &mut BufferedClient, x: i32, item: i16, y: u8) {
     client.write_all(&packet(8, &place)).unwrap();
 }
 
-/// Place a water source at (x, 64, 0) and wait for its block update.
-fn place_water(client: &mut BufferedClient, x: i32) {
-    give(client, 8);
-    place_block(client, x, 8, 63);
-    wait_for(
-        client,
-        0x23,
-        |body| body.len() == 11 && body[0..4] == x.to_be_bytes() && body[4] == 64 && body[9] == 8,
-        "water block update",
-    );
-}
-
 /// Protocol 5 fixed-point coordinate (/32) as carried by S18 teleports.
 fn fixed(body: &[u8]) -> f64 {
     f64::from(i32::from_be_bytes(body[..4].try_into().unwrap())) / 32.0
@@ -363,25 +430,14 @@ fn next029_full_speed_dock_drops_nothing_and_breaks_nothing() {
     let (mut mover, entity, origin) = server.join("DockRam");
     assert_eq!(origin, [0.5, 64.0, 0.5]);
 
-    // Build a five-cell water channel (x = 2..=6 at y 64) capped by one
-    // stone wall block at x = 7, then a boat on the x = 3 water cell.
+    // The initial chunk confirms five source cells and the stone wall.
+    // Place a real boat on the x = 3 water cell.
     server.console("/gamemode creative DockRam");
     wait_for(
         &mut mover,
         0x39,
         |body| body.first() == Some(&0x0d),
         "creative abilities",
-    );
-    for x in 2..=6 {
-        place_water(&mut mover, x);
-    }
-    give(&mut mover, 1);
-    place_block(&mut mover, 7, 1, 63);
-    wait_for(
-        &mut mover,
-        0x23,
-        |body| body.len() == 11 && body[0..4] == 7i32.to_be_bytes() && body[9] == 1,
-        "wall block update",
     );
     give(&mut mover, 333);
     place_block(&mut mover, 3, 333, 64);
@@ -393,6 +449,20 @@ fn next029_full_speed_dock_drops_nothing_and_breaks_nothing() {
     );
     let mut spawn_body = spawned.as_slice();
     let boat_id = i32::try_from(legacy_protocol::read_varint(&mut spawn_body).unwrap()).unwrap();
+    server.console("/setblock 1 64 0 air");
+    wait_for(
+        &mut mover,
+        0x23,
+        |body| {
+            body.len() == 11
+                && body[0..4] == 1i32.to_be_bytes()
+                && body[4] == 64
+                && body[5..9] == 0i32.to_be_bytes()
+                && body[9] == 0
+                && body[10] == 0
+        },
+        "spawn barrier removal",
+    );
     server.console("/gamemode survival DockRam");
     wait_for(
         &mut mover,
