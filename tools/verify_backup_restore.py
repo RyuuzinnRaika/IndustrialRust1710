@@ -31,6 +31,20 @@ def _reject_reparse_point(metadata):
         raise ValueError("backup contains a symlink or Windows reparse point")
 
 
+def _marker_matches(marker: Path) -> bool:
+    """Read no more than the expected marker and one trailing byte."""
+    data = bytearray()
+    with marker.open("rb") as stream:
+        while len(data) < len(MARKER) + 1:
+            chunk = stream.read(len(MARKER) + 1 - len(data))
+            if chunk is None:
+                raise BlockingIOError("marker read would block")
+            if not chunk:
+                break
+            data.extend(chunk)
+    return data == MARKER
+
+
 def snapshot_hashes(root: Path) -> dict[str, str]:
     """Return a bounded content manifest; reject links and special files."""
     root_metadata = root.lstat()
@@ -110,7 +124,7 @@ def verify_restore_point(server: Path, backup: Path, timeout: int = 120, *, nati
     marker = backup / ".industrial1710-backup"
     marker_metadata = marker.lstat()
     _reject_reparse_point(marker_metadata)
-    if not stat.S_ISREG(marker_metadata.st_mode) or marker.read_bytes() != MARKER:
+    if not stat.S_ISREG(marker_metadata.st_mode) or not _marker_matches(marker):
         raise ValueError("backup ownership marker is missing or invalid")
     # Scan before format detection, which otherwise follows level.dat links.
     before = snapshot_hashes(backup)
