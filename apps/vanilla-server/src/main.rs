@@ -57,6 +57,8 @@ mod online_auth;
 mod packet_stats;
 mod physics;
 mod player;
+#[cfg(test)]
+mod qdrop_session_tests;
 mod save_replace;
 mod scoreboard;
 mod security_limits;
