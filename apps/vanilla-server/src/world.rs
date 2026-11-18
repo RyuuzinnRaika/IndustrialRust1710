@@ -279,6 +279,8 @@ pub fn is_placeable(block_id: u16) -> bool {
             | 115 // Nether wart
             | 127 // cocoa pods
             | 107 // fence gate
+            | 85 | 113 | 139 // fence/Nether fence/wall: 1.5-tall collision box;
+            // the fence-click lead-tie anchor above already expects placed fences
             | 44 | 126 // half slabs
             | 53 | 67 | 108 | 109 | 114 | 128 | 134 | 135 | 136 | 156 | 163 | 164 // stairs
             | 149 | 150 // comparator
