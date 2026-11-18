@@ -1004,6 +1004,73 @@ mod tests {
         ));
     }
 
+    /// NEXT-026 / #1009: fences (85), Nether fences (113) and walls (139)
+    /// collide up to 1.5 blocks — the vanilla 1.7.10 box. A normal jump
+    /// apex (≈1.249 blocks) can neither stand inside nor clear the top,
+    /// so the block stays unclimbable, while the 1.5 top itself supports
+    /// standing and stepping off is an ordinary fall.
+    #[test]
+    fn next026_fence_collision_top_stays_one_and_a_half_blocks() {
+        let mut world = World::new();
+        for x in 0..=6 {
+            world.import_block(x, 63, 0, 1 << 4).unwrap();
+        }
+        world.import_block(2, 64, 0, 85 << 4).unwrap();
+        world.import_block(3, 64, 0, 113 << 4).unwrap();
+        world.import_block(4, 64, 0, 139 << 4).unwrap();
+
+        // Any pose with feet inside the 1.5-tall volume collides, at every
+        // sampled height for all three block IDs.
+        for (cell, label) in [(2.5, "fence"), (3.5, "nether fence"), (4.5, "wall")] {
+            for feet in [64.0, 64.5, 65.0, 65.4] {
+                assert!(
+                    collides(&world, &at(cell, feet, 0.5)),
+                    "{label} must block feet at y={feet}"
+                );
+            }
+            // The exact 1.5 top is standable, and just above it is free.
+            let on_top = at(cell, 65.5, 0.5);
+            assert!(!collides(&world, &on_top), "{label} top is clear");
+            assert!(supported(&world, &on_top), "{label} top supports standing");
+        }
+
+        // Walking into a fence on the ground is blocked; stopping flush
+        // against it (AABB 4.4..5.0) is not.
+        let beside = at(1.5, 64.0, 0.5);
+        assert!(
+            !valid_movement(&world, &beside, &at(2.5, 64.0, 0.5)),
+            "walk into fence"
+        );
+        assert!(
+            valid_movement(&world, &beside, &at(1.7, 64.0, 0.5)),
+            "walk closer"
+        );
+
+        // A normal jump cannot mount or clear the 1.5 top: the measured
+        // apex (1.249 blocks) still collides inside the cell, and the
+        // 1.5-block step-up exceeds the jump limit.
+        let apex = at(2.5, 65.249187078745, 0.5);
+        assert!(
+            collides(&world, &apex),
+            "jump apex stays inside the fence box"
+        );
+        assert!(
+            !valid_movement(&world, &at(1.5, 64.0, 0.5), &at(2.5, 65.5, 0.5)),
+            "no jump-mounting a fence from flat ground"
+        );
+
+        // From the top, stepping off is an ordinary accepted fall and
+        // sliding across the tops stays clear.
+        assert!(
+            valid_movement(&world, &at(2.5, 65.5, 0.5), &at(1.5, 64.0, 0.5)),
+            "step off the fence top"
+        );
+        assert!(
+            valid_movement(&world, &at(2.5, 65.5, 0.5), &at(4.5, 65.5, 0.5)),
+            "skim across fence tops"
+        );
+    }
+
     #[test]
     fn slab_supports_partial_player_height_and_water_cancels_fall() {
         let mut world = World::new();
