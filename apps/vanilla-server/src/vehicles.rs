@@ -361,6 +361,66 @@ mod tests {
         assert_eq!(attachment(2, 5).body.len(), 9);
     }
 
+    /// NEXT-024 / #1007: the mount registry must hold exactly one rider
+    /// link. Double-mounting the same boat or a second boat while seated is
+    /// rejected, a dismount yields one detach (-1) and clears the link so a
+    /// later mount succeeds again — the water-surface foot switch can never
+    /// leave a phantom double mount behind.
+    #[test]
+    fn next024_dismount_releases_rider_and_double_mount_stays_rejected() {
+        let root = std::env::temp_dir().join(format!("ir1710-boat-n024-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let world_path = root.join("flat.irw");
+        let mut world = World::new();
+        world
+            .update_and_save(&world_path, 0, 64, 0, 8 << 4)
+            .unwrap();
+        world
+            .update_and_save(&world_path, 3, 64, 0, 8 << 4)
+            .unwrap();
+        let position = PlayerPosition {
+            x: 0.5,
+            y: 64.45,
+            z: 0.5,
+        };
+        let mut boats = Boats::default();
+        let spawn = boats.place(&world, position, 1).unwrap();
+        let mut spawn_body = spawn.body.as_slice();
+        let first = i32::try_from(legacy_protocol::read_varint(&mut spawn_body).unwrap()).unwrap();
+        let second_spawn = boats
+            .place(&world, PlayerPosition { x: 3.5, ..position }, 1)
+            .unwrap();
+        let mut second_body = second_spawn.body.as_slice();
+        let second =
+            i32::try_from(legacy_protocol::read_varint(&mut second_body).unwrap()).unwrap();
+
+        assert!(boats.mount(first, 17, position).is_some());
+        assert_eq!(boats.boat_for(17), Some(first));
+        let rider = boats.rider_position(17).unwrap();
+        assert_eq!((rider.x, rider.z), (0.5, 0.5));
+        assert!(rider.y > position.y, "rider rides above the deck");
+
+        // Double mount: the seated rider cannot take either boat again.
+        assert!(boats.mount(first, 17, position).is_none());
+        assert!(boats.mount(second, 17, position).is_none());
+        assert_eq!(boats.boat_for(17), Some(first));
+
+        // One detach event, link cleared, repeat dismounts are silent.
+        let detach = boats.dismount(17).unwrap();
+        assert_eq!(detach.id, 0x1b);
+        assert_eq!(&detach.body[4..8], &(-1i32).to_be_bytes());
+        assert_eq!(boats.boat_for(17), None);
+        assert!(boats.rider_position(17).is_none());
+        assert!(boats.dismount(17).is_none());
+
+        // After the clean dismount the same rider may board again — and
+        // the fresh mount is still exclusive.
+        assert!(boats.mount(first, 17, position).is_some());
+        assert!(boats.mount(second, 17, position).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn boat_snapshot_restores_entity_without_session_rider() {
         let root = std::env::temp_dir().join(format!("ir1710-boat-save-{}", std::process::id()));
