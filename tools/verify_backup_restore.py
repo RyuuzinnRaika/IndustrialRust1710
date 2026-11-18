@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """J92: Verify an offline backup by restoring it into an isolated temporary tree.
 
-Never writes to the original world or the backup. This is a restore *drill*,
-not an in-place restore command or an online consistency snapshot.
+This is a restore *drill*, not an in-place restore command or an online
+consistency snapshot. Configure temporary locations outside all live worlds
+and under operator control. Scratch candidates inside the backup are refused.
+Concurrent replacement of temporary-directory path components is not guarded.
+If no safe system temporary directory is usable, the drill fails rather than
+falling back to the current working directory.
 """
 from __future__ import annotations
 
@@ -46,6 +50,43 @@ def snapshot_hashes(root: Path) -> dict[str, str]:
     return files
 
 
+def _safe_scratch_directory(backup: Path):
+    """Create scratch outside the backup without probing unsafe temp paths."""
+    backup_root = backup.resolve(strict=True)
+    if tempfile.tempdir is not None:
+        candidates = [os.fsdecode(tempfile.tempdir)]
+    else:
+        candidates = [os.environ.get(name) for name in ("TMPDIR", "TEMP", "TMP")]
+        if os.name == "nt":
+            candidates.append(os.path.expanduser(r"~\AppData\Local\Temp"))
+            if system_root := os.environ.get("SYSTEMROOT"):
+                candidates.append(os.path.join(system_root, "Temp"))
+            candidates.extend((r"C:\temp", r"C:\tmp", r"\temp", r"\tmp"))
+        else:
+            candidates.extend(("/tmp", "/var/tmp", "/usr/tmp"))
+
+    last_error = None
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            directory = Path(candidate).resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            last_error = error
+            continue
+        if not directory.is_dir():
+            last_error = NotADirectoryError("temporary directory candidate is not a directory")
+            continue
+        if directory.is_relative_to(backup_root):
+            raise ValueError("temporary directory must be outside the backup")
+        try:
+            # Supplying dir avoids gettempdir(), which probes by writing files.
+            return tempfile.TemporaryDirectory(prefix="industrial1710-restore-drill-", dir=directory)
+        except OSError as error:
+            last_error = error
+    raise OSError("no usable temporary directory outside the backup") from last_error
+
+
 def verify_restore_point(server: Path, backup: Path, timeout: int = 120, *, native_stdout=None) -> int:
     """Verify a create-only backup on scratch storage without publishing a world."""
     if not stat.S_ISREG(server.lstat().st_mode):
@@ -60,7 +101,7 @@ def verify_restore_point(server: Path, backup: Path, timeout: int = 120, *, nati
     if (anvil and irw_files) or (not anvil and len(irw_files) != 1):
         raise ValueError("expected one IRW save or one Anvil level.dat, not mixed/ambiguous data")
     before = snapshot_hashes(backup)
-    with tempfile.TemporaryDirectory(prefix="industrial1710-restore-drill-") as scratch:
+    with _safe_scratch_directory(backup) as scratch:
         copy = Path(scratch) / "world"
         # Preserve links, *never dereference* them; the next scan rejects any.
         shutil.copytree(backup, copy, symlinks=True)

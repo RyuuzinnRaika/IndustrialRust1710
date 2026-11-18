@@ -1,7 +1,9 @@
 """Restore drills never mutate the original, trust an unmarked tree, or claim GUI acceptance."""
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,6 +13,136 @@ spec = importlib.util.spec_from_file_location(
 )
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+
+
+# Each invocation starts with an uncached tempfile module (or an explicit
+# cached directory), so the standard library's own candidate probe is tested.
+# Block every write attempt inside the synthetic backup and stop before any
+# scratch allocation/copy can recurse into that backup.
+_UNSAFE_TEMP_CHECK = r"""
+import importlib.util
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+from unittest.mock import patch
+
+source, server_text, backup_text, location_text, mode = sys.argv[1:]
+if "PYTHONOPTIMIZE" in os.environ:
+    raise AssertionError("PYTHONOPTIMIZE must not reach the child process")
+spec = importlib.util.spec_from_file_location("isolated_restore_verifier", source)
+verifier = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verifier)
+backup = Path(backup_text).resolve(strict=True)
+location = Path(location_text).resolve(strict=True)
+real_open = os.open
+old_tempdir = tempfile.tempdir
+
+def is_inside_backup(path):
+    return Path(os.fsdecode(path)).resolve().is_relative_to(backup)
+
+def guard_open(path, flags, *args, **kwargs):
+    if flags & os.O_CREAT and is_inside_backup(path):
+        raise AssertionError("blocked unsafe temporary-file probe inside backup")
+    return real_open(path, flags, *args, **kwargs)
+
+def guard_mkdir(path, *args, **kwargs):
+    if is_inside_backup(path):
+        raise AssertionError("blocked directory creation inside backup")
+    raise AssertionError("scratch allocation was attempted before rejection")
+
+def block_copy(*args, **kwargs):
+    raise AssertionError("backup copy was attempted before rejection")
+
+def block_native(*args, **kwargs):
+    raise AssertionError("native verifier was started before rejection")
+
+try:
+    tempfile.tempdir = None if mode == "fresh" else str(location)
+    with patch.object(os, "open", side_effect=guard_open), \
+         patch.object(os, "mkdir", side_effect=guard_mkdir), \
+         patch.object(shutil, "copytree", side_effect=block_copy), \
+         patch.object(verifier.subprocess, "run", side_effect=block_native):
+        try:
+            verifier.verify_restore_point(Path(server_text), backup)
+        except ValueError as error:
+            message = str(error).lower()
+            if "temporary directory" not in message or "backup" not in message:
+                raise AssertionError("unexpected rejection message: " + message)
+            print("REJECTED:", type(error).__name__, str(error))
+        else:
+            raise AssertionError("unsafe temporary directory was not rejected")
+finally:
+    tempfile.tempdir = old_tempdir
+"""
+
+
+# Exercise a fresh process and real temporary-tree copy without relying on the
+# global tempfile cache or its probing gettempdir() implementation.
+_SAFE_TEMP_CHECK = r"""
+from contextlib import nullcontext
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from unittest.mock import patch
+
+source, server_text, backup_text, safe_text, loop_text = sys.argv[1:]
+if "PYTHONOPTIMIZE" in os.environ:
+    raise AssertionError("PYTHONOPTIMIZE must not reach the child process")
+spec = importlib.util.spec_from_file_location("isolated_restore_verifier", source)
+verifier = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verifier)
+server = Path(server_text)
+backup = Path(backup_text).resolve(strict=True)
+safe = Path(safe_text).resolve(strict=True)
+old_tempdir = tempfile.tempdir
+observed = []
+injected = []
+real_resolve = Path.resolve
+
+def resolve_candidate(path, *args, **kwargs):
+    if loop_text and path == Path(loop_text):
+        injected.append(True)
+        raise RuntimeError("simulated symlink loop")
+    return real_resolve(path, *args, **kwargs)
+
+def inspect_native(argv, **kwargs):
+    scratch = Path(kwargs["cwd"]).resolve(strict=True)
+    target = Path(argv[2]).resolve(strict=True)
+    if scratch.parent != safe or scratch.is_relative_to(backup):
+        raise AssertionError("scratch must be inside safe temp and outside backup")
+    if target != scratch / "world" / "flat.irw":
+        raise AssertionError("native verifier must receive the isolated copy")
+    if target.read_bytes() != (backup / "flat.irw").read_bytes():
+        raise AssertionError("isolated copy differs from backup")
+    if argv[:2] != [str(server.resolve(strict=True)), "--verify-world"]:
+        raise AssertionError("native verifier executable or command mismatch")
+    if kwargs["check"] is not True or kwargs["timeout"] != 30:
+        raise AssertionError("native verifier check or timeout mismatch")
+    observed.append(scratch)
+    return subprocess.CompletedProcess(argv, 0)
+
+try:
+    tempfile.tempdir = None
+    loop_patch = patch.object(Path, "resolve", new=resolve_candidate) if loop_text else nullcontext()
+    with loop_patch, \
+         patch.object(tempfile, "gettempdir", side_effect=AssertionError("unexpected gettempdir probe")), \
+         patch.object(verifier.subprocess, "run", side_effect=inspect_native):
+        count = verifier.verify_restore_point(server, backup, timeout=30)
+    if loop_text and not injected:
+        raise AssertionError("symlink-loop error was not injected")
+    if count != 3 or len(observed) != 1:
+        raise AssertionError("restore did not inspect the expected files exactly once")
+    if observed[0].exists():
+        raise AssertionError("scratch directory was not cleaned up")
+    print("VERIFIED: scratch created and removed outside backup")
+finally:
+    tempfile.tempdir = old_tempdir
+"""
 
 
 class RestoreDrillTests(unittest.TestCase):
@@ -117,6 +249,114 @@ class RestoreDrillTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             module.verify_restore_point(self.server, self.backup)
         self.assertTrue((self.backup / "flat.irw").is_file())
+
+    def _assert_unsafe_temp_rejected(self, mode, env_name, location):
+        before_hashes = module.snapshot_hashes(self.backup)
+        paths = [self.backup, *sorted(self.backup.rglob("*"))]
+        before_metadata = [(p.relative_to(self.backup).as_posix(), p.stat().st_mode,
+                            p.stat().st_size, p.stat().st_mtime_ns) for p in paths]
+        environment = os.environ.copy()
+        environment.pop("PYTHONOPTIMIZE", None)
+        for key in ("TMPDIR", "TEMP", "TMP"):
+            environment.pop(key, None)
+        if env_name is not None:
+            environment[env_name] = str(location)
+        result = subprocess.run(
+            [sys.executable, "-c", _UNSAFE_TEMP_CHECK, str(Path(module.__file__)),
+             str(self.server), str(self.backup), str(location), mode],
+            env=environment, capture_output=True, text=True, timeout=30, check=False,
+        )
+        after_paths = [self.backup, *sorted(self.backup.rglob("*"))]
+        after_metadata = [(p.relative_to(self.backup).as_posix(), p.stat().st_mode,
+                           p.stat().st_size, p.stat().st_mtime_ns) for p in after_paths]
+        self.assertEqual(module.snapshot_hashes(self.backup), before_hashes)
+        self.assertEqual(after_metadata, before_metadata)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("REJECTED:", result.stdout)
+
+    def test_uncached_temp_environment_inside_backup_rejected_before_probe(self):
+        nested = self.backup / "temp-location"
+        nested.mkdir()
+        for env_name in ("TMPDIR", "TEMP", "TMP"):
+            for location in (self.backup, nested):
+                with self.subTest(env_name=env_name, location=location):
+                    self._assert_unsafe_temp_rejected("fresh", env_name, location)
+
+    def test_cached_tempdir_inside_backup_rejected_before_scratch(self):
+        nested = self.backup / "temp-location"
+        nested.mkdir()
+        for location in (self.backup, nested):
+            with self.subTest(location=location):
+                self._assert_unsafe_temp_rejected("cached", None, location)
+
+    def _assert_safe_temp_accepted(self, environment, loop_path=None):
+        before_hashes = module.snapshot_hashes(self.backup)
+        safe = self.base / "safe-temp"
+        safe.mkdir()
+        environment = {**os.environ, **environment}
+        environment.pop("PYTHONOPTIMIZE", None)
+        for key in ("TMPDIR", "TEMP", "TMP"):
+            if environment.get(key) is None:
+                environment.pop(key, None)
+        result = subprocess.run(
+            [sys.executable, "-c", _SAFE_TEMP_CHECK, str(Path(module.__file__)),
+             str(self.server), str(self.backup), str(safe), str(loop_path) if loop_path else ""],
+            env=environment, capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(module.snapshot_hashes(self.backup), before_hashes)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VERIFIED:", result.stdout)
+        self.assertEqual(list(safe.iterdir()), [], "temporary directory must be empty after cleanup")
+
+    def test_uncached_safe_tmpdir_permits_restore_without_global_probe(self):
+        self._assert_safe_temp_accepted({
+            "TMPDIR": str(self.base / "safe-temp"), "TEMP": None, "TMP": None,
+        })
+
+    def test_invalid_tmpdir_falls_back_to_safe_temp_without_global_probe(self):
+        invalid = self.base / "does-not-exist"
+        self._assert_safe_temp_accepted({
+            "TMPDIR": str(invalid), "TEMP": str(self.base / "safe-temp"), "TMP": None,
+        })
+        self.assertFalse(invalid.exists())
+
+    def test_regular_file_in_backup_falls_back_to_safe_temp_without_global_probe(self):
+        self._assert_safe_temp_accepted({
+            "TMPDIR": str(self.backup / "flat.irw"),
+            "TEMP": str(self.base / "safe-temp"),
+            "TMP": None,
+        })
+
+    def test_resolve_runtime_error_falls_back_to_safe_temp_without_global_probe(self):
+        loop_path = self.base / "simulated-loop"
+        self._assert_safe_temp_accepted({
+            "TMPDIR": str(loop_path), "TEMP": str(self.base / "safe-temp"), "TMP": None,
+        }, loop_path=loop_path)
+        self.assertFalse(loop_path.exists())
+
+    def test_unavailable_temp_candidates_do_not_fallback_to_cwd(self):
+        before = module.snapshot_hashes(self.backup)
+        previous_cwd = Path.cwd()
+        environment = {key: str(self.base) for key in ("TMPDIR", "TEMP", "TMP")}
+        try:
+            os.chdir(self.backup)
+            with patch.dict(os.environ, environment), \
+                 patch.object(tempfile, "tempdir", None), \
+                 patch.object(tempfile, "TemporaryDirectory", side_effect=OSError("unavailable")) as scratch, \
+                 patch.object(os, "mkdir", side_effect=AssertionError("unexpected directory creation")) as mkdir, \
+                 patch.object(module.shutil, "copytree") as copy, \
+                 patch.object(module.subprocess, "run") as native:
+                with self.assertRaisesRegex(OSError, "no usable temporary directory outside the backup"):
+                    module.verify_restore_point(self.server, self.backup)
+                self.assertGreater(scratch.call_count, 0)
+                attempted = [Path(call.kwargs["dir"]).resolve() for call in scratch.call_args_list]
+                self.assertNotIn(self.backup.resolve(), attempted)
+                mkdir.assert_not_called()
+                copy.assert_not_called()
+                native.assert_not_called()
+        finally:
+            os.chdir(previous_cwd)
+        self.assertEqual(module.snapshot_hashes(self.backup), before)
 
     @unittest.skipUnless(hasattr(__import__("os"), "symlink"), "symlink not available")
     @patch.object(module.subprocess, "run")
