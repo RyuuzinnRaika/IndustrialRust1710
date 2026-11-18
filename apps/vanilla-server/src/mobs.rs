@@ -3482,6 +3482,11 @@ impl Mobs {
                         if enderman_teleport_safe(world, destination) {
                             mob.position = destination;
                             mob.waypoint = None;
+                            // Like vanilla Entity#teleportTo, arriving at the
+                            // destination zeroes motion: a knockback impulse
+                            // taken before the warp must never be integrated
+                            // from the new coordinates.
+                            mob.knockback = [0.0; 3];
                             events.push(multiplayer::teleport(mob.id, &destination, 0.0, 0.0));
                             break;
                         }
@@ -5052,6 +5057,59 @@ mod tests {
         let events = mobs.tick(21, &World::new(), &[]);
         assert!(mobs.entities[&id].position.x > at.x);
         assert!(events.iter().any(|event| event.id == 0x18));
+    }
+
+    /// NEXT-028 / #1011: an Enderman that warps away while still carrying
+    /// melee knockback must arrive at the destination with zero velocity,
+    /// exactly like vanilla Entity#teleportTo. The impulse taken before
+    /// the warp may never be integrated from the new coordinates.
+    #[test]
+    fn next028_enderman_water_warp_clears_residual_knockback() {
+        let mut world = World::new();
+        for x in 0..32 {
+            for z in 0..32 {
+                world.import_block(x, 63, z, 1 << 4).unwrap();
+            }
+        }
+        let mut mobs = Mobs::default();
+        let at = PlayerPosition {
+            x: 16.5,
+            y: 64.0,
+            z: 16.5,
+        };
+        mobs.insert(Kind::Enderman, at, false);
+        let id = mobs.next_id - 1;
+        mobs.player_attack(id, PlayerPosition { x: 15.5, ..at }, None, 20)
+            .unwrap();
+        assert_ne!(mobs.entities[&id].knockback, [0.0; 3], "hit lands impulse");
+
+        // Water rises under the mob: it must warp away on this tick.
+        world.import_block(16, 64, 16, 8 << 4).unwrap();
+        let events = mobs.tick(41, &world, &[]);
+        let warped = mobs.entities.get(&id).unwrap();
+        let warped_position = warped.position;
+        assert_ne!(warped_position, at, "water forces a warp");
+        assert_eq!(
+            warped.knockback, [0.0; 3],
+            "warp must zero the pre-warp velocity at the destination"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.id == 0x18 && event.body[..4] == id.to_be_bytes()),
+            "warp publishes an entity teleport"
+        );
+
+        // Later ticks from the destination: nothing moves — the old
+        // impulse is gone and a neutral Enderman stands still.
+        for tick in 42..=45 {
+            mobs.tick(tick, &world, &[]);
+            assert_eq!(
+                mobs.entities.get(&id).unwrap().position,
+                warped_position,
+                "old knockback fired from the destination at tick {tick}"
+            );
+        }
     }
 
     #[test]
