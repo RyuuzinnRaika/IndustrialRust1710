@@ -5840,6 +5840,54 @@ mod tests {
         assert!(mobs.use_mount(pig, 2, at).is_some());
     }
 
+    /// NEXT-025 / #1008: once the rider detaches, stale riding input must
+    /// find no link. Steering from the former rider emits nothing and can
+    /// never move the saddled animal (and an unrelated rider steering a
+    /// mounted animal likewise does nothing); a later mount starts clean
+    /// and steers again.
+    #[test]
+    fn next025_stale_steering_after_dismount_moves_nothing() {
+        let mut world = World::new();
+        for z in -9..=-7 {
+            world.import_block(12, 63, z, 1 << 4).unwrap();
+        }
+        let mut mobs = Mobs {
+            next_id: BASE_ID,
+            ..Mobs::default()
+        };
+        let at = PlayerPosition {
+            x: 12.25,
+            y: 64.0,
+            z: -7.5,
+        };
+        let pig = mobs.next_id;
+        mobs.insert(Kind::Pig, at, false);
+        mobs.saddle(pig, at).unwrap();
+
+        // Seated, a forward press with a carrot-on-a-stick moves the mount.
+        assert!(mobs.use_mount(pig, 2, at).is_some());
+        assert_eq!(mobs.steer_rider(2, &world, 1.0, 0.0, true, 1).len(), 1);
+        let stepped = mobs.entities.get(&pig).unwrap().position;
+        assert!(stepped.z > at.z, "seated steering advances the mount");
+
+        // A rider who never mounted cannot drive the seated animal either.
+        assert!(mobs.steer_rider(9, &world, 1.0, 0.0, true, 2).is_empty());
+        assert_eq!(mobs.entities.get(&pig).unwrap().position, stepped);
+
+        // Shift-dismount, then the stale riding burst a lagging client
+        // delivers: every packet finds no link and moves nothing.
+        mobs.dismount(2).unwrap();
+        for tick in 3..=12 {
+            assert!(mobs.steer_rider(2, &world, 1.0, 0.0, true, tick).is_empty());
+        }
+        assert_eq!(mobs.entities.get(&pig).unwrap().position, stepped);
+
+        // A fresh mount after the burst is clean and steers again.
+        assert!(mobs.use_mount(pig, 2, at).is_some());
+        assert_eq!(mobs.steer_rider(2, &world, 1.0, 0.0, true, 13).len(), 1);
+        assert!(mobs.entities.get(&pig).unwrap().position.z > stepped.z);
+    }
+
     #[test]
     fn leash_cannot_attach_to_hostile_or_duplicate_animal() {
         let mut mobs = Mobs {
