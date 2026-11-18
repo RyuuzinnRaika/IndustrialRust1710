@@ -2786,7 +2786,10 @@ fn play(
                 if survival && landed_distance >= 1.0 {
                     let (fx, fy, fz) = (
                         candidate.x.floor() as i32,
-                        candidate.y.floor() as i32 - 1,
+                        // Same 1/16 support tolerance as the client-path
+                        // trample probe: a silent landing on farmland rests
+                        // at cell + 0.9375, not on the integer boundary.
+                        (candidate.y + physics::GROUND_TOLERANCE).floor() as i32 - 1,
                         candidate.z.floor() as i32,
                     );
                     let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -4130,7 +4133,11 @@ fn play(
                 if survival {
                     let fx = x.floor() as i32;
                     let fz = z.floor() as i32;
-                    let fy = y.floor() as i32 - 1;
+                    // Farmland's collision top is 15/16, so a supported
+                    // landing can rest at cell + 0.9375. Include the same
+                    // 1/16 tolerance as support_top so the soil cell the
+                    // feet actually stand on is probed, not its basement.
+                    let fy = (y + physics::GROUND_TOLERANCE).floor() as i32 - 1;
                     // A fall of at least one block onto farmland tramples it.
                     if fy >= 0 && landing_distance >= 1.0 {
                         let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
