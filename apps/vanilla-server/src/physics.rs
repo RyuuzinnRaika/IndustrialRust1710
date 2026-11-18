@@ -941,6 +941,69 @@ mod tests {
         assert!(!valid_movement(&world, &start, &end));
     }
 
+    /// NEXT-023 / #1006: crossing the water→land boundary must never look
+    /// like an illegal move. Water (source 8 and flowing 9) is non-solid,
+    /// so a swimmer at ground level inside it leaves into open land with
+    /// ordinary walk strokes, fast 1.2-block swim strokes, and a step-up
+    /// onto a raised shore lip — none of which may be rejected. Genuine
+    /// collisions (diving into the ground) still are.
+    #[test]
+    fn next023_water_to_land_boundary_crossings_are_always_valid() {
+        let mut world = World::new();
+        for x in 0..=5 {
+            world.import_block(x, 63, 0, 1 << 4).unwrap();
+        }
+        world.import_block(0, 64, 0, 8 << 4).unwrap(); // source
+        world.import_block(1, 64, 0, 9 << 4).unwrap(); // flowing
+        world.import_block(2, 64, 0, 9 << 4).unwrap(); // flowing
+        world.import_block(4, 64, 0, 1 << 4).unwrap(); // raised shore lip
+
+        let swimmer = at(0.5, 64.0, 0.5);
+        assert!(in_water(&world, &swimmer));
+        assert!(supported(&world, &swimmer));
+
+        // Walk-scale crossing: 0.125-block samples through both flowing
+        // cells and out past the water's edge onto land.
+        let mut previous = swimmer;
+        for index in 1..=19 {
+            let next = at(0.5 + f64::from(index) * 0.125, 64.0, 0.5);
+            assert!(!collides(&world, &next));
+            assert!(
+                valid_movement(&world, &previous, &next),
+                "water→land walk stroke to x={}",
+                next.x
+            );
+            previous = next;
+        }
+
+        // Fast swim strokes exit the water column in one packet.
+        assert!(valid_movement(
+            &world,
+            &at(1.5, 64.0, 0.5),
+            &at(2.7, 64.0, 0.5)
+        ));
+        // Back into the water from land is equally legal.
+        assert!(valid_movement(
+            &world,
+            &at(3.5, 64.0, 0.5),
+            &at(2.5, 64.0, 0.5)
+        ));
+        // Stepping out of the water onto a one-block shore lip: the stepped
+        // jump leg accepts it from the swimmer's surface position.
+        assert!(valid_movement(
+            &world,
+            &at(3.5, 64.0, 0.5),
+            &at(4.5, 65.0, 0.5)
+        ));
+
+        // A real collision on the same shore is still rejected.
+        assert!(!valid_movement(
+            &world,
+            &at(3.5, 64.0, 0.5),
+            &at(3.5, 62.5, 0.5)
+        ));
+    }
+
     #[test]
     fn slab_supports_partial_player_height_and_water_cancels_fall() {
         let mut world = World::new();
