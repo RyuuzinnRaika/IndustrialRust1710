@@ -7,7 +7,10 @@ use crate::world::World;
 const HALF_WIDTH: f64 = 0.3;
 const HEIGHT: f64 = 1.8;
 const EPS: f64 = 1e-7;
-const GROUND_TOLERANCE: f64 = 0.0625;
+/// Half-pixel foot tolerance shared by `support_top` and the farmland
+/// trample probe: farmland (60) collides at 15/16, so a supported landing
+/// rests at `cell + 0.9375` and a floor() alone would probe one cell too low.
+pub const GROUND_TOLERANCE: f64 = 0.0625;
 
 /// Block-space collision volume, including metadata-dependent partial heights.
 #[derive(Clone, Copy)]
@@ -1247,6 +1250,51 @@ mod tests {
         assert_eq!(jumped.update(62.0, false), 0);
         assert_eq!(jumped.update(67.0, false), 0);
         assert_eq!(jumped.update(64.0, true), 0);
+    }
+
+    #[test]
+    fn next030_farmland_top_support_and_landing_distance_is_consumed_once() {
+        // Farmland (60) collides at its 15/16 top: a body overlapping that
+        // height is blocked, feet standing exactly on top are not, and the
+        // top is a real supported landing for the trample probe.
+        let mut world = World::new();
+        world.import_block(0, 64, 0, 60 << 4).unwrap();
+        let on_top = at(0.5, 64.9375, 0.5);
+        assert!(!collides(&world, &on_top));
+        assert!(supported(&world, &on_top));
+        assert!(collides(&world, &at(0.5, 64.9, 0.5)));
+
+        // Landing distance is cumulative across packets, appears only on a
+        // supported landing, and take_landing_distance consumes it exactly
+        // once — both landing paths share the tracker, so a second read
+        // must be silent (walking and re-broadcast protection).
+        let mut walking = FallTracker::new(64.9375);
+        assert_eq!(walking.update(64.9375, true), 0);
+        assert_eq!(walking.take_landing_distance(), 0.0);
+
+        let mut step = FallTracker::new(65.6875);
+        assert_eq!(step.update(64.9375, true), 0);
+        assert_eq!(step.take_landing_distance(), 0.75);
+        assert_eq!(step.take_landing_distance(), 0.0);
+
+        // One packet per quarter of the drop: the tracker reports the whole
+        // 1.25-block jump landing, not the last packet's delta.
+        let mut jumped = FallTracker::new(64.9375);
+        assert_eq!(jumped.update(66.1875, false), 0);
+        assert_eq!(jumped.update(65.5, false), 0);
+        assert_eq!(jumped.update(64.9375, true), 0);
+        assert_eq!(jumped.take_landing_distance(), 1.25);
+
+        let mut multi = FallTracker::new(66.9375);
+        assert_eq!(multi.update(66.1875, false), 0);
+        assert_eq!(multi.update(65.4375, false), 0);
+        assert_eq!(multi.update(64.9375, true), 0);
+        assert_eq!(multi.take_landing_distance(), 2.0);
+        // A teleport reset (fall.reset) clears any pending accumulation.
+        let mut teleported = FallTracker::new(70.0);
+        assert_eq!(teleported.update(68.0, false), 0);
+        teleported.reset(66.0);
+        assert_eq!(teleported.take_landing_distance(), 0.0);
     }
 }
 
