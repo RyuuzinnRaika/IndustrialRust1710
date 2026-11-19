@@ -1589,6 +1589,105 @@ mod tests {
     }
 
     #[test]
+    fn next033_burn_metadata_for_a_departed_observer_is_never_replayed() {
+        // A burning undead emits a periodic status(2)+health 0x1C stream. When
+        // an observer's session ends mid-stream, the still-queued updates die
+        // with that mailbox: the replacement session for the same name must
+        // never replay them, and hub operations naming the departed entity ID
+        // must stay inert (no resurrection, no delivery, no poison).
+        let hub = Hub::default();
+        let (observer, observer_rx, _) = hub
+            .add(
+                "Watcher".into(),
+                "uuid-w1".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        let (_owner, owner_rx, _) = hub
+            .add(
+                "Trampler".into(),
+                "uuid-t".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        while observer_rx.try_recv().is_ok() {}
+        while owner_rx.try_recv().is_ok() {}
+        let burn = |health: f32| {
+            let mut body = 900_001i32.to_be_bytes().to_vec();
+            body.push((3 << 5) | 6);
+            body.extend_from_slice(&health.to_be_bytes());
+            body.push(0x7f);
+            Event { id: 0x1c, body }
+        };
+        // One update is already queued when the observer's socket dies, and a
+        // second lands in the detection window before Hub::remove runs. The
+        // still-online owner consumes its legitimate live copies here.
+        hub.broadcast(burn(17.0));
+        hub.broadcast(burn(16.0));
+        assert_eq!(owner_rx.try_recv().unwrap().id, 0x1c);
+        assert_eq!(owner_rx.try_recv().unwrap().id, 0x1c);
+        drop(observer_rx);
+        hub.remove(observer);
+        // Hub::remove's own presence cleanup (Destroy 0x13 + tab removal) is
+        // legitimate; what must never reach anyone is burn metadata or gear
+        // traffic attributed to the departed ID's queued stream.
+        let mut presence_only = Vec::new();
+        for _ in 0..8 {
+            let Ok(event) = owner_rx.try_recv() else {
+                break;
+            };
+            presence_only.push(event.id);
+        }
+        assert!(
+            presence_only.iter().all(|id| *id != 0x1c && *id != 0x04),
+            "departed observer's queued metadata leaked on removal: {presence_only:?}"
+        );
+
+        // Naming the departed ID afterwards is inert: no movement fanout and
+        // no equipment tracking can revive it.
+        hub.move_player(observer, PlayerPosition::default(), 0.0, 0.0);
+        hub.set_equipment(
+            observer,
+            [
+                Some(Stack {
+                    id: 267,
+                    count: 1,
+                    damage: 0,
+                    nbt: None,
+                }),
+                None,
+                None,
+                None,
+                None,
+            ],
+        );
+        assert!(owner_rx.try_recv().is_err(), "departed ID revived traffic");
+        assert_eq!(
+            hub.participants()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| *id == observer)
+                .count(),
+            0,
+            "departed session is still registered"
+        );
+
+        // The replacement session for the same name gets a fresh mailbox; the
+        // two burn updates queued for the departed observer never appear.
+        let (_new_id, new_rx, _) = hub
+            .add(
+                "Watcher".into(),
+                "uuid-w2".into(),
+                PlayerPosition::default(),
+            )
+            .unwrap();
+        for _ in 0..32 {
+            let Ok(event) = new_rx.try_recv() else { break };
+            assert_ne!(event.id, 0x1c, "stale burn metadata replayed");
+        }
+    }
+
+    #[test]
     fn golden_protocol5_player_entity_bytes() {
         // Independently fixed Protocol 5 S0C, S13, S18 and S38 fixtures.
         let hub = Hub::default();
