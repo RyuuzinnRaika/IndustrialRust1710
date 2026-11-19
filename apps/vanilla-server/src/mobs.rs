@@ -5284,6 +5284,53 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn next031_killed_mob_is_absent_from_every_later_snapshot() {
+        // Join and respawn replay both read spawn_events(). Once a Mob dies
+        // (removed under the same mutex that guards attacks and snapshots),
+        // no later snapshot and no further simulation tick may resurrect it.
+        let pos = PlayerPosition::default();
+        let mut mobs = Mobs::default();
+        let id = mobs.next_id;
+        mobs.insert(Kind::Chicken, pos, false);
+        let sword = Some(Stack {
+            id: 267,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        });
+        let fatal = mobs
+            .player_attack(id, pos, sword, 20)
+            .expect("an iron sword kills a 4 HP Chicken in one hit");
+        assert!(fatal.events.iter().any(|event| event.id == 0x1a
+            && event.body.len() == 5
+            && event.body[..4] == id.to_be_bytes()
+            && event.body[4] == 3));
+        assert!(fatal.events.iter().any(|event| event.id == 0x13));
+
+        let spawned_ids = |state: &Mobs| -> Vec<i32> {
+            state
+                .spawn_events()
+                .filter(|event| event.id == 0x0f)
+                .map(|event| {
+                    let mut body = event.body.as_slice();
+                    i32::try_from(legacy_protocol::read_varint(&mut body).unwrap()).unwrap()
+                })
+                .collect()
+        };
+        assert!(!spawned_ids(&mobs).contains(&id), "dead Mob in snapshot");
+
+        // Continued simulation must not re-add the dead entity either.
+        let world = World::new();
+        for tick in 21..41 {
+            mobs.tick_at_daytime(tick, 6000, &world, &[pos]);
+        }
+        assert!(
+            !spawned_ids(&mobs).contains(&id),
+            "dead Mob revived by tick"
+        );
+    }
     #[test]
     fn command_summon_in_flat_world_survives_restart_without_enabling_natural_spawns() {
         let world = World::new();

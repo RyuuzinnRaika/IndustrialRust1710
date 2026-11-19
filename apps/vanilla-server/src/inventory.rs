@@ -702,6 +702,18 @@ impl Inventory {
     pub fn held(&self) -> Option<Stack> {
         self.slots[36 + self.selected as usize]
     }
+    /// Protocol 5 Entity Equipment (0x04) order: held item, boots,
+    /// leggings, chestplate, helmet. Window zero stores armor as
+    /// 5=helmet, 6=chest, 7=leggings, 8=boots.
+    pub fn equipment(&self) -> [Option<Stack>; 5] {
+        [
+            self.held(),
+            self.slots[8],
+            self.slots[7],
+            self.slots[6],
+            self.slots[5],
+        ]
+    }
     /// Helmet is protocol slot 5, independent of the selected hotbar tool.
     /// Used for the server-owned Aqua Affinity mining-speed exception.
     pub fn mining_helmet(&self) -> Option<Stack> {
@@ -2083,7 +2095,7 @@ impl Inventory {
         Self::encode_slot(&mut out, self.cursor);
         out
     }
-    fn encode_slot(out: &mut Vec<u8>, slot: Option<Stack>) {
+    pub(crate) fn encode_slot(out: &mut Vec<u8>, slot: Option<Stack>) {
         match slot {
             None => out.extend_from_slice(&(-1i16).to_be_bytes()),
             Some(value) => {
