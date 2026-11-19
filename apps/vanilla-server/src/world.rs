@@ -6,6 +6,8 @@ mod ecology;
 mod lighting;
 mod special;
 #[cfg(test)]
+mod sugar_cane_regression_tests;
+#[cfg(test)]
 mod terrain_packet_regressions;
 pub(crate) use lighting::LightSampler;
 pub use special::TntEvent;
@@ -1373,7 +1375,8 @@ impl World {
             132 => 287,       // tripwire drops string
             149 | 150 => 404, // comparator item, not powered block
             30 => 287,        // cobweb without silk touch
-            81 | 83 | 111 | 171 => id as i16,
+            81 | 111 | 171 => id as i16,
+            83 => 338,  // sugar cane block -> sugar cane item
             127 => 351, // cocoa beans (brown dye)
             115 => 372, // nether wart item
             175 => 175, // double-height flower
@@ -7120,12 +7123,18 @@ mod tests {
             (68, 2, 323, 0),            // wall sign
             (132, 0, 287, 0),           // tripwire string
             (127, 8, 351, 3),           // cocoa beans
+            (83, 0, 338, 0),            // sugar cane item, not its block ID
         ] {
-            let path = std::env::temp_dir().join(format!(
-                "ir1710-piston-items-{}-{block_id}.irw",
-                std::process::id()
+            let root = std::env::temp_dir().join(format!(
+                "ir1710-piston-items-{}-{block_id}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
             ));
-            let _ = fs::remove_file(&path);
+            fs::create_dir(&root).unwrap();
+            let path = root.join("world.irw");
             let mut world = World::new();
             world.update_and_save(&path, -1, 64, 0, 152 << 4).unwrap();
             world
@@ -7142,6 +7151,10 @@ mod tests {
                     .update_and_save(&path, 1, 64, 1, (17u16 << 4) | 3)
                     .unwrap();
             }
+            if block_id == 83 {
+                // Sugar cane requires water next to the supporting grass.
+                world.update_and_save(&path, 1, 63, 1, 9 << 4).unwrap();
+            }
             world
                 .update_and_save(&path, 1, 64, 0, (block_id << 4) | metadata)
                 .unwrap();
@@ -7156,7 +7169,7 @@ mod tests {
                 }),
                 "piston silently discarded item {block_id}: {drops:?}"
             );
-            fs::remove_file(path).unwrap();
+            fs::remove_dir_all(root).unwrap();
         }
     }
 
