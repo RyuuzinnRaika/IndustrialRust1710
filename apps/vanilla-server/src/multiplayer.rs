@@ -86,6 +86,11 @@ pub struct Peer {
     /// observer must replay this right after the Spawn packet, otherwise an
     /// item change that happened before its arrival is invisible forever.
     pub equipment: [Option<Stack>; 5],
+    /// Entity being ridden (Mob/boat/minecart), or None when not mounted.
+    /// Riding is a parent-child Spawn relation: an observer that acquires
+    /// the rider later must receive the Attach notification (0x1B) right
+    /// after the rider's Spawn, or the ride is invisible to it forever.
+    pub mount: Option<i32>,
     tx: SyncSender<QueuedEvent>,
     epoch: Arc<AtomicU64>,
     overloaded: Arc<AtomicBool>,
@@ -696,6 +701,7 @@ impl Hub {
             position,
             dimension,
             equipment: [None; 5],
+            mount: None,
             tx,
             epoch: Arc::clone(&epoch),
             overloaded: Arc::new(AtomicBool::new(false)),
@@ -780,6 +786,11 @@ impl Hub {
                             for replay in equipment_replay(id, &moved.equipment) {
                                 enqueue(other, &replay);
                             }
+                            // Riding is part of the same Spawn delivery:
+                            // attach after the rider's Spawn.
+                            if let Some(vehicle) = moved.mount {
+                                enqueue(other, &crate::vehicles::attachment(id, vehicle));
+                            }
                         }
                         (false, false) => {}
                     }
@@ -793,6 +804,12 @@ impl Hub {
                                 enqueue(&moved, &event);
                                 for replay in equipment_replay(other.id, &other.equipment) {
                                     enqueue(&moved, &replay);
+                                }
+                                if let Some(vehicle) = other.mount {
+                                    enqueue(
+                                        &moved,
+                                        &crate::vehicles::attachment(other.id, vehicle),
+                                    );
                                 }
                             }
                         }
@@ -862,9 +879,15 @@ impl Hub {
                 for replay in equipment_replay(id, &arriving.equipment) {
                     enqueue(other, &replay);
                 }
+                if let Some(vehicle) = arriving.mount {
+                    enqueue(other, &crate::vehicles::attachment(id, vehicle));
+                }
                 enqueue(&arriving, &spawn(other)?);
                 for replay in equipment_replay(other.id, &other.equipment) {
                     enqueue(&arriving, &replay);
+                }
+                if let Some(vehicle) = other.mount {
+                    enqueue(&arriving, &crate::vehicles::attachment(other.id, vehicle));
                 }
             }
         }
@@ -903,6 +926,38 @@ impl Hub {
                 for event in &changed {
                     enqueue(other, event);
                 }
+            }
+        }
+    }
+
+    /// Publish the session's server-owned riding relation (mount EntityID,
+    /// None when dismounted). Only a transition sends a packet: Attach to
+    /// the new mount, or the -1 detach, to same-dimension observers in view
+    /// distance — never to the owner. Live mount/dismount paths already
+    /// broadcast the transition globally; this cache is what every later
+    /// Spawn delivery (join snapshot or view entry) replays, and the diff
+    /// self-heals an observer that entered view inside a remote-change
+    /// window (broken boat, killed mount) within one refresh.
+    pub fn set_mount(&self, id: i32, mount: Option<i32>) {
+        let Ok(mut inner) = self.0.lock() else {
+            return;
+        };
+        let Some(peer) = inner.players.get_mut(&id) else {
+            return;
+        };
+        if peer.mount == mount {
+            return;
+        }
+        peer.mount = mount;
+        let position = peer.position;
+        let dimension = peer.dimension;
+        let event = crate::vehicles::attachment(id, mount.unwrap_or(-1));
+        for other in inner.players.values() {
+            if other.id == id || other.dimension != dimension {
+                continue;
+            }
+            if visible(&other.position, &position) {
+                enqueue(other, &event);
             }
         }
     }
@@ -1308,6 +1363,110 @@ mod tests {
         );
         assert!(b_rx.try_recv().is_err());
         // Alice observes Bob, who has no equipment: Spawn only.
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x0c);
+        assert!(a_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn next034_mount_diffs_reach_only_visible_observers() {
+        let hub = Hub::default();
+        let (a, a_rx, _) = hub
+            .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        let (_b, b_rx, _) = hub
+            .add("Bob".into(), "uuid-b".into(), PlayerPosition::default())
+            .unwrap();
+        let (_c, c_rx, _) = hub
+            .add(
+                "Cass".into(),
+                "uuid-c".into(),
+                PlayerPosition {
+                    x: 400.5,
+                    y: 65.0,
+                    z: 0.5,
+                },
+            )
+            .unwrap();
+        while a_rx.try_recv().is_ok() {}
+        while b_rx.try_recv().is_ok() {}
+        while c_rx.try_recv().is_ok() {}
+        hub.set_mount(a, Some(900_001));
+        // The owner's own stream receives nothing.
+        assert!(a_rx.try_recv().is_err());
+        // A visible observer gets exactly one Attach.
+        let attach = b_rx.try_recv().unwrap();
+        assert_eq!(
+            (
+                attach.id,
+                &attach.body[..4],
+                &attach.body[4..8],
+                attach.body[8],
+                attach.body.len()
+            ),
+            (
+                0x1b,
+                a.to_be_bytes().as_slice(),
+                900_001i32.to_be_bytes().as_slice(),
+                0,
+                9
+            )
+        );
+        assert!(b_rx.try_recv().is_err());
+        // Out of view distance: no leak.
+        assert!(c_rx.try_recv().is_err());
+        // Re-publishing the identical ride is silent.
+        hub.set_mount(a, Some(900_001));
+        assert!(b_rx.try_recv().is_err());
+        // Dismount sends the -1 detach.
+        hub.set_mount(a, None);
+        let detached = b_rx.try_recv().unwrap();
+        assert_eq!(
+            (detached.id, &detached.body[4..8]),
+            (0x1b, (-1i32).to_be_bytes().as_slice())
+        );
+    }
+
+    #[test]
+    fn next034_view_entry_replays_mount_after_spawn() {
+        let hub = Hub::default();
+        let (a, a_rx, _) = hub
+            .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        hub.set_mount(a, Some(900_002));
+        let far = PlayerPosition {
+            x: 200.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let (_b, b_rx, previous) = hub.add("Bob".into(), "uuid-b".into(), far).unwrap();
+        // The join snapshot carries Alice's tracked ride even though Bob
+        // cannot see (spawn) her yet.
+        assert_eq!(previous[0].mount, Some(900_002));
+        while a_rx.try_recv().is_ok() {}
+        while b_rx.try_recv().is_ok() {}
+        hub.move_player(
+            a,
+            PlayerPosition {
+                x: 201.5,
+                y: 65.0,
+                z: 0.5,
+            },
+            0.0,
+            0.0,
+        );
+        // Bob observes the Spawn first and the Attach immediately after.
+        assert_eq!(b_rx.try_recv().unwrap().id, 0x0c);
+        let attach = b_rx.try_recv().unwrap();
+        assert_eq!(
+            (attach.id, &attach.body[..4], &attach.body[4..8]),
+            (
+                0x1b,
+                a.to_be_bytes().as_slice(),
+                900_002i32.to_be_bytes().as_slice()
+            )
+        );
+        assert!(b_rx.try_recv().is_err());
+        // Alice observes Bob, who is not mounted: Spawn only.
         assert_eq!(a_rx.try_recv().unwrap().id, 0x0c);
         assert!(a_rx.try_recv().is_err());
     }
