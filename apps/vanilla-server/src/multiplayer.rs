@@ -2,6 +2,7 @@
 //! Wire packet structure is independently encoded from the public 1.7 protocol.
 //! No Pumpkin code is copied or linked.
 use crate::dimensions::Dimension;
+use crate::inventory::{Inventory, Stack};
 use crate::items_1710;
 use crate::player::PlayerPosition;
 use crate::world::VIEW_DISTANCE;
@@ -80,6 +81,11 @@ pub struct Peer {
     pub position: PlayerPosition,
     /// Entity visibility is isolated by dimension, not by coordinates alone.
     pub dimension: Dimension,
+    /// Last server-owned equipment snapshot in Protocol 5 Entity Equipment
+    /// order (0 held, 1 boots, 2 leggings, 3 chestplate, 4 helmet). A new
+    /// observer must replay this right after the Spawn packet, otherwise an
+    /// item change that happened before its arrival is invisible forever.
+    pub equipment: [Option<Stack>; 5],
     tx: SyncSender<QueuedEvent>,
     epoch: Arc<AtomicU64>,
     overloaded: Arc<AtomicBool>,
@@ -192,6 +198,26 @@ pub fn teleport(id: i32, pos: &PlayerPosition, yaw: f32, pitch: f32) -> Event {
     body.push(angle(pitch));
     Event { id: 0x18, body }
 }
+pub fn equipment(entity: i32, slot: i16, item: Option<Stack>) -> Event {
+    // Protocol 5 Entity Equipment (0x04): i32 entity, i16 equipment slot
+    // (0 held, 1 boots, 2 leggings, 3 chestplate, 4 helmet) and one Slot.
+    let mut body = Vec::with_capacity(14);
+    body.extend_from_slice(&entity.to_be_bytes());
+    body.extend_from_slice(&slot.to_be_bytes());
+    Inventory::encode_slot(&mut body, item);
+    Event { id: 0x04, body }
+}
+
+/// Equipment replays that must follow a Spawn on the same stream, in wire
+/// slot order. Empty stacks are the client default and send nothing.
+fn equipment_replay(entity: i32, stacks: &[Option<Stack>; 5]) -> Vec<Event> {
+    stacks
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, item)| item.map(|stack| equipment(entity, slot as i16, Some(stack))))
+        .collect()
+}
+
 pub fn destroy(id: i32) -> Event {
     let mut body = Vec::with_capacity(5);
     body.push(1); // Signed byte count, always 1.
@@ -669,6 +695,7 @@ impl Hub {
             uuid,
             position,
             dimension,
+            equipment: [None; 5],
             tx,
             epoch: Arc::clone(&epoch),
             overloaded: Arc::new(AtomicBool::new(false)),
@@ -747,6 +774,12 @@ impl Hub {
                             if let Some(event) = &appeared {
                                 enqueue(other, event);
                             }
+                            // A first-time observer never saw the earlier
+                            // 0x04 stream: replay the tracked equipment right
+                            // after the Spawn on this same mailbox.
+                            for replay in equipment_replay(id, &moved.equipment) {
+                                enqueue(other, &replay);
+                            }
                         }
                         (false, false) => {}
                     }
@@ -758,6 +791,9 @@ impl Hub {
                         (false, true) => {
                             if let Ok(event) = spawn(other) {
                                 enqueue(&moved, &event);
+                                for replay in equipment_replay(other.id, &other.equipment) {
+                                    enqueue(&moved, &replay);
+                                }
                             }
                         }
                         _ => {}
@@ -823,10 +859,52 @@ impl Hub {
             }
             if other.dimension == dimension && visible(&other.position, &position) {
                 enqueue(other, &arrival_spawn);
+                for replay in equipment_replay(id, &arriving.equipment) {
+                    enqueue(other, &replay);
+                }
                 enqueue(&arriving, &spawn(other)?);
+                for replay in equipment_replay(other.id, &other.equipment) {
+                    enqueue(&arriving, &replay);
+                }
             }
         }
         Ok(true)
+    }
+
+    /// Publish the session's server-owned equipment snapshot (Protocol 5
+    /// order: held, boots, leggings, chestplate, helmet). Only changed
+    /// slots send 0x04, and only to same-dimension observers currently in
+    /// view distance of the owner. The tracked copy is what every later
+    /// Spawn delivery (join snapshot or view entry) replays.
+    pub fn set_equipment(&self, id: i32, stacks: [Option<Stack>; 5]) {
+        let Ok(mut inner) = self.0.lock() else {
+            return;
+        };
+        let Some(peer) = inner.players.get_mut(&id) else {
+            return;
+        };
+        let position = peer.position;
+        let dimension = peer.dimension;
+        let mut changed = Vec::new();
+        for (slot, tracked) in peer.equipment.iter_mut().enumerate() {
+            if *tracked != stacks[slot] {
+                *tracked = stacks[slot];
+                changed.push(equipment(id, slot as i16, stacks[slot]));
+            }
+        }
+        if changed.is_empty() {
+            return;
+        }
+        for other in inner.players.values() {
+            if other.id == id || other.dimension != dimension {
+                continue;
+            }
+            if visible(&other.position, &position) {
+                for event in &changed {
+                    enqueue(other, event);
+                }
+            }
+        }
     }
 
     #[allow(dead_code)] // Staged A10 multi-dimension API; enabled when session routing is integrated.
@@ -1097,6 +1175,141 @@ mod tests {
         assert_eq!(b_rx.try_recv().unwrap().id, 0x13);
         assert_eq!(a_rx.try_recv().unwrap().id, 0x13);
         assert!(b_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn next032_equipment_diffs_reach_only_visible_observers() {
+        let hub = Hub::default();
+        let (a, a_rx, _) = hub
+            .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        let (_b, b_rx, _) = hub
+            .add("Bob".into(), "uuid-b".into(), PlayerPosition::default())
+            .unwrap();
+        let (_c, c_rx, _) = hub
+            .add(
+                "Cass".into(),
+                "uuid-c".into(),
+                PlayerPosition {
+                    x: 400.5,
+                    y: 65.0,
+                    z: 0.5,
+                },
+            )
+            .unwrap();
+        while a_rx.try_recv().is_ok() {}
+        while b_rx.try_recv().is_ok() {}
+        while c_rx.try_recv().is_ok() {}
+        let sword = Stack {
+            id: 267,
+            count: 1,
+            damage: 3,
+            nbt: None,
+        };
+        let helmet = Stack {
+            id: 298,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        hub.set_equipment(a, [Some(sword), None, None, None, Some(helmet)]);
+        // The owner's own stream receives nothing.
+        assert!(a_rx.try_recv().is_err());
+        // A visible observer gets 0x04 for exactly the two changed slots.
+        let held = b_rx.try_recv().unwrap();
+        assert_eq!(
+            (held.id, &held.body[..4], &held.body[4..6], &held.body[6..8]),
+            (
+                0x04,
+                a.to_be_bytes().as_slice(),
+                0i16.to_be_bytes().as_slice(),
+                267i16.to_be_bytes().as_slice()
+            )
+        );
+        let head = b_rx.try_recv().unwrap();
+        assert_eq!(
+            (head.id, &head.body[4..6], &head.body[6..8]),
+            (
+                0x04,
+                4i16.to_be_bytes().as_slice(),
+                298i16.to_be_bytes().as_slice()
+            )
+        );
+        assert!(b_rx.try_recv().is_err());
+        // Out of view distance: no leak.
+        assert!(c_rx.try_recv().is_err());
+        // Re-publishing the identical snapshot is silent.
+        hub.set_equipment(a, [Some(sword), None, None, None, Some(helmet)]);
+        assert!(b_rx.try_recv().is_err());
+        // Unequipping sends the empty Slot (-1).
+        hub.set_equipment(a, [None; 5]);
+        let cleared = b_rx.try_recv().unwrap();
+        assert_eq!(
+            (
+                cleared.id,
+                &cleared.body[4..6],
+                &cleared.body[6..8],
+                cleared.body.len()
+            ),
+            (
+                0x04,
+                0i16.to_be_bytes().as_slice(),
+                (-1i16).to_be_bytes().as_slice(),
+                8
+            )
+        );
+    }
+
+    #[test]
+    fn next032_view_entry_replays_equipment_after_spawn() {
+        let hub = Hub::default();
+        let sword = Stack {
+            id: 267,
+            count: 1,
+            damage: 0,
+            nbt: None,
+        };
+        let (a, a_rx, _) = hub
+            .add("Alice".into(), "uuid-a".into(), PlayerPosition::default())
+            .unwrap();
+        hub.set_equipment(a, [Some(sword), None, None, None, None]);
+        let far = PlayerPosition {
+            x: 200.5,
+            y: 65.0,
+            z: 0.5,
+        };
+        let (_b, b_rx, previous) = hub.add("Bob".into(), "uuid-b".into(), far).unwrap();
+        // The join snapshot carries Alice's tracked equipment even though
+        // Bob cannot see (spawn) her yet.
+        assert_eq!(previous[0].equipment[0], Some(sword));
+        while a_rx.try_recv().is_ok() {}
+        while b_rx.try_recv().is_ok() {}
+        hub.move_player(
+            a,
+            PlayerPosition {
+                x: 201.5,
+                y: 65.0,
+                z: 0.5,
+            },
+            0.0,
+            0.0,
+        );
+        // Bob observes the Spawn first and the equipment immediately after.
+        assert_eq!(b_rx.try_recv().unwrap().id, 0x0c);
+        let gear = b_rx.try_recv().unwrap();
+        assert_eq!(
+            (gear.id, &gear.body[..4], &gear.body[4..6], &gear.body[6..8]),
+            (
+                0x04,
+                a.to_be_bytes().as_slice(),
+                0i16.to_be_bytes().as_slice(),
+                267i16.to_be_bytes().as_slice()
+            )
+        );
+        assert!(b_rx.try_recv().is_err());
+        // Alice observes Bob, who has no equipment: Spawn only.
+        assert_eq!(a_rx.try_recv().unwrap().id, 0x0c);
+        assert!(a_rx.try_recv().is_err());
     }
 
     #[test]
