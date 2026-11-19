@@ -221,6 +221,9 @@ pub struct GravityMove {
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
+#[cfg(test)]
+#[path = "world/save_new_retry_tests.rs"]
+mod save_new_retry_tests;
 #[cfg(all(test, windows))]
 #[path = "world/save_sharing_tests.rs"]
 mod save_sharing_tests;
@@ -292,6 +295,59 @@ fn publish_staged_world_save(
     }
     Ok(())
 }
+/// Preserve the final hard-link error together with the previous path context.
+struct NewWorldPublishFailure {
+    staging: PathBuf,
+    destination: PathBuf,
+    source: io::Error,
+}
+
+impl std::fmt::Debug for NewWorldPublishFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.to_string(), formatter)
+    }
+}
+
+impl std::fmt::Display for NewWorldPublishFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "failed to publish new world file {} from {}: {}",
+            self.destination.display(),
+            self.staging.display(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for NewWorldPublishFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// The staging file belongs to this invocation; never remove the destination.
+fn publish_new_world(
+    staging: &Path,
+    destination: &Path,
+    hard_link: impl FnMut(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let published = crate::save_replace::hard_link_with_retry(staging, destination, hard_link)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                NewWorldPublishFailure {
+                    staging: staging.to_path_buf(),
+                    destination: destination.to_path_buf(),
+                    source: error,
+                },
+            )
+        });
+    // Preserve save_new's existing best-effort cleanup on both outcomes.
+    let _ = fs::remove_file(staging);
+    published
+}
+
 pub fn in_bounds(x: i32, y: i32, z: i32) -> bool {
     (-WORLD_LIMIT..WORLD_LIMIT).contains(&x)
         && (0..=255).contains(&y)
@@ -2767,18 +2823,9 @@ impl World {
                 ),
             ));
         }
-        let published = fs::hard_link(&staging, path).map_err(|err| {
-            io::Error::new(
-                err.kind(),
-                format!(
-                    "failed to publish new world file {} from {}: {err}",
-                    path.display(),
-                    staging.display()
-                ),
-            )
-        });
-        let _ = fs::remove_file(staging);
-        published
+        publish_new_world(&staging, path, |source, destination| {
+            fs::hard_link(source, destination)
+        })
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {

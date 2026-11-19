@@ -39,6 +39,16 @@ pub(crate) fn rename_with_retry(
     retry(|| rename(source, destination), std::thread::sleep)
 }
 
+/// Publish a create-only staged file with the same bounded retry policy.
+/// A successful link stops the retry loop immediately; no destination is removed.
+pub(crate) fn hard_link_with_retry(
+    source: &Path,
+    destination: &Path,
+    mut hard_link: impl FnMut(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    retry(|| hard_link(source, destination), std::thread::sleep)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
