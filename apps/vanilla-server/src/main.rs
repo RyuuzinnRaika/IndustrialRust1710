@@ -32,6 +32,8 @@ mod hoppers;
 mod inventory;
 mod item_nbt;
 mod items_1710;
+#[cfg(test)]
+mod join_partial_socket_tests;
 mod journal;
 #[allow(dead_code)] // E46: opt-in block-to-Anvil projection; live save switch gated.
 mod legacy_chunk_patch;
@@ -57,6 +59,8 @@ mod online_auth;
 mod packet_stats;
 mod physics;
 mod player;
+#[cfg(test)]
+mod qdrop_session_tests;
 mod save_replace;
 mod scoreboard;
 mod security_limits;
@@ -450,12 +454,98 @@ fn receive(s: &mut Connection) -> io::Result<(i32, Vec<u8>)> {
     );
     Ok((id, r.0.to_vec()))
 }
-fn send(s: &mut Connection, id: u32, body: &[u8]) -> io::Result<()> {
+#[derive(Debug)]
+struct FrameWriteFailure(io::Error);
+
+impl std::fmt::Display for FrameWriteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for FrameWriteFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+struct FrameWriter<'a, W> {
+    inner: &'a mut W,
+    attempted: bool,
+}
+
+impl<W: Write> Write for FrameWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.attempted = true;
+        self.inner.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+#[derive(Debug)]
+struct JoinInitializationFailure(io::Error);
+
+impl std::fmt::Display for JoinInitializationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "join initialization: {}", self.0)
+    }
+}
+
+impl std::error::Error for JoinInitializationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PARTIAL_S21: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<()>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn send(s: &mut impl Write, id: u32, body: &[u8]) -> io::Result<()> {
     let mut packet = Vec::with_capacity(5 + body.len());
     write_varint(id, &mut packet);
     packet.extend_from_slice(body);
     let wire_bytes = packet_stats::frame_wire_len(packet.len());
-    write_frame(s, &packet)?;
+    let mut writer = FrameWriter {
+        inner: s,
+        attempted: false,
+    };
+    #[cfg(test)]
+    let result = {
+        let inject = if id == 0x21 {
+            TEST_PARTIAL_S21.with(|slot| slot.borrow_mut().take())
+        } else {
+            None
+        };
+        if let Some(notify) = inject {
+            (|| -> io::Result<()> {
+                let mut length = Vec::new();
+                write_varint(packet.len() as u32, &mut length);
+                writer.write_all(&length)?;
+                writer.write_all(&packet[..1])?;
+                let _ = notify.try_send(());
+                Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "injected after partial S21",
+                ))
+            })()
+        } else {
+            write_frame(&mut writer, &packet)
+        }
+    };
+    #[cfg(not(test))]
+    let result = write_frame(&mut writer, &packet);
+    result.map_err(|error| {
+        if writer.attempted {
+            io::Error::new(error.kind(), FrameWriteFailure(error))
+        } else {
+            error
+        }
+    })?;
     packet_stats::GLOBAL.record(packet_stats::Direction::Outbound, i64::from(id), wire_bytes);
     Ok(())
 }
@@ -486,16 +576,21 @@ fn join_failure_reason(error: &io::Error) -> &'static str {
     }
 }
 
-fn reject_failed_join(s: &mut Connection, error: io::Error) -> io::Error {
+fn reject_failed_join(s: &mut impl Write, error: io::Error) -> io::Error {
     // A dead socket cannot receive an explanation. Preserve the root error
     // while ensuring the admission guard is dropped on return from handle().
-    if !matches!(
-        error.kind(),
-        ErrorKind::UnexpectedEof
-            | ErrorKind::ConnectionAborted
-            | ErrorKind::ConnectionReset
-            | ErrorKind::BrokenPipe
-    ) {
+    let frame_write_failed = error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<FrameWriteFailure>());
+    if !frame_write_failed
+        && !matches!(
+            error.kind(),
+            ErrorKind::UnexpectedEof
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::ConnectionReset
+                | ErrorKind::BrokenPipe
+        )
+    {
         let mut body = Vec::new();
         if write_string(
             &json!({"text": join_failure_reason(&error)}).to_string(),
@@ -506,7 +601,7 @@ fn reject_failed_join(s: &mut Connection, error: io::Error) -> io::Error {
             let _ = send(s, 0x40, &body);
         }
     }
-    io::Error::new(error.kind(), format!("join initialization: {error}"))
+    io::Error::new(error.kind(), JoinInitializationFailure(error))
 }
 
 fn offline_uuid(name: &str) -> String {
@@ -783,7 +878,7 @@ fn prioritize_chunk_view(
 /// Submit at most eight chunks per session before draining them in wire order.
 /// This avoids a large per-client raw-chunk backlog when players join together.
 fn send_chunk_batch(
-    s: &mut Connection,
+    s: &mut impl Write,
     world: &Mutex<World>,
     center: (i32, i32),
     coords: impl IntoIterator<Item = (i32, i32)>,
@@ -1857,6 +1952,9 @@ fn play(
     let mut last_movement_trace = Instant::now() - Duration::from_secs(2);
     let mut last_look_trace = Instant::now() - Duration::from_secs(2);
     let mut last_movement_broadcast = Instant::now() - Duration::from_millis(50);
+    // The Hub replays equipment to observers that arrive later; the first
+    // publish primes the cache and every later publish is a silent diff.
+    let mut last_equipment_publish: Option<u64> = None;
     // Keep the final accepted pose when packet fanout is throttled. Snapshot
     // the angles too: a rejected C06 can change the parsing locals below.
     let mut pending_movement_broadcast: Option<(PlayerPosition, f32, f32)> = None;
@@ -2606,6 +2704,14 @@ fn play(
                 }
             }
         }
+        // Keep the Hub's equipment cache fresh (≤0.5s) so any observer that
+        // enters view distance right after a window click, a consume or a
+        // durability break still replays the true armor/held item. The diff
+        // sends nothing while equipment is unchanged.
+        if last_equipment_publish.is_none_or(|published| now_tick.saturating_sub(published) >= 10) {
+            hub.set_equipment(entity_id, inventory.equipment());
+            last_equipment_publish = Some(now_tick);
+        }
         // The first active session advances the shared mob simulation.
         if vitals.health > 0.0 {
             let participants = hub.participants()?;
@@ -2786,7 +2892,10 @@ fn play(
                 if survival && landed_distance >= 1.0 {
                     let (fx, fy, fz) = (
                         candidate.x.floor() as i32,
-                        candidate.y.floor() as i32 - 1,
+                        // Same 1/16 support tolerance as the client-path
+                        // trample probe: a silent landing on farmland rests
+                        // at cell + 0.9375, not on the integer boundary.
+                        (candidate.y + physics::GROUND_TOLERANCE).floor() as i32 - 1,
                         candidate.z.floor() as i32,
                     );
                     let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -4130,7 +4239,11 @@ fn play(
                 if survival {
                     let fx = x.floor() as i32;
                     let fz = z.floor() as i32;
-                    let fy = y.floor() as i32 - 1;
+                    // Farmland's collision top is 15/16, so a supported
+                    // landing can rest at cell + 0.9375. Include the same
+                    // 1/16 tolerance as support_top so the soil cell the
+                    // feet actually stand on is probed, not its basement.
+                    let fy = (y + physics::GROUND_TOLERANCE).floor() as i32 - 1;
                     // A fall of at least one block onto farmland tramples it.
                     if fy >= 0 && landing_distance >= 1.0 {
                         let mut soil = world.lock().map_err(|_| bad("world mutex poisoned"))?;
@@ -6696,6 +6809,9 @@ fn play(
                 input.finish()?;
                 inventory.select(selected)?;
                 inventory.save(inventory_path)?;
+                // The held item is visible equipment: peers in view must see
+                // the swap without waiting for the periodic refresh.
+                hub.set_equipment(entity_id, inventory.equipment());
             }
             16 => {
                 let slot = input.i16()?;
@@ -6713,6 +6829,9 @@ fn play(
                             // Persist only an accepted inventory mutation.
                             inventory.save(inventory_path)?;
                             send(s, 0x2f, &inventory.set_slot(slot)?)?;
+                            // A granted stack may land in the held slot or an
+                            // armor slot: publish equipment immediately.
+                            hub.set_equipment(entity_id, inventory.equipment());
                         } else {
                             send(s, 0x30, &inventory.window_items())?;
                         }
@@ -7532,6 +7651,9 @@ fn play(
                     send(s, 0x1f, &experience.packet())?;
                     send(s, 0x30, &inventory.window_items())?;
                     send(s, 0x2f, &inventory.cursor_packet())?;
+                    // Death dropped (or kept) every worn piece: overwrite the
+                    // observers' stale equipment state for all five slots.
+                    hub.set_equipment(entity_id, inventory.equipment());
                     send_player_position(s, player, yaw, pitch)?;
                     pending_teleport = Some(TeleportGate::new(*player, Instant::now()));
                     hub.move_player(entity_id, *player, yaw, pitch);
@@ -8065,6 +8187,14 @@ fn handle(
             {
                 let spawn = multiplayer::spawn(other)?;
                 send(&mut s, spawn.id, &spawn.body)?;
+                // Equipment changed before this session existed: replay the
+                // Hub-tracked snapshot immediately after the Spawn.
+                for (slot, item) in other.equipment.iter().enumerate() {
+                    if let Some(stack) = item {
+                        let event = multiplayer::equipment(other.id, slot as i16, Some(*stack));
+                        send(&mut s, event.id, &event.body)?;
+                    }
+                }
             }
         }
         // Send world-owned entities to players in either game mode.
@@ -12355,6 +12485,226 @@ mod session_dimension_routing_tests {
 #[cfg(test)]
 mod initial_join_disconnect_tests {
     use super::*;
+
+    struct PartialTimeoutWriter {
+        bytes: Vec<u8>,
+        calls: usize,
+        partial_call: usize,
+        error_kind: ErrorKind,
+        raw_os_error: Option<i32>,
+    }
+
+    impl Write for PartialTimeoutWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.calls == self.partial_call && !buf.is_empty() {
+                self.bytes.push(buf[0]);
+                Ok(1)
+            } else if self.calls == self.partial_call + 1 {
+                Err(match self.raw_os_error {
+                    Some(code) => io::Error::from_raw_os_error(code),
+                    None => io::Error::new(self.error_kind, "injected write failure"),
+                })
+            } else {
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn partial_frame_write_timeout_does_not_append_disconnect() {
+        for partial_call in [1, 2] {
+            for kind in [
+                ErrorKind::TimedOut,
+                ErrorKind::WouldBlock,
+                ErrorKind::Other,
+                ErrorKind::InvalidData,
+            ] {
+                let mut writer = PartialTimeoutWriter {
+                    bytes: Vec::new(),
+                    calls: 0,
+                    partial_call,
+                    error_kind: kind,
+                    raw_os_error: None,
+                };
+                let error = send(&mut writer, 0x21, &[0; 128]).unwrap_err();
+                assert_eq!(error.kind(), kind);
+                assert_eq!(writer.calls, partial_call + 1);
+                let partial = writer.bytes.clone();
+                assert_eq!(partial.len(), if partial_call == 1 { 1 } else { 3 });
+
+                let error = reject_failed_join(&mut writer, error);
+                assert_eq!(error.kind(), kind);
+                assert!(error
+                    .to_string()
+                    .contains("join initialization: injected write failure"));
+                let join_error = error
+                    .get_ref()
+                    .unwrap()
+                    .downcast_ref::<JoinInitializationFailure>()
+                    .unwrap();
+                let frame_error = join_error
+                    .0
+                    .get_ref()
+                    .unwrap()
+                    .downcast_ref::<FrameWriteFailure>()
+                    .unwrap();
+                assert_eq!(frame_error.0.kind(), kind);
+                assert_eq!(frame_error.0.to_string(), "injected write failure");
+                assert_eq!(
+                    writer.bytes, partial,
+                    "disconnect appended to an unfinished frame"
+                );
+                assert_eq!(
+                    writer.calls,
+                    partial_call + 1,
+                    "no further writes may follow a frame failure"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn write_os_error_remains_available_in_the_source_chain() {
+        let code = 10060;
+        let original_kind = io::Error::from_raw_os_error(code).kind();
+        let mut writer = PartialTimeoutWriter {
+            bytes: Vec::new(),
+            calls: 0,
+            partial_call: 2,
+            error_kind: original_kind,
+            raw_os_error: Some(code),
+        };
+        let error = send(&mut writer, 0x21, &[0; 128]).unwrap_err();
+        let partial = writer.bytes.clone();
+        let error = reject_failed_join(&mut writer, error);
+        assert_eq!(error.kind(), original_kind);
+        let join_error = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<JoinInitializationFailure>()
+            .unwrap();
+        let frame_error = join_error
+            .0
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<FrameWriteFailure>()
+            .unwrap();
+        assert_eq!(frame_error.0.raw_os_error(), Some(code));
+        assert_eq!(writer.bytes, partial);
+        assert_eq!(writer.calls, 3);
+    }
+
+    #[test]
+    fn chunk_batch_keeps_frame_failure_marker_until_join_rejection() {
+        let mut writer = PartialTimeoutWriter {
+            bytes: Vec::new(),
+            calls: 0,
+            partial_call: 2,
+            error_kind: ErrorKind::TimedOut,
+            raw_os_error: None,
+        };
+        let world = Mutex::new(World::new());
+        let error = send_chunk_batch(&mut writer, &world, (0, 0), [(0, 0)]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert!(error.get_ref().unwrap().is::<FrameWriteFailure>());
+        assert_eq!(writer.calls, 3);
+        let partial = writer.bytes.clone();
+        let error = reject_failed_join(&mut writer, error);
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert_eq!(writer.bytes, partial);
+        assert_eq!(writer.calls, 3);
+    }
+
+    #[test]
+    fn write_zero_does_not_append_disconnect() {
+        struct ZeroWriter(usize);
+
+        impl Write for ZeroWriter {
+            fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+                self.0 += 1;
+                Ok(0)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = ZeroWriter(0);
+        let error = send(&mut writer, 0x21, &[0]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::WriteZero);
+        assert_eq!(writer.0, 1);
+        let error = reject_failed_join(&mut writer, error);
+        assert_eq!(error.kind(), ErrorKind::WriteZero);
+        assert_eq!(writer.0, 1, "no write may follow a failed frame write");
+    }
+
+    #[test]
+    fn oversize_frame_rejection_still_sends_disconnect_without_prior_write() {
+        struct CountingWriter {
+            bytes: Vec<u8>,
+            calls: usize,
+        }
+
+        impl Write for CountingWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.calls += 1;
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = CountingWriter {
+            bytes: Vec::new(),
+            calls: 0,
+        };
+        // One-byte packet ID makes the frame one byte larger than the limit.
+        let body = vec![0; legacy_protocol::MAX_FRAME_BYTES];
+        let error = send(&mut writer, 0x21, &body).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(writer.calls, 0, "validation must occur before any write");
+        assert!(writer.bytes.is_empty());
+
+        let error = reject_failed_join(&mut writer, error);
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(writer.calls > 0, "expected a Play Disconnect write");
+        let mut wire = writer.bytes.as_slice();
+        let packet = read_frame(&mut wire).unwrap();
+        assert!(wire.is_empty(), "unexpected bytes after Play Disconnect");
+        let (packet_id, mut body) = legacy_protocol::packet_id_and_body(&packet).unwrap();
+        assert_eq!(packet_id, 0x40);
+        let reason = body.read_string(512).unwrap();
+        assert!(reason.contains("World loading failed"));
+        body.finish().unwrap();
+    }
+
+    #[test]
+    fn prewrite_worker_timeout_still_sends_disconnect() {
+        for (kind, expected) in [
+            (ErrorKind::TimedOut, "World loading timed out"),
+            (ErrorKind::WouldBlock, "World loading is busy"),
+        ] {
+            let mut bytes = Vec::new();
+            let error = reject_failed_join(&mut bytes, io::Error::new(kind, "worker error"));
+            assert_eq!(error.kind(), kind);
+            let packet = read_frame(&mut bytes.as_slice()).unwrap();
+            let (packet_id, mut body) = legacy_protocol::packet_id_and_body(&packet).unwrap();
+            assert_eq!(packet_id, 0x40);
+            let reason = body.read_string(512).unwrap();
+            assert!(reason.contains(expected));
+            body.finish().unwrap();
+        }
+    }
 
     #[test]
     fn failed_chunk_join_sends_play_disconnect_and_releases_player_admission() {

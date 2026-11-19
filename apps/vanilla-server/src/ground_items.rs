@@ -195,6 +195,12 @@ pub struct GroundItems {
     /// the persisted position stays inside the same block column.
     #[serde(skip)]
     falls: BTreeMap<i32, i32>,
+    #[cfg(test)]
+    #[serde(skip)]
+    test_hold_pickups: bool,
+    #[cfg(test)]
+    #[serde(skip)]
+    test_blocked_pickups: std::cell::Cell<usize>,
 }
 impl Default for GroundItems {
     fn default() -> Self {
@@ -204,6 +210,10 @@ impl Default for GroundItems {
             entries: BTreeMap::new(),
             eligible_after: BTreeMap::new(),
             falls: BTreeMap::new(),
+            #[cfg(test)]
+            test_hold_pickups: false,
+            #[cfg(test)]
+            test_blocked_pickups: std::cell::Cell::new(0),
         }
     }
 }
@@ -480,12 +490,36 @@ impl GroundItems {
                 .get(&item.id)
                 .is_some_and(|time| now >= *time);
             if eligible && item.in_pickup_range(feet) {
+                #[cfg(test)]
+                if self.test_hold_pickups {
+                    self.test_blocked_pickups
+                        .set(self.test_blocked_pickups.get().saturating_add(1));
+                    return None;
+                }
                 if let Some(accepted) = select(item) {
                     return Some((item.clone(), accepted));
                 }
             }
         }
         None
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_hold_pickups(&mut self, hold: bool) {
+        self.test_hold_pickups = hold;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_make_pickups_ready(&mut self) {
+        let now = Instant::now();
+        for ready in self.eligible_after.values_mut() {
+            *ready = now;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_blocked_pickups(&self) -> usize {
+        self.test_blocked_pickups.get()
     }
 
     #[cfg(test)]
