@@ -225,6 +225,48 @@ fn invalid(message: &'static str) -> io::Error {
 #[path = "world/save_sharing_tests.rs"]
 mod save_sharing_tests;
 
+/// Context for an unsuccessful publish, retaining both the rename failure and
+/// an optional failure to remove this save's staging file.
+pub(crate) struct WorldSavePublishFailure {
+    staging: PathBuf,
+    destination: PathBuf,
+    pub(crate) rename: io::Error,
+    pub(crate) cleanup: Option<io::Error>,
+}
+
+impl std::fmt::Debug for WorldSavePublishFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The previous io::Error carried a String, whose Debug was quoted.
+        std::fmt::Debug::fmt(&self.to_string(), formatter)
+    }
+}
+
+impl std::fmt::Display for WorldSavePublishFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "replace world save {} from {}: {}",
+            self.destination.display(),
+            self.staging.display(),
+            self.rename
+        )?;
+        if let Some(cleanup_error) = &self.cleanup {
+            write!(
+                formatter,
+                "; failed to remove own temporary file {}: {cleanup_error}",
+                self.staging.display()
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for WorldSavePublishFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.rename)
+    }
+}
+
 /// Publish a fully synced staging image or report the rename failure after
 /// removing only the temporary file created by this save invocation. A failed
 /// rename must not strand `flat.tmp` and permanently block subsequent saves.
@@ -236,21 +278,17 @@ fn publish_staged_world_save(
 ) -> io::Result<()> {
     // Retain the session save mutex while retrying a brief sharing denial.
     if let Err(error) = crate::save_replace::rename_with_retry(staging, destination, rename) {
-        let message = format!(
-            "replace world save {} from {}: {error}",
-            destination.display(),
-            staging.display()
-        );
-        if let Err(cleanup_error) = fs::remove_file(staging) {
-            return Err(io::Error::new(
-                error.kind(),
-                format!(
-                    "{message}; failed to remove own temporary file {}: {cleanup_error}",
-                    staging.display()
-                ),
-            ));
-        }
-        return Err(io::Error::new(error.kind(), message));
+        let kind = error.kind();
+        let cleanup = fs::remove_file(staging).err();
+        return Err(io::Error::new(
+            kind,
+            WorldSavePublishFailure {
+                staging: staging.to_path_buf(),
+                destination: destination.to_path_buf(),
+                rename: error,
+                cleanup,
+            },
+        ));
     }
     Ok(())
 }
@@ -3420,6 +3458,111 @@ mod tests {
         World::new().save(&save).unwrap();
         assert!(World::load(&save).is_ok());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn world_publish_error_retains_original_os_error_and_display() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-world-rename-cause-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let staging = root.join("save.tmp");
+        let destination = root.join("save.irw");
+        fs::write(&staging, b"new synthetic snapshot").unwrap();
+        fs::write(&destination, b"original synthetic snapshot").unwrap();
+        let original = io::Error::from_raw_os_error(5);
+        let expected_kind = original.kind();
+        let expected_display = format!(
+            "replace world save {} from {}: {original}",
+            destination.display(),
+            staging.display()
+        );
+
+        let error = publish_staged_world_save(&staging, &destination, |_, _| {
+            Err(io::Error::from_raw_os_error(5))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), expected_kind);
+        assert_eq!(error.to_string(), expected_display);
+        assert_eq!(
+            format!("{error:?}"),
+            format!("{:?}", io::Error::new(expected_kind, expected_display))
+        );
+        // A context-wrapped io::Error has no outer raw code. The stored
+        // underlying io::Error retains it for diagnostic consumers.
+        assert_eq!(error.raw_os_error(), None);
+        let context = error
+            .get_ref()
+            .and_then(|value| value.downcast_ref::<WorldSavePublishFailure>())
+            .expect("publish error context");
+        assert_eq!(context.rename.raw_os_error(), Some(5));
+        assert!(context.cleanup.is_none());
+        let source = std::error::Error::source(context)
+            .and_then(|value| value.downcast_ref::<io::Error>())
+            .expect("original rename error as source");
+        assert_eq!(source.raw_os_error(), Some(5));
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"original synthetic snapshot"
+        );
+        assert!(!staging.exists());
+        fs::remove_file(&destination).unwrap();
+        fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
+    fn world_publish_error_retains_cleanup_error_separately() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ir1710-world-rename-cleanup-cause-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        // A directory cannot be removed by remove_file. This synthetic
+        // staging entry deterministically exercises the cleanup-error path.
+        let staging = root.join("save.tmp");
+        let destination = root.join("save.irw");
+        fs::create_dir(&staging).unwrap();
+        fs::write(&destination, b"original synthetic snapshot").unwrap();
+        let original = io::Error::from_raw_os_error(5);
+        let expected_kind = original.kind();
+
+        let error = publish_staged_world_save(&staging, &destination, |_, _| {
+            Err(io::Error::from_raw_os_error(5))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), expected_kind);
+        let context = error
+            .get_ref()
+            .and_then(|value| value.downcast_ref::<WorldSavePublishFailure>())
+            .expect("publish error context");
+        assert_eq!(context.rename.raw_os_error(), Some(5));
+        let cleanup = context.cleanup.as_ref().expect("cleanup failure retained");
+        let expected_display = format!(
+            "replace world save {} from {}: {original}; failed to remove own temporary file {}: {cleanup}",
+            destination.display(), staging.display(), staging.display()
+        );
+        assert_eq!(error.to_string(), expected_display);
+        assert_eq!(
+            format!("{error:?}"),
+            format!("{:?}", io::Error::new(expected_kind, expected_display))
+        );
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"original synthetic snapshot"
+        );
+        assert!(staging.is_dir());
+        fs::remove_dir(&staging).unwrap();
+        fs::remove_file(&destination).unwrap();
+        fs::remove_dir(&root).unwrap();
     }
 
     #[test]
