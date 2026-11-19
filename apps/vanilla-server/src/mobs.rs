@@ -10003,6 +10003,164 @@ mod tests {
         mobs.entities.remove(&0);
         assert!(mobs.arrows.values().next().unwrap().hostile);
     }
+
+    /// NEXT-036 / #1019: a player's EntityID is minted by the Hub and never
+    /// enters the Mob registry, so an in-flight arrow outlives its shooter's
+    /// session by construction. A hit must still apply the snapshot damage
+    /// even though the shooter resolves to nothing at impact time.
+    #[test]
+    fn arrow_from_a_logged_out_player_still_damages_the_mob() {
+        let mut mobs = Mobs::default();
+        mobs.insert(
+            Kind::Cow,
+            PlayerPosition {
+                x: 4.5,
+                y: 64.0,
+                z: 0.5,
+            },
+            false,
+        );
+        let cow = mobs.next_id - 1;
+        // Shooter 7 is a Hub-side player ID: no entity with that ID exists
+        // (or ever existed) in this registry, exactly the post-logout state.
+        mobs.fire_arrow(
+            Some(7),
+            PlayerPosition {
+                x: 0.5,
+                y: 64.0,
+                z: 0.5,
+            },
+            -90.0,
+            0.0,
+            2.0,
+            3,
+        )
+        .unwrap();
+        let arrow = mobs.arrows.values().next().unwrap();
+        assert_eq!(arrow.shooter, Some(7));
+        assert_eq!(arrow.shooter_kind, None, "players are not Mob kinds");
+        assert!(!arrow.hostile, "a player arrow never becomes hostile");
+        let arrow_id = arrow.id;
+        let mut events = Vec::new();
+        // Tick 1 reaches x=2.5; tick 2 sweeps across the cow's body column.
+        mobs.tick_arrows(&World::new(), &[], 1, &mut events);
+        mobs.tick_arrows(&World::new(), &[], 2, &mut events);
+        assert_eq!(
+            mobs.entities.get(&cow).map(|mob| mob.health),
+            Some(7),
+            "the full arrow damage lands although the shooter is gone"
+        );
+        assert!(mobs.arrows.is_empty(), "the arrow is consumed by the hit");
+        assert!(
+            events.iter().any(|event| event.id == 0x1c
+                && event.body.len() == 10
+                && event.body[..4] == cow.to_be_bytes()
+                && event.body[4] == ((3 << 5) | 6)
+                && f32::from_be_bytes(event.body[5..9].try_into().unwrap()) == 7.0
+                && event.body[9] == 0x7f),
+            "the 0x1C health metadata carries the post-hit value"
+        );
+        assert!(
+            events.iter().any(|event| event.id == 0x13
+                && event.body.len() == 5
+                && event.body[0] == 1
+                && event.body[1..] == arrow_id.to_be_bytes()),
+            "the impacted arrow is destroyed for every observer"
+        );
+        assert!(
+            !events.iter().any(|event| event.id == 0x11),
+            "a non-lethal hit mints no experience orb"
+        );
+    }
+
+    /// NEXT-036 / #1019: killing credit survives the shooter's logout. The
+    /// XP orb is granted from the fire-time snapshot (`!hostile &&
+    /// shooter.is_some()`), never from a live registry lookup that a logged
+    /// out player would fail.
+    #[test]
+    fn arrow_kill_by_a_logged_out_player_still_grants_experience() {
+        let mut mobs = Mobs::default();
+        mobs.insert(
+            Kind::Cow,
+            PlayerPosition {
+                x: 4.5,
+                y: 64.0,
+                z: 0.5,
+            },
+            false,
+        );
+        let cow = mobs.next_id - 1;
+        mobs.entities.get_mut(&cow).unwrap().health = 3;
+        mobs.fire_arrow(
+            Some(9),
+            PlayerPosition {
+                x: 0.5,
+                y: 64.0,
+                z: 0.5,
+            },
+            -90.0,
+            0.0,
+            2.0,
+            3,
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        mobs.tick_arrows(&World::new(), &[], 1, &mut events);
+        mobs.tick_arrows(&World::new(), &[], 2, &mut events);
+        assert!(
+            !mobs.entities.contains_key(&cow),
+            "the killing arrow lands after the shooter logged out"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.id == 0x13 && event.body[1..] == cow.to_be_bytes()),
+            "the dead Mob is destroyed on the wire"
+        );
+        assert!(
+            events.iter().any(|event| event.id == 0x11),
+            "the kill still credits the (departed) player with an XP orb"
+        );
+        assert!(
+            !mobs.take_drops().is_empty(),
+            "the death still queues its loot exactly once"
+        );
+    }
+
+    /// NEXT-036 / #1019: the arrow's own lifetime is age-bounded and never
+    /// tied to the shooter's presence: at age 100 it despawns with a
+    /// Destroy even when its shooter ID resolves to nothing.
+    #[test]
+    fn arrows_despawn_at_age_100_even_when_the_shooter_is_gone() {
+        let mut mobs = Mobs::default();
+        mobs.fire_arrow(
+            Some(11),
+            PlayerPosition {
+                x: 0.5,
+                y: 64.0,
+                z: 0.5,
+            },
+            -90.0,
+            0.0,
+            0.1,
+            1,
+        )
+        .unwrap();
+        let arrow_id = mobs.next_id - 1;
+        mobs.arrows.get_mut(&arrow_id).unwrap().age = 99;
+        let mut events = Vec::new();
+        mobs.tick_arrows(&World::new(), &[], 1, &mut events);
+        assert!(
+            mobs.arrows.is_empty(),
+            "age 100 expires the arrow regardless of the shooter"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.id == 0x13 && event.body[1..] == arrow_id.to_be_bytes()),
+            "the expired arrow emits its destroy packet"
+        );
+    }
     #[test]
     fn explosion_damages_all_nearby_players_once_even_when_overlapping() {
         let mut mobs = Mobs::default();
