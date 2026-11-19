@@ -228,4 +228,90 @@ mod tests {
         assert!(!f.has_float(4));
         assert!(f.cast(4, at, f32::NAN, 0.0, 210).is_none());
     }
+
+    /// Spawn Object entity id carried by a bobber Spawn (type 90).
+    fn bobber_id(event: &Event) -> i32 {
+        assert_eq!(event.id, 0x0e);
+        let mut rest = &event.body[..];
+        let mut id: i32 = 0;
+        let mut shift = 0;
+        loop {
+            let byte = *rest.first().unwrap();
+            rest = &rest[1..];
+            id |= ((byte & 0x7f) as i32) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        assert_eq!(*rest.first().unwrap(), 90, "fishing hook type");
+        id
+    }
+
+    /// NEXT-037 / #1020: every removal path (reel, owner disconnect and
+    /// tick expiry) emits exactly one Destroy for its float id, and never
+    /// re-announces a removed float. Clients have no other way to untrack
+    /// the hook: a missing Destroy ghosts the bobber, a duplicate double-
+    /// despawns, and id reuse would resurrect the wrong entity.
+    #[test]
+    fn every_float_removal_path_emits_exactly_one_destroy() {
+        let at = PlayerPosition {
+            x: 0.5,
+            y: 200.0,
+            z: 0.5,
+        };
+        let mut f = Fishing::default();
+        let destroy = |events: &[Event]| -> Vec<i32> {
+            events
+                .iter()
+                .filter(|event| event.id == 0x13)
+                .map(|event| {
+                    assert_eq!(event.body[0], 1);
+                    i32::from_be_bytes(event.body[1..5].try_into().unwrap())
+                })
+                .collect()
+        };
+
+        // Reel path: one Destroy, and nothing survives the removal.
+        let first = bobber_id(&f.cast(4, at, -90.0, 0.0, 10).unwrap());
+        let reeled = f.reel(4, 20).unwrap();
+        assert_eq!(destroy(&reeled.events), vec![first]);
+        assert!(f.reel(4, 21).is_none(), "a reeled float cannot reel again");
+        assert!(
+            f.remove_owner(4).is_none(),
+            "no lingering float after the reel"
+        );
+
+        // Disconnect path: one Destroy for the in-flight float.
+        let second = bobber_id(&f.cast(4, at, -90.0, 0.0, 30).unwrap());
+        assert_ne!(first, second, "float ids never reuse");
+        let gone = f.remove_owner(4).unwrap();
+        assert_eq!(destroy(&[gone]), vec![second]);
+        assert!(f.remove_owner(4).is_none());
+
+        // Tick expiry path: teleports while flying, exactly one Destroy at
+        // age 1200, and the float never returns afterwards.
+        let third = bobber_id(&f.cast(4, at, -90.0, 0.0, 50).unwrap());
+        assert_ne!(second, third);
+        let flying = f.tick(&World::new(), 60);
+        assert!(
+            flying.iter().any(|(_, event)| event.id == 0x18),
+            "the in-flight float announces movement"
+        );
+        assert_eq!(
+            destroy(
+                &f.tick(&World::new(), 1_250)
+                    .into_iter()
+                    .map(|(_, event)| event)
+                    .collect::<Vec<_>>()
+            ),
+            vec![third],
+            "age 1200 expires the float with exactly one Destroy"
+        );
+        assert!(
+            f.tick(&World::new(), 1_300).is_empty(),
+            "an expired float never re-announces itself"
+        );
+        assert!(!f.has_float(4));
+    }
 }
